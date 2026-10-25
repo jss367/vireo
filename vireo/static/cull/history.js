@@ -56,7 +56,7 @@ async function cullAfterHistoryChange(result) {
       // flag) and let a later Apply overwrite it.
       Object.keys(cullAppliedDecisions).forEach(function(pid) {
         if (cullAppliedDecisions[pid] !== 'review') return;
-        var saved = state.photos[pid];
+        var saved = state.photos[Number(pid)];
         if (!saved || saved.flag_confirmation_status !== 'confirmed') return;
         if (saved.flag !== 'flagged' && saved.flag !== 'rejected') return;
         delete cullManualDecisions[pid];

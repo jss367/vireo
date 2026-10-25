@@ -1558,6 +1558,38 @@ def create_pipeline_blueprint(
             }
         return result_photos
 
+    def _normalize_pipeline_apply_zones(picks, rejects, candidates):
+        """Validate shape, dedup per-zone, and reject cross-zone overlap.
+
+        Returns ``(picks, rejects, candidates, seen, err_response)``. Validates
+        shape BEFORE dedup: ``dict.fromkeys`` and ``set`` treat ``1`` and
+        ``"1"`` as distinct keys even though SQLite's INTEGER affinity resolves
+        both to the same row, so a mixed payload would survive dedup and still
+        collide on ``(edit_id, photo_id)`` in flag_attribution_history. Same bar
+        as /api/predictions/group/apply.
+        """
+        for name, value in (("picks", picks), ("rejects", rejects), ("candidates", candidates)):
+            if not isinstance(value, list):
+                return picks, rejects, candidates, None, json_error(f"{name} must be a list")
+            if any(
+                isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**63
+                for pid in value
+            ):
+                return picks, rejects, candidates, None, json_error(
+                    f"{name} must contain valid integer photo ids"
+                )
+        picks = list(dict.fromkeys(picks))
+        rejects = list(dict.fromkeys(rejects))
+        candidates = list(dict.fromkeys(candidates))
+        seen = set()
+        for pid in picks + rejects + candidates:
+            if pid in seen:
+                return picks, rejects, candidates, None, json_error(
+                    f"Photo {pid} appears in more than one zone", 400,
+                )
+            seen.add(pid)
+        return picks, rejects, candidates, seen, None
+
     @blueprint.route("/api/pipeline/group/apply", methods=["POST"])
     @grouping_edit
     def api_pipeline_group_apply():
@@ -1578,12 +1610,11 @@ def create_pipeline_blueprint(
         rejects = list(body.get("rejects", []) or [])
         candidates = list(body.get("candidates", []) or [])
 
-        # The same photo can't be in two zones. Reject conflicting input.
-        seen = set()
-        for pid in picks + rejects + candidates:
-            if pid in seen:
-                return json_error(f"Photo {pid} appears in more than one zone", 400)
-            seen.add(pid)
+        picks, rejects, candidates, seen, zones_err = _normalize_pipeline_apply_zones(
+            picks, rejects, candidates,
+        )
+        if zones_err is not None:
+            return zones_err
 
         # All photos must be in the active workspace.
         for pid in picks + rejects + candidates:

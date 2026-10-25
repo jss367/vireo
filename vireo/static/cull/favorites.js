@@ -351,9 +351,10 @@ function syncCullSourceFlags(results) {
   var flags = {};
   (results.photos || []).forEach(function(p) { flags[p.id] = p; });
   (cullSourceResults.photos || []).forEach(function(p) {
-    if (Object.prototype.hasOwnProperty.call(flags, p.id)) {
-      p.flag = flags[p.id].flag;
-      p.flag_confirmation_status = flags[p.id].flag_confirmation_status || 'unverified';
+    var saved = flags[p.id];
+    if (saved) {
+      p.flag = saved.flag;
+      p.flag_confirmation_status = saved.flag_confirmation_status || 'unverified';
     }
   });
 }

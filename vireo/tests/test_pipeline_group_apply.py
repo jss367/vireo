@@ -263,6 +263,52 @@ def test_apply_rejects_conflicting_zones(app_and_db):
     assert resp.status_code == 400
 
 
+def test_apply_rejects_non_integer_photo_ids(app_and_db):
+    """Validate as integers BEFORE dedup. SQLite's INTEGER affinity resolves
+    ``1`` and ``"1"`` to the same row, but Python's set/dict.fromkeys treats
+    them as distinct, so the mixed payload would survive and still collide on
+    ``(edit_id, photo_id)`` in flag_attribution_history. Same bar as
+    /api/predictions/group/apply.
+    """
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    pid = pids[0]
+    before_flag = db.photos.get(pid)['flag']
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/group/apply', json={
+        'picks': [pid, str(pid)],
+        'rejects': [],
+        'candidates': [],
+    })
+    assert resp.status_code == 400
+    assert 'picks' in (resp.get_json() or {}).get('error', '')
+    assert db.photos.get(pid)['flag'] == before_flag
+    rows = db.conn.execute(
+        "SELECT id FROM edit_history WHERE workspace_id = ?",
+        (db._active_workspace_id,),
+    ).fetchall()
+    assert rows == []
+
+
+def test_apply_dedupes_repeated_photo_ids_within_zone(app_and_db):
+    """A payload with the same int repeated in one zone is deduped before the
+    flag_attribution_history write, so no IntegrityError can escape as a 500.
+    """
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    pid = pids[0]
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/group/apply', json={
+        'picks': [pid, pid],
+        'rejects': [],
+        'candidates': [],
+    })
+    assert resp.status_code == 200
+    assert db.photos.get(pid)['flag'] == 'flagged'
+
+
 def test_apply_rejects_photo_outside_workspace(app_and_db):
     """Photo belonging to a folder not in the active workspace is rejected
     with 403, matching the existing predictions/group/apply endpoint."""
