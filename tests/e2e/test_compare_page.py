@@ -1,5 +1,36 @@
+import pytest
 from playwright.sync_api import expect
 from services import photo_ingest
+
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The ID Conflicts page's modules as ``pageModules.<file>`` and its state as
+    ``compareState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "id-conflicts", "compareState")
+
+
+# The page's requests go through jsonFetch, which calls ``fetch`` when it runs,
+# so a test holds or answers them by wrapping ``window.fetch`` for the length
+# of one evaluate. ``compareKind`` names a compare query: a ``refresh_photo_id``
+# query is a decision's scoped refresh, any other one a full or control load.
+COMPARE_FETCH_HELPERS = """
+  function compareKind(url) {
+    url = String(url);
+    if (url.indexOf('/api/predictions/compare?') !== 0) return null;
+    return url.indexOf('refresh_photo_id=') >= 0 ? 'refresh' : 'load';
+  }
+  function jsonResponse(body, status) {
+    return new Response(JSON.stringify(body), {
+      status: status || 200, headers: {'Content-Type': 'application/json'},
+    });
+  }
+  function tick(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms || 0); }); }
+"""
 
 
 def test_compare_keyword_conflict_filter_includes_non_top_predictions(live_server, page):
@@ -113,7 +144,7 @@ def test_compare_reject_updates_in_place_without_reloading_collection(
         else None,
     )
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     page.locator("#filterRow button", has_text="All").click()
     row = page.locator(".compare-table tbody tr").first
@@ -155,7 +186,7 @@ def test_compare_accept_refreshes_only_the_changed_photo(live_server, page):
         else None,
     )
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     page.locator("#filterRow button", has_text="All").click()
     row = page.locator(f'tr[data-photo-id="{photo_id}"]')
@@ -183,31 +214,35 @@ def test_compare_accept_refreshes_only_the_changed_photo(live_server, page):
 def test_compare_serializes_scoped_decision_refreshes(live_server, page):
     """An older scoped response cannot merge after a newer decision."""
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     result = page.evaluate(
-        """async () => {
+        """async () => {""" + COMPARE_FETCH_HELPERS + """
           var calls = [];
           var releaseFirst;
           var firstGate = new Promise(function(resolve) {
             releaseFirst = resolve;
           });
-          var originalRefresh = refreshComparisonPhotos;
-          refreshComparisonPhotos = async function(ids) {
-            calls.push(ids[0]);
-            if (ids[0] === 1) await firstGate;
+          var originalFetch = window.fetch;
+          window.fetch = async function(url, options) {
+            var match = /refresh_photo_id=(\\d+)/.exec(String(url));
+            if (match) {
+              calls.push(Number(match[1]));
+              if (match[1] === '1') await firstGate;
+            }
+            return originalFetch(url, options);
           };
           try {
-            var first = refreshDecisionPhotos([1]);
-            await new Promise(function(resolve) { setTimeout(resolve, 0); });
-            var second = refreshDecisionPhotos([2]);
-            await new Promise(function(resolve) { setTimeout(resolve, 0); });
+            var first = pageModules.decisions.refreshDecisionPhotos([1]);
+            await tick();
+            var second = pageModules.decisions.refreshDecisionPhotos([2]);
+            await tick();
             var beforeRelease = calls.slice();
             releaseFirst();
             await Promise.all([first, second]);
             return {beforeRelease: beforeRelease, afterRelease: calls};
           } finally {
-            refreshComparisonPhotos = originalRefresh;
+            window.fetch = originalFetch;
           }
         }"""
     )
@@ -218,30 +253,34 @@ def test_compare_serializes_scoped_decision_refreshes(live_server, page):
 def test_compare_discards_queued_refresh_after_collection_load(live_server, page):
     """Queued work stays bound to the collection that originated it."""
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     result = page.evaluate(
-        """async () => {
+        """async () => {""" + COMPARE_FETCH_HELPERS + """
           var calls = [];
           var releaseFirst;
           var firstGate = new Promise(function(resolve) {
             releaseFirst = resolve;
           });
-          var originalRefresh = refreshComparisonPhotos;
-          refreshComparisonPhotos = async function(ids) {
-            calls.push(ids[0]);
-            if (ids[0] === 1) await firstGate;
+          var originalFetch = window.fetch;
+          window.fetch = async function(url, options) {
+            var match = /refresh_photo_id=(\\d+)/.exec(String(url));
+            if (match) {
+              calls.push(Number(match[1]));
+              if (match[1] === '1') await firstGate;
+            }
+            return originalFetch(url, options);
           };
           try {
-            var first = refreshDecisionPhotos([1]);
-            await new Promise(function(resolve) { setTimeout(resolve, 0); });
-            var queued = refreshDecisionPhotos([2]);
-            loadingSeq++;
+            var first = pageModules.decisions.refreshDecisionPhotos([1]);
+            await tick();
+            var queued = pageModules.decisions.refreshDecisionPhotos([2]);
+            compareState.loadingSeq++;
             releaseFirst();
             await Promise.all([first, queued]);
             return calls;
           } finally {
-            refreshComparisonPhotos = originalRefresh;
+            window.fetch = originalFetch;
           }
         }"""
     )
@@ -252,29 +291,31 @@ def test_compare_discards_queued_refresh_after_collection_load(live_server, page
 def test_compare_scoped_refresh_exits_empty_needs_review_filter(live_server, page):
     """Resolving the final pending row reveals the remaining collection."""
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     result = page.evaluate(
-        """async () => {
-          var originalFetch = jsonFetch;
+        """async () => {""" + COMPARE_FETCH_HELPERS + """
+          var originalFetch = window.fetch;
           // Answer the decision refresh the way the server would once the
           // last pending row is settled: nothing left needing review.
-          var settled = JSON.parse(JSON.stringify(compareData));
+          var settled = JSON.parse(JSON.stringify(compareState.compareData));
           settled.summary.needs_review = 0;
           settled.photos = [];
           settled.total = 0;
-          jsonFetch = async function() { return settled; };
-          activeFilter = 'needs_review';
+          window.fetch = async function(url, options) {
+            return compareKind(url) ? jsonResponse(settled) : originalFetch(url, options);
+          };
+          compareState.activeFilter = 'needs_review';
           try {
-            await refreshComparisonPhotos(compareData.photos.map(function(photo) {
-              return photo.photo_id;
-            }));
+            await pageModules.decisions.refreshComparisonPhotos(
+              compareState.compareData.photos.map(function(photo) { return photo.photo_id; })
+            );
             return {
-              filter: activeFilter,
-              needsReview: effectiveSummary().needs_review,
+              filter: compareState.activeFilter,
+              needsReview: pageModules.render.effectiveSummary().needs_review,
             };
           } finally {
-            jsonFetch = originalFetch;
+            window.fetch = originalFetch;
           }
         }"""
     )
@@ -285,79 +326,71 @@ def test_compare_scoped_refresh_exits_empty_needs_review_filter(live_server, pag
 def test_compare_decision_refresh_keeps_its_origin_scope(live_server, page):
     """A collection load during the POST supersedes its later refresh."""
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     result = page.evaluate(
-        """async () => {
-          var predId = compareData.photos[0].predictions[
-            Object.keys(compareData.photos[0].predictions)[0]
+        """async () => {""" + COMPARE_FETCH_HELPERS + """
+          var data = compareState.compareData;
+          var predId = data.photos[0].predictions[
+            Object.keys(data.photos[0].predictions)[0]
           ][0].id;
-          var originalFetch = jsonFetch;
-          var originalRefresh = refreshComparisonPhotos;
-          var originalLoad = loadComparison;
+          var originalFetch = window.fetch;
           var releasePost;
           var postGate = new Promise(function(resolve) { releasePost = resolve; });
-          var refreshCalls = [];
-          var fullLoads = 0;
-          jsonFetch = async function(url) {
-            if (url.indexOf('/api/predictions/') === 0) {
+          var counts = {refresh: 0, load: 0};
+          window.fetch = async function(url, options) {
+            if (options && options.method === 'POST' && String(url).indexOf('/api/predictions/') === 0) {
               await postGate;
-              return {ok: true};
+              return jsonResponse({ok: true});
             }
-            return originalFetch(url);
+            var kind = compareKind(url);
+            if (kind) counts[kind]++;
+            return originalFetch(url, options);
           };
-          refreshComparisonPhotos = async function(ids) {
-            refreshCalls.push(ids);
-          };
-          loadComparison = async function() { fullLoads++; };
           try {
-            var decision = predictionAction(predId, 'reviewed');
-            await new Promise(function(resolve) { setTimeout(resolve, 0); });
-            loadingSeq++;
+            var decision = pageModules.decisions.predictionAction(predId, 'reviewed');
+            await tick();
+            compareState.loadingSeq++;
             releasePost();
             await decision;
-            return {refreshCalls: refreshCalls, fullLoads: fullLoads};
+            return {refreshCalls: counts.refresh, fullLoads: counts.load};
           } finally {
-            jsonFetch = originalFetch;
-            refreshComparisonPhotos = originalRefresh;
-            loadComparison = originalLoad;
+            window.fetch = originalFetch;
           }
         }"""
     )
 
-    assert result == {"refreshCalls": [], "fullLoads": 1}
+    # The collection changed under the POST: no scoped refresh of the old
+    # scope, one full load of the current one.
+    assert result == {"refreshCalls": 0, "fullLoads": 1}
 
 
 def test_compare_grouped_409_performs_full_reload(live_server, page):
     """An external grouped decision cannot be reconciled from one photo."""
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     result = page.evaluate(
-        """async () => {
-          var predId = compareData.photos[0].predictions[
-            Object.keys(compareData.photos[0].predictions)[0]
+        """async () => {""" + COMPARE_FETCH_HELPERS + """
+          var data = compareState.compareData;
+          var predId = data.photos[0].predictions[
+            Object.keys(data.photos[0].predictions)[0]
           ][0].id;
-          var originalFetch = jsonFetch;
-          var originalLoad = loadComparison;
-          var originalRefresh = refreshDecisionPhotos;
-          var fullLoads = 0;
-          var targetedRefreshes = 0;
-          jsonFetch = async function() {
-            var error = new Error('prediction already accepted');
-            error.status = 409;
-            error.answered = true;
-            throw error;
+          var originalFetch = window.fetch;
+          var counts = {refresh: 0, load: 0};
+          window.fetch = async function(url, options) {
+            if (options && options.method === 'POST') {
+              return jsonResponse({error: 'prediction already accepted'}, 409);
+            }
+            var kind = compareKind(url);
+            if (kind) counts[kind]++;
+            return originalFetch(url, options);
           };
-          loadComparison = async function() { fullLoads++; };
-          refreshDecisionPhotos = async function() { targetedRefreshes++; };
           try {
-            await predictionAction(predId, 'accept');
-            return {fullLoads: fullLoads, targetedRefreshes: targetedRefreshes};
+            await pageModules.decisions.predictionAction(predId, 'accept');
+            return {fullLoads: counts.load, targetedRefreshes: counts.refresh};
           } finally {
-            jsonFetch = originalFetch;
-            loadComparison = originalLoad;
-            refreshDecisionPhotos = originalRefresh;
+            window.fetch = originalFetch;
           }
         }"""
     )
@@ -396,7 +429,7 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
     )
 
     page.goto(f"{live_server['url']}/compare")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     page.locator("#filterRow button", has_text="All").click()
     subject_summaries = page.locator(
@@ -464,9 +497,9 @@ def test_compare_missing_prediction_filter_includes_subjectless_photos(live_serv
     )
 
     page.goto(f"{live_server['url']}/compare")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
-    summary_missing = page.evaluate("() => effectiveSummary().missing_predictions")
+    summary_missing = page.evaluate("() => pageModules.render.effectiveSummary().missing_predictions")
     assert summary_missing >= 1
 
     page.locator("#filterRow button", has_text="Missing predictions").click()
@@ -502,7 +535,7 @@ def test_compare_row_status_surfaces_unclassified_over_pending_match(
     )
 
     page.goto(f"{live_server['url']}/compare")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
     page.locator("#filterRow button", has_text="All").click()
 
     row = page.locator(f'tr[data-photo-id="{photo_id}"]')
@@ -532,7 +565,7 @@ def test_compare_full_load_lands_on_the_collection_when_nothing_needs_review(
     photo_id = live_server["data"]["photos"][0]
 
     page.goto(f"{live_server['url']}/compare")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     # Settle every pending row. The predictions table has no ``status``
     # column — per-workspace review state lives in ``prediction_review``,
@@ -561,13 +594,13 @@ def test_compare_full_load_lands_on_the_collection_when_nothing_needs_review(
     )
     db.conn.commit()
 
-    page.evaluate("() => { window.activeFilter = 'needs_review'; }")
-    page.evaluate("async () => { await loadComparison(); }")
+    page.evaluate("() => { compareState.activeFilter = 'needs_review'; }")
+    page.evaluate("async () => { await pageModules.loading.loadComparison(); }")
 
     result = page.evaluate(
         """() => ({
-          filter: window.activeFilter,
-          needsReview: effectiveSummary().needs_review,
+          filter: compareState.activeFilter,
+          needsReview: pageModules.render.effectiveSummary().needs_review,
         })"""
     )
     assert result["needsReview"] == 0
@@ -585,39 +618,40 @@ def test_compare_initial_filter_ignores_an_unavailable_model_assessment(
     is the one entitled to fall back to All.
     """
     page.goto(f"{live_server['url']}/compare")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     result = page.evaluate(
-        """async () => {
+        """async () => {""" + COMPARE_FETCH_HELPERS + """
           // Select a model the next response will not list, the way a
           // collection switch leaves a stale specific model selected.
           var modelA = document.getElementById('modelA');
           modelA.innerHTML += '<option value="Ghost-Model">Ghost-Model</option>';
           modelA.value = 'Ghost-Model';
 
-          var models = (compareData.models || []).filter(function(name) {
+          var models = (compareState.compareData.models || []).filter(function(name) {
             return name !== 'Ghost-Model';
           });
-          var stale = JSON.parse(JSON.stringify(compareData));
+          var stale = JSON.parse(JSON.stringify(compareState.compareData));
           stale.models = models;
           stale.visible_models = ['Ghost-Model'];
           stale.summary.needs_review = 0;
           stale.photos = [];
           stale.total = 0;
-          var corrected = JSON.parse(JSON.stringify(compareData));
+          var corrected = JSON.parse(JSON.stringify(compareState.compareData));
           corrected.models = models;
           corrected.visible_models = models;
           corrected.summary.needs_review = 3;
 
-          var originalFetch = jsonFetch;
+          var originalFetch = window.fetch;
           var calls = [];
-          jsonFetch = async function(url) {
+          window.fetch = async function(url, options) {
+            if (!compareKind(url)) return originalFetch(url, options);
             calls.push(url);
-            return calls.length === 1 ? stale : corrected;
+            return jsonResponse(calls.length === 1 ? stale : corrected);
           };
-          activeFilter = 'needs_review';
+          compareState.activeFilter = 'needs_review';
           try {
-            await fetchRows({initial: true, page: 1});
+            await pageModules.loading.fetchRows({initial: true, page: 1});
             // The corrected re-query is started from the response handler and
             // not awaited, so let it settle before reading the outcome.
             for (var i = 0; i < 50 && calls.length < 2; i++) {
@@ -625,13 +659,13 @@ def test_compare_initial_filter_ignores_an_unavailable_model_assessment(
             }
             await new Promise(function(resolve) { setTimeout(resolve, 20); });
             return {
-              filter: activeFilter,
+              filter: compareState.activeFilter,
               calls: calls.length,
-              needsReview: (compareData.summary || {}).needs_review,
+              needsReview: (compareState.compareData.summary || {}).needs_review,
               selectedModel: document.getElementById('modelA').value,
             };
           } finally {
-            jsonFetch = originalFetch;
+            window.fetch = originalFetch;
           }
         }"""
     )
@@ -673,7 +707,7 @@ def test_compare_pages_the_queue_instead_of_rendering_the_collection(
     db.conn.commit()
 
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
     page.locator("#filterRow button", has_text="All").click()
     total = len(live_server["data"]["photos"]) + extra_count
     # Controls fetch a new page asynchronously. Wait for the rendered result
@@ -688,7 +722,7 @@ def test_compare_pages_the_queue_instead_of_rendering_the_collection(
         expect(rows).to_have_count(per_page)
 
     first_page_ids = page.evaluate(
-        "() => compareRows.map(function(p) { return p.photo_id; })"
+        "() => compareState.compareRows.map(function(p) { return p.photo_id; })"
     )
     assert len(first_page_ids) <= 30
 
@@ -709,17 +743,17 @@ def test_compare_next_page_shows_different_rows(live_server, page):
     db.conn.commit()
 
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
     page.locator("#filterRow button", has_text="All").click()
-    page.evaluate("async () => { comparePerPage = 2; await reloadRows(); }")
+    page.evaluate("async () => { compareState.comparePerPage = 2; await pageModules.loading.reloadRows(); }")
 
     expect(page.locator("#pagerSummary")).to_contain_text("page 1 of")
-    first = page.evaluate("() => compareRows.map(p => p.photo_id)")
+    first = page.evaluate("() => compareState.compareRows.map(p => p.photo_id)")
     assert len(first) == 2
 
     page.locator("#pagerNext").click()
     expect(page.locator("#pagerSummary")).to_contain_text("page 2 of")
-    second = page.evaluate("() => compareRows.map(p => p.photo_id)")
+    second = page.evaluate("() => compareState.compareRows.map(p => p.photo_id)")
 
     assert set(first).isdisjoint(second)
     expect(page.locator("#pagerPrev")).to_be_enabled()
@@ -732,7 +766,7 @@ def test_compare_controls_stay_reachable_while_scrolling(live_server, page):
     change what they were looking at.
     """
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     position = page.evaluate(
         "() => getComputedStyle(document.getElementById('stickyControls')).position"
@@ -746,13 +780,13 @@ def test_compare_controls_stay_reachable_while_scrolling(live_server, page):
 
 def test_compare_search_narrows_the_listed_rows(live_server, page):
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
     page.locator("#filterRow button", has_text="All").click()
 
-    before = page.evaluate("() => compareTotal")
+    before = page.evaluate("() => compareState.compareTotal")
     page.fill("#compareSearch", "Red-tailed")
     page.wait_for_function(
-        "(before) => compareTotal < before", arg=before,
+        "(before) => compareState.compareTotal < before", arg=before,
     )
 
     rows = page.locator(".compare-table tbody tr")
@@ -769,13 +803,13 @@ def test_compare_control_query_waits_for_an_in_flight_decision_refresh(
     sequence number and paints pre-decision counts.
     """
     page.goto(f"{live_server['url']}/id-conflicts")
-    page.wait_for_function("() => window.compareData !== null")
+    page.wait_for_function("() => compareState.compareData !== null")
 
     result = page.evaluate(
-        """async () => {
-          var baseline = JSON.parse(JSON.stringify(compareData));
+        """async () => {""" + COMPARE_FETCH_HELPERS + """
+          var baseline = JSON.parse(JSON.stringify(compareState.compareData));
           var photoId = baseline.photos[0].photo_id;
-          var originalFetch = jsonFetch;
+          var originalFetch = window.fetch;
           var calls = [];
           var releaseRefresh;
           var refreshGate = new Promise(function(resolve) {
@@ -784,24 +818,25 @@ def test_compare_control_query_waits_for_an_in_flight_decision_refresh(
           // Stands in for the server's stored comparison: the decision only
           // shows up in the counts once its refresh has been answered.
           var serverNeedsReview = 7;
-          jsonFetch = async function(url) {
-            var isRefresh = url.indexOf('refresh_photo_id') >= 0;
-            calls.push(isRefresh ? 'refresh' : 'control');
-            if (isRefresh) {
+          window.fetch = async function(url, options) {
+            var kind = compareKind(url);
+            if (!kind) return originalFetch(url, options);
+            calls.push(kind === 'refresh' ? 'refresh' : 'control');
+            if (kind === 'refresh') {
               await refreshGate;
               serverNeedsReview = 3;
             }
             var body = JSON.parse(JSON.stringify(baseline));
             body.summary.needs_review = serverNeedsReview;
-            return body;
+            return jsonResponse(body);
           };
           try {
-            var refresh = refreshDecisionPhotos([photoId]);
+            var refresh = pageModules.decisions.refreshDecisionPhotos([photoId]);
             await new Promise(function(resolve) { setTimeout(resolve, 0); });
             // Every user control -- filter, sort, search, threshold, per-page
             // -- re-queries through reloadRows.
-            activeFilter = 'all';
-            var control = reloadRows();
+            compareState.activeFilter = 'all';
+            var control = pageModules.loading.reloadRows();
             await new Promise(function(resolve) { setTimeout(resolve, 0); });
             var beforeRelease = calls.slice();
             releaseRefresh();
@@ -810,10 +845,10 @@ def test_compare_control_query_waits_for_an_in_flight_decision_refresh(
             return {
               beforeRelease: beforeRelease,
               afterRelease: calls,
-              needsReview: effectiveSummary().needs_review,
+              needsReview: pageModules.render.effectiveSummary().needs_review,
             };
           } finally {
-            jsonFetch = originalFetch;
+            window.fetch = originalFetch;
           }
         }"""
     )

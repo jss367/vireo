@@ -1,4 +1,5 @@
 from playwright.sync_api import expect
+from services import photo_locations
 
 
 def test_species_groups_preserve_paths_and_chart_drill_down(live_server, page):
@@ -65,7 +66,7 @@ def test_location_preview_combines_only_chosen_match(live_server, page):
     expect(page.locator('#kwBody tr')).to_have_count(1)
     expect(preview).to_have_text('No matching location keywords to review.')
     expect(page.locator('#kwBody tr .kw-linked-badge')).to_be_visible()
-    assert db.get_assigned_photo_location(photos[0])['place_id'] == 'test-place'
+    assert photo_locations.get_assigned_photo_location(db, photos[0])['place_id'] == 'test-place'
     assert db.add_keyword('Lake Hodges', _resolve_alias=True) == target
 
 
@@ -223,7 +224,7 @@ def test_merge_context_menu_keeps_one_rows_name_and_the_others_place(live_server
 
     expect(page.locator(f'tr[data-id="{target}"]')).to_have_count(0)
     expect(page.locator(f'tr[data-id="{source}"] .kw-linked-badge')).to_be_visible()
-    assert db.get_assigned_photo_location(photos[0])['place_id'] == 'whatcom-falls'
+    assert photo_locations.get_assigned_photo_location(db, photos[0])['place_id'] == 'whatcom-falls'
     survivor = db.conn.execute(
         'SELECT name, type, place_id, parent_id FROM keywords WHERE id = ?', (source,)).fetchone()
     assert (survivor['name'], survivor['type'], survivor['place_id']) == (

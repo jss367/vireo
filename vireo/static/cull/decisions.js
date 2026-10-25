@@ -119,7 +119,9 @@ function resolveCullDecision(photo) {
   var suggested = actionForLabel(photo.label);
   var manual = cullManualDecisions[photo.id];
   if (manual) return {action: manual, source: 'manual', suggested: suggested};
-  var confirmed = actionForFlag(photo.flag);
+  // A confirmed clear is an explicit Review; a bare none is still undecided.
+  var confirmed = photo.flag_confirmation_status === 'confirmed'
+    ? (photo.flag === 'none' ? 'review' : actionForFlag(photo.flag)) : null;
   if (confirmed) {
     return {action: confirmed, source: 'confirmed', suggested: suggested};
   }

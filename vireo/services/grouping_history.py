@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     from db import Database
     from services.service_types import JsonDict
@@ -232,13 +232,17 @@ def load_grouping_change(db: Database, entry: HistoryEntry) -> JsonDict:
 def save_grouping_edit(
     db: Database, before: JsonDict, after: JsonDict, description: str, *,
     photo_edit: JsonDict | None = None, items: Sequence[Mapping[str, object]] = (),
-    label_edit: bool = False,
+    label_edit: bool = False, on_record: Callable[[int], None] | None = None,
 ) -> None:
     """Save a detach and its history together, restoring the cache on failure.
 
     Callers hold the workspace regroup lock and SQLite writer transaction.
     Store only encounter structure, so undo never replaces photo metadata,
     flags, scores, or settings with an old whole-catalog snapshot.
+
+    ``on_record`` runs after the edit row exists and before the commit so a
+    caller can attach replay metadata (flag attribution snapshots, say) that
+    must share this transaction.
     """
     from pipeline import save_results_raw
 
@@ -250,7 +254,9 @@ def save_grouping_edit(
         change["label_edit"] = True
     if photo_edit:
         change["photo_edit"] = photo_edit
-    record_grouping_edit(db, description, change, items)
+    edit_id = record_grouping_edit(db, description, change, items)
+    if on_record is not None:
+        on_record(edit_id)
     saved = False
     try:
         save_results_raw(after, cache_dir, db.require_workspace_id())
@@ -570,6 +576,7 @@ def apply_grouping_photo_edit(
         value = item["old_value" if undo else "new_value"]
         db.photo_review.set_flag(item["photo_id"], value, _commit=False)
         db.queue_flag_change_if_enabled(item["photo_id"], value, _commit=False)
+        db.photo_review.restore_flag_attribution_history(entry["id"], item["photo_id"], undo=undo)
     change = payload.get("photo_edit")
     if not change:
         return
@@ -580,6 +587,7 @@ def apply_grouping_photo_edit(
             value = item["old_value" if undo else "new_value"]
             db.photo_review.set_flag(pid, value, _commit=False)
             db.queue_flag_change_if_enabled(pid, value, _commit=False)
+            db.photo_review.restore_flag_attribution_history(entry["id"], pid, undo=undo)
             continue
         if action not in ("keyword_add", "species_replace"):
             raise ValueError("Unsupported photo edit in grouping history")

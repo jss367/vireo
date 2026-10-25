@@ -1921,13 +1921,16 @@ def create_predictions_blueprint(
         return jsonify(rows)
 
     def _write_group_flags_and_species(
-        db: Database, actionable_picks: list[int], actionable_rejects: list[int], species: str,
+        db: Database, actionable_picks: list[int], actionable_rejects: list[int],
+        species: str, description: str,
     ) -> tuple[int | None, str, list[int], ErrorResponse | None]:
         """Group apply's flag and species-keyword writes, under its lock.
 
         Returns ``(kid, local_species, added_picks, error)``: the species
         keyword (or None), its stored spelling, the picks that newly gained
-        it, and a 403 response when a write refused.
+        it, and a 403 response when a write refused. The flag writes'
+        current attribution is republished per zone so Cull sees the
+        photographer's prediction-group decisions as confirmed.
         """
         local_species = species
         # Flag picks and add species keyword — every write uses
@@ -1968,6 +1971,18 @@ def create_predictions_blueprint(
             # Reject rejects
             for pid in actionable_rejects:
                 db.photo_review.set_flag(pid, "rejected", _commit=False)
+
+            # Republish current attribution for every explicit zone decision.
+            # The flag UPDATE trigger wiped prior attribution; without this,
+            # Cull would show these photographer picks/rejects as unverified.
+            if actionable_picks:
+                db.photo_review.set_current_flag_note(
+                    actionable_picks, "flagged", description,
+                )
+            if actionable_rejects:
+                db.photo_review.set_current_flag_note(
+                    actionable_rejects, "rejected", description,
+                )
         except ValueError as e:
             # ``prediction_decisions.under_prediction_decision_lock``'s
             # finally will roll back the still-open transaction; returning
@@ -1976,9 +1991,15 @@ def create_predictions_blueprint(
         return kid, local_species, added_picks, None
 
     def _record_group_flag_history(
-        db: Database, actionable_picks: list[int], actionable_rejects: list[int], old_flags: dict[int, str],
-    ) -> None:
-        """Queue group apply's flag sidecar changes and record their undo entry."""
+        db: Database, actionable_picks: list[int], actionable_rejects: list[int],
+        old_flags: dict[int, str], desc: str,
+    ) -> int | None:
+        """Queue group apply's flag sidecar changes and record their undo entry.
+
+        Returns the ``edit_id`` of the recorded flag edit (or ``None`` when
+        there was nothing to record) so the caller can attach replay
+        attribution to the same transaction.
+        """
         # Record flag history for all picks + rejects
         flag_items = []
         for pid in actionable_picks:
@@ -1987,19 +2008,16 @@ def create_predictions_blueprint(
         for pid in actionable_rejects:
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
-        if flag_items:
-            for item in flag_items:
-                db.queue_flag_change_if_enabled(
-                    item["photo_id"], item["new_value"], _commit=False
-                )
-            desc = (
-                f'Group prediction: flagged {len(actionable_picks)}, '
-                f'rejected {len(actionable_rejects)}'
+        if not flag_items:
+            return None
+        for item in flag_items:
+            db.queue_flag_change_if_enabled(
+                item["photo_id"], item["new_value"], _commit=False
             )
-            db.record_edit(
-                'flag', desc, 'group_apply', flag_items,
-                is_batch=True, _commit=False,
-            )
+        return db.record_edit(
+            'flag', desc, 'group_apply', flag_items,
+            is_batch=True, _commit=False,
+        )
 
     def _record_group_pick_accepts(
         db: Database, actionable_picks: list[int], observed: dict[int, str], kid: int | None, local_species: str,
@@ -2074,6 +2092,112 @@ def create_predictions_blueprint(
                 _commit=False,
             )
 
+    def _normalize_group_apply_zones(
+        picks: object, rejects: object,
+    ) -> tuple[list[int], list[int], ErrorResponse | None]:
+        """Validate shape, dedup, and reject overlap for picks/rejects.
+
+        Returns ``(picks, rejects, err_response)``. Validates shape BEFORE
+        dedup: ``dict.fromkeys`` treats ``1`` and ``"1"`` as distinct keys
+        even though SQLite's INTEGER affinity resolves both to the same
+        row, so a mixed payload would survive dedup and still collide on
+        ``(edit_id, photo_id)`` in flag_attribution_history. Same bar as
+        /api/culling/apply.
+        """
+        for name, value in (("picks", picks), ("rejects", rejects)):
+            if not isinstance(value, list):
+                return [], [], json_error(f"{name} must be a list")
+            if any(
+                isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**63
+                for pid in value
+            ):
+                return [], [], json_error(f"{name} must contain valid integer photo ids")
+        picks = list(dict.fromkeys(cast("list[int]", picks)))
+        rejects = list(dict.fromkeys(cast("list[int]", rejects)))
+        overlap = set(picks) & set(rejects)
+        if overlap:
+            pid = next(iter(sorted(overlap)))
+            return [], [], json_error(
+                f"Photo {pid} listed in both picks and rejects", 400,
+            )
+        return picks, rejects, None
+
+    def _apply_prediction_group_decisions(
+        db: Database, picks: list[int], rejects: list[int], removed: list[int],
+        species: str, observed: dict[int, str],
+    ) -> ResponseReturnValue:
+        """Everything that runs under the prediction-decision lock, in one txn.
+
+        The stale filter, flag/keyword writes, and prediction status writes
+        all run inside ``BEGIN IMMEDIATE``: an earlier version filtered stale
+        photos and committed the flag/keyword writes *before* taking the lock,
+        which let a decision landing in that window leave the photo flagged
+        and keyworded while the in-lock recheck refused to update prediction
+        status. Holding the write lock across the read that governs the
+        writes closes that race.
+        """
+        # A decision that committed since the modal rendered wins over this
+        # apply; those photos drop before any of *this* apply's writes land.
+        stale_photos = _stale_group_apply_photos(db, observed)
+        actionable_picks = [pid for pid in picks if pid not in stale_photos]
+        actionable_rejects = [pid for pid in rejects if pid not in stale_photos]
+        target_ids = _group_pick_prediction_ids(db, actionable_picks, observed)
+        db.predictions.require_identifiable_subjects([
+            pred_id for ids in target_ids.values() for pred_id in ids
+        ])
+
+        all_flag_pids = actionable_picks + actionable_rejects
+        old_flags = {}
+        for pid in all_flag_pids:
+            old = db.photos.get(pid)
+            if old:
+                old_flags[pid] = old["flag"] or "none"
+
+        # Capture attribution BEFORE the flag UPDATEs so Undo can restore the
+        # exact prior note (or lack of one). The invalidation trigger fires on
+        # every set_flag — _write_group_flags_and_species republishes a current
+        # note per zone and the snapshot below keeps Undo lossless.
+        before_attributions = db.photo_review.flag_attributions(all_flag_pids)
+
+        flag_desc = (
+            f"Group prediction: flagged {len(actionable_picks)}, "
+            f"rejected {len(actionable_rejects)}"
+        )
+        kid, local_species, added_picks, err = _write_group_flags_and_species(
+            db, actionable_picks, actionable_rejects, species, flag_desc,
+        )
+        if err is not None:
+            return err
+
+        flag_edit_id = _record_group_flag_history(
+            db, actionable_picks, actionable_rejects, old_flags, flag_desc,
+        )
+        if flag_edit_id is not None and all_flag_pids:
+            db.photo_review.record_flag_attribution_history(
+                flag_edit_id, all_flag_pids, before_attributions,
+                db.photo_review.flag_attributions(all_flag_pids),
+            )
+
+        _record_group_pick_accepts(
+            db, actionable_picks, observed, kid, local_species, added_picks,
+        )
+
+        for pid in actionable_rejects:
+            db.update_predictions_status_by_photo(pid, 'rejected', _commit=False)
+
+        # Ungrouping is not a decision — it changes which rows the burst modal
+        # shows together, not what any of them means — so it is not gated on
+        # the baseline.
+        for pred_id in removed:
+            db.ungroup_prediction(pred_id, _commit=False)
+        db.commit()
+        # ``record_edit`` skips its prune under ``_commit=False``; run it once
+        # the decision is durable so history stays bounded.
+        db._prune_edit_history()
+        # Reported even when zero so the client can tell "nothing was stale"
+        # from an older server that never checked.
+        return jsonify({"ok": True, "already_decided": len(stale_photos)})
+
     @blueprint.route("/api/predictions/group/apply", methods=["POST"])
     def api_prediction_group_apply() -> ResponseReturnValue:
         """Apply pick/reject decisions and species to a burst group."""
@@ -2087,83 +2211,20 @@ def create_predictions_blueprint(
         if observed_err is not None:
             return observed_err
 
-        # Pre-validate all photo IDs against workspace before any mutations
+        picks, rejects, zones_err = _normalize_group_apply_zones(picks, rejects)
+        if zones_err is not None:
+            return zones_err
+
         for pid in picks + rejects:
             if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                 return json_error(f"Photo {pid} is not in the active workspace", 403)
 
-        # Everything below — the stale filter, the keyword/flag writes, and
-        # the prediction status writes — runs under the single decision lock
-        # in one transaction. An earlier version filtered stale photos and
-        # committed the flag/keyword writes *before* taking the lock and then
-        # re-checked staleness inside it; a decision that landed in that
-        # window would leave the photo flagged and keyworded while the
-        # in-lock recheck refused to update its prediction status, so the
-        # keyword-on-a-rejected-row split this precondition exists to
-        # prevent came back as a narrower race. The fix is to hold the write
-        # lock across the read that governs the writes.
-        def _apply_group_decisions() -> ErrorResponse | Response:
-            # Stale filter under the lock: a decision that committed since
-            # the modal rendered wins over this apply, so those photos are
-            # dropped before any of *this* apply's writes land. Doing the
-            # check inside ``BEGIN IMMEDIATE`` closes the check-then-write
-            # window — nothing can decide between this read and the writes
-            # below, so a photo we skip here cannot silently be flagged or
-            # keyworded on the other side of the transaction.
-            stale_photos = _stale_group_apply_photos(db, observed)
-            actionable_picks = [pid for pid in picks if pid not in stale_photos]
-            actionable_rejects = [
-                pid for pid in rejects if pid not in stale_photos
-            ]
-            target_ids = _group_pick_prediction_ids(db, actionable_picks, observed)
-            db.predictions.require_identifiable_subjects([
-                pred_id for ids in target_ids.values() for pred_id in ids
-            ])
-
-            # Capture old flag values before mutation
-            all_flag_pids = actionable_picks + actionable_rejects
-            old_flags = {}
-            for pid in all_flag_pids:
-                old = db.photos.get(pid)
-                if old:
-                    old_flags[pid] = old["flag"] or "none"
-
-            kid, local_species, added_picks, err = _write_group_flags_and_species(
-                db, actionable_picks, actionable_rejects, species,
-            )
-            if err is not None:
-                return err
-
-            _record_group_flag_history(
-                db, actionable_picks, actionable_rejects, old_flags,
-            )
-
-            _record_group_pick_accepts(
-                db, actionable_picks, observed, kid, local_species, added_picks,
-            )
-
-            for pid in actionable_rejects:
-                db.update_predictions_status_by_photo(
-                    pid, 'rejected', _commit=False,
-                )
-
-            # Remove predictions from group. Ungrouping is not a decision — it
-            # changes which rows the burst modal shows together, not what any
-            # of them means — so it is not gated on the baseline.
-            for pred_id in removed:
-                db.ungroup_prediction(pred_id, _commit=False)
-            db.commit()
-            # ``record_edit`` skips its prune under ``_commit=False``; run it
-            # once the decision is durable so history stays bounded — same
-            # shape the batch endpoints use.
-            db._prune_edit_history()
-            # Counted in photos, which is the unit the modal works in and the
-            # unit the toast names. Reported even when zero so the client can
-            # tell "nothing was stale" from an older server that never checked.
-            return jsonify({"ok": True, "already_decided": len(stale_photos)})
-
         return prediction_decisions.under_prediction_decision_lock(
-            db, _apply_group_decisions, json_error=json_error,
+            db,
+            lambda: _apply_prediction_group_decisions(
+                db, picks, rejects, removed, species, observed,
+            ),
+            json_error=json_error,
         )
 
     return blueprint

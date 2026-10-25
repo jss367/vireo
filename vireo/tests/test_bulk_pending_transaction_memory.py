@@ -26,7 +26,7 @@ def _selected(module, cls, name, namespace):
 
 
 @contextlib.contextmanager
-def _flow():
+def _flow(*, expected_manual_review=True):
     uri = f"file:invented-bulk-{uuid.uuid4().hex}?mode=memory&cache=shared"
     with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0)) as conn:
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0)) as scan:
@@ -56,7 +56,8 @@ def _flow():
                 _selected("repositories/duplicates.py", "DuplicatesRepository", "keep_folder_plan", namespace), repo,
             )
             merges = []
-            def merge(winner, losers):
+            def merge(winner, losers, *, manual_review=False):
+                assert manual_review is expected_manual_review
                 merges.append((winner, losers))
                 with conn:
                     conn.executemany("UPDATE photos SET flag='rejected' WHERE id=?", [(pid,) for pid in losers])
@@ -146,7 +147,10 @@ def test_bulk_plan_and_merge_failures_roll_back_partial_writes_and_control_flow(
 
 def test_bulk_patched_facade_callback_releases_lock_between_groups():
     with _flow() as (conn, scan, db, repo, merges, trace):
-        db._apply_winner_loser_merge = lambda winner, losers: merges.append((winner, losers))
+        def merge(winner, losers, *, manual_review=False):
+            assert manual_review is True
+            merges.append((winner, losers))
+        db._apply_winner_loser_merge = merge
         result = db.bulk(["hash", "hash"], "invented/keep")
         assert merges == [(1, [2]), (1, [2])] and len(result["resolved"]) == 2
         assert trace.count("BEGIN IMMEDIATE") == 2 and trace.count("COMMIT") == 2

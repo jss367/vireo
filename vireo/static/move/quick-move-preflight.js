@@ -1,20 +1,20 @@
 // Quick Move preflight: the debounced /api/move-folder/preflight status line.
-// Classic page script; load boot.js after all definitions.
 
-var quickPreflightSeq = 0;
-/** @type {ReturnType<typeof setTimeout> | null} */ var quickPreflightTimer = null;
+import { state } from './state.js';
+import { applyQuickDateSamples, quickUsesDateFolders } from './quick-move-form.js';
+import { _isAbsolutePath, setQuickDateSummary } from './quick-move-preview.js';
 
 /** @param {number} fid @param {string} destination @param {string} folderTemplate */
-function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
-  if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
-  var seq = ++quickPreflightSeq;
+export function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
+  if (state.quickPreflightTimer) clearTimeout(state.quickPreflightTimer);
+  var seq = ++state.quickPreflightSeq;
   // An unusable destination doesn't invalidate the dropdown's examples: they
   // are rendered from the source folder's capture dates alone, so editing or
   // clearing the destination cannot change them. Leave the last real values
   // in place — onQuickFolderChange() clears them when the folder itself
   // changes, which is the only input they depend on.
   if (!_isAbsolutePath(destination)) return;
-  quickPreflightTimer = setTimeout(async function() {
+  state.quickPreflightTimer = setTimeout(async function() {
     /** @type {MovePreflight} */ var data;
     try {
       var resp = await fetch('/api/move-folder/preflight', {
@@ -26,14 +26,14 @@ function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
           folder_template: folderTemplate,
         }),
       });
-      if (!resp.ok) { if (seq === quickPreflightSeq) clearQuickDestStatus(); return; }
+      if (!resp.ok) { if (seq === state.quickPreflightSeq) clearQuickDestStatus(); return; }
       data = await resp.json();
     } catch (e) {
-      if (seq === quickPreflightSeq) clearQuickDestStatus();
+      if (seq === state.quickPreflightSeq) clearQuickDestStatus();
       return;
     }
-    if (seq !== quickPreflightSeq || !quickUsesDateFolders()) return;
-    var folder = allFolders.find(function(item) { return item.id === fid; });
+    if (seq !== state.quickPreflightSeq || !quickUsesDateFolders()) return;
+    var folder = state.allFolders.find(function(item) { return item.id === fid; });
     setQuickDateSummary(folder, data);
     // Same response that drew the folder list above, so the dropdown's
     // examples and that list are always the same dates.
@@ -59,15 +59,15 @@ function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
 }
 
 /** @param {number} fid @param {string | null} dest @param {string} remoteId @param {string} subpath @param {string} destinationName */
-function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
-  if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
+export function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
+  if (state.quickPreflightTimer) clearTimeout(state.quickPreflightTimer);
   // Bump the sequence on *every* call, not just when a request starts. Any
   // change to the destination must immediately invalidate an in-flight
   // response for the previous value — otherwise a response landing during the
   // 350ms debounce window, or when the new value is non-absolute (so no new
   // request is scheduled), would still pass the seq guard and write stale
   // exists/new-folder text for the wrong destination.
-  var seq = ++quickPreflightSeq;
+  var seq = ++state.quickPreflightSeq;
   if (remoteId) {
     var body = {
       folder_id: fid,
@@ -75,7 +75,7 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
       subpath: subpath || '',
       destination_name: destinationName,
     };
-    quickPreflightTimer = setTimeout(function() { runQuickPreflight(seq, body); }, 350);
+    state.quickPreflightTimer = setTimeout(function() { runQuickPreflight(seq, body); }, 350);
     return;
   }
   // The preflight route rejects non-absolute paths, so wait until the input
@@ -85,7 +85,7 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
   dest = dest || '';
   var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(dest) || /^\\\\/.test(dest);
   if (!isAbs) return;
-  quickPreflightTimer = setTimeout(function() {
+  state.quickPreflightTimer = setTimeout(function() {
     runQuickPreflight(seq, {
       folder_id: fid,
       destination: dest,
@@ -95,7 +95,7 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
 }
 
 /** @param {number} seq @param {MoveDestination} body */
-async function runQuickPreflight(seq, body) {
+export async function runQuickPreflight(seq, body) {
   var status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
   if (status) {
     status.textContent = 'Checking destination…';
@@ -110,13 +110,13 @@ async function runQuickPreflight(seq, body) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
-    if (!resp.ok) { if (seq === quickPreflightSeq) clearQuickDestStatus(); return; }
+    if (!resp.ok) { if (seq === state.quickPreflightSeq) clearQuickDestStatus(); return; }
     data = await resp.json();
   } catch (e) {
-    if (seq === quickPreflightSeq) clearQuickDestStatus();
+    if (seq === state.quickPreflightSeq) clearQuickDestStatus();
     return;
   }
-  if (seq !== quickPreflightSeq) return;  // a newer keystroke superseded us
+  if (seq !== state.quickPreflightSeq) return;  // a newer keystroke superseded us
   status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
   if (!status) return;
   if (data.remote && data.reachable === false) {
@@ -143,7 +143,7 @@ async function runQuickPreflight(seq, body) {
 // the count is a floor (the fast scan stopped at its cap), so say "at least N"
 // rather than implying an exact total — the line must mean what it says.
 /** @param {HTMLElement} status @param {number} n @param {boolean | undefined} truncated */
-function setDestExistsStatus(status, n, truncated) {
+export function setDestExistsStatus(status, n, truncated) {
   var countText = truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
   status.textContent = '⚠ Destination already exists — contains ' + countText + ' file' +
     (n !== 1 || truncated ? 's' : '') + '. Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed.';
@@ -155,7 +155,7 @@ function setDestExistsStatus(status, n, truncated) {
 // instead of overwriting the line for the wrong path. Stays silent on failure:
 // the capped "at least N" line is already a valid answer.
 /** @param {number | undefined} fid @param {string | undefined} dest @param {string | undefined} destinationName @param {number} seq */
-function requestExactDestCount(fid, dest, destinationName, seq) {
+export function requestExactDestCount(fid, dest, destinationName, seq) {
   fetch('/api/move-folder/preflight', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -169,13 +169,13 @@ function requestExactDestCount(fid, dest, destinationName, seq) {
     return resp.ok ? resp.json() : null;
   }).then(function(data) {
     if (!data || !data.exists) return;
-    if (seq !== quickPreflightSeq) return;  // a newer keystroke superseded us
+    if (seq !== state.quickPreflightSeq) return;  // a newer keystroke superseded us
     var status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
     if (status) setDestExistsStatus(status, data.file_count, data.file_count_truncated);
   }).catch(function() { /* background nicety — leave the capped line in place */ });
 }
 
-function clearQuickDestStatus() {
+export function clearQuickDestStatus() {
   var status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
   if (status) status.textContent = '';
 }

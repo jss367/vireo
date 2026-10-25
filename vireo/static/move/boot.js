@@ -1,8 +1,20 @@
-// Page startup.
-// Classic page script; loads after every other Move page definition.
+// Page startup: the module the template loads. Binds the template's
+// data-move-on controls and the delegated listeners for rendered markup, then
+// keeps the old inline script's two DOMContentLoaded handlers in order: the
+// initial fetches, then the destination-input and folder-browser listeners.
 
-// Preserve the inline script's order: the initial fetches, then the
-// destination-input and folder-browser listeners.
+import { bindMoveMarkup, bindMoveRenderedMarkup } from './events.js';
+import { browseTo } from './folder-browser.js';
+import { loadFolders } from './folders.js';
+import { loadMoveVisibilityPreference } from './move-visibility.js';
+import { updatePhotoSelectionUI } from './photo-move.js';
+import { updateQuickMoveBtn } from './quick-move-preview.js';
+import { loadRecentDestinations } from './recent-destinations.js';
+import { loadRemoteTargets } from './remote-targets.js';
+import { loadRules } from './rules.js';
+
+bindMoveMarkup();
+bindMoveRenderedMarkup();
 
 /* ---------- Init ---------- */
 document.addEventListener('DOMContentLoaded', function() {

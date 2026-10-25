@@ -1,14 +1,19 @@
 // Explorer: summary chips, the drill body, breadcrumbs, and taxon cards.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { loadExplorerSpecies, renderExplorerLeaf } from './explorer-species.js';
+import { renderRankView } from './rank-view.js';
+import { renderSunburst } from './sunburst.js';
+import { escapeAttr, escapeHtml } from './shared.js';
 
 // ---------------- Explorer: summary + breadcrumb + cards (Task 11) ----------------
 
-/** @param {Record<string,LifeCount>} summary */ function renderSummaryBar(summary) {
+/** @param {Record<string,LifeCount>} summary */ export function renderSummaryBar(summary) {
   var order = summary.order || { found: 0, total: 0 };
   var family = summary.family || { found: 0, total: 0 };
   var genus = summary.genus || { found: 0, total: 0 };
   var species = summary.species || { found: 0, total: 0 };
-  var activeRank = explorerRankView ? explorerRankView.rank : null;
+  var activeRank = state.explorerRankView ? state.explorerRankView.rank : null;
   // Chips are clickable → open the flat rank breakdown. Fixed rank order:
   // order/family/genus/species. The rank matching the open flat view is marked
   // .active. Clicks are handled by the delegated listener in wireSummaryBar().
@@ -25,10 +30,10 @@
 }
 
 // Return the list of nodes at the current drill level, honoring explorerPath.
-function currentExplorerNodes() {
-  var nodes = explorerData?.nodes || [];
-  for (var i = 0; i < explorerPath.length; i++) {
-    const step = explorerPath[i]; if (!step) break;
+export function currentExplorerNodes() {
+  var nodes = state.explorerData?.nodes || [];
+  for (var i = 0; i < state.explorerPath.length; i++) {
+    const step = state.explorerPath[i]; if (!step) break;
     var match = nodes.find(function(n) { return n.id === step.id; });
     if (!match) return [];
     nodes = match.children || [];
@@ -36,7 +41,7 @@ function currentExplorerNodes() {
   return nodes;
 }
 
-function renderExplorerBody() {
+export function renderExplorerBody() {
   var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (!body) return;
   // Keep the overview in lockstep with the cards. The current taxon becomes
@@ -44,29 +49,29 @@ function renderExplorerBody() {
   renderSunburst();
 
   // Flat rank breakdown takes over the body when a summary chip is open.
-  if (explorerRankView) { renderRankView(); return; }
+  if (state.explorerRankView) { renderRankView(); return; }
 
   // If the drill path ends at a genus, the current card level has no nodes
   // (species aren't in explorerData.nodes) — render the species leaf instead of
   // an empty grid. This covers returning from the flat rank view via "Back to
   // cards", which clears explorerRankView but leaves explorerPath at the genus.
-  const last = explorerPath.length ? explorerPath[explorerPath.length - 1] : null;
+  const last = state.explorerPath.length ? state.explorerPath[state.explorerPath.length - 1] : null;
   if (last && last.rank === 'genus') {
-    if (explorerLeafGenus && explorerLeafGenus.id === last.id && explorerLeafData) {
+    if (state.explorerLeafGenus && state.explorerLeafGenus.id === last.id && state.explorerLeafData) {
       // Leaf payload for this genus is already in hand — re-render it directly.
       renderExplorerLeaf(false);
     } else {
       // Load it. loadExplorerSpecies pushes the genus crumb itself, so drop the
       // genus from the path and locate its node under the parent family first
       // (mirrors openRankItem's genus handling).
-      explorerPath = explorerPath.slice(0, -1);
+      state.explorerPath = state.explorerPath.slice(0, -1);
       var genusNode = currentExplorerNodes().find(function(n) { return n.id === last.id; });
       if (genusNode) {
         loadExplorerSpecies(genusNode);
       } else {
         // Couldn't resolve the genus node — restore the path and show a
         // non-blank empty state.
-        explorerPath.push(last);
+        state.explorerPath.push(last);
         body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Nothing to show.</div>';
       }
     }
@@ -95,23 +100,23 @@ function renderExplorerBody() {
       if (node.rank === 'genus') {
         loadExplorerSpecies(node);
       } else {
-        explorerPath.push({ id: node.id, name: node.common_name || node.name, rank: node.rank });
-        explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
+        state.explorerPath.push({ id: node.id, name: node.common_name || node.name, rank: node.rank });
+        state.explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
         renderExplorerBody();
       }
     });
   });
 }
 
-function renderBreadcrumb() {
-  /** @type {Partial<LifeTaxon>} */ var root = explorerData?.root || {};
+export function renderBreadcrumb() {
+  /** @type {Partial<LifeTaxon>} */ var root = state.explorerData?.root || {};
   var rootLabel = root.common_name || root.name || 'Class';
   var html = '<div class="ll-crumbs">';
-  var isRootCurrent = explorerPath.length === 0;
+  var isRootCurrent = state.explorerPath.length === 0;
   html += '<span class="ll-crumb' + (isRootCurrent ? ' current' : '') + '" data-depth="0">'
     + escapeHtml(rootLabel) + '</span>';
-  explorerPath.forEach(function(step, i) {
-    var current = (i === explorerPath.length - 1);
+  state.explorerPath.forEach(function(step, i) {
+    var current = (i === state.explorerPath.length - 1);
     html += '<span class="ll-crumb-sep">›</span>';
     html += '<span class="ll-crumb' + (current ? ' current' : '') + '" data-depth="' + (i + 1) + '">'
       + escapeHtml(step.name) + '</span>';
@@ -123,7 +128,7 @@ function renderBreadcrumb() {
 }
 
 // Inline SVG progress ring: accent arc over a --bg-tertiary track, pct% center.
-/** @param {number} found @param {number} total */ function renderRing(found, total) {
+/** @param {number} found @param {number} total */ export function renderRing(found, total) {
   var pct = total > 0 ? Math.round((found / total) * 100) : 0;
   var r = 20, cx = 24, cy = 24;
   var circ = 2 * Math.PI * r;
@@ -137,13 +142,13 @@ function renderBreadcrumb() {
     + '</svg>';
 }
 
-/** @param {string} rank @param {number=} n */ function rankPlural(rank, n) {
+/** @param {string} rank */ export function rankPlural(rank) {
   /** @type {Record<string,string>} */ var map = { order: 'orders', family: 'families', genus: 'genera',
               species: 'species', class: 'classes' };
   return map[rank] || (rank + 's');
 }
 
-/** @param {LifeNode} n */ function renderExplorerCard(n) {
+/** @param {LifeNode} n */ export function renderExplorerCard(n) {
   var name = n.common_name || n.name;
   var sci = (n.common_name && n.common_name !== n.name)
     ? '<div class="ll-card-sci">' + escapeHtml(n.name) + '</div>' : '';

@@ -81,6 +81,12 @@
     ],
     "sharedWrites": []
   },
+  "id-conflicts": {
+    "route": "/id-conflicts",
+    "template": "id_conflicts.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "jobs": {
     "route": "/jobs",
     "template": "jobs.html",
@@ -94,6 +100,15 @@
     "sharedWrites": [
       "_gmapsCallback"
     ]
+  },
+  "life-list": {
+    "route": "/life-list",
+    "template": "life_list.html",
+    "pageHooks": [
+      "afterHistoryChange",
+      "openExportModal"
+    ],
+    "sharedWrites": []
   },
   "lightroom": {
     "route": "/lightroom",
@@ -117,6 +132,12 @@
       "loadMisses",
       "openBrowseShortcutPhoto"
     ],
+    "sharedWrites": []
+  },
+  "move": {
+    "route": "/move",
+    "template": "move.html",
+    "pageHooks": [],
     "sharedWrites": []
   },
   "shortcuts": {

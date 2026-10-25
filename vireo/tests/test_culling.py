@@ -629,9 +629,11 @@ def test_analyze_for_culling_no_embeddings(tmp_path):
 
 
 def test_analyze_for_culling_preserves_current_explicit_decisions(tmp_path):
+    from services.photo_review import PhotoReviewService
+
     db, photo_ids = _setup_culling_db(tmp_path)
-    db.photo_review.set_flag(photo_ids[0], "flagged")
-    db.photo_review.set_flag(photo_ids[1], "rejected")
+    PhotoReviewService(db).set_flag(photo_ids[0], "flagged")
+    PhotoReviewService(db).set_flag(photo_ids[1], "rejected")
     result = analyze_for_culling(db)
     photos = {p["photo_id"]: p for group in result["species_groups"]
               for scene in group["scene_groups"] for p in scene["photos"]}
@@ -652,6 +654,8 @@ def test_analyze_for_culling_rereads_flags_at_completion(tmp_path):
     job-history summary from reporting a decision the photographer has
     since reversed.
     """
+    from services.photo_review import PhotoReviewService
+
     db, photo_ids = _setup_culling_db(tmp_path)
     # Start the run with no explicit decisions on the catalog snapshot.
     assert all(
@@ -666,8 +670,8 @@ def test_analyze_for_culling_rereads_flags_at_completion(tmp_path):
 
     def flip_once():
         if not seen["flipped"]:
-            db.photo_review.set_flag(photo_ids[0], "flagged")
-            db.photo_review.set_flag(photo_ids[1], "rejected")
+            PhotoReviewService(db).set_flag(photo_ids[0], "flagged")
+            PhotoReviewService(db).set_flag(photo_ids[1], "rejected")
             seen["flipped"] = True
 
     result = analyze_for_culling(db, pause_callback=flip_once)

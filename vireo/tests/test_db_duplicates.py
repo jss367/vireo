@@ -827,9 +827,10 @@ def test_bulk_resolve_routes_each_merge_through_the_facade(db, tmp_path, monkeyp
     _touch(os.path.join(keep, "a.jpg"))
     _touch(os.path.join(keep, "b.jpg"))
     merges = []
-    monkeypatch.setattr(
-        db, "_apply_winner_loser_merge", lambda w, l: merges.append((w, l)),
-    )
+    def merge(winner, losers, *, manual_review=False):
+        assert manual_review is True
+        merges.append((winner, losers))
+    monkeypatch.setattr(db, "_apply_winner_loser_merge", merge)
 
     result = duplicate_resolution.bulk_resolve_by_folder(db, ["H1", "H2"], keep)
 
@@ -1082,7 +1083,7 @@ def test_winner_loser_merge_stays_on_the_facade():
 
 
 def test_workflow_signatures_are_unchanged():
-    """The moved workflows take ``db`` where the methods took ``self``."""
+    """Public workflows keep their API; the internal merge explicitly opts into manual attribution."""
     def params(fn):
         return [p.name for p in inspect.signature(fn).parameters.values()]
 
@@ -1091,7 +1092,7 @@ def test_workflow_signatures_are_unchanged():
     assert params(duplicate_resolution.keep_duplicate_copy) == ["db", "photo_id"]
     assert params(duplicate_resolution.bulk_resolve_by_folder) == ["db", "file_hashes", "keep_folder"]
     assert str(inspect.signature(Database._apply_winner_loser_merge)) == (
-        "(self, winner_id, loser_ids, winner_flag=None)"
+        "(self, winner_id, loser_ids, winner_flag=None, *, manual_review=False)"
     )
 
 

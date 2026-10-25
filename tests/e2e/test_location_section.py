@@ -16,7 +16,7 @@ import json
 
 import pytest
 from playwright.sync_api import expect
-from services import photo_ingest, workspace_folders
+from services import gps_locations, photo_ingest, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -89,8 +89,8 @@ def _seed_reverse_geocode_cache(live_server, lat, lng, place_id, details):
     import places
     from services.gps_locations import encode_cached_reverse_geocode
 
-    live_server["db"].reverse_geocode_cache_put(
-        lat, lng, place_id=place_id,
+    gps_locations.reverse_geocode_cache_put(
+        live_server["db"], lat, lng, place_id=place_id,
         response_json=encode_cached_reverse_geocode(details, places.result_language(cfg.load())),
     )
 

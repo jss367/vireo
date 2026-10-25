@@ -25,7 +25,7 @@ async function main() {
   let complete;
   const ctx = vm.createContext({
     selectedPhotos: new Set(), selectedPhotoId: null, selectedIndex: -1,
-    anchorRestoreEpoch: 0, selectAllRequestSeq: 0, loadEpoch: 0,
+    anchorRestoreEpoch: 0, selectAllRequestSeq: 0,
     window: {}, buildBrowseIdsRequest: () => ({}),
     safeFetch: () => new Promise(resolve => { complete = resolve; }),
     showToast() {}, renderGrid() {}, updateBatchBar() {},
@@ -37,7 +37,8 @@ async function main() {
   // Browse's functions are ES module code that reads page state as
   // `state.<field>`; the context stands in for that object.
   ctx.state = ctx;
-  for (const name of ['observeBrowseWindow', 'selectAllMatchingPhotos', 'selectPhoto', 'getBrowseSelection', 'getActiveSelection']) {
+  vm.runInContext(fs.readFileSync('vireo/static/browse/window-requests.js', 'utf8').replace(/^export /gm, ''), ctx);
+  for (const name of ['selectAllMatchingPhotos', 'selectPhoto', 'getBrowseSelection', 'getActiveSelection']) {
     vm.runInContext(fn(browse, name), ctx);
   }
   const pending = ctx.selectAllMatchingPhotos();

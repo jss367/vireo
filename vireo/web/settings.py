@@ -23,6 +23,7 @@ from flask import Blueprint, g, jsonify, make_response, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
+from services import photo_locations
 from working_copy_cache import (
     arrange_deferred_over_quota_retry as arrange_deferred_working_copy_quota_retry,
 )
@@ -54,7 +55,7 @@ def queue_location_keyword_cleanup_for_workspace(db: Database, workspace_id: int
     saved_active = db.active_workspace_id
     try:
         db.set_active_workspace(int(workspace_id))
-        db.queue_location_changes_for_tagged_photos()
+        photo_locations.queue_location_changes_for_tagged_photos(db)
         return True
     except Exception:  # broad: a saved setting must not be undone by its cleanup side effect
         log.warning(

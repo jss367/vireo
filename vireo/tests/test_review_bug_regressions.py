@@ -7,6 +7,7 @@ import pytest
 from db import Database
 from repositories.photo_review import PhotoReviewRepository
 from repositories.sync import SyncRepository
+from services import photo_locations
 from web.location_edits import serialize_photo_location
 
 
@@ -176,7 +177,7 @@ def test_location_detail_and_sync_preview_choose_exported_location(client_with_p
     coordless = _keyword(db, "Other place", parent=root)
     for kid in (first, chosen, coordless):
         db.tag_photo(pid, kid)
-    assert db.get_photo_location_keyword_ids([pid]) == {pid: chosen}
+    assert photo_locations.get_photo_location_keyword_ids(db, [pid]) == {pid: chosen}
     assert serialize_photo_location(db, pid)["keyword_id"] == chosen
     db.queue_change(pid, "location", "effective")
     photo = app.test_client().get("/api/sync/preview").get_json()["photos"][0]
@@ -192,7 +193,7 @@ def test_location_breadcrumb_stops_at_general_parent(app_and_db):
     city = _keyword(db, "Paris", parent=country)
     db.tag_photo(pid, city)
     assert serialize_photo_location(db, pid)["parent_chain"] == [{"id": country, "name": "France"}]
-    assert db.get_photo_location_paths([pid]) == {pid: ["France", "Paris"]}
+    assert photo_locations.get_photo_location_paths(db, [pid]) == {pid: ["France", "Paris"]}
 
 
 def test_deleting_unknown_keyword_returns_not_found(app_and_db):

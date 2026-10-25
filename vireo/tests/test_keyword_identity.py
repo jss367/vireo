@@ -12,7 +12,7 @@ from keyword_identity import (
     reconcile_location,
     resolve_import_path,
 )
-from services import dashboard_stats, photo_ingest, workspace_folders
+from services import dashboard_stats, photo_ingest, photo_locations, workspace_folders
 
 
 @pytest.fixture
@@ -136,7 +136,7 @@ def test_location_reconciliation_preserves_provenance_and_import_path(catalog, n
     reconcile_location(db, source, target)
     assert db.conn.execute('SELECT 1 FROM keywords WHERE id = ?', (source,)).fetchone() is None
     assert db.add_keyword('Lake Hodges', parent_id=parent, _resolve_alias=True) == target
-    assert db.get_assigned_photo_location(photos[1])['place_id'] == 'test-place'
+    assert photo_locations.get_assigned_photo_location(db, photos[1])['place_id'] == 'test-place'
     assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?',
                            (photos[0], target)).fetchone()[0] == 'manual'
     assert db.conn.execute("SELECT COUNT(*) FROM pending_changes WHERE change_type = 'location'").fetchone()[0] == 2
@@ -228,7 +228,7 @@ def test_reconciliation_accepts_an_existing_descendant_location(catalog):
     assert location_candidates(db)[0]['conflicting_photo_count'] == 0
     reconcile_location(db, source, target)
     assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target, child}
-    assert db.get_assigned_photo_location(photos[0])['place_id'] == 'picnic-place'
+    assert photo_locations.get_assigned_photo_location(db, photos[0])['place_id'] == 'picnic-place'
 
 
 def test_reconciliation_does_not_override_a_different_assigned_place(catalog):
@@ -241,7 +241,7 @@ def test_reconciliation_does_not_override_a_different_assigned_place(catalog):
     assert location_candidates(db)[0]['conflicting_photo_count'] == 1
     with pytest.raises(ValueError, match='different linked place'):
         reconcile_location(db, source, target)
-    assert db.get_assigned_photo_location(photos[0])['place_id'] == 'another-place'
+    assert photo_locations.get_assigned_photo_location(db, photos[0])['place_id'] == 'another-place'
 
 
 @pytest.mark.parametrize('nested', [False, True])
@@ -284,7 +284,7 @@ def test_manual_keyword_addition_does_not_resolve_import_aliases(catalog, nested
     keyword = db.conn.execute('SELECT type, place_id FROM keywords WHERE id = ?', (manual,)).fetchone()
     assert keyword['type'] == 'general'
     assert keyword['place_id'] is None
-    assert db.get_assigned_photo_location(photos[1]) is None
+    assert photo_locations.get_assigned_photo_location(db, photos[1]) is None
     assert db.add_keyword('Lake Hodges', parent_id=parent, _resolve_alias=True) == target
 
 
@@ -532,7 +532,7 @@ def test_manual_merge_general_into_linked_place_remembers_import(catalog):
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
     assert db.add_keyword('Whatcom Falls Park', parent_id=parent, _resolve_alias=True) == target
-    assert db.get_assigned_photo_location(photos[0])['place_id'] == 'test-place'
+    assert photo_locations.get_assigned_photo_location(db, photos[0])['place_id'] == 'test-place'
 
 
 def test_manual_merge_multiple_keywords_and_coordinate_pair(catalog):
@@ -1404,7 +1404,7 @@ def test_conflict_guard_stops_a_place_chain_at_a_non_location_ancestor(catalog):
     db.tag_photo(photos[1], kept)
     # The app's own walk cuts off at Collection, so Country is not part of
     # this photo's exported chain even though it is an ancestor in the tree.
-    exported = db.get_photo_location_paths([photos[0]])[photos[0]]
+    exported = photo_locations.get_photo_location_paths(db, [photos[0]])[photos[0]]
     assert exported[0] == 'Park' and 'Country' not in exported
 
     with pytest.raises(ValueError, match='different linked place'):

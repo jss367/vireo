@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, cast
 import location_review
 import places
 from flask import Blueprint, current_app, g, jsonify, request
+from services import gps_locations
 from services.gps_locations import (
     decode_cached_reverse_geocode,
     encode_cached_reverse_geocode,
@@ -520,7 +521,7 @@ def create_locations_blueprint(
         Query params: ``lat``, ``lng`` (floats). Returns
         ``{"place_id": <str|null>, "summary": <str|null>}``.
 
-        Cache layer is keyed on ~110m grid (see ``Database._reverse_geocode_grid``).
+        Cache layer is keyed on ~110m grid (see ``gps_locations.reverse_geocode_grid``).
         A row with ``place_id=None`` is a cached negative — Google was previously
         asked and had no match, and we serve null without re-asking.
 
@@ -544,7 +545,7 @@ def create_locations_blueprint(
         maps_config = cfg.load()
         language = places.result_language(maps_config)
         db = get_db()
-        cached = db.reverse_geocode_cache_get(lat, lng)
+        cached = gps_locations.reverse_geocode_cache_get(db, lat, lng)
         if cached is not None:
             language_matches, details = decode_cached_reverse_geocode(
                 cached, language,
@@ -578,8 +579,8 @@ def create_locations_blueprint(
             return jsonify({"place_id": None, "summary": None})
 
         cache_place_id = details.get("place_id") if details else None
-        db.reverse_geocode_cache_put(
-            lat, lng,
+        gps_locations.reverse_geocode_cache_put(
+            db, lat, lng,
             place_id=cache_place_id,
             response_json=encode_cached_reverse_geocode(details, language),
         )

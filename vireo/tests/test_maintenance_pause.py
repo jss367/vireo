@@ -818,7 +818,11 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
     entered = threading.Event()
     release = threading.Event()
     flagged = []
-    original = PhotoReviewRepository.set_flag
+    # The sharpness job records a provisional ranking winner through
+    # ``flag_ranked_candidate`` so the automated choice does not impersonate a
+    # photographer's confirmation (see PhotoReviewRepository.flag_ranked_candidate).
+    # Gate the pause boundary on that method.
+    original = PhotoReviewRepository.flag_ranked_candidate
 
     monkeypatch.setattr(sharpness, "score_collection_photos", lambda *args, **kwargs: {
         "results": [
@@ -827,14 +831,15 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
         ],
     })
 
-    def flag_photo(review, photo_id, flag, **kwargs):
+    def flag_photo(review, photo_id, **kwargs):
         if not flagged:
             entered.set()
             assert release.wait(synchronization_timeout(5))
-        original(review, photo_id, flag, **kwargs)
+        result = original(review, photo_id, **kwargs)
         flagged.append(photo_id)
+        return result
 
-    monkeypatch.setattr(PhotoReviewRepository, "set_flag", flag_photo)
+    monkeypatch.setattr(PhotoReviewRepository, "flag_ranked_candidate", flag_photo)
     response = client.post("/api/jobs/sharpness", json={})
     assert response.status_code == 200
     job_id = response.get_json()["job_id"]

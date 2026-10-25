@@ -730,9 +730,9 @@ body { padding-bottom: 48px; }
   </div>
 
   <div class="move-tabs">
-    <button class="move-tab active" onclick="switchTab('quick')">Quick Move</button>
-    <button class="move-tab" onclick="switchTab('photo')">Photo Move</button>
-    <button class="move-tab" onclick="switchTab('rules')">Rules</button>
+    <button class="move-tab active" data-move-on="click:switchTab" data-move-arg="quick">Quick Move</button>
+    <button class="move-tab" data-move-on="click:switchTab" data-move-arg="photo">Photo Move</button>
+    <button class="move-tab" data-move-on="click:switchTab" data-move-arg="rules">Rules</button>
   </div>
 
   <!-- Quick Move Tab -->
@@ -756,7 +756,7 @@ body { padding-bottom: 48px; }
           <div class="step-number">1</div>
           <div class="step-body">
             <label class="step-title" for="quickFolderSelect">Choose the folder to move</label>
-            <select class="move-control" id="quickFolderSelect" onchange="onQuickFolderChange()">
+            <select class="move-control" id="quickFolderSelect" data-move-on="change:onQuickFolderChange">
               <option value="">Select a folder…</option>
             </select>
             <div class="folder-info" id="quickFolderInfo"></div>
@@ -772,7 +772,7 @@ body { padding-bottom: 48px; }
 
             <div class="field-group">
               <label class="field-label" for="quickDestMode">Destination type</label>
-              <select class="move-control" id="quickDestMode" onchange="onQuickDestModeChange()">
+              <select class="move-control" id="quickDestMode" data-move-on="change:onQuickDestModeChange">
                 <option value="local">A folder on this Mac or a mounted drive</option>
               </select>
             </div>
@@ -781,8 +781,8 @@ body { padding-bottom: 48px; }
               <div class="field-group" id="quickLocalRow">
                 <label class="field-label" for="quickDestInput">Destination parent folder</label>
                 <div class="move-control-row">
-                  <input type="text" id="quickDestInput" placeholder="Choose where it will live" oninput="updateQuickMoveBtn()">
-                  <button class="btn btn-secondary" type="button" onclick="openBrowser('quickDestInput')">
+                  <input type="text" id="quickDestInput" placeholder="Choose where it will live" data-move-on="input:updateQuickMoveBtn">
+                  <button class="btn btn-secondary" type="button" data-move-on="click:openBrowser" data-move-arg="quickDestInput">
                     Browse
                   </button>
                 </div>
@@ -791,20 +791,20 @@ body { padding-bottom: 48px; }
 
               <div class="field-group" id="quickRemoteRow" style="display:none;">
                 <label class="field-label" for="quickSubpathInput">Folder inside remote target <span style="font-weight:400;color:var(--text-dim);">Optional</span></label>
-                <input class="move-control" type="text" id="quickSubpathInput" placeholder="For example: USA/2026" oninput="updateQuickMoveBtn()">
+                <input class="move-control" type="text" id="quickSubpathInput" placeholder="For example: USA/2026" data-move-on="input:updateQuickMoveBtn">
                 <div class="field-hint">Leave blank to use the remote target’s main folder.</div>
               </div>
 
               <div class="field-group">
                 <label class="field-label" for="quickFolderMode">Folder organization</label>
-                <select class="move-control" id="quickFolderMode" onchange="onQuickFolderModeChange()">
+                <select class="move-control" id="quickFolderMode" data-move-on="change:onQuickFolderModeChange">
                   <option value="single">Keep as one folder</option>
                   <option value="date">Organize photos by capture date</option>
                 </select>
                 <div id="quickSingleFolderControls" style="margin-top:8px;">
                   <div class="move-control-row">
-                    <input type="text" id="quickFolderName" aria-label="Folder name" placeholder="Select a source folder first" oninput="updateQuickMoveBtn()" disabled>
-                    <button class="btn btn-secondary reset-name-btn" id="quickResetNameBtn" type="button" onclick="resetQuickFolderName()" disabled>Use original</button>
+                    <input type="text" id="quickFolderName" aria-label="Folder name" placeholder="Select a source folder first" data-move-on="input:updateQuickMoveBtn" disabled>
+                    <button class="btn btn-secondary reset-name-btn" id="quickResetNameBtn" type="button" data-move-on="click:resetQuickFolderName" disabled>Use original</button>
                   </div>
                   <div class="field-hint">Edit this name to rename the folder as part of the move.</div>
                 </div>
@@ -814,7 +814,7 @@ body { padding-bottom: 48px; }
                        the selected folder's capture dates are known. Never
                        hardcode a sample date: users read it as the folder
                        they are about to create. -->
-                  <select class="move-control" id="quickFolderTemplatePreset" aria-label="Date folder format" onchange="updateQuickFolderTemplateControls()">
+                  <select class="move-control" id="quickFolderTemplatePreset" aria-label="Date folder format" data-move-on="change:updateQuickFolderTemplateControls">
                     <option value="%Y/%Y-%m-%d">%Y/%Y-%m-%d</option>
                     <option value="%Y/%m/%d">%Y/%m/%d</option>
                     <option value="%Y/%m">%Y/%m</option>
@@ -822,7 +822,7 @@ body { padding-bottom: 48px; }
                     <option value="%Y-%m-%d" selected>%Y-%m-%d</option>
                     <option value="__custom__">Custom…</option>
                   </select>
-                  <input class="move-control" type="text" id="quickFolderTemplate" aria-label="Custom date folder format" placeholder="Enter a strftime format" oninput="updateQuickMoveBtn()" style="display:none;margin-top:8px;">
+                  <input class="move-control" type="text" id="quickFolderTemplate" aria-label="Custom date folder format" placeholder="Enter a strftime format" data-move-on="input:updateQuickMoveBtn" style="display:none;margin-top:8px;">
                   <div class="field-hint" id="quickDateSampleHint"></div>
                   <div class="field-hint">Photos can land in different folders when their capture dates differ. Photos without a capture date go to <code>unsorted</code>.</div>
                 </div>
@@ -843,7 +843,7 @@ body { padding-bottom: 48px; }
           </svg>
           <span>Vireo copies and verifies every file before removing the originals.</span>
         </div>
-        <button class="btn btn-primary quick-submit" id="quickMoveBtn" onclick="startQuickMove()" disabled>
+        <button class="btn btn-primary quick-submit" id="quickMoveBtn" data-move-on="click:startQuickMove" disabled>
           Review move <span class="button-arrow" aria-hidden="true">→</span>
         </button>
       </div>
@@ -852,7 +852,7 @@ body { padding-bottom: 48px; }
 
   <div class="move-section" id="moveVisibilityPanel">
     <label><input type="checkbox" id="moveKeepVisible" checked disabled
-      onchange="rememberMoveVisibility()"> Keep visible in other workspaces</label>
+      data-move-on="change:rememberMoveVisibility"> Keep visible in other workspaces</label>
     <p class="desc">Applies when moving individual photos, including capture-date moves and rules.
       Your choice is remembered. Keeping visibility shares only the moved photos.</p>
     <p id="moveAffectedWorkspaces" role="status">Select photos to see affected workspaces.</p>
@@ -866,14 +866,14 @@ body { padding-bottom: 48px; }
 
       <div class="form-row">
         <label>Source Folder</label>
-        <select id="photoFolderSelect" onchange="loadPhotosForFolder()">
+        <select id="photoFolderSelect" data-move-on="change:loadPhotosForFolder">
           <option value="">-- Select a folder --</option>
         </select>
       </div>
 
       <div id="photoSelectionBar" class="selection-bar" style="display:none;">
         <span class="count" id="photoSelCount">0 photos selected</span>
-        <button class="btn btn-small btn-secondary" onclick="clearPhotoSelection()">Clear</button>
+        <button class="btn btn-small btn-secondary" data-move-on="click:clearPhotoSelection">Clear</button>
       </div>
 
       <div id="photoGridContainer">
@@ -884,12 +884,12 @@ body { padding-bottom: 48px; }
         <label>Destination</label>
         <div class="dest-row">
           <input type="text" id="photoDestInput" placeholder="/path/to/destination">
-          <button class="btn btn-secondary btn-small" onclick="openBrowser('photoDestInput')">Browse</button>
+          <button class="btn btn-secondary btn-small" data-move-on="click:openBrowser" data-move-arg="photoDestInput">Browse</button>
         </div>
       </div>
 
       <div style="margin-top:12px;">
-        <button class="btn btn-primary" id="photoMoveBtn" onclick="startPhotoMove()" disabled>Move Photos</button>
+        <button class="btn btn-primary" id="photoMoveBtn" data-move-on="click:startPhotoMove" disabled>Move Photos</button>
       </div>
     </div>
   </div>
@@ -900,7 +900,7 @@ body { padding-bottom: 48px; }
       <h3>Move Rules</h3>
       <p class="desc">Create reusable rules to move photos matching specific criteria. Preview matches before running.</p>
 
-      <button class="btn btn-primary btn-small" onclick="showRuleForm()">New Rule</button>
+      <button class="btn btn-primary btn-small" data-move-on="click:showRuleForm">New Rule</button>
 
       <div id="ruleFormContainer" style="display:none;"></div>
 
@@ -920,9 +920,9 @@ body { padding-bottom: 48px; }
       <span id="moveBrowserSourceCount"></span>
     </div>
     <div class="browser-shortcuts">
-      <button onclick="browseTo(null)">Home</button>
-      <button onclick="browseTo('__pictures__')">Pictures</button>
-      <button onclick="browseTo('__volumes__')">Volumes</button>
+      <button data-move-on="click:browseTo">Home</button>
+      <button data-move-on="click:browseTo" data-move-arg="__pictures__">Pictures</button>
+      <button data-move-on="click:browseTo" data-move-arg="__volumes__">Volumes</button>
     </div>
     <div class="browser-recents" id="moveBrowserRecents" style="display:none;"
          data-testid="move-browser-recents">
@@ -933,11 +933,11 @@ body { padding-bottom: 48px; }
     <div id="moveBrowserList" style="height:300px;overflow-y:auto;border:1px solid var(--border-primary);border-radius:4px;margin-bottom:12px;"></div>
     <div class="new-folder-row">
       <input type="text" id="newFolderName" placeholder="New folder name...">
-      <button class="btn btn-secondary btn-small" onclick="createNewFolder()">Create</button>
+      <button class="btn btn-secondary btn-small" data-move-on="click:createNewFolder">Create</button>
     </div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" onclick="selectBrowserFolder()">Select This Folder</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeBrowser()">Cancel</button>
+      <button class="modal-btn modal-btn-primary" data-move-on="click:selectBrowserFolder">Select This Folder</button>
+      <button class="modal-btn modal-btn-cancel" data-move-on="click:closeBrowser">Cancel</button>
     </div>
   </div>
 </div>
@@ -961,27 +961,13 @@ body { padding-bottom: 48px; }
       <div class="confirm-message" id="confirmMessage"></div>
     </div>
     <div class="modal-actions confirm-actions">
-      <button class="modal-btn modal-btn-cancel" onclick="closeConfirm()">Cancel</button>
-      <button class="modal-btn modal-btn-primary" id="confirmOkBtn" onclick="confirmOk()">Move</button>
+      <button class="modal-btn modal-btn-cancel" data-move-on="click:closeConfirm">Cancel</button>
+      <button class="modal-btn modal-btn-primary" id="confirmOkBtn" data-move-on="click:confirmOk">Move</button>
     </div>
   </div>
 </div>
 
 <script defer src="/static/vireo-rsync-help.js"></script>
-<script defer src="/static/move/state.js"></script>
-<script defer src="/static/move/remote-targets.js"></script>
-<script defer src="/static/move/folders.js"></script>
-<script defer src="/static/move/quick-move-form.js"></script>
-<script defer src="/static/move/quick-move-preview.js"></script>
-<script defer src="/static/move/quick-move-preflight.js"></script>
-<script defer src="/static/move/quick-move-start.js"></script>
-<script defer src="/static/move/photo-move.js"></script>
-<script defer src="/static/move/move-visibility.js"></script>
-<script defer src="/static/move/rules.js"></script>
-<script defer src="/static/move/rule-form.js"></script>
-<script defer src="/static/move/folder-browser.js"></script>
-<script defer src="/static/move/recent-destinations.js"></script>
-<script defer src="/static/move/confirm-modal.js"></script>
-<script defer src="/static/move/boot.js"></script>
+<script type="module" src="/static/move/boot.js"></script>
 </body>
 </html>

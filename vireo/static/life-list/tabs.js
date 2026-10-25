@@ -1,10 +1,12 @@
 // List/Explorer tab switching and the explorer's lazy first load.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { loadExplorer } from './explorer.js';
 
 // ---------------- Explorer tab ----------------
-var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first open
+   // lazy-load guard: fetch explorer once on first open
 
-/** @param {string} name */ function llSwitchTab(name) {
+/** @param {string} name */ export function llSwitchTab(name) {
   document.querySelectorAll(/** @type {'div'} */ ('.ll-tab')).forEach(function(t) {
     t.classList.toggle('active', t.dataset.tab === name);
   });
@@ -16,8 +18,8 @@ var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first o
     url.searchParams.set('view', name);
     history.replaceState(null, '', url.toString());
   } catch (e) {}
-  if (name === 'explorer' && !explorerLoaded) {
-    explorerLoaded = true;
+  if (name === 'explorer' && !state.explorerLoaded) {
+    state.explorerLoaded = true;
     loadExplorer();
   }
 }

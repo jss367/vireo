@@ -1,20 +1,21 @@
 // The confirm modal: plain confirms and the merge review.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
 
 /* ---------- Confirm Modal ---------- */
 /** @param {string} title @param {string} message @param {() => unknown} callback */
-function showConfirm(title, message, callback) {
+export function showConfirm(title, message, callback) {
   /** @type {HTMLElement} */ (document.querySelector('#confirmHeading .confirm-heading-icon')).style.display = 'none';
   /** @type {HTMLElement} */ (document.getElementById('confirmEyebrow')).textContent = 'Please confirm';
   /** @type {HTMLElement} */ (document.getElementById('confirmTitle')).textContent = title;
   /** @type {HTMLElement} */ (document.getElementById('confirmMessage')).textContent = message;
   /** @type {HTMLButtonElement} */ (document.getElementById('confirmOkBtn')).textContent = 'Move';
-  confirmCallback = callback;
+  state.confirmCallback = callback;
   /** @type {HTMLElement} */ (document.getElementById('confirmModal')).classList.add('open');
 }
 
 /** @param {HTMLElement} container @param {string} label @param {string} path */
-function appendConfirmRoute(container, label, path) {
+export function appendConfirmRoute(container, label, path) {
   var row = document.createElement('div');
   row.className = 'confirm-route-row';
   var routeLabel = document.createElement('span');
@@ -29,7 +30,7 @@ function appendConfirmRoute(container, label, path) {
 }
 
 /** @param {HTMLElement} container @param {string} value @param {string} label */
-function appendConfirmStat(container, value, label) {
+export function appendConfirmStat(container, value, label) {
   var stat = document.createElement('div');
   stat.className = 'confirm-stat';
   var statValue = document.createElement('span');
@@ -44,7 +45,7 @@ function appendConfirmStat(container, value, label) {
 }
 
 /** @param {HTMLElement} container @param {string} icon @param {string} title @param {string} detail @param {boolean} warning */
-function appendConfirmNote(container, icon, title, detail, warning) {
+export function appendConfirmNote(container, icon, title, detail, warning) {
   var note = document.createElement('div');
   note.className = 'confirm-note' + (warning ? ' warning' : '');
   var noteIcon = document.createElement('span');
@@ -62,7 +63,7 @@ function appendConfirmNote(container, icon, title, detail, warning) {
 }
 
 /** @param {MoveFolderDetails} details @param {() => unknown} callback */
-function showMoveConfirm(details, callback) {
+export function showMoveConfirm(details, callback) {
   showConfirm('Move Folder', '', callback);
   var message = /** @type {HTMLElement} */ (document.getElementById('confirmMessage'));
   var photos = details.photoCount;
@@ -88,7 +89,7 @@ function showMoveConfirm(details, callback) {
 }
 
 /** @param {MoveMergeDetails} details @param {() => unknown} callback */
-function showMergeConfirm(details, callback) {
+export function showMergeConfirm(details, callback) {
   var heading = /** @type {HTMLElement} */ (document.getElementById('confirmHeading'));
   /** @type {HTMLElement} */ (heading.querySelector('.confirm-heading-icon')).style.display = 'grid';
   /** @type {HTMLElement} */ (document.getElementById('confirmEyebrow')).textContent = 'Destination already exists';
@@ -143,17 +144,17 @@ function showMergeConfirm(details, callback) {
     : 'Originals are removed only after every source file is verified at the destination.';
   appendConfirmNote(message, '✓', 'Your originals stay put until verification.', verifyDetail, false);
 
-  confirmCallback = callback;
+  state.confirmCallback = callback;
   /** @type {HTMLElement} */ (document.getElementById('confirmModal')).classList.add('open');
 }
 
-function closeConfirm() {
+export function closeConfirm() {
   /** @type {HTMLElement} */ (document.getElementById('confirmModal')).classList.remove('open');
-  confirmCallback = null;
+  state.confirmCallback = null;
 }
 
-function confirmOk() {
-  var cb = confirmCallback;
+export function confirmOk() {
+  var cb = state.confirmCallback;
   closeConfirm();
   if (cb) cb();
 }

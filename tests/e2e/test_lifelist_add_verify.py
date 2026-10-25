@@ -6,8 +6,20 @@ no accepted species keyword, so they are the zero-species cases.
 """
 import re
 
+import pytest
 from playwright.sync_api import expect
 from services import photo_ingest
+
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Life List page's modules as ``pageModules.<file>`` and its state as
+    ``lifeListState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "life-list", "lifeListState")
 
 
 def _seed_large_hawk_life_list(live_server, count=101):
@@ -226,9 +238,9 @@ def test_life_list_pick_badge_and_live_promotion(live_server, page):
     # persisted flag event fires, Life List refetches its authoritative order.
     page.evaluate(
         """(pid) => {
-          const entry = currentData.species.find(e => e.species === 'Red-tailed Hawk');
+          const entry = lifeListState.currentData.species.find(e => e.species === 'Red-tailed Hawk');
           const photo = entry.photos.find(p => p.id === pid);
-          lifeListLightboxSpecies = entry.species;
+          lifeListState.lifeListLightboxSpecies = entry.species;
           openLightbox(photo.id, photo.filename, entry.photos);
         }""",
         hawk2,
@@ -391,7 +403,7 @@ def test_life_list_loads_more_than_initial_100(live_server, page):
 
     page.wait_for_function(
         """() => {
-          const entry = currentData.species.find(e => e.species === 'Red-tailed Hawk');
+          const entry = lifeListState.currentData.species.find(e => e.species === 'Red-tailed Hawk');
           return entry && entry.photos.length === 102 && entry.has_more === false;
         }"""
     )
@@ -407,9 +419,9 @@ def test_life_list_lightbox_continues_across_page_boundary(live_server, page):
 
     initial_last_id = page.evaluate(
         """() => {
-          const entry = currentData.species.find(e => e.species === 'Red-tailed Hawk');
+          const entry = lifeListState.currentData.species.find(e => e.species === 'Red-tailed Hawk');
           const last = entry.photos[entry.photos.length - 1];
-          lifeListLightboxSpecies = entry.species;
+          lifeListState.lifeListLightboxSpecies = entry.species;
           openLightbox(last.id, last.filename, entry.photos);
           lightboxNav(1);
           return last.id;
@@ -418,7 +430,7 @@ def test_life_list_lightbox_continues_across_page_boundary(live_server, page):
 
     page.wait_for_function(
         """(oldId) => {
-          const entry = currentData.species.find(e => e.species === 'Red-tailed Hawk');
+          const entry = lifeListState.currentData.species.find(e => e.species === 'Red-tailed Hawk');
           return entry && entry.photos.length === 102 && !entry.has_more
             && vireoLightboxSession.requestedPhotoId() !== oldId;
         }""",

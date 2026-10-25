@@ -397,12 +397,16 @@ def test_field_setters_route_through_facade(db, pids, monkeypatch):
         ("set_photo_edit_recipe", (pid, None), {"verify_workspace": False}),
         ("PhotoLabelRepository.remove", (pid,), {}),
         ("update_photo_wildlife_excluded", (pid, False), {"verify_workspace": False}),
-        ("PhotoReviewRepository.set_flag", (pid, "none"), {"verify_workspace": False}),
-        ("queue_flag_change_if_enabled", (pid, "none"), {}),
+        # Flag undo batches both writes under one transaction, so each call
+        # carries ``_commit=False`` and the transaction commits at the end.
+        ("PhotoReviewRepository.set_flag", (pid, "none"),
+         {"verify_workspace": False, "_commit": False}),
+        ("queue_flag_change_if_enabled", (pid, "none"), {"_commit": False}),
     ]
     assert calls == [
-        ("PhotoReviewRepository.set_flag", (pid, "flagged"), {"verify_workspace": False}),
-        ("queue_flag_change_if_enabled", (pid, "flagged"), {}),
+        ("PhotoReviewRepository.set_flag", (pid, "flagged"),
+         {"verify_workspace": False, "_commit": False}),
+        ("queue_flag_change_if_enabled", (pid, "flagged"), {"_commit": False}),
         ("update_photo_wildlife_excluded", (pid, True), {"verify_workspace": False}),
         ("PhotoLabelRepository.set", (pid, "red"), {}),
         ("set_photo_edit_recipe", (pid, '{"exposure": 1}'), {"verify_workspace": False}),

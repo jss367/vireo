@@ -1,4 +1,4 @@
-"""Bulk location assignment from EXIF GPS, and the reverse-geocode cache codec.
+"""Bulk location assignment from EXIF GPS, and the reverse-geocode cache.
 
 ``/api/batch/location/from-exif`` (preview and apply) and the location-review
 EXIF suggestions turn photos' EXIF coordinates into Google places the same
@@ -9,11 +9,13 @@ grid cell per request), and group the photos by resolved ``place_id``. The
 import page's suggestions (``services.import_locations``) share the cache
 through :func:`resolve_place_for_point`.
 
-The cache rows are tagged with the Google result language and the place
-resolver they were fetched under (``encode_cached_reverse_geocode`` /
+``reverse_geocode_cache_get`` / ``_put`` read and write the cache at the
+~110m cell ``reverse_geocode_grid`` rounds a point to. The cache rows are
+tagged with the Google result language and the place resolver they were
+fetched under (``encode_cached_reverse_geocode`` /
 ``decode_cached_reverse_geocode``) so a change to the "prefer English"
 setting, or to how places are named, refreshes stale entries; the
-``/api/places/reverse-geocode`` proxy uses the same codec.
+``/api/places/reverse-geocode`` proxy uses the same cache and codec.
 
 The flows that answer with an error response need the app's ``json_error``
 and its ``LocationErrors``, so they live on :class:`BulkGpsLocations`, which
@@ -75,6 +77,44 @@ def location_keyword_photo_ids(db: Database, photo_ids: Iterable[int]) -> set[in
         rows = db.locations.location_photo_rows(chunk)
         found.update(row["photo_id"] for row in rows)
     return found
+
+
+def reverse_geocode_grid(lat: float, lng: float) -> tuple[int, int]:
+    """Round (lat, lng) to a ~110m grid cell.
+
+    Used as the cache key for reverse-geocode lookups so two coords from
+    the same neighborhood share one Google call.
+    """
+    return int(round(lat * 1000)), int(round(lng * 1000))
+
+
+def reverse_geocode_cache_get(db: Database, lat: float, lng: float) -> dict[str, str | None] | None:
+    """Look up cached reverse-geocode response for (lat, lng).
+
+    Returns ``{"place_id": <str|None>, "response": <str>}`` on hit
+    (``response`` is the raw JSON string the put-side stashed). A row
+    with ``place_id=None`` is a cached negative result — Google was
+    asked and returned no match — and is still a hit. Returns ``None``
+    only on a true miss (the cell was never populated).
+    """
+    lat_grid, lng_grid = reverse_geocode_grid(lat, lng)
+    return db.locations.reverse_geocode_cache_get(
+        lat_grid, lng_grid,
+    )
+
+
+def reverse_geocode_cache_put(
+        db: Database, lat: float, lng: float, place_id: str | None, response_json: str) -> None:
+    """Upsert reverse-geocode result at the (lat, lng) grid cell.
+
+    ``place_id`` may be ``None`` to cache a negative result (Google
+    returned no match). ``response_json`` is already a JSON string —
+    the caller serializes; we don't re-encode.
+    """
+    lat_grid, lng_grid = reverse_geocode_grid(lat, lng)
+    db.locations.reverse_geocode_cache_put(
+        lat_grid, lng_grid, place_id, response_json,
+    )
 
 
 def decode_cached_reverse_geocode(cached: Mapping[str, str | None], language: str | None) -> tuple[bool, JsonDict]:
@@ -142,11 +182,11 @@ def resolve_place_for_point(
     Returns ``(details, reason)`` as :func:`resolve_exif_place_for_photo`
     does; ``grid_cache`` de-dupes lookups within one request.
     """
-    grid = Database._reverse_geocode_grid(lat, lng)
+    grid = reverse_geocode_grid(lat, lng)
     if grid in grid_cache:
         return grid_cache[grid]
 
-    cached = db.reverse_geocode_cache_get(lat, lng)
+    cached = reverse_geocode_cache_get(db, lat, lng)
     if cached is not None:
         language_matches, details = decode_cached_reverse_geocode(
             cached, language,
@@ -185,8 +225,8 @@ def resolve_place_for_point(
         return result
 
     cache_place_id = details.get("place_id") if details else None
-    db.reverse_geocode_cache_put(
-        lat,
+    reverse_geocode_cache_put(
+        db, lat,
         lng,
         place_id=cache_place_id,
         response_json=encode_cached_reverse_geocode(details, language),

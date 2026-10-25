@@ -1,15 +1,19 @@
 // Photo Move: loading a folder's photos, the grid selection, and the move-photos job.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { showConfirm } from './confirm-modal.js';
+import { refreshMoveVisibility } from './move-visibility.js';
+import { escapeAttr, escapeHtml, safeFetch, showToast, thumbnailUrl } from './shared.js';
 
 /* ---------- Photo Move ---------- */
-async function loadPhotosForFolder() {
+export async function loadPhotosForFolder() {
   var sel = /** @type {HTMLSelectElement} */ (document.getElementById('photoFolderSelect'));
   var fid = parseInt(sel.value);
   var container = /** @type {HTMLElement} */ (document.getElementById('photoGridContainer'));
-  var seq = ++photoLoadSeq;
-  photoList = [];
-  selectedPhotos.clear();
-  lastSelectedIdx = -1;
+  var seq = ++state.photoLoadSeq;
+  state.photoList = [];
+  state.selectedPhotos.clear();
+  state.lastSelectedIdx = -1;
   updatePhotoSelectionUI();
 
   if (!fid) {
@@ -28,7 +32,7 @@ async function loadPhotosForFolder() {
         '/api/photos?folder_id=' + encodeURIComponent(fid) +
         '&per_page=500&page=' + page
       );
-      if (seq !== photoLoadSeq) return;
+      if (seq !== state.photoLoadSeq) return;
 
       var pagePhotos = data.photos || [];
       loadedPhotos = loadedPhotos.concat(pagePhotos);
@@ -41,25 +45,25 @@ async function loadPhotosForFolder() {
         loadedPhotos.length.toLocaleString() + totalText + '</div>';
     }
 
-    photoList = loadedPhotos;
-    if (photoList.length === 0) {
+    state.photoList = loadedPhotos;
+    if (state.photoList.length === 0) {
       container.innerHTML = '<div class="empty-state">No photos in this folder</div>';
       return;
     }
     renderPhotoGrid();
   } catch (e) {
-    if (seq !== photoLoadSeq) return;
+    if (seq !== state.photoLoadSeq) return;
     container.innerHTML = '<div class="empty-state">Failed to load photos</div>';
   }
 }
 
-function renderPhotoGrid() {
+export function renderPhotoGrid() {
   var container = /** @type {HTMLElement} */ (document.getElementById('photoGridContainer'));
   var html = '<div class="photo-grid">';
-  photoList.forEach(function(p, idx) {
-    var selClass = selectedPhotos.has(p.id) ? ' selected' : '';
-    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
-    html += '<div class="grid-card' + selClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="handlePhotoClick(event, ' + p.id + ', ' + idx + ')">';
+  state.photoList.forEach(function(p, idx) {
+    var selClass = state.selectedPhotos.has(p.id) ? ' selected' : '';
+    var thumbUrl = thumbnailUrl(p);
+    html += '<div class="grid-card' + selClass + '" data-id="' + p.id + '" data-idx="' + idx + '">';
     html += '<div class="grid-card-img-wrap"><img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt=""></div>';
     html += '<div class="grid-card-info"><div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div></div>';
     html += '</div>';
@@ -69,51 +73,51 @@ function renderPhotoGrid() {
 }
 
 /** @param {MouseEvent} e @param {number} id @param {number} idx */
-function handlePhotoClick(e, id, idx) {
+export function handlePhotoClick(e, id, idx) {
   e.preventDefault();
-  if (e.shiftKey && lastSelectedIdx >= 0) {
+  if (e.shiftKey && state.lastSelectedIdx >= 0) {
     // Range select
-    var start = Math.min(lastSelectedIdx, idx);
-    var end = Math.max(lastSelectedIdx, idx);
+    var start = Math.min(state.lastSelectedIdx, idx);
+    var end = Math.max(state.lastSelectedIdx, idx);
     for (var i = start; i <= end; i++) {
-      var photo = photoList[i]; if (photo) selectedPhotos.add(photo.id);
+      var photo = state.photoList[i]; if (photo) state.selectedPhotos.add(photo.id);
     }
   } else if (e.metaKey || e.ctrlKey) {
     // Toggle
-    if (selectedPhotos.has(id)) {
-      selectedPhotos.delete(id);
+    if (state.selectedPhotos.has(id)) {
+      state.selectedPhotos.delete(id);
     } else {
-      selectedPhotos.add(id);
+      state.selectedPhotos.add(id);
     }
   } else {
     // Single select
-    selectedPhotos.clear();
-    selectedPhotos.add(id);
+    state.selectedPhotos.clear();
+    state.selectedPhotos.add(id);
   }
-  lastSelectedIdx = idx;
+  state.lastSelectedIdx = idx;
 
   // Update card highlights
   document.querySelectorAll(/** @type {'.grid-card'} */ ('#photoGridContainer .grid-card')).forEach(function(el) {
     var cardId = parseInt(el.getAttribute('data-id') || '');
-    el.classList.toggle('selected', selectedPhotos.has(cardId));
+    el.classList.toggle('selected', state.selectedPhotos.has(cardId));
   });
 
   updatePhotoSelectionUI();
 }
 
-function clearPhotoSelection() {
-  selectedPhotos.clear();
-  lastSelectedIdx = -1;
+export function clearPhotoSelection() {
+  state.selectedPhotos.clear();
+  state.lastSelectedIdx = -1;
   document.querySelectorAll(/** @type {'.grid-card'} */ ('#photoGridContainer .grid-card')).forEach(function(el) {
     el.classList.remove('selected');
   });
   updatePhotoSelectionUI();
 }
 
-function updatePhotoSelectionUI() {
+export function updatePhotoSelectionUI() {
   var bar = /** @type {HTMLElement} */ (document.getElementById('photoSelectionBar'));
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('photoMoveBtn'));
-  var count = selectedPhotos.size;
+  var count = state.selectedPhotos.size;
 
   if (count > 0) {
     bar.style.display = 'flex';
@@ -123,14 +127,14 @@ function updatePhotoSelectionUI() {
   }
 
   var dest = /** @type {HTMLInputElement} */ (document.getElementById('photoDestInput')).value.trim();
-  btn.disabled = !(count > 0 && dest && moveVisibilityReady);
-  refreshMoveVisibility(Array.from(selectedPhotos)).catch(function() {});
+  btn.disabled = !(count > 0 && dest && state.moveVisibilityReady);
+  refreshMoveVisibility(Array.from(state.selectedPhotos)).catch(function() {});
 }
 
-async function startPhotoMove() {
-  var ids = Array.from(selectedPhotos);
+export async function startPhotoMove() {
+  var ids = Array.from(state.selectedPhotos);
   var dest = /** @type {HTMLInputElement} */ (document.getElementById('photoDestInput')).value.trim();
-  if (ids.length === 0 || !dest || !moveVisibilityReady) return;
+  if (ids.length === 0 || !dest || !state.moveVisibilityReady) return;
   var names;
   try { names = await refreshMoveVisibility(ids); } catch (e) { return; }
   var keepVisible = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible')).checked;
@@ -147,7 +151,7 @@ async function startPhotoMove() {
 }
 
 /** @param {number[]} photoIds @param {string} destination @param {boolean} keepVisible */
-async function executePhotoMove(photoIds, destination, keepVisible) {
+export async function executePhotoMove(photoIds, destination, keepVisible) {
   try {
     var resp = await safeFetch('/api/jobs/move-photos', {
       method: 'POST',

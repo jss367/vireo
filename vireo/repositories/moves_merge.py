@@ -43,6 +43,7 @@ from repositories.identity_alternatives import (
     remap_identity_for_photo_merge,
     remap_identity_keyword_intents,
 )
+from repositories.photo_review import PhotoReviewRepository
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import (
     keep_photo_visible_across_folder_change,
@@ -592,10 +593,14 @@ class MovesMergeRepository:
                     continue
             else:
                 value = value or "none"
-            self.conn.execute(
-                f"UPDATE photos SET {column} = ? WHERE id = ?",
-                (value, surviving_id),
-            )
+            if change_type == "flag":
+                PhotoReviewRepository(self.conn, None).transfer_flag_for_merge(
+                    newest["photo_id"], surviving_id, value,
+                )
+            else:
+                self.conn.execute(
+                    f"UPDATE photos SET {column} = ? WHERE id = ?", (value, surviving_id),
+                )
         dropped += self.transfer_edit_recipe(
             losing_id, surviving_id)
         if dropped:
