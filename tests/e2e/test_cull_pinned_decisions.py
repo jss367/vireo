@@ -120,7 +120,7 @@ def test_pinned_decisions_can_be_released(live_server, page):
 
 
 def test_applied_flags_win_over_fresh_suggestion(live_server, page):
-    _open_cull(page, live_server, _results({1: {"flag": "rejected"}}))
+    _open_cull(page, live_server, _results({1: {"flag": "rejected", "flag_confirmation_status": "confirmed"}}))
 
     # Photo 1 was rejected by an earlier apply, so that decision shows even
     # though this run's label says KEEP.
@@ -130,16 +130,19 @@ def test_applied_flags_win_over_fresh_suggestion(live_server, page):
 
     # Saved picks/rejections are always honored in the favorites-first flow.
     expect(page.locator(".summary-link", has_text="Ignore 1 saved flags")).to_have_count(0)
-    _nudge_scoring_slider(page, _results({1: {"flag": "rejected"}}))
+    _nudge_scoring_slider(page, _results({1: {"flag": "rejected", "flag_confirmation_status": "confirmed"}}))
     expect(_card(page, 1)).to_have_class(re.compile(r"\breject\b"))
     expect(_card(page, 1).locator(".cull-card-source")).to_have_text("Applied")
 
 
 def test_applied_flags_survive_recompute(live_server, page):
-    _open_cull(page, live_server, _results({1: {"flag": "rejected"}}))
+    _open_cull(page, live_server, _results({1: {"flag": "rejected", "flag_confirmation_status": "confirmed"}}))
     expect(_card(page, 1)).to_have_class(re.compile(r"\breject\b"))
 
-    _nudge_scoring_slider(page, _results({1: {"flag": "rejected"}, 2: {"label": "KEEP"}}))
+    _nudge_scoring_slider(page, _results({
+        1: {"flag": "rejected", "flag_confirmation_status": "confirmed"},
+        2: {"label": "KEEP"},
+    }))
 
     expect(_card(page, 2)).to_have_class(re.compile(r"\bkeep\b"))
     expect(_card(page, 1)).to_have_class(re.compile(r"\breject\b"))
@@ -147,7 +150,7 @@ def test_applied_flags_survive_recompute(live_server, page):
 
 
 def test_apply_clears_the_flag_behind_a_review_decision(live_server, page):
-    _open_cull(page, live_server, _results({1: {"flag": "flagged"}}))
+    _open_cull(page, live_server, _results({1: {"flag": "flagged", "flag_confirmation_status": "confirmed"}}))
 
     posted = []
 
