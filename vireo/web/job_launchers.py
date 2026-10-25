@@ -16,8 +16,10 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Protocol, cast
 
 from app_paths import media_root
 from artifact_flight import ArtifactProducerFailed
@@ -55,7 +57,42 @@ from web.request_args import (
     reject_visual_collection,
 )
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+    from threading import Lock
+    from types import ModuleType
+    from typing import Never
+
+    import numpy as np
+    from flask import Flask
+    from flask.typing import ResponseReturnValue
+    from labels import SpeciesLabels
+    from pipeline_job import _StagedMaskFile
+    from services.folder_moves import DateDestination, RemoteMoveSpec
+    from services.service_types import JobDict, JsonDict, JsonError
+    from web.background_jobs import JobLaunch
+    from web.web_types import (
+        AppConfig,
+        BuildScanWork,
+        GetDb,
+        GetRunner,
+        GuardMoveFolder,
+        InvalidateMissingOriginals,
+        PendingLocalWorkspaceTransition,
+        PreparedPhotoView,
+        RunBatchDelete,
+        StartMoveFolderJob,
+    )
+    from werkzeug.local import LocalProxy
+
 log = logging.getLogger(__name__)
+
+
+
+class LoadLabelSet(Protocol):
+    """``labels.load_label_set``: one label file as the classify job sees it."""
+
+    def __call__(self, path: str, meta: JsonDict | None = None, /) -> SpeciesLabels: ...
 
 # Representative reasons kept on the release job result. The Jobs page shows
 # ten items (``MAX_DETAIL_ITEMS``) and the ``kept`` count already reports the
@@ -68,7 +105,7 @@ _MAX_KEPT_REASONS = 50
 _MAX_ERROR_REASONS = 50
 
 
-def _count_lines(path):
+def _count_lines(path: str) -> int | None:
     if not path:
         return None
     try:
@@ -78,7 +115,7 @@ def _count_lines(path):
         return None
 
 
-def _photo_is_raw_jpeg_pair(photo):
+def _photo_is_raw_jpeg_pair(photo: Row | None) -> bool:
     """Mirror of ``static/lightbox/edits.js``'s ``vireoPhotoIsRawJpegPair``.
 
     The lightbox defaults a photo matching this predicate to its JPEG and
@@ -100,7 +137,7 @@ def _photo_is_raw_jpeg_pair(photo):
     return companion_ext in {".jpg", ".jpeg"}
 
 
-def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
+def _paired_jpeg_preview_exists(preview_dir: str, photo: Row, size: int, db: Database) -> bool:
     """Check the exact current JPEG artifact using the renderer's predicate."""
     from web.media import (
         _paired_preview_path,
@@ -134,51 +171,53 @@ def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
 
 
 def _move_folder_destination(
-    cfg, move_mod, effective_cfg, *, remote_target_id, subpath, destination,
-    folder_template,
-):
+    cfg: ModuleType, move_mod: ModuleType, effective_cfg: JsonDict, *, remote_target_id: str, subpath: str,
+    destination: object, folder_template: str,
+) -> tuple[JsonDict | None, RemoteMoveSpec | None, str, str, tuple[str, int] | None]:
     """Resolve a folder move's remote or local destination.
 
     Returns ``(target, remote, destination, display_dest, error)``;
     ``error`` holds the ``json_error`` arguments when the request must be
-    refused, and is None otherwise.
+    refused (with empty destinations), and is None otherwise.
     """
     # Remote (SSH) destination vs local path. A remote target carries its
     # own destination (remote_path + optional subpath), so `destination`
     # is not required in that case.
     if remote_target_id:
         if folder_template:
-            return None, None, destination, None, (
+            return None, None, "", "", (
                 "Organizing one folder into capture-date folders is only "
-                "available for local or mounted-drive destinations.",
+                "available for local or mounted-drive destinations.", 400,
             )
         target, remote, err = _remote_move_spec(
             cfg, move_mod, effective_cfg, remote_target_id, subpath,
         )
-        if err is not None:
-            return target, None, destination, None, err
+        if err is not None or remote is None:
+            return target, None, "", "", err
         # Pass the mount path as `destination` for informational use; the
         # move uses the SSH base from `remote`.
-        destination = remote["mount_dest_base"]
         display_dest = move_mod.rsync_dest_spec(
             target, remote["ssh_dest_base"])
-        return target, remote, destination, display_dest, None
+        return target, remote, remote["mount_dest_base"], display_dest, None
     if not isinstance(destination, str):
-        return None, None, destination, None, ("destination must be a string",)
+        return None, None, "", "", ("destination must be a string", 400)
     if not destination:
-        return None, None, destination, None, ("destination required",)
+        return None, None, "", "", ("destination required", 400)
     if not os.path.isabs(destination):
-        return None, None, destination, None, (
-            "destination must be an absolute path",
+        return None, None, "", "", (
+            "destination must be an absolute path", 400,
         )
     return None, None, destination, destination, None
 
 
-def _remote_move_spec(cfg, move_mod, effective_cfg, remote_target_id, subpath):
+def _remote_move_spec(
+    cfg: ModuleType, move_mod: ModuleType, effective_cfg: JsonDict, remote_target_id: str, subpath: str,
+) -> tuple[JsonDict | None, RemoteMoveSpec | None, tuple[str, int] | None]:
     """Validate a move-folder remote (SSH) target and build its move spec.
 
     Returns ``(target, remote, error)``; ``error`` holds the ``json_error``
-    arguments when the request must be refused, and is None otherwise.
+    arguments when the request must be refused (``remote`` is then None),
+    and is None otherwise.
     """
     target = cfg.get_remote_target(remote_target_id)
     if not target:
@@ -188,7 +227,7 @@ def _remote_move_spec(cfg, move_mod, effective_cfg, remote_target_id, subpath):
         return target, None, (
             "This remote target has no local mount path, so moved "
             "photos couldn't stay in your library. Add a mount path "
-            "under Settings → Remote targets.",
+            "under Settings → Remote targets.", 400,
         )
     # Reject a relative mount path (e.g. saved as "Photos" instead of
     # "/Volumes/Photos") before any transfer runs. move_folder also
@@ -201,7 +240,7 @@ def _remote_move_spec(cfg, move_mod, effective_cfg, remote_target_id, subpath):
             f"(\"{mount_path}\"). Moved photos would be repointed "
             "to a path relative to the server's working directory "
             "and appear missing. Set an absolute mount path under "
-            "Settings → Remote targets.",
+            "Settings → Remote targets.", 400,
         )
     rsync_bin = move_mod.resolve_rsync_bin(
         effective_cfg.get("rsync_bin", "") or "")
@@ -209,39 +248,41 @@ def _remote_move_spec(cfg, move_mod, effective_cfg, remote_target_id, subpath):
         return target, None, (
             "No usable GNU rsync was found for remote moves. Install "
             "GNU rsync for your platform or set its executable under "
-            "Settings → Paths.",
+            "Settings → Paths.", 400,
         )
     ssh_bin = move_mod.resolve_ssh_bin(
         effective_cfg.get("ssh_bin", "") or "")
     if not ssh_bin:
         return target, None, (
             "OpenSSH Client was not found. Install the Windows "
-            "OpenSSH Client optional feature or configure ssh.exe in Settings.",
+            "OpenSSH Client optional feature or configure ssh.exe in Settings.", 400,
         )
     try:
-        remote = move_mod.build_remote_move_spec(
-            target, subpath, rsync_bin, ssh_bin)
+        # cast: ``move`` is not annotated yet; RemoteMoveSpec mirrors what
+        # build_remote_move_spec returns.
+        remote = cast("RemoteMoveSpec", move_mod.build_remote_move_spec(
+            target, subpath, rsync_bin, ssh_bin))
     except ValueError as exc:
-        return target, None, (str(exc),)
+        return target, None, (str(exc), 400)
     return target, remote, None
 
 
 def _plan_date_destinations(
-    move_mod, request_db, folder_id, destination, folder_template,
-):
+    move_mod: ModuleType, request_db: Database, folder_id: int, destination: str, folder_template: str,
+) -> tuple[list[DateDestination], str | None]:
     """Plan a date-organized folder move into its per-date destinations.
 
     Returns ``(date_destinations, error)``; ``error`` is the message to
-    refuse the request with, or None.
+    refuse the request with (beside ``[]``), or None.
     """
     try:
         date_plan = move_mod.plan_folder_date_moves(
             request_db, folder_id, destination, folder_template,
         )
     except ValueError as exc:
-        return None, str(exc)
+        return [], str(exc)
     if not date_plan:
-        return None, "No tracked photos found in the source folder"
+        return [], "No tracked photos found in the source folder"
     return [
         {
             "path": item["destination"],
@@ -253,9 +294,9 @@ def _plan_date_destinations(
 
 
 def _move_folder_landing(
-    move_mod, folder, *, folder_template, remote, target, destination,
-    display_dest, destination_name, date_destinations,
-):
+    move_mod: ModuleType, folder: Row, *, folder_template: str, remote: RemoteMoveSpec | None, target: JsonDict | None,
+    destination: str, display_dest: str, destination_name: str, date_destinations: list[DateDestination] | None,
+) -> str:
     """The destination a folder move reports as where its photos land."""
     if folder_template:
         # A date-organized move fans out into one folder per capture date.
@@ -265,6 +306,8 @@ def _move_folder_landing(
         # user would otherwise read as the landing path. With several date
         # folders there is no single landing path; keep the root and let
         # the jobs panel list the folders underneath it.
+        # A date-organized move always carries its planned folders.
+        date_destinations = cast("list[DateDestination]", date_destinations)
         return (
             date_destinations[0]["path"] if len(date_destinations) == 1
             else display_dest
@@ -284,25 +327,25 @@ def _move_folder_landing(
     )
 
 
-def _scan_roots_from_body(body):
+def _scan_roots_from_body(body: JsonDict) -> tuple[list[str], str | None]:
     """Read and check the scan roots a ``/api/jobs/scan`` body names.
 
     Returns ``(roots_list, error)``; ``error`` is the message to refuse
-    the request with, or None.
+    the request with (beside ``[]``), or None.
     """
     # Normalize inputs. Prefer the explicit plural form when both are
     # provided; a caller who sends ``roots`` has opted into the new API.
     if "roots" in body:
         roots_in = body.get("roots")
         if not isinstance(roots_in, list) or not roots_in:
-            return None, "roots must be a non-empty list"
+            return [], "roots must be a non-empty list"
         roots_list = [str(r) for r in roots_in if r]
         if not roots_list:
-            return None, "roots must be a non-empty list"
+            return [], "roots must be a non-empty list"
     else:
         root = body.get("root", "")
         if not root:
-            return None, "root path required"
+            return [], "root path required"
         roots_list = [root]
 
     from image_loader import is_excluded_scan_path
@@ -314,16 +357,16 @@ def _scan_roots_from_body(body):
         # "access data from other apps" TCC prompt, defeating the guards
         # inside scan().
         if is_excluded_scan_path(r):
-            return None, (
+            return [], (
                 f"path is inside a macOS app-managed library and cannot "
                 f"be scanned: {r}"
             )
         if not os.path.isdir(r):
-            return None, f"directory not found: {r}"
+            return [], f"directory not found: {r}"
     return roots_list, None
 
 
-def _remember_scan_roots(roots_list):
+def _remember_scan_roots(roots_list: list[str]) -> None:
     """Remember scan roots in ``config.json`` (skip temp directories from tests)."""
     import tempfile
 
@@ -351,22 +394,22 @@ def _remember_scan_roots(roots_list):
 
 
 def create_job_launchers_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
+    config: AppConfig,
     *,
-    invalidate_missing_originals,
-    run_batch_delete,
-    build_scan_work,
-    pending_local_workspace_transition,
-    guard_move_folder,
-    start_move_folder_job,
-    serve_original_photo,
-    serve_photo_preview,
-    sync_job_lock,
-):
+    invalidate_missing_originals: InvalidateMissingOriginals,
+    run_batch_delete: RunBatchDelete,
+    build_scan_work: BuildScanWork,
+    pending_local_workspace_transition: PendingLocalWorkspaceTransition,
+    guard_move_folder: GuardMoveFolder,
+    start_move_folder_job: StartMoveFolderJob,
+    serve_original_photo: PreparedPhotoView,
+    serve_photo_preview: PreparedPhotoView,
+    sync_job_lock: Lock,
+) -> Blueprint:
     """Build the job-launchers blueprint.
 
     ``config`` is the Flask app's config mapping, read when a job starts
@@ -398,7 +441,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/batch-delete", methods=["POST"])
     @background_job
-    def api_job_batch_delete(ctx):
+    def api_job_batch_delete(ctx: JobLaunch) -> ResponseReturnValue:
         """Start a background delete job with phase progress."""
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
@@ -412,11 +455,11 @@ def create_job_launchers_blueprint(
         if not isinstance(photo_ids, list):
             return json_error("photo_ids must be a list")
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = ctx.thread_db()
             started = time.time()
 
-            def progress(payload):
+            def progress(payload: JsonDict) -> None:
                 current = payload.get("current", 0)
                 total = payload.get("total", 0)
                 job["progress"]["current"] = current
@@ -449,7 +492,8 @@ def create_job_launchers_blueprint(
                     )
                     if msg not in job["errors"]:
                         job["errors"].append(msg)
-                return result
+                # A TypedDict is a plain dict at runtime.
+                return cast("JsonDict", result)
             finally:
                 thread_db.close()
 
@@ -465,14 +509,14 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/precompute-embeddings", methods=["POST"])
     @background_job
-    def api_job_precompute_embeddings(ctx):
+    def api_job_precompute_embeddings(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         labels_file = body.get("labels_file")
         if not model_id or not labels_file:
             return json_error("model_id and labels_file required")
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             return _run_precompute_embeddings(ctx, job, model_id, labels_file)
 
         return ctx.start(
@@ -495,7 +539,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/fetch-labels", methods=["POST"])
     @background_job
-    def api_job_fetch_labels(ctx):
+    def api_job_fetch_labels(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         place_id = body.get("place_id")
         place_name = body.get("place_name", "")
@@ -512,10 +556,10 @@ def create_job_launchers_blueprint(
             filter_label = OBSERVATION_FILTERS[observation_filter]["name"]
             name = f"{place_name} {group_names} ({filter_label})".strip()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from labels import fetch_species_list, load_label_set, save_labels
 
-            def progress_cb(msg, current=None, total=None):
+            def progress_cb(msg: str, current: int | None = None, total: int | None = None) -> None:
                 ctx.checkpoint(job)
                 job["progress"]["current_file"] = msg
                 if current is not None:
@@ -575,7 +619,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/scan", methods=["POST"])
     @background_job
-    def api_job_scan(ctx):
+    def api_job_scan(ctx: JobLaunch) -> ResponseReturnValue:
         """Queue a scan job.
 
         Body accepts either:
@@ -667,7 +711,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/scan-workspace", methods=["POST"])
     @background_job
-    def api_job_scan_workspace(ctx):
+    def api_job_scan_workspace(ctx: JobLaunch) -> ResponseReturnValue:
         """Queue an incremental scan across every root folder of the active
         workspace.
 
@@ -718,7 +762,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/repair-metadata", methods=["POST"])
     @background_job
-    def api_job_repair_metadata(ctx):
+    def api_job_repair_metadata(ctx: JobLaunch) -> ResponseReturnValue:
         """Incrementally rescan reachable roots that contain missing EXIF."""
         from image_loader import is_excluded_scan_path
         from metadata import exiftool_status
@@ -765,7 +809,8 @@ def create_job_launchers_blueprint(
         # ``photo_count`` matches what the job will process. An unscoped
         # count could report photos under an offline sibling root that
         # this job will never touch.
-        repair_count = metadata_repair_count(db, ctx.workspace_id, existing)
+        # A scan runs in the request's active workspace.
+        repair_count = metadata_repair_count(db, cast(int, ctx.workspace_id), existing)
         if not repair_count:
             return json_error("no photos need metadata repair", 409)
 
@@ -801,7 +846,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/previews", methods=["POST"])
     @background_job
-    def api_job_previews(ctx):
+    def api_job_previews(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
         requested_photo_ids = body.get("photo_ids")
@@ -824,7 +869,7 @@ def create_job_launchers_blueprint(
         if err is not None:
             return err
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             return _PreviewWarmup(
                 ctx,
                 job,
@@ -845,7 +890,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/ingest", methods=["POST"])
     @background_job
-    def api_job_ingest(ctx):
+    def api_job_ingest(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         source = body.get("source", "")
         destination = body.get("destination", "")
@@ -871,14 +916,14 @@ def create_job_launchers_blueprint(
         if folder_template and _is_unsafe_path(folder_template):
             return json_error("folder_template must be a relative path without '..' or backslashes")
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from ingest import ingest as do_ingest
 
             thread_db = ctx.thread_db()
 
             job["_start_time"] = time.time()
 
-            def progress_cb(current, total, filename):
+            def progress_cb(current: int, total: int, filename: str) -> None:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = filename
@@ -923,7 +968,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/move-photos", methods=["POST"])
     @background_job
-    def api_job_move_photos(ctx):
+    def api_job_move_photos(ctx: JobLaunch) -> ResponseReturnValue:
         """Move selected photos to a destination directory."""
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -952,7 +997,7 @@ def create_job_launchers_blueprint(
         effective_cfg = get_db().get_effective_config(cfg.load())
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from move import move_photos
 
             thread_db = ctx.thread_db()
@@ -960,7 +1005,7 @@ def create_job_launchers_blueprint(
             job["_start_time"] = time.time()
             job["progress"]["total"] = len(photo_ids)
 
-            def progress_cb(current, total, filename):
+            def progress_cb(current: int, total: int, filename: str) -> None:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = filename
@@ -1008,7 +1053,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/offline-cache", methods=["POST"])
     @background_job
-    def api_job_offline_cache(ctx):
+    def api_job_offline_cache(ctx: JobLaunch) -> ResponseReturnValue:
         """Copy selected originals into Vireo's managed offline cache."""
         body = request.get_json(silent=True) or {}
         # Flask returns top-level JSON lists/numbers/strings as-is, so guard
@@ -1059,7 +1104,7 @@ def create_job_launchers_blueprint(
 
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
-        def work(job):
+        def work(job: JobDict) -> dict[str, int]:
             return _run_offline_cache(ctx, job, photo_ids, vireo_dir)
 
         return ctx.start(
@@ -1071,7 +1116,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/release-local-originals", methods=["POST"])
     @background_job
-    def api_job_release_local_originals(ctx):
+    def api_job_release_local_originals(ctx: JobLaunch) -> ResponseReturnValue:
         """Release selected, folder-scoped, or all managed offline originals."""
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -1108,7 +1153,7 @@ def create_job_launchers_blueprint(
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         selected_photos = db.photos.get_by_ids(photo_ids)
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from offline_cache import release_photo_original
 
             thread_db = ctx.thread_db()
@@ -1145,7 +1190,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/prepare-full-resolution", methods=["POST"])
     @background_job
-    def api_job_prepare_full_resolution(ctx):
+    def api_job_prepare_full_resolution(ctx: JobLaunch) -> ResponseReturnValue:
         """Prepare selected photos for uninterrupted full-resolution review.
 
         The job first copies source assets into Vireo's managed local cache,
@@ -1193,9 +1238,10 @@ def create_job_launchers_blueprint(
         selected_photos = db.photos.get_by_ids(photo_ids)
         # The worker renders through the app object from a job
         # thread, which has no application context of its own.
-        flask_app = current_app._get_current_object()
+        # ``current_app`` is a proxy; unwrap it for the worker thread.
+        flask_app = cast("LocalProxy[Flask]", current_app)._get_current_object()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             return _FullResolutionPreparation(
                 ctx,
                 job,
@@ -1219,7 +1265,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/move-folder", methods=["POST"])
     @background_job
-    def api_job_move_folder(ctx):
+    def api_job_move_folder(ctx: JobLaunch) -> ResponseReturnValue:
         """Move an entire folder to a destination."""
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -1317,7 +1363,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/sync", methods=["POST"])
     @background_job
-    def api_job_sync(ctx):
+    def api_job_sync(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True)
         if body is None:
             body = {}
@@ -1348,12 +1394,12 @@ def create_job_launchers_blueprint(
                     seen.add(cid)
                     change_ids.append(cid)
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from sync import sync_to_xmp
 
             thread_db = ctx.thread_db()
 
-            def status_cb(progress):
+            def status_cb(progress: JsonDict) -> None:
                 ctx.runner.push_event(
                     job["id"], "progress",
                     {**progress, "current_file": "Writing XMP metadata...",
@@ -1405,7 +1451,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/classify", methods=["POST"])
     @background_job
-    def api_job_classify(ctx):
+    def api_job_classify(ctx: JobLaunch) -> ResponseReturnValue:
         import config as cfg
         from classify_job import ClassifyParams, run_classify_job
 
@@ -1446,9 +1492,10 @@ def create_job_launchers_blueprint(
             reason="large_classification_job_cpu_only",
         )
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
+            # Classification runs in the request's active workspace.
             return run_classify_job(
-                job, ctx.runner, db_path, ctx.workspace_id, params,
+                job, ctx.runner, db_path, cast(int, ctx.workspace_id), params,
                 vireo_dir=vireo_dir,
                 computation_cache_dir=config["COMPUTATION_CACHE_DIR"],
             )
@@ -1466,7 +1513,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/develop", methods=["POST"])
     @background_job
-    def api_job_develop(ctx):
+    def api_job_develop(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         if not photo_ids:
@@ -1499,7 +1546,7 @@ def create_job_launchers_blueprint(
             width=width,
         )
 
-        def work(job):
+        def work(job: JobDict) -> dict[str, int]:
             return _run_develop(ctx, job, photo_ids, settings)
 
         return ctx.start(
@@ -1515,7 +1562,7 @@ def create_job_launchers_blueprint(
 
     @blueprint.route("/api/jobs/extract-masks", methods=["POST"])
     @background_job
-    def api_job_extract_masks(ctx):
+    def api_job_extract_masks(ctx: JobLaunch) -> ResponseReturnValue:
         """Run SAM2 mask extraction as a background job.
 
         Requires MegaDetector detections to already be computed (run classify first).
@@ -1554,7 +1601,7 @@ def create_job_launchers_blueprint(
             reason="large_segmentation_job_cpu_only",
         )
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             return _MaskExtractionRun(
                 ctx,
                 job,
@@ -1582,7 +1629,7 @@ def create_job_launchers_blueprint(
     return blueprint
 
 
-def _import_mask_extraction_deps():
+def _import_mask_extraction_deps() -> SimpleNamespace:
     """Import the SAM2 / DINOv2 / quality stack when the job starts."""
     import numpy as np
     from dino_embed import embed, embed_batch, embedding_to_blob
@@ -1621,7 +1668,7 @@ def _import_mask_extraction_deps():
     )
 
 
-def _mask_candidate(photo, det):
+def _mask_candidate(photo: Row, det: Row) -> JsonDict:
     """The per-photo record the extract-masks loop works from."""
     return {
         "id": photo["id"],
@@ -1652,17 +1699,17 @@ class _MaskPhoto:
     photo: dict
     photo_id: int
     image_path: str
-    existing: object = None
-    mask_file_stage: object = None
+    existing: JsonDict | None = None
+    mask_file_stage: _StagedMaskFile | None = None
 
 
 class _MaskExtractionRun:
     """The ``/api/jobs/extract-masks`` work function and its run-wide state."""
 
     def __init__(
-        self, ctx, job, db_path, *, collection_id, sam2_variant,
-        dinov2_variant, proxy_longest_edge, min_detector_conf,
-    ):
+        self, ctx: JobLaunch, job: JobDict, db_path: str, *, collection_id: int | None, sam2_variant: str,
+        dinov2_variant: str, proxy_longest_edge: int, min_detector_conf: float,
+    ) -> None:
         self.ctx = ctx
         self.job = job
         self.db_path = db_path
@@ -1672,7 +1719,7 @@ class _MaskExtractionRun:
         self.proxy_longest_edge = proxy_longest_edge
         self.min_detector_conf = min_detector_conf
 
-    def run(self):
+    def run(self) -> JsonDict:
         deps = self.deps = _import_mask_extraction_deps()
         runner = self.ctx.runner
         job = self.job
@@ -1760,7 +1807,7 @@ class _MaskExtractionRun:
 
         return self._result()
 
-    def _collection_candidates(self):
+    def _collection_candidates(self) -> list[JsonDict]:
         thread_db = self.thread_db
         coll_photos = thread_db.collections.get_photos(
             self.collection_id, per_page=999999
@@ -1777,7 +1824,7 @@ class _MaskExtractionRun:
                 photos.append(_mask_candidate(p, dets[0]))
         return photos
 
-    def _workspace_candidates(self):
+    def _workspace_candidates(self) -> list[JsonDict]:
         """All workspace photos with at least one real (non full-image) detection.
 
         One query keeps this one round-trip to SQLite per workspace; the
@@ -1796,7 +1843,7 @@ class _MaskExtractionRun:
             photos.append(_mask_candidate(r, r))
         return photos
 
-    def _acquire_photo_mask_lock(self, photo_id):
+    def _acquire_photo_mask_lock(self, photo_id: int) -> Lock | None:
         """Take the photo's mask lock, or return None once the job is cancelled.
 
         Share the same photo-wide critical section as Process jobs.
@@ -1819,7 +1866,7 @@ class _MaskExtractionRun:
             return photo_mask_lock
         return None
 
-    def _extract_locked_photo(self, item):
+    def _extract_locked_photo(self, item: _MaskPhoto) -> bool:
         """Mask one photo under its lock.
 
         Returns False when the photo is finished without the loop's
@@ -1864,7 +1911,7 @@ class _MaskExtractionRun:
         self.masked += 1
         return True
 
-    def _refresh_primary(self, item):
+    def _refresh_primary(self, item: _MaskPhoto) -> bool:
         """Re-read the primary detection; False when the photo has none now."""
         thread_db = self.thread_db
         photo_id = item.photo_id
@@ -1895,7 +1942,7 @@ class _MaskExtractionRun:
         photo["detection_box"] = {k: selected["box_" + k] for k in "xywh"}
         return True
 
-    def _reuse_cached_mask(self, item):
+    def _reuse_cached_mask(self, item: _MaskPhoto) -> bool:
         """Count a still-valid cached mask as masked; True on a cache hit.
 
         Cache hit: photo_masks already has a row for
@@ -1946,7 +1993,7 @@ class _MaskExtractionRun:
         # masks_features.update_embeddings atomically.
         return False
 
-    def _embed(self, proxy, mask):
+    def _embed(self, proxy: np.ndarray, mask: np.ndarray) -> tuple[bytes | None, bytes]:
         """Return the (subject, global) DINOv2 embedding blobs.
 
         Compute DINOv2 embeddings — one batched call when both
@@ -1970,16 +2017,16 @@ class _MaskExtractionRun:
         return subj_emb_blob, global_emb_blob
 
     def _store_mask(
-        self, item, mask, completeness, features, subj_emb_blob,
-        global_emb_blob,
-    ):
+        self, item: _MaskPhoto, mask: np.ndarray, completeness: float, features: JsonDict, subj_emb_blob: bytes | None,
+        global_emb_blob: bytes,
+    ) -> None:
         """Stage the mask file, write its rows in one commit, then publish it."""
         deps = self.deps
         thread_db = self.thread_db
         photo_id = item.photo_id
         photo = item.photo
         existing = item.existing
-        item.mask_file_stage = deps.StagedMaskFile.create(
+        item.mask_file_stage = stage = deps.StagedMaskFile.create(
             mask,
             self.masks_dir,
             photo_id,
@@ -1989,7 +2036,7 @@ class _MaskExtractionRun:
                 existing["path"] if existing else None
             ),
         )
-        mask_path = item.mask_file_stage.final_path
+        mask_path = stage.final_path
 
         # Per-mask features: pop them out of `features` so
         # they land on the photo_masks row and not on the
@@ -2050,12 +2097,12 @@ class _MaskExtractionRun:
             variant=self.dinov2_variant,
             _commit=False,
         )
-        item.mask_file_stage.install()
+        stage.install()
         thread_db.commit_with_retry()
-        item.mask_file_stage.finish()
+        stage.finish()
         item.mask_file_stage = None
 
-    def _push_progress(self, i, current_file):
+    def _push_progress(self, i: int, current_file: str) -> None:
         job = self.job
         self.ctx.runner.push_event(
             job["id"],
@@ -2073,7 +2120,7 @@ class _MaskExtractionRun:
             },
         )
 
-    def _result(self):
+    def _result(self) -> JsonDict:
         # Opt into JobRunner's ok/errors convention when photos went
         # unmasked. Styling the card honestly isn't enough: the Jobs
         # page, job history, API clients and the completion event all
@@ -2102,9 +2149,10 @@ class _FullResolutionPreparation:
     """The ``/api/jobs/prepare-full-resolution`` work function and its run-wide state."""
 
     def __init__(
-        self, ctx, job, *, photo_ids, selected_photos, vireo_dir, flask_app,
-        get_db, config, serve_original_photo, serve_photo_preview,
-    ):
+        self, ctx: JobLaunch, job: JobDict, *, photo_ids: list[int], selected_photos: dict[int, Row], vireo_dir: str,
+        flask_app: Flask, get_db: GetDb, config: AppConfig, serve_original_photo: PreparedPhotoView,
+        serve_photo_preview: PreparedPhotoView,
+    ) -> None:
         self.ctx = ctx
         self.job = job
         self.photo_ids = photo_ids
@@ -2117,7 +2165,7 @@ class _FullResolutionPreparation:
         self.serve_photo_preview = serve_photo_preview
         self.preview_dir = os.path.join(vireo_dir, "previews")
 
-    def run(self):
+    def run(self) -> JsonDict:
         import config as cfg
         from offline_cache import (
             cache_photo_original,
@@ -2171,7 +2219,7 @@ class _FullResolutionPreparation:
         finally:
             thread_db.close()
 
-    def _render_through_view(self, path, view, photo_id, photo, label):
+    def _render_through_view(self, path: str, view: PreparedPhotoView, photo_id: int, photo: Row, label: str) -> str | None:
         """Run a lightbox view in an isolated request context.
 
         Returns an error string, or None when the view succeeded.
@@ -2195,7 +2243,7 @@ class _FullResolutionPreparation:
             finally:
                 response.close()
 
-    def _prepare_photo(self, photo_id):
+    def _prepare_photo(self, photo_id: int) -> str:
         """Cache, warm and settle one photo under its preparation lock.
 
         Returns the filename the progress event reports.
@@ -2211,15 +2259,16 @@ class _FullResolutionPreparation:
         cached = None
         attempted = self.photo_source_matches(photo, current_photo)
         if attempted:
+            # A matching source means the selected row is there.
             cached, error = self._cache_and_warm(
-                photo_id, photo, filename, is_pair,
+                photo_id, cast("Row", photo), filename, is_pair,
             )
         self._settle_photo(
             photo_id, photo, filename, is_pair, attempted, cached, error,
         )
         return filename
 
-    def _cache_and_warm(self, photo_id, photo, filename, is_pair):
+    def _cache_and_warm(self, photo_id: int, photo: Row, filename: str, is_pair: bool) -> tuple[JsonDict | None, str | None]:
         """Copy the source into the offline cache and warm its renders.
 
         Returns ``(cached, error)``: the offline-cache result (None when
@@ -2263,7 +2312,7 @@ class _FullResolutionPreparation:
                 )
         return cached, error
 
-    def _warm_renders(self, photo_id, photo, is_pair):
+    def _warm_renders(self, photo_id: int, photo: Row, is_pair: bool) -> str | None:
         """Render /original and every fit-size preview; return the first error."""
         # Execute the canonical renderers inside
         # isolated request contexts. This avoids a
@@ -2302,7 +2351,7 @@ class _FullResolutionPreparation:
                 )
         return error
 
-    def _missing_tier(self, photo_id, photo, is_pair):
+    def _missing_tier(self, photo_id: int, photo: Row, is_pair: bool) -> tuple[int, str] | tuple[None, None]:
         """Return ``(size, kind)`` for the first tier missing from the cache.
 
         ``kind`` is ``"preview"`` or ``"paired preview"``; both are None
@@ -2329,7 +2378,7 @@ class _FullResolutionPreparation:
                 return size, "paired preview"
         return None, None
 
-    def _evicted_tier_error(self, photo_id, photo, is_pair):
+    def _evicted_tier_error(self, photo_id: int, photo: Row, is_pair: bool) -> str | None:
         """The in-loop check that this photo's warmed tiers survived."""
         size, kind = self._missing_tier(photo_id, photo, is_pair)
         if size is None:
@@ -2351,8 +2400,9 @@ class _FullResolutionPreparation:
         )
 
     def _settle_photo(
-        self, photo_id, photo, filename, is_pair, attempted, cached, error,
-    ):
+        self, photo_id: int, photo: Row | None, filename: str, is_pair: bool, attempted: bool, cached: JsonDict | None,
+        error: str | None,
+    ) -> None:
         """Record one photo's outcome, purging caches if its identity changed."""
         thread_db = self.thread_db
         # Serialize this final identity check and cache cleanup
@@ -2385,6 +2435,8 @@ class _FullResolutionPreparation:
                             self.vireo_dir, photo_id,
                         )
             elif error is None:
+                # The offline-cache result is set whenever there is no error.
+                cached = cast("JsonDict", cached)
                 self.ready += 1
                 cache_bytes = int(cached.get("bytes") or 0)
                 if cached["status"] == "cached":
@@ -2402,7 +2454,7 @@ class _FullResolutionPreparation:
                 self.failed += 1
                 self.job["errors"].append(f"{filename}: {error}")
 
-    def _push_progress(self, index, filename):
+    def _push_progress(self, index: int, filename: str) -> None:
         job = self.job
         progress = {
             "current": index,
@@ -2418,7 +2470,7 @@ class _FullResolutionPreparation:
         job["progress"].update(progress)
         self.ctx.runner.push_event(job["id"], "progress", progress)
 
-    def _verify_ready_tiers(self):
+    def _verify_ready_tiers(self) -> None:
         """Reclassify ready photos whose tiers a later photo evicted.
 
         Final cross-selection verification: later photos' warming
@@ -2458,7 +2510,7 @@ class _FullResolutionPreparation:
                     "lightbox tiers)"
                 )
 
-    def _result(self):
+    def _result(self) -> JsonDict:
         return {
             "ok": self.failed == 0,
             "ready": self.ready,
@@ -2475,14 +2527,17 @@ class _FullResolutionPreparation:
 class _PreviewWarmup:
     """The ``/api/jobs/previews`` work function and its run-wide state."""
 
-    def __init__(self, ctx, job, config, *, collection_id, requested_photo_ids):
+    def __init__(
+        self, ctx: JobLaunch, job: JobDict, config: AppConfig, *, collection_id: int | None,
+        requested_photo_ids: list[int] | None,
+    ) -> None:
         self.ctx = ctx
         self.job = job
         self.config = config
         self.collection_id = collection_id
         self.requested_photo_ids = requested_photo_ids
 
-    def run(self):
+    def run(self) -> JsonDict:
         import config as cfg
 
         job = self.job
@@ -2553,10 +2608,10 @@ class _PreviewWarmup:
         return {"generated": self.generated, "skipped": self.skipped,
                 "failed": self.failed, "total": total}
 
-    def _photos(self):
+    def _photos(self) -> list[Row]:
         thread_db = self.thread_db
         if self.requested_photo_ids is not None:
-            photos = []
+            photos: list[Row] = []
             for photo_id in self.requested_photo_ids:
                 scoped_photo = thread_db.photos.get(
                     photo_id, verify_workspace=True,
@@ -2568,7 +2623,7 @@ class _PreviewWarmup:
             return thread_db.collections.get_photos(self.collection_id, per_page=999999)
         return thread_db.photos.list_page(per_page=999999)
 
-    def _warm_photo(self, photo):
+    def _warm_photo(self, photo: Row) -> bool:
         """Warm one photo's preview.
 
         Returns False when the photo is finished without a progress event
@@ -2589,7 +2644,7 @@ class _PreviewWarmup:
             self._render_preview(photo, detail_photo, cache_path, recipe)
         return True
 
-    def _keep_existing_preview(self, photo, cache_path, recipe):
+    def _keep_existing_preview(self, photo: Row, cache_path: str, recipe: JsonDict | None) -> bool:
         """Settle a preview file already on disk.
 
         Returns True when it is kept (counted skipped); False when an
@@ -2639,7 +2694,7 @@ class _PreviewWarmup:
             )
         return True
 
-    def _render_preview(self, photo, detail_photo, cache_path, recipe):
+    def _render_preview(self, photo: Row, detail_photo: Row, cache_path: str, recipe: JsonDict | None) -> None:
         folder_path = self.folders.get(detail_photo["folder_id"])
         try:
             materialized = materialize_preview(
@@ -2668,7 +2723,7 @@ class _PreviewWarmup:
                 self.skipped += 1
 
 
-def _run_develop(ctx, job, photo_ids, settings):
+def _run_develop(ctx: JobLaunch, job: JobDict, photo_ids: list[int], settings: SimpleNamespace) -> dict[str, int]:
     """The ``/api/jobs/develop`` work function.
 
     ``settings`` carries the darktable binary and the request's resolved
@@ -2761,7 +2816,7 @@ def _run_develop(ctx, job, photo_ids, settings):
     return result
 
 
-def _fail_develop_job(job, result, errors, total):
+def _fail_develop_job(job: JobDict, result: JsonDict, errors: int, total: int) -> Never:
     """Raise so a develop run with any per-photo failure ends "failed".
 
     Rollup rule: if any per-photo develop failed, the overall
@@ -2786,7 +2841,7 @@ def _fail_develop_job(job, result, errors, total):
     raise RuntimeError(first_err)
 
 
-def _run_offline_cache(ctx, job, photo_ids, vireo_dir):
+def _run_offline_cache(ctx: JobLaunch, job: JobDict, photo_ids: list[int], vireo_dir: str) -> dict[str, int]:
     """The ``/api/jobs/offline-cache`` work function."""
     from offline_cache import cache_photo_original
 
@@ -2862,7 +2917,7 @@ def _run_offline_cache(ctx, job, photo_ids, vireo_dir):
     return result
 
 
-def _record_release_outcome(job, result, filename, outcome):
+def _record_release_outcome(job: JobDict, result: JsonDict, filename: str, outcome: JsonDict) -> None:
     """Tally one photo's release outcome into the job result."""
     status = outcome["status"]
     result[status] += 1
@@ -2902,7 +2957,7 @@ def _record_release_outcome(job, result, filename, outcome):
             result["ok"] = False
 
 
-def _run_precompute_embeddings(ctx, job, model_id, labels_file):
+def _run_precompute_embeddings(ctx: JobLaunch, job: JobDict, model_id: str, labels_file: str) -> JsonDict:
     """The ``/api/jobs/precompute-embeddings`` work function."""
     from classifier import precompute_label_embeddings
     from labels import get_saved_labels, load_label_set
@@ -2929,7 +2984,7 @@ def _run_precompute_embeddings(ctx, job, model_id, labels_file):
         model["name"],
     )
 
-    def _progress(current, total):
+    def _progress(current: int, total: int) -> None:
         ctx.runner.push_event(
             job["id"],
             "progress",
@@ -2943,10 +2998,10 @@ def _run_precompute_embeddings(ctx, job, model_id, labels_file):
 
     from classifier import ClassifierLoadPaused
 
-    def _pause_requested():
+    def _pause_requested() -> bool:
         return ctx.runner.pause_requested(job["id"])
 
-    def _cancelled():
+    def _cancelled() -> bool:
         # Pure cancel probe: the pause is handled by the retry
         # loop below, outside the embedding single-flight, so the
         # producer never parks while equal-key waiters are joined.
@@ -2980,7 +3035,7 @@ def _run_precompute_embeddings(ctx, job, model_id, labels_file):
     return {"labels": len(labels), "model": model["name"]}
 
 
-def _precompute_model(get_models, model_id):
+def _precompute_model(get_models: Callable[[], list[JsonDict]], model_id: str) -> JsonDict:
     """Find the downloaded embedding model a precompute job runs with."""
     models = get_models()
     model = None
@@ -2998,7 +3053,9 @@ def _precompute_model(get_models, model_id):
     return model
 
 
-def _precompute_labels(get_saved_labels, load_label_set, labels_file):
+def _precompute_labels(
+    get_saved_labels: Callable[[], list[JsonDict]], load_label_set: LoadLabelSet, labels_file: str,
+) -> SpeciesLabels:
     """Load the label set a precompute job embeds, refusing an empty one."""
     # The same list the classify job will load, so the warmed
     # cache is the one it looks for.
@@ -3016,7 +3073,7 @@ def _precompute_labels(get_saved_labels, load_label_set, labels_file):
     return labels
 
 
-def _embedding_precompute_offer(load_label_set, labels_path):
+def _embedding_precompute_offer(load_label_set: LoadLabelSet, labels_path: str) -> JsonDict | None:
     """The precompute the fetch-labels result offers, or None.
 
     Offered when the active model uses per-label embeddings and the

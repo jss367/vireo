@@ -15,6 +15,8 @@ import logging
 import math
 import os
 import tempfile
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from app_paths import media_root
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
@@ -42,10 +44,22 @@ from web.background_jobs import make_background_job
 from web.request_args import MAX_SELECTION_PHOTOS
 from working_copy_cache import working_copy_publication_guard
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+    from types import ModuleType
+
+    from flask.typing import ResponseReturnValue
+    from float_image import FloatImage
+    from PIL import Image
+    from services.service_types import JobDict, JsonDict, JsonError
+    from species_identity import SpeciesIdentity
+    from web.background_jobs import JobLaunch
+    from web.web_types import AppConfig, GetDb, GetRunner
+
 log = logging.getLogger(__name__)
 
 
-def _prediction_scientific_name(db, pred):
+def _prediction_scientific_name(db: Database, pred: Row) -> str | None:
     """The binomial an iNaturalist observation may carry for ``pred``.
 
     A custom-label prediction's stored name can be another species' guess
@@ -56,7 +70,7 @@ def _prediction_scientific_name(db, pred):
     return resolved_prediction_taxonomy(pred, SpeciesResolver(db=db))["scientific_name"]
 
 
-def _confirmed_species_identity(resolver, entry):
+def _confirmed_species_identity(resolver: SpeciesResolver, entry: dict[str, str]) -> SpeciesIdentity:
     """Identity of one confirmed species keyword (``get_species_for_photos``
     entry with ``include_identities``): its linked taxon when it has one,
     otherwise whatever its name resolves to."""
@@ -66,7 +80,7 @@ def _confirmed_species_identity(resolver, entry):
     return resolver.display(name)
 
 
-def _option_dedup_keys(name, identity):
+def _option_dedup_keys(name: str, identity: SpeciesIdentity) -> set[str]:
     """Signature for the picker's dedup set. Authoritative identity keys
     (``taxon:``/``scientific:``) stand alone so two taxa sharing a common
     display name don't collapse into one option; the normalized name is used
@@ -76,7 +90,7 @@ def _option_dedup_keys(name, identity):
     return {"name:" + keyword_match_key(name)}
 
 
-def _species_options(db, photo_id, primary, min_conf):
+def _species_options(db: Database, photo_id: int, primary: Row | None, min_conf: float | None) -> list[JsonDict]:
     """Every species on the photo, for the submission dialog's picker.
 
     Confirmed species keywords come first, then each detection's top
@@ -87,10 +101,10 @@ def _species_options(db, photo_id, primary, min_conf):
     observation records one taxon, so the user picks among these.
     """
     resolver = SpeciesResolver(db=db)
-    options = []
-    seen = []
+    options: list[JsonDict] = []
+    seen: list[set[str]] = []
 
-    def add(name, scientific, source, confidence, identity):
+    def add(name: str, scientific: str | None, source: str, confidence: float | None, identity: SpeciesIdentity) -> None:
         if not name:
             return
         keys = _option_dedup_keys(name, identity)
@@ -127,44 +141,46 @@ def _species_options(db, photo_id, primary, min_conf):
     return options
 
 
-def _normalize_export_submissions(submissions):
-    """Coerce ``/api/inat/export`` submissions; ``(items, error message)``."""
-    normalized_submissions = []
+def _normalize_export_submissions(submissions: list[object]) -> tuple[list[JsonDict], str | None]:
+    """Coerce ``/api/inat/export`` submissions; ``(items, error message)``, ``[]`` on error."""
+    normalized_submissions: list[JsonDict] = []
     for item in submissions:
         if not isinstance(item, dict):
-            return None, "each submission must be an object"
-        raw_photo_id = item.get("photo_id")
+            return [], "each submission must be an object"
+        # A JSON value: int() rejects anything unusable.
+        raw_photo_id: Any = item.get("photo_id")
         if isinstance(raw_photo_id, (bool, float)):
-            return None, "photo_id must be an integer"
+            return [], "photo_id must be an integer"
         try:
             photo_id = int(raw_photo_id)
         except (TypeError, ValueError):
-            return None, "photo_id must be an integer"
+            return [], "photo_id must be an integer"
         normalized = dict(item)
         normalized["photo_id"] = photo_id
         if normalized.get("include_location", False):
-            latitude = normalized.get("latitude")
-            longitude = normalized.get("longitude")
+            # JSON values: float() rejects anything unusable.
+            latitude: Any = normalized.get("latitude")
+            longitude: Any = normalized.get("longitude")
             if isinstance(latitude, bool) or isinstance(longitude, bool):
-                return None, "latitude and longitude must be finite numbers"
+                return [], "latitude and longitude must be finite numbers"
             try:
                 latitude = float(latitude)
                 longitude = float(longitude)
             except (TypeError, ValueError):
-                return None, "latitude and longitude must be finite numbers"
+                return [], "latitude and longitude must be finite numbers"
             if not math.isfinite(latitude) or not math.isfinite(longitude):
-                return None, "latitude and longitude must be finite numbers"
+                return [], "latitude and longitude must be finite numbers"
             if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
-                return None, "latitude or longitude is out of range"
+                return [], "latitude or longitude is out of range"
             normalized["latitude"] = latitude
             normalized["longitude"] = longitude
         normalized_submissions.append(normalized)
     return normalized_submissions, None
 
 
-def _inat_export_metadata(item):
+def _inat_export_metadata(item: JsonDict) -> JsonDict:
     """The metadata an export writes: only the fields the user ticked."""
-    metadata = {}
+    metadata: JsonDict = {}
     if item.get("include_taxon", False):
         taxon_name = str(
             item.get("taxon_name") or ""
@@ -198,9 +214,9 @@ def _inat_export_metadata(item):
 
 
 def _inat_export_work(
-    ctx, submissions, *, destination, vireo_dir, quality, wc_max_size,
-    developed_dir, reveal,
-):
+    ctx: JobLaunch, submissions: list[JsonDict], *, destination: str, vireo_dir: str, quality: int, wc_max_size: int,
+    developed_dir: str, reveal: bool,
+) -> Callable[..., JsonDict]:
     """The ``inat-export`` job's work function over normalized submissions."""
     from inat_export import (
         InatExportError,
@@ -208,7 +224,7 @@ def _inat_export_work(
         reveal_inat_exports,
     )
 
-    def work(job):
+    def work(job: JobDict) -> JsonDict:
         thread_db = ctx.thread_db()
         exported = []
         errors = []
@@ -296,9 +312,9 @@ def _inat_export_work(
 
 
 def _inat_retry_load_from_original(
-    img, source_path, using_working_copy, fallback_path, load_kwargs,
-    expected_meta,
-):
+    img: Image.Image | FloatImage | None, source_path: str, using_working_copy: bool, fallback_path: str,
+    load_kwargs: JsonDict, expected_meta: JsonDict,
+) -> tuple[Image.Image | FloatImage | None, str, bool]:
     """Retry a failed working-copy decode from the original.
 
     Returns ``(img, source_path, using_working_copy)``; on a successful
@@ -327,7 +343,9 @@ def _inat_retry_load_from_original(
     return img, source_path, using_working_copy
 
 
-def _inat_companion_fallback(photo, img, source_path, primary_is_raw):
+def _inat_companion_fallback(
+    photo: Row, img: Image.Image | FloatImage | None, source_path: str, primary_is_raw: bool,
+) -> Image.Image | FloatImage | None:
     """Swap a failed or undersized RAW decode for the companion JPEG.
 
     Returns the image to render (possibly ``img`` itself, possibly None);
@@ -368,7 +386,7 @@ def _inat_companion_fallback(photo, img, source_path, primary_is_raw):
                 # both axes — a long-edge-only check misses cases like a
                 # 6000x3376 embedded preview "tying" a 6000x4000 sidecar
                 # and losing the short-edge content.
-                if _companion_image_can_replace_raw_result(
+                if companion_img is not None and _companion_image_can_replace_raw_result(
                     companion_img, img, expected_w, expected_h,
                 ):
                     if img is None:
@@ -395,8 +413,9 @@ def _inat_companion_fallback(photo, img, source_path, primary_is_raw):
 
 
 def _write_inat_upload_render(
-    img, recipe, photo, vireo_dir, out_dir, out_path, meta_path, expected_meta,
-):
+    img: Image.Image | FloatImage, recipe: JsonDict, photo: Row, vireo_dir: str, out_dir: str, out_path: str,
+    meta_path: str, expected_meta: JsonDict,
+) -> None:
     """Render ``recipe`` onto ``img`` and publish the JPEG and its cache key.
 
     Closes ``img`` (and the render) whether or not the write succeeds.
@@ -442,7 +461,9 @@ def _write_inat_upload_render(
             img.close()
 
 
-def _observation_defaults(db, photo, photo_id, data, pred):
+def _observation_defaults(
+    db: Database, photo: Row, photo_id: int, data: JsonDict, pred: Row | None,
+) -> tuple[str | None, str | None, float | None, float | None]:
     """``(taxon, observed_on, photo_lat, photo_lng)`` for one observation.
 
     ``data`` overrides the prediction's taxon and the capture date; the
@@ -479,23 +500,23 @@ class InatTokenGeneration:
     writes the counter guards.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.current = 0
 
-    def advance(self):
+    def advance(self) -> None:
         """Invalidate in-flight modal validations after any token write."""
         self.current += 1
 
 
 def create_inat_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
+    config: AppConfig,
     *,
-    token_generation,
-):
+    token_generation: InatTokenGeneration,
+) -> Blueprint:
     """Build the iNaturalist blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``).
@@ -508,7 +529,7 @@ def create_inat_blueprint(
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
     @blueprint.route("/api/inat/prepare/<int:photo_id>")
-    def api_inat_prepare(photo_id):
+    def api_inat_prepare(photo_id: int) -> ResponseReturnValue:
         """Prepare iNaturalist submission data for a photo."""
         import config as cfg
 
@@ -574,7 +595,7 @@ def create_inat_blueprint(
         })
 
     @blueprint.route("/api/inat/validate-token", methods=["POST"])
-    def api_inat_validate_token():
+    def api_inat_validate_token() -> ResponseReturnValue:
         """Validate an iNaturalist API token."""
         import inat
         body = request.json or {}
@@ -590,7 +611,7 @@ def create_inat_blueprint(
         return jsonify(result)
 
     @blueprint.route("/api/inat/token", methods=["POST"])
-    def api_inat_save_token():
+    def api_inat_save_token() -> ResponseReturnValue:
         """Validate and save an iNaturalist token from the submission modal."""
         import config as cfg
         import inat
@@ -635,7 +656,7 @@ def create_inat_blueprint(
 
     @blueprint.route("/api/inat/export", methods=["POST"])
     @background_job
-    def api_inat_export(ctx):
+    def api_inat_export(ctx: JobLaunch) -> ResponseReturnValue:
         """Export edited JPEGs with only the selected iNaturalist metadata."""
         import config as cfg
 
@@ -682,7 +703,7 @@ def create_inat_blueprint(
             },
         )
 
-    def _inat_edit_recipe_source(photo, recipe, fallback_path):
+    def _inat_edit_recipe_source(photo: Row, recipe: JsonDict, fallback_path: str) -> tuple[str, bool]:
         from image_loader import RAW_EXTENSIONS
 
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
@@ -728,7 +749,7 @@ def create_inat_blueprint(
                 return companion, False
         return fallback_path, False
 
-    def _inat_upload_photo_path(db, photo, fallback_path):
+    def _inat_upload_photo_path(db: Database, photo: Row, fallback_path: str) -> tuple[str, None] | tuple[None, str]:
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo["id"])
         if not recipe:
@@ -829,7 +850,7 @@ def create_inat_blueprint(
         )
         return out_path, None
 
-    def _offline_original_has_render_source(db, photo, photo_id):
+    def _offline_original_has_render_source(db: Database, photo: Row, photo_id: int) -> bool:
         """Whether an edit recipe can render from a local copy of ``photo``."""
         recipe = db.get_photo_edit_recipe(photo_id)
         wc_rel = photo["working_copy_path"]
@@ -854,7 +875,7 @@ def create_inat_blueprint(
 
     @blueprint.route("/api/inat/submit", methods=["POST"])
     @guarded_reader("inat-uploads")
-    def api_inat_submit():
+    def api_inat_submit() -> ResponseReturnValue:
         """Submit a single observation to iNaturalist."""
         import config as cfg
         import inat
@@ -943,9 +964,10 @@ def create_inat_blueprint(
         db.inat.record_submission(photo_id, obs_id, obs_url)
         return jsonify({"observation_id": obs_id, "observation_url": obs_url})
 
-    def _submit_batch_item(db, inat, token, min_conf, sub):
+    def _submit_batch_item(db: Database, inat: ModuleType, token: str, min_conf: float, sub: JsonDict) -> JsonDict:
         """Submit one batch entry; the entry's result row."""
-        photo_id = sub.get("photo_id")
+        # The entry's raw value: the photo lookup below rejects any non-id.
+        photo_id: Any = sub.get("photo_id")
         has_latitude = "latitude" in sub
         has_longitude = "longitude" in sub
         if has_latitude != has_longitude:
@@ -1017,7 +1039,7 @@ def create_inat_blueprint(
 
     @blueprint.route("/api/inat/submit-batch", methods=["POST"])
     @guarded_reader("inat-uploads")
-    def api_inat_submit_batch():
+    def api_inat_submit_batch() -> ResponseReturnValue:
         """Submit multiple observations to iNaturalist."""
         import config as cfg
         import inat
@@ -1046,7 +1068,7 @@ def create_inat_blueprint(
         return jsonify({"results": results})
 
     @blueprint.route("/api/inat/submissions")
-    def api_inat_submissions():
+    def api_inat_submissions() -> ResponseReturnValue:
         """Return submission records for a set of photo IDs."""
         raw = request.args.get("photo_ids", "")
         if not raw:
