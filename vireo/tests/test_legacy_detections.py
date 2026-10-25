@@ -155,3 +155,25 @@ def test_unclassified_legacy_detector_output_is_found(db, evidence):
         "id": folder, "path": "/photos/legacy", "photo_count": 1,
     }]
     assert db.predictions.legacy_detection_folders() == expected
+
+
+@pytest.mark.parametrize("runtime", [None, "legacy", "other-runtime", "raw-runtime"])
+def test_incomplete_raw_run_does_not_hide_legacy_evidence(db, runtime):
+    folder = workspace_folders.add_folder(db, "/photos/legacy")
+    photo = photo_ingest.add_photo(db, folder, "old.jpg", ".jpg", 10, 1.0)
+    # A surviving synthetic prediction is evidence of the old library, but
+    # cannot satisfy a MegaDetector run claiming that animal boxes were saved.
+    anchor = db.detections.save(photo, [{
+        "box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1,
+    }], "full-image")[0]
+    db.predictions.add(anchor, "Robin", 0.9, "old-model")
+    if runtime is not None:
+        db.detections.save(photo, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.01, "category": "animal",
+        }], "megadetector-v6", runtime_fingerprint=runtime)
+    db.model_runs.record_detector_run(photo, "megadetector-v6", 1, runtime_fingerprint="raw-runtime")
+    expected = [] if runtime == "raw-runtime" else [{
+        "id": folder, "path": "/photos/legacy", "photo_count": 1,
+    }]
+    assert db.predictions.legacy_detection_folders() == expected

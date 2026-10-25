@@ -146,7 +146,7 @@ class PredictionRepository:
         Legacy detector runs/rows count even if classification never produced
         predictions. Sentinel predictions cover older catalogs without run
         metadata. Confidence and review filters must not hide affected photos.
-        A successful identified MegaDetector run proves raw boxes were stored,
+        A consistent identified MegaDetector run proves raw boxes were stored,
         including empty scenes. Old classifier rows can survive that run's
         content-addressed detection upsert and must not keep the nudge alive.
         """
@@ -159,6 +159,12 @@ class PredictionRepository:
                 SELECT 1 FROM detector_runs dr
                 WHERE dr.photo_id = p.id AND dr.detector_model = 'megadetector-v6'
                   AND dr.runtime_fingerprint != 'legacy'
+                  AND (dr.box_count = 0 OR EXISTS (
+                      SELECT 1 FROM detections raw_d
+                      WHERE raw_d.photo_id = dr.photo_id
+                        AND raw_d.detector_model = dr.detector_model
+                        AND raw_d.runtime_fingerprint = dr.runtime_fingerprint
+                  ))
             ) AND (
                 EXISTS (
                     SELECT 1 FROM detector_runs dr
