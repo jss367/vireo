@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 
+from app_paths import media_root
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
@@ -23,6 +24,44 @@ from web.background_jobs import make_background_job
 from working_copy_cache import working_copy_stats
 
 log = logging.getLogger(__name__)
+
+
+def _assemble_storage_locations(
+    *, db_path, storage_root, thumb_root, emb_dir, models_dir, hf_cache,
+    emb_size, models_size, hf_size, other_entries, is_within,
+):
+    """Named locations for /api/storage, with the storage_root label and the
+    thumbnail entry adjusted for split cache/data layouts (fresh installs).
+    Advertising storage_root as "containing thumbnails" when they live in a
+    separate cache root would be a user-visible untruth, and omitting the
+    cache root would hide its free-space warnings and Open folder affordance.
+    """
+    from services.storage_paths import location_id as managed_location_id
+
+    locations = [("catalog", "Catalog and masks", os.path.dirname(db_path))]
+    if is_within(thumb_root, storage_root):
+        locations.append((
+            "generated",
+            "Thumbnails, previews, working copies, and offline originals",
+            storage_root,
+        ))
+    else:
+        locations.append((
+            "generated", "Previews, working copies, and offline originals",
+            storage_root,
+        ))
+        locations.append(("thumbnails", "Thumbnails", thumb_root))
+    if emb_size:
+        locations.append(("embeddings", "Label embeddings", emb_dir))
+    if models_size:
+        locations.append(("models", "Downloaded models", models_dir))
+    if hf_size:
+        locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+    for entry in other_entries:
+        path = entry["path"] if os.path.isdir(entry["path"]) else os.path.dirname(entry["path"])
+        if not any(is_within(path, existing) for _id, _label, existing in locations):
+            locations.append((managed_location_id(path), "Additional managed storage", path))
+    return locations
 
 
 def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner):
@@ -173,14 +212,14 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
         thumb = _dir_stats(config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(
-            os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
+            media_root(config["THUMB_CACHE_DIR"]), "previews"
         )
         preview = _dir_stats(preview_dir)
         paired = _dir_stats(os.path.join(preview_dir, "paired"))
         preview["count"] += paired["count"]
         preview["size"] += paired["size"]
         working = working_copy_stats(
-            os.path.dirname(config["THUMB_CACHE_DIR"])
+            media_root(config["THUMB_CACHE_DIR"])
         )
         emb = _dir_stats(EMB_CACHE_DIR)
         models_size = _dir_size_recursive(DEFAULT_MODELS_DIR)
@@ -189,7 +228,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         offline_count = db.caches.offline_original_cached_count()
         masks = _storage_masks_data(db)
         masks_size = masks["total_bytes"]
-        storage_root = os.path.dirname(config["THUMB_CACHE_DIR"])
+        storage_root = media_root(config["THUMB_CACHE_DIR"])
 
         # HuggingFace cache — only the Vireo-relevant repos, split per model
         # with whether an install still uses each entry (services.hf_cache).
@@ -288,25 +327,13 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                 "capacity": capacity_bytes,
             }
 
-        raw_locations = [
-            ("catalog", "Catalog and masks", os.path.dirname(db_path)),
-            (
-                "generated",
-                "Thumbnails, previews, working copies, and offline originals",
-                storage_root,
-            ),
-        ]
-        if emb["size"]:
-            raw_locations.append(("embeddings", "Label embeddings", EMB_CACHE_DIR))
-        if models_size:
-            raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
-        if hf_size:
-            raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
-        from services.storage_paths import location_id as managed_location_id
-        for entry in other_entries:
-            path = entry["path"] if os.path.isdir(entry["path"]) else os.path.dirname(entry["path"])
-            if not any(_is_within(path, existing) for _id, _label, existing in raw_locations):
-                raw_locations.append((managed_location_id(path), "Additional managed storage", path))
+        raw_locations = _assemble_storage_locations(
+            db_path=db_path, storage_root=storage_root,
+            thumb_root=os.path.abspath(config["THUMB_CACHE_DIR"]),
+            emb_dir=EMB_CACHE_DIR, models_dir=DEFAULT_MODELS_DIR, hf_cache=hf_cache,
+            emb_size=emb["size"], models_size=models_size, hf_size=hf_size,
+            other_entries=other_entries, is_within=_is_within,
+        )
 
         locations_by_path = {}
         for location_id, label, path in raw_locations:
@@ -355,7 +382,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                 "offline_originals": {
                     "count": offline_count,
                     "size": offline_size,
-                    "path": os.path.join(os.path.dirname(config["THUMB_CACHE_DIR"]), "offline"),
+                    "path": os.path.join(media_root(config["THUMB_CACHE_DIR"]), "offline"),
                 },
                 "masks": {"size": masks_size, **masks},
             }
@@ -414,12 +441,12 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         # aged-out snapshot files (no current recipe or edit-history entry
         # points at them) are reclaimed alongside stale live masks.
         import local_masks
-        # Snapshots live under dirname(THUMB_CACHE_DIR) — the same root the
+        # Snapshots live under media_root(THUMB_CACHE_DIR) — the same root the
         # snapshot POST endpoint writes to and every render call site reads
         # from — which is not always dirname(db_path) when create_app is
         # given a custom thumb-dir under a different parent.
         gc = local_masks.gc_edit_masks(
-            db, os.path.dirname(config["THUMB_CACHE_DIR"])
+            db, media_root(config["THUMB_CACHE_DIR"])
         )
         if gc["deleted"]:
             log.info(
@@ -438,7 +465,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         dirs = {
             "thumbnails": config["THUMB_CACHE_DIR"],
             "previews": os.path.join(
-                os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
+                media_root(config["THUMB_CACHE_DIR"]), "previews"
             ),
             "embeddings": EMB_CACHE_DIR,
         }
@@ -501,7 +528,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
     def _clear_storage_cache(cache_type):
         if cache_type == "previews":
             preview_dir = os.path.join(
-                os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
+                media_root(config["THUMB_CACHE_DIR"]), "previews"
             )
             if os.path.isdir(preview_dir):
                 shutil.rmtree(preview_dir)
@@ -610,7 +637,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         )
         locations = {
             "catalog": os.path.dirname(db_path),
-            "generated": os.path.dirname(config["THUMB_CACHE_DIR"]),
+            "generated": media_root(config["THUMB_CACHE_DIR"]),
+            "thumbnails": config["THUMB_CACHE_DIR"],
             "embeddings": EMB_CACHE_DIR,
             "models": DEFAULT_MODELS_DIR,
             "hf_cache": huggingface_cache_dir(),
@@ -663,7 +691,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         dirs = {
             "thumbnails": config["THUMB_CACHE_DIR"],
             "previews": os.path.join(
-                os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
+                media_root(config["THUMB_CACHE_DIR"]), "previews"
             ),
             "embeddings": EMB_CACHE_DIR,
         }

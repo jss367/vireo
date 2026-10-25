@@ -249,6 +249,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
             sep="/",
         ),
         "config": {"THUMB_CACHE_DIR": "/invented/cache/thumbs"},
+        "media_root": posixpath.dirname,
         "db_path": "/invented/catalog/db.sqlite",
         "request": types.SimpleNamespace(args=Args(args or {})),
         "Response": response,
@@ -687,7 +688,8 @@ def test_forced_working_source_cannot_decode_original():
     load("image_loader.py", ns, {"load_working_image", "_photo_field"})
     assert ns["load_working_image"]({"working_copy_path": "invented-missing", "folder_id": 1, "filename": "invented.raw"},
                                      "/invented", folders=None, return_source=True) == (None, "original")
-    helper_ns = {"os": types.SimpleNamespace(path=posixpath), "config": {"THUMB_CACHE_DIR": "/invented/thumbs"}}
+    helper_ns = {"os": types.SimpleNamespace(path=posixpath), "config": {"THUMB_CACHE_DIR": "/invented/thumbs"},
+                 "media_root": posixpath.dirname}
     modules = {"focus_crop": types.SimpleNamespace(prefer_original=forbidden),
                "image_loader": types.SimpleNamespace(load_image=forbidden,
                    load_working_image=lambda *a, **kw: events.append(kw) or (None, "original"))}

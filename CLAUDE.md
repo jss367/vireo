@@ -11,16 +11,23 @@ Read `CORE_PHILOSOPHY.md` ("Show the user what's happening / No black boxes") be
 ## Running
 
 ```bash
-python vireo/app.py --db ~/.vireo/vireo.db --port 8080
+python vireo/app.py --port 8080
 ```
 
 ## Key paths
 
-- **App logs**: `~/.vireo/vireo.log` (RotatingFileHandler, 5MB, 3 backups). Check here first when debugging.
-- **Database**: `~/.vireo/vireo.db` (SQLite, WAL mode, foreign keys ON)
-- **Config**: `~/.vireo/config.json` (global settings — threshold, model, keys)
-- **Thumbnails**: `~/.vireo/thumbnails/`
-- **Label files**: `~/.vireo/labels/`
+Default locations are resolved by `vireo/app_paths.py` and the desktop launcher
+from `vireo/data/app_paths.json`. Existing `~/.vireo` installations retain that
+layout. Fresh installs use platform data/cache roots; see
+[the storage locations guide](docs/uninstalling.md#default-folders-and-upgrades).
+
+- **Data root**: catalog `vireo.db`, settings `config.json`, labels, taxonomy,
+  runtime locks, `vireo.log` (5 MB × 4), and persistent managed media.
+- **Cache root**: models, thumbnails, embeddings, and computation results.
+- **Managed media root**: always use `app_paths.media_root(thumb_dir)`; deriving
+  it from the thumbnail parent would place unique photo copies in a purgeable
+  cache on fresh installations. Explicit custom thumbnail paths keep their
+  historical sibling layout.
 
 ## Tests
 

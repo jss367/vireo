@@ -18,6 +18,7 @@ import os
 import tempfile
 from typing import TYPE_CHECKING
 
+from app_paths import media_root
 from flask import Blueprint, jsonify, make_response, request
 from keep_safety import review_culling_suggestions
 from photo_payload import attach_nested_edit_recipes
@@ -235,7 +236,7 @@ def create_caches_blueprint(
         import re
 
         db = get_db()
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
 
         tracked = db.caches.preview_entry_count()

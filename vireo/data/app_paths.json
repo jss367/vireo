@@ -1,23 +1,144 @@
 {
-  "data": ".vireo",
-  "database": ".vireo/vireo.db",
-  "config": ".vireo/config.json",
-  "models": ".vireo/models",
-  "model_config": ".vireo/models.json",
-  "thumbnails": ".vireo/thumbnails",
-  "embeddings": ".vireo/embedding_cache",
-  "computation_cache": ".vireo/computation-cache",
-  "labels": ".vireo/labels",
-  "active_labels": ".vireo/labels_active.json",
-  "taxonomy_json": ".vireo/taxonomy.json",
-  "taxonomy": ".vireo/taxonomy",
-  "tools": ".vireo/tools",
-  "ssh": ".vireo/ssh",
-  "runtime": ".vireo/runtime.json",
-  "runtime_lock": ".vireo/runtime.lock",
-  "gui_clients": ".vireo/gui-clients",
-  "gui_clients_lock": ".vireo/gui-clients.lock",
-  "hf_cache_lock": ".vireo/hf-cache-access.lock",
-  "desktop_logs_macos": "Library/Logs/com.vireo.app",
-  "log": ".vireo/vireo.log"
+  "legacy": {
+    "data": ".vireo",
+    "database": ".vireo/vireo.db",
+    "config": ".vireo/config.json",
+    "models": ".vireo/models",
+    "model_config": ".vireo/models.json",
+    "thumbnails": ".vireo/thumbnails",
+    "embeddings": ".vireo/embedding_cache",
+    "computation_cache": ".vireo/computation-cache",
+    "labels": ".vireo/labels",
+    "active_labels": ".vireo/labels_active.json",
+    "taxonomy_json": ".vireo/taxonomy.json",
+    "taxonomy": ".vireo/taxonomy",
+    "tools": ".vireo/tools",
+    "ssh": ".vireo/ssh",
+    "runtime": ".vireo/runtime.json",
+    "runtime_lock": ".vireo/runtime.lock",
+    "gui_clients": ".vireo/gui-clients",
+    "gui_clients_lock": ".vireo/gui-clients.lock",
+    "hf_cache_lock": ".vireo/hf-cache-access.lock",
+    "desktop_logs_macos": "Library/Logs/com.vireo.app",
+    "log": ".vireo/vireo.log"
+  },
+  "roots": {
+    "darwin": {
+      "data": {
+        "fallback": "Library/Application Support",
+        "suffix": "Vireo"
+      },
+      "cache": {
+        "fallback": "Library/Caches",
+        "suffix": "Vireo"
+      }
+    },
+    "win32": {
+      "data": {
+        "env": "LOCALAPPDATA",
+        "fallback": "AppData/Local",
+        "suffix": "Vireo"
+      },
+      "cache": {
+        "env": "LOCALAPPDATA",
+        "fallback": "AppData/Local",
+        "suffix": "Vireo/Cache"
+      }
+    },
+    "linux": {
+      "data": {
+        "env": "XDG_DATA_HOME",
+        "fallback": ".local/share",
+        "suffix": "Vireo"
+      },
+      "cache": {
+        "env": "XDG_CACHE_HOME",
+        "fallback": ".cache",
+        "suffix": "Vireo"
+      }
+    }
+  },
+  "native": {
+    "data": {
+      "root": "data",
+      "path": ""
+    },
+    "database": {
+      "root": "data",
+      "path": "vireo.db"
+    },
+    "config": {
+      "root": "data",
+      "path": "config.json"
+    },
+    "models": {
+      "root": "cache",
+      "path": "models"
+    },
+    "model_config": {
+      "root": "data",
+      "path": "models.json"
+    },
+    "thumbnails": {
+      "root": "cache",
+      "path": "thumbnails"
+    },
+    "embeddings": {
+      "root": "cache",
+      "path": "embedding_cache"
+    },
+    "computation_cache": {
+      "root": "cache",
+      "path": "computation-cache"
+    },
+    "labels": {
+      "root": "data",
+      "path": "labels"
+    },
+    "active_labels": {
+      "root": "data",
+      "path": "labels_active.json"
+    },
+    "taxonomy_json": {
+      "root": "data",
+      "path": "taxonomy.json"
+    },
+    "taxonomy": {
+      "root": "data",
+      "path": "taxonomy"
+    },
+    "tools": {
+      "root": "data",
+      "path": "tools"
+    },
+    "ssh": {
+      "root": "data",
+      "path": "ssh"
+    },
+    "runtime": {
+      "root": "data",
+      "path": "runtime.json"
+    },
+    "runtime_lock": {
+      "root": "data",
+      "path": "runtime.lock"
+    },
+    "gui_clients": {
+      "root": "data",
+      "path": "gui-clients"
+    },
+    "gui_clients_lock": {
+      "root": "data",
+      "path": "gui-clients.lock"
+    },
+    "hf_cache_lock": {
+      "root": "data",
+      "path": "hf-cache-access.lock"
+    },
+    "log": {
+      "root": "data",
+      "path": "vireo.log"
+    }
+  },
+  "native_marker": "storage-layout-v1"
 }

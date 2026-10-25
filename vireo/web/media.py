@@ -26,6 +26,7 @@ import sqlite3
 import tempfile
 import time
 
+from app_paths import media_root
 from artifact_flight import (
     ArtifactProducerFailed,
     atomic_write_bytes,
@@ -1371,7 +1372,7 @@ class _ThumbnailRequest:
             _retry_thumbnail_after_working_copy_eviction
         )
         self._retry_with_working_copy = _retry_thumbnail_with_working_copy
-        self.vireo_dir = os.path.dirname(self.thumb_dir)
+        self.vireo_dir = media_root(self.thumb_dir)
         # Look up the photo's folder path directly rather than via
         # ``get_folder_tree()``: the tree filter excludes folders whose
         # status is ``'missing'``, which would leave the canonical-path
@@ -2191,7 +2192,7 @@ def _requested_pair_source(get_db, config, photo, folder_path):
             return None
         cached = row[column]
         if not os.path.isabs(cached):
-            vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+            vireo_dir = media_root(config["THUMB_CACHE_DIR"])
             cached = os.path.join(vireo_dir, cached)
         return cached if os.path.isfile(cached) else None
 
@@ -2321,7 +2322,7 @@ def _load_crop_source(config, db, photo):
     from image_loader import load_image
 
     # Try working copy first, fall back to original
-    vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+    vireo_dir = media_root(config["THUMB_CACHE_DIR"])
     image_path = None
     using_working_copy = False
     if photo["working_copy_path"]:
@@ -2485,7 +2486,7 @@ def _focus_source_image(config, photo, folder, source_choice):
     img, source = None, None
     if source_choice != "original":
         img, source = load_working_image(
-            dict(photo), os.path.dirname(config["THUMB_CACHE_DIR"]), max_size=None,
+            dict(photo), media_root(config["THUMB_CACHE_DIR"]), max_size=None,
             folders=None if source_choice == "working" else folders,
             record_access=True, return_source=True,
         )
@@ -2666,7 +2667,7 @@ class _PreviewServer:
         effective = db.get_effective_config(cfg.load())
         try:
             data = source_frame_bytes(
-                db, photo_id, size, os.path.dirname(self._config["THUMB_CACHE_DIR"]),
+                db, photo_id, size, media_root(self._config["THUMB_CACHE_DIR"]),
                 effective.get("preview_quality", 90),
                 lambda photo, folder: _focus_source_image(self._config, photo, folder, "auto"),
             )
@@ -2860,7 +2861,7 @@ class _PreviewServer:
             if not photo_source_matches(_prepare_source, photo):
                 return "Photo source changed", 404
 
-        vireo_dir = os.path.dirname(self._config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(self._config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
         recipe = db.get_photo_edit_recipe(photo_id)
@@ -3474,7 +3475,7 @@ def create_media_blueprint(
         if not apply_crop:
             display_recipe.pop("crop", None)
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         if preview_feather is None:
             snapshot = local_masks.load_snapshot(vireo_dir, photo_id, normalized)
             if snapshot is None:
@@ -3554,7 +3555,7 @@ def create_media_blueprint(
             display_recipe = dict(recipe)
             if not apply_crop:
                 display_recipe.pop("crop", None)
-            vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+            vireo_dir = media_root(config["THUMB_CACHE_DIR"])
             folder_row = db.folders.get(photo["folder_id"])
             if not folder_row:
                 return "Not found", 404
@@ -3657,7 +3658,7 @@ def create_media_blueprint(
             photo_id,
             photo,
             folder_row,
-            os.path.dirname(config["THUMB_CACHE_DIR"]),
+            media_root(config["THUMB_CACHE_DIR"]),
             frame_recipe,
             frame_recipe,
             auto_tone.SOURCE_LONG_EDGE,
@@ -3703,7 +3704,7 @@ def create_media_blueprint(
         if not photo:
             return "Not found", 404
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo_id)
         from image_loader import RAW_EXTENSIONS
 

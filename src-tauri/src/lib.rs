@@ -170,6 +170,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            app_paths::initialize_layout()?;
             // Build the main window ourselves so the native shell, rather than
             // scattered page JavaScript, owns the external-navigation policy.
             // `create: false` in tauri.conf.json prevents Tauri from building

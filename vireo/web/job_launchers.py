@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from app_paths import media_root
 from artifact_flight import ArtifactProducerFailed
 from config import read_raw_config_file, settings_write_lock
 from db import Database
@@ -1056,7 +1057,7 @@ def create_job_launchers_blueprint(
         if not photo_ids:
             return json_error("no cacheable photos in current workspace")
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
         def work(job):
             return _run_offline_cache(ctx, job, photo_ids, vireo_dir)
@@ -1104,7 +1105,7 @@ def create_job_launchers_blueprint(
             )
             if error is not None:
                 return error
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         selected_photos = db.photos.get_by_ids(photo_ids)
 
         def work(job):
@@ -1186,7 +1187,7 @@ def create_job_launchers_blueprint(
         if not photo_ids:
             return json_error("no photos in the current workspace can be prepared")
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         # Preserve the selected source identity even if SQLite recycles its
         # numeric ID before this job reaches it.
         selected_photos = db.photos.get_by_ids(photo_ids)
@@ -1434,7 +1435,7 @@ def create_job_launchers_blueprint(
             reclassify=body.get("reclassify", False),
         )
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         work_units = runtime_warning_work_units(
             "classify collection",
             lambda: db.collections.count_photos(collection_id),
@@ -2487,7 +2488,7 @@ class _PreviewWarmup:
         job = self.job
         runner = self.ctx.runner
         thread_db = self.thread_db = self.ctx.thread_db()
-        vireo_dir = self.vireo_dir = os.path.dirname(self.config["THUMB_CACHE_DIR"])
+        vireo_dir = self.vireo_dir = media_root(self.config["THUMB_CACHE_DIR"])
         # Use workspace-effective config so per-workspace preview_max_size
         # overrides are honored — otherwise precompute warms the wrong
         # size and /photos/<id>/full (which uses workspace overrides) still

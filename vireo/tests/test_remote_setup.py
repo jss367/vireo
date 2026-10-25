@@ -221,6 +221,7 @@ def test_friendly_host_passthrough_for_hostnames_and_failed_reverse():
 
 
 def test_key_paths_under_vireo_home(tmp_path, monkeypatch):
+    (tmp_path / ".vireo").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
     priv, pub = remote_setup.vireo_key_paths()
     assert priv == str(tmp_path / ".vireo" / "ssh" / "vireo_ed25519")

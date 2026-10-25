@@ -1308,8 +1308,8 @@ def test_http_import_then_classify_job_uses_configured_cache_dir(
     # (background job falling back to the default) can't accidentally
     # hit the same artifact via the wrong path.
     monkeypatch.setattr(
-        computation_cache, "DEFAULT_CACHE_DIR",
-        str(tmp_path / "would-be-wrong-default"),
+        computation_cache, "default_path",
+        lambda _name: str(tmp_path / "would-be-wrong-default"),
     )
 
     store_dir = tmp_path / "http-store"
@@ -1357,7 +1357,7 @@ def test_http_import_then_classify_job_uses_configured_cache_dir(
     # Confirm the default location was empty — if the background job had
     # ignored the override, this is the only place its materialize would
     # have looked, and reuse would have silently failed.
-    default_store = ArtifactStore(computation_cache.DEFAULT_CACHE_DIR)
+    default_store = ArtifactStore()
     assert list(default_store.iter_artifacts() or ()) == []
 
 

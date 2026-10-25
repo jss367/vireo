@@ -7,6 +7,7 @@ import os
 from typing import TYPE_CHECKING, cast
 
 import path_guard
+from app_paths import media_root
 from db import Database
 from services import saved_processes
 from services.imports import ImportFailure, import_photos_ok
@@ -86,7 +87,7 @@ def _admit_import_job(service: ImportService, db: Database, request: _ImportPhot
     an ``ImportFailure``. ``runner.start`` must stay the last step."""
     runner = service.get_runner()
     thumb_cache_dir = service.config["THUMB_CACHE_DIR"]
-    vireo_dir = os.path.dirname(thumb_cache_dir)
+    vireo_dir = media_root(thumb_cache_dir)
     remote_target = request.remote_transport()
     job_config = request.job_config()
     failure = _competing_retry_failure(runner, job_config)
@@ -900,7 +901,7 @@ class _ImportPhotosRequest:
                 # Reuse the staging planner's frozen destination/transport
                 # validation without creating or copying anything locally.
                 plan_staged_import(
-                    os.path.dirname(self.service.config["THUMB_CACHE_DIR"]), self.destination,
+                    media_root(self.service.config["THUMB_CACHE_DIR"]), self.destination,
                     self.remote_archive_config, parent_staging, _load_known_mount_roots(self.db),
                 )
                 check_staged_mount(self.destination, parent_staging.get("mount_baseline"),
@@ -923,7 +924,7 @@ class _ImportPhotosRequest:
             from pipeline_job import _load_known_mount_roots
             try:
                 self.managed_staging, self.move_target_snapshot = plan_staged_import(
-                    os.path.dirname(self.service.config["THUMB_CACHE_DIR"]), self.destination,
+                    media_root(self.service.config["THUMB_CACHE_DIR"]), self.destination,
                     self.remote_archive_config, parent_staging, _load_known_mount_roots(self.db),
                 )
                 staging_real = os.path.realpath(self.managed_staging["destination"])

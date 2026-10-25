@@ -6,6 +6,7 @@ import os
 import time
 
 import config as cfg
+from app_paths import media_root
 from config import read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
@@ -114,7 +115,7 @@ def create_export_blueprint(
         if options["destination"] and not os.path.isdir(options["destination"]):
             return json_error("Choose an existing destination folder")
         effective_cfg = db.get_effective_config(cfg.load())
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         reveal = options.pop("reveal")
 
         def work(job):
@@ -265,7 +266,7 @@ def create_export_blueprint(
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
 
         try:
@@ -359,7 +360,7 @@ def create_export_blueprint(
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
         wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
         # Pass the configured darktable output dir so export prefers the
@@ -583,7 +584,7 @@ def create_export_blueprint(
 
         import config as cfg
         db = get_db()
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
         wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
@@ -668,7 +669,7 @@ def create_export_blueprint(
         if not isinstance(include_locations, bool):
             return json_error("include_locations must be a boolean")
         effective = get_db().get_effective_config(cfg.load())
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
         def work(job):
             from site_export import export_site

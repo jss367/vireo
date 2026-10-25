@@ -7,6 +7,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+from app_paths import protected_roots
+
 
 class UnsafeProfileError(RuntimeError):
     """The configured profile would touch real data."""
@@ -16,14 +18,10 @@ def _reject_if_unsafe(path, env_name):
     home = Path.home().resolve()
     if path == home:
         raise UnsafeProfileError(f"{env_name} cannot be $HOME: {path}")
-    real_vireo = (home / ".vireo").resolve()
-    if path == real_vireo:
-        raise UnsafeProfileError(f"{env_name} cannot be ~/.vireo/: {path}")
-    try:
-        path.relative_to(real_vireo)
-    except ValueError:
-        return
-    raise UnsafeProfileError(f"{env_name} cannot be under ~/.vireo/: {path}")
+    for root in protected_roots():
+        real_vireo = Path(root).resolve()
+        if path == real_vireo or real_vireo in path.parents:
+            raise UnsafeProfileError(f"{env_name} cannot be under Vireo storage {real_vireo}: {path}")
 
 
 def resolve_profile():
