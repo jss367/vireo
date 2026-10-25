@@ -47,15 +47,29 @@ def _cached_default_revision(repo_id: str) -> str | None:
     return None
 
 
+def _hub_transport_errors() -> tuple[type[BaseException], ...]:
+    """TransportError from every httpx backend a Hub release may use (1.x: httpx; 2.x: httpx2)."""
+    errors: list[type[BaseException]] = []
+    for module_name in ("httpx", "httpx2"):
+        try:
+            module = __import__(module_name)
+        except ImportError:
+            continue
+        candidate = getattr(module, "TransportError", None)
+        if isinstance(candidate, type) and issubclass(candidate, BaseException):
+            errors.append(candidate)
+    return tuple(errors)
+
+
 def _resolve_batch_revision(repo_id: str) -> str | None:
     """Prefer current metadata; retain offline access to an immutable cached ref."""
-    from httpx import TransportError
     from huggingface_hub import HfApi
     from huggingface_hub.errors import HfHubHTTPError, OfflineModeIsEnabled
 
+    recoverable = _hub_transport_errors() + (OfflineModeIsEnabled, HfHubHTTPError)
     try:
         return HfApi().model_info(repo_id).sha
-    except (TransportError, OfflineModeIsEnabled, HfHubHTTPError) as exc:
+    except recoverable as exc:
         if isinstance(exc, HfHubHTTPError) and (
             exc.response is None or (exc.response.status_code < 500 and exc.response.status_code != 429)
         ):

@@ -110,7 +110,7 @@ def test_real_hub_offline_download_reuses_legacy_cache(tmp_path, monkeypatch, re
 
 
 @pytest.mark.parametrize("kind", ["keypoint", "pipeline"])
-@pytest.mark.parametrize("outage", ["offline", "connection", "server"])
+@pytest.mark.parametrize("outage", ["offline", "connection", "connection-httpx2", "server"])
 def test_batches_start_from_legacy_cache_during_metadata_outage(app_and_db, tmp_path, monkeypatch, kind, outage):
     import httpx
     import huggingface_hub
@@ -119,6 +119,9 @@ def test_batches_start_from_legacy_cache_during_metadata_outage(app_and_db, tmp_
     from huggingface_hub import constants
     from huggingface_hub.errors import HfHubHTTPError, OfflineModeIsEnabled
     from web import models as routes
+
+    if outage == "connection-httpx2":
+        httpx2 = pytest.importorskip("httpx2")
 
     app, _db = app_and_db
     model_name = "rtmpose-animal" if kind == "keypoint" else "sam2-small"
@@ -140,6 +143,8 @@ def test_batches_start_from_legacy_cache_during_metadata_outage(app_and_db, tmp_
                 503, request=httpx.Request("GET", "https://huggingface.co/api/models/test")))
         if outage == "connection":
             raise httpx.ConnectError("connection failed")
+        if outage == "connection-httpx2":
+            raise httpx2.ConnectError("connection failed")
         raise OfflineModeIsEnabled("offline")
 
     monkeypatch.setattr(huggingface_hub.HfApi, "model_info", model_info)
