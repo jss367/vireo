@@ -1,5 +1,5 @@
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import pytest
 from playwright.sync_api import expect
@@ -39,8 +39,8 @@ def test_review_page_shows_seeded_species(live_server, page):
     )
 
 
-def test_review_page_shows_confidence(live_server, page):
-    """Review page shows confidence percentages for predictions."""
+def test_review_page_shows_relative_scores(live_server, page):
+    """Review labels model scores as relative evidence for the named species."""
     url = live_server["url"]
     page.goto(f"{url}/review", timeout=5000)
 
@@ -48,9 +48,9 @@ def test_review_page_shows_confidence(live_server, page):
 
     confidence_elements = page.locator(".card-confidence")
     assert confidence_elements.count() >= 2
-    # Check that confidence text contains a percentage
-    first_conf = confidence_elements.first.text_content()
-    assert "% confidence" in first_conf, f"Expected confidence text, got: {first_conf}"
+    expect(confidence_elements.first).to_have_text(
+        "92.00% relative score for Red-tailed Hawk"
+    )
 
 
 def test_review_page_title_shows_pending_count(live_server, page):
@@ -132,7 +132,7 @@ def test_history_undo_refreshes_review_prediction_state(live_server, page):
 
     with page.expect_response(
         lambda response: (
-            response.url.endswith("/api/predictions")
+            urlsplit(response.url).path == "/api/predictions"
             and response.status == 200
         )
     ):

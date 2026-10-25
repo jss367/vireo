@@ -1,9 +1,11 @@
 """Keep large process-review grids responsive while preserving review controls."""
 
 import io
+from copy import deepcopy
 
 from PIL import Image
 from playwright.sync_api import expect
+from services.species_assignment_results import encounter_changes
 
 
 def _open_grid(page, live_server, encounter_count=1124):
@@ -45,6 +47,7 @@ def _open_grid(page, live_server, encounter_count=1124):
     page.route("**/thumbnails/*", lambda route: route.fulfill(body=thumbnail.getvalue(), content_type="image/jpeg"))
     page.goto(f"{live_server['url']}/pipeline/review", wait_until="domcontentloaded")
     expect(page.locator("#encountersContainer .photo-card")).to_have_count(len(photos), timeout=30000)
+    return results
 
 
 def test_large_review_grid_keeps_unchanged_photos_and_scroll_position(live_server, page):
@@ -87,7 +90,7 @@ def test_large_review_grid_keeps_unchanged_photos_and_scroll_position(live_serve
 
 
 def test_review_grid_species_menu_opens_offscreen_and_confirms(live_server, page):
-    _open_grid(page, live_server, encounter_count=3)
+    results = _open_grid(page, live_server, encounter_count=3)
     writes = []
 
     def confirm(route):
@@ -99,7 +102,17 @@ def test_review_grid_species_menu_opens_offscreen_and_confirms(live_server, page
                            for pid in body['photo_ids']]})
             return
         writes.append(body)
-        route.fulfill(json={"ok": True})
+        # Confirmations return authoritative encounter state; the client no
+        # longer guesses the saved state from the submitted species name.
+        confirmed = deepcopy(results)
+        encounter = confirmed["encounters"][2]
+        encounter.update(species_confirmed=True, confirmed_species=body["species"],
+                         confirmed_species_list=[body["species"]])
+        for burst in encounter["bursts"]:
+            burst["species_override"] = {"species": body["species"], "confirmed": True,
+                                         "species_list": [body["species"]]}
+        route.fulfill(json={"ok": True, "response_mode": "compact",
+                            "encounter_changes": encounter_changes(results, confirmed)})
 
     page.route("**/api/encounters/species", confirm)
     # Closed menus should not create thousands of unused search inputs/rows.
@@ -117,7 +130,8 @@ def test_review_grid_species_menu_opens_offscreen_and_confirms(live_server, page
     expect(last.locator(".species-name").first).to_have_class("species-name confirmed")
     assert writes == [{"species": "Red-crowned Amazon", "photo_ids": list(range(25, 37)),
                        "source_photo_ids": list(range(25, 37)), "add": True,
-                       "split": False, "preview_token": "current-photos"}]
+                       "split": False, "preview_token": "current-photos",
+                       "response_mode": "compact"}]
 
     # A full render after partial widget updates must retain the confirmed
     # state, and Hide confirmed must remove exactly that encounter.
