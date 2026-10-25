@@ -119,6 +119,14 @@
     "pageHooks": [],
     "sharedWrites": []
   },
+  "storage": {
+    "route": "/storage",
+    "template": "storage.html",
+    "pageHooks": [
+      "loadStoragePanel"
+    ],
+    "sharedWrites": []
+  },
   "welcome": {
     "route": "/welcome",
     "template": "welcome.html",

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {test} from 'node:test';
 import vm from 'node:vm';
+import {moduleAsScript} from './module-source.mjs';
 
 function page() {
   const elements = new Map(), toasts = [], reloads = [];
@@ -19,9 +20,11 @@ function page() {
     showToast: (message, kind) => toasts.push({message, kind}),
     storageFormatBytes: bytes => `${bytes} B`,
     safeFetch() { throw new Error('Unexpected transport'); },
+    // storage/hf-cache.js is an ES module: its imports come from this context.
+    state: {hfCacheInventory: null},
   });
   for (const file of ['settings/models.js', 'storage/hf-cache.js']) {
-    vm.runInContext(readFileSync(new URL(`../../vireo/static/${file}`, import.meta.url), 'utf8'), c);
+    vm.runInContext(moduleAsScript(readFileSync(new URL(`../../vireo/static/${file}`, import.meta.url), 'utf8')), c);
   }
   c.loadModels = () => reloads.push('models');
   c.loadPipelineModels = () => reloads.push('pipeline');
@@ -68,13 +71,13 @@ test('bulk removal counts removable entries and does nothing for retained-only b
   const confirms = [], posts = [];
   c.confirm = text => { confirms.push(text); return true; };
   c._postHfCacheRemove = body => posts.push(body);
-  c._hfCacheInventory = {unused_size: 10, entries: [
+  c.state.hfCacheInventory = {unused_size: 10, entries: [
     {installed: false, removable: false}, {installed: false, removable: true}, {installed: true},
   ]};
   await c.removeUnusedHfCache();
   assert.match(confirms[0], /Remove 1 entry/);
   assert.equal(posts.length, 1);
-  c._hfCacheInventory = {unused_size: 0, entries: [{installed: false, removable: false}]};
+  c.state.hfCacheInventory = {unused_size: 0, entries: [{installed: false, removable: false}]};
   await c.removeUnusedHfCache();
   assert.equal(posts.length, 1);
   assert.equal(confirms.length, 1);

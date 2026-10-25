@@ -1,14 +1,18 @@
 /* Storage for retained generated payloads and grouping undo snapshots. */
-/** @type {RetainedStorageResponse | null} */ var retainedStorageData = null;
 
-async function loadRetainedStorage() {
+import { state } from './state.js';
+import { storageFormatBytes } from './format.js';
+import { openStorageFolder, refreshStoragePage } from './panel.js';
+import { formatDateTime, safeFetch, showToast } from './shared.js';
+
+export async function loadRetainedStorage() {
   var panel = /** @type {HTMLElement} */ (document.getElementById('retainedStorageItems'));
   try {
     /** @type {RetainedStorageResponse} */ var data = await safeFetch('/api/storage/retained', {}, {toast: false});
-    retainedStorageData = data;
+    state.retainedStorageData = data;
     if (data.maintenance) {
       /** @type {HTMLElement} */ (document.getElementById('retainedStorageStatus')).textContent = 'Latest storage maintenance: ' +
-        data.maintenance.status + ' · ' + window.VireoTime.dateTime(new Date(data.maintenance.finished_at || data.maintenance.started_at)) +
+        data.maintenance.status + ' · ' + formatDateTime(new Date(data.maintenance.finished_at || data.maintenance.started_at)) +
         (data.maintenance.summary ? ' · ' + data.maintenance.summary : '');
     }
     panel.replaceChildren();
@@ -26,7 +30,7 @@ async function loadRetainedStorage() {
       clear.className = 'btn-secondary';
       clear.textContent = 'Clear ' + cache.name.toLowerCase();
       clear.disabled = !cache.count;
-      clear.onclick = function() { clearRetainedStorage(cache.type, cache.name, clear); };
+      clear.addEventListener('click', function() { clearRetainedStorage(cache.type, cache.name, clear); });
       if (cache.clearable) item.appendChild(clear);
       else {
         var preserved = document.createElement('p');
@@ -36,7 +40,7 @@ async function loadRetainedStorage() {
       var open = document.createElement('button');
       open.className = 'btn-secondary';
       open.textContent = 'Open folder';
-      open.onclick = function() { openStorageFolder('retained-' + cache.type); };
+      open.addEventListener('click', function() { openStorageFolder('retained-' + cache.type); });
       item.appendChild(open);
       var files = document.createElement('div');
       files.className = 'storage-retained-files';
@@ -73,7 +77,9 @@ async function loadRetainedStorage() {
     historyClear.className = 'btn-secondary';
     historyClear.textContent = 'Clear grouping undo and redo snapshots';
     historyClear.disabled = !history.count;
-    historyClear.onclick = function() { clearRetainedStorage('grouping-history', 'Grouping undo snapshots', historyClear); };
+    historyClear.addEventListener('click', function() {
+      clearRetainedStorage('grouping-history', 'Grouping undo snapshots', historyClear);
+    });
     historyDetails.appendChild(historyClear);
     history.entries.forEach(function(entry) {
       var line = document.createElement('p');
@@ -100,7 +106,7 @@ async function loadRetainedStorage() {
 }
 
 /** @param {string} type @param {string} name @param {HTMLButtonElement} button */
-async function clearRetainedStorage(type, name, button) {
+export async function clearRetainedStorage(type, name, button) {
   var message = type === 'grouping-history'
     ? 'Remove grouping undo and redo snapshots from every workspace? Current grouping and ordinary photo edits remain. Removed grouping history cannot be restored.'
     : 'Clear ' + name.toLowerCase() + ' shared by every workspace? Cached renditions may be your only available offline copy. Confirm that sources or backups are available before clearing. Imported computation objects must be reimported or recomputed. Original photos, external editor files, and exports remain.';
@@ -119,7 +125,7 @@ async function clearRetainedStorage(type, name, button) {
 }
 
 /** @param {HTMLButtonElement} button */
-async function saveRetainedStoragePolicy(button) {
+export async function saveRetainedStoragePolicy(button) {
   var fields = ['retainedCacheLimit', 'retainedCacheAge', 'groupingHistoryLimit'];
   if (!fields.every(function(id) { return /** @type {HTMLInputElement} */ (document.getElementById(id)).reportValidity(); })) return;
   var values = {
@@ -142,7 +148,7 @@ async function saveRetainedStoragePolicy(button) {
 }
 
 /** @param {string} jobId */
-function watchRetainedStorageJob(jobId) {
+export function watchRetainedStorageJob(jobId) {
   var status = /** @type {HTMLElement} */ (document.getElementById('retainedStorageStatus'));
   status.textContent = 'Storage cleanup is running. Follow progress or cancel in Jobs.';
   async function poll() {
@@ -163,24 +169,29 @@ function watchRetainedStorageJob(jobId) {
 }
 
 /** @param {string} message @returns {Promise<boolean>} */
-function confirmRetainedStorage(message) {
+export function confirmRetainedStorage(message) {
   var modal = /** @type {HTMLDialogElement} */ (document.getElementById('retainedActionModal'));
   if (modal.open) return Promise.resolve(false);
   /** @type {HTMLElement} */ (document.getElementById('retainedActionDescription')).textContent = message;
   var previousFocus = document.activeElement;
+  var confirmButton = /** @type {HTMLElement} */ (document.getElementById('retainedActionConfirm'));
+  var cancelButton = /** @type {HTMLElement} */ (document.getElementById('retainedActionCancel'));
   return new Promise(function(resolve) {
+    function accept() { finish(true); }
+    function decline() { finish(false); }
+    /** @param {Event} event */ function onCancel(event) { event.preventDefault(); finish(false); }
     /** @param {boolean} accepted */ function finish(accepted) {
       modal.close();
       modal.classList.remove('open');
-      modal.oncancel = null;
-      /** @type {HTMLElement} */ (document.getElementById('retainedActionConfirm')).onclick = null;
-      /** @type {HTMLElement} */ (document.getElementById('retainedActionCancel')).onclick = null;
+      modal.removeEventListener('cancel', onCancel);
+      confirmButton.removeEventListener('click', accept);
+      cancelButton.removeEventListener('click', decline);
       if (previousFocus instanceof HTMLElement) previousFocus.focus();
       resolve(accepted);
     }
-    /** @type {HTMLElement} */ (document.getElementById('retainedActionConfirm')).onclick = function() { finish(true); };
-    /** @type {HTMLElement} */ (document.getElementById('retainedActionCancel')).onclick = function() { finish(false); };
-    modal.oncancel = function(event) { event.preventDefault(); finish(false); };
+    confirmButton.addEventListener('click', accept);
+    cancelButton.addEventListener('click', decline);
+    modal.addEventListener('cancel', onCancel);
     modal.classList.add('open');
     modal.showModal();
     /** @type {HTMLElement} */ (document.getElementById('retainedActionCancel')).focus();

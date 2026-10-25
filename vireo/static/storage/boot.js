@@ -1,9 +1,27 @@
-// Page startup: registers the page hook, binds the template's controls and
-// the delegated listeners on rendered markup, and loads the page.
-// Classic page script; loads after every other Storage page script.
+// Page startup: the module the template loads. Registers the page hook,
+// binds the template's controls and the delegated listeners on rendered
+// markup, and loads the page.
+
+import { clearEmbeddingCache, clearPreviewCache } from './caches.js';
+import { loadStorageConfig, saveStorageConfig, updateWorkingCopyLimitState } from './config.js';
+import {
+  closeStorageModal, deleteAllFiles, deleteSelectedFiles, openStorageModal, selectAllFiles,
+  updateSelectedInfo,
+} from './files-modal.js';
+import { closeHfCacheModal, openHfCacheModal, removeUnusedHfCache } from './hf-cache.js';
+import { closeMasksModal, deleteInactiveMasks, deleteStaleMasks, openMasksModal } from './masks.js';
+import { renderStorageCards } from './overview.js';
+import {
+  clearSafeCaches, loadStoragePanel, openStorageFolder, refreshStoragePage, storageEl,
+} from './panel.js';
+import { saveRetainedStoragePolicy } from './retained.js';
+import {
+  applyWorkingCopyLimit, closeWorkingCopyLimitModal, confirmWorkingCopyLimit,
+} from './working-copy-limit.js';
+import { registerPageHooks } from './shared.js';
 
 // vireo-release-originals.js reloads the overview after a release job.
-Vireo.registerPageHooks({loadStoragePanel: loadStoragePanel});
+registerPageHooks({loadStoragePanel: loadStoragePanel});
 
 /**
  * The template's controls name their handlers in
@@ -13,7 +31,7 @@ Vireo.registerPageHooks({loadStoragePanel: loadStoragePanel});
  *
  * @type {Record<string, (event: Event, element: HTMLElement) => unknown>}
  */
-var STORAGE_HANDLERS = {
+const STORAGE_HANDLERS = {
   refreshStoragePage: function() { return refreshStoragePage(); },
   clearSafeCaches: function() { return clearSafeCaches(); },
   renderStorageCards: function() { renderStorageCards(); },

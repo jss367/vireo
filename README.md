@@ -147,7 +147,7 @@ map your diff onto it:
 
 ```bash
 python scripts/select_tests.py fetch-map          # once per day or so; needs `gh`
-python scripts/select_tests.py --run -- -n auto -q
+python scripts/select_tests.py --run -- -n 4 -q
 ```
 
 `select_tests.py --explain` shows why each changed file selected what it
@@ -161,6 +161,17 @@ coverage.
 For offline grouping experiments with cached predictions and current human labels,
 see the [encounter evaluation tool](tools/encounter-evaluation/README.md). It has a
 separate development environment and is excluded from the application bundle.
+
+To check model storage against the real Hugging Face client and download service:
+
+```bash
+VIREO_REAL_HUB_TEST=1 python -m pytest vireo/tests/test_hub_download_real.py -q
+```
+
+This opt-in check downloads a pinned, public 540 KB test model into isolated
+temporary caches. It verifies that Vireo retains one model payload and that
+the historical cache-then-copy flow retains two. It requires network access
+and leaves user model and cache folders untouched; default tests skip it.
 
 ## Scripting & automation
 
