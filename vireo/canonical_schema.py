@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
@@ -186,6 +186,16 @@ def create_subject_ranking_analysis(conn):
     )""")
 
 
+def create_same_shot_reviews(conn):
+    """Library-wide review notes, independent of photo flags and file cleanup."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS same_shot_reviews (
+        group_key TEXT PRIMARY KEY,
+        review_key TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK(decision IN ('reviewed', 'keep_all')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+
+
 def create_auxiliary_schema_objects(conn):
     """Shared auxiliary objects for fresh catalogs; migrations use the same DDL."""
     create_formerly_lazy_objects(conn)
@@ -193,6 +203,7 @@ def create_auxiliary_schema_objects(conn):
     create_subject_ranking_analysis(conn)
     create_identity_alternatives(conn)
     create_detection_evidence_reviews(conn)
+    create_same_shot_reviews(conn)
 
 
 class CanonicalSchema:

@@ -92,7 +92,7 @@ Pose model conversion requires separate environments; see the
 ### Run
 
 ```bash
-python vireo/app.py --db ~/.vireo/vireo.db --port 8080
+python vireo/app.py --port 8080
 ```
 
 Then open [http://localhost:8080](http://localhost:8080).
@@ -175,7 +175,7 @@ and leaves user model and cache folders untouched; default tests skip it.
 
 ## Scripting & automation
 
-Vireo exposes a small stable HTTP API under `/api/v1` for scripts and agents. A running instance advertises its port and auth token via `~/.vireo/runtime.json`. See [docs/headless-api.md](docs/headless-api.md) for discovery, spawning a headless instance, authentication, and a worked `curl` example. Vireo is also an MCP server (`vireo-server --mcp`), so Claude Code, Claude Desktop and other MCP clients can search, view, flag, rate and tag photos on your own Claude subscription; Settings shows the connection command.
+Vireo exposes a small stable HTTP API under `/api/v1` for scripts and agents. A running instance advertises its port and auth token via `runtime.json` in its data folder (`~/.vireo` for existing installations). See [docs/headless-api.md](docs/headless-api.md) for discovery, spawning a headless instance, authentication, and a worked `curl` example. Vireo is also an MCP server (`vireo-server --mcp`), so Claude Code, Claude Desktop and other MCP clients can search, view, flag, rate and tag photos on your own Claude subscription; Settings shows the connection command.
 
 ## License
 

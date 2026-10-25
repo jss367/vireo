@@ -1,7 +1,20 @@
 // The job card: header controls, meta, retry/resume row, banners, and results.
-// Classic page script; load boot.js after all definitions.
 
-/** @param {JobsRow} job */ function jobCollectionText(job) {
+import { state } from './state.js';
+import { activeProgress, formatElapsed, isLiveStatus, jobConfig, progressPct } from './format.js';
+import {
+  canRestartInPlace, hasActiveRetryFor, importResumeHint, importResumeTakeover, importRetryBody,
+  importTakeoverNote, inPlaceRestartJobId, isResumableImport,
+} from './import-retry.js';
+import { renderMoveRoute } from './move-route.js';
+import { renderSourceCleanup } from './source-cleanup.js';
+import { renderRichStep } from './steps.js';
+import {
+  canRetryImportDirectToNas, escapeAttr, escapeHtml, formatDateTime, formatJobType, formatTime,
+  importFailedBeforeStart,
+} from './shared.js';
+
+/** @param {JobsRow} job */ export function jobCollectionText(job) {
   var cfg = jobConfig(job);
   if (cfg.collection_name) return 'Collection: ' + cfg.collection_name;
   if (cfg.collection_id !== undefined && cfg.collection_id !== null && cfg.collection_id !== '') {
@@ -10,7 +23,7 @@
   return '';
 }
 
-/** @param {JobsRow} job @param {{workspaceName?:string}=} options */ function renderJobCard(job, options) {
+/** @param {JobsRow} job @param {{workspaceName?:string}=} options */ export function renderJobCard(job, options) {
   options = options || {};
   // Queued pipelines are "live" for UI purposes: they have a real
   // backend identity, they're cancellable (runner.cancel_job handles
@@ -33,7 +46,7 @@
 
   // Header: type, workspace label, status, cancel
   html += '<div class="job-card-header">';
-  html += '<span class="job-detail-title">' + escapeHtml(window.formatJobType(job.type)) + '</span>';
+  html += '<span class="job-detail-title">' + escapeHtml(formatJobType(job.type)) + '</span>';
   if (options.workspaceName) {
     html += '<span class="job-card-workspace">' + escapeHtml(options.workspaceName) + '</span>';
   }
@@ -67,7 +80,7 @@
     } else if (job.pausable && job.status === 'paused') {
       html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '">Resume</button>';
     }
-    if (cancellingJobIds[job.id]) {
+    if (state.cancellingJobIds[job.id]) {
       html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';
     } else {
       html += '<button class="btn-cancel" data-cancel-job="' + escapeHtml(job.id) + '">Cancel</button>';
@@ -77,7 +90,7 @@
 
   // Meta: started, elapsed, overall %
   html += '<div class="job-detail-meta">';
-  html += '<span>Started: ' + window.VireoTime.time(new Date(job.started_at)) + '</span>';
+  html += '<span>Started: ' + formatTime(new Date(job.started_at)) + '</span>';
   html += '<span>Elapsed: ' + elapsed + '</span>';
   var collectionText = jobCollectionText(job);
   if (collectionText) {
@@ -94,7 +107,7 @@
 
   if (canRestartInPlace(job)) {
     var restartedJobId = inPlaceRestartJobId(job);
-    var restarting = inPlaceRestarts[job.id]?.pending;
+    var restarting = state.inPlaceRestarts[job.id]?.pending;
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
     if (restartedJobId) {
       html += 'Already restarted. <button class="btn-retry" data-show-job="' +
@@ -114,8 +127,8 @@
   // Once a later resume or retry took over, the server refuses both
   // Resume and Retry on this row (409), so neither is offered; say where
   // to go instead.
-  var resumeTakeover = importResumeTakeover(job, historyJobs);
-  var resumableImport = isResumableImport(job, historyJobs) && !resumeTakeover.by;
+  var resumeTakeover = importResumeTakeover(job, state.historyJobs);
+  var resumableImport = isResumableImport(job, state.historyJobs) && !resumeTakeover.by;
   if (!isLive && job.import_resume_pending) {
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">Checking recovery options…</div>';
   }
@@ -158,7 +171,7 @@
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '">Retry import</button>';
       var directAllowed = recoveryOptions.direct_to_nas_allowed === true &&
-        !job.import_direct_pending && canRetryImportDirectToNas(job, historyJobs);
+        !job.import_direct_pending && canRetryImportDirectToNas(job, state.historyJobs);
       if (directAllowed) {
         html += '<button class="btn-retry" data-retry-import-job="' +
           escapeAttr(job.id) + '" data-retry-direct-to-nas style="margin-left:8px;">Retry directly to NAS</button>';
@@ -262,7 +275,7 @@
 // Plain-language account of a job the restart cut short: how far it
 // got (steps finished, or the last recorded count) and when that was
 // last recorded. Never claims more than the checkpoint actually saw.
-/** @param {JobsRow} job */ function interruptedText(job) {
+/** @param {JobsRow} job */ export function interruptedText(job) {
   var parts = ['Interrupted by Vireo restart.'];
   var steps = job.steps || job.tree || [];
   var progress = job.progress || {};
@@ -283,7 +296,7 @@
   }
   if (job.result?.last_progress_at) {
     parts.push('Last progress was recorded at ' +
-      window.VireoTime.dateTime(new Date(job.result?.last_progress_at)) + '.');
+      formatDateTime(new Date(job.result?.last_progress_at)) + '.');
   } else {
     parts.push('No progress was recorded before the restart.');
   }

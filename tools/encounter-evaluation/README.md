@@ -26,10 +26,14 @@ vireo-evaluate-encounters tune --workspace 22 --max-sessions 80 --trials 12 --se
 ```
 
 Choose your workspace ID from `inventory`; 22 is only an example. Database access
-defaults to `~/.vireo/vireo.db`; override it with `--db`. The tool detects the
-checkout from an editable installation, or accepts `--repo` explicitly.
+defaults to the current Vireo installation's catalog (platform data folder on a
+fresh install, `~/.vireo/vireo.db` on an existing install); override it with
+`--db`. The tool detects the checkout from an editable installation, or accepts
+`--repo` explicitly.
 
-Runs are written to `~/.vireo/encounter-evaluation/runs/<time-id>/`. Open the
+Runs are written to `encounter-evaluation/runs/<time-id>/` under the same Vireo
+data root (so `~/Library/Application Support/Vireo/...` on macOS fresh installs
+or `~/.vireo/encounter-evaluation/runs/<time-id>/` on existing ones). Open the
 printed `report.html` locally. It contains comparative scores, the largest
 session improvements and regressions, photo context around changed boundaries,
 human labels, and existing thumbnails where their absolute paths are available.
@@ -106,8 +110,8 @@ does not pick up new reviews. The queue is deliberately enriched for difficult
 cases; its reviewed subset is not a representative library-accuracy estimate.
 Keep the final test partition untouched until candidate selection is complete.
 The server binds only to loopback and prints an access-token URL; keep that link
-and the private review database local. `--media-root` overrides `~/.vireo` when
-cached previews and thumbnails are stored elsewhere.
+and the private review database local. `--media-root` overrides the current
+Vireo data root when cached previews and thumbnails are stored elsewhere.
 
 ## Compare the encounter continuity repair at larger scale
 

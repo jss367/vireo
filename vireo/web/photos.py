@@ -23,6 +23,7 @@ import tempfile
 from dataclasses import dataclass
 
 import config as cfg
+from app_paths import media_root
 from best_batch import best_batch_scope, build_best_batch_response
 from burst_evidence import (
     DEFAULT_CLOSE_CALL_MARGIN,
@@ -1495,7 +1496,7 @@ def create_photos_blueprint(
         if len(regions) > max_regions:
             return json_error(f"too many regions (max {max_regions})", 400)
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         results = []
 
         for raw in regions:
@@ -1528,7 +1529,7 @@ def create_photos_blueprint(
         if expected is not None and (type(expected) is not int or expected != db.active_workspace_id):
             return json_error("Active workspace changed; preview the selection again", 409)
         effective = db.get_effective_config(cfg.load())
-        cache_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        cache_dir = media_root(config["THUMB_CACHE_DIR"])
         return ctx.start("analysis-retry", lambda job: run_retry(ctx, job, ids, effective, cache_dir, results_dir=os.path.dirname(db_path)),
                          config={"photo_ids": ids, "workspace_id": db.require_workspace_id()},
                          extra={"photo_ids": ids, "workspace_id": db.require_workspace_id()})
@@ -1547,7 +1548,7 @@ def create_photos_blueprint(
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("not found", 404)
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
         def work(job):
             from image_loader import get_canonical_image_path
@@ -1602,7 +1603,7 @@ def create_photos_blueprint(
         run = _OpenExternal(
             db,
             {f["id"]: f["path"] for f in db.folders.tree()},
-            os.path.dirname(config["THUMB_CACHE_DIR"]),
+            media_root(config["THUMB_CACHE_DIR"]),
             json_error,
         )
         photo_paths = run.photo_paths(photo_ids)

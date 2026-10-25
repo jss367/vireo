@@ -1,17 +1,19 @@
 // The move-folder route: From/To paths and the capture-date folder note.
-// Classic page script; load boot.js after all definitions.
+
+import { isLiveStatus, jobConfig, plural } from './format.js';
+import { escapeAttr, escapeHtml } from './shared.js';
 
 // How many date folders the route lists before collapsing the rest into
 // "+ N more". Mirrors ``MOVE_DATE_DEST_PREVIEW_LIMIT`` in services/folder_moves.py, which
 // caps the planned list server-side; a finished job's ``result`` carries
 // every folder it used, so the same cap is applied here.
-var DATE_FOLDER_ROWS = 8;
+export const DATE_FOLDER_ROWS = 8;
 
 // Strip the selected root off a planned/actual destination so the folder
 // list reads as the date folders themselves ("2026-09-12") rather than
 // repeating the root on every row. Falls back to the full path when the
 // path does not sit under the root we were given.
-/** @param {string | undefined} path @param {string | undefined} root */ function pathUnderRoot(path, root) {
+/** @param {string | undefined} path @param {string | undefined} root */ export function pathUnderRoot(path, root) {
   if (!path) return '';
   if (root && path.indexOf(root) === 0) {
     var rest = path.slice(root.length).replace(/^[/\\]+/, '');
@@ -34,7 +36,7 @@ var DATE_FOLDER_ROWS = 8;
 // finished route is drawn from the result and the config snapshot supplies
 // only the template and the selected root. That way history can never
 // describe a folder the move didn't use.
-/** @param {JobsConfig} cfg @param {JobsRow} job */ function moveDateView(cfg, job) {
+/** @param {JobsConfig} cfg @param {JobsRow} job */ export function moveDateView(cfg, job) {
   var root = cfg.destination || '';
   var plannedFolders = Array.isArray(cfg.date_destinations)
     ? cfg.date_destinations : [];
@@ -125,7 +127,7 @@ var DATE_FOLDER_ROWS = 8;
 // fans out, so this has to say which of the two it is and name the folders
 // involved. Jobs enqueued before the plan snapshot existed carry no counts;
 // they fall back to the template-only sentence.
-/** @param {JobsConfig} cfg @param {JobsRow} job */ function moveDateNote(cfg, job) {
+/** @param {JobsConfig} cfg @param {JobsRow} job */ export function moveDateNote(cfg, job) {
   var template = '<code>' + escapeHtml(cfg.folder_template) + '</code>';
   if (!(cfg.date_destination_count || 0)) {
     return '<span class="job-move-route-note">Organizing photos into ' +
@@ -195,7 +197,7 @@ var DATE_FOLDER_ROWS = 8;
   return html;
 }
 
-/** @param {JobsRow} job */ function renderMoveRoute(job) {
+/** @param {JobsRow} job */ export function renderMoveRoute(job) {
   if (!job || job.type !== 'move-folder') return '';
   var cfg = jobConfig(job);
   var source = cfg.source_path;

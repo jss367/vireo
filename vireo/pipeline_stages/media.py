@@ -704,7 +704,7 @@ def previews_stage(
         max_size = int(raw_size or 1920)
         preview_quality = effective.get("preview_quality", 90)
         # Must match the Flask serve convention — app.py reads, reaps,
-        # and evicts previews under dirname(THUMB_CACHE_DIR)/previews.
+        # and evicts previews under media_root(THUMB_CACHE_DIR)/previews.
         # Using dirname(db_path) here would, with a custom --thumb-dir,
         # warm previews (and preview_cache rows) under a root the app
         # never serves from.

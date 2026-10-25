@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .common import code_identity, configure_repo, write_json
+from .common import code_identity, configure_repo, shared_default_path, write_json
 from .library import open_library, prepare
 from .report import write_report
 from .runner import evaluate, tune
@@ -27,9 +27,11 @@ def parser():
     p = argparse.ArgumentParser(description="Evaluate and tune encounter grouping using cached Vireo data")
     p.add_argument("command", choices=["inventory", "compare", "tune"])
     p.add_argument("--repo", type=Path, help="Vireo checkout (auto-detected for an editable tool installation)")
-    p.add_argument("--db", type=Path, default=Path.home() / ".vireo" / "vireo.db")
+    p.add_argument("--db", type=Path,
+                   help="Vireo catalog; defaults to the current installation's database path")
     p.add_argument("--workspace", type=int)
-    p.add_argument("--output", type=Path, help="New run directory; defaults to ~/.vireo/encounter-evaluation/runs/<time-id>")
+    p.add_argument("--output", type=Path,
+                   help="New run directory; defaults to encounter-evaluation/runs/<time-id> under the current Vireo data root")
     p.add_argument("--resume", type=Path, help="Continue an existing run using its retained inputs, not current labels")
     p.add_argument("--max-sessions", type=positive_int, help="Limit whole sessions; unlimited by default")
     p.add_argument("--seed", type=int, default=42)
@@ -67,6 +69,11 @@ def main(argv=None):
         p.error("tune uses train/development only; --partition and --candidate-file are for compare")
     try:
         repo = configure_repo(args.repo)
+        # Resolve home-relative defaults after configure_repo: on a fresh
+        # install the catalog and tool outputs live under the platform data
+        # root rather than ``~/.vireo``.
+        if args.db is None:
+            args.db = shared_default_path("database")
         if args.command == "inventory":
             conn = open_library(args.db)
             try:
@@ -88,7 +95,7 @@ def main(argv=None):
             print("Resuming retained comparison inputs. Start a new run to include newer labels.", flush=True)
         else:
             run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-            output = (args.output or Path.home() / ".vireo" / "encounter-evaluation" / "runs" / run_id).expanduser().resolve()
+            output = (args.output or shared_default_path("data") / "encounter-evaluation" / "runs" / run_id).expanduser().resolve()
             output.mkdir(parents=True, exist_ok=False)
             cfg = json.loads(args.config.read_text()) if args.config else None
             print(f"Preparing current library evidence in {output}", flush=True)

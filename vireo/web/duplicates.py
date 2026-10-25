@@ -22,6 +22,7 @@ from duplicate_scan import attach_workspace_names, catalog_cleanup_result, reval
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
 from services import catalog_deletion, duplicate_resolution
+from services.same_shot_reviews import record_same_shot_review
 from sql_chunks import chunked
 
 if TYPE_CHECKING:
@@ -62,6 +63,25 @@ def create_duplicates_blueprint(
     # through the row delete, so a copy cleanup already chose to trash can't
     # be promoted to the kept one before its file and row are gone.
     loser_cleanup_lock = threading.Lock()
+
+    @blueprint.route("/api/duplicates/same-shot/review", methods=["POST"])
+    def api_same_shot_review():
+        """Record or reopen a library-wide review note; never modify photos."""
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("photo_ids, review_key and decision required")
+        ids, key, decision = body.get("photo_ids"), body.get("review_key"), body.get("decision")
+        if (not isinstance(ids, list) or not 2 <= len(ids) <= 10000
+                or any(type(pid) is not int or not 0 < pid < 2**63 for pid in ids) or len(set(ids)) != len(ids)):
+            return json_error("photo_ids must contain 2 to 10000 distinct positive integers")
+        if not isinstance(key, str) or len(key) != 64:
+            return json_error("review_key required")
+        if "decision" not in body or decision not in (None, "reviewed", "keep_all"):
+            return json_error("decision must be reviewed, keep_all or null")
+        group = record_same_shot_review(get_db(), ids, key, decision)
+        if group is None:
+            return json_error("same-shot group changed", 409, message="This group changed. Reload or scan again before reviewing it.")
+        return jsonify({"ok": True, "group": group})
 
     @blueprint.route("/api/duplicates/apply", methods=["POST"])
     def api_duplicates_apply() -> ResponseReturnValue:

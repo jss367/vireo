@@ -101,3 +101,22 @@ def test_seed_databases_report_closed_after_return(tmp_path, monkeypatch, seed_n
     finally:
         for database, _connection in owned:
             database.close()
+
+
+def test_subprocess_isolates_native_storage_environment(tmp_path, monkeypatch):
+    from testing.userfirst import harness
+    seen = {}
+    def spawn(_cmd, **kwargs):
+        seen.update(kwargs)
+        return object()
+    monkeypatch.setattr(harness.subprocess, "Popen", spawn)
+    for name in ("LOCALAPPDATA", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.setenv(name, "/real/user/data")
+    home = tmp_path / "isolated home"
+    _, handle = harness._start_app(
+        {"db": tmp_path / "test.db", "thumbnails": tmp_path / "thumbs"},
+        12345, tmp_path / "server.log", home,
+    )
+    handle.close()
+    for name in ("HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        assert seen["env"][name].startswith(str(home))

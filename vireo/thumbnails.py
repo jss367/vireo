@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 from datetime import UTC, datetime
 
-from app_paths import default_path
+from app_paths import default_path, media_root
 from camera_denoise import cache_matches, cache_save_options
 from file_replace import replace_file
 from image_loader import (
@@ -293,14 +293,13 @@ def generate_thumbnail(
     if recipe:
         import local_masks
         from image_edits import apply_recipe_to_loaded_image
-        # cache_dir is <vireo_dir>/thumbnails, the same root derivation the
-        # app uses (dirname of THUMB_CACHE_DIR), so snapshots resolve here
-        # without threading vireo_dir through every caller.
+        # Resolve the same persistent media root as the app: native thumbnails
+        # live in cache storage, but edit-mask snapshots must stay with media.
         img = apply_recipe_to_loaded_image(
             img, recipe, max_size=size, native_size=native_size,
             camera_metadata=camera_metadata,
             local_mask=local_masks.load_snapshot(
-                os.path.dirname(os.path.abspath(cache_dir)), photo_id, recipe,
+                media_root(os.path.abspath(cache_dir)), photo_id, recipe,
             ),
         )
 

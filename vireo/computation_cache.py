@@ -30,7 +30,6 @@ log = logging.getLogger(__name__)
 
 ARTIFACT_SCHEMA = 1
 BUNDLE_FORMAT = 1
-DEFAULT_CACHE_DIR = default_path("computation_cache", expand_user=False)
 
 MAX_OBJECTS = 10_000
 MAX_OBJECT_BYTES = 8 * 1024 * 1024
@@ -1113,7 +1112,7 @@ def validate_artifact(artifact):
 
 class ArtifactStore:
     def __init__(self, root=None):
-        self.root = Path(os.path.expanduser(os.fspath(root or DEFAULT_CACHE_DIR)))
+        self.root = Path(os.path.expanduser(os.fspath(root or default_path("computation_cache"))))
 
     def object_path(self, artifact, digest=None):
         artifact = validate_artifact(artifact)

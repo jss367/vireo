@@ -13,6 +13,8 @@ import os
 import shutil
 import sqlite3
 
+from app_paths import media_root
+
 log = logging.getLogger(__name__)
 
 # The fixed ``/photos/<id>/preview?size=N`` tiers the server allows at all.
@@ -207,7 +209,7 @@ def cleanup_cached_files_for_deleted_photos(
     conventional layout working for callers that only have one path.
     """
     # Subject masks belong to the catalog, independently of generated image caches.
-    vireo_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
+    vireo_dir = vireo_dir or media_root(thumb_cache_dir)
     dirs = _DeletedPhotoCacheDirs(thumb_cache_dir, vireo_dir, masks_dir)
     total = len(files)
     for idx, f in enumerate(files, start=1):
@@ -225,7 +227,7 @@ def _recycled_id_probe_paths(thumb_cache_dir, photo_id, vireo_dir=None, masks_di
     id, no variant suffix) names — the variant patterns are covered by
     ``_recycled_id_probe_patterns``.
     """
-    vireo_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
+    vireo_dir = vireo_dir or media_root(thumb_cache_dir)
     return (
         os.path.join(thumb_cache_dir, f"{photo_id}.jpg"),
         os.path.join(vireo_dir, "working", f"{photo_id}.jpg"),
@@ -261,7 +263,7 @@ def _recycled_id_probe_patterns(thumb_cache_dir, photo_id, vireo_dir=None, masks
     pattern short-circuits at the first hit — a fresh library pays only
     the ``os.scandir`` open on each empty derivative dir.
     """
-    vireo_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
+    vireo_dir = vireo_dir or media_root(thumb_cache_dir)
     return (
         os.path.join(thumb_cache_dir, f"{photo_id}_*.jpg"),
         os.path.join(vireo_dir, "previews", f"{photo_id}_*.jpg"),
@@ -320,7 +322,7 @@ def _recycled_id_has_stale_derivative(
 
 def _derivative_dirs(thumb_cache_dir, vireo_dir=None, masks_dir=None):
     """Every directory that stores files keyed by bare photo id."""
-    vireo_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
+    vireo_dir = vireo_dir or media_root(thumb_cache_dir)
     return (
         thumb_cache_dir,
         os.path.join(vireo_dir, "previews"),
@@ -385,7 +387,7 @@ class RecycledIdIndex:
         # --db and --thumb-dir are independent, so the other derivative
         # dirs are not necessarily siblings of the thumbnails. Callers
         # that know the real cache root pass it explicitly.
-        self._vireo_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
+        self._vireo_dir = vireo_dir or media_root(thumb_cache_dir)
         self._ids = None
         self._incomplete = False
         self._unreadable_dirs = set()
@@ -686,7 +688,7 @@ def _neutralize_recycled_id_survivors(
         thumb_cache_dir, photo_id, vireo_dir, masks_dir=masks_dir,
     )
     if survivors:
-        base_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
+        base_dir = vireo_dir or media_root(thumb_cache_dir)
         dirs = (
             os.path.join(base_dir, "previews"),
             os.path.join(base_dir, "external-edits"),

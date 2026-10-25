@@ -16,6 +16,8 @@ import time
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
+from app_paths import media_root
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
 
@@ -83,7 +85,7 @@ class SourceVerifier:
 
 def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], object] = lambda: None) -> SourceVerifier:
     """Fail closed unless independent catalog sources can be read in full."""
-    generated = os.path.dirname(config["THUMB_CACHE_DIR"])
+    generated = media_root(config["THUMB_CACHE_DIR"])
     excluded = [*roots(config).values(), *[os.path.join(generated, name) for name in (
         "offline", "working", "previews", "staging", "local-folders", "local-workspaces",
     )], config["THUMB_CACHE_DIR"]]
@@ -180,7 +182,7 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
 
 
 def roots(config: _Config) -> dict[str, str]:
-    generated = os.path.dirname(config["THUMB_CACHE_DIR"])
+    generated = media_root(config["THUMB_CACHE_DIR"])
     return {key: os.path.join(generated, subdir) if subdir else
             os.path.join(config["COMPUTATION_CACHE_DIR"], "objects")
             for key, (_label, subdir, _pattern) in FAMILIES.items()}

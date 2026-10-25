@@ -1,63 +1,68 @@
 // Selecting a job and following it over its progress stream.
-// Classic page script; load boot.js after all definitions.
 
-/** @param {string} jobId @param {string} source */ function selectJob(jobId, source) {
-  currentView = jobId;
-  selectedJobId = jobId;
-  selectedSource = source;
-  leafBuffers = {};
-  leafBufferSources = {};
-  collapsedSteps = {};
-  if (sseSource) { sseSource.close(); sseSource = null; }
+import { state } from './state.js';
+import { renderDetail, renderHistoryDetail } from './detail.js';
+import { isLiveStatus } from './format.js';
+import { updateList, updateRunningBadge } from './list.js';
+import { fetchHistory, fetchJobs } from './polling.js';
+
+/** @param {string} jobId @param {string} source */ export function selectJob(jobId, source) {
+  state.currentView = jobId;
+  state.selectedJobId = jobId;
+  state.selectedSource = source;
+  state.leafBuffers = {};
+  state.leafBufferSources = {};
+  state.collapsedSteps = {};
+  if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
   if (source === 'active') {
-    var job = activeJobs.find(function(j) { return j.id === jobId; });
+    var job = state.activeJobs.find(function(j) { return j.id === jobId; });
     if (job) { renderDetail(job); if (isLiveStatus(job.status)) connectSSE(jobId); }
   } else {
-    job = historyJobs.find(function(j) { return j.id === jobId; });
+    job = state.historyJobs.find(function(j) { return j.id === jobId; });
     if (job) renderHistoryDetail(job);
   }
   updateList();
 }
 
-/** @param {string} jobId */ function connectSSE(jobId) {
-  if (sseSource) sseSource.close();
-  sseSource = new EventSource('/api/jobs/' + jobId + '/stream');
-  sseSource.addEventListener('progress', function(e) {
+/** @param {string} jobId */ export function connectSSE(jobId) {
+  if (state.sseSource) state.sseSource.close();
+  state.sseSource = new EventSource('/api/jobs/' + jobId + '/stream');
+  state.sseSource.addEventListener('progress', function(e) {
     var data = JSON.parse(e.data);
-    var job = activeJobs.find(function(j) { return j.id === jobId; });
+    var job = state.activeJobs.find(function(j) { return j.id === jobId; });
     if (job) {
       job.progress = data;
       if (data.steps) job.steps = data.steps;
-      if (selectedJobId === jobId) renderDetail(job);
+      if (state.selectedJobId === jobId) renderDetail(job);
       updateList();
     }
   });
-  sseSource.addEventListener('status', function(e) {
+  state.sseSource.addEventListener('status', function(e) {
     var data = JSON.parse(e.data);
-    var job = activeJobs.find(function(j) { return j.id === jobId; });
+    var job = state.activeJobs.find(function(j) { return j.id === jobId; });
     if (job && data.status) {
       job.status = data.status;
-      if (selectedJobId === jobId) renderDetail(job);
+      if (state.selectedJobId === jobId) renderDetail(job);
       updateList();
       updateRunningBadge();
     }
   });
-  sseSource.addEventListener('complete', function(e) {
+  state.sseSource.addEventListener('complete', function(e) {
     /** @type {Partial<JobsRow>} */ var data = {};
     try { data = JSON.parse(e.data); } catch(ex) {}
-    var job = activeJobs.find(function(j) { return j.id === jobId; });
+    var job = state.activeJobs.find(function(j) { return j.id === jobId; });
     if (job) {
       job.status = data.status || job.status;
       if (data.result !== undefined) job.result = data.result;
       if (data.duration !== undefined) job.duration = data.duration;
       if (data.errors !== undefined) job.errors = data.errors;
-      if (selectedJobId === jobId) renderDetail(job);
+      if (state.selectedJobId === jobId) renderDetail(job);
     }
-    if (sseSource) { sseSource.close(); sseSource = null; }
+    if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
     fetchJobs();
     fetchHistory();
   });
-  sseSource.onerror = function() {
-    if (sseSource) { sseSource.close(); sseSource = null; }
-  };
+  state.sseSource.addEventListener('error', function() {
+    if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
+  });
 }

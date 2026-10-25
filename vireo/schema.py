@@ -26,6 +26,7 @@ from canonical_schema import (
     create_detection_evidence_reviews,
     create_formerly_lazy_objects,
     create_identity_alternatives,
+    create_same_shot_reviews,
     create_subject_ranking_analysis,
     job_history_columns,
 )
@@ -251,7 +252,8 @@ MIGRATIONS = (
     Migration(24, "identity_alternatives", create_identity_alternatives),
     Migration(25, "detection_evidence_reviews", create_detection_evidence_reviews),
     Migration(26, "species_assignment_provenance", _add_species_provenance),
-    Migration(27, "flag_attribution_history", create_current_flag_attribution),
+    Migration(27, "same_shot_reviews", create_same_shot_reviews),
+    Migration(28, "flag_attribution_history", create_current_flag_attribution),
 )
 
 

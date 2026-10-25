@@ -41,6 +41,14 @@ def configure_repo(path=None):
     return repo
 
 
+def shared_default_path(name):
+    """Resolve a Vireo default path (database, data root, ...) honoring the
+    fresh-install platform layout. Call after ``configure_repo`` has made the
+    ``app_paths`` module importable."""
+    from app_paths import default_path
+    return Path(default_path(name))
+
+
 def code_identity(repo):
     # Hash actual source contents, including untracked experiments, not just HEAD.
     roots = [repo / "vireo", repo / "tools" / "encounter-evaluation" / "src"]

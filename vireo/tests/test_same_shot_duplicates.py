@@ -269,3 +269,94 @@ def test_just_completed_review_works_before_history_is_saved(app_and_db, tmp_pat
     finally:
         release.set()
     assert wait_for_job_via_client(client, job)["status"] == "completed"
+
+
+def review_body(group, decision="keep_all"):
+    return {"photo_ids": [p["id"] for p in group["photos"]],
+            "review_key": group["review_key"], "decision": decision}
+
+
+def test_review_persists_library_wide_without_changing_photos(app_and_db, tmp_path):
+    app, db = app_and_db
+    a = seed(db, tmp_path, "a.jpg", "a")
+    b = seed(db, tmp_path, "b.jpg", "b")
+    result = run_duplicate_scan({}, db)
+    save_scan(db, result)
+    group, = result["same_shot_groups"]
+    client = app.test_client()
+    before = [tuple(row) for row in db.conn.execute("SELECT * FROM photos ORDER BY id")]
+    assert client.post("/api/duplicates/same-shot/review", json=review_body(group)).status_code == 200
+    other = db.create_workspace("Another review workspace")
+    db.set_active_workspace(other)
+    db.commit()
+    restored = client.get("/api/duplicates/last-scan").get_json()["result"]["same_shot_groups"][0]
+    assert restored["review_decision"] == "keep_all"
+    assert restored["reviewed_at"]
+    assert run_duplicate_scan({}, db)["same_shot_groups"][0]["review_decision"] == "keep_all"
+    assert is_duplicate_review_member(db, a) and is_duplicate_review_member(db, b)
+    assert before == [tuple(row) for row in db.conn.execute("SELECT * FROM photos ORDER BY id")]
+    assert client.post("/api/duplicates/same-shot/review", json=review_body(restored, None)).status_code == 200
+    assert run_duplicate_scan({}, db)["same_shot_groups"][0]["review_decision"] is None
+    assert db.conn.execute("SELECT COUNT(*) FROM same_shot_reviews").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("change", ["hash", "path", "timestamp", "phash", "edit", "added", "deleted", "identity", "rejected"])
+def test_changed_evidence_needs_new_review(app_and_db, tmp_path, change):
+    app, db = app_and_db
+    seed(db, tmp_path, "a.jpg", "a")
+    b = seed(db, tmp_path, "b.jpg", "b")
+    group, = run_duplicate_scan({}, db)["same_shot_groups"]
+    client = app.test_client()
+    assert client.post("/api/duplicates/same-shot/review", json=review_body(group, "reviewed")).status_code == 200
+    if change == "added":
+        seed(db, tmp_path, "c.jpg", "c")
+    elif change == "edit":
+        db.edits.set_photo_recipe(b, {"adjustments": {"exposure": 0.5}})
+    else:
+        sql, args = {
+            "hash": ("UPDATE photos SET file_hash='changed' WHERE id=?", (b,)),
+            "path": ("UPDATE photos SET filename='renamed.jpg' WHERE id=?", (b,)),
+            "timestamp": ("UPDATE photos SET timestamp='2026-10-25T01:02:03' WHERE id=?", (b,)),
+            "phash": ("UPDATE photos SET phash='ffffffffffffffff' WHERE id=?", (b,)),
+            "deleted": ("DELETE FROM photos WHERE id=?", (b,)),
+            "identity": ("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps(metadata(count=987)), b)),
+            "rejected": ("UPDATE photos SET flag='rejected' WHERE id=?", (b,)),
+        }[change]
+        db.conn.execute(sql, args)
+    db.commit()
+    refreshed = run_duplicate_scan({}, db)["same_shot_groups"]
+    assert all(group["review_decision"] is None for group in refreshed)
+    # A newly discovered member invalidates the full group's new scan key.
+    # Existing snapshots cannot discover unscanned members until the next scan.
+    if change != "added":
+        response = client.post("/api/duplicates/same-shot/review", json=review_body(group, None))
+        assert response.status_code == 409
+    if refreshed:
+        assert refreshed[0]["review_key"] != group["review_key"]
+
+
+@pytest.mark.parametrize("body", [None, {}, {"photo_ids": [True, 2]}, {"photo_ids": [1, 1]},
+                                   {"photo_ids": [1, 2**63]},
+                                   {"photo_ids": [1, "2"]}, {"photo_ids": [1, -1]},
+                                   {"photo_ids": [1, 2], "review_key": "a" * 64, "decision": "reject"},
+                                   {"photo_ids": [1, 2], "review_key": "a" * 64},
+                                   {"photo_ids": [1, 2], "review_key": "a" * 64, "decision": []}])
+def test_invalid_same_shot_reviews_are_rejected(app_and_db, body):
+    app, db = app_and_db
+    assert app.test_client().post("/api/duplicates/same-shot/review", json=body).status_code == 400
+    assert db.conn.execute("SELECT COUNT(*) FROM same_shot_reviews").fetchone()[0] == 0
+
+
+def test_reordered_members_keep_the_same_review_key_and_stale_key_cannot_overwrite(app_and_db, tmp_path):
+    app, db = app_and_db
+    seed(db, tmp_path, "a.jpg", "a")
+    seed(db, tmp_path, "b.jpg", "b")
+    group, = run_duplicate_scan({}, db)["same_shot_groups"]
+    body = review_body(group)
+    body["photo_ids"].reverse()
+    client = app.test_client()
+    assert client.post("/api/duplicates/same-shot/review", json=body).status_code == 200
+    body["review_key"] = "0" * 64
+    body["decision"] = None
+    assert client.post("/api/duplicates/same-shot/review", json=body).status_code == 409
+    assert run_duplicate_scan({}, db)["same_shot_groups"][0]["review_decision"] == "keep_all"

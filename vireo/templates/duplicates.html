@@ -112,6 +112,19 @@
   .dup-card.loser { opacity: 0.65; }
   .same-shot-group .section-sub { font-size: 12px; line-height: 1.5; color: var(--text-secondary); margin-bottom: 12px; }
   .same-shot-capture-time { font-size: 12px; line-height: 1.5; color: var(--text-primary); margin: 6px 0; }
+  .same-shot-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  .same-shot-review-note { color: var(--text-secondary); font-size: 12px; }
+  #sameShotCompare { width: min(1100px, 94vw); max-height: 90vh; margin: auto; padding: 24px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-secondary); color: var(--text-primary); }
+  #sameShotCompare::backdrop { background: #0009; }
+  #sameShotCompare h2 { margin-top: 0; }
+  #sameShotCompare .section-sub { line-height: 1.5; color: var(--text-secondary); }
+  .same-shot-compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin: 16px 0; }
+  .same-shot-compare-grid select { width: 100%; margin: 8px 0; }
+  .same-shot-compare-photo img { width: 100%; height: 330px; object-fit: contain; background: var(--bg-primary); }
+  .same-shot-compare-photo p { font-size: 12px; overflow-wrap: anywhere; }
+  #sameShotCompareError { color: var(--danger); }
+  #sameShotCompare [data-same-shot-close] { margin-top: 12px; }
+  @media (max-width: 650px) { .same-shot-compare-grid { grid-template-columns: 1fr; } }
   .dup-card .thumb {
     width: 100%; aspect-ratio: 4/3; object-fit: cover;
     border-radius: 4px; background: var(--bg-primary);
@@ -383,6 +396,15 @@
 
   <div id="results"></div>
   <section id="sameShotResults" aria-label="Possible same-shot copies"></section>
+  <dialog id="sameShotCompare" aria-labelledby="sameShotCompareTitle">
+    <h2 id="sameShotCompareTitle">Compare possible same-shot copies</h2>
+    <p class="section-sub">These are cached thumbnails, which may show edits. They cannot establish identical original image data.
+      Reveal each original to inspect full detail. Review decisions keep every copy and are shared across the library.</p>
+    <div id="sameShotCompareBody"></div>
+    <p id="sameShotCompareError" role="alert"></p>
+    <div class="same-shot-actions" id="sameShotCompareActions"></div>
+    <button type="button" class="btn-secondary" data-same-shot-close>Close comparison</button>
+  </dialog>
 
   <div id="emptyState" class="empty-state" style="display:none;">
     <div class="label">Click <b>Scan for duplicate files</b> to find exact-byte duplicates in your library.</div>

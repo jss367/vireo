@@ -73,9 +73,13 @@ def _wait_for_health(base_url, timeout=30.0):
 
 def _start_app(paths, port, log_file, fake_home):
     env = os.environ.copy()
-    # Isolate the subprocess from the user's real ~/.vireo/ — this redirects
-    # config, logs, models, masks, and any other ~/.vireo/* reads/writes.
-    env["HOME"] = str(fake_home)
+    # Isolate both legacy and native defaults, including inherited OS overrides.
+    env.update({
+        "HOME": str(fake_home), "USERPROFILE": str(fake_home),
+        "LOCALAPPDATA": str(fake_home / "AppData/Local"),
+        "XDG_DATA_HOME": str(fake_home / ".local/share"),
+        "XDG_CACHE_HOME": str(fake_home / ".cache"),
+    })
     cmd = [
         sys.executable,
         str(_APP_PY),
