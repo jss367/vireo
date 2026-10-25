@@ -12,6 +12,7 @@ import threading
 
 import numpy as np
 import onnx_runtime
+from app_paths import default_path
 from PIL import Image, ImageFilter
 from resource_ledger import ResourceWaitCancelled
 from services.hf_cache_lock import cache_access
@@ -51,7 +52,7 @@ _sam2_session_lock = threading.Lock()
 
 def _sam2_model_dir(variant):
     return os.path.join(
-        os.path.expanduser("~"), ".vireo", "models", variant
+        default_path("models"), variant
     )
 
 
@@ -207,7 +208,7 @@ def _get_sam2_sessions(variant="sam2-small"):
             )
 
         model_dir = os.path.join(
-            os.path.expanduser("~"), ".vireo", "models", variant
+            default_path("models"), variant
         )
         encoder_path = os.path.join(model_dir, "image_encoder.onnx")
         decoder_path = os.path.join(model_dir, "mask_decoder.onnx")

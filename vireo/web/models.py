@@ -14,6 +14,7 @@ import re
 import sys
 import uuid
 
+from app_paths import default_path
 from classification_readiness import classification_readiness
 from config import read_raw_config_file, settings_write_lock
 from db import Database
@@ -66,7 +67,7 @@ PIPELINE_MODELS = {
 
 def pipeline_models_dir():
     """Directory holding downloaded pipeline model weights."""
-    return os.path.expanduser("~/.vireo/models")
+    return default_path("models")
 
 
 

@@ -24,11 +24,12 @@ import threading
 
 import numpy as np
 import onnx_runtime
+from app_paths import default_path
 from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
-MODELS_DIR = os.path.expanduser("~/.vireo/models")
+MODELS_DIR = default_path("models")
 
 _sessions = {}
 _locks = {}

@@ -14,14 +14,15 @@ import tempfile
 import threading
 
 import model_verify
+from app_paths import default_path
 from file_replace import replace_file
 from hub_download import DownloadBatch, fetch_hub_file
 from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODELS_DIR = os.path.expanduser("~/.vireo/models")
-CONFIG_PATH = os.path.expanduser("~/.vireo/models.json")
+DEFAULT_MODELS_DIR = default_path("models")
+CONFIG_PATH = default_path("model_config")
 
 # HuggingFace repo containing all ONNX models
 ONNX_REPO = "jss367/vireo-onnx-models"

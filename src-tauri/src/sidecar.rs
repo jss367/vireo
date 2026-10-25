@@ -20,7 +20,6 @@ const SIDECAR_HEALTH_TIMEOUT: Duration = Duration::from_secs(90);
 // `acquire_single_instance()`, and surfaces a spurious startup failure.
 // Keep this tied to `SIDECAR_HEALTH_TIMEOUT` so the two can never drift.
 const RUNTIME_LOCK_WAIT_TIMEOUT: Duration = SIDECAR_HEALTH_TIMEOUT;
-const GUI_CLIENTS_DIR: &str = ".vireo/gui-clients";
 
 /// Typed failure modes for `start_sidecar`. The launcher matches on these
 /// to decide how to surface the error to the user — an
@@ -221,11 +220,11 @@ fn wait_for_health(
 }
 
 fn runtime_json_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|home| home.join(".vireo").join("runtime.json"))
+    crate::app_paths::default_path("runtime")
 }
 
 fn runtime_lock_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|home| home.join(".vireo").join("runtime.lock"))
+    crate::app_paths::default_path("runtime_lock")
 }
 
 fn read_runtime_json(path: &std::path::Path) -> Option<RuntimeInfo> {
@@ -306,11 +305,11 @@ fn existing_runtime() -> Option<RuntimeInfo> {
 }
 
 fn gui_clients_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|home| home.join(GUI_CLIENTS_DIR))
+    crate::app_paths::default_path("gui_clients")
 }
 
 fn gui_clients_lock_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|home| home.join(".vireo").join("gui-clients.lock"))
+    crate::app_paths::default_path("gui_clients_lock")
 }
 
 fn with_gui_clients_lock<T>(f: impl FnOnce() -> T) -> T {
@@ -474,9 +473,7 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError>
             &port.to_string(),
             "--no-browser",
             "--db",
-            &dirs::home_dir()
-                .unwrap_or_default()
-                .join(".vireo/vireo.db")
+            &crate::app_paths::path_in(&dirs::home_dir().unwrap_or_default(), "database")
                 .to_string_lossy(),
         ])
         .spawn()
