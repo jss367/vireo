@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {test} from 'node:test';
 import vm from 'node:vm';
+import {moduleAsScript} from './module-source.mjs';
 
 const context = vm.createContext({});
-vm.runInContext(readFileSync('vireo/static/duplicates/categories.js', 'utf8'), context);
+// categories.js is an ES module exporting a const; publish it to the context.
+vm.runInContext(moduleAsScript(readFileSync('vireo/static/duplicates/categories.js', 'utf8')) +
+  '\nglobalThis.DuplicateCategories = DuplicateCategories;', context);
 const categories = context.DuplicateCategories;
 
 function group(paths, overrides = {}) {
