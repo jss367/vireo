@@ -5,6 +5,7 @@
    link). Every module it imports has been evaluated by the time its body
    runs. ES module (see browse/README.md). */
 import { setBrowseTotals, state } from './state.js';
+import { claimBrowseWindow } from './window-requests.js';
 import {
   VireoBrowseCompare, VireoFilter, VireoViewPreferences, _reconcileMissingFoldersInitSnapshot,
   missingFoldersSnapshotVersion, preferredScrollBehavior, registerPageHooks, safeFetch,
@@ -34,7 +35,7 @@ import { getGridCard, renderGrid } from './grid.js';
 import { moveBrowseSelection } from './keyboard.js';
 import { openBrowseShortcutPhoto, removeDeletedLightboxPhoto } from './lightbox.js';
 import {
-  claimBrowseWindow, loadedWindowOffset, onBrowseFilterChange, resetAndLoad,
+  loadedWindowOffset, onBrowseFilterChange, resetAndLoad,
   updatePreviousPhotosButton,
 } from './loading.js';
 import { afterHistoryChange } from './prediction-panels.js';

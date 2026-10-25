@@ -134,11 +134,11 @@ def test_photo_review_signatures_unchanged():
 
     assert params("set_rating") == [
         ("self", empty, False), ("photo_id", empty, False), ("rating", empty, False),
-        ("verify_workspace", True, True),
+        ("verify_workspace", True, True), ("_commit", True, True),
     ]
     assert params("set_ratings") == [
         ("self", empty, False), ("photo_ids", empty, False), ("rating", empty, False),
-        ("verify_workspace", True, True),
+        ("verify_workspace", True, True), ("_commit", True, True),
     ]
     assert params("set_flag") == [
         ("self", empty, False), ("photo_id", empty, False), ("flag", empty, False),

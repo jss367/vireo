@@ -22,7 +22,7 @@ edit and commits once) lives here but is reached only through that method.
 
 import sqlite3
 from collections.abc import Collection, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 
 
 class PhotoReviewRepository:
@@ -33,8 +33,10 @@ class PhotoReviewRepository:
         self.workspace_id = workspace_id
         self.chunk_size = chunk_size
 
-    def set_rating(self, photo_id: int, rating: int, *, verify_workspace: bool = True) -> None:
-        """Set a photo's rating (0-5) and commit.
+    def set_rating(
+        self, photo_id: int, rating: int, *, verify_workspace: bool = True, _commit: bool = True,
+    ) -> None:
+        """Set a photo's rating (0-5); leave commit to the caller when requested.
 
         ``verify_workspace=True`` (the default) raises ``ValueError`` if the
         photo is not visible in the active workspace (``RuntimeError`` when
@@ -47,10 +49,11 @@ class PhotoReviewRepository:
         self.conn.execute(
             "UPDATE photos SET rating = ? WHERE id = ?", (rating, photo_id)
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
 
     def set_ratings(
-        self, photo_ids: Collection[int], rating: int, *, verify_workspace: bool = True,
+        self, photo_ids: Collection[int], rating: int, *, verify_workspace: bool = True, _commit: bool = True,
     ) -> None:
         """Set the rating of several photos in one transaction.
 
@@ -62,6 +65,7 @@ class PhotoReviewRepository:
             "rating",
             rating,
             verify_workspace=verify_workspace,
+            _commit=_commit,
         )
 
     def set_flag(
@@ -150,28 +154,32 @@ class PhotoReviewRepository:
             raise
 
     @contextmanager
-    def flag_write(self):
-        """One flag/history/note transaction; preserve an existing caller's transaction."""
+    def review_write(self) -> Iterator[bool]:
+        """Keep a review, sync and history atomic, preserving a caller's transaction."""
         owns_transaction = not self.conn.in_transaction
         if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
-        self.conn.execute("SAVEPOINT flag_review_write")
+        self.conn.execute("SAVEPOINT photo_review_write")
         try:
             yield owns_transaction
         except BaseException:
-            self.conn.execute("ROLLBACK TO flag_review_write")
-            self.conn.execute("RELEASE flag_review_write")
+            self.conn.execute("ROLLBACK TO photo_review_write")
+            self.conn.execute("RELEASE photo_review_write")
             if owns_transaction:
                 self.conn.rollback()
             raise
         else:
-            self.conn.execute("RELEASE flag_review_write")
+            self.conn.execute("RELEASE photo_review_write")
             if owns_transaction:
                 try:
                     self.conn.commit()
                 except BaseException:
                     self.conn.rollback()
                     raise
+
+    def flag_write(self) -> AbstractContextManager[bool]:
+        """Compatibility entry point for flag writers sharing the review transaction."""
+        return self.review_write()
 
     def set_current_flag_note(self, photo_ids, flag, description, *, source=None, reason=None):
         """Publish only inside the flag writer's transaction, with no history dependency."""

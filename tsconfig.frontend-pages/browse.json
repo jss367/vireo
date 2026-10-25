@@ -44,6 +44,7 @@
     "../vireo/static/browse/stacks.js",
     "../vireo/static/browse/state.js",
     "../vireo/static/browse/view-controls.js",
+    "../vireo/static/browse/window-requests.js",
     "../tests/frontend/browse-type-contracts.ts"
   ]
 }

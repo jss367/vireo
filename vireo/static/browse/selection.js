@@ -5,7 +5,8 @@ import { VireoFilter, nativeMenuPhotoIdsOverride, safeFetch, showToast } from '.
 import { updateBatchBar } from './batch-bar.js';
 import { abandonDetailFocusForBatch, loadDetail, loadSummary } from './detail.js';
 import { renderGrid } from './grid.js';
-import { getBrowseRules, observeBrowseWindow } from './loading.js';
+import { getBrowseRules } from './loading.js';
+import { observeBrowseWindow } from './window-requests.js';
 import { clearExifSuggestion } from './location.js';
 import { noteFocusedCardVisibility } from './scroll.js';
 import {

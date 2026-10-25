@@ -1,6 +1,7 @@
 /* Browse: photo loading: the loaded window, paging, reset-and-reload. ES module (see
    browse/README.md). */
 import { browseLimits, setBrowseTotals, state } from './state.js';
+import { browseWindowSequence, claimBrowseWindow, observeBrowseWindow } from './window-requests.js';
 import { VireoFilter, safeFetch, searchLaneHeaders } from './shared.js';
 import {
   anchorRestoreIsPending, anchorSelectionIsCurrent, captureBrowseViewportAnchor,
@@ -33,36 +34,9 @@ import { updateFilterSummary, updateScrollPosition } from './view-controls.js';
 
 /* ---------- Photo Loading ---------- */
 
-/* Browse's grid window is four variables that only make sense together:
-   ``photos``, ``currentPage``, ``earliestPage`` and ``allLoaded`` describe one
-   contiguous slice of one dataset. Any async path that writes them has to
-   prove, after every await, that no newer load has taken the window over in
-   the meantime — otherwise a response from an abandoned dataset paints into a
-   window that has since changed (unscoped workspace rows appended to a
-   folder-scoped grid, an ``earliestPage`` banner counting photos from a
-   dataset that is no longer on screen). ``loadEpoch`` is that generation
-   counter; these two helpers are the only supported way to use it, so every
-   guard is written the same way instead of re-deriving the comparison at each
-   call site (Codex reviews r3792693920 and r3792769108).
-
-     claimBrowseWindow()   — take ownership. Advances loadEpoch, which
-                             invalidates every load already in flight. Use
-                             when about to replace the dataset: reset, folder
-                             switch, deep link, bootstrap.
-     observeBrowseWindow() — follow the current owner without displacing it.
-                             Use when extending a window somebody else already
-                             claimed (loadPhotos appending the next page).
-
-   Both return a zero-arg predicate; call it after each await, before touching
-   window state, releasing ``loading``, or rendering. */
-export function claimBrowseWindow() {
-  return observeBrowseWindow(++state.loadEpoch);
-}
-export function observeBrowseWindow(/** @type {number | undefined} */ epoch = undefined) {
-  var claimedEpoch = (epoch === undefined) ? state.loadEpoch : epoch;
-  return function() { return state.loadEpoch === claimedEpoch; };
-}
-
+/* Request ownership comes from window-requests.js. Claim before replacing
+   a dataset and observe before extending it. Check the returned predicate
+   after each await before changing the grid or releasing its loading flag. */
 async function refreshBrowseWindowInPlace() {
   var windowIsCurrent = claimBrowseWindow();
   state.selectAllRequestSeq++;
@@ -799,7 +773,7 @@ function buildBrowsePageRequest(/** @type {number} */ page, /** @type {number} *
   // the server may abandon one as soon as a newer epoch's request arrives.
   var headers = Object.assign(
     { 'Content-Type': 'application/json' },
-    searchLaneHeaders('grid', state.loadEpoch)
+    searchLaneHeaders('grid', browseWindowSequence())
   );
   return {
     url: '/api/photos/query',
