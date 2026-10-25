@@ -48,6 +48,11 @@ that information for interactive use.
   `vireo/web/background_jobs.py`. The view receives a `JobLaunch` (runner,
   active workspace id, worker-thread database factory) and returns
   `ctx.start(job_type, work, ...)`; do not re-implement that prologue inline.
+  Standalone mask extraction runs in `services.mask_extraction`: the route
+  passes the runner, `ctx.thread_db` and captured `MaskExtractionOptions`.
+  The service opens and closes its own worker connection and owns the
+  per-photo locks, cached-mask checks, staged-file publication, rollback and
+  progress events. It needs no Flask application or request context.
 - Processing stages live in `vireo/pipeline_stages/`: scanning and collection
   creation, thumbnails and previews, model loading, detection, classification,
   masks and eye keypoints, and grouping and miss detection. `pipeline_job.py`
