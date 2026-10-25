@@ -3,6 +3,7 @@
 var _legacyDetectionFolders = [];
 var _legacyReclassifyPending = false;
 
+/** @returns {Promise<boolean>} */
 async function loadLegacyDetections() {
   try {
     var data = await safeFetch('/api/pipeline/legacy-detections', {}, {toast: false});
@@ -20,8 +21,10 @@ async function loadLegacyDetections() {
         (folder.photo_count === 1 ? ' photo' : ' photos');
       list.appendChild(item);
     });
+    return true;
   } catch (e) {
     console.error('Could not check for legacy detections:', e);
+    return false;
   }
 }
 
@@ -70,13 +73,20 @@ async function reclassifyLegacyFolders() {
       onProgress: function(p) {
         status.textContent = p.phase || 'Reclassify is running…';
       },
-      onComplete: function(result) {
+      onComplete: async function(result) {
         status.textContent = result.status === 'completed'
           ? 'Reclassify finished. See Jobs for results.'
           : 'Reclassify ' + result.status + '. See Jobs for details before retrying.';
-        _legacyReclassifyPending = false;
-        button.disabled = false;
-        loadLegacyDetections();
+        var outcome = status.textContent;
+        status.textContent = outcome + ' Refreshing affected folders…';
+        if (await loadLegacyDetections()) {
+          _legacyReclassifyPending = false;
+          button.disabled = false;
+          status.textContent = outcome;
+        } else {
+          status.textContent = outcome +
+            ' Could not refresh affected folders. Reload this page before retrying.';
+        }
       },
       onError: function() {
         // The job may still be running; keep the action disabled to avoid
