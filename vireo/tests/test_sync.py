@@ -3441,3 +3441,44 @@ def test_shared_sidecar_repeated_add_after_case_variant_removal(tmp_path, db):
     assert sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == {'Osprey'}
     assert not db.pending_changes.list_all()
+
+
+@pytest.mark.parametrize('outcome', ['success', 'skipped', 'error'])
+def test_sync_from_xmp_leaves_outer_transaction_to_caller(tmp_path, db, monkeypatch, outcome):
+    """Neither commit nor discard unrelated work in a caller-owned transaction."""
+    import sqlite3
+
+    import sync
+
+    db.set_active_workspace(db.ensure_default_workspace())
+    photos = [_setup_photo_with_xmp(tmp_path / name, db, keywords={'Heron'})
+              for name in ('one', 'two')]
+    pids = [pid for pid, _ in photos]
+    old_rating = db.photos.get(pids[0])['rating']
+    if outcome == 'skipped':
+        Path(photos[1][1]).write_text('not XML')
+    if outcome == 'error':
+        original_read = sync._read_sidecar_keywords
+
+        def fail_second(db, pid, path):
+            if pid == pids[1]:
+                raise OSError('sidecar disappeared during read')
+            return original_read(db, pid, path)
+
+        monkeypatch.setattr(sync, '_read_sidecar_keywords', fail_second)
+    db.begin_immediate()
+    db.conn.execute('UPDATE photos SET rating = 4 WHERE id = ?', (pids[0],))
+    if outcome == 'error':
+        with pytest.raises(OSError, match='disappeared'):
+            sync.sync_from_xmp(db, pids)
+    else:
+        sync.sync_from_xmp(db, pids)
+    assert db.in_transaction
+    assert db.photos.get(pids[0])['rating'] == 4
+    assert {row['name'] for row in db.photo_keywords.get_for_photo(pids[0])} == {'Heron'}
+    with sqlite3.connect(db._db_path) as reader:
+        assert reader.execute('SELECT rating FROM photos WHERE id = ?', (pids[0],)).fetchone()[0] == old_rating
+        assert reader.execute('SELECT COUNT(*) FROM photo_keywords WHERE photo_id = ?', (pids[0],)).fetchone()[0] == 0
+    db.rollback()
+    assert db.photos.get(pids[0])['rating'] == old_rating
+    assert not db.photo_keywords.get_for_photo(pids[0])

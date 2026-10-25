@@ -56,6 +56,27 @@ def _rearm_label_desc_heal(peek_model: ModelSpec | None) -> None:
                 )
 
 
+def _missing_common_names_notice(clf: Any, model_name: str) -> str | None:
+    """The notice for a timm classifier built without its common-name file.
+
+    Only a ``TimmClassifier`` sets ``label_descriptions_missing``; every
+    other classifier returns None without importing the timm module.
+    """
+    if not getattr(clf, "label_descriptions_missing", False):
+        return None
+    from timm_classifier import missing_common_names_notice
+
+    return missing_common_names_notice(clf, model_name)
+
+
+def _with_common_names_notice(job: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Add the run's common-name notice to its result, when there is one."""
+    notice = job.get("_common_names_notice")
+    if notice:
+        result["common_names_notice"] = notice
+    return result
+
+
 @dataclass
 class _CachePeek:
     """What the cached-only shortcut checks a run's cached results against."""

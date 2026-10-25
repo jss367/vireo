@@ -2510,9 +2510,8 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     _write_fake_model_files(tmp_path / "models" / "bioclip-vit-b-16")
     models.set_active_model("bioclip-vit-b-16")
-    # Short-circuit taxonomy and label loading so the test stays focused on
+    # Short-circuit label loading so the test stays focused on
     # model-loading behavior.
-    monkeypatch.setattr(classify_job.common, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False, [])
     )
@@ -2548,7 +2547,6 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
         extra_files=("tol_embeddings.npy", "tol_classes.json"),
     )
     models.set_active_model("bioclip-vit-b-16")
-    monkeypatch.setattr(classify_job.common, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False, [])
     )
@@ -3658,7 +3656,7 @@ def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     monkeypatch.setattr(
         taxonomy_mod, "find_taxonomy_json", lambda: str(fake_path)
     )
-    monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
+    monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda **_kw: None)
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
@@ -3711,7 +3709,7 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
     monkeypatch.setattr(
         taxonomy_mod, "find_taxonomy_json", lambda: str(fake_path)
     )
-    monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
+    monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda **_kw: None)
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
@@ -3745,6 +3743,136 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
     assert not download_calls, (
         "Valid (>= 1MB) taxonomy must not be redundantly redownloaded"
     )
+
+
+def _run_pipeline_with_taxonomy_files(
+    tmp_path, monkeypatch, download, download_taxonomy=True,
+):
+    """Run a classify-only pipeline against tmp taxonomy paths.
+
+    ``download`` replaces ``taxonomy.download_taxonomy``. Returns the
+    ``(result, runner)`` pair.
+    """
+    import classifier as classifier_mod
+    import taxonomy as taxonomy_mod
+
+    persistent = tmp_path / "taxonomy.json"
+    monkeypatch.setattr(taxonomy_mod, "TAXONOMY_JSON_PATH", str(persistent))
+    monkeypatch.setattr(
+        taxonomy_mod, "LEGACY_TAXONOMY_JSON_PATH", str(tmp_path / "no-legacy.json"),
+    )
+    taxonomy_mod.clear_taxonomy_cache()
+
+    db_path, db, ws_id = _open_db(tmp_path)
+    col_id = db.collections.add("Test", "[]")
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    monkeypatch.setattr(taxonomy_mod, "download_taxonomy", download)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        download_taxonomy=download_taxonomy,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    try:
+        result = run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
+    finally:
+        taxonomy_mod.clear_taxonomy_cache()
+    return result, runner
+
+
+def _model_loader_summary(runner):
+    """The completed model step's summary; its warning text rides along."""
+    updates = [
+        kwargs for _job, step, kwargs in runner.step_updates
+        if step == "model_loader" and kwargs.get("status") == "completed"
+    ]
+    assert updates
+    return updates[-1]["summary"]
+
+
+def _model_loader_warning(runner):
+    updates = [
+        kwargs for _job, step, kwargs in runner.step_updates
+        if step == "model_loader" and kwargs.get("status") == "completed"
+    ]
+    return updates[-1].get("error")
+
+
+def test_pipeline_notes_a_failed_taxonomy_download(tmp_path, monkeypatch):
+    """The run asked for the taxonomy and the download failed. It used to
+    continue without it and say so only in the log; the run's notes (shown
+    on the Process page and in Jobs) and the model step now say so, and the
+    run stays green because its classifications are still valid."""
+
+    def failing_download(output_path, progress_callback=None):
+        raise OSError("Network is unreachable")
+
+    result, runner = _run_pipeline_with_taxonomy_files(
+        tmp_path, monkeypatch, failing_download,
+    )
+
+    notes = [n for n in result["notes"] if n.startswith("[taxonomy] ")]
+    assert notes == [
+        "[taxonomy] This run had no taxonomy: downloading it failed "
+        "(Network is unreachable). Without it, predictions are not checked "
+        "against your photos' existing keywords (each one goes to review as "
+        "new), and they get no order, family or genus from the taxonomy. "
+        "Download it in Settings › Taxonomy before the next run."
+    ]
+    assert notes[0] in result["errors"]
+    assert result["ok"] is True
+    assert _model_loader_summary(runner).endswith(
+        " — no taxonomy (taxonomy download failed)"
+    )
+    # The Jobs page shows a completed step's ``error`` as a warning.
+    assert _model_loader_warning(runner) == notes[0].removeprefix("[taxonomy] ")
+
+
+def test_pipeline_notes_an_unreadable_taxonomy_file(tmp_path, monkeypatch):
+    """A taxonomy file that exists but cannot be parsed left the run without
+    the taxonomy, and only the log said why."""
+
+    def writes_a_truncated_file(output_path, progress_callback=None):
+        with open(output_path, "w") as f:
+            f.write('{"taxa_by_scientific": {')
+
+    result, runner = _run_pipeline_with_taxonomy_files(
+        tmp_path, monkeypatch, writes_a_truncated_file,
+    )
+
+    notes = [n for n in result["notes"] if n.startswith("[taxonomy] ")]
+    assert len(notes) == 1
+    assert notes[0].startswith(
+        f"[taxonomy] This run had no taxonomy: Vireo could not read "
+        f"{tmp_path / 'taxonomy.json'} (JSONDecodeError: "
+    )
+    assert notes[0].endswith("Download it again in Settings › Taxonomy.")
+    assert result["ok"] is True
+    assert _model_loader_summary(runner).endswith(
+        " — no taxonomy (taxonomy file unreadable)"
+    )
+    assert _model_loader_warning(runner) == notes[0].removeprefix("[taxonomy] ")
+
+
+def test_pipeline_without_a_requested_taxonomy_has_no_taxonomy_note(
+    tmp_path, monkeypatch,
+):
+    """An install with no taxonomy that did not ask for one runs without it
+    on purpose; Settings already explains that, so the run adds nothing."""
+
+    def must_not_download(*_args, **_kwargs):
+        raise AssertionError("download not requested")
+
+    result, runner = _run_pipeline_with_taxonomy_files(
+        tmp_path, monkeypatch, must_not_download, download_taxonomy=False,
+    )
+
+    assert not [n for n in result["notes"] if n.startswith("[taxonomy] ")]
+    assert "no taxonomy" not in _model_loader_summary(runner)
+    assert _model_loader_warning(runner) is None
 
 
 def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
@@ -18938,3 +19066,44 @@ def test_extract_masks_distinguishes_zero_boxes_from_missing_execution(
     _stub_extract_masks_heavy_ops(monkeypatch)
     _, result = _run_extract_masks_only(db_path, ws_id, collection_id)
     assert result["stages"]["extract_masks"]["outcomes"]["counts"] == {reason: 1}
+
+
+def test_pipeline_notes_a_timm_model_without_common_names(tmp_path, monkeypatch):
+    """A timm model without label_descriptions.json names species from the
+    taxonomy alone. When Vireo's repair of that file failed, only the log
+    said so; the run now records a ``[common_names]`` note (it stays green:
+    the predictions are valid) and the model's step carries the notice."""
+    from types import SimpleNamespace
+
+    import models
+    from pipeline_stages.classification import _ClassifyPass
+
+    monkeypatch.setattr(
+        models, "_LABEL_DESC_HEAL_FAILURES",
+        {"m": "the model's upstream config has no common names"},
+    )
+    runner = FakeRunner()
+    notes = []
+    stage = SimpleNamespace(run=SimpleNamespace(
+        note=notes.append, runner=runner, job={"id": "job"},
+    ))
+    clf = SimpleNamespace(
+        label_descriptions_missing=True, _model_str="m", _model_dir=str(tmp_path),
+    )
+
+    notice = _ClassifyPass._note_missing_common_names(stage, clf, "iNat21", "classify:t")
+
+    assert notice.startswith("iNat21 is missing its common-name file")
+    assert (
+        "Vireo's last attempt to fetch it failed: the model's upstream "
+        "config has no common names." in notice
+    )
+    assert notes == [f"[common_names] {notice}"]
+    assert runner.step_updates == [("job", "classify:t", {"error": notice})]
+
+    # Any other classifier says nothing.
+    notes.clear()
+    assert _ClassifyPass._note_missing_common_names(
+        stage, SimpleNamespace(), "BioCLIP", "classify:b",
+    ) is None
+    assert notes == []

@@ -9,7 +9,6 @@ here once, so every module sees the same ``ClassificationCancelled`` class.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +16,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from classify_job.classify_types import PhotoRecord
+    from services.service_types import JobDict, JsonDict
     from taxonomy import Taxonomy
 
 try:
@@ -93,20 +93,47 @@ class ClassifyParams:
     reclassify: bool
 
 
-def _load_taxonomy(taxonomy_path: str) -> Taxonomy | None:
-    """Load taxonomy from JSON file. Returns Taxonomy instance or None."""
-    if not os.path.exists(taxonomy_path):
-        return None
-    try:
-        from taxonomy import Taxonomy
+def _load_job_taxonomy(job: JobDict) -> Taxonomy | None:
+    """Load the local taxonomy, recording on ``job`` why a run goes without it.
 
-        return Taxonomy(taxonomy_path)
-    except Exception as e:  # broad: taxonomy parsing raises undocumented errors; classification runs without enrichment
-        log.warning(
-            "Could not load taxonomy: %s — continuing without taxonomy enrichment", e,
-            exc_info=True,
-        )
-        return None
+    A taxonomy file that exists but cannot be read leaves the run without
+    the taxonomy (or on the older fallback copy). Classification still
+    produces valid predictions, so this is a notice in the job's result
+    (``taxonomy_notice``) and its step summary, not a failure.
+    """
+    from taxonomy import load_local_taxonomy, taxonomy_fallback_notice
+
+    failures: list[dict[str, str]] = []
+    tax = load_local_taxonomy(failures=failures)
+    notice = taxonomy_fallback_notice(tax, failures)
+    if notice:
+        job["_taxonomy_notice"] = notice
+    return tax
+
+
+def taxonomy_step_summary(job: JobDict, tax: Taxonomy | None) -> str:
+    """The ``load_taxonomy`` step's summary, naming an unreadable file."""
+    if job.get("_taxonomy_notice"):
+        return "Taxonomy unreadable" if tax is None else "Taxonomy loaded from the older copy"
+    return "Taxonomy loaded" if tax else "No taxonomy"
+
+
+def taxonomy_step_warning(job: JobDict) -> dict[str, str]:
+    """``update_step`` fields that show the notice under the taxonomy step.
+
+    A completed step with an ``error`` reads as a warning on the Jobs page,
+    which lists a job's steps instead of its result details.
+    """
+    notice = job.get("_taxonomy_notice")
+    return {"error": notice} if notice else {}
+
+
+def with_taxonomy_notice(job: JobDict, result: JsonDict) -> JsonDict:
+    """Add the run's taxonomy notice to its result, when there is one."""
+    notice = job.get("_taxonomy_notice")
+    if notice:
+        result["taxonomy_notice"] = notice
+    return result
 
 
 def _photo_timestamp(photo: PhotoRecord) -> datetime | None:

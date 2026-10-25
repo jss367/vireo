@@ -1131,11 +1131,17 @@ def _untag_keywords_missing_from_sidecar(
         if kw["type"] == "location":
             continue
         if kw_key not in xmp_keywords_by_key and kw['id'] not in resolved_ids and not preserve_hierarchy:
-            db.untag_photo(photo_id, kw["id"], _commit=False)
+            # Reconcile is not an undoable edit (``record_edit`` never runs
+            # here), so suppress the species-evidence snapshot that would
+            # otherwise leak into a later unrelated ``record_edit`` call on
+            # the same ``Database`` instance.
+            db.untag_photo(photo_id, kw["id"], _commit=False, _record_history=False)
 
 
 def sync_from_xmp(db, photo_ids):
     """Re-read XMP sidecars and update database keywords.
+
+    An existing transaction belongs to the caller, including commit/rollback.
 
     Args:
         db: Database instance
@@ -1159,14 +1165,18 @@ def sync_from_xmp(db, photo_ids):
         # one writer transaction. Background migrations use the same SQLite
         # writer lock, so they cannot act on a pre-reconciliation association
         # snapshot between this read and the final xmp_mtime update.
-        db.begin_immediate()
+        owns_transaction = not db.in_transaction
+        if owns_transaction:
+            db.begin_immediate()
         try:
             sidecar = _read_sidecar_keywords(db, photo_id, xmp_path)
             if sidecar is None:
                 # Removed, unreadable or corrupt since the check above.
                 # Reconciling would read that as a sidecar with no keywords
                 # and untag every keyword the photo has.
-                db.rollback()
+                # An outer repair still needs its lock for the history comparison.
+                if owns_transaction:
+                    db.rollback()
                 continue
             (
                 xmp_keywords, xmp_keywords_by_key, imported_hierarchies,
@@ -1215,9 +1225,11 @@ def sync_from_xmp(db, photo_ids):
             # Update xmp_mtime in the same transaction as reconciliation.
             xmp_mtime = os.path.getmtime(xmp_path)
             db.scanning.set_xmp_mtime(photo_id, xmp_mtime)
-            db.commit()
-        except Exception:
-            db.rollback()
+            if owns_transaction:
+                db.commit()
+        except Exception:  # broad: roll back only our transaction, then propagate every reconciliation error
+            if owns_transaction:
+                db.rollback()
             raise
 
         log.info(

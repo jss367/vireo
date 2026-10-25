@@ -39,7 +39,10 @@ function updateList() {
   if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });
 
   html += '<div class="jobs-list-divider clickable' + (currentView === 'history' ? ' selected' : '') + '" data-view="history">History</div>';
-  if (filtered.length === 0 && running.length === 0) {
+  if (jobsPollState.history.error && !jobsPollState.history.loaded) {
+    // Never an empty History section that reads as "no jobs have run".
+    html += '<div style="padding:12px 16px;color:var(--text-ghost);font-size:13px;">Job history could not be loaded.</div>';
+  } else if (filtered.length === 0 && running.length === 0) {
     var emptyMessage = 'No jobs yet';
     if (!jobsPollState.active.loaded || !jobsPollState.history.loaded) {
       emptyMessage = jobsPollState.active.error || jobsPollState.history.error

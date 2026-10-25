@@ -28,7 +28,7 @@ def history():
         is_batch INTEGER DEFAULT 0, undone INTEGER DEFAULT 0,
         created_at TEXT DEFAULT 'invented-time');
         CREATE TABLE edit_history_items(id INTEGER PRIMARY KEY, edit_id INTEGER,
-        photo_id INTEGER, old_value TEXT, new_value TEXT);""")
+        photo_id INTEGER, old_value TEXT, new_value TEXT, species_provenance TEXT);""")
     ws = [1]
     cls = load("repositories/edit_history.py", classes={"EditHistoryRepository"})["EditHistoryRepository"]
     repo = cls(conn, lambda: ws[0], non_undoable=[], restore_species_representative=lambda *a: None)

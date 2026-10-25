@@ -50,7 +50,7 @@ function renderNoDuplicateGroups(result) {
   } else {
     results.innerHTML = _duplicateBucketOperations.size
       ? '<div class="no-results">Duplicate review is complete. Pending cleanup is shown above.</div>'
-      : '<div class="no-results">No duplicates found. Your library is clean.</div>';
+      : '<div class="no-results">No exact-byte duplicates found in these results.</div>';
   }
   updateApplyCount();
 }
@@ -176,6 +176,7 @@ function renderResults(result) {
 
   _lastScanResult = result;
   _proposals = result.proposals || [];
+  renderSameShotResults(result);
   var categories = DuplicateCategories.summarize(_proposals.filter(groupMatchesPhotoFilter));
   if (!categories.some(function(c) { return c.id === _duplicateCategory; })) _duplicateCategory = 'all';
 
@@ -366,6 +367,8 @@ function clearResults() {
   // re-render the stale results the user just cleared, resurrecting the
   // duplicate groups and their bulk/apply actions.
   _lastScanResult = null;
+  _sameShotVisibleLimit = 50;
+  /** @type {HTMLElement} */ (document.getElementById('sameShotResults')).innerHTML = '';
   /** @type {HTMLElement} */ (document.getElementById('results')).innerHTML = '';
   /** @type {HTMLElement} */ (document.getElementById('summary')).style.display = 'none';
   /** @type {HTMLElement} */ (document.getElementById('applyBar')).style.display = 'none';

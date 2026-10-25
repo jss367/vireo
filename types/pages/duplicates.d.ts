@@ -2,7 +2,9 @@ interface DuplicatePhoto {id:number;filename?:string;path?:string;exists?:boolea
 interface DuplicateKeepResponse {file_hash:string;winner_id:number;loser_ids:number[];rating:number;flag:string}
 interface DuplicateProposal {file_hash:string;winner:DuplicatePhoto;other_kept?:DuplicatePhoto[];losers:DuplicatePhoto[];status:string;empty_file_group?:boolean;all_missing?:boolean;all_offline?:boolean;_gi?:number}
 interface DuplicateBucket {file_hashes:string[];folders:string[];group_count:number;total_size?:number;example_filenames?:string[]}
-interface DuplicateScan {proposals:DuplicateProposal[];buckets?:DuplicateBucket[];catalog_cleanup?:boolean;stale_group_count?:number;new_group_count?:number;changed_group_count?:number;group_count?:number;loser_count?:number;resolved_group_count?:number;resolved_loser_count?:number}
+interface SameShotPhoto extends DuplicatePhoto {file_hash:string;timestamp?:string|null;phash?:string|null}
+interface SameShotGroup {identity:[string,string,string,number];camera:string;serial_number:string;shutter_count:number;visual_evidence:'matching'|'different'|'unavailable';photos:SameShotPhoto[]}
+interface DuplicateScan {proposals:DuplicateProposal[];buckets?:DuplicateBucket[];catalog_cleanup?:boolean;stale_group_count?:number;new_group_count?:number;changed_group_count?:number;group_count?:number;loser_count?:number;resolved_group_count?:number;resolved_loser_count?:number;same_shot_scanned?:boolean;same_shot_groups?:SameShotGroup[];same_shot_eligible_photos?:number}
 interface DuplicateCategory {id:string;label:string;groups:number;extras:number;bytes:number}
 interface DuplicateFailure {id:number;error?:string}
 interface DuplicateSkip {id:number;reason:string}

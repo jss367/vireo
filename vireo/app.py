@@ -1967,6 +1967,7 @@ def _register_core_blueprints(app, w):
             json_error,
             db_path,
             app.config,
+            get_runner=lambda: app._job_runner,
             invalid_preview_cache_paths=w.render_cache.invalid_preview_cache_paths,
             clear_preview_cache_invalid=w.render_cache.clear_preview_cache_invalid,
             render_edit_preview=app._preview_workers.render,

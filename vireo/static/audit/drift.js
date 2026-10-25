@@ -4,7 +4,7 @@
 
 import { state } from './state.js';
 import { byId, paintFirst, postAuditAction, showCheckError, showCheckResult } from './helpers.js';
-import { escapeHtml, safeFetch } from './shared.js';
+import { escapeHtml, safeFetch, showToast } from './shared.js';
 import { loadSummary } from './summary.js';
 
 export async function runDriftCheck() {
@@ -37,14 +37,30 @@ function renderDrift() {
   var html = '<table class="audit-table"><thead><tr><th>File</th><th>Field</th><th>Database</th><th>XMP</th><th>Actions</th></tr></thead><tbody>';
   state.driftData.forEach(function(d) {
     var dbVal = Array.isArray(d.db_value) ? d.db_value.join(', ') : d.db_value;
-    var xmpVal = Array.isArray(d.xmp_value) ? d.xmp_value.join(', ') : d.xmp_value;
+    var unreadable = d.direction === 'sidecar_unreadable';
+    // Vireo never saw an unreadable sidecar's keywords; say why instead.
+    var xmpCell = unreadable
+      ? '<span class="drift-unreadable">Could not read this sidecar: ' + escapeHtml(d.xmp_error || 'unknown error') + '.</span>'
+      : escapeHtml(Array.isArray(d.xmp_value) ? d.xmp_value.join(', ') : d.xmp_value);
     html += '<tr><td>' + escapeHtml(d.filename) + '</td><td>' + d.field + '</td>' +
-      '<td>' + escapeHtml(dbVal) + '</td><td>' + escapeHtml(xmpVal) + '</td>' +
-      '<td><button class="btn btn-secondary" data-photo-id="' + d.photo_id + '" data-direction="use_db">Use DB</button> ' +
-      '<button class="btn btn-secondary" data-photo-id="' + d.photo_id + '" data-direction="use_xmp">Use XMP</button></td></tr>';
+      '<td>' + escapeHtml(dbVal) + '</td><td>' + xmpCell + '</td>' +
+      '<td>' + driftActions(d, unreadable) + '</td></tr>';
   });
   html += '</tbody></table>';
   byId('driftContent').innerHTML = html;
+}
+
+/** Only the resolutions the server says can apply to this row. @param {AuditDrift} d @param {boolean} unreadable */
+function driftActions(d, unreadable) {
+  var offered = d.resolutions || ['use_db', 'use_xmp'];
+  /** @type {[string, string][]} */ var choices = [['use_db', 'Use DB'], ['use_xmp', 'Use XMP']];
+  var buttons = choices.filter(function(pair) {
+    return offered.indexOf(pair[0]) >= 0;
+  }).map(function(pair) {
+    return '<button class="btn btn-secondary" data-photo-id="' + d.photo_id + '" data-direction="' + pair[0] + '">' + pair[1] + '</button>';
+  }).join(' ');
+  if (!unreadable) return buttons;
+  return buttons + (buttons ? ' ' : '') + '<div class="drift-advice">' + escapeHtml(d.advice || '') + '</div>';
 }
 
 /** @param {number} photoId @param {string} direction */
@@ -56,7 +72,9 @@ async function resolveDrift(photoId, direction) {
 /** @param {string} direction */
 export async function resolveAll(direction) {
   byId('driftStatus').textContent = 'Resolving...';
-  await postAuditAction('/api/audit/resolve-all', {direction: direction});
+  var result = await postAuditAction('/api/audit/resolve-all', {direction: direction});
+  // Rows whose sidecar Vireo cannot read are left alone; say so.
+  if (result && result.warning) showToast(result.warning, 'warning');
   runDriftCheck();
 }
 

@@ -51,7 +51,7 @@ interface JobsRow {
   import_resume_allowed?: boolean; import_recovery_options?: JobsRecoveryOptions;
 }
 interface JobsSnapshot {active: JobsRow[];active_workspace_id?: number | null; workspace_names?: Record<number,string>;keeping_awake?:boolean}
-interface JobsPollLane {generation:number;pending:boolean;loaded:boolean;error:boolean;controller:AbortController|null}
+interface JobsPollLane {generation:number;pending:boolean;loaded:boolean;error:boolean;errorDetail:string;controller:AbortController|null}
 interface JobsImportEntry {id:string;status:string;startedAt:string;result:JobsResult;root?:string;config:JobsConfig;parent?:string;tagsApplied?:boolean;chainProcessJobIds?:string[];chained?:boolean;resumable?:boolean;hasFailedFiles?:boolean}
 interface JobsTakeover {tagsApplied:boolean;chained:boolean;by:string|null;byStartedAt:string|null;kind:string|null;parentInterrupted:boolean}
 interface JobsSourceCleanup {checking?:boolean;state?:string;file_count?:number;xmp_count?:number;message?:string;error?:string|null;files?:{name:string;size:number}[];review_token?:string;confirmed?:boolean;busy?:boolean;directories?:string[];trashed?:number;failures?:{path:string;error:string}[]}

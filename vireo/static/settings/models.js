@@ -138,7 +138,7 @@ async function loadModels() {
       } else if (state === 'unverified' && hasMissingOptional) {
         var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
         var missingList = missingOptional.map(escapeHtml).join(', ');
-        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + ', and optional files are not installed: ' + missingList + '. Click Repair to fetch them and re-verify — Retry verification alone only re-checks hashes and cannot download the optional artifacts.</div>';
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + ', and optional files are not installed: ' + missingList + '. Click Repair to fetch them and re-verify — Retry verification alone only re-checks hashes and cannot download the optional artifacts.' + labelDescriptionsFailureText(m) + '</div>';
       } else if (state === 'unverified') {
         reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + '. The model should work; click Retry verification once the network is reachable.</div>';
@@ -150,7 +150,7 @@ async function loadModels() {
         // carry it yet. The others really do have to land on HuggingFace
         // first, and saying otherwise would promise a no-op.
         var optionalHint = missingOptional.indexOf('label_descriptions.json') !== -1
-          ? 'Common names fall back to taxonomy lookups, so some species show their scientific name; click Repair to fetch the mapping — Vireo derives it from the upstream model config if HuggingFace does not carry it yet.'
+          ? 'Common names fall back to taxonomy lookups, so some species show their scientific name; click Repair to fetch the mapping — Vireo derives it from the upstream model config if HuggingFace does not carry it yet.' + labelDescriptionsFailureText(m)
           : 'The model works for label-list classification without them; click Repair to fetch them once available on HuggingFace (e.g. to enable Tree of Life mode).';
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Optional files not installed: ' + missingList + '. ' + optionalHint + '</div>';
       }
@@ -196,6 +196,14 @@ async function loadModels() {
   } catch(e) {
     /** @type {HTMLElement} */ (document.getElementById('modelsContent')).innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load models</span>';
   }
+}
+
+// Why Vireo's own attempt (the background repair or Repair) to fetch a
+// model's common-name file failed, so the card says more than "click Repair".
+/** @param {SettingsModel} m */ function labelDescriptionsFailureText(m) {
+  return m.label_descriptions_error
+    ? ' Vireo\'s last attempt to fetch label_descriptions.json failed: ' + escapeHtml(m.label_descriptions_error) + '.'
+    : '';
 }
 
 /** @param {string} modelId */ async function downloadModel(modelId) {

@@ -15,13 +15,14 @@ wrappers on ``Database``. Resolution goes through
 friends) and ``Database._apply_winner_loser_merge``, not the plan and
 ``reject`` methods here.
 
-Not to be confused with the top-level ``duplicates`` module, the pure
-resolver this repository feeds.
+Also streams camera metadata for review-only same-shot candidates and reads
+their saved review membership. Those reads do not change exact-byte cleanup.
+Not to be confused with the top-level ``duplicates`` module, the pure resolver.
 """
 
 import os
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 from keyword_identity import embedded_keyword_associations_for_merge
@@ -71,6 +72,51 @@ class DuplicatesRepository:
     def transaction(self) -> sqlite3.Connection:
         """The connection as a context manager: commit on success, roll back on error."""
         return self.conn
+
+    def same_shot_rows(self, photo_ids: Sequence[int] | None = None) -> Iterator[sqlite3.Row]:
+        """Stream live, nonempty photos' camera metadata without reading originals.
+
+        The background scan walks the catalog once. Restores read only the
+        saved members, chunked below SQLite's parameter limit.
+        """
+        chunks = [None] if photo_ids is None else chunked(photo_ids)
+        for ids in chunks:
+            where = "" if ids is None else f" AND p.id IN ({','.join('?' * len(ids))})"
+            cursor = self.conn.execute(
+                "SELECT p.id, p.filename, p.file_hash, p.file_size, p.rating, "
+                "p.timestamp, p.phash, p.exif_data, p.camera_make, p.camera_model, "
+                "f.path AS folder_path FROM photos p JOIN folders f ON f.id = p.folder_id "
+                "WHERE (p.flag IS NULL OR p.flag != 'rejected') "
+                "AND p.file_size > 0 AND p.file_hash IS NOT NULL "
+                "AND p.file_hash != '' AND p.exif_data IS NOT NULL" + where,
+                () if ids is None else ids,
+            )
+            while rows := cursor.fetchmany(128):
+                yield from rows
+
+    def saved_same_shot_group(self, photo_id: int) -> str | None:
+        """Only a member of the latest completed review can use library-wide media.
+
+        Return one group's JSON, rather than sending the entire scan back
+        through Python for every thumbnail. The service revalidates its ids,
+        paths, hashes and camera identities before allowing access.
+        """
+        row = self.conn.execute(
+            """SELECT g.value FROM (
+                   SELECT result FROM job_history
+                   WHERE type = 'duplicate-scan' AND status = 'completed'
+                     AND result IS NOT NULL
+                   ORDER BY finished_at DESC, started_at DESC LIMIT 1
+               ) latest, json_each(
+                   CASE WHEN json_valid(latest.result) THEN latest.result ELSE '{}' END,
+                   '$.same_shot_groups'
+               ) g
+               WHERE EXISTS (SELECT 1 FROM json_each(g.value, '$.photos') p
+                             WHERE json_extract(p.value, '$.id') = ?)
+               LIMIT 1""",
+            (photo_id,),
+        ).fetchone()
+        return row[0] if row else None
 
     # -- groups -------------------------------------------------------------
 
@@ -539,7 +585,7 @@ class DuplicatesRepository:
         for chunk in self._chunks(loser_ids):
             loser_placeholders = ",".join("?" * len(chunk))
             rows.extend(self.conn.execute(
-                f"""SELECT photo_id, keyword_id, source
+                f"""SELECT photo_id, keyword_id, source, species_provenance
                     FROM photo_keywords
                     WHERE photo_id IN ({loser_placeholders})""",
                 chunk,

@@ -38,6 +38,8 @@ async function tryRestoreLastScan(forceCleanup) {
   // A refresh must not leave older cleanup buttons actionable beneath the
   // loading/error state. A subsequent filter edit must not revive them either.
   _lastScanResult = null;
+  _sameShotVisibleLimit = 50;
+  /** @type {HTMLElement} */ (document.getElementById('sameShotResults')).innerHTML = '';
   _proposals = [];
   /** @type {HTMLElement} */ (document.getElementById('results')).innerHTML = '';
   /** @type {HTMLElement} */ (document.getElementById('summary')).style.display = 'none';
@@ -121,8 +123,7 @@ function restoredFreshnessText(result) {
   var added = result.new_group_count || 0;
   var changed = result.changed_group_count || 0;
   if (!added && !changed) {
-    return ' Still up to date: no duplicates have been added or changed ' +
-      'in your catalog since then.';
+    return ' Exact-byte groups are unchanged in your catalog. Scan again to refresh possible same-shot copies.';
   }
   var parts = [];
   if (added) {
