@@ -120,7 +120,13 @@ class PhotoReviewService:
     def apply_culling_flags(
         self, keepers: Sequence[int], rejects: Sequence[int], unflag: Sequence[int],
     ) -> dict[str, int]:
-        """Save explicit Cull choices and their attribution as one reversible edit."""
+        """Save explicit Cull choices and their attribution as one reversible edit.
+
+        An ``unflag`` entry whose photo is already ``none`` is skipped: there is
+        nothing to clear, so no attribution is published and no edit-history row
+        is recorded. Keepers and rejects always confirm, even when the raw flag
+        would be unchanged.
+        """
         ids = list(keepers) + list(rejects) + list(unflag)
         with self.db.photo_review.flag_write() as owns_transaction:
             photos = self.db.photos.get_by_ids(ids)
@@ -130,23 +136,29 @@ class PhotoReviewService:
                 self.db._verify_photo_in_workspace(pid)
             old = {pid: photos[pid]["flag"] or "none" for pid in ids}
             cleared = [pid for pid in unflag if old[pid] != "none"]
-            before = self.db.photo_review.flag_attributions(ids)
+            effective_unflag = cleared
+            effective_ids = list(keepers) + list(rejects) + effective_unflag
+            before = self.db.photo_review.flag_attributions(effective_ids)
             items = []
             summary = f"Culling: flagged {len(keepers)}, rejected {len(rejects)}"
             if cleared:
                 summary += f", cleared {len(cleared)}"
-            for photo_ids, flag in ((keepers, "flagged"), (rejects, "rejected"), (unflag, "none")):
+            for photo_ids, flag in (
+                (keepers, "flagged"), (rejects, "rejected"), (effective_unflag, "none"),
+            ):
                 for pid in photo_ids:
                     self.db.photo_review.set_flag(pid, flag, _commit=False)
                     self.db.queue_flag_change_if_enabled(pid, flag, _commit=False)
                     items.append({"photo_id": pid, "old_value": old[pid], "new_value": flag})
-                self.db.photo_review.set_current_flag_note(photo_ids, flag, summary)
+                if photo_ids:
+                    self.db.photo_review.set_current_flag_note(photo_ids, flag, summary)
             if items:
                 edit_id = self.db.record_edit(
                     "flag", summary, "culling_apply", items, is_batch=True, _commit=False,
                 )
                 self.db.photo_review.record_flag_attribution_history(
-                    edit_id, ids, before, self.db.photo_review.flag_attributions(ids),
+                    edit_id, effective_ids, before,
+                    self.db.photo_review.flag_attributions(effective_ids),
                 )
         if owns_transaction and items:
             self.db.prune_edit_history()

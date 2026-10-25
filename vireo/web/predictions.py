@@ -2074,6 +2074,79 @@ def create_predictions_blueprint(
             )
         return picks, rejects, None
 
+    def _apply_prediction_group_decisions(db, picks, rejects, removed, species, observed):
+        """Everything that runs under the prediction-decision lock, in one txn.
+
+        The stale filter, flag/keyword writes, and prediction status writes
+        all run inside ``BEGIN IMMEDIATE``: an earlier version filtered stale
+        photos and committed the flag/keyword writes *before* taking the lock,
+        which let a decision landing in that window leave the photo flagged
+        and keyworded while the in-lock recheck refused to update prediction
+        status. Holding the write lock across the read that governs the
+        writes closes that race.
+        """
+        # A decision that committed since the modal rendered wins over this
+        # apply; those photos drop before any of *this* apply's writes land.
+        stale_photos = _stale_group_apply_photos(db, observed)
+        actionable_picks = [pid for pid in picks if pid not in stale_photos]
+        actionable_rejects = [pid for pid in rejects if pid not in stale_photos]
+        target_ids = _group_pick_prediction_ids(db, actionable_picks, observed)
+        db.predictions.require_identifiable_subjects([
+            pred_id for ids in target_ids.values() for pred_id in ids
+        ])
+
+        all_flag_pids = actionable_picks + actionable_rejects
+        old_flags = {}
+        for pid in all_flag_pids:
+            old = db.photos.get(pid)
+            if old:
+                old_flags[pid] = old["flag"] or "none"
+
+        # Capture attribution BEFORE the flag UPDATEs so Undo can restore the
+        # exact prior note (or lack of one). The invalidation trigger fires on
+        # every set_flag — _write_group_flags_and_species republishes a current
+        # note per zone and the snapshot below keeps Undo lossless.
+        before_attributions = db.photo_review.flag_attributions(all_flag_pids)
+
+        flag_desc = (
+            f"Group prediction: flagged {len(actionable_picks)}, "
+            f"rejected {len(actionable_rejects)}"
+        )
+        kid, local_species, added_picks, err = _write_group_flags_and_species(
+            db, actionable_picks, actionable_rejects, species, flag_desc,
+        )
+        if err is not None:
+            return err
+
+        flag_edit_id = _record_group_flag_history(
+            db, actionable_picks, actionable_rejects, old_flags, flag_desc,
+        )
+        if flag_edit_id is not None and all_flag_pids:
+            db.photo_review.record_flag_attribution_history(
+                flag_edit_id, all_flag_pids, before_attributions,
+                db.photo_review.flag_attributions(all_flag_pids),
+            )
+
+        _record_group_pick_accepts(
+            db, actionable_picks, observed, kid, local_species, added_picks,
+        )
+
+        for pid in actionable_rejects:
+            db.update_predictions_status_by_photo(pid, 'rejected', _commit=False)
+
+        # Ungrouping is not a decision — it changes which rows the burst modal
+        # shows together, not what any of them means — so it is not gated on
+        # the baseline.
+        for pred_id in removed:
+            db.ungroup_prediction(pred_id, _commit=False)
+        db.commit()
+        # ``record_edit`` skips its prune under ``_commit=False``; run it once
+        # the decision is durable so history stays bounded.
+        db._prune_edit_history()
+        # Reported even when zero so the client can tell "nothing was stale"
+        # from an older server that never checked.
+        return jsonify({"ok": True, "already_decided": len(stale_photos)})
+
     @blueprint.route("/api/predictions/group/apply", methods=["POST"])
     def api_prediction_group_apply():
         """Apply pick/reject decisions and species to a burst group."""
@@ -2091,100 +2164,16 @@ def create_predictions_blueprint(
         if zones_err is not None:
             return zones_err
 
-        # Pre-validate all photo IDs against workspace before any mutations
         for pid in picks + rejects:
             if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                 return json_error(f"Photo {pid} is not in the active workspace", 403)
 
-        # Everything below — the stale filter, the keyword/flag writes, and
-        # the prediction status writes — runs under the single decision lock
-        # in one transaction. An earlier version filtered stale photos and
-        # committed the flag/keyword writes *before* taking the lock and then
-        # re-checked staleness inside it; a decision that landed in that
-        # window would leave the photo flagged and keyworded while the
-        # in-lock recheck refused to update its prediction status, so the
-        # keyword-on-a-rejected-row split this precondition exists to
-        # prevent came back as a narrower race. The fix is to hold the write
-        # lock across the read that governs the writes.
-        def _apply_group_decisions():
-            # Stale filter under the lock: a decision that committed since
-            # the modal rendered wins over this apply, so those photos are
-            # dropped before any of *this* apply's writes land. Doing the
-            # check inside ``BEGIN IMMEDIATE`` closes the check-then-write
-            # window — nothing can decide between this read and the writes
-            # below, so a photo we skip here cannot silently be flagged or
-            # keyworded on the other side of the transaction.
-            stale_photos = _stale_group_apply_photos(db, observed)
-            actionable_picks = [pid for pid in picks if pid not in stale_photos]
-            actionable_rejects = [
-                pid for pid in rejects if pid not in stale_photos
-            ]
-            target_ids = _group_pick_prediction_ids(db, actionable_picks, observed)
-            db.predictions.require_identifiable_subjects([
-                pred_id for ids in target_ids.values() for pred_id in ids
-            ])
-
-            # Capture old flag values before mutation
-            all_flag_pids = actionable_picks + actionable_rejects
-            old_flags = {}
-            for pid in all_flag_pids:
-                old = db.photos.get(pid)
-                if old:
-                    old_flags[pid] = old["flag"] or "none"
-
-            # Capture attribution BEFORE the flag UPDATEs so Undo can
-            # restore the exact prior note (or lack of one for a legacy
-            # flag). The invalidation trigger fires on every set_flag,
-            # erasing current attribution — _write_group_flags_and_species
-            # republishes a current note per zone and the snapshot below
-            # keeps Undo lossless.
-            before_attributions = db.photo_review.flag_attributions(all_flag_pids)
-
-            flag_desc = (
-                f"Group prediction: flagged {len(actionable_picks)}, "
-                f"rejected {len(actionable_rejects)}"
-            )
-            kid, local_species, added_picks, err = _write_group_flags_and_species(
-                db, actionable_picks, actionable_rejects, species, flag_desc,
-            )
-            if err is not None:
-                return err
-
-            flag_edit_id = _record_group_flag_history(
-                db, actionable_picks, actionable_rejects, old_flags, flag_desc,
-            )
-            if flag_edit_id is not None and all_flag_pids:
-                db.photo_review.record_flag_attribution_history(
-                    flag_edit_id, all_flag_pids, before_attributions,
-                    db.photo_review.flag_attributions(all_flag_pids),
-                )
-
-            _record_group_pick_accepts(
-                db, actionable_picks, observed, kid, local_species, added_picks,
-            )
-
-            for pid in actionable_rejects:
-                db.update_predictions_status_by_photo(
-                    pid, 'rejected', _commit=False,
-                )
-
-            # Remove predictions from group. Ungrouping is not a decision — it
-            # changes which rows the burst modal shows together, not what any
-            # of them means — so it is not gated on the baseline.
-            for pred_id in removed:
-                db.ungroup_prediction(pred_id, _commit=False)
-            db.commit()
-            # ``record_edit`` skips its prune under ``_commit=False``; run it
-            # once the decision is durable so history stays bounded — same
-            # shape the batch endpoints use.
-            db._prune_edit_history()
-            # Counted in photos, which is the unit the modal works in and the
-            # unit the toast names. Reported even when zero so the client can
-            # tell "nothing was stale" from an older server that never checked.
-            return jsonify({"ok": True, "already_decided": len(stale_photos)})
-
         return prediction_decisions.under_prediction_decision_lock(
-            db, _apply_group_decisions, json_error=json_error,
+            db,
+            lambda: _apply_prediction_group_decisions(
+                db, picks, rejects, removed, species, observed,
+            ),
+            json_error=json_error,
         )
 
     return blueprint
