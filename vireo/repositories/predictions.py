@@ -151,8 +151,8 @@ class PredictionRepository:
             SELECT f.id, f.path, COUNT(*) AS photo_count
             FROM photos p
             JOIN folders f ON f.id = p.folder_id
-            JOIN workspace_folders wf ON wf.folder_id = f.id
-            WHERE wf.workspace_id = ? AND EXISTS (
+            JOIN photo_workspace_visibility v ON v.photo_id = p.id
+            WHERE v.workspace_id = ? AND EXISTS (
                 SELECT 1 FROM detections d
                 JOIN predictions pr ON pr.detection_id = d.id
                 WHERE d.photo_id = p.id AND pr.labels_fingerprint = 'legacy'
