@@ -20,6 +20,7 @@ from .region_target import region_contract
 DETAIL_FIELDS = ('median_variance', 'median_gradient_energy', 'median_laplacian_variance',
                  'median_contrast_normalized_gradient', 'median_contrast_normalized_laplacian')
 FIT_RECIPE = 'equal-encounter-dino-prototypes-and-ridge-logit-v1'
+MINIMUM_CLASS_GROUPS = 2
 
 
 def read_features(path, manifest):
@@ -63,7 +64,7 @@ def embedding(row):
 def enough_groups(rows, name):
     for value in (0, 1):
         groups = {row[1] for row in rows if row[2] == value}
-        if len(groups) < 2:
+        if len(groups) < MINIMUM_CLASS_GROUPS:
             raise ValueError(f'{name} needs independent development judgments from at least two groups per class; do not borrow diagnostic/held-out labels')
 
 
@@ -90,12 +91,8 @@ def fit_detail(rows):
     return {'coefficients': result.x.tolist(), 'mean': mean.tolist(), 'scale': scale.tolist()}
 
 
-def fit(bundle, feature_path, domain, output):
-    manifest = read_bundle(bundle)
-    validate_domain(domain, manifest['pixel_recipe'])
-    region_contract(manifest)
-    features, by_id = read_features(feature_path, manifest)
-    reviews = read_reviews(bundle, manifest)
+def development_rows(manifest, reviews, by_id, domain):
+    """Use the same eligible evidence for fitting and its read-only readiness report."""
     labels = consensus(manifest, reviews)
     animal_rows, detail_rows, unavailable = [], [], []
     for sample in manifest['samples']:
@@ -110,6 +107,16 @@ def fit(bundle, feature_path, domain, output):
                 unavailable.append(sample['sample_id'])
             else:
                 detail_rows.append((vector, sample['group_id'], int(label['focus'] == 'sufficient_detail')))
+    return animal_rows, detail_rows, unavailable
+
+
+def fit(bundle, feature_path, domain, output):
+    manifest = read_bundle(bundle)
+    validate_domain(domain, manifest['pixel_recipe'])
+    region_contract(manifest)
+    features, by_id = read_features(feature_path, manifest)
+    reviews = read_reviews(bundle, manifest)
+    animal_rows, detail_rows, unavailable = development_rows(manifest, reviews, by_id, domain)
     enough_groups(animal_rows, 'Animal-validity candidate')
     grouped = defaultdict(list)
     for vector, group, label in animal_rows:

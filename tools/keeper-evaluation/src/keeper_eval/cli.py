@@ -24,6 +24,10 @@ def main(argv=None):
     review.add_argument('--port', type=int, default=8097)
     status = commands.add_parser('status', help='Verify frozen pixels and report available independent judgments')
     status.add_argument('--bundle', type=Path, required=True)
+    readiness = commands.add_parser('training-readiness', help='Report development class shortfalls without fitting or exposing holdout answers')
+    readiness.add_argument('--bundle', type=Path, required=True)
+    readiness.add_argument('--features', type=Path, required=True)
+    readiness.add_argument('--domain', type=Path, required=True)
     freeze = commands.add_parser('freeze', help='Freeze thresholds/model/code before accessing held-out judgments')
     freeze.add_argument('--bundle', type=Path, required=True)
     freeze.add_argument('--model', type=Path, required=True)
@@ -78,6 +82,9 @@ def main(argv=None):
                           'review_protocol': manifest['review_protocol'],
                           'meeting_human_review_protocol': sum(v['human_judgments'] >= manifest['review_protocol']['minimum_human_reviewers'] for v in labels.values()),
                           'runtime_approved': False}, indent=2))
+    elif args.command == 'training-readiness':
+        from .readiness import training_readiness
+        print(json.dumps(training_readiness(args.bundle, args.features, json.loads(args.domain.read_text())), indent=2))
     elif args.command == 'extract':
         from .features import extract
         result = extract(args.bundle, args.model_directory, args.output, limit=args.limit, threads=args.threads)

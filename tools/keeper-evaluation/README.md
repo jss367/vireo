@@ -172,6 +172,24 @@ detail gate fits a regularized linear classifier on native detail features.
 This candidate requires positive and negative independent development groups
 for **each** gate. Fitting refuses absent labels, uncertain targets and
 insufficient class coverage instead of borrowing diagnostic or held-out labels.
+Check the actual shortfall before attempting a fit:
+
+```sh
+vireo-evaluate-keepers training-readiness --bundle /scratch/native-region-review \
+  --features /scratch/candidate-features.json --domain /scratch/domain.json
+```
+
+The read-only JSON report counts samples and distinct development encounters
+for each animal/detail class using the same eligible rows as fitting. It lists
+missing human reviews, uncertain judgments, unavailable detail features and
+the number of additional groups needed per class. Assistant judgments, repeated
+frames, out-of-domain samples, diagnostics and held-out answers cannot fill a
+shortfall. Missing labels mean unknown class coverage: review existing development
+cases first, then curate new encounters if the actual classes remain insufficient.
+`class_coverage_met` means only that fitting has enough eligible groups; it does
+not establish convergence, calibrated accuracy or permission for automatic keeps.
+The report writes no model, profile, labels or holdout commitment.
+
 The first seven development cases may not meet the candidate's minimum of two
 independent development groups in each class of each gate. After independent
 judgments establish the actual shortfall, add new development encounters with
