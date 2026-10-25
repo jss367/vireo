@@ -1585,6 +1585,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   padding: 5px 8px; font-size: 12px; outline: none; box-sizing: border-box;
 }
 .inat-card-fields textarea { grid-column: 1 / -1; resize: vertical; min-height: 36px; }
+.inat-species-choice { margin-bottom: 10px; }
+.inat-species-choice p { font-size: 12px; line-height: 1.5; color: var(--text-secondary); margin: 0 0 6px; }
+.inat-species-choice select {
+  width: 100%; background: var(--bg-secondary); color: var(--text-primary);
+  border: 1px solid var(--border-secondary); border-radius: 3px;
+  padding: 5px 8px; font-size: 12px; box-sizing: border-box;
+}
 .inat-card-status { font-size: 12px; margin-top: 6px; }
 .inat-card-status.success { color: var(--accent); }
 .inat-card-status.error { color: var(--danger); }
