@@ -1,6 +1,7 @@
 """Favorites-first culling: scope, existing picks, comparison and explicit rejection."""
 import json
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -21,9 +22,10 @@ def _results():
                 'timestamp': f'{date}T08:00:{number:02}',
                 'confirmed_species': species, 'species_top5': [[species, 0.99]],
                 'label': 'KEEP', 'quality_composite': 0.99 - number / 100,
-                # Four existing picks must survive both the AI rejection
+                # Four confirmed picks must survive both the AI rejection
                 # label and the three-suggestion limit.
                 'flag': 'flagged' if photo_id in [1, 2, 3, 4] else 'none',
+                'flag_confirmation_status': 'confirmed' if photo_id in [1, 2, 3, 4] else 'unverified',
             })
         encounters.append({
             'photo_ids': ids, 'species': [species], 'burst_count': 2,
@@ -78,6 +80,26 @@ def test_favorites_include_all_existing_picks_and_only_three_suggestions_per_day
     expect(_card(page, 9)).to_have_class('cull-card review')  # AI REJECT stays undecided
     expect(page.locator('#cullReviewRejected')).to_be_disabled()
     expect(_card(page, 1)).to_contain_text('Picked by you')
+
+
+@pytest.mark.parametrize('confirmation', [None, 'unverified'])
+def test_unconfirmed_flags_do_not_count_as_existing_picks(live_server, page, confirmation):
+    results = _results()
+    for photo in results['photos'][:4]:
+        if confirmation is None:
+            photo.pop('flag_confirmation_status')
+        else:
+            photo['flag_confirmation_status'] = confirmation
+    # Neither a bare keep flag nor a bare reject flag proves a user decision.
+    results['photos'][3]['flag'] = 'rejected'
+    _open(page, live_server, results)
+    heron = _section(page, 'Great blue heron')
+    expect(heron.locator('.cull-favorite-card')).to_have_count(6)
+    expect(heron.locator('.cull-favorite-card').filter(has_text='Picked by you')).to_have_count(0)
+    for photo_id in [1, 2, 3, 4]:
+        expect(_card(page, photo_id)).to_have_class('cull-card review')
+        expect(_card(page, photo_id)).to_contain_text('Undecided')
+    expect(page.locator('#cullReviewRejected')).to_be_disabled()
 
 
 def test_species_dates_scope_analysis_and_apply_without_touching_other_photos(live_server, page):
