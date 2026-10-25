@@ -1,11 +1,15 @@
 // Row selection and the batch bar, and accepting or rejecting predictions
 // (one or in bulk), refreshing only the rows a decision touched.
-// Classic page script.
+
+import { state } from './state.js';
+import { fetchRows, jsonFetch, loadComparison } from './loading.js';
+import { renderCompare } from './render.js';
+import { groupedDecisionTracker, showToast } from './shared.js';
 
 /** @param {number} photoId @param {boolean} checked */
-function toggleRow(photoId, checked) {
-  if (checked) selectedRows.add(photoId);
-  else selectedRows.delete(photoId);
+export function toggleRow(photoId, checked) {
+  if (checked) state.selectedRows.add(photoId);
+  else state.selectedRows.delete(photoId);
   updateBatchControls();
 }
 
@@ -13,39 +17,39 @@ function toggleRow(photoId, checked) {
 // "select everything the filter matched" would fire tens of thousands of
 // writes from a single click.
 /** @param {boolean} checked */
-function toggleAllRows(checked) {
-  compareRows.forEach(function(photo) {
+export function toggleAllRows(checked) {
+  state.compareRows.forEach(function(photo) {
     if ((photo.subjects || []).length > 1) return;
-    if (checked) selectedRows.add(photo.photo_id);
-    else selectedRows.delete(photo.photo_id);
+    if (checked) state.selectedRows.add(photo.photo_id);
+    else state.selectedRows.delete(photo.photo_id);
   });
   renderCompare();
 }
 
-function updateBatchControls() {
+export function updateBatchControls() {
   var row = /** @type {HTMLElement} */ (document.getElementById('batchRow'));
-  if (!compareData) {
+  if (!state.compareData) {
     row.style.display = 'none';
     return;
   }
   row.style.display = '';
-  /** @type {HTMLElement} */ (document.getElementById('batchCount')).textContent = selectedRows.size + ' selected';
+  /** @type {HTMLElement} */ (document.getElementById('batchCount')).textContent = state.selectedRows.size + ' selected';
   ['batchAccept', 'batchReplace', 'batchReject', 'batchReviewed'].forEach(function(id) {
-    /** @type {HTMLButtonElement} */ (document.getElementById(id)).disabled = selectedRows.size === 0;
+    /** @type {HTMLButtonElement} */ (document.getElementById(id)).disabled = state.selectedRows.size === 0;
   });
 }
 
 /** @param {number} photoId */
-function loadedPhoto(photoId) {
-  return compareRows.find(function(photo) { return photo.photo_id === photoId; });
+export function loadedPhoto(photoId) {
+  return state.compareRows.find(function(photo) { return photo.photo_id === photoId; });
 }
 
 /** @param {(number | string)[]} predictionIds */
-function comparePhotoIdsForPredictions(predictionIds) {
+export function comparePhotoIdsForPredictions(predictionIds) {
   var wanted = new Set((predictionIds || []).map(function(id) { return Number(id); }));
   /** @type {number[]} */
   var photoIds = [];
-  compareRows.forEach(function(photo) {
+  state.compareRows.forEach(function(photo) {
     var found = (photo.subjects || []).some(function(subject) {
       return Object.keys(subject.predictions || {}).some(function(model) {
         return ((subject.predictions || {})[model] || []).some(function(pred) {
@@ -59,9 +63,9 @@ function comparePhotoIdsForPredictions(predictionIds) {
 }
 
 /** @param {number | string} predId @param {string} status */
-function setComparePredictionStatus(predId, status) {
+export function setComparePredictionStatus(predId, status) {
   var changed = false;
-  compareRows.forEach(function(photo) {
+  state.compareRows.forEach(function(photo) {
     (photo.subjects || []).forEach(function(subject) {
       Object.keys(subject.predictions || {}).forEach(function(model) {
         ((subject.predictions || {})[model] || []).forEach(function(pred) {
@@ -76,16 +80,16 @@ function setComparePredictionStatus(predId, status) {
 }
 
 /** @returns {CompareScope} */
-function currentComparisonScope() {
+export function currentComparisonScope() {
   return {
     collectionId: /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker')).value,
-    loadingSeq: loadingSeq,
+    loadingSeq: state.loadingSeq,
   };
 }
 
 /** @param {CompareScope} scope */
-function comparisonScopeIsCurrent(scope) {
-  return Boolean(compareData) && scope.loadingSeq === loadingSeq &&
+export function comparisonScopeIsCurrent(scope) {
+  return Boolean(state.compareData) && scope.loadingSeq === state.loadingSeq &&
     /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker')).value === scope.collectionId;
 }
 
@@ -93,8 +97,8 @@ function comparisonScopeIsCurrent(scope) {
 // comparison and re-query this page, so the row, the chip counts and the
 // filter membership all move together instead of drifting apart.
 /** @param {(number | string)[]} photoIds @param {CompareScope=} scope */
-async function refreshComparisonPhotos(photoIds, scope) {
-  if (!compareData) return;
+export async function refreshComparisonPhotos(photoIds, scope) {
+  if (!state.compareData) return;
   var uniqueIds = Array.from(new Set((photoIds || []).map(Number).filter(function(id) {
     return Number.isInteger(id) && id > 0;
   })));
@@ -108,12 +112,12 @@ async function refreshComparisonPhotos(photoIds, scope) {
 }
 
 /** @param {(number | string)[]} photoIds @param {CompareScope=} scope */
-function refreshDecisionPhotos(photoIds, scope) {
+export function refreshDecisionPhotos(photoIds, scope) {
   // Decision buttons on different rows can be used before an earlier scoped
   // request finishes. Serialize the reads so an older server snapshot can
   // never merge after a newer one and overwrite its state.
   var queuedScope = scope || currentComparisonScope();
-  var refresh = decisionRefreshQueue.then(async function() {
+  var refresh = state.decisionRefreshQueue.then(async function() {
     // Capture scope when the decision is made, not when its queued refresh
     // eventually starts. A collection load while it waits supersedes it.
     if (!comparisonScopeIsCurrent(queuedScope)) return;
@@ -125,12 +129,12 @@ function refreshDecisionPhotos(photoIds, scope) {
     }
   });
   // A failed reload must not poison every later refresh in the queue.
-  decisionRefreshQueue = refresh.catch(function() {});
+  state.decisionRefreshQueue = refresh.catch(function() {});
   return refresh;
 }
 
 /** @param {number} predId @param {string} action */
-async function predictionAction(predId, action) {
+export async function predictionAction(predId, action) {
   var decisionScope = currentComparisonScope();
   var url = '/api/predictions/' + predId + '/' + endpointForAction(action);
   var entryPhotoIds = comparePhotoIdsForPredictions([predId]);
@@ -200,7 +204,7 @@ async function predictionAction(predId, action) {
 }
 
 /** @param {string} action */
-function endpointForAction(action) {
+export function endpointForAction(action) {
   if (action === 'accept') return 'accept';
   if (action === 'accept_subject') return 'accept-subject';
   if (action === 'replace') return 'replace-keywords';
@@ -209,9 +213,9 @@ function endpointForAction(action) {
 }
 
 /** @param {string} action */
-async function batchAction(action) {
+export async function batchAction(action) {
   var decisionScope = currentComparisonScope();
-  var ids = Array.from(selectedRows);
+  var ids = Array.from(state.selectedRows);
   var photos = /** @type {ComparePhoto[]} */ (ids.map(loadedPhoto).filter(Boolean));
   var attempted = 0;
   /** @type {string[]} */
@@ -226,7 +230,7 @@ async function batchAction(action) {
   // demonstrably landed. Shared with Review's Accept All, which loops the same
   // routes over the same contract — see vireo-predictions.js for why the ids
   // ride on the write rather than being read out of the 409's wording.
-  var decidedByThisBatch = Vireo.predictions.groupedDecisionTracker();
+  var decidedByThisBatch = groupedDecisionTracker();
   for (var i = 0; i < photos.length; i++) {
     var predId = /** @type {ComparePhoto} */ (photos[i]).best_prediction_id;
     if (!predId) continue;
@@ -277,7 +281,7 @@ async function batchAction(action) {
   if (reportParts.length) {
     showToast(reportParts.join('; '), 'error');
   }
-  selectedRows.clear();
+  state.selectedRows.clear();
   if (!comparisonScopeIsCurrent(decisionScope)) {
     await loadComparison();
     return;

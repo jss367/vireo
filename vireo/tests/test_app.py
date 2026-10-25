@@ -24180,10 +24180,16 @@ def _grouped_decision_module():
 
 
 _ID_CONFLICTS_BATCH_STUB = """
-var compareData = {summary: {}};
-var compareRows = __input.photos;
-var selectedRows = new Set(__input.photos.map(function(p) { return p.photo_id; }));
-var loadingSeq = 0;
+// state.js's `state` and shared.js's tracker forwarder, which the module
+// imports (the harness drops the `export` keywords and runs it as a script).
+var state = {
+  compareData: {summary: {}},
+  compareRows: __input.photos,
+  selectedRows: new Set(__input.photos.map(function(p) { return p.photo_id; })),
+  loadingSeq: 0,
+  decisionRefreshQueue: Promise.resolve(),
+};
+function groupedDecisionTracker() { return Vireo.predictions.groupedDecisionTracker(); }
 var document = {
   getElementById: function() { return {value: '1'}; },
 };
@@ -24218,9 +24224,11 @@ def _run_id_conflicts_batch(html, payload):
     )
     import json as _json
 
+    # decisions.js is an ES module: run its declarations as a script.
+    code = re.sub(r"^export ", "", html[start:end], flags=re.M)
     source = "\n".join([
         _grouped_decision_server_stub("jsonFetch"), _grouped_decision_module(),
-        _ID_CONFLICTS_BATCH_STUB, html[start:end], _ID_CONFLICTS_BATCH_DRIVER,
+        _ID_CONFLICTS_BATCH_STUB, code, _ID_CONFLICTS_BATCH_DRIVER,
     ])
     return _run_node(source, [_json.dumps(payload)])
 
