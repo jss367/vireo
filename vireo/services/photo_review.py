@@ -59,20 +59,7 @@ class PhotoReviewService:
         self.db = db
 
     def set_rating(self, photo_id: int, rating: int) -> None:
-        old = self.db.photos.get(photo_id)
-        old_rating = old["rating"] if old else 0
-        self.db.photo_review.set_rating(photo_id, rating)
-        self.db.queue_change(photo_id, "rating", str(rating))
-        self.db.record_edit(
-            "rating",
-            f"Set rating to {rating}",
-            str(rating),
-            [{
-                "photo_id": photo_id,
-                "old_value": str(old_rating),
-                "new_value": str(rating),
-            }],
-        )
+        self._write_ratings([photo_id], rating, is_batch=False)
 
     def set_flag(
         self, photo_id: int, flag: str, *, source: str | None = None, reason: str | None = None,
@@ -85,31 +72,31 @@ class PhotoReviewService:
         )
 
     def set_ratings(self, photo_ids: Sequence[int], rating: int) -> int:
-        photos_map = self.db.photos.get_by_ids(photo_ids)
-        old_values = {
-            photo_id: photos_map[photo_id]["rating"]
-            for photo_id in photo_ids
-            if photo_id in photos_map
-        }
-        valid_ids = list(old_values)
-        self.db.photo_review.set_ratings(valid_ids, rating)
-        for photo_id in valid_ids:
-            self.db.queue_change(photo_id, "rating", str(rating))
-        items = [
-            {
-                "photo_id": photo_id,
-                "old_value": str(old_values[photo_id]),
-                "new_value": str(rating),
-            }
-            for photo_id in old_values
-        ]
-        self.db.record_edit(
-            "rating",
-            f"Set rating to {rating} on {len(photo_ids)} photos",
-            str(rating),
-            items,
-            is_batch=True,
-        )
+        return self._write_ratings(photo_ids, rating, is_batch=True)
+
+    def _write_ratings(self, photo_ids: Sequence[int], rating: int, *, is_batch: bool) -> int:
+        with self.db.photo_review.review_write() as owns_transaction:
+            photos = self.db.photos.get_by_ids(photo_ids)
+            old_values = {pid: photos[pid]["rating"] for pid in photo_ids if pid in photos}
+            if not old_values:
+                if not is_batch:
+                    raise ValueError("Photo not in active workspace")
+                return 0
+            valid_ids = list(old_values)
+            self.db.photo_review.set_ratings(valid_ids, rating, _commit=False)
+            for pid in valid_ids:
+                self.db.queue_change(pid, "rating", str(rating), _commit=False)
+            description = f"Set rating to {rating}"
+            if is_batch:
+                description += f" on {len(photo_ids)} photos"
+            self.db.record_edit(
+                "rating", description, str(rating),
+                [{"photo_id": pid, "old_value": str(old), "new_value": str(rating)}
+                 for pid, old in old_values.items()],
+                is_batch=is_batch, _commit=False,
+            )
+        if owns_transaction:
+            self.db.prune_edit_history()
         return len(old_values)
 
     def set_flags(

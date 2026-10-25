@@ -1,6 +1,17 @@
-// Page startup: binds the template's data-compare-on controls, then loads
-// the threshold control and the collections on DOMContentLoaded.
-// Classic page script; loads after every other ID Conflicts script.
+// Page startup: the module the template loads. Binds the template's
+// data-compare-on controls and the delegated listeners for rendered markup,
+// then loads the threshold control and the collections on DOMContentLoaded.
+
+import { state } from './state.js';
+import { goToPage, scheduleSearch, setPerPage } from './controls.js';
+import { batchAction } from './decisions.js';
+import { bindCompareRenderedMarkup } from './events.js';
+import { loadCollections, loadComparison, reloadRows, setVisibleModels } from './loading.js';
+import { setSort } from './render.js';
+import {
+  previewConflictThreshold, setConflictThreshold, updateConflictThresholdControl,
+} from './threshold.js';
+import { VireoTextSearch } from './shared.js';
 
 /**
  * The template's controls name their handlers in
@@ -10,7 +21,7 @@
  *
  * @type {Record<string, (element: HTMLElement) => unknown>}
  */
-var COMPARE_HANDLERS = {
+const COMPARE_HANDLERS = {
   loadComparison: function() { return loadComparison(); },
   setVisibleModels: function() { setVisibleModels(); },
   setSort: function(el) { setSort(/** @type {HTMLSelectElement} */ (el).value); },
@@ -19,8 +30,8 @@ var COMPARE_HANDLERS = {
   scheduleSearch: function() { scheduleSearch(); },
   toggleMatchCase: function() { VireoTextSearch.toggle('compareSearch', 'match_case', reloadRows); },
   toggleWholeWord: function() { VireoTextSearch.toggle('compareSearch', 'whole_word', reloadRows); },
-  previousPage: function() { goToPage(comparePage - 1); },
-  nextPage: function() { goToPage(comparePage + 1); },
+  previousPage: function() { goToPage(state.comparePage - 1); },
+  nextPage: function() { goToPage(state.comparePage + 1); },
   setPerPage: function(el) { setPerPage(/** @type {HTMLSelectElement} */ (el).value); },
   batchAccept: function() { return batchAction('accept'); },
   batchReplace: function() { return batchAction('replace'); },
@@ -42,5 +53,6 @@ function bindCompareMarkup() {
 }
 
 bindCompareMarkup();
+bindCompareRenderedMarkup();
 document.addEventListener('DOMContentLoaded', function() { updateConflictThresholdControl(); });
 document.addEventListener('DOMContentLoaded', function() { loadCollections(); });

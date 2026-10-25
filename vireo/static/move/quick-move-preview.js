@@ -1,8 +1,15 @@
 // Quick Move preview: the summary panel, the Review move button, and the resolved destination path.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import {
+  quickFolderNameResult, quickFolderTemplateResult, quickUsesDateFolders, sourceFolderName,
+} from './quick-move-form.js';
+import { scheduleQuickDatePreflight, scheduleQuickPreflight } from './quick-move-preflight.js';
+import { quickRemoteTargetId } from './remote-targets.js';
+import { rsyncInstallHint } from './shared.js';
 
 /** @param {MoveFolder | null | undefined} folder @param {string} finalPath */
-function setQuickMoveSummary(folder, finalPath) {
+export function setQuickMoveSummary(folder, finalPath) {
   var summary = /** @type {HTMLElement} */ (document.getElementById('quickMoveSummary'));
   if (!folder || !finalPath) {
     summary.replaceChildren();
@@ -52,7 +59,7 @@ function setQuickMoveSummary(folder, finalPath) {
 }
 
 /** @param {MoveFolder | undefined} folder @param {MovePreflight | null} data */
-function setQuickDateSummary(folder, data) {
+export function setQuickDateSummary(folder, data) {
   var summary = /** @type {HTMLElement} */ (document.getElementById('quickMoveSummary'));
   if (!folder || !data || !data.date_organized) {
     summary.replaceChildren();
@@ -91,7 +98,7 @@ function setQuickDateSummary(folder, data) {
   summary.style.display = 'block';
 }
 
-function updateQuickMoveBtn() {
+export function updateQuickMoveBtn() {
   var fid = /** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect')).value;
   var remoteId = quickRemoteTargetId();
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('quickMoveBtn'));
@@ -103,21 +110,21 @@ function updateQuickMoveBtn() {
   if (remoteId) {
     // Remote needs a usable GNU rsync; no destination text is required (the
     // target carries it). An optional subpath refines where under it.
-    ready = !!fid && quickRsyncAvailable && !nameResult.error && !templateResult.error;
+    ready = !!fid && state.quickRsyncAvailable && !nameResult.error && !templateResult.error;
   } else {
     ready = !!(fid && /** @type {HTMLInputElement} */ (document.getElementById('quickDestInput')).value.trim()
       && !nameResult.error && !templateResult.error);
   }
-  btn.disabled = quickMoveBusy || !ready;
-  btn.innerHTML = quickMoveBusy
+  btn.disabled = state.quickMoveBusy || !ready;
+  btn.innerHTML = state.quickMoveBusy
     ? 'Checking destination…'
     : 'Review move <span class="button-arrow" aria-hidden="true">→</span>';
   updateQuickMovePreview();
 }
 
 /** @param {boolean} isBusy */
-function setQuickMoveBusy(isBusy) {
-  quickMoveBusy = !!isBusy;
+export function setQuickMoveBusy(isBusy) {
+  state.quickMoveBusy = !!isBusy;
   updateQuickMoveBtn();
 }
 
@@ -129,7 +136,7 @@ function setQuickMoveBusy(isBusy) {
 // 'C:\Archive\Birds', not 'C:\Archive\/Birds'. Also lets the folder.name
 // fallback split a backslash-delimited source path.
 /** @param {MoveFolder | undefined} folder @param {string} destination @param {string} destinationName */
-function resolvedMoveDest(folder, destination, destinationName) {
+export function resolvedMoveDest(folder, destination, destinationName) {
   var srcPath = (folder && folder.path) || '';
   var winStyle = destination.indexOf('\\') !== -1 || srcPath.indexOf('\\') !== -1;
   var sep = winStyle ? '\\' : '/';
@@ -138,7 +145,7 @@ function resolvedMoveDest(folder, destination, destinationName) {
   return destination.replace(trimRe, '') + sep + folderName;
 }
 
-function updateQuickMovePreview() {
+export function updateQuickMovePreview() {
   var preview = /** @type {HTMLElement} */ (document.getElementById('quickDestPreview'));
   var fid = parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect')).value);
   var remoteId = quickRemoteTargetId();
@@ -147,7 +154,7 @@ function updateQuickMovePreview() {
     setQuickMoveSummary(null, '');
     return;
   }
-  var folder = allFolders.find(function(f) { return f.id === fid; });
+  var folder = state.allFolders.find(function(f) { return f.id === fid; });
   var nameResult = quickFolderNameResult();
   if (nameResult.error) {
     preview.textContent = '';
@@ -157,7 +164,7 @@ function updateQuickMovePreview() {
   var destinationName = nameResult.value;
 
   if (remoteId) {
-    var t = quickRemoteTargets.find(function(x) { return x.id === remoteId; });
+    var t = state.quickRemoteTargets.find(function(x) { return x.id === remoteId; });
     if (!t) {
       preview.textContent = '';
       setQuickMoveSummary(null, '');
@@ -193,7 +200,7 @@ function updateQuickMovePreview() {
     line.appendChild(span);
     preview.appendChild(line);
 
-    if (!quickRsyncAvailable) {
+    if (!state.quickRsyncAvailable) {
       preview.appendChild(_destWarn('⚠ No GNU rsync found. ' + rsyncInstallHint()));
     }
     if (!t.mount_path) {
@@ -254,7 +261,7 @@ function updateQuickMovePreview() {
 }
 
 /** @param {string} text */
-function _destWarn(text) {
+export function _destWarn(text) {
   var d = document.createElement('div');
   d.className = 'dest-status';
   d.style.color = 'var(--warning)';
@@ -269,7 +276,7 @@ function _destWarn(text) {
 // accept any form. Used to warn before the backend refuses a relative
 // mount path on the remote target.
 /** @param {string | null | undefined} p */
-function _isAbsolutePath(p) {
+export function _isAbsolutePath(p) {
   if (!p) return false;
   return p.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
 }
@@ -282,7 +289,7 @@ function _isAbsolutePath(p) {
 // keeps the move-form's local preview honest before the user has typed
 // anything that would trigger the preflight call.
 /** @param {string} user @param {string} host @param {string} path */
-function rsyncDestSpec(user, host, path) {
+export function rsyncDestSpec(user, host, path) {
   var hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
   return user + '@' + hostToken + ':' + path;
 }
@@ -295,7 +302,7 @@ function rsyncDestSpec(user, host, path) {
 // preflight, and the actual move submission means the path the UI shows
 // matches the path the backend will write — a UI-transparency requirement.
 /** @param {string} raw */
-function normalizeRemoteSubpath(raw) {
+export function normalizeRemoteSubpath(raw) {
   var trimmed = (raw || '').trim();
   if (!trimmed) return {value: '', error: ''};
   var s = trimmed.replace(/\\/g, '/');

@@ -1,27 +1,27 @@
 // Keep-visible preference and the affected-workspaces check (/api/move-photos/visibility).
-// Classic page script; load boot.js after all definitions.
 
-var moveVisibilityRequest = 0;
-var moveVisibilityReady = false;
+import { state } from './state.js';
+import { updatePhotoSelectionUI } from './photo-move.js';
+import { safeFetch } from './shared.js';
 
-async function loadMoveVisibilityPreference() {
+export async function loadMoveVisibilityPreference() {
   try {
     var cfg = await safeFetch('/api/config');
     var checkbox = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible'));
     checkbox.checked = cfg.move_keep_visible_in_other_workspaces !== false;
     checkbox.disabled = false;
-    moveVisibilityReady = true;
+    state.moveVisibilityReady = true;
     updatePhotoSelectionUI();
   } catch (e) {
     /** @type {HTMLElement} */ (document.getElementById('moveAffectedWorkspaces')).textContent = 'Could not load the remembered move choice. Reload before moving photos.';
   }
 }
 
-async function rememberMoveVisibility() {
+export async function rememberMoveVisibility() {
   var checkbox = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible'));
   var choice = checkbox.checked;
   checkbox.disabled = true;
-  moveVisibilityReady = false;
+  state.moveVisibilityReady = false;
   try {
     await safeFetch('/api/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -31,14 +31,14 @@ async function rememberMoveVisibility() {
     checkbox.checked = !choice;
   } finally {
     checkbox.disabled = false;
-    moveVisibilityReady = true;
-    refreshMoveVisibility(Array.from(selectedPhotos)).catch(function() {});
+    state.moveVisibilityReady = true;
+    refreshMoveVisibility(Array.from(state.selectedPhotos)).catch(function() {});
   }
 }
 
 /** @param {number[]} ids */
-async function refreshMoveVisibility(ids) {
-  var seq = ++moveVisibilityRequest;
+export async function refreshMoveVisibility(ids) {
+  var seq = ++state.moveVisibilityRequest;
   var status = /** @type {HTMLElement} */ (document.getElementById('moveAffectedWorkspaces'));
   if (!ids.length) {
     status.textContent = 'Select photos to see affected workspaces.';
@@ -53,14 +53,14 @@ async function refreshMoveVisibility(ids) {
     var names = (data.workspaces || []).map(function(ws) {
       return ws.name + ' (' + ws.photo_count + ' photo' + (ws.photo_count === 1 ? '' : 's') + ')';
     });
-    if (seq === moveVisibilityRequest) {
+    if (seq === state.moveVisibilityRequest) {
       status.textContent = names.length ? 'Affected workspaces: ' + names.join(', ') +
         (/** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible')).checked ? '. Visibility will be kept for the moved photos.' : '. Moving permits removal of their visibility here; existing destination sharing still applies.') :
         'No other workspaces currently see these photos.';
     }
     return names;
   } catch (e) {
-    if (seq === moveVisibilityRequest) status.textContent = 'Could not check affected workspaces. Try again before moving.';
+    if (seq === state.moveVisibilityRequest) status.textContent = 'Could not check affected workspaces. Try again before moving.';
     throw e;
   }
 }

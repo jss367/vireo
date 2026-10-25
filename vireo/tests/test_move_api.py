@@ -74,7 +74,7 @@ def test_move_page_folder_browser_exposes_volumes_shortcut(app_and_db):
     app, _ = app_and_db
     html = page_with_scripts(app.test_client(), "/move")
 
-    assert "browseTo('__volumes__')" in html
+    assert 'data-move-on="click:browseTo" data-move-arg="__volumes__"' in html
     # Non-Mac hosts (Windows + Linux) fan through /api/volumes.
     assert "if (navigator.userAgent.indexOf('Mac') < 0)" in html
     assert "await safeFetch('/api/volumes')" in html
@@ -92,9 +92,9 @@ def test_move_page_browser_stamps_requests(app_and_db):
     app, _ = app_and_db
     html = page_with_scripts(app.test_client(), "/move")
 
-    assert "var browseSeq = 0;" in html
-    assert "var seq = ++browseSeq;" in html
-    assert "if (seq !== browseSeq) return;" in html
+    assert "browseSeq: 0," in html
+    assert "var seq = ++state.browseSeq;" in html
+    assert "if (seq !== state.browseSeq) return;" in html
 
 
 def test_move_page_loads_every_photo_page_for_selection(app_and_db):
@@ -102,11 +102,11 @@ def test_move_page_loads_every_photo_page_for_selection(app_and_db):
     app, _ = app_and_db
     html = page_with_scripts(app.test_client(), "/move")
 
-    assert "var photoLoadSeq = 0;" in html
+    assert "photoLoadSeq: 0," in html
     assert "while (total === null || loadedPhotos.length < total)" in html
     assert "&per_page=500&page=' + page" in html
     assert "loadedPhotos = loadedPhotos.concat(pagePhotos);" in html
-    assert "if (seq !== photoLoadSeq) return;" in html
+    assert "if (seq !== state.photoLoadSeq) return;" in html
 
 
 def test_move_page_pictures_shortcut_resolves_home_on_demand(app_and_db):
@@ -119,11 +119,11 @@ def test_move_page_pictures_shortcut_resolves_home_on_demand(app_and_db):
 
     assert "if (path === '__pictures__')" in html
     # The on-demand home fetch must happen inside the Pictures branch.
-    assert "if (!browserHomePath)" in html
+    assert "if (!state.browserHomePath)" in html
     assert "await safeFetch('/api/browse')" in html
     assert (
         "url = '/api/browse?path=' + encodeURIComponent("
-        "browserHomePath + '/Pictures');"
+        "state.browserHomePath + '/Pictures');"
     ) in html
 
 

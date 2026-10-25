@@ -51,7 +51,7 @@ def flag_provenance(body: JsonDict) -> tuple[tuple[str | None, str | None], None
 
 
 
-def _valid_flag_photo_id(photo_id: object) -> bool:
+def _valid_photo_id(photo_id: object) -> bool:
     """SQLite photo keys are positive signed 64-bit integers, never booleans."""
     return isinstance(photo_id, int) and not isinstance(photo_id, bool) and 0 < photo_id < 2**63
 
@@ -61,8 +61,12 @@ def create_photo_review_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
 
     @blueprint.post("/api/photos/<int:photo_id>/rating")
     def set_rating(photo_id: int) -> ResponseReturnValue:
-        body = request.get_json(silent=True) or {}
-        rating = body.get("rating", 0)
+        if not _valid_photo_id(photo_id):
+            return json_error("photo_id must be a positive signed 64-bit integer")
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        rating = body.get("rating")
         if (
             isinstance(rating, bool)
             or not isinstance(rating, int)
@@ -78,7 +82,7 @@ def create_photo_review_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
 
     @blueprint.post("/api/photos/<int:photo_id>/flag")
     def set_flag(photo_id: int) -> ResponseReturnValue:
-        if not _valid_flag_photo_id(photo_id):
+        if not _valid_photo_id(photo_id):
             return json_error("photo_id must be a positive signed 64-bit integer")
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -97,7 +101,7 @@ def create_photo_review_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
         if "observed_flag" in body and observed_flag not in VALID_FLAGS:
             return json_error("observed_flag must be 'none', 'flagged', or 'rejected'")
         observed_workspace = body.get("observed_workspace_id")
-        if "observed_workspace_id" in body and not _valid_flag_photo_id(observed_workspace):
+        if "observed_workspace_id" in body and not _valid_photo_id(observed_workspace):
             return json_error("observed_workspace_id must be a positive integer")
         db = get_db()
         try:
@@ -115,9 +119,11 @@ def create_photo_review_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
 
     @blueprint.post("/api/batch/rating")
     def set_ratings() -> ResponseReturnValue:
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         photo_ids = body.get("photo_ids", [])
-        rating = body.get("rating", 0)
+        rating = body.get("rating")
         if (
             isinstance(rating, bool)
             or not isinstance(rating, int)
@@ -127,6 +133,8 @@ def create_photo_review_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
             return json_error("rating must be an integer 0-5")
         if not photo_ids:
             return json_error("photo_ids required")
+        if not isinstance(photo_ids, list) or any(not _valid_photo_id(pid) for pid in photo_ids):
+            return json_error("photo_ids must be a list of positive signed 64-bit integer IDs")
         try:
             updated = PhotoReviewService(get_db()).set_ratings(photo_ids, rating)
         except ValueError as exc:
@@ -146,7 +154,7 @@ def create_photo_review_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
         if not photo_ids:
             return json_error("photo_ids required")
         if not isinstance(photo_ids, list) or any(
-            not _valid_flag_photo_id(pid) for pid in photo_ids
+            not _valid_photo_id(pid) for pid in photo_ids
         ):
             return json_error("photo_ids must be a list of positive signed 64-bit integer IDs")
         provenance = flag_provenance(body)

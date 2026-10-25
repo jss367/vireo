@@ -38,6 +38,17 @@ move state and lifecycle together, inject dependencies, and replace cross-owner
 writes with methods. Avoid introducing a shared mutable state bag or exporting
 private variables just to preserve their old names.
 
+## Browse grid requests
+
+Browse grid-request ownership lives in `static/browse/window-requests.js`.
+It has no dependencies on the page's rendering or loading modules. Dataset
+replacements claim an opaque owner; paging, selection and stack callbacks
+observe it and check their predicate after asynchronous work. The mutable
+owner remains private. The numeric sequence is exposed only for server search
+cancellation. Grid data, pagination and the loading flag still live in
+`browse/state.js`; this extraction removes request ownership from that shared
+object and lets consumers observe it without importing the loading workflow.
+
 ## Lightbox navigation and loading
 
 `VireoLightboxSession` in `static/lightbox/session.js` owns requested and displayed

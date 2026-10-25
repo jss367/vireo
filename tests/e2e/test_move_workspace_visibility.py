@@ -1,7 +1,19 @@
 """The move choice names affected workspaces and survives a page restart."""
 
+import pytest
 from playwright.sync_api import expect
 from services import workspace_folders
+
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Move page's modules as ``pageModules.<file>`` and its state as
+    ``moveState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "move", "moveState")
 
 
 def test_move_visibility_checkbox_remembers_choice_and_lists_workspaces(live_server, page):
@@ -14,7 +26,7 @@ def test_move_visibility_checkbox_remembers_choice_and_lists_workspaces(live_ser
     checkbox = page.get_by_label("Keep visible in other workspaces", exact=True)
     expect(checkbox).to_be_enabled()
     expect(checkbox).to_be_checked()
-    page.evaluate("selectedPhotos.add(%d); updatePhotoSelectionUI();" % photo["id"])
+    page.evaluate("moveState.selectedPhotos.add(%d); pageModules.photoMove.updatePhotoSelectionUI();" % photo["id"])
     expect(page.locator("#moveAffectedWorkspaces")).to_contain_text("Other birds")
     expect(page.locator("#moveAffectedWorkspaces")).to_contain_text("Visibility will be kept")
     checkbox.uncheck()

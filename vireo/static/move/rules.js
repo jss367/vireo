@@ -1,28 +1,32 @@
 // Move rules: the rule list, and running, editing and deleting a rule.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { showConfirm } from './confirm-modal.js';
+import { refreshMoveVisibility } from './move-visibility.js';
+import { showRuleForm } from './rule-form.js';
+import { escapeHtml, safeFetch, showToast } from './shared.js';
 
 /* ---------- Rules ---------- */
-/** @type {MoveRule[]} */ var rulesList = [];
 
-async function loadRules() {
+export async function loadRules() {
   try {
     var data = await safeFetch('/api/move-rules');
-    rulesList = data || [];
+    state.rulesList = data || [];
     renderRules();
   } catch (e) {
     /** @type {HTMLElement} */ (document.getElementById('rulesList')).innerHTML = '<div class="empty-state">Failed to load rules</div>';
   }
 }
 
-function renderRules() {
+export function renderRules() {
   var container = /** @type {HTMLElement} */ (document.getElementById('rulesList'));
-  if (rulesList.length === 0) {
+  if (state.rulesList.length === 0) {
     container.innerHTML = '<div class="empty-state">No move rules yet. Create one to get started.</div>';
     return;
   }
 
   var html = '';
-  rulesList.forEach(function(r) {
+  state.rulesList.forEach(function(r) {
     /** @type {MoveCriteria} */ var criteria = {};
     try { criteria = typeof r.criteria === 'string' ? JSON.parse(r.criteria) : (r.criteria || {}); } catch(e) {}
     var critSummary = buildCriteriaSummary(criteria);
@@ -37,9 +41,9 @@ function renderRules() {
     html += '</div>';
     html += '<div class="rule-last-run">' + (r.last_run_at ? 'Last run: ' + escapeHtml(r.last_run_at) : 'Never run') + '</div>';
     html += '<div class="rule-actions">';
-    html += '<button class="btn btn-primary btn-small" onclick="runRule(' + r.id + ')">Run</button>';
-    html += '<button class="btn btn-secondary btn-small" onclick="editRule(' + r.id + ')">Edit</button>';
-    html += '<button class="btn btn-danger btn-small" onclick="deleteRule(' + r.id + ')">Delete</button>';
+    html += '<button class="btn btn-primary btn-small" data-rule-action="run">Run</button>';
+    html += '<button class="btn btn-secondary btn-small" data-rule-action="edit">Edit</button>';
+    html += '<button class="btn btn-danger btn-small" data-rule-action="delete">Delete</button>';
     html += '</div>';
     html += '</div>';
   });
@@ -47,7 +51,7 @@ function renderRules() {
 }
 
 /** @param {MoveCriteria} criteria */
-function buildCriteriaSummary(criteria) {
+export function buildCriteriaSummary(criteria) {
   var parts = [];
   if (criteria.rating_min) parts.push('Rating >= ' + criteria.rating_min);
   if (criteria.flag && criteria.flag !== 'any') parts.push('Flag: ' + criteria.flag);
@@ -59,13 +63,13 @@ function buildCriteriaSummary(criteria) {
 }
 
 /** @param {number} ruleId */
-function editRule(ruleId) {
-  var rule = rulesList.find(function(r) { return r.id === ruleId; });
+export function editRule(ruleId) {
+  var rule = state.rulesList.find(function(r) { return r.id === ruleId; });
   if (rule) showRuleForm(rule);
 }
 
 /** @param {number} ruleId */
-async function deleteRule(ruleId) {
+export async function deleteRule(ruleId) {
   showConfirm('Delete Rule', 'Are you sure you want to delete this rule? This cannot be undone.', async function() {
     try {
       await safeFetch('/api/move-rules/' + ruleId, {method: 'DELETE'});
@@ -78,8 +82,8 @@ async function deleteRule(ruleId) {
 }
 
 /** @param {number} ruleId */
-async function runRule(ruleId) {
-  var foundRule = rulesList.find(function(r) { return r.id === ruleId; });
+export async function runRule(ruleId) {
+  var foundRule = state.rulesList.find(function(r) { return r.id === ruleId; });
   if (!foundRule) return;
   const rule = foundRule;
 
@@ -99,7 +103,7 @@ async function runRule(ruleId) {
       return;
     }
 
-    if (!moveVisibilityReady) return;
+    if (!state.moveVisibilityReady) return;
     var names = await refreshMoveVisibility(photoIds);
     var keepVisible = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible')).checked;
     showConfirm(

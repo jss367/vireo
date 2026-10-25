@@ -65,16 +65,13 @@ def test_inline_page_script_only_shrinks():
 SPLIT_PAGES = {
     "/settings": "settings",
     "/import": "import",
-    "/life-list": "life-list",
     "/pipeline": "pipeline",
     "/pipeline/review": "pipeline-review",
     "/pipeline/rapid-review": "pipeline-rapid-review",
     "/edit": "photo-editor",
     "/locations/review": "location-review",
     "/review": "review",
-    "/move": "move",
     "/cull": "cull",
-    "/id-conflicts": "id-conflicts",
 }
 
 
