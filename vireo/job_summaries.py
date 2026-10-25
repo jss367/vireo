@@ -309,10 +309,15 @@ def _cull(result: dict, config: dict) -> tuple[str, list[str]]:
         details.append(result["keep_review_message"])
     missing = _int(result, "photos_missing_phash")
     if missing:
+        named = [p for p in result.get("unfingerprinted_photos") or [] if isinstance(p, dict)]
         details.append(
             _n(missing, "photo") + " could not be fingerprinted for scene grouping "
-            "and were grouped on their own"
+            + ("and was grouped on its own" if missing == 1 else "and were grouped on their own")
+            + (":" if named else "")
         )
+        details.extend(f"{p.get('path')}: {p.get('reason')}" for p in named)
+        if named and missing > len(named):
+            details.append(f"and {missing - len(named):,} more")
     return summary, details
 
 
