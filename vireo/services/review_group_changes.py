@@ -140,21 +140,49 @@ def validate_group_changes(db: Database, cached: JsonDict, enc: JsonDict, body: 
     return group
 
 
-def apply_group_changes(db: Database, cached: JsonDict, group: JsonDict) -> list[JsonDict]:
-    """Write flags and detach frames without committing or saving the cache."""
+def apply_group_changes(db: Database, cached: JsonDict, group: JsonDict) -> JsonDict:
+    """Write flags and detach frames without committing or saving the cache.
+
+    Returns ``{"items": [...], "before_attributions": {...}, "touched_ids": [...]}``:
+    ``items`` is the catalog edit's reversible flag items, ``before_attributions``
+    the pre-write attribution snapshot captured so the enclosing grouping edit
+    can record replay metadata, and ``touched_ids`` every photo whose zone
+    decision was explicit so attribution is published even when the raw flag
+    is unchanged (a legacy ``flagged`` in Picks, an unattributed ``none`` in
+    Candidates).
+    """
     from pipeline import refresh_serialized_summary
 
+    touched_ids = []
+    for key in ("picks", "rejects", "candidates"):
+        for pid in group[key]:
+            if pid not in touched_ids:
+                touched_ids.append(pid)
+    before_attributions = db.photo_review.flag_attributions(touched_ids)
     items = []
     flag_by_id = {}
     for key, target in (("picks", "flagged"), ("rejects", "rejected"), ("candidates", "none")):
+        attributed_ids = []
         for pid in group[key]:
             row = db.photos.get(pid)
             old = row["flag"] or "none"
             flag_by_id[pid] = target
+            # Always UPDATE so a raw-NULL flag canonicalizes to ``target``.
+            # set_current_flag_note filters by ``flag IS 'none'``, which
+            # does not match NULL; without this, an explicit Candidates
+            # decision on a NULL-flag photo would not publish attribution.
+            # For old == target the UPDATE is a no-op write that still
+            # fires the invalidation trigger, and set_current_flag_note
+            # republishes the explicit note.
+            db.photo_review.set_flag(pid, target, _commit=False)
             if old != target:
-                db.photo_review.set_flag(pid, target, _commit=False)
                 db.queue_flag_change_if_enabled(pid, target, _commit=False)
-                items.append({"photo_id": pid, "old_value": old, "new_value": target})
+            attributed_ids.append(pid)
+            items.append({"photo_id": pid, "old_value": old, "new_value": target})
+        if attributed_ids:
+            db.photo_review.set_current_flag_note(
+                attributed_ids, target, "Applied Group Review species and cull decisions",
+            )
     for pid in group["removed"]:
         for ei, enc in enumerate(cached["encounters"]):
             bi = next((i for i, burst in enumerate(enc.get("bursts") or [])
@@ -169,4 +197,8 @@ def apply_group_changes(db: Database, cached: JsonDict, group: JsonDict) -> list
             flag = flag_by_id[photo["id"]]
             photo["flag"] = flag
     refresh_serialized_summary(cached)
-    return items
+    return {
+        "items": items,
+        "before_attributions": before_attributions,
+        "touched_ids": touched_ids,
+    }

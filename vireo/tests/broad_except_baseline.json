@@ -131,7 +131,6 @@
   "timm_classifier.py": 2,
   "volume_reachability.py": 4,
   "web/audit.py": 1,
-  "web/caches.py": 1,
   "web/duplicates.py": 1,
   "web/encounters.py": 3,
   "web/highlights.py": 3,

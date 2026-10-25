@@ -393,11 +393,15 @@ function decideCullComparison(action) {
 /** @param {CullSourceResults | null} results */
 function syncCullSourceFlags(results) {
   if (!cullSourceResults || !results) return;
-  /** @type {Record<number, string | undefined>} */
+  /** @type {Record<number, CullSourcePhoto>} */
   var flags = {};
-  (results.photos || []).forEach(function(p) { flags[p.id] = p.flag; });
+  (results.photos || []).forEach(function(p) { flags[p.id] = p; });
   (cullSourceResults.photos || []).forEach(function(p) {
-    if (Object.prototype.hasOwnProperty.call(flags, p.id)) p.flag = flags[p.id];
+    var saved = flags[p.id];
+    if (saved) {
+      p.flag = saved.flag;
+      p.flag_confirmation_status = saved.flag_confirmation_status || 'unverified';
+    }
   });
 }
 
@@ -546,7 +550,10 @@ function initializeCullFavorites() {
     var id = e.detail.photoId;
     [pipelineResults, cullSourceResults].forEach(function(results) {
       var p = results && results.photos.find(function(p) { return p.id === id; });
-      if (p) p.flag = e.detail.flag;
+      if (p) {
+        p.flag = e.detail.flag;
+        p.flag_confirmation_status = 'confirmed';
+      }
     });
     delete cullManualDecisions[id]; delete cullAppliedDecisions[id];
     cullDirty = unappliedPinCount() > 0;

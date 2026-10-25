@@ -92,11 +92,49 @@ def test_apply_clears_flag_when_photo_moved_to_candidates(app_and_db):
     assert db.photos.get(pid)['flag'] == 'none'
 
 
-def test_apply_is_idempotent_when_state_unchanged(app_and_db):
-    """Applying the same state twice doesn't double-record edit history."""
+def test_apply_candidates_null_flag_publishes_confirmation(app_and_db):
+    """A photo with a raw SQL ``NULL`` flag placed in Candidates must still
+    have its explicit Review decision confirmed. The attribution writer
+    filters by ``flag IS 'none'`` which does not match NULL, so Apply must
+    canonicalize the column to ``none`` before publishing the note."""
     app, db = app_and_db
     pids = _photo_ids(db)
     pid = pids[0]
+    # Force the raw column to NULL. Seeded photos may already carry
+    # ``flag = 'none'``; the finding is about the raw NULL case.
+    db.conn.execute("UPDATE photos SET flag = NULL WHERE id = ?", (pid,))
+    db.conn.commit()
+    assert db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?", (pid,),
+    ).fetchone()['flag'] is None
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/group/apply', json={
+        'picks': [],
+        'rejects': [],
+        'candidates': [pid],
+        'species': '',
+    })
+    assert resp.status_code == 200
+
+    # Column canonicalized to 'none' so attribution's WHERE flag IS 'none'
+    # matches, and the Cull overlay sees the decision as confirmed.
+    assert db.photos.get(pid)['flag'] == 'none'
+    states = db.photo_review.culling_flag_states([pid])
+    assert states[pid]['confirmed_flag'] == 'none'
+
+
+def test_apply_records_attribution_history_without_flag_transition(app_and_db):
+    """A legacy ``flagged`` photo placed in Picks has its unverified
+    attribution turned into a confirmed photographer decision. The
+    confirmation is recorded as a reversible history entry even though
+    the raw flag did not change, so Undo can restore the prior
+    attribution (or lack of it)."""
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    pid = pids[0]
+    # Direct set_flag writes the legacy flag without publishing
+    # attribution — the condition the finding this test covers describes.
     db.photo_review.set_flag(pid, 'flagged')
     client = app.test_client()
 
@@ -118,7 +156,7 @@ def test_apply_is_idempotent_when_state_unchanged(app_and_db):
         "SELECT COUNT(*) AS n FROM edit_history WHERE workspace_id = ?",
         (db._active_workspace_id,),
     ).fetchone()['n']
-    assert after == before  # no flag transition → no history row
+    assert after == before + 1  # explicit confirmation records one row
 
 
 def test_apply_skips_keyword_when_already_applied(app_and_db):
@@ -223,6 +261,52 @@ def test_apply_rejects_conflicting_zones(app_and_db):
         'candidates': [],
     })
     assert resp.status_code == 400
+
+
+def test_apply_rejects_non_integer_photo_ids(app_and_db):
+    """Validate as integers BEFORE dedup. SQLite's INTEGER affinity resolves
+    ``1`` and ``"1"`` to the same row, but Python's set/dict.fromkeys treats
+    them as distinct, so the mixed payload would survive and still collide on
+    ``(edit_id, photo_id)`` in flag_attribution_history. Same bar as
+    /api/predictions/group/apply.
+    """
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    pid = pids[0]
+    before_flag = db.photos.get(pid)['flag']
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/group/apply', json={
+        'picks': [pid, str(pid)],
+        'rejects': [],
+        'candidates': [],
+    })
+    assert resp.status_code == 400
+    assert 'picks' in (resp.get_json() or {}).get('error', '')
+    assert db.photos.get(pid)['flag'] == before_flag
+    rows = db.conn.execute(
+        "SELECT id FROM edit_history WHERE workspace_id = ?",
+        (db._active_workspace_id,),
+    ).fetchall()
+    assert rows == []
+
+
+def test_apply_dedupes_repeated_photo_ids_within_zone(app_and_db):
+    """A payload with the same int repeated in one zone is deduped before the
+    flag_attribution_history write, so no IntegrityError can escape as a 500.
+    """
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    pid = pids[0]
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/group/apply', json={
+        'picks': [pid, pid],
+        'rejects': [],
+        'candidates': [],
+    })
+    assert resp.status_code == 200
+    assert db.photos.get(pid)['flag'] == 'flagged'
 
 
 def test_apply_rejects_photo_outside_workspace(app_and_db):

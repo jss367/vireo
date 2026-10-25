@@ -942,9 +942,9 @@ def test_bulk_reject_validates_category_before_workspace(db):
         miss_flags.bulk_reject_miss_category(db, "oof")
 
 
-def test_bulk_reject_updates_in_chunks_of_500(db):
+def test_bulk_reject_uses_shared_flag_writer_chunks(db):
     fid = _folder(db)
-    pids = _bulk_photos(db, fid, 501, miss_no_subject=1)
+    pids = _bulk_photos(db, fid, 801, miss_no_subject=1)
     statements = _trace(db)
     affected = miss_flags.bulk_reject_miss_category(db, "no_subject")
     db.conn.set_trace_callback(None)
@@ -953,7 +953,7 @@ def test_bulk_reject_updates_in_chunks_of_500(db):
     updates = list(dict.fromkeys(
         s for s in statements if s.startswith("UPDATE photos SET flag")
     ))
-    assert [s.count(",") + 1 for s in updates] == [500, 1]
+    assert [s.count(",") + 1 for s in updates] == [800, 1]
     assert {a["photo_id"] for a in affected} == set(pids)
 
 
@@ -1010,7 +1010,7 @@ _REMOVED_DETECTION_WRAPPERS = (
 _FACADE_ONLY_DETECTION_METHODS = (
     "write_batch", "get", "get_for_photos", "get_predictions",
     "delete_by_ids", "miss_column", "miss_where", "list_miss_photos",
-    "attach_miss_detections", "clear_miss_flag", "reject_misses",
+    "attach_miss_detections", "clear_miss_flag", "select_misses_to_reject",
 )
 
 

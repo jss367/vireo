@@ -129,7 +129,7 @@ def keep_duplicate_copy(db: Database, photo_id: int) -> JsonDict:
         plan = cast("JsonDict", found)
         # Commits the transaction opened above.
         db._apply_winner_loser_merge(
-            photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"],
+            photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"], manual_review=True,
         )
     except BaseException:
         if db.in_transaction:
@@ -194,7 +194,7 @@ def bulk_resolve_by_folder(
                 db.rollback()
                 skipped.append({"file_hash": file_hash, "reason": reason})
                 continue
-            db._apply_winner_loser_merge(winner_id, loser_ids)
+            db._apply_winner_loser_merge(winner_id, loser_ids, manual_review=True)
         resolved.append({
             "file_hash": file_hash,
             "winner_id": winner_id,

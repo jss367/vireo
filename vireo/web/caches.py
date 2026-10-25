@@ -318,13 +318,15 @@ def create_caches_blueprint(
             results = json.load(f)
 
         # Enrich with photo metadata for the UI
-        photo_flags = {}
+        photo_ids = {p["photo_id"] for g in results["species_groups"]
+                     for s in g.get("scene_groups", g.get("pose_groups", [])) for p in s["photos"]}
+        photo_ids.update(p["photo_id"] for g in results["species_groups"] for p in g.get("photos_data", []))
+        photo_flags = db.photo_review.culling_flag_states(photo_ids)
         for sg in results["species_groups"]:
             for pg in sg.get("scene_groups", sg.get("pose_groups", [])):
                 for photo in pg["photos"]:
                     p = db.photos.get(photo["photo_id"])
                     if p:
-                        photo_flags[photo["photo_id"]] = p["flag"]
                         photo["filename"] = p["filename"]
                         photo["sharpness"] = p["sharpness"]
                         photo["subject_sharpness"] = p["subject_sharpness"]
@@ -381,50 +383,13 @@ def create_caches_blueprint(
                     f"Photo {pid} listed in both {a} and {b}", 400
                 )
 
+        from services.photo_review import PhotoReviewService
+
         try:
-            # Flags, sidecar intents and undo history are one durable edit.
-            # Lock before reading old values so history also describes the
-            # flags this request actually replaced.
-            db.begin_immediate()
-            old_flags = {}
-            for pid in keepers + rejects + unflag:
-                db._verify_photo_in_workspace(pid)
-                old_flags[pid] = db.photos.get(pid)["flag"] or "none"
-
-            # Clearing an already-clear flag is a no-op.
-            cleared = [pid for pid in unflag if old_flags[pid] != "none"]
-            flag_items = []
-            for photo_ids, flag in ((keepers, "flagged"), (rejects, "rejected"), (cleared, "none")):
-                for pid in photo_ids:
-                    db.photo_review.set_flag(pid, flag, _commit=False)
-                    db.queue_flag_change_if_enabled(pid, flag, _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old_flags[pid], "new_value": flag})
-
-            if flag_items:
-                summary = f'Culling: flagged {len(keepers)}, rejected {len(rejects)}'
-                if cleared:
-                    summary += f', cleared {len(cleared)}'
-                db.record_edit('flag', summary, 'culling_apply', flag_items, is_batch=True, _commit=False)
-            db.commit()
+            counts = PhotoReviewService(db).apply_culling_flags(keepers, rejects, unflag)
         except ValueError as e:
-            db.rollback()
             return json_error(str(e), 403)
-        except Exception:
-            db.rollback()
-            raise
-
-        if flag_items:
-            db._prune_edit_history()
-
-        log.info(
-            "Culling applied: %d keepers, %d rejects, %d cleared",
-            len(keepers), len(rejects), len(cleared),
-        )
-        return jsonify({
-            "ok": True,
-            "keepers": len(keepers),
-            "rejects": len(rejects),
-            "cleared": len(cleared),
-        })
+        log.info("Culling applied: %s", counts)
+        return jsonify({"ok": True, **counts})
 
     return blueprint

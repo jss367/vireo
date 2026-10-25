@@ -400,6 +400,76 @@ def test_prediction_group_apply(app_and_db):
     assert all(p['status'] == 'rejected' for p in reject_preds)
 
 
+def test_prediction_group_apply_dedupes_repeated_photo_ids(app_and_db):
+    """Repeated picks collapse to one attribution row instead of a 500.
+
+    `flag_attribution_history` keys on `(edit_id, photo_id)`, so a payload
+    repeating the same photo in picks would otherwise insert the same row
+    twice under one edit and trip the primary key.
+    """
+    app, db = app_and_db
+    photos = _seed_predictions(db)
+    client = app.test_client()
+    pick_id = photos[0]['id']
+
+    resp = client.post('/api/predictions/group/apply', json={
+        'picks': [pick_id, pick_id],
+        'rejects': [],
+        'removed': [],
+        'species': '',
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()['ok'] is True
+    assert db.photos.get(pick_id)['flag'] == 'flagged'
+    assert db.edit_history.list_recent()[0]['item_count'] == 1
+
+
+def test_prediction_group_apply_rejects_overlap(app_and_db):
+    """A photo in both picks and rejects is a 400, not a last-write-wins race."""
+    app, db = app_and_db
+    photos = _seed_predictions(db)
+    client = app.test_client()
+    pid = photos[0]['id']
+    before = db.photos.get(pid)['flag']
+
+    resp = client.post('/api/predictions/group/apply', json={
+        'picks': [pid],
+        'rejects': [pid],
+        'removed': [],
+        'species': '',
+    })
+    assert resp.status_code == 400
+    assert 'picks' in resp.get_json()['error']
+    assert 'rejects' in resp.get_json()['error']
+    # Nothing moved — the overlap was rejected before any write landed.
+    assert db.photos.get(pid)['flag'] == before
+    assert db.edit_history.list_recent() == []
+
+
+def test_prediction_group_apply_rejects_non_integer_photo_ids(app_and_db):
+    """``picks: [1, "1"]`` would survive dict.fromkeys yet SQLite's INTEGER
+    affinity treats both as the same row, so both reach
+    record_flag_attribution_history and collide on (edit_id, photo_id).
+    Validate shape up front, same bar as /api/culling/apply."""
+    app, db = app_and_db
+    photos = _seed_predictions(db)
+    client = app.test_client()
+    pid = photos[0]['id']
+    before = db.photos.get(pid)['flag']
+
+    resp = client.post('/api/predictions/group/apply', json={
+        'picks': [pid, str(pid)],
+        'rejects': [],
+        'removed': [],
+        'species': '',
+    })
+    assert resp.status_code == 400
+    assert 'picks' in resp.get_json()['error']
+    # Nothing moved — the shape error landed before any write.
+    assert db.photos.get(pid)['flag'] == before
+    assert db.edit_history.list_recent() == []
+
+
 def test_predictions_for_collection(app_and_db):
     """GET /api/predictions?collection_id=N scopes to that collection's photos."""
     app, db = app_and_db

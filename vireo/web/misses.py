@@ -458,25 +458,6 @@ def create_misses_blueprint(
         affected = miss_flags.bulk_reject_miss_category(
             db, category, since=since, photo_ids=photo_ids
         )
-        if affected:
-            items = [
-                {"photo_id": a["photo_id"],
-                 "old_value": a["old_value"],
-                 "new_value": "rejected"}
-                for a in affected
-            ]
-            for item in items:
-                db.queue_flag_change_if_enabled(
-                    item["photo_id"], item["new_value"], _commit=False
-                )
-            db.commit()
-            db.record_edit(
-                "flag",
-                f"Rejected {len(items)} miss photos (category={category})",
-                "rejected",
-                items,
-                is_batch=True,
-            )
         return jsonify({"rejected": len(affected), "category": category})
 
     @blueprint.route("/api/misses/<int:photo_id>/unflag", methods=["POST"])

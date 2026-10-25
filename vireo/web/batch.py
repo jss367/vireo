@@ -344,35 +344,61 @@ def create_batch_blueprint(
         except ValueError as e:
             return json_error(str(e), 403)
 
-        safety_error = best_batch_application_error(photos_map, best_photo_id, normalized_reject_ids)
+        # Ranking and legacy writes can set raw flags without manual approval.
+        states = db.photo_review.culling_flag_states(photo_ids)
+        gate_rows = {
+            pid: {**dict(photos_map[pid]), "flag": states.get(pid, {}).get("confirmed_flag") or "none"}
+            for pid in photo_ids
+        }
+        safety_error = best_batch_application_error(gate_rows, best_photo_id, normalized_reject_ids)
         if safety_error:
             return json_error(safety_error, 409)
 
-        items = []
-        for pid in photo_ids:
-            new_flag = desired_flags[pid]
-            old_flag = photos_map[pid]["flag"]
-            db.photo_review.set_flag(pid, new_flag, verify_workspace=False, _commit=False)
-            db.queue_flag_change_if_enabled(pid, new_flag, _commit=False)
-            items.append({
-                "photo_id": pid,
-                "old_value": old_flag,
-                "new_value": new_flag,
-            })
         reject_count = len(normalized_reject_ids)
         description = (
             f"Best Batch: flagged best photo and rejected {reject_count} "
             f"{'photo' if reject_count == 1 else 'photos'}"
         )
-        db.record_edit(
-            "flag",
-            description,
-            "best_batch_apply",
-            items,
-            is_batch=True,
-            _commit=False,
-        )
-        db.commit()
+        # Capture attribution BEFORE any writes so Undo can restore the
+        # exact prior note (or lack of one for a legacy flag). The flag
+        # UPDATE trigger invalidates attribution rows; without the
+        # republish below the explicit Best Batch decision would show as
+        # unverified in Cull even for photos already flagged "flagged".
+        with db.photo_review.flag_write():
+            before_attributions = db.photo_review.flag_attributions(photo_ids)
+            items = []
+            flagged_ids = []
+            rejected_ids = []
+            for pid in photo_ids:
+                new_flag = desired_flags[pid]
+                old_flag = photos_map[pid]["flag"]
+                db.photo_review.set_flag(pid, new_flag, verify_workspace=False, _commit=False)
+                db.queue_flag_change_if_enabled(pid, new_flag, _commit=False)
+                items.append({
+                    "photo_id": pid,
+                    "old_value": old_flag,
+                    "new_value": new_flag,
+                })
+                if new_flag == "flagged":
+                    flagged_ids.append(pid)
+                elif new_flag == "rejected":
+                    rejected_ids.append(pid)
+            if flagged_ids:
+                db.photo_review.set_current_flag_note(flagged_ids, "flagged", description)
+            if rejected_ids:
+                db.photo_review.set_current_flag_note(rejected_ids, "rejected", description)
+            edit_id = db.record_edit(
+                "flag",
+                description,
+                "best_batch_apply",
+                items,
+                is_batch=True,
+                _commit=False,
+            )
+            db.photo_review.record_flag_attribution_history(
+                edit_id, photo_ids, before_attributions,
+                db.photo_review.flag_attributions(photo_ids),
+            )
         db._prune_edit_history()
         return jsonify({
             "ok": True,

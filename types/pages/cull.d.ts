@@ -5,6 +5,7 @@ interface CullSourcePhoto {
   id: number; filename: string; timestamp?: string | null;
   confirmed_species?: string | string[]; confirmed_species_list?: string[];
   species_top5?: [string, number][]; subjects?: CullSubject[];
+  flag_confirmation_status?: 'confirmed' | 'unverified';
   flag?: string; rating?: number; width?: number; height?: number;
   quality_composite?: number | null; subject_sharpness?: number | null; label?: string;
 }

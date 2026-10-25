@@ -816,6 +816,7 @@ def create_pipeline_blueprint(
             run_selected_batch_review(photos, config=effective_cfg)
         )
         attach_edit_recipes(db, results.get("photos", []))
+        _attach_live_flag_confirmations(db, results.get("photos", []))
         results["source"] = "browse-selection"
         results["workspace_id"] = db.active_workspace_id
         return jsonify(results)
@@ -899,6 +900,7 @@ def create_pipeline_blueprint(
             # so a stale one would keep showing a removed second species
             # and mis-derive "Mixed species" after an edit, undo, or redo.
             photo["confirmed_species_list"] = list(names)
+        _attach_live_flag_confirmations(db, results.get("photos", []))
         from pipeline import attach_species_identities
         from species_identity import SpeciesResolver
         attach_species_identities(results, SpeciesResolver(db=db))
@@ -1051,6 +1053,7 @@ def create_pipeline_blueprint(
 
         serialized = serialize_results(results, prior_results=existing)
         attach_nested_edit_recipes(db, serialized)
+        _attach_live_flag_confirmations(db, serialized.get("photos", []))
         return jsonify(serialized)
 
     @blueprint.route("/api/pipeline/regroup-live", methods=["POST"])
@@ -1140,6 +1143,7 @@ def create_pipeline_blueprint(
 
         serialized = serialize_results(results, prior_results=existing)
         attach_nested_edit_recipes(db, serialized)
+        _attach_live_flag_confirmations(db, serialized.get("photos", []))
         return jsonify(serialized)
 
     @blueprint.route("/api/pipeline/detach-burst", methods=["POST"])
@@ -1382,6 +1386,10 @@ def create_pipeline_blueprint(
         # no longer carrying the species keyword) doesn't light up the modal
         # while browse/highlights hide it.
         representatives = db.get_species_representatives(eligible_only=True)
+        # Confirmation status rides with the flag so Cull's undo/redo
+        # refresh does not strand a stale "confirmed" marker when the
+        # restored flag has no matching current attribution.
+        flag_states = db.photo_review.culling_flag_states(photo_ids) if photo_ids else {}
         photos = {}
         for pid in photo_ids:
             # Same workspace guard the apply endpoint uses, so a malicious
@@ -1402,8 +1410,13 @@ def create_pipeline_blueprint(
                     name: (kid is not None and kid in attached)
                     for name, kid in list_kids.items()
                 }
+            flag_state = flag_states.get(pid, {})
+            flag = flag_state.get("flag") or (row["flag"] or "none")
             photos[pid] = {
-                "flag": row["flag"] or "none",
+                "flag": flag,
+                "flag_confirmation_status": (
+                    "confirmed" if flag_state.get("confirmed_flag") == flag else "unverified"
+                ),
                 "has_species_keyword": has_kw,
                 "has_species_keywords": has_kws,
                 "is_species_representative": bool(
@@ -1440,31 +1453,97 @@ def create_pipeline_blueprint(
                 detach_review_photo(results, enc_idx, burst_idx, pid)
         return None
 
-    def _apply_group_zone_flags(db, picks, rejects, candidates, old_flags):
-        """Write each zone's target flag where it changes: ``(flag_items, error)``."""
+    def _apply_group_zone_flags(db, picks, rejects, candidates, old_flags, description):
+        """Write each zone's target flag with attribution for every explicit decision.
+
+        Returns ``(flag_items, before_attributions, error)``. Attribution is
+        captured BEFORE any writes. Every explicit zone decision — including
+        a legacy ``flagged`` photo placed in Picks or an unattributed ``none``
+        photo placed in Candidates — publishes a current attribution note and
+        gets a replay snapshot, so Cull sees the choice as confirmed and Undo
+        restores prior attribution from the snapshot.
+        """
         try:
-            # Apply target flags. We rely on update_photo_flag's own write
-            # being a no-op at the SQL level when the value matches, but we
-            # still skip when unchanged so we don't record useless history.
             flag_items = []
-            for pid in picks:
-                old = old_flags.get(pid, "none")
-                if old != "flagged":
-                    db.photo_review.set_flag(pid, "flagged", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "flagged"})
-            for pid in rejects:
-                old = old_flags.get(pid, "none")
-                if old != "rejected":
-                    db.photo_review.set_flag(pid, "rejected", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "rejected"})
-            for pid in candidates:
-                old = old_flags.get(pid, "none")
-                if old in ("flagged", "rejected"):
-                    db.photo_review.set_flag(pid, "none", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
+            touched_ids = list(dict.fromkeys(list(picks) + list(rejects) + list(candidates)))
+            before_attributions = db.photo_review.flag_attributions(touched_ids)
+            for zone_ids, target in (
+                (picks, "flagged"), (rejects, "rejected"), (candidates, "none"),
+            ):
+                attributed_ids = []
+                for pid in zone_ids:
+                    old = old_flags.get(pid, "none")
+                    # Always UPDATE so a raw-NULL flag canonicalizes to
+                    # ``target``: set_current_flag_note's WHERE clause
+                    # filters by ``flag IS 'none'``, which does not match
+                    # NULL. For old == target the UPDATE is a no-op write
+                    # that still fires the invalidation trigger, and
+                    # set_current_flag_note republishes the explicit note
+                    # so Cull sees the photographer's confirmation.
+                    db.photo_review.set_flag(pid, target, _commit=False)
+                    attributed_ids.append(pid)
+                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": target})
+                if attributed_ids:
+                    db.photo_review.set_current_flag_note(attributed_ids, target, description)
         except ValueError as e:
-            return None, json_error(str(e), 403)
-        return flag_items, None
+            return None, None, json_error(str(e), 403)
+        return flag_items, before_attributions, None
+
+    def _record_flag_attribution_history(db, edit_id, changed_ids, before_attributions):
+        """Replay metadata must share the flag write's transaction."""
+        if not changed_ids:
+            return
+        db.photo_review.record_flag_attribution_history(
+            edit_id, changed_ids, before_attributions,
+            db.photo_review.flag_attributions(changed_ids),
+        )
+
+    def _persist_group_apply(db, flag_items, before_attributions, desc,
+                             removed, before, results):
+        """Record the flag edits, attribution snapshots, and cache either path.
+
+        ``removed`` photos route through ``save_grouping_edit`` (same
+        transaction, encounter snapshot included); otherwise the flag edit is
+        recorded directly and the cache is saved before committing.
+        """
+        from pipeline import save_results_raw
+        from services.grouping_history import save_grouping_edit
+
+        if flag_items:
+            for item in flag_items:
+                if item["old_value"] != item["new_value"]:
+                    db.queue_flag_change_if_enabled(
+                        item["photo_id"], item["new_value"], _commit=False,
+                    )
+        changed_ids = [item["photo_id"] for item in (flag_items or ())]
+
+        def record_attribution(edit_id):
+            _record_flag_attribution_history(db, edit_id, changed_ids, before_attributions)
+
+        if removed:
+            save_grouping_edit(
+                db, before, results, desc + f", detached {len(removed)}",
+                photo_edit={"action_type": "flag", "new_value": "pipeline_group_apply"} if flag_items else None,
+                items=flag_items,
+                on_record=record_attribution if changed_ids else None,
+            )
+            return
+        if flag_items:
+            edit_id = db.record_edit("flag", desc, "pipeline_group_apply", flag_items,
+                                     is_batch=len(flag_items) > 1, _commit=False)
+            record_attribution(edit_id)
+        saved = False
+        try:
+            if results is not None:
+                save_results_raw(results, os.path.dirname(db._db_path), db.require_workspace_id())
+                saved = True
+            db.commit()
+        except Exception:  # broad: roll back catalog changes and restore the saved cache before re-raising
+            db.rollback()
+            if saved:
+                save_results_raw(before, os.path.dirname(db._db_path), db.require_workspace_id())
+            raise
+        db._prune_edit_history()
 
     def _group_apply_photo_states(db, photo_ids):
         """Each photo's flag after a group apply, for the client's card update."""
@@ -1479,6 +1558,38 @@ def create_pipeline_blueprint(
             }
         return result_photos
 
+    def _normalize_pipeline_apply_zones(picks, rejects, candidates):
+        """Validate shape, dedup per-zone, and reject cross-zone overlap.
+
+        Returns ``(picks, rejects, candidates, seen, err_response)``. Validates
+        shape BEFORE dedup: ``dict.fromkeys`` and ``set`` treat ``1`` and
+        ``"1"`` as distinct keys even though SQLite's INTEGER affinity resolves
+        both to the same row, so a mixed payload would survive dedup and still
+        collide on ``(edit_id, photo_id)`` in flag_attribution_history. Same bar
+        as /api/predictions/group/apply.
+        """
+        for name, value in (("picks", picks), ("rejects", rejects), ("candidates", candidates)):
+            if not isinstance(value, list):
+                return picks, rejects, candidates, None, json_error(f"{name} must be a list")
+            if any(
+                isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**63
+                for pid in value
+            ):
+                return picks, rejects, candidates, None, json_error(
+                    f"{name} must contain valid integer photo ids"
+                )
+        picks = list(dict.fromkeys(picks))
+        rejects = list(dict.fromkeys(rejects))
+        candidates = list(dict.fromkeys(candidates))
+        seen = set()
+        for pid in picks + rejects + candidates:
+            if pid in seen:
+                return picks, rejects, candidates, None, json_error(
+                    f"Photo {pid} appears in more than one zone", 400,
+                )
+            seen.add(pid)
+        return picks, rejects, candidates, seen, None
+
     @blueprint.route("/api/pipeline/group/apply", methods=["POST"])
     @grouping_edit
     def api_pipeline_group_apply():
@@ -1491,8 +1602,7 @@ def create_pipeline_blueprint(
         were previously flagged/rejected. Returns per-photo new flag state so
         the client can update its rendered cards without reloading.
         """
-        from pipeline import load_results_raw, save_results_raw
-        from services.grouping_history import save_grouping_edit
+        from pipeline import load_results_raw
 
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -1500,12 +1610,11 @@ def create_pipeline_blueprint(
         rejects = list(body.get("rejects", []) or [])
         candidates = list(body.get("candidates", []) or [])
 
-        # The same photo can't be in two zones. Reject conflicting input.
-        seen = set()
-        for pid in picks + rejects + candidates:
-            if pid in seen:
-                return json_error(f"Photo {pid} appears in more than one zone", 400)
-            seen.add(pid)
+        picks, rejects, candidates, seen, zones_err = _normalize_pipeline_apply_zones(
+            picks, rejects, candidates,
+        )
+        if zones_err is not None:
+            return zones_err
 
         # All photos must be in the active workspace.
         for pid in picks + rejects + candidates:
@@ -1526,45 +1635,24 @@ def create_pipeline_blueprint(
             if row:
                 old_flags[pid] = row["flag"] or "none"
 
-        flag_items, err = _apply_group_zone_flags(
-            db, picks, rejects, candidates, old_flags,
+        cleared_count = sum(
+            1 for pid in candidates if old_flags.get(pid, "none") in ("flagged", "rejected")
+        )
+        desc = (
+            f"Pipeline burst group: flagged {len(picks)}, rejected {len(rejects)}, "
+            f"cleared {cleared_count}"
+        )
+
+        flag_items, before_attributions, err = _apply_group_zone_flags(
+            db, picks, rejects, candidates, old_flags, desc,
         )
         if err is not None:
             return err
 
-        if flag_items:
-            for item in flag_items:
-                db.queue_flag_change_if_enabled(
-                    item["photo_id"], item["new_value"], _commit=False
-                )
-        desc = (
-            f"Pipeline burst group: flagged {len(picks)}, rejected {len(rejects)}, "
-            f"cleared {sum(1 for it in flag_items if it['new_value'] == 'none')}"
-        )
         if results is not None:
             sync_review_photo_flags(db, results, seen)
-        if removed:
-            save_grouping_edit(
-                db, before, results, desc + f", detached {len(removed)}",
-                photo_edit={"action_type": "flag", "new_value": "pipeline_group_apply"} if flag_items else None,
-                items=flag_items,
-            )
-        else:
-            if flag_items:
-                db.record_edit("flag", desc, "pipeline_group_apply", flag_items,
-                               is_batch=len(flag_items) > 1, _commit=False)
-            saved = False
-            try:
-                if results is not None:
-                    save_results_raw(results, os.path.dirname(db_path), db.require_workspace_id())
-                    saved = True
-                db.commit()
-            except Exception:  # broad: roll back catalog changes and restore the saved cache before re-raising
-                db.rollback()
-                if saved:
-                    save_results_raw(before, os.path.dirname(db_path), db.require_workspace_id())
-                raise
-            db._prune_edit_history()
+        _persist_group_apply(db, flag_items, before_attributions, desc,
+                             removed, before, results)
 
         # Return new per-photo state so the client can update without a reload.
         # `has_species_keyword` is kept in the payload (now always False) so the
@@ -1764,6 +1852,18 @@ def _shrink_source_encounter(results, enc, bursts, detached_ids, photos_by_id):
         b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
 
 
+def _attach_live_flag_confirmations(db, photos):
+    """Only current persisted photographer attribution confirms a Cull flag."""
+    states = db.photo_review.culling_flag_states([p["id"] for p in photos])
+    for photo in photos:
+        state = states.get(photo["id"], {})
+        flag = state.get("flag") or "none"
+        photo["flag"] = flag
+        photo["flag_confirmation_status"] = (
+            "confirmed" if state.get("confirmed_flag") == flag else "unverified"
+        )
+
+
 def _overlay_live_photo_state(db, results):
     """Overlay live flags, ratings, eyes and edit recipes on cached results."""
     # Cached pipeline rows predate edit recipes, which live in their
@@ -1794,6 +1894,7 @@ def _overlay_live_photo_state(db, results):
     # live overlay above is what makes this call correct — the shared
     # attacher short-circuits rejected photos, and the overlay
     # ensures p["flag"] reflects the live DB, not a stale cache.
+    _attach_live_flag_confirmations(db, results["photos"])
     attach_species_representatives(db, results["photos"])
 
 

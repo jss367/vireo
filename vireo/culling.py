@@ -171,8 +171,7 @@ def _current_photo_flags(db, photo_ids):
     result and the job-history summary, otherwise "kept/rejected by you"
     claims a decision that is no longer the catalog's.
     """
-    live = db.photos.flags_ratings_and_eyes(photo_ids)
-    return {pid: (live[pid]["flag"] if pid in live else "none") for pid in photo_ids}
+    return db.photo_review.culling_flag_states(photo_ids)
 
 
 def _load_top_predictions(db, photo_ids, pause_callback):

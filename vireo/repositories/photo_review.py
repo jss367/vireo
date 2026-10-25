@@ -20,6 +20,7 @@ is a different column whose workspace check stays on ``Database``; its write
 edit and commits once) lives here but is reached only through that method.
 """
 
+import json
 import sqlite3
 from collections.abc import Collection, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -94,6 +95,28 @@ class PhotoReviewRepository:
         )
         if _commit:
             self.conn.commit()
+
+    def flag_ranked_candidate(self, photo_id: int, *, _commit: bool = True) -> bool:
+        """Record a provisional winner without overwriting any existing choice.
+
+        The condition and write are one statement so a concurrent photographer
+        decision cannot be replaced between a separate read and update. The
+        ordinary invalidation trigger leaves this ranking write unattributed.
+        """
+        if self.workspace_id is None:
+            raise RuntimeError("No active workspace set")
+        changed = self.conn.execute(
+            """UPDATE photos SET flag='flagged' WHERE id=? AND (flag='none' OR flag IS NULL)
+               AND EXISTS (SELECT 1 FROM photo_workspace_visibility
+                           WHERE photo_id=photos.id AND workspace_id=?)
+               AND NOT EXISTS (SELECT 1 FROM current_flag_attribution a
+                               WHERE a.photo_id=photos.id AND a.flag IS photos.flag
+                                 AND a.source IS NULL AND a.reason IS NULL)""",
+            (photo_id, self.workspace_id),
+        ).rowcount
+        if _commit:
+            self.conn.commit()
+        return bool(changed)
 
     def wildlife_excluded_states(self, photo_ids: Iterable[int]) -> dict[int, int]:
         """``{photo_id: 0 or 1}`` for the named photos the active workspace can see.
@@ -187,8 +210,6 @@ class PhotoReviewRepository:
             raise RuntimeError("No active workspace set")
         if not self.conn.in_transaction:
             raise RuntimeError("Current flag attribution requires the flag write transaction")
-        if not source and not reason:
-            return
         self.conn.executemany(
             """INSERT OR REPLACE INTO current_flag_attribution
                (photo_id, workspace_id, flag, source, reason, description)
@@ -197,16 +218,123 @@ class PhotoReviewRepository:
         )
 
     def current_flag_note(self, photo_id):
-        """Current provenance only; pruning, replay and unattributed writes cannot revive history."""
+        """Current visible note; manual confirmations do not impersonate agent notes."""
         if self.workspace_id is None:
             raise RuntimeError("No active workspace set")
         row = self.conn.execute(
             """SELECT a.flag, a.source, a.reason, a.description, a.created_at AS at
                FROM current_flag_attribution a JOIN photos p ON p.id=a.photo_id
-               WHERE a.photo_id=? AND a.workspace_id=? AND a.flag IS p.flag""",
+               WHERE a.photo_id=? AND a.workspace_id=? AND a.flag IS p.flag
+                 AND (a.source IS NOT NULL OR a.reason IS NOT NULL)""",
             (photo_id, self.workspace_id),
         ).fetchone()
         return dict(row) if row else None
+
+    def culling_flag_states(self, photo_ids):
+        """Read flag and its current confirmation together, within visible scope.
+
+        The attribution trigger invalidates every flag write. Only an explicit
+        review write subsequently publishes attribution; a missing legacy row
+        is unknown, and an attributed automated source is not a photographer.
+        Flags are global, so a real manual decision remains valid when its photo
+        is visible in another workspace. No catalog flag is changed here.
+        """
+        if self.workspace_id is None:
+            raise RuntimeError("No active workspace set")
+        result = {}
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT p.id, p.flag,
+                    CASE WHEN a.photo_id IS NOT NULL
+                              AND a.source IS NULL AND a.reason IS NULL
+                         THEN p.flag END AS confirmed_flag
+                    FROM photos p
+                    JOIN photo_workspace_visibility v ON v.photo_id=p.id AND v.workspace_id=?
+                    LEFT JOIN current_flag_attribution a ON a.photo_id=p.id AND a.flag IS p.flag
+                    WHERE p.id IN ({placeholders})""", [self.workspace_id, *chunk],
+            )
+            result.update({row["id"]: dict(row) for row in rows})
+        return result
+
+    def flag_attributions(self, photo_ids):
+        """Capture exact current attribution before a reversible explicit write."""
+        result = {}
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT a.* FROM current_flag_attribution a
+                    JOIN photos p ON p.id=a.photo_id AND p.flag IS a.flag
+                    WHERE a.photo_id IN ({placeholders})""", chunk,
+            )
+            result.update({row["photo_id"]: dict(row) for row in rows})
+        return result
+
+    def confirm_duplicate_choices(self, winner_id, loser_ids):
+        """Publish an explicit duplicate choice inside its metadata transaction.
+
+        Keeping a copy preserves its flag; it does not turn an unflagged copy
+        into a flagged keeper. An explicit clear is still a confirmed decision.
+        Duplicate resolution has no flag-only Undo entry: its metadata merge
+        is not reversible independently of these choices.
+        """
+        row = self.conn.execute("SELECT flag FROM photos WHERE id=?", (winner_id,)).fetchone()
+        if row is None:
+            raise ValueError("Duplicate winner no longer exists")
+        flag = row[0] or "none"
+        if row[0] is None:
+            self.set_flag(winner_id, flag, verify_workspace=False, _commit=False)
+        self.set_current_flag_note([winner_id], flag, "Kept this duplicate copy")
+        self.set_current_flag_note(loser_ids, "rejected", "Rejected duplicate copies by user choice")
+
+    def transfer_flag_for_merge(self, source_id, surviving_id, flag):
+        """Carry only the winning queue photo's matching current attribution.
+
+        Capture before the flag UPDATE invalidates attribution, including when
+        the survivor itself wins. Unknown or stale evidence stays unknown.
+        The merge owns the transaction and the losing photo's deletion.
+        """
+        state = self.flag_attributions([source_id]).get(source_id)
+        self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, surviving_id))
+        if state is not None and state["flag"] == flag:
+            self.conn.execute(
+                """INSERT INTO current_flag_attribution
+                   (photo_id,workspace_id,flag,source,reason,description,created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (surviving_id, state["workspace_id"], flag, state["source"],
+                 state["reason"], state["description"], state["created_at"]),
+            )
+
+    def record_flag_attribution_history(self, edit_id, photo_ids, before, after):
+        """Keep replay metadata with its edit; history pruning cascades it away."""
+        if not self.conn.in_transaction:
+            raise RuntimeError("Flag replay metadata requires the flag write transaction")
+        self.conn.executemany(
+            "INSERT INTO flag_attribution_history VALUES(?,?,?,?)",
+            [(edit_id, pid, json.dumps(before[pid]) if pid in before else None,
+              json.dumps(after[pid]) if pid in after else None) for pid in photo_ids],
+        )
+
+    def restore_flag_attribution_history(self, edit_id, photo_id, *, undo):
+        """Restore only captured metadata; legacy replay never manufactures it."""
+        field = "old_state" if undo else "new_state"
+        row = self.conn.execute(
+            f"SELECT {field} FROM flag_attribution_history WHERE edit_id=? AND photo_id=?",
+            (edit_id, photo_id),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return
+        state = json.loads(row[0])
+        if state["photo_id"] != photo_id:
+            raise ValueError("Flag attribution belongs to a different photo")
+        self.conn.execute(
+            """INSERT INTO current_flag_attribution
+               (photo_id,workspace_id,flag,source,reason,description,created_at)
+               SELECT p.id,(SELECT id FROM workspaces WHERE id=?),p.flag,?,?,?,? FROM photos p
+               WHERE p.id=? AND p.flag IS ?""",
+            (state["workspace_id"], state["source"], state["reason"], state["description"],
+             state["created_at"], photo_id, state["flag"]),
+        )
 
     def _verify_photo(self, photo_id):
         if self.workspace_id is None:
