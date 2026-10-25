@@ -1,5 +1,10 @@
 // Explorer: the flat rank breakdown opened from a summary chip.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { rankPlural, renderRing } from './explorer-cards.js';
+import { loadExplorerSpecies, renderSpeciesTile } from './explorer-species.js';
+import { renderExplorer } from './explorer.js';
+import { escapeAttr, escapeHtml, safeFetch } from './shared.js';
 
 // ---------------- Explorer: flat rank breakdown (clickable summary chips) ----------------
 //
@@ -9,38 +14,38 @@
 // so counts always match the chips. A breadcrumb ("Birds › All families")
 // returns to the normal drill cards.
 
-/** @type {ReturnType<typeof setTimeout>|null} */ var rankSearchTimer = null;   // debounce for the flat-view search input
+   // debounce for the flat-view search input
 
 // Fetch the flat rank list for the current class and switch the body into the
 // flat view. Threads the current class root id from explorerData.root so the
 // endpoint scopes to the same class the drill cards use. Clicking the already-
 // open rank's chip toggles the view closed.
-/** @param {string} rank */ async function openRankView(rank) {
+/** @param {string} rank */ export async function openRankView(rank) {
   // Drop any pending search debounce so it can't fire against a different view.
-  clearTimeout(rankSearchTimer ?? undefined);
-  if (explorerRankView && explorerRankView.rank === rank) {
-    explorerRankView = null;
-    explorerViewReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
+  clearTimeout(state.rankSearchTimer ?? undefined);
+  if (state.explorerRankView && state.explorerRankView.rank === rank) {
+    state.explorerRankView = null;
+    state.explorerViewReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
     renderExplorer();
     return;
   }
-  var rootId = (explorerData && explorerData.root && explorerData.root.id != null)
-    ? explorerData.root.id : null;
+  var rootId = (state.explorerData && state.explorerData.root && state.explorerData.root.id != null)
+    ? state.explorerData.root.id : null;
   var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (body) body.innerHTML = '<div class="ll-exp-empty">Loading…</div>';
   var url = '/api/life-list/explorer/rank?rank=' + encodeURIComponent(rank)
     + (rootId != null ? ('&root=' + encodeURIComponent(rootId)) : '');
-  var myReq = ++explorerViewReqId;   // claim the body token; any later navigation bumps it
+  var myReq = ++state.explorerViewReqId;   // claim the body token; any later navigation bumps it
   /** @type {LifeRankData} */ var data;
   try {
     data = await safeFetch(url);
   } catch (e) {
-    if (myReq !== explorerViewReqId) return;   // superseded — leave the newer view alone
+    if (myReq !== state.explorerViewReqId) return;   // superseded — leave the newer view alone
     if (body) body.innerHTML = '<div class="ll-exp-empty">Failed to load rank breakdown.</div>';
     return;
   }
-  if (myReq !== explorerViewReqId) return;   // the user navigated away; discard this stale response
-  explorerRankView = { rank: rank, data: data, search: '', missingOnly: false, showAll: false };
+  if (myReq !== state.explorerViewReqId) return;   // the user navigated away; discard this stale response
+  state.explorerRankView = { rank: rank, data: data, search: '', missingOnly: false, showAll: false };
   renderExplorer();   // full rebuild so the chips pick up .active and the body flips
 }
 
@@ -48,14 +53,14 @@
 // the grid via renderRankGrid(). The search input and checkbox live outside the
 // grid container, so typing only refreshes the grid (renderRankGrid) and never
 // steals focus from the input.
-function renderRankView() {
+export function renderRankView() {
   var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (!body) return;
-  const rv = explorerRankView; if (!rv) return;
+  const rv = state.explorerRankView; if (!rv) return;
   var data = rv.data || {};
   var rank = rv.rank;
   var pluralLabel = rankPlural(rank);
-  /** @type {Partial<LifeTaxon>} */ var root = (explorerData && explorerData.root) || {};
+  /** @type {Partial<LifeTaxon>} */ var root = (state.explorerData && state.explorerData.root) || {};
   var rootLabel = root.common_name || root.name || 'Class';
 
   var html = '<div class="ll-crumbs">';
@@ -77,9 +82,9 @@ function renderRankView() {
   body.innerHTML = html;
 
   var back = function() {
-    clearTimeout(rankSearchTimer ?? undefined);
-    explorerRankView = null;
-    explorerViewReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
+    clearTimeout(state.rankSearchTimer ?? undefined);
+    state.explorerRankView = null;
+    state.explorerViewReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
     renderExplorer();
   };
   var bc = /** @type {HTMLElement} */ (document.getElementById('rankBackCrumb'));
@@ -90,20 +95,20 @@ function renderRankView() {
   var search = /** @type {HTMLInputElement} */ (document.getElementById('rankSearch'));
   if (search) {
     search.addEventListener('input', function() {
-      clearTimeout(rankSearchTimer ?? undefined);
-      rankSearchTimer = setTimeout(function() {
-        if (!explorerRankView) return;
-        explorerRankView.search = search.value;
-        explorerRankView.showAll = false;
+      clearTimeout(state.rankSearchTimer ?? undefined);
+      state.rankSearchTimer = setTimeout(function() {
+        if (!state.explorerRankView) return;
+        state.explorerRankView.search = search.value;
+        state.explorerRankView.showAll = false;
         renderRankGrid();
       }, 150);
     });
   }
   var chk = /** @type {HTMLInputElement} */ (document.getElementById('rankMissingOnly'));
   if (chk) chk.addEventListener('change', function() {
-    if (!explorerRankView) return;
-    explorerRankView.missingOnly = chk.checked;
-    explorerRankView.showAll = false;
+    if (!state.explorerRankView) return;
+    state.explorerRankView.missingOnly = chk.checked;
+    state.explorerRankView.showAll = false;
     renderRankGrid();
   });
 
@@ -117,11 +122,11 @@ function renderRankView() {
 // search — a visible notice shows and the render caps to the first 500 unless
 // "Show all" is pressed (No-black-boxes: never truncate silently, and never
 // build an ~11k-tile innerHTML that can freeze the WKWebView renderer).
-function renderRankGrid() {
+export function renderRankGrid() {
   var grid = /** @type {HTMLElement} */ (document.getElementById('rankGrid'));
   var notice = /** @type {HTMLElement} */ (document.getElementById('rankNotice'));
   if (!grid) return;
-  const rv = explorerRankView; if (!rv) return;
+  const rv = state.explorerRankView; if (!rv) return;
   var data = rv.data || {};
   var items = data.items || [];
   var rank = rv.rank;
@@ -173,8 +178,8 @@ function renderRankGrid() {
 
   var showAll = /** @type {HTMLButtonElement} */ (document.getElementById('rankShowAll'));
   if (showAll) showAll.addEventListener('click', function() {
-    if (!explorerRankView) return;
-    explorerRankView.showAll = true;
+    if (!state.explorerRankView) return;
+    state.explorerRankView.showAll = true;
     renderRankGrid();
   });
 
@@ -193,7 +198,7 @@ function renderRankGrid() {
 // Card for an order/family/genus row in the flat view. Reuses the .ll-card look
 // (ring + name + scientific + species count). The `order` context label is only
 // present for family/genus rows (null for order-rank items themselves).
-/** @param {LifeNode} i */ function renderRankCard(i) {
+/** @param {LifeNode} i */ export function renderRankCard(i) {
   var name = i.common_name || i.name;
   var sci = (i.common_name && i.common_name !== i.name)
     ? '<div class="ll-card-sci">' + escapeHtml(i.name) + '</div>' : '';
@@ -212,7 +217,7 @@ function renderRankGrid() {
 // Build the drill lineage (root→node, excluding the class root) for a taxon id
 // from explorerData.nodes. Returns [{id,name,rank}] or null if not in the tree
 // (species aren't in the tree, so those rows stay non-navigable).
-/** @param {number} id */ function explorerLineage(id) {
+/** @param {number} id */ export function explorerLineage(id) {
   /** @type {LifeCrumb[] | null} */ var path = null;
   (/** @param {LifeNode[]} list @param {LifeCrumb[]} acc */ function walk(list, acc) {
     if (path || !list) return;
@@ -223,12 +228,12 @@ function renderRankGrid() {
       walk(n.children || [], next);
       if (path) return;
     }
-  })((explorerData && explorerData.nodes) || [], []);
+  })((state.explorerData && state.explorerData.nodes) || [], []);
   return path;
 }
 
 // Locate the raw tree node (with children) for a taxon id in explorerData.nodes.
-/** @param {number} id */ function explorerFindNode(id) {
+/** @param {number} id */ export function explorerFindNode(id) {
   /** @type {LifeNode | null} */ var found = null;
   (/** @param {LifeNode[]} list */ function walk(list) {
     if (found || !list) return;
@@ -238,25 +243,25 @@ function renderRankGrid() {
       walk(n.children || []);
       if (found) return;
     }
-  })((explorerData && explorerData.nodes) || []);
+  })((state.explorerData && state.explorerData.nodes) || []);
   return found;
 }
 
 // Click-through from a flat-view order/family/genus row into the drill view.
 // Sets explorerPath to the row's lineage and clears the flat view. Genus rows
 // open the species leaf. If the id isn't in the tree, do nothing (non-navigable).
-/** @param {number} id */ function openRankItem(id) {
+/** @param {number} id */ export function openRankItem(id) {
   var lineage = explorerLineage(id);
   var node = explorerFindNode(id);
   if (!lineage || !node) return;
-  explorerRankView = null;
-  explorerViewReqId++;   // invalidate any in-flight /rank or /species fetch so it can't replace the drill
+  state.explorerRankView = null;
+  state.explorerViewReqId++;   // invalidate any in-flight /rank or /species fetch so it can't replace the drill
   if (node.rank === 'genus') {
-    explorerPath = lineage.slice(0, -1);   // drill to the parent family
+    state.explorerPath = lineage.slice(0, -1);   // drill to the parent family
     renderExplorer();
     loadExplorerSpecies(node);             // then open the genus's species leaf
   } else {
-    explorerPath = lineage.slice();
+    state.explorerPath = lineage.slice();
     renderExplorer();
   }
 }

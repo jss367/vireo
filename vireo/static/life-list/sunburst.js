@@ -1,5 +1,9 @@
 // Explorer: the zoomable sunburst overview and its tooltip.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { currentExplorerNodes, renderExplorerBody } from './explorer-cards.js';
+import { loadExplorerSpecies } from './explorer-species.js';
+import { escapeAttr, escapeHtml } from './shared.js';
 
 // ---------------- Explorer: sunburst overview (Task 13) ----------------
 //
@@ -15,17 +19,17 @@
 // untouched branch reads clearly faded and a complete branch fully saturated.
 // Clicking an arc drills in; clicking the center moves up one level.
 
-/** @type {Record<number,LifeCrumb[]>} */ var explorerSunburstLineage = {};   // node id -> [{id,name,rank}] root→node lineage
+   // node id -> [{id,name,rank}] root→node lineage
 
 // Resolve explorerPath against the materialized tree. Keeping this separate
 // from currentExplorerNodes makes the selected taxon's own rollup available to
 // the sunburst center as well as its children.
-function currentExplorerFocus() {
-  var nodes = (explorerData && explorerData.nodes) || [];
+export function currentExplorerFocus() {
+  var nodes = (state.explorerData && state.explorerData.nodes) || [];
   var focus = null;
   var lineage = [];
-  for (var i = 0; i < explorerPath.length; i++) {
-    const step = explorerPath[i]; if (!step) break;
+  for (var i = 0; i < state.explorerPath.length; i++) {
+    const step = state.explorerPath[i]; if (!step) break;
     var match = nodes.find(function(n) { return n.id === step.id; });
     if (!match) break;
     focus = match;
@@ -35,7 +39,7 @@ function currentExplorerFocus() {
   return { node: focus, children: focus ? (focus.children || []) : nodes, lineage: lineage };
 }
 
-/** @param {LifeNode[]} nodes */ function explorerTreeDepth(nodes) {
+/** @param {LifeNode[]} nodes */ export function explorerTreeDepth(nodes) {
   var depth = 0;
   (nodes || []).forEach(function(node) {
     depth = Math.max(depth, 1 + explorerTreeDepth(node.children || []));
@@ -45,13 +49,13 @@ function currentExplorerFocus() {
 
 // Convert a polar point (center + radius + angle in radians, 0 = top,
 // clockwise) to SVG x/y. Returns a string "x,y".
-/** @param {number} cx @param {number} cy @param {number} r @param {number} a */ function llPolar(cx, cy, r, a) {
+/** @param {number} cx @param {number} cy @param {number} r @param {number} a */ export function llPolar(cx, cy, r, a) {
   return (cx + r * Math.sin(a)).toFixed(3) + ',' + (cy - r * Math.cos(a)).toFixed(3);
 }
 
 // SVG path for a single ring segment (annular sector) spanning [a0,a1] radians
 // between inner radius r0 and outer radius r1.
-/** @param {number} cx @param {number} cy @param {number} r0 @param {number} r1 @param {number} a0 @param {number} a1 @returns {string} */ function llArcPath(cx, cy, r0, r1, a0, a1) {
+/** @param {number} cx @param {number} cy @param {number} r0 @param {number} r1 @param {number} a0 @param {number} a1 @returns {string} */ export function llArcPath(cx, cy, r0, r1, a0, a1) {
   // A single child spanning (near) a full 360° collapses to a degenerate arc
   // because start==end. Draw a full annulus (two stacked half-arcs) instead.
   if ((a1 - a0) >= 2 * Math.PI - 1e-6) {
@@ -73,19 +77,19 @@ function currentExplorerFocus() {
 // Accent fill at an opacity scaled by completeness. 0 found → a ghost track so
 // untouched branches read faded; 1.0 → full accent. Zero-total arcs (should not
 // happen below genus, but guard anyway) render as the plain track.
-/** @param {number} found @param {number} total */ function llArcFill(found, total) {
+/** @param {number} found @param {number} total */ export function llArcFill(found, total) {
   if (!total || total <= 0) return { fill: 'var(--bg-tertiary)', op: 1 };
   var frac = Math.max(0, Math.min(1, found / total));
   if (frac <= 0) return { fill: 'var(--bg-tertiary)', op: 1 };
   return { fill: 'var(--accent)', op: (0.15 + 0.85 * frac) };
 }
 
-function renderSunburst() {
+export function renderSunburst() {
   var host = /** @type {HTMLElement} */ (document.getElementById('explorerSunburst'));
   if (!host) return;
   var focus = currentExplorerFocus();
   var top = focus.children;
-  explorerSunburstLineage = {};
+  state.explorerSunburstLineage = {};
 
   // Keep the selected center visible even when it has no materialized species
   // below it. layout() partitions zero-total children equally, so incomplete
@@ -101,7 +105,7 @@ function renderSunburst() {
     rings.push(R_CENTER + ((R_OUTER - R_CENTER) * ringIndex / visibleDepth));
   }
 
-  /** @type {Partial<LifeTaxon>} */ var root = (explorerData && explorerData.root) || {};
+  /** @type {Partial<LifeTaxon>} */ var root = (state.explorerData && state.explorerData.root) || {};
   var rootLineage = focus.lineage;   // lineage entries accumulate as we recurse
   /** @type {{id:number;path:string;fill:string;op:number;name:string;sci:string;found:number;total:number}[]} */ var arcs = [];          // collected {path, fill, op, tip, lineage}
 
@@ -125,7 +129,7 @@ function renderSunburst() {
       cursor = e;
       if (w <= 0) return;   // zero-weight child gets no arc
       var lin = lineage.concat([{ id: n.id, name: n.common_name || n.name, rank: n.rank }]);
-      explorerSunburstLineage[n.id] = lin;
+      state.explorerSunburstLineage[n.id] = lin;
       var shade = llArcFill(n.found_species || 0, n.total_species || 0);
       arcs.push({
         id: n.id,
@@ -153,7 +157,7 @@ function renderSunburst() {
       + ' data-found="' + a.found + '" data-total="' + a.total + '" data-pct="' + pct + '"></path>');
   });
   // Center hub = active selection. Clicking it moves up one level.
-  var summary = (explorerData && explorerData.summary) || {};
+  var summary = (state.explorerData && state.explorerData.summary) || {};
   var selected = focus.node || root;
   var sp = focus.node
     ? { found: focus.node.found_species || 0, total: focus.node.total_species || 0 }
@@ -174,7 +178,7 @@ function renderSunburst() {
 }
 
 // Shared floating tooltip element (one per document, reused).
-function llSunburstTooltip() {
+export function llSunburstTooltip() {
   var tip = /** @type {HTMLElement} */ (document.getElementById('explorerSunburstTip'));
   if (!tip) {
     tip = document.createElement('div');
@@ -185,7 +189,7 @@ function llSunburstTooltip() {
   return tip;
 }
 
-/** @param {HTMLElement} host */ function wireSunburst(host) {
+/** @param {HTMLElement} host */ export function wireSunburst(host) {
   var svg = host.querySelector(/** @type {'svg'} */ ('.ll-sb-svg'));
   if (!svg) return;
   var tip = llSunburstTooltip();
@@ -226,8 +230,8 @@ function llSunburstTooltip() {
     if (!(ev.target instanceof Element)) return;
     var center = ev.target.closest('.ll-sb-center');
     if (center) {
-      explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
-      if (explorerPath.length) explorerPath = explorerPath.slice(0, -1);
+      state.explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
+      if (state.explorerPath.length) state.explorerPath = state.explorerPath.slice(0, -1);
       hideTip();
       renderExplorerBody();
       return;
@@ -235,9 +239,9 @@ function llSunburstTooltip() {
     var arc = ev.target.closest('.ll-sb-arc');
     if (!arc) return;
     var id = parseInt(arc.getAttribute('data-id') || '', 10);
-    var lineage = explorerSunburstLineage[id];
+    var lineage = state.explorerSunburstLineage[id];
     if (!lineage) return;
-    explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
+    state.explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
     hideTip();
     // Genus arcs: drilling to a genus loads its species leaf (matches card
     // behavior); anything above genus just sets the path and shows cards.
@@ -245,15 +249,15 @@ function llSunburstTooltip() {
     if (leaf?.rank === 'genus') {
       // Set path to the genus's parent chain, then load species (which pushes
       // the genus crumb itself), mirroring a card click on that genus.
-      explorerPath = lineage.slice(0, -1);
+      state.explorerPath = lineage.slice(0, -1);
       var node = currentExplorerNodes().find(function(n) { return n.id === id; });
       if (node) { loadExplorerSpecies(node); return; }
       // Fallback: if the node isn't in the current level, just set the full path.
-      explorerPath = lineage.slice();
+      state.explorerPath = lineage.slice();
       renderExplorerBody();
       return;
     }
-    explorerPath = lineage.slice();
+    state.explorerPath = lineage.slice();
     renderExplorerBody();
   });
 }

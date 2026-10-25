@@ -1,7 +1,8 @@
 // The Export Life List dialog: formats, CSV columns, and the download.
-// Classic page script; load boot.js after all definitions.
 
-/** @type {Record<'species'|'photos',[string,string][]>} */ var LIFE_LIST_EXPORT_COLUMNS = {
+import { state } from './state.js';
+
+/** @type {Record<'species'|'photos',[string,string][]>} */ export const LIFE_LIST_EXPORT_COLUMNS = {
   species: [
     ['number', 'Life-list number'],
     ['species', 'Displayed species name'],
@@ -27,9 +28,8 @@
     ['locations', 'Locations'],
   ],
 };
-/** @type {Record<'species'|'photos',Record<string,boolean>|null>} */ var lifeListExportColumnSelections = {species: null, photos: null};
 
-function openExportModal() {
+export function openExportModal() {
   var modal = /** @type {HTMLElement} */ (document.getElementById('exportModal'));
   var status = /** @type {HTMLElement} */ (document.getElementById('exportStatus'));
   if (status) status.textContent = '';
@@ -41,29 +41,29 @@ function openExportModal() {
   }, 0);
 }
 
-function closeExportModal() {
+export function closeExportModal() {
   /** @type {HTMLElement} */ (document.getElementById('exportModal')).classList.remove('open');
 }
 
-/** @param {'species'|'photos'} detail */ function exportColumnSelection(detail) {
-  if (!lifeListExportColumnSelections[detail]) {
+/** @param {'species'|'photos'} detail */ export function exportColumnSelection(detail) {
+  if (!state.lifeListExportColumnSelections[detail]) {
     /** @type {Record<string,boolean>} */ var selection = {};
     LIFE_LIST_EXPORT_COLUMNS[detail].forEach(function(column) {
       selection[column[0]] = true;
     });
-    lifeListExportColumnSelections[detail] = selection;
+    state.lifeListExportColumnSelections[detail] = selection;
   }
-  return lifeListExportColumnSelections[detail];
+  return state.lifeListExportColumnSelections[detail];
 }
 
-/** @param {'species'|'photos'} detail */ function selectedExportColumns(detail) {
+/** @param {'species'|'photos'} detail */ export function selectedExportColumns(detail) {
   var selection = exportColumnSelection(detail);
   return LIFE_LIST_EXPORT_COLUMNS[detail]
     .map(function(column) { return column[0]; })
     .filter(function(column) { return selection[column]; });
 }
 
-function updateExportLocationsVisibility() {
+export function updateExportLocationsVisibility() {
   var format = /** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).value;
   var detail = /** @type {HTMLSelectElement & {value:'species'|'photos'}} */ (document.getElementById('exportDetail')).value;
   var showLocations = format === 'json' || format === 'txt';
@@ -73,7 +73,7 @@ function updateExportLocationsVisibility() {
   /** @type {HTMLElement} */ (document.getElementById('exportLocationsWrap')).style.display = showLocations ? '' : 'none';
 }
 
-/** @param {'species'|'photos'} detail */ function renderExportColumns(detail) {
+/** @param {'species'|'photos'} detail */ export function renderExportColumns(detail) {
   var container = /** @type {HTMLElement} */ (document.getElementById('exportColumns'));
   var selection = exportColumnSelection(detail);
   container.textContent = '';
@@ -97,7 +97,7 @@ function updateExportLocationsVisibility() {
   });
 }
 
-function updateExportControls() {
+export function updateExportControls() {
   var format = /** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).value;
   var detailWrap = /** @type {HTMLElement} */ (document.getElementById('exportDetailWrap'));
   var photosWrap = /** @type {HTMLElement} */ (document.getElementById('exportPhotosWrap'));
@@ -112,7 +112,7 @@ function updateExportControls() {
   updateExportLocationsVisibility();
 }
 
-function downloadLifeListExport() {
+export function downloadLifeListExport() {
   var format = /** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).value;
   var detail = /** @type {HTMLSelectElement & {value:'species'|'photos'}} */ (document.getElementById('exportDetail')).value;
   var photos = /** @type {HTMLSelectElement} */ (document.getElementById('exportPhotos')).value;

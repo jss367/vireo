@@ -12,19 +12,23 @@ interface LifeRankData {found?:number;total?:number;items?:LifeNode[]}
 interface LifeRankView {rank:string;data:LifeRankData;search:string;missingOnly:boolean;showAll:boolean}
 interface LifePublishOptions {include_life_list:boolean;photos_per_species:number;include_highlights:boolean;limit_per_bucket:number;include_locations:boolean;max_size:string;destination?:string}
 interface LifePublishPreflight {life_list_species:number;highlight_buckets:number;unidentified_photos?:number;image_count:number;data_file_count:number}
-declare function escapeHtml(value:unknown):string;
-declare function escapeAttr(value:unknown):string;
-declare function showToast(message:string,kind?:string):void;
-declare function safeFetch<T>(url:string,options?:RequestInit,feedback?:{toast?:boolean}):Promise<T>;
-declare function safeEventSource(url:string,callbacks:{onComplete:()=>void}):unknown;
-declare function openLightbox(id:number,filename:string,photos:LifePhoto[]):void;
-declare function isTauri():boolean;
-declare function pickDirectory(title:string,options:{defaultPath?:string}):Promise<string|string[]|null>;
-declare const VireoViewPreferences:{restoreAll(element:HTMLElement|null):void};
-declare const VireoTextSearch:{readOptions(prefix:string):{caseSensitive?:boolean;wholeWord?:boolean;regex?:boolean};matchesFields(fields:string[],query:string,options:ReturnType<typeof VireoTextSearch.readOptions>):boolean};
 declare class VireoFolderBrowser {constructor(options:{overlayId:string;defaultMode:string;modes:Record<string,{title:string;multiple:boolean;showCounts:boolean;startPath:()=>string;onSelect:(path:string)=>void}>});sequence:number;open(mode:string,options?:{skipInitialBrowse:boolean}):void}
-interface Window {vireoThumbnailUrl?(photo:LifePhoto):string;openLightbox?:typeof openLightbox;vireoLightboxSession:{requestedPhotoId():number|null}}
+// The shared globals the page's shared.js reads.
+interface Window {
+  escapeHtml(value:unknown):string;
+  escapeAttr(value:unknown):string;
+  showToast?(message:string,kind?:string):void;
+  safeFetch<T>(url:string,options?:RequestInit,feedback?:{toast?:boolean}):Promise<T>;
+  safeEventSource?(url:string,callbacks:{onComplete:()=>void}):unknown;
+  openLightbox?(id:number,filename:string,photos:LifePhoto[]):void;
+  isTauri?():boolean;
+  pickDirectory?(title:string,options:{defaultPath?:string}):Promise<string|string[]|null>;
+  VireoViewPreferences:{restoreAll(element:HTMLElement|null):void};
+  VireoTextSearch:{readOptions(prefix:string):{caseSensitive?:boolean;wholeWord?:boolean;regex?:boolean};matchesFields(fields:string[],query:string,options:{caseSensitive?:boolean;wholeWord?:boolean;regex?:boolean}):boolean;toggle(prefix:string,option:string,callback:()=>unknown):void};
+  VireoFolderBrowser:typeof VireoFolderBrowser;
+  vireoThumbnailUrl?(photo:LifePhoto):string;
+  vireoLightboxSession:{requestedPhotoId():number|null};
+  Vireo:VireoPageHookRegistry;
+}
 interface HTMLElement {_llSummaryWired?:boolean}
 interface DocumentEventMap {'lightbox:photochanged':CustomEvent<{photoId?:number}>;'lightbox:navigationboundary':CustomEvent<{delta?:number;photoId?:number}>;'lightbox:flagchanged':CustomEvent<{previousFlag?:string;flag?:string}>;'lightbox:closed':CustomEvent<void>;'lifelist:changed':CustomEvent<unknown>}
-// The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
-declare var Vireo: VireoPageHookRegistry;

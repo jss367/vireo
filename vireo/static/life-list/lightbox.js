@@ -1,12 +1,16 @@
 // Shared-lightbox listeners: page prefetch, the navigation boundary, Picks, and close.
-// Classic page script; load boot.js after all definitions.
 
-function bindLifeListLightboxEvents() {
+import { state } from './state.js';
+import { lifeListEntry, loadMoreLifeListPhotos } from './cards.js';
+import { loadLifeList } from './list.js';
+import { hasLightbox, lightboxRequestedPhotoId, openLightbox } from './shared.js';
+
+export function bindLifeListLightboxEvents() {
   // Prefetch the next page before the viewer reaches the end of the current
   // lightbox list. If navigation reaches the boundary first, the boundary
   // listener waits for that same request and advances as soon as it arrives.
   document.addEventListener('lightbox:photochanged', function(event) {
-    const entry = lifeListEntry(lifeListLightboxSpecies);
+    const entry = lifeListEntry(state.lifeListLightboxSpecies);
     if (!entry || !entry.has_more) return;
     var photoId = event && event.detail && event.detail.photoId;
     var index = (entry.photos || []).findIndex(function(photo) { return photo.id === photoId; });
@@ -16,14 +20,14 @@ function bindLifeListLightboxEvents() {
   document.addEventListener('lightbox:navigationboundary', function(event) {
     var detail = event && event.detail || {};
     if (detail.delta !== 1) return;
-    const entry = lifeListEntry(lifeListLightboxSpecies);
+    const entry = lifeListEntry(state.lifeListLightboxSpecies);
     if (!entry || !entry.has_more) return;
     var currentId = detail.photoId;
     loadMoreLifeListPhotos(entry).then(function() {
-      if (window.vireoLightboxSession.requestedPhotoId() !== currentId) return;
+      if (lightboxRequestedPhotoId() !== currentId) return;
       var index = entry.photos.findIndex(function(photo) { return photo.id === currentId; });
       var next = entry.photos[index + 1];
-      if (next && typeof window.openLightbox === 'function') {
+      if (next && hasLightbox()) {
         openLightbox(next.id, next.filename, entry.photos);
       }
     });
@@ -43,6 +47,6 @@ function bindLifeListLightboxEvents() {
   });
 
   document.addEventListener('lightbox:closed', function() {
-    lifeListLightboxSpecies = null;
+    state.lifeListLightboxSpecies = null;
   });
 }
