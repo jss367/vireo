@@ -1606,6 +1606,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app_hooks.register_app_hooks(
         app,
         get_db=_get_db,
+        get_runner=lambda: app._job_runner,
         reservation_exempt_endpoints=_reservation_exempt_endpoints,
     )
 

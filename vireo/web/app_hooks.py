@@ -21,12 +21,16 @@ used to define inline:
 * ``teardown_request``: ``_release_workspace_mutation``.
 """
 
+from __future__ import annotations
+
 import contextlib
 import logging
 import re
 import secrets
 import time
 import uuid
+from collections.abc import Collection
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from db import Database
@@ -36,6 +40,11 @@ from repositories.predictions import DeferredIdentificationError
 from services import search_lanes
 from web.responses import json_error
 from werkzeug.exceptions import HTTPException
+
+if TYPE_CHECKING:
+    from flask import Flask, Response
+    from services.service_types import ErrorResponse
+    from web.web_types import AppConfig, GetDb, GetRunner
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +78,7 @@ RESERVATION_EXEMPT_ENDPOINTS = frozenset({
 })
 
 
-def get_request_db(db_path):
+def get_request_db(db_path: str) -> Database:
     """Get a Database instance. One connection per request via Flask g."""
     if "db" not in g:
         g.db = Database(
@@ -79,14 +88,14 @@ def get_request_db(db_path):
     return g.db
 
 
-def close_request_db(exc):
+def close_request_db(exc: BaseException | None) -> None:
     """Close the request's Database, if one was opened."""
     db = g.pop("db", None)
     if db is not None:
         db.close()
 
 
-def claim_search_lane(db):
+def claim_search_lane(db: Database) -> None:
     """Let a newer request on this request's search lane cancel it.
 
     Read routes the page re-issues on every search change call this with
@@ -103,8 +112,8 @@ def claim_search_lane(db):
     search_lanes.cancel_when_superseded(db, superseded)
 
 
-def _start_timer():
-    request._start_time = time.time()
+def _start_timer() -> None:
+    g.request_start_time = time.time()
     supplied_request_id = request.headers.get("X-Request-ID", "")
     if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", supplied_request_id):
         g.request_id = supplied_request_id
@@ -112,7 +121,7 @@ def _start_timer():
         g.request_id = uuid.uuid4().hex
 
 
-def _browser_surface_refusal(config):
+def _browser_surface_refusal(config: AppConfig) -> ErrorResponse | None:
     """The refusal for a request on the browser surface, or ``None``.
 
     The check behind ``_protect_browser_surface`` (see there), reading
@@ -194,7 +203,7 @@ def _browser_surface_refusal(config):
     return None
 
 
-def _action_log_detail():
+def _action_log_detail() -> str:
     """The `` key=value`` suffix the action log adds for a POST/DELETE."""
     # Log user actions with details about what changed
     detail = ""
@@ -232,10 +241,11 @@ def _action_log_detail():
     return detail
 
 
-def _log_request_timing(response):
+def _log_request_timing(response: Response) -> None:
     """Log the action, slow-request and API lines for the finished request."""
-    if hasattr(request, "_start_time"):
-        elapsed = time.time() - request._start_time
+    start_time = g.get("request_start_time")
+    if start_time is not None:
+        elapsed = time.time() - start_time
         if request.method in ("POST", "DELETE"):
             detail = _action_log_detail()
             log.info(
@@ -270,7 +280,7 @@ def _log_request_timing(response):
             )
 
 
-def _finish_response(response, config):
+def _finish_response(response: Response, config: AppConfig) -> Response:
     """Stamp the request id and security headers; set the session cookie."""
     request_id = getattr(g, "request_id", None)
     if request_id:
@@ -303,7 +313,7 @@ def _finish_response(response, config):
 
 
 # Catch uncaught exceptions so they don't disappear silently
-def _handle_error(e):
+def _handle_error(e: Exception) -> ErrorResponse | HTTPException:
     if isinstance(e, DeferredIdentificationError):
         return json_error(str(e), 409, code='identification_deferred')
     if isinstance(e, WorkspaceBusyError):
@@ -328,7 +338,7 @@ def _handle_error(e):
     }), 500
 
 
-def _reject_non_object_json_body():
+def _reject_non_object_json_body() -> ErrorResponse | None:
     """Refuse a JSON body that parses to anything but an object.
 
     Every API route reads its body as an object, usually through
@@ -353,16 +363,19 @@ def _reject_non_object_json_body():
     )
 
 
-def _release_workspace_mutation(exc):
+def _release_workspace_mutation(exc: BaseException | None) -> None:
     reservation = g.pop("nas_workspace_mutation", None)
     if reservation is not None:
         reservation.__exit__(None, None, None)
 
 
-def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
+def register_app_hooks(
+    app: Flask, *, get_db: GetDb, get_runner: GetRunner, reservation_exempt_endpoints: Collection[str],
+) -> None:
     """Install the app-wide request hooks on ``app``.
 
-    ``get_db`` returns the request's ``Database``.
+    ``get_db`` returns the request's ``Database`` and ``get_runner`` the
+    app's ``JobRunner``.
     ``reservation_exempt_endpoints`` is the set of endpoint names that skip
     the workspace mutation reservation; it is read at request time, so
     endpoints ``create_app`` adds after this call are honored.
@@ -372,7 +385,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
     app.before_request(_start_timer)
 
     @app.before_request
-    def _protect_browser_surface():
+    def _protect_browser_surface() -> ErrorResponse | None:
         """Keep hostile web pages away from Vireo's localhost interface.
 
         `/api/v1` remains token-authenticated for automation.  The internal
@@ -383,7 +396,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
         return _browser_surface_refusal(app.config)
 
     @app.after_request
-    def _log_requests(response):
+    def _log_requests(response: Response) -> Response:
         _log_request_timing(response)
         return _finish_response(response, app.config)
 
@@ -392,7 +405,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
     app.teardown_appcontext(close_request_db)
 
     @app.before_request
-    def _enforce_api_v1_token():
+    def _enforce_api_v1_token() -> ErrorResponse | None:
         if not request.path.startswith("/api/v1/"):
             return None
         expected = app.config.get("API_TOKEN")
@@ -411,7 +424,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
     app.before_request(_reject_non_object_json_body)
 
     @app.before_request
-    def _reserve_workspace_mutation():
+    def _reserve_workspace_mutation() -> None:
         if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.path.startswith("/api/"):
             return None
         if request.endpoint in reservation_exempt_endpoints:
@@ -435,7 +448,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
             return None
         with contextlib.ExitStack() as reservation:
             for workspace_id in sorted(workspaces):
-                reservation.enter_context(app._job_runner.workspace_mutation(
+                reservation.enter_context(get_runner().workspace_mutation(
                     workspace_id,
                     exclusive=(
                         request.endpoint == "workspaces.api_delete_workspace"

@@ -11,6 +11,7 @@ aliases them by their ``collections.``-qualified endpoint names.
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import config as cfg
 from flask import Blueprint, current_app, jsonify, request
@@ -31,8 +32,16 @@ from web.request_args import (
     request_bool_arg,
 )
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
 
-def _collection_accepts_manual_photos(rules):
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import GetDb, MissingOriginalsPayload
+
+
+def _collection_accepts_manual_photos(rules: object) -> bool:
     """Return True when collection rules are static photo-id membership only."""
     if isinstance(rules, list):
         return all(_collection_accepts_manual_photos(child) for child in rules)
@@ -44,19 +53,20 @@ def _collection_accepts_manual_photos(rules):
         return isinstance(rules.get("value", []), list)
 
     if "rules" in rules and "field" not in rules:
+        children = rules.get("rules")
         return (
             rules.get("mode", "all") == "all"
-            and isinstance(rules.get("rules"), list)
+            and isinstance(children, list)
             and all(
                 _collection_accepts_manual_photos(child)
-                for child in rules.get("rules")
+                for child in children
             )
         )
 
     return False
 
 
-def _collection_list_entry(db, c):
+def _collection_list_entry(db: Database, c: Row) -> JsonDict:
     """One ``/api/collections`` row: counts, degraded state and add support."""
     d = dict(c)
     # A single collection with an unresolvable rule must not 500 the
@@ -157,8 +167,8 @@ def _collection_list_entry(db, c):
     return d
 
 
-def _parse_focus_photo_ids(raw):
-    """``(ids, error message)`` for a ``focus_photo_ids`` query value."""
+def _parse_focus_photo_ids(raw: str | None) -> tuple[list[int], str | None]:
+    """``(ids, error message)`` for a ``focus_photo_ids`` query value (``[]`` on error)."""
     raw_focus_ids = (raw or "").strip()
     focus_photo_ids = []
     if raw_focus_ids:
@@ -167,11 +177,11 @@ def _parse_focus_photo_ids(raw):
                 int(part) for part in raw_focus_ids.split(",") if part.strip()
             ]
         except ValueError:
-            return None, (
+            return [], (
                 "focus_photo_ids must be a comma-separated list of integers"
             )
         if len(focus_photo_ids) > MAX_FOCUS_PHOTO_IDS:
-            return None, (
+            return [], (
                 "focus_photo_ids must hold at most "
                 f"{MAX_FOCUS_PHOTO_IDS} integers"
             )
@@ -179,9 +189,9 @@ def _parse_focus_photo_ids(raw):
 
 
 def _collection_photos_page(
-    db, collection_id, *, stacks, stack_cfg, sort, page, per_page,
-    underlying_total,
-):
+    db: Database, collection_id: int, *, stacks: bool, stack_cfg: JsonDict | None, sort: str, page: int,
+    per_page: int, underlying_total: int,
+) -> tuple[list[Row], int, int | None]:
     """``(photos, total, stack_count)`` for one page of a collection."""
     stack_count = None
     if stacks:
@@ -202,7 +212,9 @@ def _collection_photos_page(
     return photos, total, stack_count
 
 
-def create_collections_blueprint(get_db, json_error, *, missing_originals_payload=None):
+def create_collections_blueprint(
+    get_db: GetDb, json_error: JsonError, *, missing_originals_payload: MissingOriginalsPayload | None = None,
+) -> Blueprint:
     """Build the collections blueprint.
 
     ``MAX_PER_PAGE`` is the page-size cap shared with the ``/api/photos``
@@ -212,7 +224,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
     blueprint = Blueprint("collections", __name__)
 
     @blueprint.route("/api/collections/<int:collection_id>/coverage")
-    def api_collection_coverage(collection_id):
+    def api_collection_coverage(collection_id: int) -> ResponseReturnValue:
         if collection_id > 9223372036854775807:
             return json_error("collection_id is outside SQLite's signed 64-bit integer range", 400)
         db = get_db()
@@ -228,7 +240,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
             return json_error(f"Collection rules cannot be resolved: {exc}", 400)
 
     @blueprint.route("/api/collections")
-    def api_collections():
+    def api_collections() -> ResponseReturnValue:
         db = get_db()
         collections = db.collections.list_all()
         result = []
@@ -237,7 +249,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
         return jsonify(result)
 
     @blueprint.route("/api/collections", methods=["POST"])
-    def api_create_collection():
+    def api_create_collection() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         import json
@@ -269,7 +281,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
         return jsonify({"ok": True, "id": cid})
 
     @blueprint.route("/api/collections/preview", methods=["POST"])
-    def api_collection_preview():
+    def api_collection_preview() -> ResponseReturnValue:
         """Live count of photos that would match an unsaved rules list.
 
         Body: {"rules": [...]}. Returns {"count": N}. Used by the smart-
@@ -307,13 +319,13 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
         return jsonify({"count": count})
 
     @blueprint.route("/api/collections/<int:collection_id>", methods=["DELETE"])
-    def api_delete_collection(collection_id):
+    def api_delete_collection(collection_id: int) -> ResponseReturnValue:
         db = get_db()
         db.collections.delete(collection_id)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/collections/<int:collection_id>", methods=["PUT"])
-    def api_update_collection(collection_id):
+    def api_update_collection(collection_id: int) -> ResponseReturnValue:
         """Update a collection. Body: {"name": "...", "rules": [...|group]}."""
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -349,7 +361,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
         return jsonify({"ok": True})
 
     @blueprint.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
-    def api_collection_add_photos(collection_id):
+    def api_collection_add_photos(collection_id: int) -> ResponseReturnValue:
         """Add photos to a static collection by appending to its photo_ids rule."""
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -398,7 +410,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
         if not _collection_accepts_manual_photos(rules):
             return json_error("Cannot add photos to this collection", 400)
 
-        def _find_photo_ids_rule(node):
+        def _find_photo_ids_rule(node: object) -> JsonDict | None:
             if isinstance(node, list):
                 for child in node:
                     found = _find_photo_ids_rule(child)
@@ -432,7 +444,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
 
     @blueprint.route("/api/collections/<int:collection_id>/duplicate", methods=["POST"])
-    def api_collection_duplicate(collection_id):
+    def api_collection_duplicate(collection_id: int) -> ResponseReturnValue:
         """Duplicate a collection within the active workspace. Returns {id}."""
         db = get_db()
         try:
@@ -442,7 +454,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
         return jsonify({"ok": True, "id": new_id})
 
     @blueprint.route("/api/collections/<int:collection_id>/photos")
-    def api_collection_photos(collection_id):
+    def api_collection_photos(collection_id: int) -> ResponseReturnValue:
         import config as cfg
         db = get_db()
         # This endpoint evaluates ``rules`` only (see
@@ -539,7 +551,7 @@ def create_collections_blueprint(get_db, json_error, *, missing_originals_payloa
         return jsonify(response)
 
     @blueprint.route("/api/collections/<int:collection_id>/photo-ids")
-    def api_collection_photo_ids(collection_id):
+    def api_collection_photo_ids(collection_id: int) -> ResponseReturnValue:
         """Return every photo ID matching a collection.
 
         Accepts ``sort`` and ``stacks`` so Select-all-matching keeps the
