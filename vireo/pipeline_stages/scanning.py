@@ -362,6 +362,15 @@ class _ScanPass:
         self.ingest_progress = _ProgressAccumulator()
         # Directories already reported by _on_permission_denied.
         self.denied_seen: set[str] = set()
+        # One line per sidecar whose keywords a scan could not import
+        # (``ScanHooks.sidecar_error``), from every scan this stage runs.
+        # Each goes into the run's errors, so the run ends failed (the
+        # rollup rule) while every stage still runs on the cataloged photos.
+        from scanner import SidecarFailures
+
+        self.sidecar_failures = SidecarFailures(
+            on_new=lambda msg: run.errors.append(f"[scan] {msg}"),
+        )
 
     def _db(self) -> Database:
         """The worker connection ``run_all`` opened for this pass."""
@@ -667,6 +676,8 @@ class _ScanPass:
         if (self.handoff.prepare_scan_item is not None
                 and hooks.photo == self._on_scanned_photo):
             hooks = replace(hooks, photo=_ScannedPhotoCallback(self))
+        if hooks.sidecar_error is None:
+            hooks = replace(hooks, sidecar_error=self.sidecar_failures.record)
         self.do_scan(
             root, self._db(),
             options=replace(
@@ -698,6 +709,26 @@ class _ScanPass:
         run.job["progress"]["current"] = 0
         run.job["progress"]["total"] = 0
         run.update_stages(run.runner, run.job["id"], run.stages)
+
+    def _scan_step_fields(self, summary: str) -> dict[str, Any]:
+        """The finished scan step's status, summary and error fields.
+
+        A sidecar whose keywords were not imported fails the step, as in a
+        standalone scan job, and names the photo in ``error``. The stage
+        itself stays completed so later stages run on every cataloged
+        photo; the run's errors decide the job's verdict.
+        """
+        sidecar_note = self.sidecar_failures.note()
+        if not sidecar_note:
+            return {"status": "completed", "summary": summary}
+        messages = self.sidecar_failures.messages
+        self.run.stages["scan"]["error_count"] = len(messages)
+        return {
+            "status": "failed",
+            "summary": f"{summary} ({sidecar_note})",
+            "error": messages[0],
+            "error_count": len(messages),
+        }
 
     def _summary_with_metadata_warning(self, summary: str) -> str:
         from metadata import scan_metadata_warning
@@ -767,11 +798,10 @@ class _ScanPass:
         # Mirror the standalone scan/import paths in app.py: append
         # the missing-exiftool warning so a repair scan that lost
         # metadata reads as degraded, not as a clean success.
-        summary = self._summary_with_metadata_warning(summary)
+        step = self._scan_step_fields(summary)
+        step["summary"] = self._summary_with_metadata_warning(step["summary"])
         run.stages["scan"]["status"] = "completed"
-        run.runner.update_step(
-            run.job["id"], "scan", status="completed", summary=summary,
-        )
+        run.runner.update_step(run.job["id"], "scan", **step)
         self.handoff.put_scan_item(self.handoff.sentinel)
 
     def _on_repaired_photo(self, photo_id: int, path: str) -> None:
@@ -1708,11 +1738,9 @@ class _ScanPass:
         # /api/jobs/scan path, so a missing exiftool silently strips
         # capture dates, GPS, and camera info here too. Append the
         # same warning the standalone path appends.
-        scan_summary = self._summary_with_metadata_warning(
-            f"{photo_count} photos"
-        )
-        run.runner.update_step(run.job["id"], "scan", status="completed",
-                               summary=scan_summary)
+        step = self._scan_step_fields(f"{photo_count} photos")
+        step["summary"] = self._summary_with_metadata_warning(step["summary"])
+        run.runner.update_step(run.job["id"], "scan", **step)
 
 
 def _collection_stage_body(
