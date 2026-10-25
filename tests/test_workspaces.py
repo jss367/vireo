@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from services import dashboard_stats, photo_ingest, workspace_config
+from services import dashboard_stats, moves_merge, photo_ingest, workspace_config
 
 
 def test_database_creates_tables(db):
@@ -2237,7 +2237,7 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
         {"new_count": 99, "files": []},
     )
 
-    result = db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+    result = moves_merge.merge_staged_tree_into_archive(db, staged_archive_id, "/archive/USA")
 
     assert result["new_photos"] == 2
     assert db._new_images_cache.get(db._db_path, ws_id) is None
@@ -2335,7 +2335,7 @@ def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
         db._db_path, ws_id, {"new_count": 0, "per_root": [], "sample": []}
     )
 
-    db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+    moves_merge.merge_staged_tree_into_archive(db, staged_archive_id, "/archive/USA")
 
     assert db._new_images_cache.get(db._db_path, ws_id) is None
 
@@ -2373,7 +2373,7 @@ def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
     )
     photo_ingest.add_photo(db, staged_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
 
-    result = db.merge_staged_tree_into_archive(
+    result = moves_merge.merge_staged_tree_into_archive(db,
         staged_year_id,
         "/archive/USA/2027",
     )
@@ -2432,7 +2432,7 @@ def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(d
     )
     photo_ingest.add_photo(db, staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
 
-    result = db.merge_staged_tree_into_archive(
+    result = moves_merge.merge_staged_tree_into_archive(db,
         staged_trip_id,
         "/archive/USA/2027/Trip",
     )
@@ -2520,7 +2520,7 @@ def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
     )
     photo_ingest.add_photo(db, staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
 
-    result = db.merge_staged_tree_into_archive(
+    result = moves_merge.merge_staged_tree_into_archive(db,
         staged_trip_id,
         "/archive/USA/2027/Trip",
     )
@@ -2634,7 +2634,7 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
     )
     photo_ingest.add_photo(db, staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
 
-    db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+    moves_merge.merge_staged_tree_into_archive(db, staged_archive_id, "/archive/USA")
 
     # Scoped root survives untouched.
     root_paths = {

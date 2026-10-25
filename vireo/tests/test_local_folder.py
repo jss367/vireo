@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 from services.local_folder import (
     LocalWorkspaceConflict,
     LocalWorkspaceError,
@@ -1780,7 +1780,7 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
         db.add_workspace_folder(child_ws, child_id)
         db.add_workspace_folder(observer_ws, parent_id)
         db.set_active_workspace(parent_ws)
-        db.delete_folder(child_id if remove_root else descendant_id)
+        catalog_deletion.delete_folder(db, child_id if remove_root else descendant_id)
         expected = {parent_id} if remove_root else {parent_id, child_id}
         db.set_active_workspace(child_ws)
         late = descendant / "late"
@@ -3291,7 +3291,7 @@ def test_discard_invalidates_new_images_for_ancestor_workspace_without_link(tmp_
         db.add_workspace_folder(parent_ws, parent_id)
         db.add_workspace_folder(child_ws, child_id)
         db.set_active_workspace(parent_ws)
-        db.delete_folder(child_id)
+        catalog_deletion.delete_folder(db, child_id)
         db.set_active_workspace(child_ws)
         vireo_dir = str(tmp_path / "vireo")
         cache = db._new_images_cache

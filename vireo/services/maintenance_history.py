@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from services import catalog_deletion
+
 if TYPE_CHECKING:
     from db import Database
     from services.service_types import JsonDict
@@ -43,7 +45,7 @@ def remove_orphans_with_history(db: Database, photo_ids: list[int]) -> JsonDict:
     with db._commits_held():
         db.begin_immediate()
         confirmed = confirmed_orphan_ids(db, photo_ids)
-        result = db.delete_photos(confirmed, commit=False)
+        result = catalog_deletion.delete_photos(db, confirmed, commit=False)
         if result['deleted']:
             # Photo-linked items cascade away on deletion. Keep the removed
             # IDs and paths on the parent entry so the audit survives that FK.
@@ -54,7 +56,7 @@ def remove_orphans_with_history(db: Database, photo_ids: list[int]) -> JsonDict:
                 [], is_batch=True,
             )
     if result['deleted']:
-        db.prune_pipeline_cache_for_ids(result['ids'])
+        catalog_deletion.prune_pipeline_cache_for_ids(db, result['ids'])
     return result
 
 

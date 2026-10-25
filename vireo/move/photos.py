@@ -376,7 +376,7 @@ class _StemLedger:
 
         Provenance is keyed by the source folder's **path** (not folders.id).
         SQLite ``INTEGER PRIMARY KEY`` without AUTOINCREMENT can reuse a freed
-        rowid after ``Database.delete_folder``; storing the reusable id would
+        rowid after ``catalog_deletion.delete_folder``; storing the reusable id would
         let a new unrelated folder that lands on the same rowid compare equal
         to a stale reference and bypass the collision guard in
         ``refuse_render_collision``.

@@ -23,7 +23,7 @@ from db import Database
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.workspace_folders import WorkspaceFolderRepository
-from services import photo_ingest
+from services import moves_merge, photo_ingest
 
 
 @pytest.fixture
@@ -796,12 +796,12 @@ def test_get_sync_only_photo_paths(db):
         "VALUES (?, ?)", [(active, a), (active, b), (sibling, c)])
     db.conn.commit()
 
-    assert db.get_sync_only_photo_paths() == {a: "/ok"}
-    assert db.get_sync_only_photo_paths(sibling) == {c: "/ok"}
+    assert moves_merge.get_sync_only_photo_paths(db) == {a: "/ok"}
+    assert moves_merge.get_sync_only_photo_paths(db, sibling) == {c: "/ok"}
     db.set_active_workspace(None)
-    assert db.get_sync_only_photo_paths(sibling) == {c: "/ok"}
+    assert moves_merge.get_sync_only_photo_paths(db, sibling) == {c: "/ok"}
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db.get_sync_only_photo_paths()
+        moves_merge.get_sync_only_photo_paths(db)
 
 
 # -- query_move_rule_matches -------------------------------------------------
@@ -826,17 +826,17 @@ def rule_photos(db):
 
 def test_query_move_rule_matches_criteria(db, rule_photos):
     p = rule_photos
-    assert sorted(db.query_move_rule_matches({})) == sorted(
+    assert sorted(moves_merge.query_move_rule_matches(db, {})) == sorted(
         [p["hi"], p["lo"], p["other"]])
-    assert db.query_move_rule_matches({"rating_min": 3}) == [p["hi"]]
-    assert db.query_move_rule_matches({"flag": "flagged"}) == [p["hi"]]
-    assert sorted(db.query_move_rule_matches({"folder_ids": [p["fid"]]})) == sorted(
+    assert moves_merge.query_move_rule_matches(db, {"rating_min": 3}) == [p["hi"]]
+    assert moves_merge.query_move_rule_matches(db, {"flag": "flagged"}) == [p["hi"]]
+    assert sorted(moves_merge.query_move_rule_matches(db, {"folder_ids": [p["fid"]]})) == sorted(
         [p["hi"], p["lo"]])
-    assert sorted(db.query_move_rule_matches({"folder_ids": []})) == sorted(
+    assert sorted(moves_merge.query_move_rule_matches(db, {"folder_ids": []})) == sorted(
         [p["hi"], p["lo"], p["other"]])
-    assert sorted(db.query_move_rule_matches(
+    assert sorted(moves_merge.query_move_rule_matches(db,
         {"imported_before": "2026-02-01"})) == sorted([p["hi"], p["other"]])
-    assert db.query_move_rule_matches(
+    assert moves_merge.query_move_rule_matches(db,
         {"rating_min": 1, "imported_before": "2026-02-01",
          "folder_ids": [p["fid"]]}) == [p["hi"]]
 
@@ -852,9 +852,9 @@ def test_query_move_rule_matches_species(db, rule_photos):
     db.tag_photo(p["hi"], robin)
     db.tag_photo(p["hi"], wren)
     db.tag_photo(p["lo"], plain)
-    assert db.query_move_rule_matches({"species": ["Robin", "Wren"]}) == [p["hi"]]
-    assert db.query_move_rule_matches({"species": ["Robin Nest"]}) == []
-    assert len(db.query_move_rule_matches({"species": []})) == 3
+    assert moves_merge.query_move_rule_matches(db, {"species": ["Robin", "Wren"]}) == [p["hi"]]
+    assert moves_merge.query_move_rule_matches(db, {"species": ["Robin Nest"]}) == []
+    assert len(moves_merge.query_move_rule_matches(db, {"species": []})) == 3
 
 
 def test_query_move_rule_matches_scopes_to_active_workspace_and_visible_folders(
@@ -863,13 +863,13 @@ def test_query_move_rule_matches_scopes_to_active_workspace_and_visible_folders(
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?",
                     (p["other_fid"],))
     db.conn.commit()
-    assert p["other"] not in db.query_move_rule_matches({})
+    assert p["other"] not in moves_merge.query_move_rule_matches(db, {})
     empty_ws = db.create_workspace("Empty")
     db.set_active_workspace(empty_ws)
-    assert db.query_move_rule_matches({}) == []
+    assert moves_merge.query_move_rule_matches(db, {}) == []
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db.query_move_rule_matches({})
+        moves_merge.query_move_rule_matches(db, {})
 
 
 def test_query_move_rule_matches_reads_config_only_for_has_predictions(
@@ -883,20 +883,20 @@ def test_query_move_rule_matches_reads_config_only_for_has_predictions(
         return real(cfg)
 
     monkeypatch.setattr(db, "get_effective_config", recorder)
-    db.query_move_rule_matches({"rating_min": 1})
+    moves_merge.query_move_rule_matches(db, {"rating_min": 1})
     assert calls == []
 
     det = db.detections.save(p["hi"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.5,
          "category": "animal"}], detector_model="MDV6")[0]
     db.predictions.add(det, species="Robin", confidence=0.9, model="bioclip")
-    assert db.query_move_rule_matches({"has_predictions": True}) == [p["hi"]]
+    assert moves_merge.query_move_rule_matches(db, {"has_predictions": True}) == [p["hi"]]
     assert len(calls) == 1
     # A workspace override above the detection's confidence hides it.
     db.workspaces.update(db._active_workspace_id,
                         config_overrides={"detector_confidence": 0.6})
-    assert db.query_move_rule_matches({"has_predictions": True}) == []
-    assert p["hi"] in db.query_move_rule_matches({"has_predictions": False})
+    assert moves_merge.query_move_rule_matches(db, {"has_predictions": True}) == []
+    assert p["hi"] in moves_merge.query_move_rule_matches(db, {"has_predictions": False})
 
 
 # -- merge_staged_tree_into_archive -----------------------------------------
@@ -913,7 +913,7 @@ def test_merge_missing_staged_root_returns_empty_counts_before_workspace(
     calls = []
     monkeypatch.setattr(FolderRepository, "update_counts", lambda self: calls.append(1))
     db.set_active_workspace(None)
-    assert db.merge_staged_tree_into_archive(99999, "/arch") == EMPTY_COUNTS
+    assert moves_merge.merge_staged_tree_into_archive(db, 99999, "/arch") == EMPTY_COUNTS
     assert calls == []
 
 
@@ -921,7 +921,7 @@ def test_merge_requires_active_workspace_when_staged_root_exists(db):
     stage = _folder(db, "/stage", root=True)
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db.merge_staged_tree_into_archive(stage, "/arch")
+        moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
 
 
 class _CacheRecorder:
@@ -986,7 +986,7 @@ def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_p
         # A synced decision still owns real confirmations after its queue drained.
         db.conn.execute('DELETE FROM pending_changes')
         db.commit()
-    counts = db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    counts = moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert losing in counts['dropped_photo_ids']
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == state
     assert db.conn.execute('SELECT photo_id FROM edit_history_items WHERE edit_id=?', (edit_id,)).fetchone()[0] == survivor
@@ -1020,7 +1020,7 @@ def test_duplicate_merge_rejects_distinct_identity_decisions_atomically(db, tmp_
     before = {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY id' if table not in ['photo_identity_alternatives', 'photo_keywords'] else f'SELECT * FROM {table} ORDER BY photo_id')]
               for table in tables}
     with pytest.raises(IdentityMergeConflict, match='Reconcile their alternatives and evidence in Review'):
-        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+        moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert not db.conn.in_transaction
     for table in tables:
         after = [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY id' if table not in ['photo_identity_alternatives', 'photo_keywords'] else f'SELECT * FROM {table} ORDER BY photo_id')]
@@ -1036,7 +1036,7 @@ def test_duplicate_merge_keeps_existing_equal_identity_decision(db, tmp_path, ow
     if owner == 'both':
         db.identity_alternatives.set_state(t['staged'], state)
     db.commit()
-    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert db.identity_alternatives.for_photos()[t['survivor']] == state
 
 
@@ -1068,7 +1068,7 @@ def test_duplicate_merge_rejects_synced_candidate_confirmation_aliases(db, tmp_p
     db.commit()
     assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
     with pytest.raises(IdentityMergeConflict, match='Reconcile the species confirmation in Review'):
-        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+        moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert db.photos.get(losing) is not None
     assert db.photos.get(survivor) is not None
     assert keyword in _kw_ids(db, confirmed_photo)
@@ -1089,7 +1089,7 @@ def test_survivor_uncertainty_keeps_unrelated_synced_source_species_and_provenan
     db.tag_photo(survivor, keyword, source='accept')
     db.conn.execute('DELETE FROM pending_changes')
     db.commit()
-    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert db.identity_alternatives.for_photos()[survivor]['reason'] == 'Need calls'
     assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (survivor, keyword)).fetchone()[0] == 'manual'
 
@@ -1106,7 +1106,7 @@ def test_identity_merge_carry_respects_newer_unrelated_species_removal(db, tmp_p
     db.tag_photo(losing, keyword)
     _queue(db, losing, 'keyword_add', 'American Robin', '2020-01-01')
     _queue(db, survivor, 'keyword_remove', 'American Robin', '2099-01-01')
-    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert keyword not in _kw_ids(db, survivor)
     assert db.conn.execute("SELECT 1 FROM pending_changes WHERE photo_id=? AND change_type='keyword_remove' AND value='American Robin'", (survivor,)).fetchone()
 
@@ -1126,7 +1126,7 @@ def test_identity_merge_preserves_higher_rank_taxonomy_without_confirming_candid
     with db._commits_held():
         save_alternatives(db, [losing], ['Tropical Kingbird', "Couch's Kingbird"], 'Need species evidence', 'A clearer view')
     assert keyword in _kw_ids(db, photo)
-    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert keyword in _kw_ids(db, survivor)
     assert db.identity_alternatives.for_photos()[survivor]['status'] == 'unresolved'
     assert not db.identity_alternatives.candidate_links([survivor], ['Puma', 'Bobcat'])
@@ -1152,7 +1152,7 @@ def test_identity_merge_rejects_candidate_removal_that_would_erase_same_named_hi
     pending = _pending(db, losing, survivor)
     history = [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')]
     with pytest.raises(IdentityMergeConflict, match='higher-rank taxonomy metadata'):
-        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+        moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert db.identity_alternatives.for_photos() == state
     assert _pending(db, losing, survivor) == pending
     assert [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')] == history
@@ -1175,7 +1175,7 @@ def test_merge_commits_counts_and_invalidates_after_reparent(
     monkeypatch.setattr(db, "_new_images_cache", recorder)
     monkeypatch.setattr(FolderRepository, "update_counts", counts_recorder)
 
-    counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    counts = moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
 
     assert counts == {
         "new_photos": 2, "new_folders": 1, "merged_folders": 2,
@@ -1218,7 +1218,7 @@ def test_merge_rolls_back_every_reparent_on_error(db, tmp_path, monkeypatch):
         "SELECT id, folder_id FROM photos ORDER BY id")]
 
     with pytest.raises(RuntimeError, match="transfer exploded"):
-        db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+        moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
 
     assert not db.conn.in_transaction
     assert [tuple(r) for r in db.conn.execute(
@@ -1248,7 +1248,7 @@ def test_merge_routes_real_collision_helpers_through_the_facade(
             return _real(self, losing, surviving)
 
         monkeypatch.setattr(MovesMergeRepository, name, recorder)
-    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert calls == [
         ("_move_location_state_for_merge", t["staged"], t["survivor"]),
         ("reconcile_conflicting_keyword_edits", t["staged"], t["survivor"]),
@@ -1275,7 +1275,7 @@ def test_merge_routes_phantom_helpers_through_the_facade(
             return _real(self, losing, surviving)
 
         monkeypatch.setattr(MovesMergeRepository, name, recorder)
-    counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    counts = moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert calls == [
         ("_move_location_state_for_merge", t["survivor"], t["staged"]),
         ("reconcile_conflicting_keyword_edits", t["survivor"], t["staged"]),
@@ -1302,12 +1302,12 @@ def test_merge_links_sibling_survivors_through_the_facade(
         return real(self, ws_id, photo_id)
 
     monkeypatch.setattr(MovesMergeRepository, "link_survivor_for_sibling_edits", recorder)
-    counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    counts = moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert calls == [(sibling, t["survivor"], t["day"])]
     # Sibling rows are preserved but not reported as active-ws identities.
     assert counts["preserved_edit_count"] == 1
     assert counts["preserved_off_staging_identities"] == []
-    assert db.get_sync_only_photo_paths(sibling) == {
+    assert moves_merge.get_sync_only_photo_paths(db, sibling) == {
         t["survivor"]: str(tmp_path / "arch" / "day")}
 
 
@@ -1323,7 +1323,7 @@ def test_merge_moves_embedded_keyword_offered_onto_the_survivor(db, tmp_path):
     t = _collision_tree(db, tmp_path)
     db.photo_keywords.record_embedded_offered_keys(t["staged"], ["robin"])
 
-    counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    counts = moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
 
     assert counts["dropped_photo_ids"] == [t["staged"]]
     with _other(db) as other:
@@ -1346,7 +1346,7 @@ def test_merge_moves_embedded_keyword_offered_from_phantom_target(
     t = _collision_tree(db, tmp_path, same_hash=False)
     db.photo_keywords.record_embedded_offered_keys(t["survivor"], ["robin"])
 
-    counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    counts = moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
 
     assert counts["dropped_photo_ids"] == [t["survivor"]]
     with _other(db) as other:
@@ -1379,7 +1379,7 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
         assert _import_embedded_keywords_for_photo(db, survivor, metadata)
         db.untag_photo(survivor, keyword["id"])
 
-    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
 
     assert {k["name"] for k in db.photo_keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
@@ -1404,7 +1404,7 @@ def test_embedded_merge_keeps_survivor_manual_provenance(db, tmp_path, same_hash
     keyword = db.photo_keywords.get_for_photo(losing)[0]
     db.tag_photo(survivor, keyword["id"])
 
-    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
 
     assert db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
@@ -1425,7 +1425,7 @@ def test_merge_links_archive_base_through_the_facade(db, monkeypatch):
         return real(workspace_id, folder_id, is_root=is_root, **kw)
 
     monkeypatch.setattr(db, "add_workspace_folder", recorder)
-    counts = db.merge_staged_tree_into_archive(stage, "/arch")
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
     assert calls == [(ws, base, True)]
     assert counts["merged_folders"] == 1 and counts["new_photos"] == 1
 
@@ -1437,7 +1437,7 @@ def test_merge_missing_target_parent_logs_and_leaves_parent_null(db, caplog):
     deep = _folder(db, "/stage/a/b", stage, link=False)
     _photo(db, deep, "x.raf")
     with caplog.at_level(logging.WARNING):
-        db.merge_staged_tree_into_archive(stage, "/arch")
+        moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
     row = db.conn.execute(
         "SELECT path, parent_id FROM folders WHERE id = ?", (deep,)).fetchone()
     assert (row["path"], row["parent_id"]) == ("/arch/a/b", None)
@@ -1460,7 +1460,7 @@ def test_merge_missing_target_parent_falls_back_to_processed_parent(db, caplog):
         "WHEN NEW.path = '/arch/a' BEGIN "
         "UPDATE folders SET path = '/arch/a-hidden' WHERE id = NEW.id; END")
     with caplog.at_level(logging.WARNING):
-        db.merge_staged_tree_into_archive(stage, "/arch")
+        moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
     row = db.conn.execute(
         "SELECT path, parent_id FROM folders WHERE id = ?", (deep,)).fetchone()
     assert (row["path"], row["parent_id"]) == ("/arch/a/b", mid)
@@ -1486,7 +1486,7 @@ def test_merge_materializes_missing_intermediates_top_down(db):
     stage = _folder(db, "/stage", link=False)
     _photo(db, stage, "a.raf")
 
-    counts = db.merge_staged_tree_into_archive(stage, "/arch/2026/05/shoot")
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage, "/arch/2026/05/shoot")
 
     assert counts["new_folders"] == 1 and counts["new_photos"] == 1
     with _other(db) as other:
@@ -1512,7 +1512,7 @@ def test_merge_flips_missing_archive_base_and_target_to_ok(db):
     stage = _folder(db, "/stage", link=False)
     stage_day = _folder(db, "/stage/day", stage, link=False)
     _photo(db, stage_day, "a.raf")
-    db.merge_staged_tree_into_archive(stage, "/arch")
+    moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
     with _other(db) as other:
         statuses = {r["id"]: r["status"] for r in other.execute(
             "SELECT id, status FROM folders WHERE id IN (?, ?)", (base, day))}
@@ -1532,7 +1532,7 @@ def test_merge_scoped_workspace_prunes_instead_of_linking_broad_base(db):
     stage = _folder(db, "/stage", link=False)
     _photo(db, stage, "a.raf")
 
-    db.merge_staged_tree_into_archive(stage, "/arch/USA")
+    moves_merge.merge_staged_tree_into_archive(db, stage, "/arch/USA")
 
     links = _ws_links(db, ws)
     assert "/arch/USA" not in links and "/arch" not in links
@@ -1564,7 +1564,7 @@ def test_merge_into_existing_folder_keeps_photo_in_sharing_workspace(db):
     db.add_workspace_folder(sharing, stage)
     db.add_workspace_folder(linked, stage)
 
-    counts = db.merge_staged_tree_into_archive(stage, "/arch")
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
 
     assert counts["new_photos"] == 1 and counts["merged_folders"] == 1
     assert _visible_to(db, ws) == {"old.jpg", "new.jpg"}
@@ -1583,7 +1583,7 @@ def test_merge_new_path_roots_deepest_tracked_ancestor(db):
     db.set_active_workspace(ws)
     stage = _folder(db, "/stage", link=False)
     _photo(db, stage, "a.raf")
-    db.merge_staged_tree_into_archive(stage, "/photos/sub/new")
+    moves_merge.merge_staged_tree_into_archive(db, stage, "/photos/sub/new")
     links = _ws_links(db, ws)
     assert links["/photos"] == 1
     assert links["/photos/sub"] == 0
@@ -1600,7 +1600,7 @@ def test_merge_new_path_under_descendant_root_prunes_ancestor(db):
     db.conn.commit()
     stage = _folder(db, "/stage", root=True)
     _photo(db, stage, "a.raf")
-    db.merge_staged_tree_into_archive(stage, "/photos/2027")
+    moves_merge.merge_staged_tree_into_archive(db, stage, "/photos/2027")
     links = _ws_links(db, ws)
     assert "/photos" not in links
     # Not covered by any workspace root: the staged link is dropped.
@@ -1619,7 +1619,7 @@ def test_merge_intra_staged_case_alias_drops_later_row(db, monkeypatch):
     first = _photo(db, stage_day, "IMG.raf")
     second = _photo(db, stage_day, "img.RAF")
     _queue(db, second, "rating", "2", "2026-01-01 00:00:00", token="t2")
-    counts = db.merge_staged_tree_into_archive(stage, "/arch")
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
     assert counts["already_present"] == 1
     assert counts["dropped_photo_ids"] == [second]
     assert counts["preserved_edit_count"] == 1
@@ -1632,9 +1632,9 @@ def test_merge_phantom_sibling_edits_link_staged_survivor(db, tmp_path):
     t = _collision_tree(db, tmp_path, same_hash=False)
     sibling = db.create_workspace("Sibling")
     _queue(db, t["survivor"], "rating", "3", "2026-01-01 00:00:00", ws=sibling)
-    counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    counts = moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert counts["preserved_edit_count"] == 1
-    assert db.get_sync_only_photo_paths(sibling) == {
+    assert moves_merge.get_sync_only_photo_paths(db, sibling) == {
         t["staged"]: str(tmp_path / "arch" / "day")}
 
 
@@ -1910,15 +1910,19 @@ def test_thumb_paths_for_ids_skips_photos_without_a_thumbnail(db):
 # -- structure ---------------------------------------------------------------
 
 # Still on ``Database``: the keyword re-tagging (which the provenance contract
-# finds through ``self.tag_photo`` / ``untag_photo``), the staged-tree merge
-# (which wires in the workspace-link, new-images and folder-count hooks), and
-# the reads that resolve the active workspace or its detector floor.
+# finds through ``self.tag_photo`` / ``untag_photo``) and the sync-grant guard.
 MOVED = [
     "_move_location_state_for_merge",
     "_carry_keyword_associations_for_merge",
-    "get_sync_only_photo_paths", "merge_staged_tree_into_archive",
-    "query_move_rule_matches",
     "_photo_syncable_in_workspace",
+]
+
+# Moved to ``services/moves_merge.py``: the staged-tree merge (which wires in
+# the workspace-link, new-images and folder-count hooks), its scoped link
+# prune, and the reads that resolve the active workspace or its detector floor.
+SERVICE_WORKFLOWS = [
+    "get_sync_only_photo_paths", "merge_staged_tree_into_archive",
+    "query_move_rule_matches", "prune_ws_nonroot_links_outside_roots",
 ]
 
 # The forwarding wrappers this domain used to have on ``Database``; callers
@@ -1977,6 +1981,23 @@ def test_moves_merge_method_delegates_to_repository(name):
         f"Database.{name} no longer delegates to MovesMergeRepository")
 
 
+@pytest.mark.parametrize("name", SERVICE_WORKFLOWS)
+def test_moves_merge_workflow_lives_in_the_service(name):
+    import inspect
+
+    assert not hasattr(Database, name) and not hasattr(Database, f"_{name}")
+    source = inspect.getsource(getattr(moves_merge, name))
+    assert ".conn" not in source
+    assert "db.moves_merge." in source or "db.workspace_folders." in source
+
+
+def _service_ast(name):
+    import ast
+    import inspect
+
+    return ast.parse(inspect.getsource(getattr(moves_merge, name))).body[0]
+
+
 def test_keyword_retags_stay_on_the_facade():
     """``test_keyword_provenance_contract`` only sees ``self.tag_photo(...)``."""
     import ast
@@ -2009,39 +2030,27 @@ def test_keyword_retags_stay_on_the_facade():
 def test_merge_wires_every_callback_to_the_facade():
     import ast
 
-    expected = {
-        "workspace_id_fn": "_ws_id",
-        "prune_nonroot_links_outside_roots": "_prune_ws_nonroot_links_outside_roots",
-        "materialize_workspace_descendants": "_materialize_workspace_descendants",
-        "add_workspace_folder": "add_workspace_folder",
-        "add_workspace_folder_no_commit": "_add_workspace_folder_no_commit",
-        "move_location_state": "_move_location_state_for_merge",
-    }
     call = next(
-        node for node in ast.walk(_method_ast("merge_staged_tree_into_archive"))
+        node for node in ast.walk(_service_ast("merge_staged_tree_into_archive"))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
         and node.func.attr == "merge_staged_tree_into_archive"
     )
-    wired = {
-        kw.arg: kw.value.attr for kw in call.keywords
-        if isinstance(kw.value, ast.Attribute)
-        and isinstance(kw.value.value, ast.Name) and kw.value.value.id == "self"
+    assert ast.unparse(call.func) == "db.moves_merge.merge_staged_tree_into_archive"
+    wired = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
+    assert wired == {
+        "workspace_id_fn": "db.require_workspace_id",
+        "root_ancestor_exists": "db.workspace_folders.root_ancestor_exists",
+        "root_descendant_exists": "db.workspace_folders.root_descendant_exists",
+        "prune_nonroot_links_outside_roots": "partial(prune_ws_nonroot_links_outside_roots, db)",
+        "materialize_workspace_descendants": "db._materialize_workspace_descendants",
+        "add_workspace_folder": "db.add_workspace_folder",
+        "add_workspace_folder_no_commit": "db._add_workspace_folder_no_commit",
+        "case_insensitive_root": "case_insensitive_root",
+        "move_location_state": "db._move_location_state_for_merge",
+        "invalidate_new_images": "db.invalidate_new_images_cache_for_workspaces",
+        "update_folder_counts": "db.folders.update_counts",
+        "KEYWORD_SOURCE_CONFLICT_SQL": "KEYWORD_SOURCE_CONFLICT_SQL",
     }
-    assert wired == expected
-    others = {kw.arg for kw in call.keywords} - set(expected)
-    assert others == {"case_insensitive_root", "invalidate_new_images", "KEYWORD_SOURCE_CONFLICT_SQL",
-                      "update_folder_counts", "root_ancestor_exists", "root_descendant_exists"}
-    through_accessors = {
-        kw.arg: ast.unparse(kw.value) for kw in call.keywords
-        if kw.arg in {"update_folder_counts", "root_ancestor_exists", "root_descendant_exists"}
-    }
-    assert through_accessors == {
-        "update_folder_counts": "self.folders.update_counts",
-        "root_ancestor_exists": "self.workspace_folders.root_ancestor_exists",
-        "root_descendant_exists": "self.workspace_folders.root_descendant_exists",
-    }
-    fold = next(kw.value for kw in call.keywords if kw.arg == "KEYWORD_SOURCE_CONFLICT_SQL")
-    assert isinstance(fold, ast.Name) and fold.id == "KEYWORD_SOURCE_CONFLICT_SQL"
 
 
 def test_factory_binds_the_cross_domain_callbacks():
@@ -2076,12 +2085,19 @@ def test_facade_signatures_are_unchanged():
     expected = {
         "_move_location_state_for_merge": "(self, losing_id, surviving_id)",
         "_carry_keyword_associations_for_merge": "(self, losing_id, surviving_id, by_key)",
-        "get_sync_only_photo_paths": "(self, workspace_id=None)",
-        "merge_staged_tree_into_archive": "(self, staged_root_id, archive_path)",
-        "query_move_rule_matches": "(self, criteria)",
     }
     for name, sig in expected.items():
         assert str(inspect.signature(getattr(Database, name))) == sig, name
+    service_expected = {
+        "get_sync_only_photo_paths": ["db", "workspace_id"],
+        "merge_staged_tree_into_archive": ["db", "staged_root_id", "archive_path"],
+        "query_move_rule_matches": ["db", "criteria"],
+        "prune_ws_nonroot_links_outside_roots": ["db", "workspace_id", "path"],
+    }
+    for name, params in service_expected.items():
+        assert list(inspect.signature(getattr(moves_merge, name)).parameters) == params, name
+    assert inspect.signature(moves_merge.get_sync_only_photo_paths).parameters[
+        "workspace_id"].default is None
     repo_expected = {
         "create_rule": "(self, name, destination, criteria)",
         "get_rule": "(self, rule_id)",
@@ -2173,7 +2189,7 @@ def test_collision_preserves_identity_decision_history_and_sharing(db, tmp_path,
     before = db.identity_alternatives.for_photos([loser], include_resolved=True)[loser]
     links_before = _kw_ids(db, loser)
     history_id = db._edit_history_repository().latest_undoable()["id"]
-    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == before
     assert _kw_ids(db, survivor) == links_before
     if resolved:
@@ -2213,7 +2229,7 @@ def test_collision_refuses_conflicting_identity_without_losing_evidence(db, tmp_
     history = [tuple(r) for r in db.conn.execute("SELECT * FROM edit_history_items")]
     pending = _pending(db, loser, survivor)
     with pytest.raises(ValueError, match="conflicting"):
-        db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+        moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert db.identity_alternatives.for_photos(include_resolved=True) == before
     assert [tuple(r) for r in db.conn.execute("SELECT * FROM edit_history_items")] == history
     assert _pending(db, loser, survivor) == pending
@@ -2236,7 +2252,7 @@ def test_collision_deduplicates_batch_identity_history_and_preserves_redo(db, tm
             edit = resolve_alternatives(db, [loser, survivor], "Heron")
     if undone:
         db.undo_last_edit()
-    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert [r[0] for r in db.conn.execute("SELECT photo_id FROM edit_history_items WHERE edit_id=?", (edit,))] == [survivor]
     if undone:
         db.redo_last_undo()
@@ -2261,7 +2277,7 @@ def test_intra_staged_collision_preserves_identity_evidence(db, tmp_path, monkey
         save_alternatives(db, [second], ["Heron", "Egret"], "Case alias evidence", "Bill")
     import move
     monkeypatch.setattr(move, "_case_insensitive_root", lambda path: True)
-    counts = db.merge_staged_tree_into_archive(stage, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage, str(arch))
     assert second in counts["dropped_photo_ids"]
     assert db.identity_alternatives.for_photos([first])[first]["reason"] == "Case alias evidence"
     db.undo_last_edit()
@@ -2285,7 +2301,7 @@ def test_collision_rolls_back_when_pending_edit_conflicts_with_identity(db, tmp_
     before = db.identity_alternatives.for_photos()
     pending = _pending(db, loser, survivor)
     with pytest.raises(ValueError, match="conflicting species"):
-        db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+        moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert db.identity_alternatives.for_photos() == before
     assert _pending(db, loser, survivor) == pending
     assert _kw_ids(db, survivor) == []
@@ -2302,7 +2318,7 @@ def test_collision_preserves_incompatible_batch_history_by_rolling_back(db, tmp_
         edit = save_alternatives(db, [t["staged"], t["survivor"]], ["Heron", "Egret"], "Same evidence", "Bill")
     before = db.identity_alternatives.for_photos()
     with pytest.raises(ValueError, match="conflicting identity history"):
-        db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+        moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert db.identity_alternatives.for_photos() == before
     assert db.conn.execute("SELECT COUNT(*) FROM edit_history_items WHERE edit_id=?", (edit,)).fetchone()[0] == 2
     db.undo_last_edit()
@@ -2326,7 +2342,7 @@ def test_same_resolution_batch_collapses_with_deduplicated_replay(db, tmp_path, 
         resolved = resolve_alternatives(db, ids, 'Heron')
     if undone:
         db.undo_last_edit()
-    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     for edit in (saved, resolved):
         assert [r[0] for r in db.conn.execute('SELECT photo_id FROM edit_history_items WHERE edit_id=?', (edit,))] == [survivor]
     if undone:
@@ -2359,7 +2375,7 @@ def test_collision_keeps_higher_rank_taxonomy_outside_species_decision(db, tmp_p
     with db._commits_held():
         edit = save_alternatives(db, [identity_photo], ['Heron', 'Egret'], 'Uncertain species', 'Bill')
     assert keyword in _kw_ids(db, tagged)
-    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert db.identity_alternatives.for_photos([survivor])[survivor]['reason'] == 'Uncertain species'
     assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (survivor, keyword)).fetchone()[0] == 'manual'
     assert db.undo_last_edit()['id'] == edit
@@ -2409,7 +2425,7 @@ def test_higher_rank_homonym_collision_rollback_survives_sync_and_history(db, tm
     pending = [tuple(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
     history = [tuple(r) for r in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')]
     with pytest.raises(IdentityMergeConflict, match='higher-rank taxonomy metadata'):
-        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+        moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert db.identity_alternatives.for_photos() == state
     assert [tuple(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')] == pending
     assert [tuple(r) for r in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')] == history

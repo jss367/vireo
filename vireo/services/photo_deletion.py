@@ -25,6 +25,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
+from services import catalog_deletion
+
 if TYPE_CHECKING:
     from db import Database
     from services.service_types import JsonDict
@@ -283,7 +285,7 @@ class _BatchDeleteRun:
                 ids_to_delete = list(ids)
 
             for chunk in self._deletion._chunked(ids_to_delete):
-                chunk_result = db.delete_photos(
+                chunk_result = catalog_deletion.delete_photos(db,
                     chunk,
                     include_companions=expand_companions,
                     commit=False,
@@ -353,7 +355,7 @@ class _BatchDeleteRun:
         """Prune the pipeline cache and sweep cached files for removed rows."""
         self.emit("Pruning pipeline cache", 0, 1)
         try:
-            self.db.prune_pipeline_cache_for_ids(result["ids"])
+            catalog_deletion.prune_pipeline_cache_for_ids(self.db, result["ids"])
         except BaseException as exc:
             reraise_fatal_cleanup_error(exc)
             log.exception("Failed to prune pipeline cache after delete")

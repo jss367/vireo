@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from page_scripts import page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import detection_store, photo_ingest, stage_counts, subject_masks
+from services import catalog_deletion, detection_store, photo_ingest, stage_counts, subject_masks
 from testing.waits import synchronization_timeout
 
 
@@ -2232,7 +2232,7 @@ def test_preview_returns_404_for_deleted_photo_even_with_stale_cache(app_and_db)
 
     # Delete the photo (cascades FK-dependent rows) then simulate a leftover
     # cache file, e.g. crash-after-commit-before-cleanup.
-    db.delete_photos([pid])
+    catalog_deletion.delete_photos(db, [pid])
     stale = os.path.join(preview_dir, f"{pid}_1920.jpg")
     Image.new("RGB", (10, 10)).save(stale, "JPEG")
 
@@ -12837,7 +12837,7 @@ def test_api_photos_query_visual_focus_holds_one_read_snapshot(
             # A separate connection — a cull or a scan committing mid-request.
             writer = Database(db_path)
             writer.set_active_workspace(ws_id)
-            writer.delete_photos([target])
+            catalog_deletion.delete_photos(writer, [target])
             writer.close()
             deleted.append(target)
         return original(self, ids, *args, **kwargs)
