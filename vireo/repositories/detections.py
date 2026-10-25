@@ -659,7 +659,7 @@ class DetectionsRepository:
         )
         self.conn.commit()
 
-    def reject_misses(
+    def select_misses_to_reject(
         self,
         col: str,
         workspace_id: int,
@@ -667,11 +667,7 @@ class DetectionsRepository:
         scope_clause: str,
         scope_params: Sequence[Any],
     ) -> list[dict[str, Any]]:
-        """Reject the workspace's non-rejected photos flagged in ``col``.
-
-        Returns ``[{"photo_id", "old_value"}]`` for the changed photos and
-        commits only when there were any.
-        """
+        """Select scoped non-rejected misses without changing flags or attribution."""
         params = [workspace_id]
         since_clause = ""
         if since:
@@ -693,24 +689,10 @@ class DetectionsRepository:
         # string instead of the original NULL, leaving rows in a
         # non-canonical state that bypasses code paths expecting
         # none/flagged/rejected (or NULL).
-        affected = [
+        return [
             {"photo_id": r["id"], "old_value": r["flag"]}
             for r in rows
         ]
-        if not affected:
-            return []
-        ids = [a["photo_id"] for a in affected]
-        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
-        _CHUNK = 500
-        for i in range(0, len(ids), _CHUNK):
-            chunk = ids[i:i + _CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            self.conn.execute(
-                f"UPDATE photos SET flag='rejected' WHERE id IN ({placeholders})",
-                chunk,
-            )
-        self.conn.commit()
-        return affected
 
     def _chunks(self, values):
         values = list(values)

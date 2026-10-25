@@ -114,8 +114,11 @@ class PhotoReviewService:
 
     def set_flags(
         self, photo_ids: Sequence[int], flag: str, *, source: str | None = None, reason: str | None = None,
+        description: str | None = None,
     ) -> int:
-        return self._write_flags(photo_ids, flag, source=source, reason=reason, is_batch=True)
+        return self._write_flags(
+            photo_ids, flag, source=source, reason=reason, is_batch=True, description=description,
+        )
 
     def apply_culling_flags(
         self, keepers: Sequence[int], rejects: Sequence[int], unflag: Sequence[int],
@@ -167,6 +170,7 @@ class PhotoReviewService:
     def _write_flags(
         self, photo_ids: Sequence[int], flag: str, *, source: str | None, reason: str | None, is_batch: bool,
         observed_flags: dict[int, str] | None = None, observed_workspace_id: int | None = None,
+        description: str | None = None,
     ) -> int:
         with self.db.photo_review.flag_write() as owns_transaction:
             # Database caches its workspace when opened. Activation in another
@@ -188,7 +192,7 @@ class PhotoReviewService:
                 raise FlagConflict("This photo's flag changed elsewhere. Reload it before changing the flag.")
             valid_ids = list(old_values)
             before = self.db.photo_review.flag_attributions(valid_ids)
-            description = flag_description(
+            description = description or flag_description(
                 flag, count=len(photo_ids) if is_batch else None, source=source, reason=reason,
             )
             self.db.photo_review.set_flags(valid_ids, flag, _commit=False)

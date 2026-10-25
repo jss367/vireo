@@ -250,7 +250,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
     def setUp(self):
         from db import Database
         from PIL import Image
-        from services import photo_ingest
+        from services import photo_ingest, workspace_folders
 
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -261,7 +261,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.db.set_active_workspace(self.db.ensure_default_workspace())
         folder = self.root / "photos"
         folder.mkdir()
-        folder_id = self.db.add_folder(str(folder), name="synthetic")
+        folder_id = workspace_folders.add_folder(self.db, str(folder), name="synthetic")
         self.ids = []
         for index in range(3):
             path = folder / f"synthetic-{index}.jpg"
@@ -365,6 +365,62 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.assertEqual(client.post("/api/batch/best-batch-flags", json=payload).status_code, 200)
         states = self.db.photo_review.culling_flag_states([best, reject])
         self.assertEqual([states[pid]["confirmed_flag"] for pid in [best, reject]], ["flagged", "rejected"])
+
+    def test_misses_bulk_reject_records_confirmation_and_restores_prior_attribution(self):
+        from flask import Flask, jsonify
+        from web.misses import create_misses_blueprint
+
+        app = Flask(__name__)
+        app.register_blueprint(create_misses_blueprint(
+            lambda: self.db, lambda message, status=400: (jsonify(error=message), status),
+            resolve_visual=None,
+        ))
+        first, second, excluded = self.ids
+        self.service.set_flag(first, "flagged")
+        before = self.db.photo_review.flag_attributions(self.ids)
+        self.db.conn.execute("UPDATE photos SET flag=NULL WHERE id=?", (second,))
+        self.db.conn.execute("UPDATE photos SET miss_clipped=1, miss_computed_at='2026-10-25'")
+        self.db.conn.execute("UPDATE photos SET miss_computed_at='2026-10-01' WHERE id=?", (excluded,))
+        self.db.conn.commit()
+        history_count = len(self.db.edit_history.list_recent())
+        response = app.test_client().post("/api/misses/reject", json={
+            "category": "clipped", "since": "2026-10-24",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"rejected": 2, "category": "clipped"})
+        states = self.db.photo_review.culling_flag_states(self.ids)
+        self.assertEqual([states[pid]["confirmed_flag"] for pid in self.ids], ["rejected", "rejected", None])
+        self.assertEqual(states[excluded]["flag"], "none")
+        self.assertEqual(len(self.db.edit_history.list_recent()), history_count + 1)
+        self.assertIn("category=clipped", self.db.edit_history.list_recent()[0]["description"])
+        after = self.db.photo_review.flag_attributions(self.ids)
+        self.db.undo_last_edit()
+        self.assertEqual(self.db.photo_review.flag_attributions(self.ids), before)
+        states = self.db.photo_review.culling_flag_states(self.ids)
+        self.assertIsNone(self.db.photos.get(second)["flag"])
+        self.assertEqual([states[pid]["flag"] for pid in self.ids], ["flagged", None, "none"])
+        self.assertEqual(states[first]["confirmed_flag"], "flagged")
+        self.assertIsNone(states[second]["confirmed_flag"])
+        self.db.redo_last_undo()
+        self.assertEqual(self.db.photo_review.flag_attributions(self.ids), after)
+
+    def test_misses_bulk_reject_rolls_back_flags_and_attribution_on_history_failure(self):
+        from unittest.mock import patch
+
+        from services import miss_flags
+
+        self.service.set_flag(self.ids[0], "flagged")
+        before = self.db.photo_review.flag_attributions(self.ids)
+        self.db.conn.execute("UPDATE photos SET miss_clipped=1")
+        self.db.conn.commit()
+        history = self.db.edit_history.list_recent()
+        with patch.object(self.db, "record_edit", side_effect=ValueError("synthetic history failure")):
+            with self.assertRaisesRegex(ValueError, "synthetic history failure"):
+                miss_flags.bulk_reject_miss_category(self.db, "clipped", photo_ids=self.ids[:2])
+        self.assertEqual(self.db.photo_review.flag_attributions(self.ids), before)
+        self.assertEqual([self.db.photos.get(pid)["flag"] for pid in self.ids], ["flagged", "none", "none"])
+        self.assertEqual(self.db.edit_history.list_recent(), history)
+        self.assertFalse(self.db.conn.in_transaction)
 
     def test_manual_apply_round_trip_is_one_attributed_reversible_edit(self):
         from flask import Flask, jsonify

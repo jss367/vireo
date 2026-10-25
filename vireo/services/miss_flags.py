@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
+from services.photo_review import PhotoReviewService
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -82,14 +83,19 @@ def bulk_reject_miss_category(
     Browse-style filters currently visible on the Misses page.
 
     Returns a list of ``{"photo_id": int, "old_value": str}`` for each
-    photo whose flag was changed. The caller (``/api/misses/reject``)
-    uses this to write an ``edit_history`` entry so the bulk change is
-    undoable/auditable like the other batch flag routes; without it,
-    an accidental "Reject all" on /misses would be invisible to the
-    undo flow.
+    changed photo. Flags, current manual attribution, sidecar queue, and
+    reversible history snapshots are written in one review transaction.
     """
     repo = db.detections
     col = repo.miss_column(category)
     ws_id = db.require_workspace_id()
     scope_clause, scope_params = db.stats.scope_clause(photo_ids)
-    return repo.reject_misses(col, ws_id, since, scope_clause, scope_params)
+    with db.photo_review.flag_write() as owns_transaction:
+        affected = repo.select_misses_to_reject(col, ws_id, since, scope_clause, scope_params)
+        PhotoReviewService(db).set_flags(
+            [item["photo_id"] for item in affected], "rejected",
+            description=f"Rejected {len(affected)} miss photos (category={category})",
+        )
+    if owns_transaction and affected:
+        db.prune_edit_history()
+    return affected
