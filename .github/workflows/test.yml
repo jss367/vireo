@@ -169,14 +169,20 @@ jobs:
       # ``key`` hits exactly when main hasn't moved since the map was built;
       # ``restore-keys`` otherwise picks the newest map published by any
       # merge. Cache keys are immutable, so a SHA suffix is what makes each
-      # merge's map distinct. Only Linux uses this map; Windows runs in full.
+      # merge's map distinct. Both OS legs select from this one map, which
+      # test-main.yml records on Linux: a Windows-only test or branch is not
+      # in it, so a change that only a Windows-only test exercises is caught
+      # by the post-merge full suite on main, not here (the ``ci-full-suite``
+      # label runs it on the PR). ``enableCrossOsArchive`` lets the Windows
+      # runner read the Linux-saved entry.
       - name: Restore test-impact map
-        if: needs.changes.outputs.python == 'true' && needs.changes.outputs.full != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.python == 'true' && needs.changes.outputs.full != 'true'
         uses: actions/cache/restore@v5
         with:
           path: .test-impact
           key: test-impact-map-${{ github.event.pull_request.base.sha }}
           restore-keys: test-impact-map-
+          enableCrossOsArchive: true
 
       - name: Select tests for this change
         id: select
@@ -186,9 +192,9 @@ jobs:
           FORCE_FULL: ${{ needs.changes.outputs.full }}
         run: |
           mkdir -p .test-impact
-          if [ "$FORCE_FULL" = "true" ] || [ "$RUNNER_OS" = "Windows" ]; then
+          if [ "$FORCE_FULL" = "true" ]; then
             mode=full
-            echo "mode: full (full-suite override or Windows platform coverage)" | tee .test-impact/select.log
+            echo "mode: full (full-suite override)" | tee .test-impact/select.log
           else
             set +e
             python scripts/select_tests.py --explain --output .test-impact/selected.txt \
@@ -226,21 +232,20 @@ jobs:
       # Cap xdist workers at 2 for the same reason as the post-merge run:
       # several heavy ML/pipeline tests loading models on parallel workers
       # can trip the Linux OOM killer and cancel the whole run.
-      - name: Run selected tests
-        if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'subset'
-        run: >-
-          python -m pytest tests/ vireo/tests/ --selected-tests .test-impact/selected.txt
-          --shard ${{ matrix.shard }}/4
-          -n 2 -v --tb=short --timeout=120 --timeout-method=thread
-
-      # Windows gets the same bounded rerun as the post-merge full suite
-      # (see test-main.yml): one retry per failing test, with every test that
-      # passed only on its rerun surfaced as a warning annotation.
-      - name: Run full suite
-        if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'full'
+      #
+      # In ``subset`` mode the run is limited to the selected tests; in
+      # ``full`` mode (harness change, no map, or the ``ci-full-suite``
+      # label) it is the whole suite. Windows gets the same bounded rerun as
+      # the post-merge full suite (see test-main.yml) in both modes: one
+      # retry per failing test, with every test that passed only on its
+      # rerun surfaced as a warning annotation.
+      - name: Run tests
+        if: needs.changes.outputs.python == 'true' && (steps.select.outputs.mode == 'subset' || steps.select.outputs.mode == 'full')
         shell: bash
         run: >-
-          python -m pytest tests/ vireo/tests/ --shard ${{ matrix.shard }}/4
+          python -m pytest tests/ vireo/tests/
+          ${{ steps.select.outputs.mode == 'subset' && '--selected-tests .test-impact/selected.txt' || '' }}
+          --shard ${{ matrix.shard }}/4
           -n 2 -v --tb=short --timeout=120 --timeout-method=thread
           ${{ runner.os == 'Windows' && '--reruns 1 --reruns-delay 2' || '' }}
           2>&1 | tee pytest-output.txt
@@ -251,7 +256,7 @@ jobs:
       # lines main-health.yml already parses; a fixture that errored on both
       # attempts ends as ERROR rather than FAILED, so that is excluded too.
       - name: Surface tests that passed only on rerun
-        if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'full' && runner.os == 'Windows' && !cancelled()
+        if: needs.changes.outputs.python == 'true' && runner.os == 'Windows' && (steps.select.outputs.mode == 'subset' || steps.select.outputs.mode == 'full') && !cancelled()
         shell: bash
         run: |
           grep -oE 'RERUN [^ ]+::[^ ]+' pytest-output.txt | sed 's/^RERUN //' | sort -u > reruns.txt || true
