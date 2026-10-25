@@ -143,6 +143,23 @@ def _check_tree(source: Path) -> None:
     def walk_error(error: OSError) -> None:
         raise error
 
+    # A top-level entry on another volume cannot be moved by rename; without a
+    # fail-closed preflight the journal would publish, `_apply` would move
+    # earlier entries, and the EXDEV from this one would strand recovery.
+    # Guard files stay in place via compatibility symlinks, so their device
+    # does not matter here.
+    source_dev = source.stat().st_dev
+    case_insensitive = _case_insensitive(source)
+    for entry in sorted(source.iterdir()):
+        if _is_guard_name(entry.name, case_insensitive=case_insensitive):
+            continue
+        try:
+            entry_dev = entry.lstat().st_dev
+        except OSError:
+            continue
+        if entry_dev != source_dev:
+            raise MigrationError(f"Cross-volume entry requires manual migration: {entry}")
+
     for root, dirs, files in os.walk(source, followlinks=False, onerror=walk_error):
         for name in dirs + files:
             path = Path(root) / name

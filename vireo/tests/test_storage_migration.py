@@ -267,6 +267,37 @@ def test_cross_volume_move_is_refused_before_creating_journal(legacy, monkeypatc
     assert (source / "working/photo.raw").read_bytes() == b"unique original"
 
 
+def test_cross_volume_top_level_entry_is_refused_before_journal_or_moves(legacy, monkeypatch):
+    """A top-level entry on another volume cannot be moved by rename.
+
+    Without a fail-closed preflight the journal would publish, ``_apply``
+    would rename earlier entries first, and the EXDEV from this one would
+    strand recovery. The preflight must reject such a mount point before
+    writing the journal or moving any entry, preserving original bytes and
+    source identities.
+    """
+    source, data, cache, journal = legacy
+    before = snapshot(source)
+    source_dev = source.stat().st_dev
+    cross_volume_entry = source / "models"
+    original_lstat = Path.lstat
+
+    def lstat_on_another_device(path, *args, **kwargs):
+        result = original_lstat(path, *args, **kwargs)
+        if path == cross_volume_entry:
+            fields = list(result)
+            fields[2] = source_dev + 1
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", lstat_on_another_device)
+    with pytest.raises(migration.MigrationError, match="Cross-volume entry"):
+        migration.migrate()
+    assert not journal.exists()
+    assert not data.exists() and not cache.exists()
+    assert snapshot(source) == before
+
+
 def test_missing_or_replaced_root_stops_recovery(legacy, monkeypatch):
     source, data, _cache, journal = legacy
     with monkeypatch.context() as patch:

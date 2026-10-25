@@ -209,9 +209,13 @@ def _onnx_repo_dir_name() -> str:
     return "models--" + ONNX_REPO.replace("/", "--")
 
 
-def _is_install_dir(path: str) -> bool:
-    """A model directory, even an empty one a download has just created."""
-    return bool(path) and os.path.isdir(path)
+def _is_install_candidate(path: str) -> bool:
+    """A registered install location: a directory (even an empty one a download
+    just created) or a file that `weights_path` points to directly, including
+    symlinks resolving to either. Broken symlinks and non-existent paths are
+    not candidates: the registration is stale and cleanup has nothing to guard.
+    """
+    return bool(path) and (os.path.isdir(path) or os.path.isfile(path))
 
 
 def _within(path: str, root: str) -> bool:
@@ -380,7 +384,7 @@ def _collect(
                 key, name, candidates = repo, f"{repo}: repository metadata", []
             else:
                 key, name, candidates = repo, repo, by_repo.get(repo, [])
-            existing = list(dict.fromkeys(d for d in candidates if _is_install_dir(d)))
+            existing = list(dict.fromkeys(d for d in candidates if _is_install_candidate(d)))
             install = existing[0] if existing else None
             found[key] = {
                 "key": key, "name": name, "repo_dir": repo_dir, "cleanup_eligible": cleanup_eligible,
@@ -676,6 +680,11 @@ def _require_independent_install(install: str, cache_dir: str) -> None:
             raise UnsafeCacheCleanup(f"Installed model still reads from this cache: {path}. Keep its cache entry.")
 
     check(install)
+    # A file-backed install candidate (``weights_path`` pointing to a single
+    # file or a symlink to one) has nothing to walk; the top-level realpath
+    # check above already catches a cache-backed registration.
+    if not os.path.isdir(install):
+        return
     for root, dirs, files in os.walk(install, followlinks=False, onerror=walk_error):
         for name in dirs + files:
             path = os.path.join(root, name)
