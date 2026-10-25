@@ -123,6 +123,22 @@ def page(browser, page):
 
 
 @pytest.fixture()
+def saved_pipeline_suggestions(monkeypatch):
+    """Keep explicitly seeded suggestions for review UI/decision tests.
+
+    These tests write synthetic classifier summaries and quality labels to a
+    saved review, without the model/quality evidence needed to regenerate
+    them. Reopening normally refreshes those suggestions from the catalog.
+    Isolate that analysis boundary here; live flags, ratings, grouping edits,
+    species confirmations and history still use the real server/database.
+    Catalog-driven refresh has integration coverage in test_saved_review_recovery.py.
+    """
+    from services import saved_review
+
+    monkeypatch.setattr(saved_review, "refresh_saved_suggestions", lambda *_args, **_kwargs: None)
+
+
+@pytest.fixture()
 def live_server(tmp_path, monkeypatch):
     """Start an isolated Flask server with seeded E2E data."""
     monkeypatch.setenv("HOME", str(tmp_path))

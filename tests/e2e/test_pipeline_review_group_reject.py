@@ -8,6 +8,8 @@ import time
 import pytest
 from playwright.sync_api import expect
 
+pytestmark = pytest.mark.usefixtures("saved_pipeline_suggestions")
+
 
 def _write_grouped_pipeline_cache(live_server, photo_ids):
     db = live_server["db"]
@@ -2660,6 +2662,10 @@ def test_native_rating_and_wildlife_writes_rejected_through_held_apply(
     expect(page.locator(".photo-card[data-photo-id]")).to_have_count(4)
     page.evaluate("openGroupReview(0, 0)")
     page.wait_for_function("grmState && grmState.seeded === true")
+    # Hold the flags-only endpoint even if catalog predictions make species
+    # confirmation a smart default for this burst.
+    page.locator("#grmConfirmSpeciesChk").uncheck()
+    page.locator("#grmApplyFlagsChk").check()
     page.evaluate(
         """() => {
           window.__originalSafeFetchForApplyRating = window.safeFetch;
@@ -2835,9 +2841,13 @@ def test_text_undo_does_not_undo_photos(live_server, page):
 
 
 def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
+    from services.photo_review import PhotoReviewService
+
     db = live_server['db']
     ids = live_server['data']['photos'][:4]
-    db.photo_review.set_flag(ids[0], 'flagged')
+    # A saved photographer choice includes attribution; a raw flag is only
+    # an unverified legacy/ranking value and must not count as a saved pick.
+    PhotoReviewService(db).set_flag(ids[0], 'flagged')
     _write_grouped_pipeline_cache(live_server, ids)
     path = os.path.join(os.path.dirname(db._db_path), f'pipeline_results_ws{db._ws_id()}.json')
     with open(path) as cache_file:
