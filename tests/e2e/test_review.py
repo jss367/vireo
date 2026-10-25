@@ -210,3 +210,37 @@ def test_review_fingerprint_deep_link_is_literal_text_and_clears(
     assert f"photo_id={photo_id}" in page.url
     assert page.evaluate("currentLabelsFingerprint") is None
     expect(page.locator(".card[data-pred-id]")).to_have_count(1)
+
+
+def test_second_subject_card_is_not_shown_as_disagreeing(live_server, page):
+    """A photo tagged with one bird's species shows the other bird's
+    prediction as new, not as disagreeing with the first bird (#1298)."""
+    from services import photo_ingest
+
+    db = live_server["db"]
+    folder_id = db.folders.tree()[0]["id"]
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="redshank-egret.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    redshank_det, egret_det = db.detections.save(
+        photo_id,
+        [{"box": {"x": x, "y": 0.1, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"} for x in (0.1, 0.6)],
+        detector_model="MDV6",
+    )
+    db.predictions.add(redshank_det, "Spotted Redshank", 0.9, "bioclip",
+                      labels_fingerprint="fp1")
+    db.predictions.add(egret_det, "Little Egret", 0.9, "bioclip",
+                      category="disagreement", labels_fingerprint="fp1")
+    db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
+    egret = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (egret_det,),
+    ).fetchone()["id"]
+
+    page.goto(f"{live_server['url']}/review", timeout=5000)
+    card = page.locator(f'[data-pred-id="{egret}"]')
+    card.wait_for(state="visible", timeout=5000)
+
+    expect(card.locator(".badge-new")).to_have_text("new")
+    expect(card.locator(".badge-disagreement")).to_have_count(0)

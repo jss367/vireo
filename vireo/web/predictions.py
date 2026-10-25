@@ -219,11 +219,20 @@ def create_predictions_blueprint(
             )
             d["effective_category"] = effective_category
             if prediction_is_ambiguous(effective_category, d.get("category")):
-                keywords = db.photo_keywords.get_for_photo(d["photo_id"])
-                d["existing_species"] = [
-                    k["name"] for k in keywords
-                    if db.keyword_taxa.is_species(k["id"])
-                ]
+                # Name only the keywords this detection was compared
+                # against: another subject's species is not something this
+                # prediction disagrees with. Without a fresh comparison,
+                # fall back to every species keyword on the photo.
+                if effective_category_of is not None:
+                    d["existing_species"] = effective_category_of.compared_species(
+                        d.get("photo_id"), d.get("detection_id"),
+                    )
+                else:
+                    keywords = db.photo_keywords.get_for_photo(d["photo_id"])
+                    d["existing_species"] = [
+                        k["name"] for k in keywords
+                        if db.keyword_taxa.is_species(k["id"])
+                    ]
             # Attach alternatives
             key = (d.get("detection_id"), d.get("model"))
             d["alternatives"] = alts_by_key.get(key, [])
