@@ -1,24 +1,26 @@
 // Remote (SSH) move targets: the destination-mode select and the remote target id.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { onQuickFolderModeChange, quickUsesDateFolders } from './quick-move-form.js';
+import { updateQuickMoveBtn } from './quick-move-preview.js';
+import { safeFetch } from './shared.js';
 
 /* ---------- Remote (SSH) move targets ---------- */
-/** @type {MoveRemoteTarget[]} */ var quickRemoteTargets = [];
-var quickRsyncAvailable = false;
 
-async function loadRemoteTargets() {
+export async function loadRemoteTargets() {
   try {
     var data = await safeFetch('/api/remote-targets');
-    quickRemoteTargets = (data && data.targets) || [];
-    quickRsyncAvailable = !!(data && data.rsync_available);
+    state.quickRemoteTargets = (data && data.targets) || [];
+    state.quickRsyncAvailable = !!(data && data.rsync_available);
   } catch (e) {
-    quickRemoteTargets = [];
-    quickRsyncAvailable = false;
+    state.quickRemoteTargets = [];
+    state.quickRsyncAvailable = false;
   }
   var sel = /** @type {HTMLSelectElement} */ (document.getElementById('quickDestMode'));
   if (!sel) return;
   // Rebuild remote options, keeping the "Local path" option at index 0.
   while (sel.options.length > 1) sel.remove(1);
-  quickRemoteTargets.forEach(function(t) {
+  state.quickRemoteTargets.forEach(function(t) {
     var opt = document.createElement('option');
     opt.value = 'remote:' + t.id;
     opt.textContent = t.name + ' — ' + t.user + '@' + t.host + ' (SSH)';
@@ -27,13 +29,13 @@ async function loadRemoteTargets() {
 }
 
 // The remote target id when the destination mode is a remote target, else ''.
-function quickRemoteTargetId() {
+export function quickRemoteTargetId() {
   var el = /** @type {HTMLSelectElement} */ (document.getElementById('quickDestMode'));
   var v = el ? el.value : 'local';
   return v.indexOf('remote:') === 0 ? v.slice(7) : '';
 }
 
-function onQuickDestModeChange() {
+export function onQuickDestModeChange() {
   var remoteId = quickRemoteTargetId();
   /** @type {HTMLElement} */ (document.getElementById('quickLocalRow')).style.display = remoteId ? 'none' : '';
   /** @type {HTMLElement} */ (document.getElementById('quickRemoteRow')).style.display = remoteId ? '' : 'none';

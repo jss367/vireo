@@ -1,16 +1,19 @@
 // The rule editor form: criteria, preview, and save.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { loadRules } from './rules.js';
+import { escapeAttr, escapeHtml, safeFetch, showToast } from './shared.js';
 
 /** @param {MoveRule | undefined} [rule] */
-function showRuleForm(rule) {
-  editingRuleId = rule ? rule.id : null;
+export function showRuleForm(rule) {
+  state.editingRuleId = rule ? rule.id : null;
   /** @type {MoveCriteria} */ var criteria = {};
   if (rule) {
     try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : (rule.criteria || {}); } catch(e) {}
   }
 
   var html = '<div class="rule-form">';
-  html += '<h4>' + (editingRuleId ? 'Edit Rule' : 'New Rule') + '</h4>';
+  html += '<h4>' + (state.editingRuleId ? 'Edit Rule' : 'New Rule') + '</h4>';
 
   html += '<div class="form-row">';
   html += '<label>Name</label>';
@@ -21,7 +24,7 @@ function showRuleForm(rule) {
   html += '<label>Destination</label>';
   html += '<div class="dest-row">';
   html += '<input type="text" id="ruleDestInput" value="' + escapeAttr(rule ? rule.destination : '') + '" placeholder="/path/to/destination">';
-  html += '<button class="btn btn-secondary btn-small" onclick="openBrowser(\'ruleDestInput\')">Browse</button>';
+  html += '<button class="btn btn-secondary btn-small" data-rule-form="browse">Browse</button>';
   html += '</div>';
   html += '</div>';
 
@@ -65,7 +68,7 @@ function showRuleForm(rule) {
   html += '<div class="criteria-field">';
   html += '<label>Source Folders</label>';
   html += '<select id="ruleCriteriaFolders" multiple style="height:80px;">';
-  allFolders.forEach(function(f) {
+  state.allFolders.forEach(function(f) {
     var sel = (criteria.folder_ids && criteria.folder_ids.indexOf(f.id) >= 0) ? ' selected' : '';
     html += '<option value="' + f.id + '"' + sel + '>' + escapeHtml(f.path) + '</option>';
   });
@@ -83,9 +86,9 @@ function showRuleForm(rule) {
   html += '<div id="rulePreviewResult"></div>';
 
   html += '<div class="form-actions">';
-  html += '<button class="btn btn-primary" onclick="saveRule()">Save Rule</button>';
-  html += '<button class="btn btn-secondary" onclick="previewRule()">Preview</button>';
-  html += '<button class="btn btn-secondary" onclick="hideRuleForm()">Cancel</button>';
+  html += '<button class="btn btn-primary" data-rule-form="save">Save Rule</button>';
+  html += '<button class="btn btn-secondary" data-rule-form="preview">Preview</button>';
+  html += '<button class="btn btn-secondary" data-rule-form="cancel">Cancel</button>';
   html += '</div>';
 
   html += '</div>';
@@ -94,13 +97,13 @@ function showRuleForm(rule) {
   /** @type {HTMLElement} */ (document.getElementById('ruleFormContainer')).style.display = 'block';
 }
 
-function hideRuleForm() {
+export function hideRuleForm() {
   /** @type {HTMLElement} */ (document.getElementById('ruleFormContainer')).style.display = 'none';
   /** @type {HTMLElement} */ (document.getElementById('ruleFormContainer')).innerHTML = '';
-  editingRuleId = null;
+  state.editingRuleId = null;
 }
 
-function gatherCriteria() {
+export function gatherCriteria() {
   /** @type {MoveCriteria} */ var criteria = {};
   var rating = /** @type {HTMLSelectElement} */ (document.getElementById('ruleCriteriaRating')).value;
   if (rating) criteria.rating_min = parseInt(rating);
@@ -125,7 +128,7 @@ function gatherCriteria() {
   return criteria;
 }
 
-async function previewRule() {
+export async function previewRule() {
   /** @type {MoveCriteria} */ var criteria = gatherCriteria();
   var resultDiv = /** @type {HTMLElement} */ (document.getElementById('rulePreviewResult'));
   resultDiv.innerHTML = '<div class="loading">Checking matches...</div>';
@@ -143,7 +146,7 @@ async function previewRule() {
   }
 }
 
-async function saveRule() {
+export async function saveRule() {
   var name = /** @type {HTMLInputElement} */ (document.getElementById('ruleNameInput')).value.trim();
   var dest = /** @type {HTMLInputElement} */ (document.getElementById('ruleDestInput')).value.trim();
   if (!name || !dest) {
@@ -153,8 +156,8 @@ async function saveRule() {
   /** @type {MoveCriteria} */ var criteria = gatherCriteria();
 
   try {
-    if (editingRuleId) {
-      await safeFetch('/api/move-rules/' + editingRuleId, {
+    if (state.editingRuleId) {
+      await safeFetch('/api/move-rules/' + state.editingRuleId, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name, destination: dest, criteria: criteria}),

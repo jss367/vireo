@@ -1,9 +1,12 @@
 // The tab strip and the source-folder selects (/api/folders).
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { onQuickFolderChange } from './quick-move-form.js';
+import { safeFetch } from './shared.js';
 
 /* ---------- Tab Switching ---------- */
 /** @param {string} name */
-function switchTab(name) {
+export function switchTab(name) {
   document.querySelectorAll('.move-tab').forEach(function(t) { t.classList.remove('active'); });
   document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
   /** @type {HTMLElement} */ (document.getElementById('tab-' + name)).classList.add('active');
@@ -19,17 +22,17 @@ function switchTab(name) {
 }
 
 /* ---------- Load Folders ---------- */
-async function loadFolders() {
+export async function loadFolders() {
   try {
     var data = await safeFetch('/api/folders');
-    allFolders = data || [];
+    state.allFolders = data || [];
     populateFolderSelects();
   } catch (e) {
     console.error('Failed to load folders:', e);
   }
 }
 
-function populateFolderSelects() {
+export function populateFolderSelects() {
   var selects = ['quickFolderSelect', 'photoFolderSelect'];
   selects.forEach(function(id) {
     var sel = /** @type {HTMLSelectElement} */ (document.getElementById(id));
@@ -38,7 +41,7 @@ function populateFolderSelects() {
     sel.innerHTML = '';
     if (defaultOpt) sel.appendChild(defaultOpt);
 
-    allFolders.forEach(function(f) {
+    state.allFolders.forEach(function(f) {
       var opt = document.createElement('option');
       opt.value = String(f.id);
       var count = f.photo_count || 0;

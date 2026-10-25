@@ -1,34 +1,37 @@
 // Recent destinations shortcuts in the folder browser (/api/recent-destinations).
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { browseTo } from './folder-browser.js';
+import { safeFetch } from './shared.js';
 
 /** @param {string} path */
-function recentDestinationParts(path) {
+export function recentDestinationParts(path) {
   var trimmed = path.replace(/[\\/]+$/, '');
   return trimmed.split(/[\\/]/).filter(Boolean);
 }
 
 /** @param {unknown} paths */
-function renderRecentDestinations(paths) {
+export function renderRecentDestinations(paths) {
   var section = /** @type {HTMLElement} */ (document.getElementById('moveBrowserRecents'));
   var list = /** @type {HTMLElement} */ (document.getElementById('moveBrowserRecentList'));
   if (!section || !list) return;
 
   var seen = new Set();
-  recentDestinations = (Array.isArray(paths) ? paths : []).filter(function(path) {
+  state.recentDestinations = (Array.isArray(paths) ? paths : []).filter(function(path) {
     if (typeof path !== 'string' || !path || seen.has(path)) return false;
     seen.add(path);
     return true;
   }).slice(0, 5);
 
   /** @type {Record<string, number>} */ var leafCounts = {};
-  recentDestinations.forEach(function(path) {
+  state.recentDestinations.forEach(function(path) {
     var parts = recentDestinationParts(path);
     var leaf = parts[parts.length - 1] || path;
     leafCounts[leaf] = (leafCounts[leaf] || 0) + 1;
   });
 
   list.replaceChildren();
-  recentDestinations.forEach(function(path) {
+  state.recentDestinations.forEach(function(path) {
     var parts = recentDestinationParts(path);
     var leaf = parts[parts.length - 1] || path;
     var label = leaf;
@@ -43,26 +46,26 @@ function renderRecentDestinations(paths) {
     button.addEventListener('click', function() { browseTo(path); });
     list.appendChild(button);
   });
-  section.style.display = recentDestinations.length ? '' : 'none';
+  section.style.display = state.recentDestinations.length ? '' : 'none';
 }
 
-async function loadRecentDestinations() {
-  var seq = ++recentDestinationsSeq;
+export async function loadRecentDestinations() {
+  var seq = ++state.recentDestinationsSeq;
   try {
     var cfg = await safeFetch('/api/config', undefined, {toast: false});
-    if (seq !== recentDestinationsSeq) return;
+    if (seq !== state.recentDestinationsSeq) return;
     var ingest = cfg && cfg.ingest;
     renderRecentDestinations(ingest && ingest.recent_destinations);
   } catch (e) {
-    if (seq === recentDestinationsSeq) renderRecentDestinations([]);
+    if (seq === state.recentDestinationsSeq) renderRecentDestinations([]);
   }
 }
 
 /** @param {string} path */
-async function rememberRecentDestination(path) {
-  var seq = ++recentDestinationsSeq;
+export async function rememberRecentDestination(path) {
+  var seq = ++state.recentDestinationsSeq;
   renderRecentDestinations(
-    [path].concat(recentDestinations.filter(function(item) { return item !== path; }))
+    [path].concat(state.recentDestinations.filter(function(item) { return item !== path; }))
   );
   try {
     var data = await safeFetch('/api/recent-destinations', {
@@ -70,7 +73,7 @@ async function rememberRecentDestination(path) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path: path}),
     }, {toast: false});
-    if (seq === recentDestinationsSeq && data && Array.isArray(data.recent_destinations)) {
+    if (seq === state.recentDestinationsSeq && data && Array.isArray(data.recent_destinations)) {
       renderRecentDestinations(data.recent_destinations);
     }
   } catch (e) {

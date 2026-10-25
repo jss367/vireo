@@ -71,7 +71,6 @@ SPLIT_PAGES = {
     "/edit": "photo-editor",
     "/locations/review": "location-review",
     "/review": "review",
-    "/move": "move",
     "/cull": "cull",
 }
 

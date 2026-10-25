@@ -4,6 +4,7 @@
     "../types/pages/move.d.ts",
     "../vireo/static/move/boot.js",
     "../vireo/static/move/confirm-modal.js",
+    "../vireo/static/move/events.js",
     "../vireo/static/move/folder-browser.js",
     "../vireo/static/move/folders.js",
     "../vireo/static/move/move-visibility.js",
@@ -16,6 +17,7 @@
     "../vireo/static/move/remote-targets.js",
     "../vireo/static/move/rule-form.js",
     "../vireo/static/move/rules.js",
+    "../vireo/static/move/shared.js",
     "../vireo/static/move/state.js"
   ]
 }
