@@ -357,3 +357,26 @@ def test_journal_publication_retries_transient_windows_locks(tmp_path, monkeypat
     assert len(calls) == 3
     assert json.loads(journal.read_text()) == {"current": True}
     assert list(tmp_path.iterdir()) == [journal]
+
+
+def test_target_respects_filesystem_case_sensitivity(tmp_path, monkeypatch):
+    """Route a case-variant cache directory to the cache root on case-insensitive filesystems.
+
+    On Windows a legacy ``Models`` folder resolves to the same path as
+    ``models`` and must land in the cache root so its installed models stay
+    discoverable after the native-layout marker takes effect. A POSIX
+    filesystem is case-sensitive, so ``Models`` is a distinct user-created
+    directory and still routes to the data root.
+    """
+    data, cache = tmp_path / "data", tmp_path / "cache"
+
+    if os.path.normcase("Models") == "Models":
+        assert migration._target("Models", data, cache) == data / "Models"
+    assert migration._target("models", data, cache) == cache / "models"
+    assert migration._target("working", data, cache) == data / "working"
+
+    monkeypatch.setattr(migration.os.path, "normcase", str.lower)
+    assert migration._target("Models", data, cache) == cache / "Models"
+    assert migration._target("THUMBNAILS", data, cache) == cache / "THUMBNAILS"
+    assert migration._target("Embedding_Cache", data, cache) == cache / "Embedding_Cache"
+    assert migration._target("working", data, cache) == data / "working"

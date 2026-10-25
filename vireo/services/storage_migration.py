@@ -26,7 +26,21 @@ if TYPE_CHECKING:
 
 MARKER = "storage-layout-v1"
 CACHES = frozenset({"models", "thumbnails", "embedding_cache", "computation-cache"})
+_CACHES_NORMALIZED = frozenset(os.path.normcase(name) for name in CACHES)
 GUARDS = frozenset({"runtime.lock", "hf-cache-access.lock"})
+
+
+def _is_cache_name(name: str) -> bool:
+    """Membership check that respects the filesystem's case sensitivity.
+
+    On a case-insensitive filesystem (Windows), a legacy ``Models`` folder
+    resolves to the same path as ``models`` and must route to the cache
+    root; routing it to the data root would strand its installed models
+    after the native-layout marker takes effect. On a case-sensitive
+    filesystem, ``Models`` is a distinct user-created directory and still
+    goes to the data root.
+    """
+    return os.path.normcase(name) in _CACHES_NORMALIZED
 
 
 class MigrationError(ValueError):
@@ -184,7 +198,7 @@ def _read_journal(journal: Path, source: Path, data: Path, cache: Path) -> JsonD
 
 
 def _target(name: str, data: Path, cache: Path) -> Path:
-    return (cache if name in CACHES else data) / name
+    return (cache if _is_cache_name(name) else data) / name
 
 
 def _normalized_link_target(target: str) -> str:
@@ -238,7 +252,7 @@ def _apply(record: JsonDict, source: Path, data: Path, cache: Path, journal: Pat
         if _identity(target) != row["identity"]:
             raise MigrationError(f"Moved entry could not be verified: {target}")
         _link(old, target, row["directory"])
-        if row["name"] in CACHES:
+        if _is_cache_name(row["name"]):
             _link(data / row["name"], target, True)
     marker = data / MARKER
     if not _exists(marker):
@@ -263,7 +277,7 @@ def _rollback(record: JsonDict, source: Path, data: Path, cache: Path, journal: 
             target.rename(old)
             _sync_directory(old.parent)
             _sync_directory(target.parent)
-        if row["name"] in CACHES and _is_link(data / row["name"], target):
+        if _is_cache_name(row["name"]) and _is_link(data / row["name"], target):
             (data / row["name"]).unlink()
     for name in GUARDS:
         if _is_link(data / name, source / name):

@@ -380,11 +380,13 @@ def _collect(
                 key, name, candidates = repo, f"{repo}: repository metadata", []
             else:
                 key, name, candidates = repo, repo, by_repo.get(repo, [])
-            install = next((d for d in candidates if _is_install_dir(d)), None)
+            existing = list(dict.fromkeys(d for d in candidates if _is_install_dir(d)))
+            install = existing[0] if existing else None
             found[key] = {
                 "key": key, "name": name, "repo_dir": repo_dir, "cleanup_eligible": cleanup_eligible,
                 "files": data["files"], "blobs": data["blobs"],
                 "installed": install is not None, "install_path": install,
+                "install_paths": existing,
             }
         dangling = _unreferenced_blobs(repo_dir, referenced)
         if dangling:
@@ -392,7 +394,7 @@ def _collect(
             found[key] = {
                 "key": key, "name": f"{repo}: files no download refers to",
                 "repo_dir": repo_dir, "files": list(dangling), "blobs": dangling, "cleanup_eligible": cleanup_eligible,
-                "installed": False, "install_path": None, "dangling": True,
+                "installed": False, "install_path": None, "install_paths": [], "dangling": True,
             }
     _size_groups(found)
     return total, found
@@ -649,10 +651,13 @@ def remove_installed(cache_dir: str | None = None, models_dir: str | None = None
 
     def select(found: dict[str, JsonDict]) -> list[JsonDict]:
         groups = [g for g in found.values() if g["installed"] and g["removable"]]
-        # User-provided links are not duplicate copies. Check every selected
-        # installation before deleting anything, including directory links.
+        # User-provided links are not duplicate copies. A stale default
+        # directory does not mask a registered weights path that reads out
+        # of this cache, so every existing install candidate is checked,
+        # not only the one surfaced as ``install_path``.
         for group in groups:
-            _require_independent_install(group["install_path"], cache_dir)
+            for path in group["install_paths"]:
+                _require_independent_install(path, cache_dir)
         return groups
 
     result = _delete_selected(cache_dir, _models_dir(models_dir), select)

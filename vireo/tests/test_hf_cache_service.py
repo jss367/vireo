@@ -6,6 +6,7 @@ the developer's real cache.
 """
 
 import hashlib
+import json
 import os
 import time
 
@@ -118,6 +119,33 @@ def test_existing_model_cleanup_preserves_weights_linked_into_cache(hub, tmp_pat
         hf_cache.remove_installed()
     assert weights.read_bytes() == b"the only weights"
     assert blob.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_rejects_when_registered_weights_live_in_cache(hub, tmp_path):
+    """A stale default directory must not mask a cache-backed registered path.
+
+    The default install directory exists but is empty, while the model's
+    registered ``weights_path`` points into the Hub snapshot that backs the
+    active install. Validation must inspect every existing install candidate,
+    not just the first one, before deleting the cache that serves the model.
+    """
+    from services import hf_cache
+
+    stale_default = tmp_path / "models" / "bioclip-vit-b-16"
+    stale_default.mkdir(parents=True)
+    files = ("image_encoder.onnx", "image_encoder.onnx.data", "text_encoder.onnx",
+             "text_encoder.onnx.data", "tokenizer.json", "config.json")
+    blobs = [hub.add(f"bioclip-vit-b-16/{name}", f"bytes {name}".encode()) for name in files]
+    snapshot_install = blobs[0].parent.parent / "snapshots" / "rev1" / "bioclip-vit-b-16"
+    (tmp_path / "models.json").write_text(json.dumps(
+        {"models": [{"id": "bioclip-vit-b-16", "weights_path": str(snapshot_install)}]}
+    ))
+
+    with pytest.raises(hf_cache.UnsafeCacheCleanup, match="still reads from this cache"):
+        hf_cache.remove_installed()
+    for blob in blobs:
+        assert blob.exists()
 
 
 def test_inventory_splits_installed_from_unused(hub, tmp_path):
