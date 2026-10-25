@@ -165,6 +165,42 @@ def test_import_names_the_photo_and_still_processes(
         )
 
 
+def test_cancelled_import_with_sidecar_failure_reports_cancelled_step(tmp_path):
+    """Stop accepted after the preservation scan recorded an unreadable sidecar.
+
+    The job settles as cancelled, so the import step must report ``cancelled``
+    too — not a contradictory ``failed`` step inside a cancelled job. Matches
+    the scan step in services/scan_work.py and services/import_in_place.py.
+    """
+    from db import Database
+    from import_job.result import _finalize_import
+    from import_job.state import ImportParams, _ImportRunState
+    from test_import_job import FakeRunner, _make_job
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    runner = FakeRunner()
+    job = _make_job()
+
+    state = _ImportRunState(log_label="local")
+    state.cancelled = True
+    state.sidecar_failures.record(
+        "/card/heron.xmp", "heron.jpg",
+        "Vireo could not read it, or it is not valid XMP",
+    )
+
+    _finalize_import(
+        job, runner, db, state,
+        ImportParams(sources=["/card"], destination=str(tmp_path / "archive")),
+        discovered=0, include_paths=None, source_snapshots={},
+        deselected=0, vanished_paths=set(), appeared=0,
+    )
+
+    import_updates = [kw for _job, step, kw in runner.step_updates if step == "import"]
+    assert import_updates, "import step must be updated"
+    assert import_updates[-1]["status"] == "cancelled", import_updates[-1]
+
+
 def test_import_full_names_the_photo(app_and_db, tmp_path, no_metadata_warning):
     from wait import wait_for_job_via_client
 

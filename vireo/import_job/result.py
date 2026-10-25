@@ -44,9 +44,20 @@ def _finalize_import(job: JobDict, runner: JobRunner, db: Database, state: _Impo
     sidecar_note = state.sidecar_failures.note()
     if sidecar_note:
         summary += f", {sidecar_note}"
+    # Cancellation takes precedence over the sidecar-failure status: Stop
+    # accepted after the preservation scan recorded an unreadable sidecar
+    # settles the job as cancelled, so the step must report cancelled too
+    # — not a contradictory failed step inside a cancelled job. Matches
+    # the scan step in services/scan_work.py and services/import_in_place.py.
+    if status == "cancelled":
+        step_status = "cancelled"
+    elif status == "failed" or sidecar_note:
+        step_status = "failed"
+    else:
+        step_status = "completed"
     runner.update_step(
         job["id"], "import",
-        status="failed" if status == "failed" or sidecar_note else "completed",
+        status=step_status,
         summary=summary,
     )
 
