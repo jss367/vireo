@@ -106,6 +106,7 @@ def storage_inventory_routes(fs, service_ns):
     ns = {"__builtins__": {**vars(builtins), "__import__": lambda name, *_a, **_k: modules[name]},
           "os": S(path=fake_path, listdir=forbidden), "jsonify": lambda value: value,
           "config": {"THUMB_CACHE_DIR": "/invented/generated/thumbs"}, "db_path": "/invented/catalog/db",
+          "media_root": posixpath.dirname,
           "get_db": lambda: S(caches=S(offline_original_total_bytes=lambda: 0, offline_original_cached_count=lambda: 0)),
           "working_copy_stats": lambda _p: {"count": 0, "size": 0, "path": "/invented/generated/working"},
           "_storage_masks_data": lambda _db: {"total_bytes": 0, "path": "/invented/catalog/masks"},

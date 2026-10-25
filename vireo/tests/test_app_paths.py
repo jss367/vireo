@@ -284,8 +284,8 @@ def test_native_storage_report_and_safe_cleanup_preserve_media(app_and_db, monke
     response = client.get("/api/storage")
     assert response.status_code == 200
     report = response.get_json()
-    assert str(thumbs) in json.dumps(report)
-    assert str(data / "working") in json.dumps(report)
+    assert report["thumbnails"]["path"] == str(thumbs)
+    assert report["working_copies"]["path"] == str(data / "working")
     response = client.post("/api/storage/clear-safe")
     assert response.status_code == 200
     assert not thumbnail.exists()
