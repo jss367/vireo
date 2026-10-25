@@ -24168,7 +24168,7 @@ var __input = JSON.parse(process.argv[2]);
 var __status = __input.status;   // {predId: 'pending' | terminal status}
 var __groups = __input.groups;   // {predId: [every row one decision settles]}
 var __requests = [];
-async function %s(url) {
+async function %s(url, options) {
   var predId = Number(url.split('/')[3]);
   __requests.push(predId);
   if (__status[predId] !== 'pending') {
@@ -24179,6 +24179,15 @@ async function %s(url) {
     throw err;
   }
   var members = __groups[predId] || [predId];
+  if (options && options.body) {
+    var body = JSON.parse(options.body);
+    if (body.review_prediction_ids) {
+      members = body.review_prediction_ids;
+      if (members.some(function(m) { return __status[m] !== 'pending'; })) {
+        throw new Error('a card member was already decided');
+      }
+    }
+  }
   if (url.endsWith('/reject')) {
     members.forEach(function(m) { __status[m] = 'rejected'; });
     return {ok: true, rejected_prediction_ids: members};
@@ -24354,6 +24363,7 @@ var currentModel = __filters.model || 'all';
 var currentLabelsFingerprint = __filters.labels_fingerprint || '';
 var currentTab = __filters.tab || 'all';
 var currentSort = 'default';
+var reviewQueue = {workspace: 1};
 var __renders = 0;
 function renderAll() { __renders++; }
 async function loadPredictions() {}
@@ -24385,11 +24395,14 @@ def _run_review_accept(html, payload, call):
     evidence_start = html.find('// Subject evidence and saved uncertainty')
     evidence_end = html.find('</script>', evidence_start)
     assert evidence_start != -1 and evidence_end > evidence_start
+    cards_start = html.find('// Card identity is computed by the server;')
+    cards_end = html.find('</script>', cards_start)
+    assert cards_start != -1 and cards_end > cards_start
     import json as _json
 
     source = "\n".join([
         _grouped_decision_server_stub("safeFetch"), _grouped_decision_module(),
-        _REVIEW_ACCEPT_STUB, html[evidence_start:evidence_end],
+        _REVIEW_ACCEPT_STUB, html[cards_start:cards_end], html[evidence_start:evidence_end],
         html[grid_start:grid_end], html[start:end],
         call + ".then(__report);",
     ])
@@ -24422,8 +24435,8 @@ def test_review_accept_all_consumes_grouped_accept_expansion(app_and_db):
     html = _page_with_scripts(client, "/review")
     # 11 and 12 are one burst; 13 is unrelated and queued behind them.
     predictions = [
-        {"id": 11, "status": "pending"},
-        {"id": 12, "status": "pending"},
+        {"id": 11, "status": "pending", "group_id": "burst"},
+        {"id": 12, "status": "pending", "group_id": "burst"},
         {"id": 13, "status": "pending"},
     ]
 
@@ -24448,7 +24461,7 @@ def test_review_accept_all_consumes_grouped_accept_expansion(app_and_db):
     # Control: no group, and 12 was decided by someone else. That 409 is a real
     # conflict, not this run's own work, and must still stop the run.
     stale = _run_review_accept(html, {
-        "predictions": predictions,
+        "predictions": [{**p, "group_id": None} for p in predictions],
         "status": {"11": "pending", "12": "rejected", "13": "pending"},
         "groups": {},
     }, "acceptAllPending()")
@@ -24459,17 +24472,11 @@ def test_review_accept_all_consumes_grouped_accept_expansion(app_and_db):
     assert stale["localStatus"]["13"] == "pending"
 
 
-def test_review_single_accept_marks_expanded_group_members(app_and_db):
-    """One Accept click on a burst member settles the whole burst on screen.
+def test_review_single_accept_preserves_filtered_group_members(app_and_db):
+    """An explicit card scope excludes a burst member outside the collection.
 
-    The other half of the same Codex P2: ``acceptPrediction`` credited only the
-    row in the URL, so the siblings ``accept_prediction`` decided in the same
-    transaction kept rendering as pending — offering an Accept the database had
-    already recorded, and a Reject that would now 409.
-
-    The sibling here sits outside the collection filter, so it exists only in
-    ``allPredictions``. Walking just the filtered view would miss it and leave
-    the unfiltered copy lying the moment the filter is cleared.
+    Review submits the members it displayed, so the server must not expand
+    the request to an excluded row even when it shares the clicked group.
     """
     app, _ = app_and_db
     client = app.test_client()
@@ -24487,7 +24494,7 @@ def test_review_single_accept_marks_expanded_group_members(app_and_db):
     }, "acceptPrediction(11)")
     assert result["requests"] == [11]
     assert result["localStatus"] == {
-        "11": "accepted", "12": "accepted", "13": "pending",
+        "11": "accepted", "12": "pending", "13": "pending",
     }
     assert result["renders"] == 1
 
@@ -24522,13 +24529,8 @@ def test_review_accept_all_accepts_only_the_cards_the_filters_show(app_and_db):
     assert result["serverStatus"]["13"] == "pending"
 
 
-def test_review_reject_marks_burst_members_outside_the_filter(app_and_db):
-    """"Not X" on a burst card settles every member the server rejected.
-
-    ``/reject`` now expands across the burst the way accept does and names
-    the rows it wrote. A member outside the collection filter lives only in
-    ``allPredictions``, so walking just the filtered view would leave the
-    unfiltered copy claiming it is still pending.
+def test_review_reject_preserves_filtered_group_members(app_and_db):
+    """"Not X" submits only the card members inside the current collection.
     """
     app, _ = app_and_db
     html = _page_with_scripts(app.test_client(), "/review")
@@ -24545,7 +24547,7 @@ def test_review_reject_marks_burst_members_outside_the_filter(app_and_db):
     }, "rejectPrediction(11)")
     assert result["requests"] == [11]
     assert result["localStatus"] == {
-        "11": "rejected", "12": "rejected", "13": "pending",
+        "11": "rejected", "12": "pending", "13": "pending",
     }
 
 

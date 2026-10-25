@@ -33,6 +33,13 @@ from services.edit_history import prediction_status_item
 from services.pending_changes import queue_keyword_add
 from services.prediction_ambiguity import ambiguous_prediction_ids, effective_category_resolver, prediction_is_ambiguous
 from services.prediction_evidence import DECISIONS, attach_prediction_evidence
+from services.review_cards import (
+    ReviewCardConflict,
+    accept_review_card,
+    attach_review_cards,
+    reject_review_card,
+    validate_review_card,
+)
 from services.visual_scope import inject_active_visual_model
 from web.request_args import (
     MAX_SELECTION_PHOTOS,
@@ -329,6 +336,7 @@ def create_predictions_blueprint(
             return json_error(str(e), 400)
 
         results = _enrich_prediction_rows(db, preds, alt_preds)
+        attach_review_cards(results)
         if request.args.get('evidence') == '1':
             import config as cfg
             attach_prediction_evidence(db, results, db.get_effective_config(cfg.load()))
@@ -1652,6 +1660,25 @@ def create_predictions_blueprint(
             "skipped_out_of_workspace": len(out_of_workspace_ids),
         })
 
+    def _review_card_decision(db: Database, pred_id: int, decision: str) -> ResponseReturnValue:
+        """Validate an explicit Review card under the caller's decision lock."""
+        body = request.get_json()
+        ids = body.get('review_prediction_ids')
+        workspace = body.get('observed_workspace_id')
+        if not isinstance(ids, list) or not ids or len(ids) > 10000 or any(
+            type(pid) is not int or pid <= 0 for pid in ids
+        ) or type(workspace) is not int:
+            db.rollback()
+            return json_error('review_prediction_ids and observed_workspace_id are required', 400)
+        try:
+            rows = validate_review_card(db, pred_id, list(dict.fromkeys(ids)), workspace)
+        except ReviewCardConflict as exc:
+            db.rollback()
+            return json_error(str(exc), 409)
+        result = accept_review_card(db, rows) if decision == 'accept' else reject_review_card(db, rows)
+        db.commit()
+        return jsonify(result)
+
     @blueprint.route("/api/predictions/<int:pred_id>/accept", methods=["POST"])
     def api_accept_prediction(pred_id: int) -> ResponseReturnValue:
         """Accept a single prediction as one atomic decision.
@@ -1675,6 +1702,8 @@ def create_predictions_blueprint(
         if lock_err is not None:
             return lock_err
         try:
+            if request.is_json and 'review_prediction_ids' in request.get_json():
+                return _review_card_decision(db, pred_id, 'accept')
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
@@ -1840,6 +1869,8 @@ def create_predictions_blueprint(
         if lock_err is not None:
             return lock_err
         try:
+            if request.is_json and 'review_prediction_ids' in request.get_json():
+                return _review_card_decision(db, pred_id, 'reject')
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)

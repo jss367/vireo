@@ -105,12 +105,12 @@ async function loadPredictions() {
       currentModel = 'all';
     }
 
-    var pending = allPredictions.filter(function(p) { return p.status === 'pending'; });
+    var pending = reviewCardCounts().pending || 0;
     mode = allPredictions.length > 0 ? 'review' : 'browse';
 
     /** @type {HTMLElement} */ (document.getElementById('title')).textContent =
-      'Review Predictions (' + pending.length + ' pending)';
-    document.title = 'Vireo - Review (' + pending.length + ' pending)';
+      'Review Predictions (' + pending + ' pending cards)';
+    document.title = 'Vireo - Review (' + pending + ' pending cards)';
 
     /** @type {HTMLElement} */ (document.getElementById('loading')).style.display = 'none';
     _predictionsReloading = false;

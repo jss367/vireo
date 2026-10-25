@@ -770,7 +770,9 @@ def test_accept_subject_species(db, cat, monkeypatch):
                         lambda pid, **kw: calls.append((pid, kw)) or real(pid, **kw))
     result = db.accept_subject_species(top, _commit=False)
     assert db.conn.in_transaction
-    assert [c[1] for c in calls] == [{"photo_ids": [p0], "_commit": False}] * 2
+    assert [kw for _, kw in calls] == [
+        {"photo_ids": [p0], "prediction_ids": [pid], "_commit": False} for pid, _ in calls
+    ]
     assert result["photo_id"] == p0
     assert result["prediction_ids"][0] == top
     assert len(result["prediction_ids"]) == 2

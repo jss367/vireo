@@ -13,7 +13,7 @@ function harness() {
     reviewErrorMessage: (error, fallback) => error?.message || fallback,
     showToast() {},
   });
-  for (const file of ['evidence', 'grid', 'decisions']) {
+  for (const file of ['cards', 'evidence', 'grid', 'decisions']) {
     vm.runInContext(readFileSync(`vireo/static/review/${file}.js`, 'utf8'), ctx);
   }
   return ctx;

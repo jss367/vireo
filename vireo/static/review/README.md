@@ -90,6 +90,35 @@ changing this code:
   `#grmOverlay` is open and the lightbox is not. Boot registers the A/S handler
   first; keep both guard lists and that order.
 
+## Cards shared by classifier models
+
+`GET /api/predictions` retains individual prediction rows and attaches a
+`card_id`. The server connects burst groups and singletons with the same
+`consensus_species_key`, review status, and overlapping photo membership,
+including transitive overlaps. Species identity is the one Accept applies;
+raw per-frame labels and stored per-model `group_id`s remain evidence.
+
+`cards.js` indexes visible members within these card boundaries. Model or
+fingerprint filters show per-model cards; a confidence filter that removes a
+connecting frame splits the remaining components. Cards show each model's
+best relative score and its burst votes separately. The tag button counts
+distinct visible photos, and the status counts refer to cards. The existing
+Questionable detections view remains per detected subject.
+
+Card accept/reject and Accept All send `review_prediction_ids` and
+`observed_workspace_id` to the existing single-decision routes. Under the
+shared writer lock, `services/review_cards.py` verifies that every submitted
+row is visible, pending, current for its model, and part of one species card.
+Only those member rows are targets; ordinary alternative-candidate resolution
+still applies within each target's model/detection/fingerprint. A changed
+member or workspace refuses the entire decision. Deferred subjects block
+acceptance of the whole card. Keyword aliases, prior decisions, and every
+accepted/rejected model scope are recorded for undo/redo. The per-model Burst
+Group buttons retain their existing explicit group-edit scope.
+
+Compare's additional-subject accept also uses resolved species identity for
+model agreement, scoped to current pending rows on that same detection.
+
 ## Unresolved species alternatives
 
 The independent `identity-alternatives.js` panel loads workspace-wide review
