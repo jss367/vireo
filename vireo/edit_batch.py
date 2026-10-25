@@ -3,6 +3,7 @@
 import copy
 import json
 import math
+from typing import Any
 
 from image_edits import (
     _ADJUSTMENT_RANGES,
@@ -47,7 +48,8 @@ def validate_fields(fields):
     return list(dict.fromkeys(fields))
 
 
-def get_value(recipe, path, default=None):
+# Recipe values are arbitrary JSON.
+def get_value(recipe, path, default=None) -> Any:
     value = recipe or {}
     for part in path.split("."):
         if not isinstance(value, dict) or part not in value:
@@ -148,7 +150,7 @@ def _transform_retained_crop(current, result, native_size):
     result["crop"] = bounds
 
 
-def compose_recipe(current, source, fields=None, mode="replace", *, native_size=None):
+def compose_recipe(current, source, fields=None, mode="replace", *, native_size=None) -> dict[str, Any] | None:
     """Compose without rebinding masks; the caller owns target mask access."""
     fields = validate_operation(source, fields, mode)
     if fields is None:

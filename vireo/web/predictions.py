@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, cast
 
 import id_conflicts
 from db import Database
@@ -41,8 +42,18 @@ from web.request_args import (
     request_visual_arg,
 )
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
 
-def _request_photo_ids_arg():
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.edit_history import HistoryItem
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+    from services.visual_scope import RuleTree, VisualScope
+    from web.web_types import AppConfig, GetDb
+
+
+def _request_photo_ids_arg() -> list[int] | None:
     """Parse the optional ``photo_ids`` query param (comma-separated ints).
 
     Returns None when absent so callers keep their unscoped behaviour, and
@@ -77,12 +88,12 @@ def _request_photo_ids_arg():
 
 
 def create_predictions_blueprint(
-    get_db,
-    json_error,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    config: AppConfig,
     *,
-    visual_scope,
-):
+    visual_scope: VisualScope,
+) -> Blueprint:
     """Build the prediction listing, Compare and review-decision blueprint.
 
     ``config`` is ``app.config``, read at request time for Compare's
@@ -98,8 +109,9 @@ def create_predictions_blueprint(
     blueprint = Blueprint("predictions", __name__)
 
     def _query_predictions_with_alternatives(
-        db, collection_id, explicit_photo_ids, status, rules,
-    ):
+        db: Database, collection_id: int | None, explicit_photo_ids: list[int] | None, status: str | None,
+        rules: RuleTree | None,
+    ) -> tuple[list[Row], list[Row]]:
         """The Review queue's predictions and their nested alternatives.
 
         Returns ``(preds, alt_preds)``; raises ``ValueError`` on a bad rule.
@@ -152,13 +164,13 @@ def create_predictions_blueprint(
                 )
         return preds, alt_preds
 
-    def _enrich_prediction_rows(db, preds, alt_preds):
+    def _enrich_prediction_rows(db: Database, preds: list[Row], alt_preds: list[Row]) -> list[JsonDict]:
         """Enrich top-level predictions and nest their alternatives under them."""
         from species_identity import SpeciesResolver, resolved_prediction_taxonomy
         resolver = SpeciesResolver(db=db)
 
         # Index alternatives by (detection_id, model)
-        alts_by_key = {}
+        alts_by_key: dict[tuple[object, object], list[JsonDict]] = {}
         for a in alt_preds:
             ad = dict(a)
             key = (ad["detection_id"], ad["model"])
@@ -174,7 +186,7 @@ def create_predictions_blueprint(
         pred_dicts = [dict(p) for p in preds]
         attach_species_representatives(db, pred_dicts)
         recipes_by_photo = db.edits.get_photo_recipes({
-            p.get("photo_id") for p in pred_dicts if p.get("photo_id") is not None
+            pid for p in pred_dicts if (pid := p.get("photo_id")) is not None
         })
         # Same recomputation as the selection aggregator: the stored
         # ``category`` is a classify-time snapshot, so a keyword added
@@ -193,7 +205,7 @@ def create_predictions_blueprint(
         for d in pred_dicts:
             if d.get("status") == "alternative":
                 continue  # alternatives are nested, not top-level
-            d["edit_recipe"] = recipes_by_photo.get(d.get("photo_id"))
+            d["edit_recipe"] = recipes_by_photo.get(d["photo_id"])
             d["render_key"] = render_key_for_recipe(d["edit_recipe"])
             # Species the accept path will actually apply. For an ordinary
             # prediction this is the row's own species; for a grouped/burst
@@ -239,7 +251,7 @@ def create_predictions_blueprint(
             results.append(d)
         return results
 
-    def _attach_photo_states(db, response, explicit_photo_ids):
+    def _attach_photo_states(db: Database, response: JsonDict, explicit_photo_ids: list[int]) -> None:
         """Add per-photo ``photo_states`` and ``match_states`` to ``response``."""
         response["photo_states"] = {
             str(pid): state
@@ -266,7 +278,7 @@ def create_predictions_blueprint(
         }
 
     @blueprint.route("/api/predictions")
-    def api_predictions():
+    def api_predictions() -> ResponseReturnValue:
         db = get_db()
         collection_id = request.args.get("collection_id", None, type=int)
         status = request.args.get("status", None)
@@ -326,7 +338,7 @@ def create_predictions_blueprint(
         # over the broadened metadata-only prediction set. Response is a
         # dict envelope so the field can travel alongside the list;
         # callers unwrap ``data.predictions``.
-        response = {"predictions": results}
+        response: JsonDict = {"predictions": results}
         if visual_info is not None:
             response["visual"] = visual_info
         # Only the per-photo callers (Browse's detail panel) need this, and
@@ -338,7 +350,7 @@ def create_predictions_blueprint(
         return jsonify(response)
 
     @blueprint.route('/api/detections/<int:detection_id>/evidence-review', methods=['POST'])
-    def api_detection_evidence_review(detection_id):
+    def api_detection_evidence_review(detection_id: int) -> ResponseReturnValue:
         """Save subject uncertainty independently of species decisions and flags."""
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -351,7 +363,7 @@ def create_predictions_blueprint(
             return json_error('observed_revision must be a nonnegative integer')
         db = get_db()
 
-        def save():
+        def save() -> ErrorResponse | Response:
             if type(body.get('observed_workspace_id')) is not int or (
                 body['observed_workspace_id'] != db.require_workspace_id()
                 or body['observed_workspace_id'] != db.workspaces.most_recently_opened_id()
@@ -370,7 +382,7 @@ def create_predictions_blueprint(
 
     _COMPARE_MAX_PER_PAGE = 200
 
-    def _compare_photo_ids(name="photo_id"):
+    def _compare_photo_ids(name: str = "photo_id") -> tuple[None, None] | tuple[None, ErrorResponse] | tuple[list[int], None]:
         """Parse repeated photo id args, or ``(None, None)`` when absent."""
         values = request.args.getlist(name)
         if not values:
@@ -385,7 +397,7 @@ def create_predictions_blueprint(
             return None, json_error(f"{name} must be a positive integer")
         return photo_ids, None
 
-    def _attach_comparison_render_keys(db, photos):
+    def _attach_comparison_render_keys(db: Database, photos: list[JsonDict]) -> list[JsonDict]:
         """Give ID Conflicts rows the fingerprint their thumbnail URLs need.
 
         The page builds ``/thumbnails/<id>.jpg`` through ``vireoThumbnailUrl``
@@ -409,8 +421,9 @@ def create_predictions_blueprint(
         return photos
 
     def _comparison_snapshot(
-        db, collection_id, requested_models, min_confidence, refresh_ids,
-    ):
+        db: Database, collection_id: int, requested_models: list[str], min_confidence: float,
+        refresh_ids: list[int] | None,
+    ) -> id_conflicts.Snapshot:
         """The ID Conflicts snapshot for this request, rebuilt when it is spent."""
         workspace_id = db.require_workspace_id()
         store = config["ID_CONFLICTS_SNAPSHOTS"]
@@ -448,7 +461,7 @@ def create_predictions_blueprint(
         return snapshot
 
     @blueprint.route("/api/predictions/compare")
-    def api_predictions_compare():
+    def api_predictions_compare() -> ResponseReturnValue:
         """One page of the ID Conflicts comparison, plus every count it shows.
 
         Deriving what a row means — its status, whether the models disagree,
@@ -541,7 +554,7 @@ def create_predictions_blueprint(
         })
 
     @blueprint.route("/api/predictions/<int:pred_id>/reviewed", methods=["POST"])
-    def api_mark_prediction_reviewed(pred_id):
+    def api_mark_prediction_reviewed(pred_id: int) -> ResponseReturnValue:
         """Mark a pending prediction as reviewed, atomically.
 
         Under the same lock as the accept/reject routes. The existing
@@ -594,7 +607,7 @@ def create_predictions_blueprint(
             raise
 
     @blueprint.route("/api/predictions/<int:pred_id>/replace-keywords", methods=["POST"])
-    def api_replace_species_keywords_with_prediction(pred_id):
+    def api_replace_species_keywords_with_prediction(pred_id: int) -> ResponseReturnValue:
         """Accept a prediction and replace existing species keywords atomically.
 
         Same lock as every other prediction-decision route. Without it, a
@@ -667,10 +680,13 @@ def create_predictions_blueprint(
             db.rollback()
             raise
 
-    def _parse_batch_accept_body(db, body):
+    def _parse_batch_accept_body(
+        db: Database, body: JsonDict,
+    ) -> tuple[list[int], str | None, list[int] | None, ErrorResponse | None]:
         """Validate a ``batch-accept`` payload before its lock is taken.
 
-        Returns ``(pred_ids, expected_species, all_photo_ids, error)``.
+        Returns ``(pred_ids, expected_species, all_photo_ids, error)``;
+        ``pred_ids`` is ``[]`` when ``error`` is set.
         """
         # ``replace_species=True`` strips conflicting species keywords from
         # every tagged photo, but the batch endpoint records one
@@ -683,7 +699,7 @@ def create_predictions_blueprint(
         # non-undoable. Refuse the flag here rather than silently drop it
         # so a mis-wired caller learns immediately.
         if bool(body.get("replace_species")):
-            return None, None, None, json_error(
+            return [], None, None, json_error(
                 "replace_species is not supported on batch-accept because "
                 "the batched undo entry cannot restore removed keywords; "
                 "use /api/predictions/<pred_id>/replace-keywords for a "
@@ -692,17 +708,17 @@ def create_predictions_blueprint(
             )
         # An explicit selection extends the accept to photos without a
         # matching prediction. Their keyword additions share the same undo.
-        all_photo_ids = None
+        all_photo_ids: list[int] | None = None
         if "photo_ids" in body:
             all_photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error)
             if err is not None:
-                return None, None, None, err
+                return [], None, None, err
         if all_photo_ids is not None and body.get("prediction_ids") == []:
             pred_ids, err = [], None
         else:
             pred_ids, err = _parse_prediction_ids(db, body)
         if err is not None:
-            return None, None, None, err
+            return [], None, None, err
 
         # ``expected_species`` is the species the button in Browse names —
         # what "Accept on 38 Bald Eagle" would tag. Passed through so the
@@ -717,13 +733,13 @@ def create_predictions_blueprint(
             raw_expected.strip() if isinstance(raw_expected, str) else None
         ) or None
         if all_photo_ids is not None and not expected_species:
-            return None, None, None, json_error(
+            return [], None, None, json_error(
                 "expected_species required when accepting on all photos"
             )
         return pred_ids, expected_species, all_photo_ids, None
 
     @blueprint.route("/api/predictions/batch-accept", methods=["POST"])
-    def api_batch_accept_predictions():
+    def api_batch_accept_predictions() -> ResponseReturnValue:
         """Accept many predictions of one species as a single action.
 
         Browse's selection panel accepts a species across the whole selection.
@@ -807,7 +823,10 @@ def create_predictions_blueprint(
             db.rollback()
             raise
 
-    def _batch_accept_under_lock(db, pred_ids, expected_species=None, all_photo_ids=None):
+    def _batch_accept_under_lock(
+        db: Database, pred_ids: list[int], expected_species: str | None = None,
+        all_photo_ids: list[int] | None = None,
+    ) -> ErrorResponse | Response:
         """The checks and writes of ``batch-accept``, inside its transaction.
 
         Split out only so the transaction's boundaries are impossible to
@@ -822,8 +841,9 @@ def create_predictions_blueprint(
 
         has_accepted_predictions = bool(items)
         if all_photo_ids is not None:
+            # _parse_batch_accept_body requires expected_species with a selection.
             keyword_id, species = _extend_accept_to_selection(
-                db, items, keyword_id, species, expected_species, all_photo_ids,
+                db, items, keyword_id, species, cast(str, expected_species), all_photo_ids,
             )
 
         # History joins the same transaction rather than committing after it:
@@ -885,7 +905,9 @@ def create_predictions_blueprint(
             "species": species,
         })
 
-    def _filter_batch_accept_rows(db, pred_ids, expected_species):
+    def _filter_batch_accept_rows(
+        db: Database, pred_ids: list[int], expected_species: str | None,
+    ) -> tuple[list[int], JsonDict]:
         """Drop the submitted rows ``batch-accept`` must skip, under its lock.
 
         Returns the rows still to accept and the skipped id sets by reason,
@@ -976,11 +998,14 @@ def create_predictions_blueprint(
             "drifted": drifted_ids,
         }
 
-    def _accept_submitted_predictions(db, pred_ids):
+    def _accept_submitted_predictions(
+        db: Database, pred_ids: list[int],
+    ) -> tuple[list[JsonDict], int | None, str | None, ErrorResponse | None]:
         """Accept the filtered ``batch-accept`` rows, building its undo items.
 
         Returns ``(items, keyword_id, species, error)``; on a mixed-species
-        batch the transaction is rolled back and ``error`` is the response.
+        batch the transaction is rolled back, ``error`` is the response and
+        ``items`` is empty.
         """
         # Confine the whole batch to the rows the caller actually submitted.
         # ``accept_prediction`` otherwise expands a grouped (burst) accept to
@@ -1006,10 +1031,10 @@ def create_predictions_blueprint(
         # already fully done; re-entering them was O(N^2) in group size and
         # appended a second, status-only history item per photo whose
         # recorded "previous" status is a fiction.
-        handled = set()
-        items = []
-        keyword_id = None
-        species = None
+        handled: set[int] = set()
+        items: list[JsonDict] = []
+        keyword_id: int | None = None
+        species: str | None = None
         species_key = None
         for pid in pred_ids:
             if pid in handled:
@@ -1041,7 +1066,7 @@ def create_predictions_blueprint(
                 species_key = result["species_key"]
             elif result["species_key"] != species_key:
                 db.rollback()
-                return None, None, None, json_error(
+                return [], None, None, json_error(
                     "prediction_ids must all resolve to one species", 400,
                 )
             for a in result["affected"]:
@@ -1061,8 +1086,9 @@ def create_predictions_blueprint(
         return items, keyword_id, species, None
 
     def _extend_accept_to_selection(
-        db, items, keyword_id, species, expected_species, all_photo_ids,
-    ):
+        db: Database, items: list[JsonDict], keyword_id: int | None, species: str | None, expected_species: str,
+        all_photo_ids: list[int],
+    ) -> tuple[int, str | None]:
         """Tag the rest of an "Accept on all" selection and queue its sidecars.
 
         Appends keyword-only undo items to ``items`` and rewrites every tagging
@@ -1084,10 +1110,11 @@ def create_predictions_blueprint(
             # ``accept_prediction`` so both accept paths behave the
             # same for a legacy/name-only bucket.
             explicit = resolver.explicit_source(expected_species) is not None
-            keyword_id = db.add_keyword(
+            # add_keyword returns the new or existing keyword's id.
+            keyword_id = cast(int, db.add_keyword(
                 identity.display_name, is_species=True, _commit=False,
                 source_taxon_id=identity.taxon_id if explicit else None,
-            )
+            ))
             species = db.keywords.name_of(keyword_id)
         already_tagged = db.get_photos_with_equivalent_species(all_photo_ids, keyword_id)
         for photo_id in all_photo_ids:
@@ -1104,14 +1131,15 @@ def create_predictions_blueprint(
         # including tags already added by accept_prediction above.
         for item in items:
             old_value = item["old_value"]
-            old_meta = (
+            old_meta: JsonDict = (
                 json.loads(old_value) if old_value.startswith("{")
                 else {"prediction_id": int(old_value)}
             )
             if old_meta.get("no_tag"):
                 continue
             photo_id = item["photo_id"]
-            item_species = db.keywords.name_of(int(item["new_value"]))
+            # The keyword this batch just tagged, so it exists.
+            item_species = cast(str, db.keywords.name_of(int(item["new_value"])))
             flat_removals = db.pending_changes.flat_keyword_removals(photo_id, item_species)
             # accept_prediction queues an add directly. Reconcile it
             # with any pending removal before applying the shared helper.
@@ -1123,7 +1151,7 @@ def create_predictions_blueprint(
             item["old_value"] = json.dumps(old_meta)
         return keyword_id, species
 
-    def _load_prediction_rows(db, pred_ids):
+    def _load_prediction_rows(db: Database, pred_ids: list[int]) -> list[Row]:
         """Load ``pred_ids`` in the shape ``ambiguous_prediction_ids`` wants.
 
         Selected by id rather than through ``get_predictions(photo_ids=...)``
@@ -1165,7 +1193,7 @@ def create_predictions_blueprint(
     # mirrors the same three values in ``PREDICTION_DECIDED_STATUSES``.
     _DECIDED_PREDICTION_STATUSES = Database.DECIDED_PREDICTION_STATUSES
 
-    def _decided_prediction_ids(db, pred_ids):
+    def _decided_prediction_ids(db: Database, pred_ids: list[int]) -> set[int]:
         """Which of ``pred_ids`` already have a decision recorded.
 
         Both batch endpoints need the same precondition, so neither gets to
@@ -1185,7 +1213,7 @@ def create_predictions_blueprint(
         """
         return db.predictions.decided_ids(pred_ids)
 
-    def _prediction_status(db, pred_id):
+    def _prediction_status(db: Database, pred_id: int) -> str | None:
         """Current review status of one prediction in the active workspace.
 
         Single-row decision endpoints (accept, reject, mark-reviewed,
@@ -1205,7 +1233,7 @@ def create_predictions_blueprint(
         """
         return db.predictions.current_status(pred_id)
 
-    def _superseded_prediction_ids(db, pred_ids):
+    def _superseded_prediction_ids(db: Database, pred_ids: list[int]) -> set[int]:
         """Which of ``pred_ids`` belong to a label set the catalog moved past.
 
         The third precondition both batch endpoints share, alongside
@@ -1240,7 +1268,7 @@ def create_predictions_blueprint(
         """
         return db.predictions.superseded_ids(pred_ids)
 
-    def _parse_observed_statuses(body):
+    def _parse_observed_statuses(body: JsonDict) -> tuple[dict[int, str], ErrorResponse | None]:
         """Validate ``/api/predictions/group/apply``'s render-time baseline.
 
         The burst modal sends ``observed``: the status it displayed for each
@@ -1259,7 +1287,7 @@ def create_predictions_blueprint(
         if raw is None:
             return {}, None
         if not isinstance(raw, dict):
-            return None, json_error(
+            return {}, json_error(
                 "observed must be an object mapping prediction id to status"
             )
         observed = {}
@@ -1267,17 +1295,19 @@ def create_predictions_blueprint(
             try:
                 pred_id = int(key)
             except (TypeError, ValueError):
-                return None, json_error(
+                return {}, json_error(
                     "observed keys must be prediction ids"
                 )
             if not isinstance(value, str):
-                return None, json_error(
+                return {}, json_error(
                     "observed values must be status strings"
                 )
             observed[pred_id] = value
         return observed, None
 
-    def _group_pick_prediction_ids(db, photo_ids, observed):
+    def _group_pick_prediction_ids(
+        db: Database, photo_ids: list[int], observed: dict[int, str],
+    ) -> dict[int, list[int]]:
         """The prediction rows a group-apply pick accepts, keyed by photo.
 
         The modal's ``observed`` baseline names the burst member it showed for
@@ -1308,7 +1338,7 @@ def create_predictions_blueprint(
             by_photo.update(grouped)
         return by_photo
 
-    def _snapshot_pick_prior_statuses(db, pick_pred_ids):
+    def _snapshot_pick_prior_statuses(db: Database, pick_pred_ids: dict[int, list[int]]) -> dict[int, dict[int, str]]:
         """Prior review status of every row a group pick can rewrite, by photo.
 
         Returns ``{photo_id: {pred_id: status}}`` covering each pick row and
@@ -1335,7 +1365,7 @@ def create_predictions_blueprint(
             out.setdefault(photo_id, {})[row["prediction_id"]] = row["status"]
         return out
 
-    def _accept_group_pick_rows(db, pick_pred_ids):
+    def _accept_group_pick_rows(db: Database, pick_pred_ids: dict[int, list[int]]) -> None:
         """Accept each pick's rows and settle their siblings, in-transaction.
 
         Mirrors a single Accept: within each accepted row's (detection,
@@ -1348,12 +1378,12 @@ def create_predictions_blueprint(
         records the sibling's prior ``accepted`` so undo restores it, and
         ``Database._redo_prediction_accept_statuses`` re-rejects it on redo.
         """
-        accepted_by_scope = {}
+        accepted_by_scope: dict[tuple[int, str, str], set[int]] = {}
         for ids in pick_pred_ids.values():
             for pred_id in ids:
                 db.update_prediction_status(pred_id, "accepted", _commit=False)
-                scope = db.predictions.get_scope(pred_id)
-                accepted_by_scope.setdefault(tuple(scope), set()).add(pred_id)
+                detection_id, model, fingerprint = db.predictions.get_scope(pred_id)
+                accepted_by_scope.setdefault((detection_id, model, fingerprint), set()).add(pred_id)
         for scope, accepted_ids in accepted_by_scope.items():
             sibling_ids = db.predictions.open_scope_sibling_ids(
                 *scope, sorted(accepted_ids),
@@ -1361,7 +1391,7 @@ def create_predictions_blueprint(
             for sid in sibling_ids:
                 db.update_prediction_status(sid, "rejected", _commit=False)
 
-    def _stale_group_apply_photos(db, observed):
+    def _stale_group_apply_photos(db: Database, observed: dict[int, str]) -> set[int]:
         """Photos whose group member was decided or regenerated since the modal rendered.
 
         Group apply is the one decision route where "already decided" is *not*
@@ -1414,7 +1444,7 @@ def create_predictions_blueprint(
                 stale.add(row["photo_id"])
         return stale
 
-    def _species_drifted_prediction_ids(db, rows, expected_species):
+    def _species_drifted_prediction_ids(db: Database, rows: list[Row], expected_species: str | None) -> set[int]:
         """Which of ``rows`` no longer resolve to the species Browse rendered.
 
         Both accept panels group by species and label the button with the
@@ -1457,10 +1487,10 @@ def create_predictions_blueprint(
                 drifted.add(row["id"])
         return drifted
 
-    def _parse_prediction_ids(db, body):
+    def _parse_prediction_ids(db: Database, body: JsonDict) -> tuple[list[int], ErrorResponse | None]:
         """Validate a batch payload's ``prediction_ids``.
 
-        Returns ``(prediction_ids, None)`` or ``(None, error_response)``.
+        Returns ``(prediction_ids, None)`` or ``([], error_response)``.
         Every id must exist and belong to a photo in the active workspace, so
         a batch can never reach across a workspace boundary.
 
@@ -1479,12 +1509,12 @@ def create_predictions_blueprint(
         """
         raw_ids = body.get("prediction_ids", [])
         if not isinstance(raw_ids, list) or not raw_ids:
-            return None, json_error("prediction_ids required")
+            return [], json_error("prediction_ids required")
         pred_ids = []
         seen = set()
         for raw in raw_ids:
             if isinstance(raw, bool) or not isinstance(raw, int):
-                return None, json_error("prediction_ids must be integers")
+                return [], json_error("prediction_ids must be integers")
             if raw not in seen:
                 pred_ids.append(raw)
                 seen.add(raw)
@@ -1497,22 +1527,22 @@ def create_predictions_blueprint(
             pred_ids, stop_after_photos=MAX_SELECTION_PHOTOS,
         )
         if len(set(photo_by_pred.values())) > MAX_SELECTION_PHOTOS:
-            return None, json_error("too many photos in selection", 400)
+            return [], json_error("too many photos in selection", 400)
         for pid in pred_ids:
             if pid not in photo_by_pred:
-                return None, json_error(f"Prediction {pid} not found", 404)
+                return [], json_error(f"Prediction {pid} not found", 404)
         # One workspace query per distinct photo, not per prediction id:
         # several rows on one photo must not cost several round trips each.
         for photo_id in dict.fromkeys(photo_by_pred.values()):
             if not db.workspace_folders.photo_in_workspace(photo_id, db.require_workspace_id()):
-                return None, json_error(
+                return [], json_error(
                     f"Photo {photo_id} does not belong to the "
                     "active workspace", 403,
                 )
         return pred_ids, None
 
     @blueprint.route("/api/predictions/batch-reject", methods=["POST"])
-    def api_batch_reject_predictions():
+    def api_batch_reject_predictions() -> ResponseReturnValue:
         """Reject many predictions as a single undoable action.
 
         A photo with several detections carries one prediction row per
@@ -1542,7 +1572,7 @@ def create_predictions_blueprint(
             db.rollback()
             raise
 
-    def _batch_reject_under_lock(db, pred_ids):
+    def _batch_reject_under_lock(db: Database, pred_ids: list[int]) -> Response:
         """The checks and writes of ``batch-reject``, inside its transaction."""
         # The same filter ``batch-accept`` applies, through the same helper —
         # not a parallel copy that can be tightened on one side only. Without
@@ -1622,7 +1652,7 @@ def create_predictions_blueprint(
         })
 
     @blueprint.route("/api/predictions/<int:pred_id>/accept", methods=["POST"])
-    def api_accept_prediction(pred_id):
+    def api_accept_prediction(pred_id: int) -> ResponseReturnValue:
         """Accept a single prediction as one atomic decision.
 
         Serialized with every other prediction-decision route through
@@ -1667,7 +1697,7 @@ def create_predictions_blueprint(
                 # deliberately kept. Regular accepts still use the compact
                 # ``str(prediction_id)`` form so existing edit-history rows
                 # keep parsing unchanged.
-                def _make_item(a):
+                def _make_item(a: JsonDict) -> JsonDict:
                     if a.get('changed_tag', True):
                         old_value = str(a['prediction_id'])
                     else:
@@ -1711,7 +1741,7 @@ def create_predictions_blueprint(
             raise
 
     @blueprint.route("/api/predictions/<int:pred_id>/accept-subject", methods=["POST"])
-    def api_accept_subject_species(pred_id):
+    def api_accept_subject_species(pred_id: int) -> ResponseReturnValue:
         """Accept an additional-subject species from Compare, atomically.
 
         Under the same lock as every other prediction-decision route (see
@@ -1756,7 +1786,7 @@ def create_predictions_blueprint(
                 _all_no_tag = all(
                     not a.get("changed_tag", True) for a in result["affected"]
                 )
-                payload = {
+                payload: JsonDict = {
                     "prediction_ids": [
                         int(pid) for pid in result["prediction_ids"]
                     ],
@@ -1787,7 +1817,7 @@ def create_predictions_blueprint(
             raise
 
     @blueprint.route("/api/predictions/<int:pred_id>/reject", methods=["POST"])
-    def api_reject_prediction(pred_id):
+    def api_reject_prediction(pred_id: int) -> ResponseReturnValue:
         """Reject a single prediction as one atomic decision.
 
         Serialized with every other prediction-decision route through
@@ -1868,21 +1898,21 @@ def create_predictions_blueprint(
             db.rollback()
             raise
 
-    def _reject_prediction_row(db, pred_id):
+    def _reject_prediction_row(db: Database, pred_id: int) -> HistoryItem | None:
         """Reject one prediction and its ``alternative`` siblings, in-transaction."""
         pred = db.predictions.get_decision_row(pred_id)
         ids = [pred_id, *db.predictions.alternative_sibling_ids(
             pred["detection_id"], pred["model"], pred["labels_fingerprint"], pred_id,
         )]
 
-        def apply():
+        def apply() -> None:
             for target_id in ids:
                 db.update_prediction_status(target_id, "rejected", _commit=False)
 
         return prediction_status_item(db, pred["photo_id"], ids, apply)
 
     @blueprint.route("/api/predictions/group/<group_id>")
-    def api_prediction_group(group_id):
+    def api_prediction_group(group_id: str) -> ResponseReturnValue:
         """Get all predictions and photo data for a burst group."""
         db = get_db()
         preds = db.predictions.get_group(group_id)
@@ -1890,7 +1920,10 @@ def create_predictions_blueprint(
         attach_nested_edit_recipes(db, rows)
         return jsonify(rows)
 
-    def _write_group_flags_and_species(db, actionable_picks, actionable_rejects, species, description):
+    def _write_group_flags_and_species(
+        db: Database, actionable_picks: list[int], actionable_rejects: list[int],
+        species: str, description: str,
+    ) -> tuple[int | None, str, list[int], ErrorResponse | None]:
         """Group apply's flag and species-keyword writes, under its lock.
 
         Returns ``(kid, local_species, added_picks, error)``: the species
@@ -1954,10 +1987,13 @@ def create_predictions_blueprint(
             # ``prediction_decisions.under_prediction_decision_lock``'s
             # finally will roll back the still-open transaction; returning
             # here just short-circuits the rest of the writes.
-            return None, None, None, json_error(str(e), 403)
+            return None, species, [], json_error(str(e), 403)
         return kid, local_species, added_picks, None
 
-    def _record_group_flag_history(db, actionable_picks, actionable_rejects, old_flags, desc):
+    def _record_group_flag_history(
+        db: Database, actionable_picks: list[int], actionable_rejects: list[int],
+        old_flags: dict[int, str], desc: str,
+    ) -> int | None:
         """Queue group apply's flag sidecar changes and record their undo entry.
 
         Returns the ``edit_id`` of the recorded flag edit (or ``None`` when
@@ -1984,8 +2020,9 @@ def create_predictions_blueprint(
         )
 
     def _record_group_pick_accepts(
-        db, actionable_picks, observed, kid, local_species, added_picks,
-    ):
+        db: Database, actionable_picks: list[int], observed: dict[int, str], kid: int | None, local_species: str,
+        added_picks: list[int],
+    ) -> None:
         """Accept each group pick's member rows and record one undo entry."""
         # A pick accepts its burst member, the way a single Accept does:
         # the member row becomes ``accepted`` and the open siblings in its
@@ -2157,7 +2194,7 @@ def create_predictions_blueprint(
         return jsonify({"ok": True, "already_decided": len(stale_photos)})
 
     @blueprint.route("/api/predictions/group/apply", methods=["POST"])
-    def api_prediction_group_apply():
+    def api_prediction_group_apply() -> ResponseReturnValue:
         """Apply pick/reject decisions and species to a burst group."""
         db = get_db()
         body = request.get_json(silent=True) or {}

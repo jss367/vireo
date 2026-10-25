@@ -11,6 +11,8 @@ import os
 import stat
 from dataclasses import dataclass, field
 
+from services import workspace_folders
+
 from .paths import (
     _is_case_insensitive_path,
     _samefile_or_false,
@@ -518,8 +520,8 @@ class _PhotoCatalogRewrite:
         moves = db.moves_merge
         with moves.photo_move_savepoint():
             if link_destination:
-                db._add_workspace_folder_no_commit(
-                    db.active_workspace_id, self.dest_folder_id, restore_removed=True,
+                workspace_folders.add_workspace_folder_no_commit(
+                    db, db.active_workspace_id, self.dest_folder_id, restore_removed=True,
                 )
             db.photo_visibility.preserve_for_move(item.pid, self.keep_visible)
             moves.repoint_moved_photo(item.pid, self.dest_folder_id, item.src_dir)

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 
 @pytest.mark.parametrize('viewport', [(1280, 900), (800, 700), (390, 844)])
@@ -13,7 +13,7 @@ def test_manual_focus_center_and_subject_inspection_preserve_decisions(page, liv
     page.set_viewport_size({'width': viewport[0], 'height': viewport[1]})
     db = live_server['db']
     live_server['app'].config['EDIT_PREVIEW_IN_PROCESS'] = True
-    folder = db.add_folder(str(tmp_path), name='Focus inspection')
+    folder = workspace_folders.add_folder(db, str(tmp_path), name='Focus inspection')
     pids = []
     for index in range(2):
         path = tmp_path / f'DSC_{index:04d}.jpg'
@@ -85,7 +85,7 @@ def test_manual_focus_uses_available_working_raster_with_offline_originals(page,
     app = live_server['app']
     app.config['EDIT_PREVIEW_IN_PROCESS'] = True
     page.set_viewport_size({'width': 800, 'height': 700})
-    folder = db.add_folder(str(tmp_path / 'offline-originals'), name='Offline focus')
+    folder = workspace_folders.add_folder(db, str(tmp_path / 'offline-originals'), name='Offline focus')
     pids = []
     working_dir = Path(app.config['THUMB_CACHE_DIR']).parent / 'working'
     working_dir.mkdir(exist_ok=True)

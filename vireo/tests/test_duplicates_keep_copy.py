@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import repositories.duplicates as dup_repo
 from db import Database
-from services import duplicate_resolution, photo_ingest
+from services import duplicate_resolution, photo_ingest, workspace_folders
 
 
 def _resolved_pair(tmp_path, file_hash="HKEEP", touch=(True, True)):
@@ -26,7 +26,7 @@ def _resolved_pair(tmp_path, file_hash="HKEEP", touch=(True, True)):
         folder.mkdir()
         if make:
             (folder / "owl.jpg").write_bytes(b"x")
-        fid = db.add_folder(str(folder))
+        fid = workspace_folders.add_folder(db, str(folder))
         ids.append(photo_ingest.add_photo(
             db, folder_id=fid, filename="owl.jpg", extension=".jpg",
             file_size=1, file_mtime=100.0, file_hash=file_hash,
@@ -127,7 +127,7 @@ def test_keep_rejects_every_other_kept_copy(tmp_path):
     db, kept, rejected = _resolved_pair(tmp_path)
     folder = tmp_path / "c"
     folder.mkdir()
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     third = photo_ingest.add_photo(
         db, folder_id=fid, filename="owl.jpg", extension=".jpg",
         file_size=1, file_mtime=100.0, file_hash="HKEEP",
@@ -162,7 +162,7 @@ def test_keep_refuses_copy_on_offline_volume(tmp_path, monkeypatch):
 def test_keep_refuses_photo_without_duplicates(tmp_path):
     db = Database(str(tmp_path / "t.db"))
     (tmp_path / "solo.jpg").write_bytes(b"x")
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="solo.jpg", extension=".jpg",
         file_size=1, file_mtime=100.0, file_hash="HSOLO",
@@ -197,7 +197,7 @@ def test_second_keep_in_a_group_rejects_the_first_choice(tmp_path):
     folder = tmp_path / "c"
     folder.mkdir()
     (folder / "owl.jpg").write_bytes(b"x")
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     third = photo_ingest.add_photo(
         db, folder_id=fid, filename="owl.jpg", extension=".jpg",
         file_size=1, file_mtime=100.0, file_hash="HKEEP",

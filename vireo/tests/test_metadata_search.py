@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import browse_queries, photo_ingest
+from services import browse_queries, photo_ingest, workspace_folders
 
 
 def parse_queries(queries, options=None):
@@ -34,7 +34,7 @@ def catalog(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "load", lambda: {"detector_confidence": 0.2})
     db = Database(str(tmp_path / "search.db"))
     db.set_active_workspace(db.ensure_default_workspace())
-    folder = db.add_folder("/photos/Wetlands", name="Lake visit")
+    folder = workspace_folders.add_folder(db, "/photos/Wetlands", name="Lake visit")
     ids = {}
     for name in ("hawk", "owl", "robin", "empty"):
         ids[name] = photo_ingest.add_photo(db, folder_id=folder, filename=f"{name}.jpg", extension=".jpg",
@@ -139,7 +139,7 @@ def test_number_search_matches_where_a_number_starts(catalog):
     """``7688`` finds file number 7688, not every value with 7688 buried in
     its digits: hashes, scores, byte counts, coefficients, shutter counts."""
     db, ids = catalog
-    folder = db.add_folder("/photos/20240712", name="20240712")
+    folder = workspace_folders.add_folder(db, "/photos/20240712", name="20240712")
     filename = photo_ingest.add_photo(db, folder_id=folder, filename="_D857688.NEF", extension=".nef",
                             file_size=1, file_mtime=1.0)
     file_number = photo_ingest.add_photo(db, folder_id=folder, filename="a.nef", extension=".nef",
@@ -315,7 +315,7 @@ def test_color_search_is_workspace_scoped_for_shared_photos(catalog):
     original_ws = db._ws_id()
     other_ws = db.create_workspace("Shared photos")
     folder = db.conn.execute("SELECT folder_id FROM photos WHERE id=?", (ids["robin"],)).fetchone()[0]
-    db.add_workspace_folder(other_ws, folder)
+    workspace_folders.add_workspace_folder(db, other_ws, folder)
     rule = [{"field": "metadata", "op": "contains", "value": "purple"}]
     assert db.collections.query_photo_ids(rule) == [ids["robin"]]
     db.set_active_workspace(other_ws)

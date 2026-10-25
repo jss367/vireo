@@ -6,14 +6,14 @@ import cv2
 import numpy as np
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def test_panorama_selection_folder_picker_and_real_stitch(live_server, page, tmp_path):
     db = live_server["db"]
     folder = tmp_path / "Panorama photos"
     folder.mkdir()
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     rng = np.random.default_rng(42)
     scene = cv2.GaussianBlur(rng.integers(0, 256, (300, 900, 3), dtype=np.uint8), (5, 5), 0)
     ids = []

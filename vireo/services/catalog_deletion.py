@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import partial
 from typing import TYPE_CHECKING, Any
+
+from services import workspace_folders
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -158,7 +161,7 @@ def delete_folder(db: Database, folder_id: int) -> JsonDict:
     """
     active_ws = db.require_workspace_id()
     if (active_ws is not None
-            and not db.workspace_has_folder_link(folder_id, active_ws)
+            and not workspace_folders.workspace_has_folder_link(db, folder_id, active_ws)
             and any(
                 row["id"] == active_ws
                 for row in db.workspace_folders.list_workspaces_for_folder(folder_id)
@@ -175,7 +178,7 @@ def delete_folder(db: Database, folder_id: int) -> JsonDict:
         folder_id,
         active_ws,
         delete_photos=delete_chunk,
-        remember_removals=db._remember_workspace_folder_removals,
+        remember_removals=partial(workspace_folders.remember_workspace_folder_removals, db),
     )
     prune_pipeline_cache_for_ids(db, deleted_ids)
 

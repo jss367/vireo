@@ -3,7 +3,7 @@
 import json
 
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _seed_resolved_scan(db, loser_count):
@@ -12,7 +12,7 @@ def _seed_resolved_scan(db, loser_count):
     last-scan drops groups whose ids no longer name the same catalog file,
     so every restored entry must point at a photo that exists.
     """
-    fid = db.add_folder("/photos")
+    fid = workspace_folders.add_folder(db, "/photos")
     proposals = []
     loser_ids = []
     for i in range(loser_count):

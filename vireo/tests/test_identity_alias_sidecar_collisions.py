@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from db import Database
 from scanner.companions import _pair_raw_jpeg_companions
-from services import moves_merge
+from services import moves_merge, workspace_folders
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 from sync import sync_from_xmp, sync_to_xmp
 from test_db_moves_merge import _collision_tree
@@ -29,8 +29,8 @@ def _collision(db, tmp_path, mode, monkeypatch):
         archive = tmp_path / 'archive'
         stage = tmp_path / 'stage'
         archive.mkdir()
-        db.add_folder(str(archive), workspace_root=True)
-        stage_root = db.add_folder(str(stage), workspace_root=True)
+        workspace_folders.add_folder(db, str(archive), workspace_root=True)
+        stage_root = workspace_folders.add_folder(db, str(stage), workspace_root=True)
         survivor, losing = photo(db, stage_root, 'A.raf'), photo(db, stage_root, 'a.raf')
         target = archive / 'A.raf'
         monkeypatch.setattr(move, '_case_insensitive_root', lambda path: True)
@@ -40,7 +40,7 @@ def _collision(db, tmp_path, mode, monkeypatch):
         target = Path(target_dir) / 'bird.raf'
         collapse = partial(db.folders.merge_into_existing, source, destination, target_dir)
     else:
-        folder = db.add_folder(str(tmp_path / 'paired'))
+        folder = workspace_folders.add_folder(db, str(tmp_path / 'paired'))
         survivor, losing = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')
         target = _path(db, survivor)
         collapse = partial(_pair_raw_jpeg_companions, db)

@@ -18,7 +18,7 @@ import pytest
 from dir_listing_cache import DirListingCache, ListingPass, read_directory
 from image_loader import safe_scan_walk
 from PIL import Image
-from services import missing_originals, photo_ingest
+from services import missing_originals, photo_ingest, workspace_folders
 
 HOUR = 3600
 
@@ -308,7 +308,7 @@ def test_new_images_walk_reuses_unchanged_folders(db_with_workspace, scandir_cal
     root = tmp_path / "shoot"
     _touch_image(str(root / "day1" / "a.jpg"))
     _touch_image(str(root / "day2" / "b.jpg"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
     _age_tree(root)
     cache = DirListingCache()
 
@@ -338,7 +338,7 @@ def test_new_images_reused_listing_follows_the_catalog(db_with_workspace):
     root = tmp_path / "shoot"
     _touch_image(str(root / "a.jpg"))
     _touch_image(str(root / "b.jpg"))
-    folder_id = db.add_folder(str(root), name="shoot")
+    folder_id = workspace_folders.add_folder(db, str(root), name="shoot")
     _age(root)
     cache = DirListingCache()
     assert count_new_images_for_workspace(db, ws_id, listing_cache=cache)["new_count"] == 2
@@ -358,7 +358,7 @@ def test_new_images_without_a_cache_reads_every_folder(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "a.jpg"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
     for _ in range(2):
         result = count_new_images_for_workspace(db, ws_id)
         assert (result["folders_read"], result["folders_unchanged"]) == (1, 0)
@@ -407,7 +407,7 @@ def db(tmp_path):
 def test_missing_scan_reuses_unchanged_folders_and_sees_deletions(db, tmp_path, scandir_calls):
     folder = tmp_path / "shoot"
     folder.mkdir()
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     for name in ("a.jpg", "b.jpg"):
         (folder / name).write_bytes(b"x")
         _photo(db, fid, name)
@@ -440,7 +440,7 @@ def test_missing_scan_checks_symlink_targets_live_on_a_reused_listing(db, tmp_pa
     elsewhere.mkdir()
     (elsewhere / "real.jpg").write_bytes(b"x")
     os.symlink(elsewhere / "real.jpg", folder / "link.jpg")
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     _photo(db, fid, "link.jpg")
     _age(folder)
     cache = DirListingCache()
@@ -456,8 +456,8 @@ def test_missing_scan_with_a_listing_pass_matches_the_direct_read(db, tmp_path):
     folder = tmp_path / "shoot"
     sub = folder / "sub"
     sub.mkdir(parents=True)
-    fid = db.add_folder(str(folder))
-    fsub = db.add_folder(str(sub), parent_id=fid, workspace_root=False)
+    fid = workspace_folders.add_folder(db, str(folder))
+    fsub = workspace_folders.add_folder(db, str(sub), parent_id=fid, workspace_root=False)
     (folder / "here.jpg").write_bytes(b"x")
     for folder_id, name in ((fid, "here.jpg"), (fid, "gone.jpg"), (fsub, "gone2.jpg")):
         _photo(db, folder_id, name)

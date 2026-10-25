@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest, subject_masks
+from services import photo_ingest, subject_masks, workspace_folders
 
 
 @pytest.fixture
@@ -16,7 +16,7 @@ def masked_photo(live_server, tmp_path):
     path = folder / 'heron.png'
     Image.new('RGB', (256, 128), (120, 140, 160)).save(path)
     db = live_server['db']
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id, filename=path.name, extension='.png',
         file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,

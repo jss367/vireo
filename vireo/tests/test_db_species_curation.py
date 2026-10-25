@@ -25,7 +25,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.species_curation import SpeciesCurationRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _visible(db, sql, params=()):
@@ -104,9 +104,9 @@ def cur(db):
     (species 6); Mammalia (class 7) > Puma concolor (species 8).
     """
     ws = db._active_workspace_id
-    fid = db.add_folder("/cur", name="cur")
-    sub = db.add_folder("/cur/sub", name="sub", parent_id=fid)
-    other_folder = db.add_folder("/elsewhere", name="elsewhere",
+    fid = workspace_folders.add_folder(db, "/cur", name="cur")
+    sub = workspace_folders.add_folder(db, "/cur/sub", name="sub", parent_id=fid)
+    other_folder = workspace_folders.add_folder(db, "/elsewhere", name="elsewhere",
                                  link_to_workspace=False)
     p = {}
     for i, (name, folder) in enumerate(

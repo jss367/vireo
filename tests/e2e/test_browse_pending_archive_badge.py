@@ -9,6 +9,7 @@ The row has to say otherwise.
 import re
 
 from playwright.sync_api import expect
+from services import workspace_folders
 
 
 def _pending_archive(db, workspace_id, staging, destination):
@@ -30,12 +31,12 @@ def test_browse_badges_folders_waiting_for_transfer(live_server, page, tmp_path)
     elsewhere.mkdir()
 
     workspace_id = db.create_workspace("Kept Locally")
-    day_id = db.add_folder(str(day), name="12", link_to_workspace=False)
-    elsewhere_id = db.add_folder(
-        str(elsewhere), name="already-transferred", link_to_workspace=False
+    day_id = workspace_folders.add_folder(db, str(day), name="12", link_to_workspace=False)
+    elsewhere_id = workspace_folders.add_folder(
+        db, str(elsewhere), name="already-transferred", link_to_workspace=False
     )
-    db.add_workspace_folder(workspace_id, day_id, is_root=True)
-    db.add_workspace_folder(workspace_id, elsewhere_id, is_root=True)
+    workspace_folders.add_workspace_folder(db, workspace_id, day_id, is_root=True)
+    workspace_folders.add_workspace_folder(db, workspace_id, elsewhere_id, is_root=True)
     _pending_archive(db, workspace_id, staging, "/Volumes/Photography/USA/2026")
 
     assert page.request.post(

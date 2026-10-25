@@ -20,7 +20,7 @@ import textwrap
 
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, KEYWORD_SOURCE_MANUAL, Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 # -- helpers ------------------------------------------------------------------
 
@@ -78,7 +78,7 @@ def _selects(statements, needle):
 
 @pytest.fixture
 def fid(db):
-    return db.add_folder("/photos", name="photos")
+    return workspace_folders.add_folder(db, "/photos", name="photos")
 
 
 # -- location status ------------------------------------------------------------
@@ -188,7 +188,7 @@ def test_geolocated_photos_resolves_workspace_before_folder_subtree(
 def test_geolocated_photos_route_folder_and_rules_through_facade(
     db, fid, monkeypatch,
 ):
-    child = db.add_folder("/photos/sub", name="sub", parent_id=fid)
+    child = workspace_folders.add_folder(db, "/photos/sub", name="sub", parent_id=fid)
     in_child = _photo(db, child, "child.jpg", 1.0, 2.0)
     _photo(db, fid, "top.jpg", 1.0, 2.0)
 
@@ -216,8 +216,8 @@ def test_geolocated_photos_route_folder_and_rules_through_facade(
 
 
 def test_plottable_photo_ids_folder_subtree_and_keyword_coords(db, fid):
-    child = db.add_folder("/photos/sub", name="sub", parent_id=fid)
-    other = db.add_folder("/other", name="other")
+    child = workspace_folders.add_folder(db, "/photos/sub", name="sub", parent_id=fid)
+    other = workspace_folders.add_folder(db, "/other", name="other")
     exif = _photo(db, child, "exif.jpg", 1.0, 2.0)
     by_kw = _photo(db, fid, "kw.jpg")
     _photo(db, fid, "none.jpg")
@@ -239,7 +239,7 @@ def test_plottable_photo_ids_resolves_workspace_before_subtree(db, fid, monkeypa
 
 
 def test_count_photos_without_coordinates_skips_missing_folders(db, fid):
-    gone = db.add_folder("/gone", name="gone")
+    gone = workspace_folders.add_folder(db, "/gone", name="gone")
     _photo(db, fid, "exif.jpg", 1.0, 2.0)
     half = _photo(db, fid, "half.jpg", None, 2.0)
     _photo(db, fid, "bare.jpg")
@@ -727,8 +727,8 @@ def test_get_photo_location_leaf_reads_a_linked_location_keyword(db, fid):
 def test_get_located_keywords_in_workspace_counts_visible_photos(db, fid):
     p1 = _photo(db, fid, "a.jpg")
     p2 = _photo(db, fid, "b.jpg")
-    hidden_folder = db.add_folder("/hidden", name="hidden")
-    db.remove_workspace_folder(db.active_workspace_id, hidden_folder)
+    hidden_folder = workspace_folders.add_folder(db, "/hidden", name="hidden")
+    workspace_folders.remove_workspace_folder(db, db.active_workspace_id, hidden_folder)
     hidden = _photo(db, hidden_folder, "c.jpg")
     park = _kw(db, "Park", lat=1.0, lng=2.0, place_id="pid-park")
     half = _kw(db, "Pond", lat=1.0)

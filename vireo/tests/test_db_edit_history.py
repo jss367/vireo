@@ -25,7 +25,7 @@ from repositories.edit_history import EditHistoryRepository
 from repositories.photo_labels import PhotoLabelRepository
 from repositories.photo_review import PhotoReviewRepository
 from repositories.species_curation import SpeciesCurationRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders, workspace_lifecycle
 
 
 @contextlib.contextmanager
@@ -41,7 +41,7 @@ def _reader(db):
 
 @pytest.fixture
 def pids(db):
-    fid = db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
     return [
         photo_ingest.add_photo(db, fid, f"IMG_{i}.jpg", ".jpg", 100, 1700000000.0 + i)
         for i in range(3)
@@ -662,7 +662,7 @@ def test_prediction_accept_flat_removals_restore_only_live_workspaces(db, pids):
         "prediction_accept", "Accepted", str(kid),
         [{"photo_id": pids[0], "old_value": old_value, "new_value": str(kid)}],
     )
-    db.delete_workspace(gone)
+    workspace_lifecycle.delete_workspace(db, gone)
     db.set_active_workspace(ws)
 
     db.undo_last_edit()

@@ -2,7 +2,7 @@
 import os
 
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _make_jpeg(path, w, h, color=(200, 100, 50)):
@@ -49,7 +49,7 @@ def test_full_pyramid_cycle(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(folder), name="photos")
+    fid = workspace_folders.add_folder(db, str(folder), name="photos")
     pid_big = photo_ingest.add_photo(
         db, folder_id=fid, filename="big.jpg", extension=".jpg",
         file_size=os.path.getsize(big), file_mtime=os.path.getmtime(big),

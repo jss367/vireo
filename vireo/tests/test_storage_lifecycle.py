@@ -8,7 +8,14 @@ import time
 from pathlib import Path
 
 import pytest
-from services import catalog_deletion, photo_ingest, result_files, retained_cache
+from services import (
+    catalog_deletion,
+    photo_ingest,
+    result_files,
+    retained_cache,
+    workspace_folders,
+    workspace_lifecycle,
+)
 from services.grouping_history import record_grouping_edit
 from wait import wait_for_job_via_client
 
@@ -21,11 +28,11 @@ def _pipeline(path, ids):
 
 
 def test_photo_delete_updates_every_workspace_and_invalidates_culling(db, tmp_path):
-    folder = db.add_folder(str(tmp_path / "photos"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     photo = photo_ingest.add_photo(db, folder, "bird.jpg", ".jpg", 12, 1)
     keep = photo_ingest.add_photo(db, folder, "keep.jpg", ".jpg", 13, 1)
     other = db.create_workspace("Other")
-    db.add_workspace_folder(other, folder)
+    workspace_folders.add_workspace_folder(db, other, folder)
     for ws in (db.active_workspace_id, other):
         _pipeline(tmp_path / f"pipeline_results_ws{ws}.json", [photo, keep])
         (tmp_path / f"culling_results_ws{ws}.json").write_text(json.dumps({
@@ -43,7 +50,7 @@ def test_photo_delete_updates_every_workspace_and_invalidates_culling(db, tmp_pa
 
 
 def test_rollback_does_not_prune_shared_results(db, tmp_path):
-    folder = db.add_folder(str(tmp_path / "photos"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     photo = photo_ingest.add_photo(db, folder, "bird.jpg", ".jpg", 12, 1)
     path = tmp_path / f"pipeline_results_ws{db.active_workspace_id}.json"
     _pipeline(path, [photo])
@@ -87,7 +94,7 @@ def test_workspace_delete_removes_snapshots_history_and_never_reuses_id(app_and_
     culling.write_text("{}")
     db.conn.execute("INSERT INTO job_history (id, workspace_id) VALUES ('old-job', ?)", (ws,))
     db.conn.commit()
-    db.delete_workspace(ws)
+    workspace_lifecycle.delete_workspace(db, ws)
     assert not pipeline.exists() and not culling.exists()
     assert db.job_history.get('old-job') is None
     replacement = db.create_workspace("Replacement")
@@ -138,7 +145,7 @@ def test_locked_workspace_snapshot_does_not_belong_to_new_workspace(db, tmp_path
         return real_unlink(target, *args, **kwargs)
 
     monkeypatch.setattr(result_files.os, "unlink", unlink)
-    errors = db.delete_workspace(ws)
+    errors = workspace_lifecycle.delete_workspace(db, ws)
     assert len(errors) == 1 and "locked" in errors[0]
     assert path.exists()
     assert db.create_workspace("Replacement") > ws
@@ -257,7 +264,7 @@ def test_automatic_render_retention_requires_independent_readable_sources(db, tm
     root = Path(config["THUMB_CACHE_DIR"]).parent
     source = _payload((root / "offline" if problem == "cache-source" else tmp_path / "photos") / "bird.jpg")
     info = source.stat()
-    folder = db.add_folder(str(source.parent))
+    folder = workspace_folders.add_folder(db, str(source.parent))
     photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()
@@ -300,7 +307,7 @@ def test_automatic_paired_render_retention_verifies_stored_companion_identity(db
     config = _cache_config(tmp_path)
     raw = _payload(tmp_path / "photos" / "bird.NEF")
     companion = _payload(raw.parent / "bird.jpg")
-    folder = db.add_folder(str(raw.parent))
+    folder = workspace_folders.add_folder(db, str(raw.parent))
     photo = photo_ingest.add_photo(db, folder, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime)
     db.conn.execute("UPDATE photos SET file_hash=?, companion_path=? WHERE id=?", (
         hashlib.sha256(raw.read_bytes()).hexdigest(), companion.name, photo,
@@ -435,7 +442,7 @@ def test_source_verification_preserves_change_time_with_windows_stat_semantics(d
     config = _cache_config(tmp_path)
     source = _payload(tmp_path / "source" / "bird.jpg")
     info = source.stat()
-    folder = db.add_folder(str(source.parent))
+    folder = workspace_folders.add_folder(db, str(source.parent))
     photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()
@@ -476,7 +483,7 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
     config = _cache_config(tmp_path)
     source = _payload(tmp_path / "source" / "bird.jpg")
     info = source.stat()
-    folder = db.add_folder(str(source.parent))
+    folder = workspace_folders.add_folder(db, str(source.parent))
     photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()

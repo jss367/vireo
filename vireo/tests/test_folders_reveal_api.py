@@ -4,11 +4,13 @@ the OS file manager. Backs the bulk-decide UI's "Reveal in Finder" button.
 
 from unittest.mock import MagicMock, patch
 
+from services import workspace_folders
+
 
 def _seed_folder(db, path):
     """Add a folder by path so the reveal endpoint's path-validation
     accepts it. Returns the folder id."""
-    return db.add_folder(path)
+    return workspace_folders.add_folder(db, path)
 
 
 def test_folders_reveal_single_path_macos(app_and_db):
@@ -123,7 +125,7 @@ def test_folders_reveal_allows_cross_workspace_paths_known_to_library(app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    db.add_folder("/tmp/cross-ws-bucket")
+    workspace_folders.add_folder(db, "/tmp/cross-ws-bucket")
     db.set_active_workspace(default_ws)
 
     with app.test_client() as c, \

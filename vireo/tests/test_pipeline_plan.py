@@ -13,15 +13,15 @@ import pytest
 from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from services import classify_preflight, photo_ingest, stage_counts, subject_masks
+from services import classify_preflight, photo_ingest, stage_counts, subject_masks, workspace_folders
 
 
 def _make_db(tmp_path, name="test.db"):
     from db import Database
     db = Database(str(tmp_path / name))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     db._active_workspace_id = db.create_workspace("WS")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     return db, folder_id
 
 
@@ -72,8 +72,8 @@ def test_photos_by_paths_returns_known_and_omits_unknown(tmp_path):
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    fid_a = db.add_folder("/cards/a")
-    fid_b = db.add_folder("/cards/b")
+    fid_a = workspace_folders.add_folder(db, "/cards/a")
+    fid_b = workspace_folders.add_folder(db, "/cards/b")
     pid_a1 = photo_ingest.add_photo(db, folder_id=fid_a, filename="IMG_001.NEF",
                           extension=".nef", file_size=1, file_mtime=1.0)
     pid_b1 = photo_ingest.add_photo(db, folder_id=fid_b, filename="IMG_900.JPG",
@@ -107,7 +107,7 @@ def test_photos_by_paths_ignores_workspace_membership(tmp_path):
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder("/cards/a")
+    fid = workspace_folders.add_folder(db, "/cards/a")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="x.jpg",
                        extension=".jpg", file_size=1, file_mtime=1.0)
     # Active workspace has no folders (the import target is a fresh ws).
@@ -129,16 +129,16 @@ def test_workspace_unlinked_folder_count_counts_unlinked(tmp_path):
     ws_other = db.create_workspace("Other")
     ws_active = db.create_workspace("Active")
 
-    fid_other = db.add_folder("/cards/other-ws-only")
-    db.add_workspace_folder(ws_other, fid_other)
-    db.add_folder("/cards/orphan")  # no workspace link at all
-    fid_shared = db.add_folder("/cards/shared")
-    db.add_workspace_folder(ws_other, fid_shared)
-    db.add_workspace_folder(ws_active, fid_shared)
+    fid_other = workspace_folders.add_folder(db, "/cards/other-ws-only")
+    workspace_folders.add_workspace_folder(db, ws_other, fid_other)
+    workspace_folders.add_folder(db, "/cards/orphan")  # no workspace link at all
+    fid_shared = workspace_folders.add_folder(db, "/cards/shared")
+    workspace_folders.add_workspace_folder(db, ws_other, fid_shared)
+    workspace_folders.add_workspace_folder(db, ws_active, fid_shared)
 
     db._active_workspace_id = ws_active
 
-    assert db.workspace_unlinked_folder_count([
+    assert workspace_folders.workspace_unlinked_folder_count(db, [
         "/cards/other-ws-only",  # linked only to Other
         "/cards/orphan",         # linked to nothing
         "/cards/shared",         # linked to Active
@@ -150,12 +150,12 @@ def test_workspace_unlinked_folder_count_dedupes_and_handles_empty(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db._active_workspace_id = db.create_workspace("Active")
-    fid = db.add_folder("/cards/a")
-    db.add_workspace_folder(db._active_workspace_id, fid)
+    fid = workspace_folders.add_folder(db, "/cards/a")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
 
-    assert db.workspace_unlinked_folder_count([]) == 0
-    assert db.workspace_unlinked_folder_count(["/cards/a", "/cards/a"]) == 0
-    assert db.workspace_unlinked_folder_count(["/cards/x", "/cards/x"]) == 1
+    assert workspace_folders.workspace_unlinked_folder_count(db, []) == 0
+    assert workspace_folders.workspace_unlinked_folder_count(db, ["/cards/a", "/cards/a"]) == 0
+    assert workspace_folders.workspace_unlinked_folder_count(db, ["/cards/x", "/cards/x"]) == 1
 
 
 def test_count_real_detections_in_scope_excludes_full_image(tmp_path):
@@ -3288,8 +3288,8 @@ def test_import_plan_known_files_with_pending_masks_combine(tmp_path):
     """
     from pipeline_plan import compute_plan
     db, _folder = _make_db(tmp_path)
-    fid_card = db.add_folder("/cards/A")
-    db.add_workspace_folder(db._active_workspace_id, fid_card)
+    fid_card = workspace_folders.add_folder(db, "/cards/A")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid_card)
     pid_known, _ = _add_photo_with_detection(db, fid_card, "IMG_001.NEF")
     # IMG_001.NEF: known, has detection, no mask → eligible=1, pending=1.
     paths = ["/cards/A/IMG_001.NEF", "/cards/A/IMG_002.NEF"]
@@ -3353,7 +3353,7 @@ def test_import_plan_partial_overlap_counts_only_truly_new(tmp_path, monkeypatch
     db, folder_id = _make_db(tmp_path)
     _stub_models(monkeypatch)
     # Two existing photos in DB at /cards/A/...
-    fid_card = db.add_folder("/cards/A")
+    fid_card = workspace_folders.add_folder(db, "/cards/A")
     photo_ingest.add_photo(db, folder_id=fid_card, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
     photo_ingest.add_photo(db, folder_id=fid_card, filename="IMG_002.NEF",
@@ -3386,7 +3386,7 @@ def test_import_plan_deduplicates_source_paths(tmp_path, monkeypatch):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     _stub_models(monkeypatch)
-    fid_card = db.add_folder("/cards/A")
+    fid_card = workspace_folders.add_folder(db, "/cards/A")
     photo_ingest.add_photo(db, folder_id=fid_card, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
@@ -3560,7 +3560,7 @@ def test_import_plan_all_known_scan_is_done_prior(tmp_path):
     real status of those known photos as scope."""
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    fid_card = db.add_folder("/cards/A")
+    fid_card = workspace_folders.add_folder(db, "/cards/A")
     photo_ingest.add_photo(db, folder_id=fid_card, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
@@ -3599,7 +3599,7 @@ def test_import_plan_all_known_but_folder_unlinked_to_active_workspace(tmp_path)
     # Photos imported under workspace A.
     ws_a = db.create_workspace("WorkspaceA")
     db._active_workspace_id = ws_a
-    fid = db.add_folder("/cards/A")  # auto-linked to WorkspaceA
+    fid = workspace_folders.add_folder(db, "/cards/A")  # auto-linked to WorkspaceA
     photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
@@ -3633,7 +3633,7 @@ def test_import_plan_all_known_with_folder_linked_stays_done_prior(tmp_path):
     """
     from pipeline_plan import compute_plan
     db, _ = _make_db(tmp_path)
-    fid = db.add_folder("/cards/A")  # auto-links to active WS
+    fid = workspace_folders.add_folder(db, "/cards/A")  # auto-links to active WS
     photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
@@ -3945,7 +3945,7 @@ def test_import_plan_hash_dup_also_known_at_path_not_double_counted(tmp_path, mo
     from pipeline_plan import compute_plan
     db, _ = _make_db(tmp_path)
     _stub_models(monkeypatch)
-    fid = db.add_folder("/cards/A")
+    fid = workspace_folders.add_folder(db, "/cards/A")
     photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
@@ -3983,7 +3983,7 @@ def test_import_plan_hash_duplicate_does_not_link_source_folder(tmp_path, monkey
     db._active_workspace_id = ws_a
     # Photo lives at /library/2025 in WorkspaceA. Folder /cards/SD has
     # never been seen by the DB, so it would normally count as "unlinked".
-    fid = db.add_folder("/library/2025")
+    fid = workspace_folders.add_folder(db, "/library/2025")
     photo_ingest.add_photo(db, folder_id=fid, filename="dest.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
     db._active_workspace_id = db.create_workspace("WorkspaceB")
@@ -4023,7 +4023,7 @@ def test_import_plan_hash_duplicate_with_unlinked_source_folder(tmp_path, monkey
     db._active_workspace_id = ws_a
     # Existing photo at /cards/A/IMG_OLD.NEF — its folder is in WorkspaceA
     # only. Re-importing into WorkspaceB will link /cards/A here.
-    fid_a = db.add_folder("/cards/A")
+    fid_a = workspace_folders.add_folder(db, "/cards/A")
     photo_ingest.add_photo(db, folder_id=fid_a, filename="IMG_OLD.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
     db._active_workspace_id = db.create_workspace("WorkspaceB")

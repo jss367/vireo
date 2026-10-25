@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from app_paths import media_root
 from flask import Blueprint, jsonify, request
 from metadata import scan_metadata_warning
+from services import workspace_folders
 from services.local_folder import (
     local_copy_scan_conflict,
     stage_boundary_lock,
@@ -131,7 +132,7 @@ def create_audit_blueprint(
         empty) request certify the whole workspace. Stray ``root``
         query params are tolerated and ignored.
 
-        Uses :meth:`Database.get_audit_root_paths`, which returns only real
+        Uses ``workspace_folders.get_audit_root_paths``, which returns only real
         ``workspace_folders`` roots. Folders a workspace sees solely through
         a ``workspace_photos`` grant are excluded, because the whole-folder
         audit workflows (``/api/audit/untracked``,
@@ -139,7 +140,7 @@ def create_audit_blueprint(
         otherwise enumerate and permit importing hidden sibling files that
         the workspace has no claim to.
         """
-        return db.get_audit_root_paths()
+        return workspace_folders.get_audit_root_paths(db)
 
     @blueprint.route("/api/audit/untracked")
     def api_audit_untracked() -> ResponseReturnValue:

@@ -9,6 +9,7 @@ import json
 import os
 
 from path_guard import contains_resolved
+from services import workspace_folders
 
 LIVE_STATUSES = {"running", "queued", "pausing", "paused"}
 
@@ -54,7 +55,7 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
         raise ValueError("The local originals no longer match their saved location.")
     if not os.path.isdir(source):
         raise ValueError("Local originals are unavailable. Reconnect their storage before sending to NAS.")
-    folder_id = db.add_folder(source)
+    folder_id = workspace_folders.add_folder(db, source)
     error = guard_folder(db, folder_id)
     if error:
         raise ValueError(error)

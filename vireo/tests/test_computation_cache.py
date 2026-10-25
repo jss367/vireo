@@ -27,7 +27,7 @@ from computation_cache import (  # noqa: E402
     validate_artifact,
     write_bundle,
 )
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 PHOTO_HASH = "1" * 64
 RUNTIME = runtime_fingerprint({
@@ -371,10 +371,10 @@ def _database_with_photo(path, filename, file_hash=PHOTO_HASH):
     from db import Database
 
     db = Database(str(path))
-    folder_id = db.add_folder("/tmp/photos")
+    folder_id = workspace_folders.add_folder(db, "/tmp/photos")
     workspace_id = db.create_workspace("Photos")
     db._active_workspace_id = workspace_id
-    db.add_workspace_folder(workspace_id, folder_id)
+    workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename=filename,

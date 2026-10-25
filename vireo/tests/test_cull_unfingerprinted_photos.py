@@ -10,6 +10,7 @@ is logged at warning level with the exception.
 import logging
 import os
 
+from services import workspace_folders
 from test_culling import _setup_culling_db
 
 DECODER_ERROR = "decoder exploded"
@@ -136,7 +137,7 @@ def test_cull_job_result_names_the_photo(app_and_db, tmp_path):
     folder.mkdir()
     Image.new("RGB", (64, 64), "blue").save(folder / "good.jpg")
     _corrupt(folder / "bad.jpg")
-    fid = db.add_folder(str(folder), name="cullphotos")
+    fid = workspace_folders.add_folder(db, str(folder), name="cullphotos")
     for name in ("good.jpg", "bad.jpg"):
         pid = photo_ingest.add_photo(db, fid, name, ".jpg", 10, 1.0)
         det_ids = db.detections.save(pid, [

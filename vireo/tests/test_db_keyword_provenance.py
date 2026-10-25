@@ -31,7 +31,7 @@ from db import (
     KEYWORD_SOURCE_UNKNOWN,
     Database,
 )
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _visible(db, sql, params=()):
@@ -86,7 +86,7 @@ def lib(db, tmp_path, monkeypatch):
     ws = db._active_workspace_id
     root = tmp_path / "photos"
     root.mkdir()
-    fid = db.add_folder(str(root), name="photos")
+    fid = workspace_folders.add_folder(db, str(root), name="photos")
     photos = [photo_ingest.add_photo(db, fid, f"p{i}.jpg", ".jpg", 10 + i, float(i)) for i in range(4)]
     db.conn.commit()
     return {"ws": ws, "fid": fid, "root": root, "p": photos}

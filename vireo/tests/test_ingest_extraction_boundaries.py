@@ -42,7 +42,7 @@ def _inert_namespace():
         if name == "services":
             if "/invented/checkout/vireo" not in fake_sys.path:
                 raise ModuleNotFoundError("services is unavailable before product-path bootstrap")
-            return SimpleNamespace(photo_ingest=ingest)
+            return SimpleNamespace(photo_ingest=ingest, workspace_folders=object())
         if name == "scripts.benchmark_raw_previews":
             return SimpleNamespace(ROOT=FakePath("/invented/checkout"), **{
                 key: object() for key in fromlist if key != "ROOT"
@@ -148,7 +148,7 @@ def test_userfirst_seed_prefix_bootstraps_before_ingest_import():
         assert name == "services", "Seed prefix unexpectedly imported a runtime dependency"
         if expected not in fake_sys.path:
             raise ModuleNotFoundError("services unavailable before seed path bootstrap")
-        return SimpleNamespace(photo_ingest=ingest)
+        return SimpleNamespace(photo_ingest=ingest, workspace_folders=object())
 
     tree = ast.parse((ROOT / "vireo/testing/userfirst/seeds.py").read_text(encoding="utf-8"))
     for initial in ([], [expected]):

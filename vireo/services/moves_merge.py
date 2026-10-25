@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import config as cfg
 from db import KEYWORD_SOURCE_CONFLICT_SQL
+from services import workspace_folders
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -37,7 +38,7 @@ def prune_ws_nonroot_links_outside_roots(db: Database, workspace_id: int, path: 
 
     Prunes uncovered non-root links that are ``path`` itself, strict
     descendants of ``path``, OR strict ancestors of ``path``. Ancestors
-    matter because ``_materialize_workspace_descendants`` walks the whole
+    matter because ``materialize_workspace_descendants`` walks the whole
     subtree below every linked folder — a surviving non-root ancestor
     like ``/archive`` (left over from a restricted scan; see
     ``scanner.py`` ``_restrict_root_paths``) would immediately re-insert
@@ -178,9 +179,9 @@ def merge_staged_tree_into_archive(db: Database, staged_root_id: int, archive_pa
         root_ancestor_exists=db.workspace_folders.root_ancestor_exists,
         root_descendant_exists=db.workspace_folders.root_descendant_exists,
         prune_nonroot_links_outside_roots=partial(prune_ws_nonroot_links_outside_roots, db),
-        materialize_workspace_descendants=db._materialize_workspace_descendants,
-        add_workspace_folder=db.add_workspace_folder,
-        add_workspace_folder_no_commit=db._add_workspace_folder_no_commit,
+        materialize_workspace_descendants=partial(workspace_folders.materialize_workspace_descendants, db),
+        add_workspace_folder=partial(workspace_folders.add_workspace_folder, db),
+        add_workspace_folder_no_commit=partial(workspace_folders.add_workspace_folder_no_commit, db),
         case_insensitive_root=case_insensitive_root,
         move_location_state=db._move_location_state_for_merge,
         invalidate_new_images=db.invalidate_new_images_cache_for_workspaces,

@@ -15,7 +15,7 @@ import card_cleanup
 import pytest
 from page_scripts import page_with_scripts
 from scanner import compute_file_hash as _sha
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -36,7 +36,7 @@ def _archive_photo(db, tmp_path, name="IMG_0001.NEF", content=b"raw-one",
     f = folder_path / name
     f.write_bytes(content)
     st = os.stat(f)
-    fid = db.add_folder(str(folder_path))
+    fid = workspace_folders.add_folder(db, str(folder_path))
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename=name, extension=os.path.splitext(name)[1],
         file_size=st.st_size, file_mtime=st.st_mtime,
@@ -74,7 +74,7 @@ def test_scan_rejects_archive_overlap(app_and_db, tmp_path):
     client = app.test_client()
     archive_root = tmp_path / "archive"
     archive_root.mkdir()
-    db.add_folder(str(archive_root))
+    workspace_folders.add_folder(db, str(archive_root))
 
     # Exact overlap.
     resp = client.post(
@@ -104,7 +104,7 @@ def test_scan_rejects_case_swapped_overlap(app_and_db, tmp_path):
     client = app.test_client()
     archive_root = tmp_path / "Archive"
     archive_root.mkdir()
-    db.add_folder(str(archive_root))
+    workspace_folders.add_folder(db, str(archive_root))
 
     resp = client.post(
         "/api/card-cleanup/scan",

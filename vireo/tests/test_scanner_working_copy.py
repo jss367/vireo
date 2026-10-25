@@ -5,7 +5,7 @@ import os
 import pytest
 from PIL import Image
 from scanner import ScanHooks, ScanOptions
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from testing.waits import synchronization_timeout
 
 
@@ -73,7 +73,7 @@ def test_extract_working_copy_for_large_jpeg(tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_id = photo_ingest.add_photo(
         db, folder_id, "big.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
@@ -116,7 +116,7 @@ def test_no_jpeg_working_copy_when_max_size_zero(tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_id = photo_ingest.add_photo(
         db, folder_id, "big.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
@@ -138,7 +138,7 @@ def _seed_large_jpeg(db, folder, filename):
     """Make a large JPEG on disk, register it in `db`, return photo_id."""
     src = folder / filename
     _make_jpeg(str(src), 2000, 1500)
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     return photo_ingest.add_photo(
         db, folder_id, filename, ".jpg",
         file_size=os.path.getsize(str(src)),
@@ -483,7 +483,7 @@ def test_no_working_copy_for_small_jpeg(tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_id = photo_ingest.add_photo(
         db, folder_id, "small.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
@@ -527,7 +527,7 @@ def test_candidate_count_excludes_small_jpegs(tmp_path, monkeypatch):
     _make_jpeg(str(src), 800, 600)
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_ingest.add_photo(
         db, folder_id, "small.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
@@ -553,7 +553,7 @@ def test_candidate_count_includes_large_jpeg(tmp_path, monkeypatch):
     _make_jpeg(str(src), 2000, 1500)
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_ingest.add_photo(
         db, folder_id, "big.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
@@ -579,7 +579,7 @@ def test_candidate_count_includes_raw(tmp_path, monkeypatch):
     raw.write_bytes(b"\x00" * 16)  # contents irrelevant for the SELECT
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_ingest.add_photo(
         db, folder_id, "shot.nef", ".nef",
         file_size=os.path.getsize(str(raw)),
@@ -690,7 +690,7 @@ def test_backfill_failure_marker_prevents_retry_loop(tmp_path, monkeypatch):
 
     # Register a row whose source file does NOT exist on disk —
     # extract_working_copy will fail.
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(
         db, folder_id, "missing.jpg", ".jpg",
         file_size=1000, file_mtime=42.0,
@@ -739,7 +739,7 @@ def test_backfill_failure_retries_when_mtime_changes(tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(
         db, folder_id, "missing.jpg", ".jpg",
         file_size=1000, file_mtime=42.0,
@@ -842,7 +842,7 @@ def test_backfill_failure_does_not_retry_within_grace_period(tmp_path, monkeypat
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(
         db, folder_id, "missing.jpg", ".jpg",
         file_size=1000, file_mtime=42.0,
@@ -1219,7 +1219,7 @@ def _prepare_backfill_app(tmp_path, monkeypatch, filenames):
     photos_dir.mkdir()
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(photos_dir))
+    folder_id = workspace_folders.add_folder(db, str(photos_dir))
     ids = []
     for name in filenames:
         src = photos_dir / name
@@ -1459,7 +1459,7 @@ def test_snapshot_revalidation_covers_relocation_repair_and_publish(
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     src = folder / "a.jpg"
     _make_jpeg(str(src), 2000, 1500)
     photo_id = _photo_id_of_file(db, folder_id, "a.jpg", src)
@@ -1687,7 +1687,7 @@ def test_batch_generation_stops_when_quota_exhausted(tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_ids = []
     for i in range(6):
         src = folder / f"big-{i}.jpg"
@@ -1739,7 +1739,7 @@ def test_incremental_enforcement_bounds_transient_overshoot(tmp_path, monkeypatc
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     for i in range(4):
         src = folder / f"big-{i}.jpg"
         _make_noisy_jpeg(src, 2000, 1500)
@@ -1800,7 +1800,7 @@ def test_capacity_deferred_rows_do_not_retrigger_backfill(tmp_path, monkeypatch)
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     try:
-        folder_id = db.add_folder(str(folder))
+        folder_id = workspace_folders.add_folder(db, str(folder))
         for i in range(6):
             src = folder / f"big-{i}.jpg"
             _make_noisy_jpeg(src, 2000, 1500)
@@ -1874,7 +1874,7 @@ def test_capacity_deferral_does_not_mark_reused_photo_id(
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     try:
-        folder_id = db.add_folder(str(folder))
+        folder_id = workspace_folders.add_folder(db, str(folder))
         photo_ids = []
         for index in range(3):
             source = folder / f"candidate-{index}.jpg"
@@ -1951,7 +1951,7 @@ def _prepare_capacity_deferral_db(tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_ids = []
     for index in range(3):
         source = folder / f"candidate-{index}.jpg"
@@ -2067,7 +2067,7 @@ def test_capacity_deferral_rejects_folder_relocation_on_pending_row(
             per_photo_folder.mkdir()
             source = per_photo_folder / f"candidate-{index}.jpg"
             _make_jpeg(str(source), 2000, 1500)
-            folder_id = db.add_folder(str(per_photo_folder))
+            folder_id = workspace_folders.add_folder(db, str(per_photo_folder))
             folder_ids.append(folder_id)
             photo_ids.append(
                 _photo_id_of_file(db, folder_id, source.name, source)
@@ -2148,7 +2148,7 @@ def test_oversized_copy_does_not_defer_later_fitting_candidate(
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     try:
-        folder_id = db.add_folder(str(folder))
+        folder_id = workspace_folders.add_folder(db, str(folder))
         oversized_source = folder / "oversized.jpg"
         fitting_source = folder / "fitting.jpg"
         _make_jpeg(str(oversized_source), 2000, 1500)
@@ -2222,7 +2222,7 @@ def test_backfill_adopts_quota_increase_before_deferring_rows(
     (vireo_dir / "working").mkdir()
     db = Database(str(vireo_dir / "test.db"))
     try:
-        folder_id = db.add_folder(str(folder))
+        folder_id = workspace_folders.add_folder(db, str(folder))
         photo_ids = []
         for index in range(3):
             source = folder / f"candidate-{index}.jpg"
@@ -2284,7 +2284,7 @@ def test_backfill_enforces_quota_lowered_during_extraction(
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     try:
-        folder_id = db.add_folder(str(folder))
+        folder_id = workspace_folders.add_folder(db, str(folder))
         photo_ids = []
         for i in range(2):
             src = folder / f"big-{i}.jpg"
@@ -2346,7 +2346,7 @@ def test_batch_stops_when_quota_rotates_fitting_working_copies(
     (vireo_dir / "working").mkdir()
     db = Database(str(vireo_dir / "test.db"))
     try:
-        folder_id = db.add_folder(str(folder))
+        folder_id = workspace_folders.add_folder(db, str(folder))
         for index in range(8):
             source = folder / f"candidate-{index}.jpg"
             _make_jpeg(str(source), 2000, 1500)
@@ -2399,7 +2399,7 @@ def test_scanner_does_not_track_copy_evicted_before_catalog_commit(
     (vireo_dir / "working").mkdir()
     db = Database(str(vireo_dir / "test.db"))
     try:
-        folder_id = db.add_folder(str(folder))
+        folder_id = workspace_folders.add_folder(db, str(folder))
         photo_id = _photo_id_of_file(
             db, folder_id, source.name, source,
         )
@@ -2461,7 +2461,7 @@ def test_backfill_extracts_newest_imports_first(tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_ids = []
     for i in range(5):
         src = folder / f"big-{i}.jpg"
@@ -2522,7 +2522,7 @@ def test_backfill_stops_rather_than_evicting_existing_coverage(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     # Already covered, and the oldest file in the cache — first in line
     # for eviction under an mtime-ordered quota pass.
@@ -2603,8 +2603,8 @@ def test_scoped_scan_still_displaces_older_copies_to_cover_new_photos(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    old_folder_id = db.add_folder(str(old_folder))
-    new_folder_id = db.add_folder(str(new_folder))
+    old_folder_id = workspace_folders.add_folder(db, str(old_folder))
+    new_folder_id = workspace_folders.add_folder(db, str(new_folder))
 
     covered_src = old_folder / "covered.jpg"
     _make_noisy_jpeg(covered_src, 2000, 1500)
@@ -2921,7 +2921,7 @@ def test_desc_batch_protects_own_newest_import_from_mid_batch_eviction(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(4):
@@ -3090,7 +3090,7 @@ def test_post_loop_trim_adopts_a_quota_raised_mid_batch(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(10):
@@ -3184,7 +3184,7 @@ def test_small_sweep_near_ceiling_keeps_existing_coverage(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     # 990 KB of pre-existing coverage under a 1 MB ceiling, with the oldest
     # mtimes in the directory — i.e. first in line for an ASC-mtime pass.
@@ -3280,7 +3280,7 @@ def test_post_loop_trim_marks_trimmed_rows_capacity_deferred(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(10):
@@ -3355,7 +3355,7 @@ def test_post_loop_trim_evicts_lowest_id_first_preserving_newest(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(10):
@@ -3432,8 +3432,8 @@ def test_scoped_import_near_ceiling_may_displace_existing_coverage(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    archive_id = db.add_folder(str(archive))
-    card_id = db.add_folder(str(card))
+    archive_id = workspace_folders.add_folder(db, str(archive))
+    card_id = workspace_folders.add_folder(db, str(card))
 
     # Pre-existing coverage taking 850 KB of the 1 MB budget, oldest mtime.
     existing_src = archive / "existing.jpg"
@@ -3562,7 +3562,7 @@ def test_post_loop_trim_holds_publication_guard_across_unlink_and_update(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     for i in range(10):
         src = folder / f"photo-{i:02d}.jpg"
@@ -3645,7 +3645,7 @@ def test_quota_lowered_during_extraction_protects_batch_writes(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(4):
@@ -3728,7 +3728,7 @@ def test_deferred_row_marker_guards_companion_and_folder_identity(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     # Fill the quota with an existing pre-batch file so the batch's
     # first candidate triggers the "sum >= quota" stop and defers the
@@ -3852,7 +3852,7 @@ def test_post_loop_trim_verifies_file_identity_before_unlinking(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(10):
@@ -3953,7 +3953,7 @@ def test_post_loop_trim_quota_refresh_covers_pre_existing_overshoot(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     # 850 KB pre-existing coverage against a 1 MB ceiling.
     existing_src = folder / "existing.jpg"
@@ -4066,7 +4066,7 @@ def test_post_loop_trim_quota_refresh_runs_under_publication_guard(
     vireo_dir.mkdir()
     (vireo_dir / "working").mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(10):
@@ -4174,7 +4174,7 @@ def test_post_loop_trim_usage_snapshot_under_publication_guard(
     vireo_dir.mkdir()
     (vireo_dir / "working").mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     src = folder / "photo.jpg"
     _make_jpeg(str(src), 2000, 1500)
     _photo_id_of_file(db, folder_id, "photo.jpg", src)
@@ -4269,7 +4269,7 @@ def test_post_loop_trim_revalidates_batch_bytes_under_publication_guard(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(10):
@@ -4396,7 +4396,7 @@ def test_trim_deferred_marker_carries_snapshot_source_identity(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(10):
@@ -4514,7 +4514,7 @@ def test_trim_revalidation_rejects_candidates_without_publisher_fingerprint(
     working_dir = vireo_dir / "working"
     working_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
 
     imported_ids = []
     for i in range(10):

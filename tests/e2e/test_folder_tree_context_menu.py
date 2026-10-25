@@ -17,6 +17,7 @@ subtrees are intentionally deferred — workspace roots are the removable unit.
 """
 
 from playwright.sync_api import expect
+from services import workspace_folders
 
 
 def test_folder_tree_right_click_opens_menu(live_server, page):
@@ -75,7 +76,7 @@ def test_folder_tree_removes_workspace_root_without_deleting_folder(
     expect(item).to_have_count(0)
     assert db.folders.get(folder_id) is not None
     assert folder_id not in {
-        row["id"] for row in db.get_workspace_folders(workspace_id)
+        row["id"] for row in workspace_folders.get_workspace_folders(db, workspace_id)
     }
 
 
@@ -134,8 +135,8 @@ def test_folder_tree_remove_strips_descendant_folder_id_from_url(
     """
     db = live_server["db"]
     root_id = live_server["data"]["folders"][0]
-    child_id = db.add_folder(
-        "/photos/park/nested",
+    child_id = workspace_folders.add_folder(
+        db, "/photos/park/nested",
         name="nested",
         parent_id=root_id,
         workspace_root=False,
@@ -185,8 +186,8 @@ def test_folder_tree_remove_strips_missing_descendant_folder_id_from_url(
     """
     db = live_server["db"]
     root_id = live_server["data"]["folders"][0]
-    child_id = db.add_folder(
-        "/photos/park/nested",
+    child_id = workspace_folders.add_folder(
+        db, "/photos/park/nested",
         name="nested",
         parent_id=root_id,
         workspace_root=False,
@@ -237,8 +238,8 @@ def test_folder_tree_does_not_offer_remove_for_inherited_descendant(
     """Descendants require exclusion semantics and cannot be unlinked alone."""
     db = live_server["db"]
     root_id = live_server["data"]["folders"][0]
-    child_id = db.add_folder(
-        "/photos/park/nested",
+    child_id = workspace_folders.add_folder(
+        db, "/photos/park/nested",
         name="nested",
         parent_id=root_id,
         workspace_root=False,
@@ -286,7 +287,7 @@ def test_folder_tree_work_locally_copies_selected_root(live_server, page, tmp_pa
     (source / "bird.jpg").write_bytes(b"original")
     workspace_id = db.create_workspace("Browse Local Copy")
     db.set_active_workspace(workspace_id)
-    folder_id = db.add_folder(str(source), name="nas-source")
+    folder_id = workspace_folders.add_folder(db, str(source), name="nas-source")
     assert page.request.post(
         f"{live_server['url']}/api/workspaces/{workspace_id}/activate"
     ).ok
@@ -335,15 +336,15 @@ def test_folder_tree_marks_parent_when_only_descendant_is_local(
     child.mkdir(parents=True)
     (child / "bird.jpg").write_bytes(b"original")
     workspace_id = db.create_workspace("Mixed Local Folders")
-    parent_id = db.add_folder(
-        str(source), name="trip", link_to_workspace=False
+    parent_id = workspace_folders.add_folder(
+        db, str(source), name="trip", link_to_workspace=False
     )
-    child_id = db.add_folder(
-        str(child), name="2026-08-01", parent_id=parent_id,
+    child_id = workspace_folders.add_folder(
+        db, str(child), name="2026-08-01", parent_id=parent_id,
         link_to_workspace=False,
     )
-    db.add_workspace_folder(workspace_id, parent_id, is_root=True)
-    db.add_workspace_folder(workspace_id, child_id, is_root=False)
+    workspace_folders.add_workspace_folder(db, workspace_id, parent_id, is_root=True)
+    workspace_folders.add_workspace_folder(db, workspace_id, child_id, is_root=False)
     # The E2E app derives its managed-data directory from ``thumb_dir``;
     # conftest places that directory directly under tmp_path.
     stage_folder(db, child_id, str(tmp_path))
@@ -492,20 +493,20 @@ def test_folder_tree_fallback_anchor_does_not_bleed_into_siblings(
     child_b.mkdir(parents=True)
     (child_b / "b.jpg").write_bytes(b"b")
     workspace_id = db.create_workspace("Fallback Spread")
-    parent_id = db.add_folder(
-        str(source), name="trip-with-siblings", link_to_workspace=False
+    parent_id = workspace_folders.add_folder(
+        db, str(source), name="trip-with-siblings", link_to_workspace=False
     )
-    child_a_id = db.add_folder(
-        str(child_a), name="kept-remote", parent_id=parent_id,
+    child_a_id = workspace_folders.add_folder(
+        db, str(child_a), name="kept-remote", parent_id=parent_id,
         link_to_workspace=False,
     )
-    child_b_id = db.add_folder(
-        str(child_b), name="also-remote", parent_id=parent_id,
+    child_b_id = workspace_folders.add_folder(
+        db, str(child_b), name="also-remote", parent_id=parent_id,
         link_to_workspace=False,
     )
-    db.add_workspace_folder(workspace_id, parent_id, is_root=True)
-    db.add_workspace_folder(workspace_id, child_a_id, is_root=False)
-    db.add_workspace_folder(workspace_id, child_b_id, is_root=False)
+    workspace_folders.add_workspace_folder(db, workspace_id, parent_id, is_root=True)
+    workspace_folders.add_workspace_folder(db, workspace_id, child_a_id, is_root=False)
+    workspace_folders.add_workspace_folder(db, workspace_id, child_b_id, is_root=False)
 
     assert page.request.post(
         f"{live_server['url']}/api/workspaces/{workspace_id}/activate"
@@ -1008,7 +1009,7 @@ def test_folder_tree_shows_associated_workspaces(live_server, page):
     active_workspace = db.workspaces.get(db._active_workspace_id)
     folder_id = db.folders.tree()[0]["id"]
     shared_workspace_id = db.create_workspace("Shared Bird Library")
-    db.add_workspace_folder(shared_workspace_id, folder_id)
+    workspace_folders.add_workspace_folder(db, shared_workspace_id, folder_id)
 
     page.goto(f"{live_server['url']}/browse")
     item = page.locator(f'.tree-item[data-folder-id="{folder_id}"]')
