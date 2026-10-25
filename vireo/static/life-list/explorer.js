@@ -1,41 +1,44 @@
 // Explorer: shared state, loading /api/life-list/explorer, the taxonomy download, and honesty states.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { renderExplorerBody, renderSummaryBar } from './explorer-cards.js';
+import { openRankView } from './rank-view.js';
+import { escapeAttr, escapeHtml, hasEventSource, safeEventSource, safeFetch } from './shared.js';
 
 // ---------------- Explorer: data load + honesty states (Task 10) ----------------
 
-/** @type {LifeExplorer|null} */ var explorerData = null;      // last payload from /api/life-list/explorer
-/** @type {LifeCrumb[]} */ var explorerPath = [];        // [{id,name,rank}] drill path from class root down
-/** @type {LifeRankView|null} */ var explorerRankView = null;  // {rank,data,search,missingOnly,showAll} when the flat rank view is open, else null
+      // last payload from /api/life-list/explorer
+        // [{id,name,rank}] drill path from class root down
+  // {rank,data,search,missingOnly,showAll} when the flat rank view is open, else null
 // Token for the requests that fill #explorerBody (the genus species leaf and the
 // flat rank view). Each one claims it; every navigation that replaces the body
 // bumps it, so a late response for a view the user already left is dropped.
-var explorerViewReqId = 0;
 
 // Load the explorer tree for a class (rootId = class taxon id, or omit for
 // the default Aves root). Stores the payload and re-renders.
-/** @param {string|number=} rootId */ async function loadExplorer(rootId) {
+/** @param {string|number=} rootId */ export async function loadExplorer(rootId) {
   var panel = /** @type {HTMLElement} */ (document.getElementById('tab-explorer'));
-  explorerViewReqId++;   // invalidate any in-flight /rank or /species fetch from the old class
+  state.explorerViewReqId++;   // invalidate any in-flight /rank or /species fetch from the old class
   panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Loading…</div></div>';
   try {
-    explorerData = await safeFetch('/api/life-list/explorer' + (rootId ? ('?root=' + encodeURIComponent(rootId)) : ''));
+    state.explorerData = await safeFetch('/api/life-list/explorer' + (rootId ? ('?root=' + encodeURIComponent(rootId)) : ''));
   } catch (e) {
     panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Failed to load explorer.</div></div>';
     return;
   }
-  explorerPath = [];        // reset drill path whenever a new class is loaded
-  explorerRankView = null;  // and exit the flat rank view on class change
+  state.explorerPath = [];        // reset drill path whenever a new class is loaded
+  state.explorerRankView = null;  // and exit the flat rank view on class change
   renderExplorer();
 }
 
 // Trigger the taxonomy download job, then poll it and reload the explorer on
 // completion. Mirrors settings.html's downloadTaxonomy() pattern.
-/** @param {HTMLButtonElement} btn */ async function explorerDownloadTaxonomy(btn) {
+/** @param {HTMLButtonElement} btn */ export async function explorerDownloadTaxonomy(btn) {
   btn.disabled = true;
   btn.textContent = 'Downloading… (see Jobs panel)';
   try {
     /** @type {{job_id?:string}} */ var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
-    if (typeof safeEventSource === 'function' && data && data.job_id) {
+    if (hasEventSource() && data && data.job_id) {
       safeEventSource('/api/jobs/' + data.job_id + '/stream', {
         onComplete: function() { loadExplorer(); }
       });
@@ -46,9 +49,9 @@ var explorerViewReqId = 0;
   }
 }
 
-function renderExplorer() {
+export function renderExplorer() {
   var panel = /** @type {HTMLElement} */ (document.getElementById('tab-explorer'));
-  var d = explorerData || {};
+  var d = state.explorerData || {};
 
   // Honesty state 1: reference taxonomy not downloaded — no fake 0/0.
   if (!d.taxonomy_ready) {
@@ -58,7 +61,7 @@ function renderExplorer() {
       + '<p>The explorer compares your tagged species against the full iNaturalist '
       + 'reference taxonomy (orders, families, genera, species). That reference '
       + "hasn't been downloaded yet, so there are no totals to measure against.</p>"
-      + '<button class="publish-btn" onclick="explorerDownloadTaxonomy(this)">Download the taxonomy</button>'
+      + '<button class="publish-btn" data-explorer-download>Download the taxonomy</button>'
       + '</div></div>';
     return;
   }
@@ -69,7 +72,7 @@ function renderExplorer() {
   // even before the user has tagged any birds.
   html += '<div class="ll-exp-controls">';
   html += '<label for="explorerClass">Class</label>';
-  html += '<select id="explorerClass" onchange="loadExplorer(this.value)">';
+  html += '<select id="explorerClass">';
   var classes = (d.classes || []).slice();
   /** @type {Partial<LifeTaxon>} */ var root = d.root || {};
   var seenRoot = classes.some(function(c) { return c.id === root.id; });
@@ -116,7 +119,7 @@ function renderExplorer() {
 // innerHTML rebuild), so re-rendering never accumulates duplicate handlers.
 // Mirrors wireBreadcrumb's delegation pattern. Reads data-rank off the clicked
 // chip and opens the flat rank breakdown for that rank.
-function wireSummaryBar() {
+export function wireSummaryBar() {
   var panel = /** @type {HTMLElement} */ (document.getElementById('tab-explorer'));
   if (!panel || panel._llSummaryWired) return;
   panel._llSummaryWired = true;
@@ -132,21 +135,21 @@ function wireSummaryBar() {
 // Single delegated click listener for breadcrumb crumbs. Attached once to the
 // persistent #explorerBody container, so re-rendering its innerHTML (cards,
 // species leaf, loading states) never accumulates duplicate handlers.
-/** @param {HTMLElement|null} container */ function wireBreadcrumb(container) {
+/** @param {HTMLElement|null} container */ export function wireBreadcrumb(container) {
   if (!container) return;
   container.addEventListener('click', function(event) {
     if (!(event.target instanceof Element)) return;
     var crumb = event.target.closest('.ll-crumb');
     if (!crumb || !container.contains(crumb)) return;
     var depth = parseInt(crumb.getAttribute('data-depth') || '', 10);
-    if (isNaN(depth) || depth === explorerPath.length) return;   // current crumb: no-op
-    explorerPath = explorerPath.slice(0, depth);
-    explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
+    if (isNaN(depth) || depth === state.explorerPath.length) return;   // current crumb: no-op
+    state.explorerPath = state.explorerPath.slice(0, depth);
+    state.explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
     renderExplorerBody();
   });
 }
 
-/** @param {LifeUncounted} entry */ function uncountedBrowseHref(entry) {
+/** @param {LifeUncounted} entry */ export function uncountedBrowseHref(entry) {
   // The compact token is expanded by Browse into the same server-side
   // ancestor-suppression predicate that produced ``photo_count``. Embedding
   // every matching photo ID here would exceed browser/server URL limits for
@@ -157,7 +160,7 @@ function wireSummaryBar() {
   return '/browse?filters=' + encodeURIComponent(JSON.stringify(filters));
 }
 
-/** @param {LifeUncounted[]|undefined} entries @param {number} count @param {string} message */ function renderUncountedGroup(entries, count, message) {
+/** @param {LifeUncounted[]|undefined} entries @param {number} count @param {string} message */ export function renderUncountedGroup(entries, count, message) {
   if (!count) return '';
   var shown = entries || [];
   var truncated = count > shown.length;
@@ -183,7 +186,7 @@ function wireSummaryBar() {
 
 // Reasoned, class-aware disclosure for accepted identification labels that
 // cannot contribute to exact species completeness.
-/** @param {LifeExplorer} d */ function renderUnmatched(d) {
+/** @param {LifeExplorer} d */ export function renderUnmatched(d) {
   var u = d.uncounted_identifications;
   if (!u) return '';
   /** @type {Partial<LifeTaxon>} */ var root = d.root || {};

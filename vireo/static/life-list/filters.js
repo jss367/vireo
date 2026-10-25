@@ -1,9 +1,10 @@
 // Taxonomic group and identification-level filters, sorting, and the list controls.
-// Classic page script; load boot.js after all definitions.
 
-/** @type {ReturnType<typeof setTimeout>|null} */ var debounceTimer = null;
+import { state } from './state.js';
+import { render } from './cards.js';
+import { escapeAttr } from './shared.js';
 
-/** @param {HTMLSelectElement} select @param {{value:string;label:string}[]} options */ function replaceSelectOptions(select, options) {
+/** @param {HTMLSelectElement} select @param {{value:string;label:string}[]} options */ export function replaceSelectOptions(select, options) {
   var previous = select.value;
   select.innerHTML = options.map(function(option) {
     return '<option value="' + escapeAttr(option.value) + '">'
@@ -14,8 +15,8 @@
   }
 }
 
-function populateLifeListTaxonomyFilters() {
-  var entries = (currentData && currentData.species) || [];
+export function populateLifeListTaxonomyFilters() {
+  var entries = (state.currentData && state.currentData.species) || [];
   /** @type {Record<string,string>} */ var classes = {};
   var hasUnknownClass = false;
   var hasUnknownRank = false;
@@ -63,7 +64,7 @@ function populateLifeListTaxonomyFilters() {
   replaceSelectOptions(/** @type {HTMLSelectElement} */ (document.getElementById('identificationRankSelect')), rankOptions);
 }
 
-/** @param {string} name */ function lifeListAlphabeticalName(name) {
+/** @param {string} name */ export function lifeListAlphabeticalName(name) {
   // In an English-oriented common-name list, a leading Hawaiian ʻokina is
   // ignored for alphabetization even though it remains part of the displayed
   // spelling. Include common apostrophe substitutes so imported variants sort
@@ -71,16 +72,16 @@ function populateLifeListTaxonomyFilters() {
   return String(name || '').replace(/^[\u0027\u0060\u00B4\u02B9\u02BB\u02BC\u2018\u2019\u201B]+/, '');
 }
 
-/** @param {LifeSpecies} a @param {LifeSpecies} b */ function compareLifeListSpeciesAlphabetically(a, b) {
+/** @param {LifeSpecies} a @param {LifeSpecies} b */ export function compareLifeListSpeciesAlphabetically(a, b) {
   var aName = String(a.species || '');
   var bName = String(b.species || '');
   return lifeListAlphabeticalName(aName).localeCompare(lifeListAlphabeticalName(bName))
     || aName.localeCompare(bName);
 }
 
-function sortedSpecies() {
+export function sortedSpecies() {
   var sort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
-  var list = (currentData?.species || []).slice();
+  var list = (state.currentData?.species || []).slice();
   list.sort(function(a, b) {
     if (sort === 'alpha') return compareLifeListSpeciesAlphabetically(a, b);
     if (sort === 'most-photos') return b.photo_count - a.photo_count;
@@ -99,19 +100,19 @@ function sortedSpecies() {
   return list;
 }
 
-function debounceRender() {
-  clearTimeout(debounceTimer ?? undefined);
-  debounceTimer = setTimeout(render, 150);
+export function debounceRender() {
+  clearTimeout(state.debounceTimer ?? undefined);
+  state.debounceTimer = setTimeout(render, 150);
 }
 
-function bindLifeListControls() {
+export function bindLifeListControls() {
   /** @type {HTMLInputElement} */ (document.getElementById('speciesSearch')).addEventListener('input', debounceRender);
   /** @type {HTMLSelectElement} */ (document.getElementById('taxonomicGroupSelect')).addEventListener('change', render);
   /** @type {HTMLSelectElement} */ (document.getElementById('identificationRankSelect')).addEventListener('change', render);
   /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).addEventListener('change', function() {
-    if (currentData) render();
+    if (state.currentData) render();
   });
   /** @type {HTMLInputElement} */ (document.getElementById('renumberView')).addEventListener('change', function() {
-    if (currentData) render();
+    if (state.currentData) render();
   });
 }

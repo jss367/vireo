@@ -81,6 +81,15 @@
     ],
     "sharedWrites": []
   },
+  "life-list": {
+    "route": "/life-list",
+    "template": "life_list.html",
+    "pageHooks": [
+      "afterHistoryChange",
+      "openExportModal"
+    ],
+    "sharedWrites": []
+  },
   "lightroom": {
     "route": "/lightroom",
     "template": "lightroom.html",

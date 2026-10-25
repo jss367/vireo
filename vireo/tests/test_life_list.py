@@ -144,7 +144,7 @@ def test_page_renders(life_app):
     assert "Calculating what will be published" in html
     assert "link.download = ''" in html
     assert 'id="folderBrowser"' in html
-    assert "publishFolderBrowser.open('destination')" in html
+    assert "publishFolderBrowser().open('destination')" in html
 
 
 def test_groups_by_species_and_counts(life_app):

@@ -1,19 +1,24 @@
 // Explorer: the species leaf for a genus.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { photoThumbnailUrl } from './cards.js';
+import { renderBreadcrumb } from './explorer-cards.js';
+import { renderSunburst } from './sunburst.js';
+import { escapeAttr, escapeHtml, safeFetch } from './shared.js';
 
 // ---------------- Explorer: species leaf (Task 12) ----------------
 
-/** @type {{species:LifeNode[]}|null} */ var explorerLeafData = null;   // last species-leaf payload
-/** @type {LifeCrumb|null} */ var explorerLeafGenus = null;  // {id,name,rank} of the genus being shown
+   // last species-leaf payload
+  // {id,name,rank} of the genus being shown
 
-/** @param {LifeNode} node */ async function loadExplorerSpecies(node) {
-  var myReq = ++explorerViewReqId;   // claim the body token; any later navigation bumps it
-  explorerLeafGenus = { id: node.id, name: node.common_name || node.name, rank: node.rank };
+/** @param {LifeNode} node */ export async function loadExplorerSpecies(node) {
+  var myReq = ++state.explorerViewReqId;   // claim the body token; any later navigation bumps it
+  state.explorerLeafGenus = { id: node.id, name: node.common_name || node.name, rank: node.rank };
   // Drop the previous genus's payload now, so a view that returns to this genus
   // before the response lands (Back to cards) reloads it instead of showing the
   // old genus's species under this genus's name.
-  explorerLeafData = null;
-  explorerPath.push(explorerLeafGenus);
+  state.explorerLeafData = null;
+  state.explorerPath.push(state.explorerLeafGenus);
   renderSunburst();
   var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Loading species…</div>';
@@ -21,21 +26,21 @@
   try {
     data = await safeFetch('/api/life-list/explorer/species?genus=' + encodeURIComponent(node.id));
   } catch (e) {
-    if (myReq !== explorerViewReqId) return;   // superseded — leave the newer view alone
+    if (myReq !== state.explorerViewReqId) return;   // superseded — leave the newer view alone
     if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Failed to load species.</div>';
     return;
   }
-  if (myReq !== explorerViewReqId) return;   // the user navigated away; discard this stale response
-  explorerLeafData = data;
+  if (myReq !== state.explorerViewReqId) return;   // the user navigated away; discard this stale response
+  state.explorerLeafData = data;
   renderExplorerLeaf(false);
 }
 
-/** @param {boolean} missingOnly */ function renderExplorerLeaf(missingOnly) {
+/** @param {boolean} missingOnly */ export function renderExplorerLeaf(missingOnly) {
   var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (!body) return;
-  var species = (explorerLeafData && explorerLeafData.species) || [];
+  var species = (state.explorerLeafData && state.explorerLeafData.species) || [];
   var found = species.filter(function(s) { return s.found; }).length;
-  var genusName = explorerLeafGenus ? explorerLeafGenus.name : '';
+  var genusName = state.explorerLeafGenus ? state.explorerLeafGenus.name : '';
 
   var html = renderBreadcrumb();
   html += '<div class="ll-leaf-head">';
@@ -55,7 +60,7 @@
   if (chk) chk.addEventListener('change', function() { renderExplorerLeaf(chk.checked); });
 }
 
-/** @param {LifeNode} s */ function renderSpeciesTile(s) {
+/** @param {LifeNode} s */ export function renderSpeciesTile(s) {
   var common = (s.common_name && s.common_name !== s.name)
     ? '<div class="ll-sp-common">' + escapeHtml(s.common_name) + '</div>' : '';
   if (s.found) {
