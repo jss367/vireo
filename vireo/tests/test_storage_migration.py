@@ -459,7 +459,13 @@ def test_is_guard_name_respects_case_insensitive_probe():
     """Guard-name membership mirrors the cache-name helper's case rules."""
     assert migration._is_guard_name("runtime.lock")
     assert migration._is_guard_name("hf-cache-access.lock")
-    assert not migration._is_guard_name("Runtime.Lock")
+    # ``os.path.normcase`` is identity on POSIX, so a case variant does not
+    # match without the explicit probe; on Windows normcase folds case, so
+    # the same variant matches even with the default flag.
+    if os.path.normcase("Runtime.Lock") == "Runtime.Lock":
+        assert not migration._is_guard_name("Runtime.Lock")
+    else:
+        assert migration._is_guard_name("Runtime.Lock")
     assert migration._is_guard_name("Runtime.Lock", case_insensitive=True)
     assert migration._is_guard_name("HF-Cache-Access.LOCK", case_insensitive=True)
     assert not migration._is_guard_name("other.lock", case_insensitive=True)
