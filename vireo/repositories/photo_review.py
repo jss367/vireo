@@ -106,7 +106,8 @@ class PhotoReviewRepository:
                AND EXISTS (SELECT 1 FROM photo_workspace_visibility
                            WHERE photo_id=photos.id AND workspace_id=?)
                AND NOT EXISTS (SELECT 1 FROM current_flag_attribution a
-                               WHERE a.photo_id=photos.id AND a.flag IS photos.flag AND a.source IS NULL)""",
+                               WHERE a.photo_id=photos.id AND a.flag IS photos.flag
+                                 AND a.source IS NULL AND a.reason IS NULL)""",
             (photo_id, self.workspace_id),
         ).rowcount
         if _commit:
@@ -237,7 +238,8 @@ class PhotoReviewRepository:
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"""SELECT p.id, p.flag,
-                    CASE WHEN a.photo_id IS NOT NULL AND a.source IS NULL
+                    CASE WHEN a.photo_id IS NOT NULL
+                              AND a.source IS NULL AND a.reason IS NULL
                          THEN p.flag END AS confirmed_flag
                     FROM photos p
                     JOIN photo_workspace_visibility v ON v.photo_id=p.id AND v.workspace_id=?

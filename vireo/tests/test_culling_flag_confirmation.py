@@ -166,6 +166,16 @@ class CullingFlagConfirmationTests(unittest.TestCase):
         self.assertEqual(self.cull()[1]["label"], "REVIEW")
         self.assertEqual(flag_note(self.db, 7, "flagged")["source"], "synthetic-model")
 
+    def test_reason_only_attribution_is_not_photographer_confirmation(self):
+        # Headless /api/v1 callers may send a reason without a source; that
+        # row carries attribution, so Cull must not promote it to a confirmed
+        # photographer decision or protect it from ranking.
+        self.service.set_flag(7, "flagged", reason="attributed note without source")
+        self.assertEqual(self.cull()[1]["label"], "REVIEW")
+        self.assertIsNone(self.db.photo_review.culling_flag_states([7])[7]["confirmed_flag"])
+        self.service.set_flag(7, "none", reason="attributed clear without source")
+        self.assertTrue(self.db.photo_review.flag_ranked_candidate(7))
+
     def test_unattributed_same_value_write_invalidates_confirmation(self):
         self.service.set_flag(7, "flagged")
         self.db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=7")
