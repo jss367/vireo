@@ -1,6 +1,6 @@
-// Per-photo decisions: species names, how a flag or label maps to an
-// action, pinned counts, resolving a photo's decision (your pin, then the
-// applied flag), and encounter labels.
+// Per-photo decisions: species names (every species a photo counts under),
+// how a flag or label maps to an action, pinned counts, resolving a photo's
+// decision (your pin, then the applied flag), and encounter labels.
 // Classic page script.
 
 /** @param {CullSourcePhoto | null | undefined} photo */
@@ -16,18 +16,74 @@ function speciesName(value) {
   return value || 'Unclassified';
 }
 
-/** @param {Partial<CullEncounter>} enc @param {Record<number, CullSourcePhoto>} photoMap */
-function speciesForEncounter(enc, photoMap) {
-  if (enc.confirmed_species) return speciesName(enc.confirmed_species);
-  if (enc.species) return speciesName(enc.species);
+/**
+ * The distinct non-empty names in a confirmed-species value, which the
+ * cache stores as a list (``confirmed_species_list``) or, in older caches,
+ * as one name or an array in ``confirmed_species``.
+ *
+ * @param {string | string[] | null | undefined} value @returns {string[]}
+ */
+function speciesNameList(value) {
+  /** @type {string[]} */
+  var names = [];
+  (Array.isArray(value) ? value : [value]).forEach(function(name) {
+    if (typeof name === 'string' && name && names.indexOf(name) < 0) names.push(name);
+  });
+  return names;
+}
+
+/** @param {CullSubject} subject @returns {string} */
+function subjectTopSpecies(subject) {
+  /** @type {[string, number, ...unknown[]] | null} */
+  var best = null;
+  (subject && subject.predictions || []).forEach(function(prediction) {
+    if (prediction && prediction[0] && (!best || Number(prediction[1] || 0) > Number(best[1] || 0))) best = prediction;
+  });
+  return best ? best[0] : '';
+}
+
+/**
+ * Every species a photo shows, from what the results carry: its confirmed
+ * species (all of them), else each detected subject's top prediction, else
+ * the photo's single top prediction. Empty when the photo has none of
+ * these (the encounter then decides). A photo with two animals therefore
+ * counts under both species.
+ *
+ * @param {CullSourcePhoto} photo @returns {string[]}
+ */
+function speciesListForPhoto(photo) {
+  var confirmed = speciesNameList(photo.confirmed_species_list);
+  if (!confirmed.length) confirmed = speciesNameList(photo.confirmed_species);
+  if (confirmed.length) return confirmed;
+  var top = photo.species_top5 && photo.species_top5.length ? topSpeciesForPhoto(photo) : '';
+  var subjects = speciesNameList((photo.subjects || []).map(subjectTopSpecies));
+  if (subjects.length) {
+    // The photo's overall best guess leads, as it did before subjects.
+    if (top && subjects.indexOf(top) > 0) subjects = [top].concat(subjects.filter(function(n) { return n !== top; }));
+    return subjects;
+  }
+  return top ? [top] : [];
+}
+
+/**
+ * The species an encounter stands for when one of its photos carries no
+ * species of its own: every confirmed species, else its predicted label.
+ *
+ * @param {Partial<CullEncounter>} enc @param {Record<number, CullSourcePhoto>} photoMap @returns {string[]}
+ */
+function speciesListForEncounter(enc, photoMap) {
+  var confirmed = speciesNameList(enc.confirmed_species_list);
+  if (!confirmed.length) confirmed = speciesNameList(enc.confirmed_species);
+  if (confirmed.length) return confirmed;
+  if (enc.species) return [speciesName(enc.species)];
   var votes = enc.species_predictions || [];
-  if (votes.length && votes[0] && votes[0].species) return speciesName(votes[0].species);
+  if (votes.length && votes[0] && votes[0].species) return [speciesName(votes[0].species)];
   var ids = enc.photo_ids || [];
   for (var i = 0; i < ids.length; i++) {
     var photo = photoMap[/** @type {number} */ (ids[i])];
-    if (photo) return topSpeciesForPhoto(photo);
+    if (photo) return [topSpeciesForPhoto(photo)];
   }
-  return 'Unclassified';
+  return ['Unclassified'];
 }
 
 /** @param {string | undefined} label @returns {CullAction} */

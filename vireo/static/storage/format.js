@@ -1,9 +1,8 @@
-// Storage's own escape and size formatters (storage-overview.js and the
-// other Storage scripts share them by global name).
-// Classic page script; loads first among the Storage page scripts.
+// Storage's own escape and size formatters, imported by the page's other
+// modules.
 
 /** @param {unknown} s */
-function storageEscapeHtml(s) {
+export function storageEscapeHtml(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -13,12 +12,12 @@ function storageEscapeHtml(s) {
 }
 
 /** @param {unknown} s */
-function storageEscapeAttr(s) {
+export function storageEscapeAttr(s) {
   return storageEscapeHtml(s).replace(/`/g, '&#96;');
 }
 
 /** @param {number | null | undefined} b */
-function storageFormatBytes(b) {
+export function storageFormatBytes(b) {
   if (b == null || b === 0) return '0 B';
   if (b < 1024) return b + ' B';
   if (b < 1024 * 1024) return Math.round(b / 1024) + ' KB';
