@@ -2,6 +2,41 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Grid Rendering ---------- */
+// Fresh comparison categories (`effective_category`) mapped to the badge the
+// stored classify-time `category` would have drawn.
+/** @type {Record<string, string | null>} */
+var REVIEW_EFFECTIVE_BADGE_KIND = {
+  match: null, new: 'new', refinement: 'refinement', broader: 'broader', conflict: 'disagreement',
+};
+
+/**
+ * The category badge for a card, or null. The server's `effective_category`
+ * compares the prediction with the photo's current keywords, leaving out a
+ * species another detection on the photo accounts for, so a second bird is
+ * not shown as disagreeing with the first. The stored `category` is a
+ * classify-time snapshot against every keyword on the photo, used only when
+ * no fresh comparison was possible (the same precedence as Browse).
+ * `existing_species` names the keywords the comparison used.
+ * @param {ReviewPrediction} pred
+ * @returns {{cls: string, text: string} | null}
+ */
+function reviewCategoryBadge(pred) {
+  var eff = pred.effective_category;
+  var kind = eff ? REVIEW_EFFECTIVE_BADGE_KIND[eff] || null : pred.category || null;
+  if (!kind || kind === 'match') return null;
+  var existing = (pred.existing_species || []).join(', ');
+  if (kind === 'disagreement') {
+    return {cls: 'badge-disagreement', text: existing ? 'disagrees with "' + existing + '"' : 'disagreement'};
+  }
+  if (kind === 'refinement') {
+    return {cls: 'badge-refinement', text: existing ? 'refines "' + existing + '"' : 'refinement'};
+  }
+  if (kind === 'broader') {
+    return {cls: 'badge-refinement', text: existing ? 'broader than "' + existing + '"' : 'broader'};
+  }
+  return {cls: kind === 'new' ? 'badge-new' : 'badge-disagreement', text: kind};
+}
+
 /** @param {boolean} [includeGroupMembers] */
 function getVisibleItems(includeGroupMembers) {
   var filtered = predictions.slice(); // copy for sorting
@@ -148,17 +183,10 @@ function bindReviewGridClicks() {
   if (pred.status === 'rejected') cardClass += ' skipped';
 
   // Category badge
-  var badgeHtml = '';
-  if (pred.category && pred.category !== 'match') {
-    var badgeClass = pred.category === 'new' ? 'badge-new' : pred.category === 'refinement' ? 'badge-refinement' : 'badge-disagreement';
-    var badgeText = pred.category;
-    if (pred.category === 'disagreement' && pred.existing_species && pred.existing_species.length > 0) {
-      badgeText = 'disagrees with "' + pred.existing_species.join(', ') + '"';
-    } else if (pred.category === 'refinement' && pred.existing_species && pred.existing_species.length > 0) {
-      badgeText = 'refines "' + pred.existing_species.join(', ') + '"';
-    }
-    badgeHtml = '<span class="badge ' + badgeClass + '">' + escapeHtml(badgeText) + '</span>';
-  }
+  var badge = reviewCategoryBadge(pred);
+  var badgeHtml = badge
+    ? '<span class="badge ' + badge.cls + '">' + escapeHtml(badge.text) + '</span>'
+    : '';
 
   // Group badge
   var groupHtml = '';

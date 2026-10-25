@@ -9,6 +9,7 @@ from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
 from services import (
     browse_queries,
+    catalog_deletion,
     detection_store,
     missing_originals,
     pending_changes,
@@ -913,7 +914,7 @@ def test_storage_page_confirms_destructive_working_copy_quota_reduction(
         '<dialog class="modal-overlay" id="workingCopyLimitModal"',
         'modal.showModal()',
         'MAX_WORKING_COPY_QUOTA_MB = 1048576',
-        'quotaMb > _committedWorkingCopyQuotaMb',
+        'quotaMb > state.committedWorkingCopyQuotaMb',
         'Lower working-copy storage limit?',
         'Lower limit and remove copies',
         'Your original photos will not be deleted',
@@ -935,7 +936,7 @@ def test_storage_page_confirms_destructive_working_copy_quota_reduction(
         # (another tab, All Settings) doesn't leave Apply disabled with
         # the input showing a stale value.
         'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
-        'currentInputMb === _committedWorkingCopyQuotaMb',
+        'currentInputMb === state.committedWorkingCopyQuotaMb',
     ):
         assert marker in html
 
@@ -10890,7 +10891,7 @@ def test_api_photos_missing(app_and_db, tmp_path):
                              timestamp="2024-03-08T10:00:00")
     # Pre-existing seed photos in /photos/2024 also have absent sources;
     # simplify the assertion by removing them from the workspace.
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -10932,7 +10933,7 @@ def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatc
         file_size=42,
         file_mtime=2.0,
     )
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -10969,7 +10970,7 @@ def test_api_photos_missing_automatic_uses_fresh_cache(app_and_db, monkeypatch, 
         file_size=42,
         file_mtime=2.0,
     )
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -11020,7 +11021,7 @@ def test_api_photos_missing_automatic_gate_uses_scan_start_time(
         file_size=42,
         file_mtime=2.0,
     )
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -11115,7 +11116,7 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
         file_mtime=2.0,
     )
     # Simplify assertions by removing seed rows from other folders.
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -11294,7 +11295,7 @@ def test_api_folder_delete_invalidates_missing_cache(app_and_db, tmp_path):
         file_mtime=2.0,
     )
     # Drop unrelated seed photos so the cache payload is deterministic.
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -11339,7 +11340,7 @@ def test_api_folder_relocate_invalidates_missing_cache(app_and_db, tmp_path):
         file_mtime=2.0,
     )
     # Strip unrelated seed photos so the cached payload is deterministic.
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -11390,7 +11391,7 @@ def test_api_folders_check_health_invalidates_missing_cache(app_and_db, tmp_path
         file_size=len(b"stub"),
         file_mtime=2.0,
     )
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -11960,7 +11961,7 @@ def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path
         file_size=42,
         file_mtime=2.0,
     )
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -12069,7 +12070,7 @@ def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
     db.conn.commit()
     # Make the winner the anchor row and drop unrelated seed photos so the
     # missing-originals scan is small and deterministic.
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ? AND id NOT IN (?, ?)",
             (fid, pid_winner, pid_loser),
@@ -12138,7 +12139,7 @@ def test_batch_delete_invalidates_missing_cache_across_workspaces(
         file_size=42,
         file_mtime=2.0,
     )
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -12502,7 +12503,7 @@ def test_api_photos_missing_detects_preview_variants(app_and_db, tmp_path):
                               extension=".nef", file_size=1, file_mtime=1.0)
     pid_no_preview = photo_ingest.add_photo(db, folder_id=fid, filename="bare.NEF",
                                   extension=".nef", file_size=1, file_mtime=1.0)
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -12541,7 +12542,7 @@ def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
     fid = db.add_folder(str(real_dir), name="live")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                        extension=".nef", file_size=1, file_mtime=1.0)
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()
@@ -12573,7 +12574,7 @@ def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):
     fid = db.add_folder(str(real_dir), name="ok")
     photo_ingest.add_photo(db, folder_id=fid, filename="still_here.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
-    db.delete_photos([
+    catalog_deletion.delete_photos(db, [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos WHERE folder_id != ?", (fid,)
         ).fetchall()

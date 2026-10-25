@@ -1,42 +1,50 @@
 // The working-copy quota's explicit Apply flow: measuring usage, the
 // reduction confirmation modal, and committing the new limit (rerouting a
 // server-side 409 back into the modal).
-// Classic page script.
+
+import { state } from './state.js';
+import {
+  flushPendingStorageAutosave, postWorkingCopyLimit, readWorkingCopyQuotaMb,
+  updateWorkingCopyLimitState,
+} from './config.js';
+import { storageFormatBytes } from './format.js';
+import { refreshStoragePage } from './panel.js';
+import { safeFetch, showToast } from './shared.js';
 
 // Fetch a fresh working-copy usage snapshot. Returns the size in bytes on
 // success, or null if the /api/storage scan failed. Keeps
-// _workingCopySizeBytes and the Apply button state in sync with the result.
-async function refreshWorkingCopyUsage() {
+// state.workingCopySizeBytes and the Apply button state in sync with the result.
+export async function refreshWorkingCopyUsage() {
   try {
     var s = /** @type {Partial<StorageReport> | null} */ (await safeFetch('/api/storage', {}, { toast: false }));
     var working = s && s.working_copies ? s.working_copies : null;
     if (!working) {
-      _workingCopySizeBytes = null;
+      state.workingCopySizeBytes = null;
       return null;
     }
-    _workingCopySizeBytes = working.size || 0;
-    return _workingCopySizeBytes;
+    state.workingCopySizeBytes = working.size || 0;
+    return state.workingCopySizeBytes;
   } catch(e) {
-    _workingCopySizeBytes = null;
+    state.workingCopySizeBytes = null;
     return null;
   } finally {
     updateWorkingCopyLimitState();
   }
 }
 
-async function applyWorkingCopyLimit() {
+export async function applyWorkingCopyLimit() {
   var quotaMb = readWorkingCopyQuotaMb();
   if (quotaMb == null) {
     showToast('Enter a valid working-copy storage limit', 'error');
     return;
   }
-  if (quotaMb === _committedWorkingCopyQuotaMb) return;
+  if (quotaMb === state.committedWorkingCopyQuotaMb) return;
 
   // Any reduction the client can already see needs the confirmation modal.
-  // For a raise, POST straight through: if _committedWorkingCopyQuotaMb is
+  // For a raise, POST straight through: if state.committedWorkingCopyQuotaMb is
   // stale and the server sees a reduction, /api/config rejects with 409
   // and commitWorkingCopyLimit reroutes to the modal below.
-  if (quotaMb > _committedWorkingCopyQuotaMb) {
+  if (quotaMb > state.committedWorkingCopyQuotaMb) {
     await commitWorkingCopyLimit(quotaMb, { confirmed: false });
     return;
   }
@@ -48,7 +56,7 @@ async function applyWorkingCopyLimit() {
 // response body), reuse that value instead of racing another /api/storage
 // scan against a concurrent publication.
 /** @param {number} quotaMb @param {{usageBytes?: number | null}=} opts */
-async function promptWorkingCopyLimit(quotaMb, opts) {
+export async function promptWorkingCopyLimit(quotaMb, opts) {
   opts = opts || {};
   var applyBtn = /** @type {HTMLButtonElement} */ (document.getElementById('applyWorkingCopyLimitBtn'));
   var input = /** @type {HTMLInputElement} */ (document.getElementById('cfgWorkingCopyCacheMaxGb'));
@@ -56,7 +64,7 @@ async function promptWorkingCopyLimit(quotaMb, opts) {
   input.disabled = true;
   var usage;
   if (opts.usageBytes != null) {
-    _workingCopySizeBytes = opts.usageBytes;
+    state.workingCopySizeBytes = opts.usageBytes;
     usage = opts.usageBytes;
   } else {
     applyBtn.textContent = 'Checking…';
@@ -68,7 +76,7 @@ async function promptWorkingCopyLimit(quotaMb, opts) {
   input.disabled = true;
   applyBtn.textContent = 'Apply';
   updateWorkingCopyLimitState();
-  _pendingWorkingCopyQuotaMb = quotaMb;
+  state.pendingWorkingCopyQuotaMb = quotaMb;
   var desc = /** @type {HTMLElement} */ (document.getElementById('workingCopyLimitModalDesc'));
   var confirmBtn = /** @type {HTMLButtonElement} */ (document.getElementById('confirmWorkingCopyLimitBtn'));
   if (removalBytes != null && removalBytes > 0) {
@@ -92,27 +100,27 @@ async function promptWorkingCopyLimit(quotaMb, opts) {
   confirmBtn.focus();
 }
 
-function closeWorkingCopyLimitModal() {
+export function closeWorkingCopyLimitModal() {
   var modal = /** @type {HTMLDialogElement} */ (document.getElementById('workingCopyLimitModal'));
   if (modal.open) modal.close();
   modal.classList.remove('open');
-  _pendingWorkingCopyQuotaMb = null;
+  state.pendingWorkingCopyQuotaMb = null;
   /** @type {HTMLInputElement} */ (document.getElementById('cfgWorkingCopyCacheMaxGb')).disabled = false;
   updateWorkingCopyLimitState();
   /** @type {HTMLButtonElement} */ (document.getElementById('applyWorkingCopyLimitBtn')).focus();
 }
 
-function confirmWorkingCopyLimit() {
-  var quotaMb = _pendingWorkingCopyQuotaMb;
+export function confirmWorkingCopyLimit() {
+  var quotaMb = state.pendingWorkingCopyQuotaMb;
   var modal = /** @type {HTMLDialogElement} */ (document.getElementById('workingCopyLimitModal'));
   if (modal.open) modal.close();
   modal.classList.remove('open');
-  _pendingWorkingCopyQuotaMb = null;
+  state.pendingWorkingCopyQuotaMb = null;
   if (quotaMb != null) commitWorkingCopyLimit(quotaMb, { confirmed: true });
 }
 
 /** @param {number} quotaMb @param {{confirmed?: boolean}=} opts */
-async function commitWorkingCopyLimit(quotaMb, opts) {
+export async function commitWorkingCopyLimit(quotaMb, opts) {
   opts = opts || {};
   var input = /** @type {HTMLInputElement} */ (document.getElementById('cfgWorkingCopyCacheMaxGb'));
   var applyBtn = /** @type {HTMLButtonElement} */ (document.getElementById('applyWorkingCopyLimitBtn'));
@@ -134,7 +142,7 @@ async function commitWorkingCopyLimit(quotaMb, opts) {
   var reroutedToModal = false;
   try {
     await postWorkingCopyLimit(quotaMb, opts);
-    _committedWorkingCopyQuotaMb = quotaMb;
+    state.committedWorkingCopyQuotaMb = quotaMb;
     input.value = String(quotaMb / 1024);
     showToast('Working-copy storage limit updated', 'success');
     await refreshStoragePage();
@@ -152,7 +160,7 @@ async function commitWorkingCopyLimit(quotaMb, opts) {
       // server's usage measurement.
       var body = e.body || {};
       if (typeof body.previous_working_copy_quota_mb === 'number') {
-        _committedWorkingCopyQuotaMb = body.previous_working_copy_quota_mb;
+        state.committedWorkingCopyQuotaMb = body.previous_working_copy_quota_mb;
       }
       reroutedToModal = true;
       input.disabled = false;

@@ -782,6 +782,19 @@ def _load_standard(path, max_size):
         return None
 
 
+def _photo_field(photo, key):
+    """``photo[key]``, or ``None`` when the record has no such column.
+
+    Callers pass catalog ``sqlite3.Row``s (``collections.get_photos``) as
+    well as dicts. A row has no ``.get`` and raises ``IndexError`` for a
+    missing column; a dict raises ``KeyError``.
+    """
+    try:
+        return photo[key]
+    except (KeyError, IndexError):
+        return None
+
+
 def get_canonical_image_path(photo, vireo_dir, folders):
     """Return the canonical image path for a photo — the root of the pyramid.
 
@@ -800,21 +813,14 @@ def get_canonical_image_path(photo, vireo_dir, folders):
     Returns:
         str path (may or may not exist — caller checks)
     """
-    # Support both dict and sqlite3.Row (no .get() on Row).
-    def _pget(key):
-        try:
-            return photo[key]
-        except (KeyError, IndexError):
-            return None
-
-    wc_rel = _pget("working_copy_path")
+    wc_rel = _photo_field(photo, "working_copy_path")
     if wc_rel:
         wc_abs = os.path.join(vireo_dir, wc_rel)
         if os.path.exists(wc_abs):
             return wc_abs
         log.warning(
             "Canonical path: working copy missing for photo %s at %s; "
-            "falling back to source", _pget("id"), wc_abs,
+            "falling back to source", _photo_field(photo, "id"), wc_abs,
         )
     folder_path = folders.get(photo["folder_id"], "")
     return os.path.join(folder_path, photo["filename"])
@@ -954,7 +960,8 @@ def load_working_image(
     otherwise falls back to loading the original file directly.
 
     Args:
-        photo: photo dict with working_copy_path, folder_id, filename
+        photo: photo dict or catalog ``sqlite3.Row`` with working_copy_path,
+            folder_id, filename
         vireo_dir: path to ~/.vireo/
         max_size: maximum dimension (longest side). None for full resolution.
         folders: optional {folder_id: path} mapping (required when working_copy_path is NULL)
@@ -977,8 +984,9 @@ def load_working_image(
             return image, source_kind
         return image
 
-    if photo.get("working_copy_path"):
-        wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+    working_copy_path = _photo_field(photo, "working_copy_path")
+    if working_copy_path:
+        wc_path = os.path.join(vireo_dir, working_copy_path)
         if os.path.exists(wc_path):
             working_image = _load_working_copy_image(
                 wc_path, max_size, record_access,

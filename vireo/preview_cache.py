@@ -184,8 +184,8 @@ def cleanup_cached_files_for_deleted_photos(
 ):
     """Remove thumbnail, preview, working-copy, and display files for deleted photos.
 
-    ``files`` is the list returned by ``db.delete_photos`` /
-    ``db.delete_folder``. The FK cascade drops preview_cache rows when
+    ``files`` is the list returned by ``catalog_deletion.delete_photos`` /
+    ``delete_folder``. The FK cascade drops preview_cache rows when
     photos are deleted, but the on-disk files stay unless we unlink
     them here — otherwise they leak into untracked bytes that eviction
     can't see, and on SQLite a retry that reuses one of the just-freed

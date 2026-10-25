@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 import path_guard
 from db import Database
 from services import saved_processes
-from services.imports import ImportFailure
+from services.imports import ImportFailure, import_photos_ok
 from services.local_folder import local_copy_scan_conflict, stage_pending_source_paths
 from services.local_workspace import stage_boundary_lock
 from services.pipeline_launch import resolve_remote_archive_target
@@ -1281,7 +1281,8 @@ class _ImportPhotosJob:
             # Record the chain independently of the tag pass: a tag-only
             # resume must not publish a second collection or processing job.
             # A cancelled run skipped the chain and still owes it.
-            if chain_paid and not result.get("cancelled") and result.get("ok") is not False:
+            if (chain_paid and not result.get("cancelled")
+                    and import_photos_ok(result) is not False):
                 self._mark_post_import_step(job, "chained", result)
                 result["chained"] = True
             # Both marks land on the final row either way, so a row that
@@ -1450,7 +1451,10 @@ class _ImportPhotosJob:
         if after_import is None:
             result["after_import_skipped"] = "import-only"
             return not chain_scope or col_id is not None
-        if not result.get("ok"):
+        # ``photos_ok``: every photo was imported. A sidecar whose keywords
+        # were not imported fails the job but not that: the photos are
+        # cataloged, so processing still runs.
+        if not import_photos_ok(result):
             result["after_import_skipped"] = "import failed"
             return False
         if result.get("cancelled"):

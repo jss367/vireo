@@ -9,7 +9,7 @@ import pytest
 from db import Database
 from PIL import Image
 from scanner import ScanOptions
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 
 
 def _touch_image(path):
@@ -1298,7 +1298,7 @@ def test_delete_photos_invalidates_cache(db_with_workspace):
 
     # Remove a.JPG's photo row but leave the file on disk (mimics
     # "Remove from Vireo" semantics — delete_photos does not touch files).
-    db.delete_photos([a_id])
+    catalog_deletion.delete_photos(db, [a_id])
 
     # a.JPG on disk is now untracked: it should re-appear as "new" on the
     # next read. If the cache was not invalidated, this would still be 0.

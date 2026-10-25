@@ -1,20 +1,24 @@
 // render(): the keyword table, its empty state, stats and the unlinked count.
-// Classic page script; load boot.js after all definitions.
 
-function render() {
+import { state, TYPE_ICONS } from './state.js';
+import { getFiltered, isActionableUnlinkedLocation, sortList, unlinkedLocationCount } from './filtering.js';
+import { updateBulkBar, updateSelectAllCheckbox } from './selection.js';
+import { escapeHtml } from './shared.js';
+
+export function render() {
   const filtered = sortList(getFiltered());
   const tbody = /** @type {HTMLElement} */ (document.getElementById('kwBody'));
   const empty = /** @type {HTMLElement} */ (document.getElementById('kwEmpty'));
   const stats = /** @type {HTMLElement} */ (document.getElementById('kwStats'));
 
-  stats.textContent = filtered.length + ' of ' + (showRecords ? allKeywords.length : identityGroups.length) + ' keywords';
+  stats.textContent = filtered.length + ' of ' + (state.showRecords ? state.allKeywords.length : state.identityGroups.length) + ' keywords';
   const unlinkedEl = /** @type {HTMLElement} */ (document.getElementById('kwUnlinkedCount'));
   if (unlinkedEl) unlinkedEl.textContent = String(unlinkedLocationCount());
 
   if (!filtered.length) {
     tbody.innerHTML = '';
     empty.style.display = 'block';
-    empty.textContent = searchTerm || filterType !== 'all' ? 'No matching keywords.' : 'No keywords found.';
+    empty.textContent = state.searchTerm || state.filterType !== 'all' ? 'No matching keywords.' : 'No keywords found.';
     updateBulkBar();
     updateSelectAllCheckbox();
     return;
@@ -23,10 +27,10 @@ function render() {
 
   const rows = filtered.map(k => {
     const t = k.type || 'general';
-    const grouped = !showRecords && k.members && k.members.length > 1;
+    const grouped = !state.showRecords && k.members && k.members.length > 1;
     const icon = TYPE_ICONS[t] || TYPE_ICONS.general;
-    const checked = selectedIds.has(k.id) ? 'checked' : '';
-    const parentName = k.parent_id ? (parentMap[k.parent_id] || '#' + k.parent_id) : '';
+    const checked = state.selectedIds.has(k.id) ? 'checked' : '';
+    const parentName = k.parent_id ? (state.parentMap[k.parent_id] || '#' + k.parent_id) : '';
     const taxonStr = k.taxon_common_name ? (k.taxon_common_name + (k.taxon_name ? ' (' + k.taxon_name + ')' : ''))
                      : (k.taxon_name || '');
     const coordStr = (k.latitude != null && k.longitude != null)
@@ -47,7 +51,7 @@ function render() {
       }
     }
 
-    const details = !showRecords && k.paths && k.paths.length > 1
+    const details = !state.showRecords && k.paths && k.paths.length > 1
       ? '<details><summary>' + k.paths.length + ' names and paths</summary>' +
         k.paths.map(path => '<div class="kw-parent">' + escapeHtml(path.join(' → ')) + '</div>').join('') +
         '<button type="button" class="kw-link-btn" data-edit-records="1">Edit individual records</button></details>' : '';

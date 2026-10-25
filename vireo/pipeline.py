@@ -1738,7 +1738,7 @@ def prune_missing_photos(cache_dir, workspace_id, db):
 
     The pipeline review page renders a card per cached photo and requests
     ``/thumbnails/<id>.jpg`` for each. When a photo was deleted before
-    ``prune_results`` was wired into ``db.delete_photos`` (commit 5ad83fa),
+    ``prune_results`` was wired into ``catalog_deletion.delete_photos`` (commit 5ad83fa),
     the cache file kept its ID, the page rendered an orphan card, and the
     thumbnail route correctly 404'd because the photo row is gone. Reading
     the cache should therefore reconcile against the DB and quietly drop

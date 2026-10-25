@@ -81,6 +81,14 @@
     ],
     "sharedWrites": []
   },
+  "keywords": {
+    "route": "/keywords",
+    "template": "keywords.html",
+    "pageHooks": [],
+    "sharedWrites": [
+      "_gmapsCallback"
+    ]
+  },
   "lightroom": {
     "route": "/lightroom",
     "template": "lightroom.html",
@@ -109,6 +117,14 @@
     "route": "/shortcuts",
     "template": "shortcuts.html",
     "pageHooks": [],
+    "sharedWrites": []
+  },
+  "storage": {
+    "route": "/storage",
+    "template": "storage.html",
+    "pageHooks": [
+      "loadStoragePanel"
+    ],
     "sharedWrites": []
   },
   "welcome": {

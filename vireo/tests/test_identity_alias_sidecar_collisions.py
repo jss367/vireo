@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from db import Database
 from scanner.companions import _pair_raw_jpeg_companions
+from services import moves_merge
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 from sync import sync_from_xmp, sync_to_xmp
 from test_db_moves_merge import _collision_tree
@@ -22,7 +23,7 @@ def _collision(db, tmp_path, mode, monkeypatch):
         tree = _collision_tree(db, tmp_path, same_hash=mode == 'staged')
         losing, survivor = ((tree['staged'], tree['survivor']) if mode == 'staged' else (tree['survivor'], tree['staged']))
         target = tmp_path / 'arch/day/dup.raf'
-        collapse = partial(db.merge_staged_tree_into_archive, tree['stage_root'], tree['arch'])
+        collapse = partial(moves_merge.merge_staged_tree_into_archive, db, tree['stage_root'], tree['arch'])
     elif mode == 'intra_staged':
         import move
         archive = tmp_path / 'archive'
@@ -33,7 +34,7 @@ def _collision(db, tmp_path, mode, monkeypatch):
         survivor, losing = photo(db, stage_root, 'A.raf'), photo(db, stage_root, 'a.raf')
         target = archive / 'A.raf'
         monkeypatch.setattr(move, '_case_insensitive_root', lambda path: True)
-        collapse = partial(db.merge_staged_tree_into_archive, stage_root, str(archive))
+        collapse = partial(moves_merge.merge_staged_tree_into_archive, db, stage_root, str(archive))
     elif mode == 'folder':
         source, destination, losing, survivor, target_dir = folder_twins(db, tmp_path)
         target = Path(target_dir) / 'bird.raf'
