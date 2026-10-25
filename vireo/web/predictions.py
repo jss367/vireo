@@ -1770,6 +1770,23 @@ def create_predictions_blueprint(
             db.rollback()
             raise
 
+    def _subject_accept_items(affected: list[JsonDict]) -> list[HistoryItem]:
+        """Keep each alias's real tag mutation and all agreeing model scopes."""
+        by_keyword: dict[tuple[int, int], JsonDict] = {}
+        for row in affected:
+            key = (row["photo_id"], row["keyword_id"])
+            meta = by_keyword.setdefault(key, {"prediction_ids": [], "no_tag": True})
+            meta["prediction_ids"].append(int(row["prediction_id"]))
+            meta["no_tag"] = meta["no_tag"] and not row.get("changed_tag", True)
+        items: list[HistoryItem] = []
+        for (photo_id, keyword_id), meta in by_keyword.items():
+            if not meta["no_tag"]:
+                del meta["no_tag"]
+            items.append({
+                "photo_id": photo_id, "old_value": json.dumps(meta), "new_value": str(keyword_id),
+            })
+        return items
+
     @blueprint.route("/api/predictions/<int:pred_id>/accept-subject", methods=["POST"])
     def api_accept_subject_species(pred_id: int) -> ResponseReturnValue:
         """Accept an additional-subject species from Compare, atomically.
@@ -1802,37 +1819,13 @@ def create_predictions_blueprint(
                 db.rollback()
                 return json_error("prediction not found", 404)
             if result["affected"]:
-                # Accept-subject can accept agreeing predictions from
-                # multiple classifier models on one detection. Undo/redo
-                # must reset every sibling scope, so always encode the full
-                # ``prediction_ids`` list as JSON — the compact
-                # comma-separated fallback cannot be parsed by
-                # ``_edit_prediction_ids`` and would drop every sibling
-                # status flip. ``no_tag`` is set only when every underlying
-                # accept was a no-op (photo already carried the target via
-                # an equivalent hierarchical or root row); in mixed batches
-                # one accept actually tagged the species, so undo must
-                # untag exactly once.
-                _all_no_tag = all(
-                    not a.get("changed_tag", True) for a in result["affected"]
-                )
-                payload: JsonDict = {
-                    "prediction_ids": [
-                        int(pid) for pid in result["prediction_ids"]
-                    ],
-                }
-                if _all_no_tag:
-                    payload["no_tag"] = True
-                old_value = json.dumps(payload)
+                # One history item per actual keyword, with status-only
+                # aliases marked no_tag so replay never invents their tags.
                 db.record_edit(
                     "prediction_accept",
                     f'Accepted additional subject species: added "{result["species"]}"',
                     str(result["keyword_id"]),
-                    [{
-                        "photo_id": result["photo_id"],
-                        "old_value": old_value,
-                        "new_value": str(result["keyword_id"]),
-                    }],
+                    _subject_accept_items(result["affected"]),
                     _commit=False,
                 )
             db.commit()

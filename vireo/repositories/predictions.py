@@ -1704,7 +1704,10 @@ class PredictionRepository:
                 if accepted and accepted["accepted_prediction_ids"]:
                     result = accepted
                     accepted_ids.append(row["id"])
-                    affected.extend(accepted["affected"])
+                    # Equivalent legacy labels can return different keyword
+                    # IDs. History must retain the ID each accept touched.
+                    affected.extend({**a, "keyword_id": accepted["keyword_id"]}
+                                    for a in accepted["affected"])
             if _commit:
                 self.conn.commit()
         except Exception:

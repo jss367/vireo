@@ -1,5 +1,7 @@
 """Cross-model Review cards and their exact, reversible decision scope."""
 
+import json
+
 import pytest
 
 BLUE = {"taxon_id": 138690, "scientific_name": "Cyanistes caeruleus"}
@@ -135,6 +137,91 @@ def test_compare_accepts_aliases_only_on_same_detection(app_and_db):
     assert _statuses(db, [ids[0], ids[3], ids[4]]) == ['pending'] * 3
     assert client.post('/api/undo').status_code == 200
     assert _statuses(db, ids) == ['pending'] * len(ids)
+
+
+@pytest.mark.parametrize('existing_alias', [None, 'Verdin', 'Auriparus flaviceps'])
+@pytest.mark.parametrize('reverse_order', [False, True])
+@pytest.mark.parametrize('sidecar_synced', [False, True])
+def test_compare_legacy_aliases_undo_redo_tags_and_sidecar_intent(
+    app_and_db, existing_alias, reverse_order, sidecar_synced,
+):
+    """History must undo the alias actually tagged, preserving pre-existing tags."""
+    app, db = app_and_db
+    photo_id = db.photos.list_page()[0]['id']
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')",
+    )
+    db.commit()
+    aliases = ['Verdin', 'Auriparus flaviceps']
+    if reverse_order:
+        aliases.reverse()
+    keywords = {name: db.add_keyword(name, is_species=True) for name in aliases}
+    if existing_alias:
+        db.tag_photo(photo_id, keywords[existing_alias])
+    before = {k['id'] for k in db.photo_keywords.get_for_photo(photo_id)}
+    detection_id = db.detections.save(photo_id, [{
+        'box': {'x': .1, 'y': .1, 'w': .3, 'h': .4}, 'confidence': .9,
+        'category': 'animal',
+    }], detector_model='MDV6')[0]
+    ids = []
+    for index, name in enumerate(aliases):
+        db.predictions.add(detection_id, name, .9 - index * .1, f'custom-{index}',
+                           labels_fingerprint='legacy')
+        ids.append(db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0])
+    assert all(row['source_taxon_id'] is None for row in db.predictions.get_rows_by_ids(ids))
+    db.commit()
+
+    def tags():
+        return {k['id'] for k in db.photo_keywords.get_for_photo(photo_id)}
+
+    def pending():
+        return {tuple(row) for row in db.conn.execute(
+            'SELECT change_type, value FROM pending_changes WHERE photo_id=?', (photo_id,),
+        )}
+
+    pending_before = pending()
+    client = app.test_client()
+    response = client.post(f'/api/predictions/{ids[0]}/accept-subject')
+    assert response.status_code == 200, response.get_json()
+    assert set(response.get_json()['prediction_ids']) == set(ids)
+    assert _statuses(db, ids) == ['accepted', 'accepted']
+    expected_tags = before if existing_alias else before | {keywords[aliases[0]]}
+    assert tags() == expected_tags
+    expected_pending = pending_before if existing_alias else pending_before | {('keyword_add', aliases[0])}
+    assert pending() == expected_pending
+
+    items = db.conn.execute(
+        "SELECT i.new_value, i.old_value FROM edit_history_items i "
+        "JOIN edit_history e ON e.id=i.edit_id WHERE e.action_type='prediction_accept'",
+    ).fetchall()
+    by_keyword = {int(item['new_value']): json.loads(item['old_value']) for item in items}
+    assert set(by_keyword) == set(keywords.values())
+    for index, alias in enumerate(aliases):
+        meta = by_keyword[keywords[alias]]
+        assert meta['prediction_ids'] == [ids[index]]
+        assert bool(meta.get('no_tag')) == (bool(existing_alias) or index > 0)
+
+    if sidecar_synced:
+        db.conn.execute('DELETE FROM pending_changes WHERE photo_id=?', (photo_id,))
+        db.commit()
+        pending_before = set()
+    assert client.post('/api/undo').status_code == 200
+    assert tags() == before
+    assert _statuses(db, ids) == ['pending', 'pending']
+    undo_pending = pending_before
+    if sidecar_synced and not existing_alias:
+        undo_pending = {('keyword_remove', aliases[0])}
+    assert pending() == undo_pending
+    assert client.post('/api/redo').status_code == 200
+    assert tags() == expected_tags
+    assert _statuses(db, ids) == ['accepted', 'accepted']
+    # If the accept was synced, redo cancels undo's unsynced removal:
+    # the sidecar already contains the first alias, so no add is needed.
+    redo_pending = pending_before
+    if not existing_alias and not sidecar_synced:
+        redo_pending = pending_before | {('keyword_add', aliases[0])}
+    assert pending() == redo_pending
 
 
 def test_same_species_without_overlap_is_not_merged(app_and_db):
