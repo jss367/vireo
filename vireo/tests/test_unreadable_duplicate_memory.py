@@ -111,7 +111,8 @@ def duplicate_flow(*, sidecar="unreadable", repeated_failures=0, recover=True, c
             db.commit_with_retry = conn.commit
             db._fake_check_and_resolve_duplicates_for_hash = resolve
             owner = SimpleNamespace(db=db, repair_missing_metadata=False,
-                                    tally=SimpleNamespace(credit_reused_row=lambda *args: None))
+                                    tally=SimpleNamespace(credit_reused_row=lambda *args: None,
+                                                          report_sidecar_failure=lambda *args: None))
             reuse = SUPPORT["_scanner_method"](ns, "triage.py", "_IncrementalTriage", "_reuse_existing_row")
             return reuse(owner, existing, "invented image", SimpleNamespace(st_mtime=2 if changed_file else 1, st_size=100),
                          "invented-memory://photo.xmp", 9)

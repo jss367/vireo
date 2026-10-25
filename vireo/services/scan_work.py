@@ -114,6 +114,22 @@ class _ScanJobRun:
         self.root_errors: list[str] = []
         self.scan_failed_roots: set[str] = set()
         self.cache_failed_roots: set[str] = set()
+        # One line per sidecar whose keywords the scan could not import
+        # (``ScanHooks.sidecar_error``). The photos are cataloged, but their
+        # keywords are missing, so each is a failed item: the job ends
+        # "failed" and these lines name the photos.
+        self.sidecar_errors: list[str] = []
+
+    def sidecar_error_cb(self, xmp_path: str, filename: str, reason: str) -> None:
+        msg = (
+            f"{filename}: keywords in {xmp_path} were not imported "
+            f"({reason}). Vireo tries again on the next scan."
+        )
+        if msg in self.sidecar_errors:
+            return
+        self.sidecar_errors.append(msg)
+        if msg not in self.job["errors"]:
+            self.job["errors"].append(msg)
 
     def progress_cb(self, current: int, total: int) -> None:
         job = self.job
@@ -227,7 +243,10 @@ class _ScanJobRun:
                     thumb_cache_dir=self.config["THUMB_CACHE_DIR"],
                     repair_missing_metadata=self.repair_missing_metadata,
                 ),
-                hooks=ScanHooks(progress=self.progress_cb, status=self.status_cb),
+                hooks=ScanHooks(
+                    progress=self.progress_cb, status=self.status_cb,
+                    sidecar_error=self.sidecar_error_cb,
+                ),
                 control=ScanControl(
                     cancel_check=self.cancel_check,
                     pause_check=self.pause_check,
@@ -324,17 +343,25 @@ class _ScanJobRun:
         # invalidation.
         failed_root_count = len(self.scan_failed_roots | self.cache_failed_roots)
         metadata_warning = _scan_metadata_warning()
-        if self.root_errors:
-            scan_summary = (
-                f"{photo_count} photos ({failed_root_count} of "
-                f"{len(self.roots_list)} root"
-                f"{'s' if len(self.roots_list) != 1 else ''} failed)"
-            )
+        failures = self.root_errors + self.sidecar_errors
+        if failures:
+            notes = []
+            if self.root_errors:
+                notes.append(
+                    f"{failed_root_count} of {len(self.roots_list)} root"
+                    f"{'s' if len(self.roots_list) != 1 else ''} failed"
+                )
+            if self.sidecar_errors:
+                n = len(self.sidecar_errors)
+                notes.append(
+                    f"keywords from {n} sidecar{'s' if n != 1 else ''} not imported"
+                )
+            scan_summary = f"{photo_count} photos ({'; '.join(notes)})"
             if metadata_warning:
                 scan_summary += f" — {metadata_warning}"
             self.runner.update_step(
                 self.job["id"], "scan", status="failed", summary=scan_summary,
-                error=self.root_errors[0], error_count=len(self.root_errors),
+                error=failures[0], error_count=len(failures),
             )
         else:
             scan_summary = f"{photo_count} photos"
@@ -377,6 +404,9 @@ class _ScanJobRun:
         if self.root_errors:
             raise RuntimeError(self.root_errors[0])
 
+        # Sidecar failures are already in job["errors"]; returning normally
+        # lets the runner's rollup mark the job failed while keeping the
+        # counts as its result.
         return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
     def skip_thumbnails(self) -> None:

@@ -110,7 +110,8 @@ def _flow():
             _identity_column_updates=lambda item: (["file_hash=?"],[item.file_hash]),
             fills=SimpleNamespace(take_pending_companion_fill=lambda *a: None),
             _heal_changed_content=lambda *a: None,
-            tally=SimpleNamespace(report_cataloged=lambda *a: None))
+            tally=SimpleNamespace(report_cataloged=lambda *a: None,
+                                  report_sidecar_failure=lambda *a: None))
         owner._write_photo_columns = lambda *a: write(owner, *a)
         def visit(pid, *, sidecar, existing=False):
             owner._add_photo = lambda item: (
@@ -124,7 +125,9 @@ def _flow():
         def retry(pid, *, changed=False, mtime=9):
             stored=dict(conn.execute("SELECT * FROM photos WHERE id=?",(pid,)).fetchone())
             stored.update(extension='.jpg',width=1200,timestamp='invented',exif_extracted=True,summary_needs_extract=False)
-            triage = SimpleNamespace(db=db,repair_missing_metadata=False,tally=SimpleNamespace(credit_reused_row=lambda *a: None))
+            triage = SimpleNamespace(db=db,repair_missing_metadata=False,
+                tally=SimpleNamespace(credit_reused_row=lambda *a: None,
+                                      report_sidecar_failure=lambda *a: None))
             ns.update(RAW_EXTENSIONS=set(),EMPTY_FILE_SHA256='empty')
             reuse=SUPPORT["_scanner_method"](ns,"triage.py","_IncrementalTriage","_reuse_existing_row")
             return reuse(triage,stored,'invented',SimpleNamespace(st_mtime=2 if changed else 1,st_size=100),
