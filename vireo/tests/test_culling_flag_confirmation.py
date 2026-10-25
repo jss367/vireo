@@ -531,6 +531,60 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         ).fetchone()[0])
         self.assertEqual(list(self.db.conn.execute("PRAGMA foreign_key_check")), [])
 
+    def test_explicit_duplicate_choices_confirm_flags_but_automatic_resolution_does_not(self):
+        from db import Database
+        from services import duplicate_resolution
+
+        for mode in ("keep", "bulk", "automatic"):
+            for original_flag in ("none", "flagged", None):
+                with self.subTest(mode=mode, original_flag=original_flag):
+                    self.db.conn.execute("UPDATE photos SET file_hash='same-content', flag=?", (original_flag,))
+                    self.db.conn.execute("DELETE FROM pending_changes")
+                    self.db.conn.commit()
+                    if mode == "keep":
+                        result = duplicate_resolution.keep_duplicate_copy(self.db, self.ids[1])
+                    elif mode == "bulk":
+                        result = duplicate_resolution.bulk_resolve_by_folder(
+                            self.db, ["same-content"], str(self.root / "photos"),
+                        )["resolved"][0]
+                    else:
+                        result = duplicate_resolution.apply_duplicate_resolution(self.db, self.ids)
+                    winner = result["winner_id"]
+                    self.assertIn(winner, self.ids)
+                    self.assertEqual(len(result["loser_ids"]), 2)
+                    # Reload through a separate real catalog: no client pins or
+                    # transient resolver state may stand in for attribution.
+                    reopened = Database(str(self.db_path))
+                    try:
+                        reopened.set_active_workspace(self.db.active_workspace_id)
+                        states = reopened.photo_review.culling_flag_states(self.ids)
+                        for pid, state in states.items():
+                            expected = (original_flag or "none") if pid == winner else "rejected"
+                            if mode == "automatic":
+                                self.assertIsNone(state["confirmed_flag"])
+                            else:
+                                self.assertEqual(state["flag"], expected)
+                                self.assertEqual(state["confirmed_flag"], expected)
+                    finally:
+                        reopened.close()
+
+    def test_manual_duplicate_attribution_failure_rolls_back_merge(self):
+        from unittest.mock import patch
+
+        from services import duplicate_resolution
+
+        winner = self.ids[0]
+        self.db.conn.execute("UPDATE photos SET file_hash='same-content'")
+        self.db.conn.commit()
+        self.service.set_flag(winner, "flagged")
+        before = self.db.photo_review.flag_attributions(self.ids)
+        with patch.object(PhotoReviewRepository, "set_current_flag_note", side_effect=ValueError("note failure")):
+            with self.assertRaisesRegex(ValueError, "note failure"):
+                duplicate_resolution.keep_duplicate_copy(self.db, self.ids[1])
+        self.assertEqual(self.db.photo_review.flag_attributions(self.ids), before)
+        self.assertEqual([self.db.photos.get(pid)["flag"] for pid in self.ids], ["flagged", "none", "none"])
+        self.assertFalse(self.db.conn.in_transaction)
+
     def test_manual_apply_round_trip_is_one_attributed_reversible_edit(self):
         from flask import Flask, jsonify
         from web.caches import create_caches_blueprint

@@ -270,6 +270,23 @@ class PhotoReviewRepository:
             result.update({row["photo_id"]: dict(row) for row in rows})
         return result
 
+    def confirm_duplicate_choices(self, winner_id, loser_ids):
+        """Publish an explicit duplicate choice inside its metadata transaction.
+
+        Keeping a copy preserves its flag; it does not turn an unflagged copy
+        into a flagged keeper. An explicit clear is still a confirmed decision.
+        Duplicate resolution has no flag-only Undo entry: its metadata merge
+        is not reversible independently of these choices.
+        """
+        row = self.conn.execute("SELECT flag FROM photos WHERE id=?", (winner_id,)).fetchone()
+        if row is None:
+            raise ValueError("Duplicate winner no longer exists")
+        flag = row[0] or "none"
+        if row[0] is None:
+            self.set_flag(winner_id, flag, verify_workspace=False, _commit=False)
+        self.set_current_flag_note([winner_id], flag, "Kept this duplicate copy")
+        self.set_current_flag_note(loser_ids, "rejected", "Rejected duplicate copies by user choice")
+
     def transfer_flag_for_merge(self, source_id, surviving_id, flag):
         """Carry only the winning queue photo's matching current attribution.
 

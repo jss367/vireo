@@ -1956,7 +1956,7 @@ class Database:
         """
         return self._duplicates_repository()
 
-    def _apply_winner_loser_merge(self, winner_id, loser_ids, winner_flag=None):
+    def _apply_winner_loser_merge(self, winner_id, loser_ids, winner_flag=None, *, manual_review=False):
         """Merge rating/keywords from losers onto winner, then flag losers
         as rejected. Single transaction. Shared between the resolver-based
         ``duplicate_resolution.apply_duplicate_resolution`` and the
@@ -1964,6 +1964,8 @@ class Database:
 
         ``winner_flag``, when given, is written to the winner in the same
         transaction (``keep_duplicate_copy`` un-rejects the copy it keeps).
+        Only explicit user choices publish manual flag attribution; automatic
+        resolution never publishes new manual confirmation.
         """
         from duplicates import merge_metadata
         from repositories.species_provenance import evidence_for_photo_copy
@@ -2013,6 +2015,8 @@ class Database:
             # Collections are rule-based (no junction table) so
             # merge.collection_ids_to_add has nothing to write either.
             repo.reject(loser_ids)
+            if manual_review:
+                self.photo_review.confirm_duplicate_choices(winner_id, loser_ids)
 
         logging.getLogger(__name__).info(
             "Duplicate resolved: kept id=%s, rejected id(s)=%s",
