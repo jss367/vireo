@@ -51,6 +51,7 @@ import json
 
 import config as cfg
 from keyword_normalization import keyword_match_key
+from species_memberships import photo_species_memberships
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
 # highlights whose photo is reachable, not rejected and still in the bucket.
@@ -114,9 +115,9 @@ _HIGHLIGHT_ELIGIBILITY_JOINS = """
 # be keyword-free: a Teal-tagged photo whose Wigeon subject
 # predicts Wigeon can hold a Wigeon highlight that
 # ``collect_highlight_buckets`` places in the Wigeon bucket.
-_HIGHLIGHT_ELIGIBILITY_FILTER = """
-                 AND COALESCE(p.flag, 'none') != 'rejected'
-                 AND (
+# Whether it does is decided in ``get_highlights`` by the
+# bucket rule itself (see ``_HIGHLIGHT_PREDICTION_MATCH``).
+_HIGHLIGHT_KEYWORD_MATCH = """
                      EXISTS (
                          SELECT 1
                          FROM photo_keywords pk
@@ -139,8 +140,13 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = """
                                    )
                                )
                            )
-                     )
-                     OR EXISTS (
+                     )"""
+# A prefilter only: ``get_highlights`` keeps a row matched here alone (not
+# by an accepted keyword) only when ``photo_species_memberships`` still puts
+# its photo in that species' bucket. The bucket rule also requires another
+# subject to account for the photo's keyword, which this SQL does not check.
+_HIGHLIGHT_PREDICTION_MATCH = """
+                     EXISTS (
                          SELECT 1
                          FROM detections d
                          JOIN predictions pr ON pr.detection_id = d.id
@@ -268,7 +274,13 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = """
                                ),
                                pr.species
                            ) COLLATE NOCASE
-                     )
+                     )"""
+_HIGHLIGHT_ELIGIBILITY_FILTER = f"""
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND (
+{_HIGHLIGHT_KEYWORD_MATCH}
+                     OR
+{_HIGHLIGHT_PREDICTION_MATCH}
                  )"""
 
 
@@ -1182,8 +1194,11 @@ class SpeciesCurationRepository:
         """Return ordered highlighted photo ids for the active workspace.
 
         When ``eligible_only`` is true, omit rejected photos and photos that
-        are no longer eligible for the Highlights page. Stored rows are kept
-        intact so un-rejecting a photo restores its selection.
+        are no longer in the species' Highlights bucket. Stored rows are kept
+        intact so un-rejecting a photo restores its selection. A highlight
+        held through an accepted keyword is matched in SQL; one held through
+        a prediction is kept only while ``photo_species_memberships`` (the
+        rule that builds the buckets) still puts the photo in that bucket.
 
         Eligibility mirrors :meth:`get_highlights_candidates` at the default
         quality floor: not-yet-analyzed (``quality_score IS NULL``) photos
@@ -1198,34 +1213,67 @@ class SpeciesCurationRepository:
         ws = self.workspace_id
         eligibility_joins = ""
         eligibility_filter = ""
+        keyword_match = "1"
         if eligible_only:
             eligibility_joins = _HIGHLIGHT_ELIGIBILITY_JOINS
             eligibility_filter = _HIGHLIGHT_ELIGIBILITY_FILTER
+            keyword_match = _HIGHLIGHT_KEYWORD_MATCH
         eligibility_params = (self._detector_floor(),) if eligible_only else ()
-        if species:
-            rows = self.conn.execute(
-                f"""SELECT sh.species, sh.photo_id, sh.rank
-                   FROM species_highlights sh
-                   {eligibility_joins}
-                   WHERE sh.workspace_id = ? AND sh.species = ?
-                   {eligibility_filter}
-                   ORDER BY sh.rank, sh.created_at, sh.photo_id""",
-                (ws, species, *eligibility_params),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                f"""SELECT sh.species, sh.photo_id, sh.rank
-                   FROM species_highlights sh
-                   {eligibility_joins}
-                   WHERE sh.workspace_id = ?
-                   {eligibility_filter}
-                   ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
-                (ws, *eligibility_params),
-            ).fetchall()
+        species_filter = "AND sh.species = ?" if species else ""
+        species_params = (species,) if species else ()
+        rows = self.conn.execute(
+            f"""SELECT sh.species, sh.photo_id, sh.rank,
+                      ({keyword_match}) AS keyword_match
+               FROM species_highlights sh
+               {eligibility_joins}
+               WHERE sh.workspace_id = ? {species_filter}
+               {eligibility_filter}
+               ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
+            (ws, *species_params, *eligibility_params),
+        ).fetchall()
+        if eligible_only:
+            rows = self._in_prediction_bucket(ws, rows)
         result = {}
         for r in rows:
             result.setdefault(r["species"], {})[r["photo_id"]] = r["rank"]
         return result
+
+    def _in_prediction_bucket(self, ws, rows):
+        """Drop the prediction-held highlights whose photo is no longer in
+        that species' bucket under ``photo_species_memberships``."""
+        if all(r["keyword_match"] for r in rows):
+            return rows
+        scope_sql = (
+            "SELECT DISTINCT photo_id AS id FROM species_highlights "
+            "WHERE workspace_id = ?"
+        )
+        names = self._highlight_species_names(scope_sql, (ws,))
+        subjects = self._highlight_subject_predictions(ws, scope_sql, (ws,))
+        cache = {}
+
+        def canonicalize(name):
+            if name not in cache:
+                cache[name] = self.resolve_species_display_name(name)
+            return cache[name]
+
+        buckets_by_photo = {}
+        kept = []
+        for r in rows:
+            if r["keyword_match"]:
+                kept.append(r)
+                continue
+            pid = r["photo_id"]
+            if pid not in buckets_by_photo:
+                buckets_by_photo[pid] = {
+                    keyword_match_key(m.species)
+                    for m in photo_species_memberships({
+                        "species_names": names.get(pid, []),
+                        "subject_predictions": subjects.get(pid, []),
+                    }, canonicalize)
+                }
+            if keyword_match_key(r["species"]) in buckets_by_photo[pid]:
+                kept.append(r)
+        return kept
 
     def add_highlight(self, species, photo_id, _commit=True):
         """Add a photo to a species' ordered highlights, appending if new.

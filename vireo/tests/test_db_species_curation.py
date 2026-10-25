@@ -853,29 +853,62 @@ def test_species_highlights_eligible_only(db, cur):
     }
 
 
-def test_species_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
-    """A highlight saved from a second-species prediction bucket of an
-    already-tagged photo survives on reload.
+def _detect_subjects(db, pid, species_conf, model="m1"):
+    """One detection per (species, confidence), each its own subject."""
+    det_ids = db.detections.save(
+        pid,
+        [{"box": {"x": 0.05 + 0.3 * i, "y": 0.1, "w": 0.2, "h": 0.2},
+          "confidence": 0.9, "category": "animal"}
+         for i in range(len(species_conf))],
+        "md",
+    )
+    for det, (species, conf) in zip(det_ids, species_conf, strict=True):
+        db.predictions.add(det, species, conf, model, labels_fingerprint="fp1")
+    return det_ids
 
-    ``collect_highlight_buckets`` puts a photo tagged with species A whose
-    second subject predicts species B in both buckets. Before the
-    multi-species fix, the eligibility filter required ``NOT EXISTS``
-    for any species keyword in the prediction branch, so the B highlight
-    was dropped on reload. The prediction branch now matches
-    ``sh.species`` against any detection's top non-rejected prediction,
-    regardless of whether the photo also carries a different species
-    keyword.
+
+def test_species_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
+    """A highlight saved from the second-species bucket of a tagged photo
+    stays eligible exactly as long as the photo stays in that bucket.
+
+    card1 is tagged Northern Cardinal. With a Cardinal subject and a Blue
+    Jay subject, ``photo_species_memberships`` puts it in the Blue Jay
+    bucket, so a Blue Jay highlight survives reload. Once the Cardinal
+    prediction is rejected no subject accounts for the keyword, the photo
+    leaves the Blue Jay bucket, and the highlight must stop counting, or
+    the Blue Jay bucket (kept visible by another photo) would report a
+    selected highlight it does not show.
     """
+    from highlights_payload import HighlightsQuery, build_highlights_payload
+
     p = cur["p"]
-    ws = cur["ws"]
-    # card1 has Northern Cardinal tagged. Give it a second subject whose
-    # top prediction is Blue Jay.
-    _detect(db, p["card1"], [("Blue Jay", 0.8)])
+    cardinal_det, _jay_det = _detect_subjects(
+        db, p["card1"], [("Northern Cardinal", 0.9), ("Blue Jay", 0.8)],
+    )
+    # card2 (genus-only keyword) keeps a Blue Jay bucket on the page.
+    _detect(db, p["card2"], [("Blue Jay", 0.9)])
     db.species_curation.add_highlight("Blue Jay", p["card1"])
     db.conn.commit()
     assert db.species_curation.get_highlights(
         species="Blue Jay", eligible_only=True
     ) == {"Blue Jay": {p["card1"]: 1}}
+
+    cardinal_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (cardinal_det,),
+    ).fetchone()["id"]
+    db.update_prediction_status(cardinal_pred, "rejected")
+
+    assert db.species_curation.get_highlights(
+        species="Blue Jay", eligible_only=True
+    ) == {}
+    payload = build_highlights_payload(db, HighlightsQuery(scope="workspace"))
+    jay = next(b for b in payload["buckets"] if b["species"] == "Blue Jay")
+    assert [ph["id"] for ph in jay["photos"]] == [p["card2"]]
+    assert jay["has_highlight_selection"] is False
+    # The stored row is kept, so the selection returns with the subject.
+    assert db.species_curation.get_highlights(species="Blue Jay") == {
+        "Blue Jay": {p["card1"]: 1},
+    }
 
 
 def test_species_highlights_eligible_lower_confidence_subject_bucket(db, cur):

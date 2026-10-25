@@ -25,13 +25,13 @@ from highlights_payload import (
     filter_highlight_curation_state,
     filter_highlight_sections,
     normalize_highlight_confirmation_filter,
-    photo_species_memberships,
     species_canonicalizer,
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
 from services import prediction_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
+from species_memberships import photo_species_memberships
 from web.request_args import request_bool_arg
 
 
