@@ -8,6 +8,12 @@
   if (!listElement || !errorElement) return;
   const list = listElement;
   const error = errorElement;
+  // Dashboard and Storage surface this banner as their primary view of local
+  // originals, so start expanded there without a click; other pages (Browse,
+  // Jobs, Import) show it as a sidebar nudge that opens on demand.
+  if (['/dashboard', '/storage'].includes(location.pathname)) {
+    panel.dataset.expanded = 'true';
+  }
   let signature = '';
   let loading = false;
   let sending = false;
