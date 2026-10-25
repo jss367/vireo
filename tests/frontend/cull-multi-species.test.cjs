@@ -81,7 +81,7 @@ test('single-species photos group exactly as before', () => {
   const {ctx} = page();
   ctx.cullManualDecisions = {3: 'reject'};
   const data = ctx.pipelineToCullData(results([
-    photo(1, {confirmed_species: 'Mallard', confirmed_species_list: ['Mallard'], flag: 'flagged'}),
+    photo(1, {confirmed_species: 'Mallard', confirmed_species_list: ['Mallard'], flag: 'flagged', flag_confirmation_status: 'confirmed'}),
     photo(2, {species_top5: [['Mallard', 0.9]]}),
     photo(3, {species_top5: [['Gadwall', 0.8]]}),
   ]));
