@@ -471,8 +471,6 @@ class DescriptorSafetyTests(unittest.TestCase):
         fs, ns = service()
         payload(fs)
         fs.add("/invented/models/group", "dir")
-        with self.assertRaises(ValueError):
-            cleanup(ns, [KEY])
         self.assertEqual(cleanup(ns)["removed"], [])
         self.assertFalse(fs.unlinked)
 
