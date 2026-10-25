@@ -362,11 +362,12 @@ def test_journal_publication_retries_transient_windows_locks(tmp_path, monkeypat
 def test_target_respects_filesystem_case_sensitivity(tmp_path, monkeypatch):
     """Route a case-variant cache directory to the cache root on case-insensitive filesystems.
 
-    On Windows a legacy ``Models`` folder resolves to the same path as
-    ``models`` and must land in the cache root so its installed models stay
-    discoverable after the native-layout marker takes effect. A POSIX
-    filesystem is case-sensitive, so ``Models`` is a distinct user-created
-    directory and still routes to the data root.
+    Windows always folds case, and macOS folds case by default. A legacy
+    ``Models`` folder on either resolves to the same path as ``models`` and
+    must land in the cache root so its installed models stay discoverable
+    after the native-layout marker takes effect. On a case-sensitive
+    filesystem, ``Models`` is a distinct user-created directory and still
+    routes to the data root.
     """
     data, cache = tmp_path / "data", tmp_path / "cache"
 
@@ -380,3 +381,75 @@ def test_target_respects_filesystem_case_sensitivity(tmp_path, monkeypatch):
     assert migration._target("THUMBNAILS", data, cache) == cache / "THUMBNAILS"
     assert migration._target("Embedding_Cache", data, cache) == cache / "Embedding_Cache"
     assert migration._target("working", data, cache) == data / "working"
+
+
+def test_target_routes_case_variants_on_case_insensitive_filesystem(tmp_path, monkeypatch):
+    """A case-insensitive POSIX filesystem routes case variants to the cache root.
+
+    ``os.path.normcase`` only folds case on Windows, so a POSIX host whose
+    volume is case-insensitive (macOS APFS/HFS+ by default) needs the
+    explicit filesystem probe. Without it, a legacy ``Models`` folder would
+    be classified as user data and stranded under the data root after the
+    native-layout marker takes effect.
+    """
+    data, cache = tmp_path / "data", tmp_path / "cache"
+
+    assert migration._is_cache_name("Models", case_insensitive=True)
+    assert migration._is_cache_name("THUMBNAILS", case_insensitive=True)
+    assert migration._is_cache_name("Embedding_Cache", case_insensitive=True)
+    assert not migration._is_cache_name("working", case_insensitive=True)
+
+    assert migration._target("Models", data, cache, case_insensitive=True) == cache / "Models"
+    assert migration._target("THUMBNAILS", data, cache, case_insensitive=True) == cache / "THUMBNAILS"
+    assert migration._target("working", data, cache, case_insensitive=True) == data / "working"
+
+
+def test_case_insensitive_probe_detects_folding(tmp_path, monkeypatch):
+    """The filesystem probe reports folding by toggling the leaf's casing."""
+    probed = tmp_path / "Vireo"
+    probed.mkdir()
+
+    def fake_samefile(path, other):
+        return str(other) == str(probed.parent / "vIREO")
+
+    monkeypatch.setattr(Path, "samefile", fake_samefile)
+    assert migration._case_insensitive(probed) is True
+
+    monkeypatch.setattr(Path, "samefile", lambda _self, _other: False)
+    assert migration._case_insensitive(probed) is False
+
+    def raiser(_self, _other):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(Path, "samefile", raiser)
+    assert migration._case_insensitive(probed) is False
+
+    no_case = tmp_path / "123"
+    no_case.mkdir()
+    assert migration._case_insensitive(no_case) is False
+
+
+def test_apply_routes_case_variant_cache_on_case_insensitive_filesystem(legacy, monkeypatch):
+    """Case-variant cache directories still land in the cache root on macOS.
+
+    When the source filesystem folds case, a legacy ``Models`` folder is
+    the same on-disk directory as ``models`` and must route to the cache
+    root. ``os.path.normcase`` alone does not detect macOS folding, so the
+    migration asks the filesystem.
+    """
+    source, data, cache, _journal = legacy
+    # Rename `models` to the case-variant the finding covers; preserve the
+    # file hierarchy so the migration can move the actual directory.
+    (source / "models").rename(source / "Models")
+    monkeypatch.setattr(migration, "_case_insensitive", lambda _path: True)
+
+    migration.migrate()
+
+    assert (cache / "Models").is_dir()
+    assert (cache / "Models" / "bird" / "model.onnx").read_bytes() == b"weights"
+    # The compatibility link lives in the data root under the on-disk name
+    # and points at the real cache directory; the model bytes are not left
+    # behind as a plain directory under the data root.
+    assert (data / "Models").is_symlink()
+    assert (data / "Models").resolve() == (cache / "Models").resolve()
+    assert (source / "Models").is_symlink()

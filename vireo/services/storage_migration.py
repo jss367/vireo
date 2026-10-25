@@ -30,17 +30,38 @@ _CACHES_NORMALIZED = frozenset(os.path.normcase(name) for name in CACHES)
 GUARDS = frozenset({"runtime.lock", "hf-cache-access.lock"})
 
 
-def _is_cache_name(name: str) -> bool:
+def _case_insensitive(path: Path) -> bool:
+    """Return True when ``path``'s filesystem matches names case-insensitively.
+
+    ``os.path.normcase`` only lowercases on Windows, so a POSIX host with a
+    case-insensitive volume (macOS APFS/HFS+ by default) needs a filesystem
+    probe. Toggle the leaf's casing against the parent and compare inodes:
+    the toggled lookup resolves to the same entry only when the filesystem
+    folds case.
+    """
+    swapped = path.name.swapcase()
+    if swapped == path.name:
+        return False
+    try:
+        return path.samefile(path.parent / swapped)
+    except OSError:
+        return False
+
+
+def _is_cache_name(name: str, *, case_insensitive: bool = False) -> bool:
     """Membership check that respects the filesystem's case sensitivity.
 
-    On a case-insensitive filesystem (Windows), a legacy ``Models`` folder
-    resolves to the same path as ``models`` and must route to the cache
-    root; routing it to the data root would strand its installed models
-    after the native-layout marker takes effect. On a case-sensitive
-    filesystem, ``Models`` is a distinct user-created directory and still
-    goes to the data root.
+    On a case-insensitive filesystem (Windows always; macOS by default), a
+    legacy ``Models`` folder resolves to the same path as ``models`` and
+    must route to the cache root; routing it to the data root would strand
+    its installed models after the native-layout marker takes effect. On a
+    case-sensitive filesystem, ``Models`` is a distinct user-created
+    directory and still goes to the data root.
     """
-    return os.path.normcase(name) in _CACHES_NORMALIZED
+    normalized = os.path.normcase(name)
+    if case_insensitive:
+        normalized = normalized.lower()
+    return normalized in _CACHES_NORMALIZED
 
 
 class MigrationError(ValueError):
@@ -197,8 +218,8 @@ def _read_journal(journal: Path, source: Path, data: Path, cache: Path) -> JsonD
     return record
 
 
-def _target(name: str, data: Path, cache: Path) -> Path:
-    return (cache if _is_cache_name(name) else data) / name
+def _target(name: str, data: Path, cache: Path, *, case_insensitive: bool = False) -> Path:
+    return (cache if _is_cache_name(name, case_insensitive=case_insensitive) else data) / name
 
 
 def _normalized_link_target(target: str) -> str:
@@ -239,12 +260,14 @@ def _link(path: Path, target: Path, directory: bool) -> None:
 def _apply(record: JsonDict, source: Path, data: Path, cache: Path, journal: Path) -> None:
     data.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
+    case_insensitive = _case_insensitive(source)
     # Keep lock inodes at their original paths throughout the move and after
     # migration, so old and new servers contend for the same kernel locks.
     for name in GUARDS:
         _link(data / name, source / name, False)
     for row in record["entries"]:
-        old, target = source / row["name"], _target(row["name"], data, cache)
+        old = source / row["name"]
+        target = _target(row["name"], data, cache, case_insensitive=case_insensitive)
         if not _verify_entry(row, old, target):
             old.rename(target)
             _sync_directory(old.parent)
@@ -252,7 +275,7 @@ def _apply(record: JsonDict, source: Path, data: Path, cache: Path, journal: Pat
         if _identity(target) != row["identity"]:
             raise MigrationError(f"Moved entry could not be verified: {target}")
         _link(old, target, row["directory"])
-        if _is_cache_name(row["name"]):
+        if _is_cache_name(row["name"], case_insensitive=case_insensitive):
             _link(data / row["name"], target, True)
     marker = data / MARKER
     if not _exists(marker):
@@ -266,18 +289,21 @@ def _apply(record: JsonDict, source: Path, data: Path, cache: Path, journal: Pat
 
 
 def _rollback(record: JsonDict, source: Path, data: Path, cache: Path, journal: Path) -> None:
+    case_insensitive = _case_insensitive(source)
     # Validate every row before touching anything, so changed paths stop recovery.
     for row in record["entries"]:
-        _verify_entry(row, source / row["name"], _target(row["name"], data, cache))
+        _verify_entry(row, source / row["name"],
+                      _target(row["name"], data, cache, case_insensitive=case_insensitive))
     for row in reversed(record["entries"]):
-        old, target = source / row["name"], _target(row["name"], data, cache)
+        old = source / row["name"]
+        target = _target(row["name"], data, cache, case_insensitive=case_insensitive)
         if _exists(target):
             if old.is_symlink():
                 old.unlink()
             target.rename(old)
             _sync_directory(old.parent)
             _sync_directory(target.parent)
-        if _is_cache_name(row["name"]) and _is_link(data / row["name"], target):
+        if _is_cache_name(row["name"], case_insensitive=case_insensitive) and _is_link(data / row["name"], target):
             (data / row["name"]).unlink()
     for name in GUARDS:
         if _is_link(data / name, source / name):
