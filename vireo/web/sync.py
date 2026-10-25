@@ -16,7 +16,9 @@ import logging
 import os
 import threading
 from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
 
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key
@@ -25,10 +27,18 @@ from services import pending_changes
 from web.location_edits import walk_parent_chain
 from xmp import location_keyword_entries, read_sync_preview_metadata
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import GetDb, GetRunner
+
 log = logging.getLogger(__name__)
 
 
-def _sync_preview_coordinate_text(location):
+def _sync_preview_coordinate_text(location: JsonDict | None) -> str | None:
     """Return a compact, truthful coordinate label for sync review."""
     if not location:
         return None
@@ -46,7 +56,7 @@ def _sync_preview_coordinate_text(location):
     )
 
 
-def _sync_preview_location_name(location):
+def _sync_preview_location_name(location: JsonDict | None) -> str | None:
     """Format a location keyword leaf and its parents from specific to broad."""
     if not location:
         return None
@@ -68,7 +78,7 @@ def _sync_preview_location_name(location):
     return ", ".join(result) or None
 
 
-def _sync_preview_absent_xmp_value(metadata, empty_value):
+def _sync_preview_absent_xmp_value(metadata: JsonDict, empty_value: str) -> str:
     if metadata.get("status") == "missing":
         return "No XMP sidecar"
     if metadata.get("status") == "unreadable":
@@ -88,7 +98,7 @@ _SYNC_PREVIEW_FIELD_LABELS = {
 }
 
 
-def _sync_preview_folder_offline_presentation(change_type):
+def _sync_preview_folder_offline_presentation(change_type: str) -> dict[str, str]:
     """Presentation for a change whose photo folder isn't accessible.
 
     ``sync_to_xmp`` calls ``os.path.isdir(os.path.dirname(xmp_path))`` before
@@ -114,7 +124,7 @@ def _sync_preview_folder_offline_presentation(change_type):
     }
 
 
-def _sync_preview_rating_label(value):
+def _sync_preview_rating_label(value: str | None) -> str:
     if value in (None, "", "0", 0):
         return "Unrated"
     try:
@@ -124,7 +134,7 @@ def _sync_preview_rating_label(value):
     return f"{rating} star" if rating == 1 else f"{rating} stars"
 
 
-def _sync_preview_flag_label(value):
+def _sync_preview_flag_label(value: str | None) -> str:
     return {
         None: "Unflagged",
         "": "Unflagged",
@@ -134,7 +144,7 @@ def _sync_preview_flag_label(value):
     }.get(value, str(value))
 
 
-def _discard_history_items(changes):
+def _discard_history_items(changes: list[Row]) -> list[JsonDict]:
     """History items recording which pending changes a discard dropped."""
     return [
         {
@@ -147,8 +157,8 @@ def _discard_history_items(changes):
 
 
 def _sync_preview_location_gps_presentation(
-    metadata, assigned_location, write_locations,
-):
+    metadata: JsonDict, assigned_location: JsonDict | None, write_locations: bool,
+) -> dict[str, str]:
     """Describe the GPS half of a queued ``location`` change."""
     current_coordinates = _sync_preview_coordinate_text(
         metadata.get("location")
@@ -225,9 +235,9 @@ def _sync_preview_location_gps_presentation(
 
 
 def _sync_preview_merge_location_keywords(
-    presentation, metadata, assigned_location, location_path,
-    write_location_keywords,
-):
+    presentation: JsonDict, metadata: JsonDict, assigned_location: JsonDict | None, location_path: list[str] | None,
+    write_location_keywords: bool,
+) -> JsonDict:
     """Fold the keyword half of a ``location`` change into its presentation.
 
     One queued ``location`` row can write two different things -- GPS and
@@ -240,10 +250,10 @@ def _sync_preview_merge_location_keywords(
     the marker Vireo stamped: a keyword deleted in Lightroom must read as a
     write, not as a no-op.
     """
-    def in_sidecar(path):
+    def in_sidecar(path: str) -> bool:
         """Whether the sidecar still carries both entries for one place path."""
         leaf, hierarchical = location_keyword_entries(path)
-        if not hierarchical:
+        if not hierarchical or leaf is None:
             return False
         leaf_key = keyword_match_key(leaf)
         # Match ``set_location_keywords``'s ``existed_hier`` logic: it treats
@@ -304,7 +314,8 @@ def _sync_preview_merge_location_keywords(
                 merged["action"] = "updated"
                 merged["after"] = (
                     _sync_preview_location_name(assigned_location)
-                    or location_path[-1]
+                    # A non-empty hierarchy comes from a non-empty path.
+                    or cast("list[str]", location_path)[-1]
                 )
             else:
                 merged["action"] = "cleared"
@@ -312,7 +323,7 @@ def _sync_preview_merge_location_keywords(
     return merged
 
 
-def _sync_preview_keyword_merge_presentation(change, value):
+def _sync_preview_keyword_merge_presentation(change: JsonDict, value: str) -> dict[str, str]:
     """Before/after for a merged keyword's hierarchy."""
     merge = json.loads(value)
     target_path = change.get('merge_target_path')
@@ -326,9 +337,9 @@ def _sync_preview_keyword_merge_presentation(change, value):
 
 
 def _sync_preview_paired_rename_presentation(
-    change_type, existing, hierarchy_display, paired_keyword_rename,
-    paired_add_value,
-):
+    change_type: str, existing: str | None, hierarchy_display: list[str], paired_keyword_rename: bool,
+    paired_add_value: str | None,
+) -> dict[str, str] | None:
     """A removal half of a paired keyword rename, or ``None`` otherwise."""
     if (
         change_type == "keyword_remove"
@@ -372,7 +383,7 @@ def _sync_preview_paired_rename_presentation(
     return None
 
 
-def _sync_preview_keyword_add_presentation(value, metadata, xmp_value):
+def _sync_preview_keyword_add_presentation(value: str, metadata: JsonDict, xmp_value: str) -> dict[str, str]:
     """Before/after for adding one keyword to XMP."""
     # The writer preserves exact entries and canonicalizes every
     # equivalent spelling before adding. Inspect all matches: an
@@ -403,8 +414,8 @@ def _sync_preview_keyword_add_presentation(value, metadata, xmp_value):
 
 
 def _sync_preview_keyword_presentation(
-    change_type, value, metadata, paired_keyword_rename, paired_add_value,
-):
+    change_type: str, value: str, metadata: JsonDict, paired_keyword_rename: bool, paired_add_value: str | None,
+) -> JsonDict:
     """Before/after for a keyword add, remove or flat-only remove."""
     existing = next(
         (
@@ -479,7 +490,7 @@ def _sync_preview_keyword_presentation(
     }
 
 
-def _sync_preview_rating_presentation(value, metadata, sidecar_will_exist):
+def _sync_preview_rating_presentation(value: str, metadata: JsonDict, sidecar_will_exist: bool) -> dict[str, str]:
     """Before/after for a rating change."""
     before = _sync_preview_rating_label(metadata.get("rating"))
     if not metadata.get("rating_writable") and not sidecar_will_exist:
@@ -513,7 +524,7 @@ def _sync_preview_rating_presentation(value, metadata, sidecar_will_exist):
     }
 
 
-def _sync_preview_flag_presentation(value, metadata, sync_flags):
+def _sync_preview_flag_presentation(value: str, metadata: JsonDict, sync_flags: bool) -> dict[str, str]:
     """Before/after for a pick/reject flag change."""
     before = _sync_preview_flag_label(metadata.get("flag"))
     if metadata.get("status") != "ok":
@@ -537,7 +548,7 @@ def _sync_preview_flag_presentation(value, metadata, sync_flags):
     }
 
 
-def _sync_preview_edit_recipe_presentation(value, metadata):
+def _sync_preview_edit_recipe_presentation(value: str, metadata: JsonDict) -> dict[str, str]:
     """Before/after for the Vireo edit-recipe marker."""
     before = (
         "Existing Vireo edits"
@@ -570,11 +581,11 @@ def _sync_preview_edit_recipe_presentation(value, metadata):
 
 
 def _sync_preview_presentation(
-    change, metadata, *, assigned_location=None, write_locations=False,
-    location_path=None, write_location_keywords=False,
-    sidecar_will_exist=False, sync_flags=False, paired_keyword_rename=False,
-    paired_add_value=None, folder_offline=False,
-):
+    change: JsonDict, metadata: JsonDict, *, assigned_location: JsonDict | None = None, write_locations: bool = False,
+    location_path: list[str] | None = None, write_location_keywords: bool = False,
+    sidecar_will_exist: bool = False, sync_flags: bool = False, paired_keyword_rename: bool = False,
+    paired_add_value: str | None = None, folder_offline: bool = False,
+) -> JsonDict:
     """Translate one internal pending row into user-facing XMP before/after data."""
     change_type = change["change_type"]
     value = change["value"]
@@ -635,7 +646,7 @@ _SYNC_PREVIEW_SNAPSHOTS_LOCK = threading.Lock()
 _SYNC_PREVIEW_SNAPSHOTS_MAX = 8
 
 
-def _sync_preview_pending_fingerprint(db, ws_id):
+def _sync_preview_pending_fingerprint(db: Database, ws_id: int) -> int:
     """Return the per-workspace monotonic write generation for pending_changes.
 
     A dedicated ``db_meta`` counter — ``pending_changes_version:<ws>`` —
@@ -655,7 +666,7 @@ def _sync_preview_pending_fingerprint(db, ws_id):
     return int(value) if value is not None else 0
 
 
-def _sync_preview_build_snapshot(db, ws_id):
+def _sync_preview_build_snapshot(db: Database, ws_id: int) -> JsonDict:
     """Load pending changes, group by photo, and compute the revision hash."""
     # Read the version counter BEFORE the row scan. If a concurrent write
     # commits between the two reads, the stored fingerprint is one behind
@@ -713,7 +724,7 @@ def _sync_preview_build_snapshot(db, ws_id):
     }
 
 
-def _sync_preview_get_snapshot(db, ws_id, requested_revision):
+def _sync_preview_get_snapshot(db: Database, ws_id: int, requested_revision: str | None) -> JsonDict:
     """Return a cached or freshly computed snapshot of pending changes.
 
     Progressive page loads normally arrive back-to-back with the same
@@ -753,9 +764,9 @@ def _sync_preview_get_snapshot(db, ws_id, requested_revision):
 
 
 def _sync_preview_change_creates_sidecar(
-    change, *, sync_flags=False, write_locations=False, assigned_location=None,
-    write_location_keywords=False, location_path=None,
-):
+    change: JsonDict, *, sync_flags: bool = False, write_locations: bool = False, assigned_location: JsonDict | None = None,
+    write_location_keywords: bool = False, location_path: list[str] | None = None,
+) -> bool:
     """Mirror sync operations that create a missing XMP sidecar before rating.
 
     Matches the write order in ``sync.py``: ``add_keywords`` (keyword_add),
@@ -790,27 +801,28 @@ def _sync_preview_change_creates_sidecar(
     return False
 
 
-def _sync_preview_page_bounds(args):
+def _sync_preview_page_bounds(args: Mapping[str, str]) -> tuple[int | None, int, str | None]:
     """Parse ``limit``/``offset`` for the progressive sync preview.
 
     Returns ``(limit, offset, error)``; ``error`` is the message for a 400
-    response, and ``limit`` is ``None`` for the all-at-once response.
+    response (with ``(None, 0)`` beside it), and ``limit`` is ``None`` for
+    the all-at-once response.
     """
     raw_limit = args.get("limit")
     raw_offset = args.get("offset", "0")
     if raw_limit is None:
         if raw_offset != "0":
-            return None, None, "offset requires limit"
+            return None, 0, "offset requires limit"
         return None, 0, None
     try:
         limit = int(raw_limit)
         offset = int(raw_offset)
     except (TypeError, ValueError):
-        return None, None, "limit and offset must be integers"
+        return None, 0, "limit and offset must be integers"
     if limit < 1 or limit > 200:
-        return None, None, "limit must be between 1 and 200"
+        return None, 0, "limit must be between 1 and 200"
     if offset < 0:
-        return None, None, "offset must be non-negative"
+        return None, 0, "offset must be non-negative"
     return limit, offset, None
 
 
@@ -818,12 +830,12 @@ def _sync_preview_page_bounds(args):
 class _SyncPreviewPhoto:
     """What one page photo's enrichment reads besides its pending changes."""
 
-    photo: dict
+    photo: JsonDict
     folder_offline: bool
-    metadata: dict
-    assigned_location: dict | None = None
-    location_path: list | None = None
-    keyword_add_values_by_key: dict = field(default_factory=dict)
+    metadata: JsonDict
+    assigned_location: JsonDict | None = None
+    location_path: list[str] | None = None
+    keyword_add_values_by_key: dict[str, str] = field(default_factory=dict)
 
 
 class _SyncPreviewPage:
@@ -835,7 +847,7 @@ class _SyncPreviewPage:
     change in place, and ``attach_edit_recipes()`` adds the render inputs.
     """
 
-    def __init__(self, db, all_photos, limit, offset):
+    def __init__(self, db: Database, all_photos: list[JsonDict], limit: int | None, offset: int) -> None:
         self.db = db
         # Enrichment below mutates the per-change dicts (``creates_xmp_sidecar``,
         # ``presentation``, …), so copy the slice before touching it — the
@@ -858,13 +870,14 @@ class _SyncPreviewPage:
         self.write_locations = False
         self.write_location_keywords = False
         self.sync_flags = False
-        self.assigned_locations = {}
-        self.location_paths = {}
-        self.merge_paths = {}
-        self.resolve_merge_target = None
-        self.folder_accessibility = {}
+        self.assigned_locations: dict[int, JsonDict] = {}
+        self.location_paths: dict[int, list[str]] = {}
+        self.merge_paths: dict[int, str] = {}
+        # Late-bound by load_location_context, which runs before enrich_photos.
+        self.resolve_merge_target = cast("Callable[[Database, JsonDict], int]", None)
+        self.folder_accessibility: dict[str, bool] = {}
 
-    def load_settings(self):
+    def load_settings(self) -> None:
         import config as cfg
 
         effective_config = self.db.get_effective_config(cfg.load())
@@ -876,7 +889,9 @@ class _SyncPreviewPage:
         )
         self.sync_flags = bool(effective_config.get("sync_flags_to_xmp", False))
 
-    def load_location_context(self, serialize_photo_locations):
+    def load_location_context(
+        self, serialize_photo_locations: Callable[[Database, list[int]], dict[int, JsonDict]],
+    ) -> None:
         db = self.db
         location_photo_ids = [
             photo["photo_id"]
@@ -898,14 +913,14 @@ class _SyncPreviewPage:
             for photo in self.photos for change in photo['changes']
         ) else {}
 
-    def enrich_photos(self):
+    def enrich_photos(self) -> None:
         for photo in self.photos:
             self._resolve_merge_targets(photo)
             item = self._read_photo_state(photo)
             self._mark_sidecar_creation(item)
             self._present_changes(item)
 
-    def _resolve_merge_targets(self, photo):
+    def _resolve_merge_targets(self, photo: JsonDict) -> None:
         merges = [c for c in photo['changes'] if c['type'] == 'keyword_merge']
         if merges:
             tagged_ids = {k['id'] for k in self.db.photo_keywords.get_for_photo(photo['photo_id'])}
@@ -913,7 +928,7 @@ class _SyncPreviewPage:
                 target_id = self.resolve_merge_target(self.db, json.loads(change['value']))
                 change['merge_target_path'] = self.merge_paths.get(target_id) if target_id in tagged_ids else None
 
-    def _read_photo_state(self, photo):
+    def _read_photo_state(self, photo: JsonDict) -> _SyncPreviewPhoto:
         xmp_path = os.path.join(
             photo["folder"],
             os.path.splitext(photo["filename"])[0] + ".xmp",
@@ -959,7 +974,7 @@ class _SyncPreviewPage:
             item.location_path = self.location_paths.get(photo["photo_id"])
         return item
 
-    def _mark_sidecar_creation(self, item):
+    def _mark_sidecar_creation(self, item: _SyncPreviewPhoto) -> None:
         changes = item.photo["changes"]
         # Map normalized-key -> original add value so a paired
         # keyword_remove can display the clean spelling the paired
@@ -1002,7 +1017,7 @@ class _SyncPreviewPage:
                 )
             )
 
-    def _present_changes(self, item):
+    def _present_changes(self, item: _SyncPreviewPhoto) -> None:
         changes = item.photo["changes"]
         sidecar_will_exist = any(
             change["creates_xmp_sidecar"] for change in changes
@@ -1038,7 +1053,9 @@ class _SyncPreviewPage:
                 folder_offline=item.folder_offline,
             )
 
-    def _presentation(self, item, change, paired_add_value, **kwargs):
+    def _presentation(
+        self, item: _SyncPreviewPhoto, change: JsonDict, paired_add_value: str | None, **kwargs: bool,
+    ) -> JsonDict:
         return _sync_preview_presentation(
             change,
             item.metadata,
@@ -1052,7 +1069,7 @@ class _SyncPreviewPage:
             **kwargs,
         )
 
-    def attach_edit_recipes(self):
+    def attach_edit_recipes(self) -> None:
         # The sync dialog needs edit recipes for correctly versioned rendered
         # thumbnails, but not the species/life-list enrichment performed by
         # _attach_nested_edit_recipes.
@@ -1064,7 +1081,7 @@ class _SyncPreviewPage:
             photo["render_key"] = render_key_for_recipe(photo["edit_recipe"])
 
 
-def create_sync_blueprint(get_db, json_error, get_runner):
+def create_sync_blueprint(get_db: GetDb, json_error: JsonError, get_runner: GetRunner) -> Blueprint:
     """Build the sync blueprint.
 
     ``get_runner`` returns the app's job runner, used to spot a sync job
@@ -1072,7 +1089,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
     """
     blueprint = Blueprint("sync", __name__)
 
-    def _serialize_photo_locations(db, photo_ids):
+    def _serialize_photo_locations(db: Database, photo_ids: list[int]) -> dict[int, JsonDict]:
         """Bulk form of :func:`web.location_edits.serialize_photo_location`.
 
         Sync review can contain thousands of location changes.  Looking up
@@ -1103,7 +1120,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
             }
         return result
 
-    def _active_workspace_sync(db):
+    def _active_workspace_sync(db: Database) -> JsonDict | None:
         for job in get_runner().list_jobs():
             if (job.get("type") == "sync"
                     and job.get("workspace_id") == db.require_workspace_id()
@@ -1112,7 +1129,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         return None
 
     @blueprint.route("/api/sync/status")
-    def api_sync_status():
+    def api_sync_status() -> ResponseReturnValue:
         db = get_db()
         # One statement keeps totals and per-type counts in the same snapshot,
         # without loading every queued row into Python on each progress poll.
@@ -1125,7 +1142,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         })
 
     @blueprint.route("/api/sync/location-writes")
-    def api_sync_location_writes_status():
+    def api_sync_location_writes_status() -> ResponseReturnValue:
         """Report what queueing location writes for this workspace would do.
 
         The counts are the honest ones for the button that follows: how many
@@ -1153,7 +1170,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         })
 
     @blueprint.route("/api/sync/location-writes", methods=["POST"])
-    def api_sync_queue_location_writes():
+    def api_sync_queue_location_writes() -> ResponseReturnValue:
         """Queue a location change for every located photo in the workspace.
 
         Assigning a place queues its sidecar write at assignment time, so
@@ -1166,7 +1183,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         return jsonify({"ok": True, **result})
 
     @blueprint.route("/api/sync/preview")
-    def api_sync_preview():
+    def api_sync_preview() -> ResponseReturnValue:
         """Preview pending changes with the XMP values they will replace.
 
         Supplying ``limit`` enables progressive photo pagination.  Omitting
@@ -1251,7 +1268,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         return jsonify(result)
 
     @blueprint.route("/api/sync/discard", methods=["POST"])
-    def api_sync_discard():
+    def api_sync_discard() -> ResponseReturnValue:
         """Discard specific pending changes."""
         db = get_db()
         body = request.get_json(silent=True) or {}

@@ -15,7 +15,9 @@ import logging
 import os
 import queue
 import time
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 from db import Database
 from flask import Blueprint, Response, jsonify, request
@@ -24,10 +26,16 @@ from web.background_jobs import make_background_job
 from web.request_args import reject_visual_collection
 from werkzeug.exceptions import BadRequest
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JobDict, JsonDict, JsonError
+    from web.background_jobs import JobLaunch
+    from web.web_types import GetDb, GetRunner
+
 log = logging.getLogger(__name__)
 
 
-def _strip_heavy_for_list(job):
+def _strip_heavy_for_list(job: JobDict) -> JsonDict:
     """Drop heavy fields from a job dict for the polling response.
 
     ``GET /api/jobs`` is fetched every few seconds by the navbar and the
@@ -46,17 +54,17 @@ def _strip_heavy_for_list(job):
     return trimmed
 
 
-def _rate(job, current):
+def _rate(job: JobDict, current: int) -> float:
     return round(current / max(time.time() - job["_start_time"], 0.01), 1)
 
 
 def create_jobs_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
-    get_thumb_cache_dir,
-):
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
+    get_thumb_cache_dir: Callable[[], str],
+) -> Blueprint:
     """Build the jobs blueprint.
 
     ``get_thumb_cache_dir`` is a callable rather than a path because the
@@ -68,13 +76,13 @@ def create_jobs_blueprint(
     blueprint = Blueprint("jobs", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
-    def vireo_dir():
+    def vireo_dir() -> str:
         return os.path.dirname(get_thumb_cache_dir())
 
     # -- Job control -------------------------------------------------------
 
     @blueprint.get("/api/jobs")
-    def api_jobs_list():
+    def api_jobs_list() -> ResponseReturnValue:
         from embedding_cache import get_embedding_cache_diagnostics
         from resource_ledger import get_resource_ledger
 
@@ -110,7 +118,7 @@ def create_jobs_blueprint(
         return jsonify(payload)
 
     @blueprint.post("/api/jobs/runtime-warning/dismiss")
-    def api_job_runtime_warning_dismiss():
+    def api_job_runtime_warning_dismiss() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         warning_id = body.get("id")
         if not warning_id:
@@ -119,7 +127,7 @@ def create_jobs_blueprint(
         return jsonify({"ok": True, "id": str(warning_id)})
 
     @blueprint.get("/api/jobs/history")
-    def api_job_history():
+    def api_job_history() -> ResponseReturnValue:
         db = get_db()
         limit = min(max(1, request.args.get("limit", 10, type=int)), 1000)
         try:
@@ -129,14 +137,14 @@ def create_jobs_blueprint(
             return json_error(str(exc), 503, code="job_history_unavailable")
 
     @blueprint.get("/api/jobs/<job_id>")
-    def api_job_status(job_id):
+    def api_job_status(job_id: str) -> ResponseReturnValue:
         job = get_runner().get(job_id)
         if not job:
             return json_error("job not found", 404)
         return jsonify(job)
 
     @blueprint.post("/api/jobs/<job_id>/cancel")
-    def api_job_cancel(job_id):
+    def api_job_cancel(job_id: str) -> ResponseReturnValue:
         """Request cancellation of a running, pausing, paused, or queued job.
 
         Returns 200 if the live job accepted cancellation, or 404 if the job
@@ -151,7 +159,7 @@ def create_jobs_blueprint(
         return json_error(f"job is not running (status={job['status']})", 404)
 
     @blueprint.post("/api/jobs/<job_id>/pause")
-    def api_job_pause(job_id):
+    def api_job_pause(job_id: str) -> ResponseReturnValue:
         """Pause supported work at its next safe checkpoint."""
         runner = get_runner()
         if runner.pause_job(job_id):
@@ -170,7 +178,7 @@ def create_jobs_blueprint(
         )
 
     @blueprint.post("/api/jobs/<job_id>/resume")
-    def api_job_resume(job_id):
+    def api_job_resume(job_id: str) -> ResponseReturnValue:
         """Resume a pausing or paused job."""
         runner = get_runner()
         if runner.resume_job(job_id):
@@ -187,7 +195,7 @@ def create_jobs_blueprint(
         )
 
     @blueprint.post("/api/jobs/cancel-queued")
-    def api_jobs_cancel_queued():
+    def api_jobs_cancel_queued() -> ResponseReturnValue:
         """Bulk-cancel every queued pipeline in a workspace.
 
         Body (optional): ``{"workspace_id": <id>}``. Default scope is
@@ -225,7 +233,7 @@ def create_jobs_blueprint(
         return jsonify({"cancelled": cancelled})
 
     @blueprint.get("/api/jobs/<job_id>/stream")
-    def api_job_stream(job_id):
+    def api_job_stream(job_id: str) -> ResponseReturnValue:
         """SSE stream of job progress events."""
         runner = get_runner()
         job = runner.get(job_id)
@@ -234,7 +242,7 @@ def create_jobs_blueprint(
 
         q = runner.subscribe(job_id)
 
-        def generate():
+        def generate() -> Iterator[str]:
             try:
                 while True:
                     try:
@@ -272,13 +280,13 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/thumbnails")
     @background_job
-    def api_job_thumbnails(ctx):
-        def work(job):
+    def api_job_thumbnails(ctx: JobLaunch) -> ResponseReturnValue:
+        def work(job: JobDict) -> dict[str, int]:
             from thumbnails import generate_all
 
             thread_db = ctx.thread_db()
 
-            def progress_cb(current, total):
+            def progress_cb(current: int, total: int) -> None:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 ctx.runner.push_event(
@@ -299,7 +307,7 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/duplicates/scan")
     @background_job
-    def api_duplicates_scan(ctx):
+    def api_duplicates_scan(ctx: JobLaunch) -> ResponseReturnValue:
         """Start a background duplicate-detection job.
 
         Returns immediately with the job id. The job walks every file_hash
@@ -314,7 +322,7 @@ def create_jobs_blueprint(
         /api/duplicates/delete-loser-files.
         """
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from duplicate_scan import run_duplicate_scan
             thread_db = ctx.thread_db()
             try:
@@ -329,7 +337,7 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/verify-hashes")
     @background_job
-    def api_job_verify_hashes(ctx):
+    def api_job_verify_hashes(ctx: JobLaunch) -> ResponseReturnValue:
         """Re-hash every photo file and compare against the stored SHA-256.
 
         Background job: flags silent corruption (content changed, mtime
@@ -339,12 +347,12 @@ def create_jobs_blueprint(
         /api/audit/integrity.
         """
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from audit import verify_hashes
 
             thread_db = ctx.thread_db()
 
-            def progress_cb(current, total, filename):
+            def progress_cb(current: int, total: int, filename: str) -> None:
                 # Throttle SSE events; hashing is per-file fast on small
                 # files and the stream doesn't need every one.
                 if current % 10 != 0 and current not in (1, total):
@@ -372,7 +380,7 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/capture-time")
     @background_job
-    def api_job_capture_time(ctx):
+    def api_job_capture_time(ctx: JobLaunch) -> ResponseReturnValue:
         """Adjust capture timestamps and timezone offsets for selected photos."""
         body = request.get_json(silent=True)
         if body is None:
@@ -402,14 +410,14 @@ def create_jobs_blueprint(
         shift_minutes = body.get("shift_minutes")
         keep_backups = bool(body.get("keep_backups", True))
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from capture_time import adjust_capture_time
 
             thread_db = ctx.thread_db()
             job["_start_time"] = time.time()
             job["progress"]["total"] = len(photo_ids)
 
-            def progress_cb(current, total, filename):
+            def progress_cb(current: int, total: int, filename: str) -> None:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = filename
@@ -454,16 +462,16 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/download-model")
     @background_job
-    def api_job_download_model(ctx):
+    def api_job_download_model(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         if not model_id:
             return json_error("model_id required")
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from models import download_model
 
-            def progress_cb(msg, current=0, total=0, rate=0):
+            def progress_cb(msg: str, current: int = 0, total: int = 0, rate: float = 0) -> None:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = msg
@@ -486,7 +494,7 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/verify-all-models")
     @background_job
-    def api_job_verify_all_models(ctx):
+    def api_job_verify_all_models(ctx: JobLaunch) -> ResponseReturnValue:
         """Run SHA256 verification on every installed known model.
 
         Launches a background job that iterates get_models(), hashes each
@@ -496,10 +504,10 @@ def create_jobs_blueprint(
         state classifier path.
         """
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             import model_verify
 
-            def progress_cb(msg):
+            def progress_cb(msg: str) -> None:
                 ctx.runner.push_event(
                     job["id"],
                     "progress",
@@ -529,16 +537,16 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/download-hf-model")
     @background_job
-    def api_job_download_hf_model(ctx):
+    def api_job_download_hf_model(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         repo_id = body.get("repo_id", "").strip()
         if not repo_id:
             return json_error("repo_id required")
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from models import download_hf_model
 
-            def progress_cb(msg):
+            def progress_cb(msg: str) -> None:
                 job["progress"]["current_file"] = msg
                 ctx.runner.push_event(
                     job["id"],
@@ -558,8 +566,8 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/download-taxonomy")
     @background_job
-    def api_job_download_taxonomy(ctx):
-        def work(job):
+    def api_job_download_taxonomy(ctx: JobLaunch) -> ResponseReturnValue:
+        def work(job: JobDict) -> JsonDict:
             from taxonomy import (
                 TAXONOMY_JSON_PATH,
                 download_taxonomy,
@@ -568,7 +576,7 @@ def create_jobs_blueprint(
                 seed_informal_groups,
             )
 
-            def progress_cb(msg):
+            def progress_cb(msg: str) -> None:
                 ctx.runner.push_event(
                     job["id"],
                     "progress",
@@ -646,7 +654,7 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/sharpness")
     @background_job
-    def api_job_sharpness(ctx):
+    def api_job_sharpness(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
         db = get_db()
@@ -656,7 +664,7 @@ def create_jobs_blueprint(
 
         working_dir = vireo_dir()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from sharpness import score_collection_photos
 
             thread_db = ctx.thread_db()
@@ -668,7 +676,7 @@ def create_jobs_blueprint(
             ])
             ctx.runner.update_step(job["id"], "score", status="running")
 
-            def progress_cb(current, total, msg):
+            def progress_cb(current: int, total: int, msg: str) -> None:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = msg
@@ -738,7 +746,7 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/cull")
     @background_job
-    def api_job_cull(ctx):
+    def api_job_cull(ctx: JobLaunch) -> ResponseReturnValue:
         """Run culling analysis as a background job."""
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
@@ -751,12 +759,12 @@ def create_jobs_blueprint(
         phash_threshold = body.get("phash_threshold", 19)
         cross_bucket_merge = body.get("cross_bucket_merge", False)
 
-        def analyze(job):
+        def analyze(job: JobDict) -> JsonDict:
             from culling import analyze_for_culling
 
             thread_db = ctx.thread_db()
 
-            def progress_cb(msg):
+            def progress_cb(msg: str) -> None:
                 ctx.runner.push_event(
                     job["id"],
                     "progress",
@@ -802,7 +810,7 @@ def create_jobs_blueprint(
                 "unfingerprinted_photos": result.get("unfingerprinted_photos", []),
             }
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from pipeline_locks import acquire_workspace_regroup
             lock = acquire_workspace_regroup(ctx.workspace_id)
             while not lock.acquire(timeout=0.2):
@@ -819,7 +827,7 @@ def create_jobs_blueprint(
 
     @blueprint.post("/api/jobs/regroup")
     @background_job
-    def api_job_regroup(ctx):
+    def api_job_regroup(ctx: JobLaunch) -> ResponseReturnValue:
         """Run pipeline stages 2-6 (grouping + scoring + triage) from cached features.
 
         This is fast (seconds) — no model inference, just math on stored features.
@@ -837,7 +845,7 @@ def create_jobs_blueprint(
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             return _run_regroup(
                 ctx, job,
                 collection_id=collection_id,
@@ -851,7 +859,10 @@ def create_jobs_blueprint(
     return blueprint
 
 
-def _run_regroup(ctx, job, *, collection_id, effective_cfg, pipeline_cfg, db_path):
+def _run_regroup(
+    ctx: JobLaunch, job: JobDict, *, collection_id: int | None, effective_cfg: JsonDict, pipeline_cfg: JsonDict,
+    db_path: str,
+) -> JsonDict:
     """The ``/api/jobs/regroup`` work function."""
     from pipeline import (
         collection_covers_workspace,
@@ -932,20 +943,20 @@ def _run_regroup(ctx, job, *, collection_id, effective_cfg, pipeline_cfg, db_pat
 
 
 def _regroup_under_lock(
-    ctx, job, thread_db, pipeline_fns, *, collection_id, effective_cfg,
-    pipeline_cfg, db_path,
-):
+    ctx: JobLaunch, job: JobDict, thread_db: Database, pipeline_fns: SimpleNamespace, *, collection_id: int | None,
+    effective_cfg: JsonDict, pipeline_cfg: JsonDict, db_path: str,
+) -> tuple[JsonDict | None, JsonDict]:
     """Load, group and save while holding the workspace regroup lock.
 
     Returns ``(early_result, results)``: ``early_result`` is what the job
-    returns when it stops early (cancelled, or no photos to group), and
-    is None when ``results`` were saved.
+    returns when it stops early (cancelled, or no photos to group), with
+    empty ``results``, and is None when ``results`` were saved.
     """
     # A Cancel that landed just before an uncontended acquire (or
     # while the previous holder was releasing) never reached the
     # polling loop's check; recheck before the feature load.
     if ctx.runner.cancellation_requested(job["id"]):
-        return {}, None
+        return {}, {}
     photos = pipeline_fns.load_photo_features(
         thread_db, collection_id=collection_id, config=effective_cfg,
     )
@@ -958,7 +969,7 @@ def _regroup_under_lock(
                                    summary="Skipped")
         # ``ok: False`` makes JobRunner record the job as failed;
         # a bare ``{"error": ...}`` was recorded as completed.
-        return {"ok": False, "error": msg, "errors": [msg]}, None
+        return {"ok": False, "error": msg, "errors": [msg]}, {}
     ctx.runner.update_step(job["id"], "load", status="completed",
                            summary=f"{len(photos)} photos")
 
@@ -974,7 +985,7 @@ def _regroup_under_lock(
     # very first load (not only after the user drags a live-tuning
     # slider). Cost is negligible (~300B per adjacent pair).
     if ctx.runner.cancellation_requested(job["id"]):
-        return {}, None
+        return {}, {}
     results = pipeline_fns.run_full_pipeline(
         photos, config=pipeline_cfg, emit_trace=True,
     )
@@ -990,7 +1001,7 @@ def _regroup_under_lock(
     )
 
     if ctx.runner.cancellation_requested(job["id"]):
-        return {}, None
+        return {}, {}
     cache_dir = os.path.dirname(db_path)
     pipeline_fns.save_results(results, cache_dir, ctx.workspace_id)
     _stamp_regroup_state(
@@ -1001,8 +1012,9 @@ def _regroup_under_lock(
 
 
 def _stamp_regroup_state(
-    ctx, thread_db, pipeline_fns, photos, *, collection_id, effective_cfg,
-):
+    ctx: JobLaunch, thread_db: Database, pipeline_fns: SimpleNamespace, photos: list[JsonDict], *,
+    collection_id: int | None, effective_cfg: JsonDict,
+) -> None:
     """Stamp or clear the workspace grouping fingerprint after a save.
 
     save_results replaced the whole workspace cache. Stamp the
@@ -1020,18 +1032,20 @@ def _stamp_regroup_state(
     a cache that in fact excluded the newly-eligible photo.
     """
     snapshot_photo_ids = {p["id"] for p in photos}
+    # The regroup route runs in the request's active workspace.
+    workspace_id = cast(int, ctx.workspace_id)
     if pipeline_fns.collection_covers_workspace(
         thread_db, ctx.workspace_id, collection_id,
         snapshot_photo_ids=snapshot_photo_ids,
     ):
         thread_db.workspaces.set_group_state(
-            workspace_id=ctx.workspace_id,
+            workspace_id=workspace_id,
             fingerprint=pipeline_fns.compute_group_fingerprint(effective_cfg),
             when_ts=int(time.time()),
         )
     else:
         thread_db.workspaces.set_group_state(
-            workspace_id=ctx.workspace_id,
+            workspace_id=workspace_id,
             fingerprint=None,
             when_ts=None,
         )

@@ -632,7 +632,7 @@ class SyncRepository:
         return synced_changes
 
     def clear_equivalent_flat_removals(
-        self, changes: Iterable[Mapping[str, Any]], _commit: bool = True,
+        self, changes: Iterable[Mapping[str, Any] | sqlite3.Row], _commit: bool = True,
     ) -> None:
         """Clear shared-sidecar flat removals represented by ``changes``.
 

@@ -13,7 +13,9 @@ import copy
 import json
 import logging
 import os
+from collections.abc import Callable
 from functools import wraps
+from typing import TYPE_CHECKING, Any, cast
 
 from config import read_raw_config_file, settings_write_lock
 from flask import Blueprint, jsonify, request
@@ -43,18 +45,28 @@ from services.pipeline_launch import (
 from services.review_group_changes import detach_review_photo
 from web.request_args import coerce_collection_id, reject_visual_collection
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from pipeline_plan import PipelinePlanParams
+    from pipeline_stages.context import PipelineParams
+    from services.service_types import ErrorResponse, JobDict, JsonDict, JsonError
+    from web.web_types import AppConfig, GetDb, GetRunner, InvalidateMissingOriginals
+
 log = logging.getLogger(__name__)
 
 
 def create_pipeline_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
+    config: AppConfig,
     *,
-    invalidate_missing_originals,
-):
+    invalidate_missing_originals: InvalidateMissingOriginals,
+) -> Blueprint:
     """Build the pipeline-launch blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR`` and
@@ -66,9 +78,9 @@ def create_pipeline_blueprint(
     """
     blueprint = Blueprint("pipeline", __name__)
 
-    def grouping_edit(fn):
+    def grouping_edit(fn: Callable[[], ResponseReturnValue]) -> Callable[[], ResponseReturnValue]:
         @wraps(fn)
-        def wrapped():
+        def wrapped() -> ResponseReturnValue:
             from pipeline_locks import acquire_workspace_regroup
 
             db = get_db()
@@ -82,7 +94,7 @@ def create_pipeline_blueprint(
         return wrapped
 
     @blueprint.route("/api/pipeline/slots")
-    def api_pipeline_slots():
+    def api_pipeline_slots() -> ResponseReturnValue:
         """Pipeline-slot occupancy for the Start/Queue button.
 
         The pipeline page polls this to decide whether the next click
@@ -110,7 +122,7 @@ def create_pipeline_blueprint(
             "slot_cap": SLOT_CAP,
         })
 
-    def _plan_path_list(body, key):
+    def _plan_path_list(body: JsonDict, key: str) -> tuple[list[str] | None, ErrorResponse | None]:
         """Validate an optional path list in a plan body: ``(paths, error)``.
 
         A missing key is ``None``, not ``[]``; the two mean different scopes.
@@ -128,13 +140,13 @@ def create_pipeline_blueprint(
             return None, json_error(f"{key} entries must be strings", 400)
         return paths, None
 
-    def _plan_folder_scope_photo_ids(folder_ids):
-        """Resolve a plan's ``folder_ids`` to ``(photo_ids, error)``."""
+    def _plan_folder_scope_photo_ids(folder_ids: list[int]) -> tuple[list[int], ErrorResponse | None]:
+        """Resolve a plan's ``folder_ids`` to ``(photo_ids, error)``; ``[]`` on error."""
         err = folder_ids_error(folder_ids, json_error)
         if err is not None:
-            return None, err
+            return [], err
         db = get_db()
-        subtree_ids = set()
+        subtree_ids: set[int] = set()
         # Mirror the /api/jobs/pipeline folder resolution exactly so the
         # plan describes the same photos the run will process. Without
         # the path-based fallback, legacy folders with parent_id=NULL
@@ -143,7 +155,7 @@ def create_pipeline_blueprint(
         # folders.subtree_ids_by_path.
         for fid in folder_ids:
             if not db.workspace_folders.visible_ids(db.active_workspace_id, [fid]):
-                return None, json_error("folder not found", 404)
+                return [], json_error("folder not found", 404)
             subtree_ids.update(db.get_folder_subtree_ids(fid))
             # Intersect the path-based descendants with the workspace's
             # folder set so nothing leaks in from another workspace that
@@ -156,18 +168,18 @@ def create_pipeline_blueprint(
             )
         ], None
 
-    def _expand_plan_process(body):
-        """Merge a plan body's saved process under it: ``(body, error)``."""
+    def _expand_plan_process(body: JsonDict) -> tuple[JsonDict, ErrorResponse | None]:
+        """Merge a plan body's saved process under it: ``(body, error)``; ``{}`` on error."""
         pid = body.get("process_id")
         if not isinstance(pid, int) or isinstance(pid, bool):
             kind = "null" if pid is None else type(pid).__name__
-            return None, json_error(
+            return {}, json_error(
                 f"process_id must be an integer, got {kind}", 400
             )
         try:
             expanded = saved_processes.resolve_process(get_db(), pid)
         except ValueError as e:
-            return None, json_error(str(e), 404)
+            return {}, json_error(str(e), 404)
         body = {**expanded, **body}
         # Mirror the job path: a process with Eye Keypoints on opts into
         # eye scoring, so the plan reflects the eye stage running rather
@@ -179,7 +191,7 @@ def create_pipeline_blueprint(
             body["eye_detect_override"] = True
         return body, None
 
-    def _plan_legacy_field_error(body):
+    def _plan_legacy_field_error(body: JsonDict) -> ErrorResponse | None:
         """Refuse plan bodies carrying import/archive or strategy fields."""
         deprecated_plan_fields = [
             key for key in (
@@ -207,7 +219,7 @@ def create_pipeline_blueprint(
             )
         return None
 
-    def _plan_option_error(body):
+    def _plan_option_error(body: JsonDict) -> ErrorResponse | None:
         """Type-check a plan body's ``review_mode`` and ``eye_detect_override``."""
         review_mode = body.get("review_mode")
         if review_mode is not None and not isinstance(review_mode, str):
@@ -230,8 +242,9 @@ def create_pipeline_blueprint(
         return None
 
     def _plan_params(
-        body, collection_id, scope_photo_ids, source_paths, hash_duplicate_paths,
-    ):
+        body: JsonDict, collection_id: int | None, scope_photo_ids: list[int] | None, source_paths: list[str] | None,
+        hash_duplicate_paths: list[str] | None,
+    ) -> PipelinePlanParams:
         """Build the ``PipelinePlanParams`` a validated plan body describes."""
         from pipeline_plan import PipelinePlanParams
 
@@ -259,7 +272,7 @@ def create_pipeline_blueprint(
         )
 
     @blueprint.route("/api/pipeline/plan", methods=["POST"])
-    def api_pipeline_plan():
+    def api_pipeline_plan() -> ResponseReturnValue:
         """Return the per-stage plan for the pipeline given current UI selections.
 
         Truth source for the Pipeline page's status pills + plan summary —
@@ -359,19 +372,19 @@ def create_pipeline_blueprint(
         )
         return jsonify(compute_plan(db, params, db_path))
 
-    def _coerce_process_fields(body, *, require_name):
-        """Return ``(kwargs, error_string)`` for create/update.
+    def _coerce_process_fields(body: JsonDict, *, require_name: bool) -> tuple[JsonDict, str | None]:
+        """Return ``(kwargs, error_string)`` for create/update (``{}`` on error).
 
         Only keys present in ``body`` are returned (so the update path treats
         an omitted key as "leave unchanged"). Flags must be real booleans and
         ``review_mode`` must be ``None`` or ``"species"`` — a bad value 400s
         here rather than being silently coerced.
         """
-        kwargs = {}
+        kwargs: JsonDict = {}
         if require_name or "name" in body:
             name = body.get("name")
             if not isinstance(name, str) or not name.strip():
-                return None, "name is required"
+                return {}, "name is required"
             kwargs["name"] = name
         for key in (
             "skip_classify", "skip_extract_masks", "skip_eye_keypoints",
@@ -379,23 +392,23 @@ def create_pipeline_blueprint(
         ):
             if key in body:
                 if not isinstance(body[key], bool):
-                    return None, f"{key} must be a boolean"
+                    return {}, f"{key} must be a boolean"
                 kwargs[key] = body[key]
         if "review_mode" in body:
             rm = body["review_mode"]
             if rm is not None and rm != "species":
-                return None, "review_mode must be 'species' or null"
+                return {}, "review_mode must be 'species' or null"
             kwargs["review_mode"] = rm
         return kwargs, None
 
     @blueprint.route("/api/processes")
-    def api_list_processes():
+    def api_list_processes() -> ResponseReturnValue:
         """List all saved processes (global; ordered for the pickers)."""
         db = get_db()
         return jsonify(db.processes.list_all())
 
     @blueprint.route("/api/processes", methods=["POST"])
-    def api_create_process():
+    def api_create_process() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         kwargs, err = _coerce_process_fields(body, require_name=True)
@@ -408,7 +421,7 @@ def create_pipeline_blueprint(
         return jsonify(db.processes.get(pid))
 
     @blueprint.route("/api/processes/<int:process_id>", methods=["PUT"])
-    def api_update_process(process_id):
+    def api_update_process(process_id: int) -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         kwargs, err = _coerce_process_fields(body, require_name=False)
@@ -423,7 +436,7 @@ def create_pipeline_blueprint(
         return jsonify(db.processes.get(process_id))
 
     @blueprint.route("/api/processes/<int:process_id>", methods=["DELETE"])
-    def api_delete_process(process_id):
+    def api_delete_process(process_id: int) -> ResponseReturnValue:
         db = get_db()
         if not saved_processes.delete_saved_process(db, process_id):
             return json_error("process not found", 404)
@@ -447,7 +460,7 @@ def create_pipeline_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/pipeline/extract-readiness")
-    def api_extract_readiness():
+    def api_extract_readiness() -> ResponseReturnValue:
         """Report SAM2/DINOv2 download status for the Extract Features card."""
         import config as cfg
         from dino_embed import DINOV2_VARIANTS, dinov2_status
@@ -467,7 +480,7 @@ def create_pipeline_blueprint(
         })
 
     @blueprint.route("/api/jobs/pipeline", methods=["POST"])
-    def api_job_pipeline():
+    def api_job_pipeline() -> ResponseReturnValue:
         """Process cataloged photos through thumbnails and analysis stages.
 
         Overlaps I/O stages and interleaves detection with classification.
@@ -512,7 +525,7 @@ def create_pipeline_blueprint(
         active_ws = db.active_workspace_id
         runtime_warning = launch.runtime_warning(params)
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             return run_pipeline_job(
                 job, runner, db_path, active_ws, params,
                 thumb_cache_dir=config["THUMB_CACHE_DIR"],
@@ -561,7 +574,7 @@ def create_pipeline_blueprint(
         return jsonify(result)
 
     @blueprint.route("/api/pipeline/config", methods=["GET", "POST"])
-    def api_pipeline_config():
+    def api_pipeline_config() -> ResponseReturnValue:
         """Get or update pipeline model configuration.
 
         GET: Returns current effective pipeline config.
@@ -611,12 +624,12 @@ def create_pipeline_blueprint(
             pipeline_section.update(pipeline_updates)
             current_overrides["pipeline"] = pipeline_section
 
-            db.workspaces.update(db.active_workspace_id, config_overrides=current_overrides)
+            db.workspaces.update(db.require_workspace_id(), config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
 
     @blueprint.route("/api/pipeline/save-grouping-defaults", methods=["POST"])
-    def api_pipeline_save_grouping_defaults():
+    def api_pipeline_save_grouping_defaults() -> ResponseReturnValue:
         """Persist current grouping weights/thresholds to the global config.
 
         Whitelists known grouping keys and validates each value's type and
@@ -691,7 +704,7 @@ def create_pipeline_blueprint(
         return jsonify({"saved": coerced})
 
     @blueprint.route("/api/pipeline/page-init")
-    def api_pipeline_page_init():
+    def api_pipeline_page_init() -> ResponseReturnValue:
         """Combined endpoint for pipeline page initial load."""
         db = get_db()
         total_photos = db.photos.count()
@@ -776,7 +789,7 @@ def create_pipeline_blueprint(
         })
 
     @blueprint.route("/api/pipeline/selection-results", methods=["POST"])
-    def api_pipeline_selection_results():
+    def api_pipeline_selection_results() -> ResponseReturnValue:
         """Return a temporary Pipeline Review result for selected photo IDs."""
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -821,7 +834,7 @@ def create_pipeline_blueprint(
         return jsonify(results)
 
     @blueprint.route("/api/pipeline/scope-photos")
-    def api_pipeline_scope_photos():
+    def api_pipeline_scope_photos() -> ResponseReturnValue:
         """Return the photo IDs in a folder subtree or collection.
 
         Pipeline Review filters the saved review to these IDs, so narrowing
@@ -881,7 +894,7 @@ def create_pipeline_blueprint(
                 return json_error("Collection not found in this workspace", 404)
         return jsonify({"photo_ids": photo_ids, "count": len(photo_ids)})
 
-    def attach_live_pipeline_decisions(db, results):
+    def attach_live_pipeline_decisions(db: Database, results: JsonDict) -> None:
         """Overlay saved photo decisions without trusting cached browser metadata."""
         photo_ids = [p["id"] for p in results.get("photos", [])]
         species = db.photo_species.get_species_for_photos(photo_ids)
@@ -904,7 +917,7 @@ def create_pipeline_blueprint(
         attach_species_identities(results, SpeciesResolver(db=db))
 
     @blueprint.route("/api/pipeline/results")
-    def api_pipeline_results():
+    def api_pipeline_results() -> ResponseReturnValue:
         """Return the most recent pipeline triage results for the active workspace."""
         from pipeline import load_results, prune_missing_photos
 
@@ -924,7 +937,7 @@ def create_pipeline_blueprint(
         return jsonify(results)
 
     @blueprint.route("/api/pipeline/photo/<int:photo_id>")
-    def api_pipeline_photo_detail(photo_id):
+    def api_pipeline_photo_detail(photo_id: int) -> ResponseReturnValue:
         """Return full pipeline feature detail for a single photo."""
         db = get_db()
         # Workspace gate before the raw lookup below, matching
@@ -954,7 +967,7 @@ def create_pipeline_blueprint(
         return jsonify(result)
 
     @blueprint.route("/api/pipeline/reflow", methods=["POST"])
-    def api_pipeline_reflow():
+    def api_pipeline_reflow() -> ResponseReturnValue:
         """Re-run stages 4-6 with new scoring/selection thresholds.
 
         Instant (milliseconds) — no model inference, no regrouping.
@@ -1054,7 +1067,7 @@ def create_pipeline_blueprint(
         return jsonify(serialized)
 
     @blueprint.route("/api/pipeline/regroup-live", methods=["POST"])
-    def api_pipeline_regroup_live():
+    def api_pipeline_regroup_live() -> ResponseReturnValue:
         """Re-run stages 2-6 with new grouping thresholds.
 
         Slightly slower than reflow (seconds) because it re-runs encounter
@@ -1144,7 +1157,7 @@ def create_pipeline_blueprint(
 
     @blueprint.route("/api/pipeline/detach-burst", methods=["POST"])
     @grouping_edit
-    def api_pipeline_detach_burst():
+    def api_pipeline_detach_burst() -> ResponseReturnValue:
         """Detach a burst from its encounter, creating a new standalone encounter."""
         from pipeline import load_results_raw, rebuild_species_predictions
         from services.grouping_history import save_grouping_edit
@@ -1234,7 +1247,7 @@ def create_pipeline_blueprint(
 
     @blueprint.route("/api/pipeline/detach-photo", methods=["POST"])
     @grouping_edit
-    def api_pipeline_detach_photo():
+    def api_pipeline_detach_photo() -> ResponseReturnValue:
         """Detach a photo from its burst, creating a new single-photo burst."""
         from pipeline import load_results_raw
         from services.grouping_history import save_grouping_edit
@@ -1274,7 +1287,7 @@ def create_pipeline_blueprint(
         save_grouping_edit(db, before, results, "Photo detached from burst")
         return jsonify({"ok": True, "encounters": encounters, "summary": results["summary"]})
 
-    def sync_review_photo_flags(db, results, photo_ids):
+    def sync_review_photo_flags(db: Database, results: JsonDict, photo_ids: set[int]) -> None:
         """Refresh cached review labels from the authoritative database flags."""
         from pipeline import refresh_serialized_summary
 
@@ -1287,7 +1300,8 @@ def create_pipeline_blueprint(
                 photo["flag"] = flag
         refresh_serialized_summary(results)
 
-    def review_decision_signature(encounters):
+    # The cached encounters' JSON values, compared for equality only.
+    def review_decision_signature(encounters: list[JsonDict]) -> list[tuple[Any, Any, bool, list[tuple[Any, Any]]]]:
         return [
             (enc.get("photo_ids"), enc.get("confirmed_species"), bool(enc.get("species_confirmed")),
              [(b.get("photo_ids"), b.get("species_override")) if isinstance(b, dict) else (b, None)
@@ -1297,7 +1311,7 @@ def create_pipeline_blueprint(
 
     @blueprint.route("/api/pipeline/save-cache", methods=["POST"])
     @grouping_edit
-    def api_pipeline_save_cache():
+    def api_pipeline_save_cache() -> ResponseReturnValue:
         """Refresh cached flags, or clear one burst override against its baseline.
 
         Whole browser snapshots never replace server-owned groups or metadata.
@@ -1336,7 +1350,7 @@ def create_pipeline_blueprint(
         return jsonify({"ok": True, "encounters": restored["encounters"], "summary": restored.get("summary", {})})
 
     @blueprint.route("/api/pipeline/group/state", methods=["POST"])
-    def api_pipeline_group_state():
+    def api_pipeline_group_state() -> ResponseReturnValue:
         """Return current DB state for a set of photos in a pipeline burst.
 
         Used by the burst-review modal on open so it can seed picks/rejects
@@ -1364,7 +1378,7 @@ def create_pipeline_blueprint(
             if str(name).strip()
         ]
 
-        def _species_kid(name):
+        def _species_kid(name: str) -> int | None:
             # Read-only mirror of the species-aware lookup in db.add_keyword(
             # species, is_species=True): match top-level taxonomy/general rows
             # case-insensitively, prefer taxonomy. Excludes homonym rows of
@@ -1412,7 +1426,9 @@ def create_pipeline_blueprint(
             }
         return jsonify({"photos": photos, "species_kid": species_kid})
 
-    def _detach_group_removed(db, body, results, removed, seen):
+    def _detach_group_removed(
+        db: Database, body: JsonDict, results: JsonDict | None, removed: object, seen: set[int],
+    ) -> ErrorResponse | None:
         """Validate group apply's ``removed`` photos and detach them from the burst.
 
         Returns an error response, or None once every removed photo is detached.
@@ -1440,13 +1456,15 @@ def create_pipeline_blueprint(
                 detach_review_photo(results, enc_idx, burst_idx, pid)
         return None
 
-    def _apply_group_zone_flags(db, picks, rejects, candidates, old_flags):
-        """Write each zone's target flag where it changes: ``(flag_items, error)``."""
+    def _apply_group_zone_flags(
+        db: Database, picks: list[int], rejects: list[int], candidates: list[int], old_flags: dict[int, str],
+    ) -> tuple[list[JsonDict], ErrorResponse | None]:
+        """Write each zone's target flag where it changes: ``(flag_items, error)``; ``[]`` on error."""
         try:
             # Apply target flags. We rely on update_photo_flag's own write
             # being a no-op at the SQL level when the value matches, but we
             # still skip when unchanged so we don't record useless history.
-            flag_items = []
+            flag_items: list[JsonDict] = []
             for pid in picks:
                 old = old_flags.get(pid, "none")
                 if old != "flagged":
@@ -1463,12 +1481,12 @@ def create_pipeline_blueprint(
                     db.photo_review.set_flag(pid, "none", _commit=False)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
         except ValueError as e:
-            return None, json_error(str(e), 403)
+            return [], json_error(str(e), 403)
         return flag_items, None
 
-    def _group_apply_photo_states(db, photo_ids):
+    def _group_apply_photo_states(db: Database, photo_ids: list[int]) -> dict[int, JsonDict]:
         """Each photo's flag after a group apply, for the client's card update."""
-        result_photos = {}
+        result_photos: dict[int, JsonDict] = {}
         for pid in photo_ids:
             row = db.photos.get(pid)
             if not row:
@@ -1481,7 +1499,7 @@ def create_pipeline_blueprint(
 
     @blueprint.route("/api/pipeline/group/apply", methods=["POST"])
     @grouping_edit
-    def api_pipeline_group_apply():
+    def api_pipeline_group_apply() -> ResponseReturnValue:
         """Apply flag decisions and photo removals as one history action.
 
         Species confirmation routes through a dedicated path
@@ -1544,8 +1562,9 @@ def create_pipeline_blueprint(
         if results is not None:
             sync_review_photo_flags(db, results, seen)
         if removed:
+            # _detach_group_removed refused removals without loaded results.
             save_grouping_edit(
-                db, before, results, desc + f", detached {len(removed)}",
+                db, cast("JsonDict", before), cast("JsonDict", results), desc + f", detached {len(removed)}",
                 photo_edit={"action_type": "flag", "new_value": "pipeline_group_apply"} if flag_items else None,
                 items=flag_items,
             )
@@ -1579,7 +1598,7 @@ def create_pipeline_blueprint(
         return jsonify(response)
 
     @blueprint.route("/api/pipeline/active-mask-variant", methods=["POST"])
-    def api_pipeline_active_mask_variant():
+    def api_pipeline_active_mask_variant() -> ResponseReturnValue:
         """Switch the active mask variant for every photo in the workspace
         that has a row for ``variant`` in ``photo_masks``.
 
@@ -1634,7 +1653,7 @@ def create_pipeline_blueprint(
         return jsonify({"ok": True, "updated": updated})
 
     @blueprint.route("/api/photos/<int:photo_id>/pipeline")
-    def api_photo_pipeline(photo_id):
+    def api_photo_pipeline(photo_id: int) -> ResponseReturnValue:
         """Return full pipeline debug info for a single photo."""
         db = get_db()
         # Workspace gate before the raw join below: the response exposes
@@ -1735,7 +1754,9 @@ def create_pipeline_blueprint(
     return blueprint
 
 
-def _shrink_source_encounter(results, enc, bursts, detached_ids, photos_by_id):
+def _shrink_source_encounter(
+    results: JsonDict, enc: JsonDict, bursts: list[JsonDict], detached_ids: list[int], photos_by_id: dict[int, JsonDict],
+) -> None:
     """Recompute an encounter's metadata after one of its bursts was detached."""
     from pipeline import rebuild_species_predictions
 
@@ -1764,7 +1785,7 @@ def _shrink_source_encounter(results, enc, bursts, detached_ids, photos_by_id):
         b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
 
 
-def _overlay_live_photo_state(db, results):
+def _overlay_live_photo_state(db: Database, results: JsonDict) -> None:
     """Overlay live flags, ratings, eyes and edit recipes on cached results."""
     # Cached pipeline rows predate edit recipes, which live in their
     # own table. Enrich them before Process Review positions overlays
@@ -1797,7 +1818,7 @@ def _overlay_live_photo_state(db, results):
     attach_species_representatives(db, results["photos"])
 
 
-def _results_cache_info(db, results, total_photos, effective_cfg):
+def _results_cache_info(db: Database, results: JsonDict, total_photos: int, effective_cfg: JsonDict) -> JsonDict:
     """How much of the workspace the cached results cover, and how current."""
     from pipeline import compute_group_fingerprint
 
@@ -1827,7 +1848,7 @@ def _results_cache_info(db, results, total_photos, effective_cfg):
     }
 
 
-def _attach_inspector_match_scores(db, photo_id, effective_cfg, result):
+def _attach_inspector_match_scores(db: Database, photo_id: int, effective_cfg: JsonDict, result: JsonDict) -> None:
     """Add the inspector's per-run ``match_scores`` and ``match_summary``."""
     # Match strength: how well the best label in each list actually fit,
     # as opposed to which label fit least badly. Reported for every
@@ -1858,7 +1879,9 @@ def _attach_inspector_match_scores(db, photo_id, effective_cfg, result):
     )
 
 
-def _inspector_classification_diagnostics(db, photo_id, min_conf, raw_dets, dets, preds):
+def _inspector_classification_diagnostics(
+    db: Database, photo_id: int, min_conf: float, raw_dets: list[Row], dets: list[Row], preds: list[Row],
+) -> JsonDict:
     """Counts that tell "classifier not run" from "hidden by the threshold"."""
     current_pred_rows = db.model_runs.current_prediction_detector_confidences(
         photo_id, full_image=False,
@@ -1905,7 +1928,7 @@ def _inspector_classification_diagnostics(db, photo_id, min_conf, raw_dets, dets
     }
 
 
-def _save_recent_destination(destination):
+def _save_recent_destination(destination: str) -> None:
     """Record ``destination`` at the head of the recent-destinations list."""
     try:
         import config as cfg
@@ -1933,7 +1956,7 @@ _SQLITE_INT_MIN = -(1 << 63)
 _SQLITE_INT_MAX = (1 << 63) - 1
 
 
-def folder_ids_error(folder_ids, json_error):
+def folder_ids_error(folder_ids: object, json_error: JsonError) -> ErrorResponse | None:
     """The 400 response for a malformed ``folder_ids``, or None if valid.
 
     Shared by ``/api/jobs/pipeline`` and ``/api/pipeline/plan`` so both
@@ -1962,7 +1985,7 @@ def folder_ids_error(folder_ids, json_error):
     return None
 
 
-def _job_config_scan_paths(job_config):
+def _job_config_scan_paths(job_config: JsonDict) -> list[str]:
     """The ``source``/``sources``/``destination`` paths a run will walk."""
     scan_paths = [
         job_config["source"]
@@ -1983,7 +2006,7 @@ class _PipelineLaunch:
     returns the error response that ends the request, or None to continue.
     """
 
-    def __init__(self, body, get_db, json_error):
+    def __init__(self, body: JsonDict, get_db: GetDb, json_error: JsonError) -> None:
         self.body = body
         self.get_db = get_db
         self.json_error = json_error
@@ -1995,7 +2018,7 @@ class _PipelineLaunch:
         self.remote_archive_config = None
         self.collection_name = None
 
-    def run_checks(self):
+    def run_checks(self) -> ErrorResponse | None:
         """Run the request checks in order; the first error response, or None."""
         for check in (
             self.apply_saved_process,
@@ -2017,7 +2040,7 @@ class _PipelineLaunch:
                 return err
         return None
 
-    def apply_saved_process(self):
+    def apply_saved_process(self) -> ErrorResponse | None:
         """Expand a saved process id server-side into stage flags.
 
         The import page, the process page, and import→process chaining share
@@ -2061,7 +2084,7 @@ class _PipelineLaunch:
                 body["eye_detect_override"] = True
         return None
 
-    def read_scope(self):
+    def read_scope(self) -> ErrorResponse | None:
         """Read the scope selectors, rejecting filesystem and visual scopes."""
         json_error = self.json_error
         body = self.body
@@ -2092,7 +2115,7 @@ class _PipelineLaunch:
             self.db, collection_id, json_error=json_error,
         )
 
-    def read_exclusions(self):
+    def read_exclusions(self) -> ErrorResponse | None:
         """Validate ``exclude_paths`` / ``exclude_photo_ids``.
 
         These are validated up front — before the folder-scope subtree is
@@ -2143,7 +2166,7 @@ class _PipelineLaunch:
             self.excluded_photo_ids_set = set(_ids_value)
         return None
 
-    def resolve_folder_scope(self):
+    def resolve_folder_scope(self) -> ErrorResponse | None:
         """Resolve ``folder_ids`` into a pending ad-hoc collection.
 
         Folder scope: resolve folder_ids to their active-workspace subtrees
@@ -2181,7 +2204,7 @@ class _PipelineLaunch:
         }
         return None
 
-    def _folder_ids_error(self):
+    def _folder_ids_error(self) -> ErrorResponse | None:
         """Reject ``folder_ids`` combined with another scope or malformed."""
         json_error = self.json_error
         folder_ids = self.folder_ids
@@ -2219,8 +2242,8 @@ class _PipelineLaunch:
             )
         return folder_ids_error(folder_ids, json_error)
 
-    def _folder_subtree_ids(self):
-        """Every workspace folder under ``folder_ids``, or a 404 response.
+    def _folder_subtree_ids(self) -> tuple[set[int], ErrorResponse | None]:
+        """Every workspace folder under ``folder_ids``, or ``set()`` and a 404 response.
 
         Reject folders the active workspace has no claim on (mirrors
         the rescan guard): a stale UI or crafted request must not
@@ -2229,10 +2252,11 @@ class _PipelineLaunch:
         active workspace, so unrelated descendants can never leak in.
         """
         db = self.db
-        subtree_ids = set()
-        for fid in self.folder_ids:
+        subtree_ids: set[int] = set()
+        # _folder_ids_error validated them.
+        for fid in cast("list[int]", self.folder_ids):
             if not db.workspace_folders.visible_ids(db.active_workspace_id, [fid]):
-                return None, self.json_error("folder not found", 404)
+                return set(), self.json_error("folder not found", 404)
             # Union — a workspace can link both a root and a nested
             # folder, so the same descendant can appear twice.
             subtree_ids.update(db.get_folder_subtree_ids(fid))
@@ -2252,7 +2276,7 @@ class _PipelineLaunch:
             subtree_ids.update(db.workspace_folders.visible_ids(db.active_workspace_id, db.folders.subtree_ids_by_path(fid)))
         return subtree_ids, None
 
-    def _folder_scope_photo_ids(self, subtree_ids):
+    def _folder_scope_photo_ids(self, subtree_ids: set[int]) -> list[int]:
         """The subtree's photo ids, minus the requested exclusions."""
         db = self.db
         excluded_paths_set = self.excluded_paths_set
@@ -2300,7 +2324,7 @@ class _PipelineLaunch:
             photo_ids.append(r["id"])
         return photo_ids
 
-    def check_required_scope(self):
+    def check_required_scope(self) -> ErrorResponse | None:
         """Require a collection or folder scope."""
         if (
             not self.source and not self.sources and not self.collection_id
@@ -2312,7 +2336,7 @@ class _PipelineLaunch:
             )
         return None
 
-    def check_snapshot(self):
+    def check_snapshot(self) -> ErrorResponse | None:
         """Validate ``source_snapshot_id`` and resolve it synchronously."""
         source_snapshot_id = self.source_snapshot_id
         # Validate type before touching SQLite. Non-integer bodies (objects,
@@ -2337,7 +2361,7 @@ class _PipelineLaunch:
             )
         return None
 
-    def check_source_dirs(self):
+    def check_source_dirs(self) -> ErrorResponse | None:
         """Validate source directories.
 
         Skipped when a snapshot is present, since run_pipeline_job overrides
@@ -2378,7 +2402,7 @@ class _PipelineLaunch:
                 return json_error(f"source directory not found: {source}")
         return None
 
-    def reject_import_fields(self):
+    def reject_import_fields(self) -> ErrorResponse | None:
         """Reject the import/archive fields this route no longer accepts."""
         deprecated_import_fields = [
             key for key in (
@@ -2395,7 +2419,7 @@ class _PipelineLaunch:
             )
         return None
 
-    def read_destination(self):
+    def read_destination(self) -> ErrorResponse | None:
         """Read the copy-ingest destination and the remote-target fields."""
         json_error = self.json_error
         body = self.body
@@ -2435,7 +2459,7 @@ class _PipelineLaunch:
             return json_error("destination must be an absolute path")
         return None
 
-    def resolve_remote_archive(self):
+    def resolve_remote_archive(self) -> ErrorResponse | None:
         """Resolve the remote (SSH) archive destination.
 
         Mirrors the Move page's remote-target request shape
@@ -2475,7 +2499,7 @@ class _PipelineLaunch:
                 return err
         return None
 
-    def check_local_processing(self):
+    def check_local_processing(self) -> ErrorResponse | None:
         """Require local processing to have an archive target and a source."""
         json_error = self.json_error
         destination = self.destination
@@ -2524,7 +2548,7 @@ class _PipelineLaunch:
             )
         return None
 
-    def check_folder_template(self):
+    def check_folder_template(self) -> ErrorResponse | None:
         """Validate the ingest ``folder_template``."""
         self.folder_template = folder_template = self.body.get(
             "folder_template", "%Y/%Y-%m-%d",
@@ -2537,7 +2561,7 @@ class _PipelineLaunch:
                 return self.json_error("folder_template must be a relative path without '..' or backslashes")
         return None
 
-    def check_run_flags(self):
+    def check_run_flags(self) -> ErrorResponse | None:
         """Validate the per-run switches and model selection."""
         json_error = self.json_error
         body = self.body
@@ -2608,7 +2632,7 @@ class _PipelineLaunch:
             return json_error("raw_subject_analysis must be a boolean")
         return None
 
-    def build_params(self, pipeline_params_cls):
+    def build_params(self, pipeline_params_cls: type[PipelineParams]) -> PipelineParams:
         """Build the run's ``PipelineParams`` from the validated request."""
         body = self.body
         remote_archive_config = self.remote_archive_config
@@ -2662,7 +2686,7 @@ class _PipelineLaunch:
             recursive=body.get("recursive", True),
         )
 
-    def materialize_collection(self, params):
+    def materialize_collection(self, params: PipelineParams) -> None:
         """Insert the folder-scope collection and name the run's collection.
 
         All request validation and param coercion have passed — safe to
@@ -2699,7 +2723,7 @@ class _PipelineLaunch:
                 None,
             )
 
-    def runtime_warning(self, params):
+    def runtime_warning(self, params: PipelineParams) -> JsonDict | None:
         """The CPU-only runtime warning for the run's ML stages, if any."""
         db = self.db
         collection_id = self.collection_id
@@ -2727,7 +2751,7 @@ class _PipelineLaunch:
             )
         return runtime_warning
 
-    def job_config(self, params):
+    def job_config(self, params: PipelineParams) -> JsonDict:
         """The job's ``config``, which the Jobs page and stage blocker read."""
         job_config = {
             "raw_subject_analysis": params.raw_subject_analysis,
