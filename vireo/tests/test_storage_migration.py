@@ -453,3 +453,61 @@ def test_apply_routes_case_variant_cache_on_case_insensitive_filesystem(legacy, 
     assert (data / "Models").is_symlink()
     assert (data / "Models").resolve() == (cache / "Models").resolve()
     assert (source / "Models").is_symlink()
+
+
+def test_is_guard_name_respects_case_insensitive_probe():
+    """Guard-name membership mirrors the cache-name helper's case rules."""
+    assert migration._is_guard_name("runtime.lock")
+    assert migration._is_guard_name("hf-cache-access.lock")
+    assert not migration._is_guard_name("Runtime.Lock")
+    assert migration._is_guard_name("Runtime.Lock", case_insensitive=True)
+    assert migration._is_guard_name("HF-Cache-Access.LOCK", case_insensitive=True)
+    assert not migration._is_guard_name("other.lock", case_insensitive=True)
+
+
+def test_record_excludes_case_variant_guards_on_case_insensitive_filesystem(legacy, monkeypatch):
+    """A ``Runtime.Lock`` on a case-insensitive volume stays out of the record.
+
+    Recording it as an ordinary entry would collide with the lowercase guard
+    symlink ``_apply`` installs under the data root, because both names
+    resolve to the same inode on a case-insensitive filesystem.
+    """
+    source, data, cache, _journal = legacy
+    data.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    (source / "Runtime.Lock").write_bytes(b"")
+    (source / "HF-Cache-Access.LOCK").write_bytes(b"")
+    monkeypatch.setattr(migration, "_case_insensitive", lambda _path: True)
+
+    record = migration._record(source, data, cache)
+    names = {row["name"] for row in record["entries"]}
+
+    assert "Runtime.Lock" not in names
+    assert "HF-Cache-Access.LOCK" not in names
+    # Non-guard case variants still flow through as ordinary entries.
+    assert "working" in names
+
+
+def test_read_journal_rejects_case_variant_guard_entry_on_case_insensitive_filesystem(
+        legacy, monkeypatch):
+    """Journal validation refuses a case-variant guard masquerading as an entry.
+
+    A tampered or legacy journal that carries a case-variant guard name
+    would otherwise let ``_apply`` try to rename the aliased on-disk file
+    into its own compatibility symlink. The read-side check must share the
+    filesystem probe with the write side.
+    """
+    source, data, cache, journal = legacy
+    data.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    (source / "runtime.lock").write_bytes(b"")
+    monkeypatch.setattr(migration, "_case_insensitive", lambda _path: True)
+    identity = migration._identity(source / "runtime.lock")
+    record = {"version": 1, "source": str(source), "data": str(data), "cache": str(cache),
+              "roots": [migration._identity(root) for root in (source, data, cache)],
+              "entries": [{"name": "Runtime.Lock", "identity": identity, "directory": False}]}
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(migration.MigrationError, match="Invalid entry in migration journal"):
+        migration._read_journal(journal, source, data, cache)

@@ -28,6 +28,7 @@ MARKER = "storage-layout-v1"
 CACHES = frozenset({"models", "thumbnails", "embedding_cache", "computation-cache"})
 _CACHES_NORMALIZED = frozenset(os.path.normcase(name) for name in CACHES)
 GUARDS = frozenset({"runtime.lock", "hf-cache-access.lock"})
+_GUARDS_NORMALIZED = frozenset(os.path.normcase(name) for name in GUARDS)
 
 
 def _case_insensitive(path: Path) -> bool:
@@ -62,6 +63,22 @@ def _is_cache_name(name: str, *, case_insensitive: bool = False) -> bool:
     if case_insensitive:
         normalized = normalized.lower()
     return normalized in _CACHES_NORMALIZED
+
+
+def _is_guard_name(name: str, *, case_insensitive: bool = False) -> bool:
+    """Guard-name membership check that respects filesystem case sensitivity.
+
+    The ``_apply`` phase installs the lowercase guard symlinks itself. On a
+    case-insensitive filesystem, a legacy ``Runtime.Lock`` file is the same
+    inode as ``runtime.lock``; recording it as an ordinary entry would then
+    collide with the guard symlink when ``_apply`` tries to rename it into
+    the data root. Filter case variants out of the recorded entries using
+    the same probe that routes case-variant cache directories.
+    """
+    normalized = os.path.normcase(name)
+    if case_insensitive:
+        normalized = normalized.lower()
+    return normalized in _GUARDS_NORMALIZED
 
 
 class MigrationError(ValueError):
@@ -188,10 +205,12 @@ def _write_journal(path: Path, record: JsonDict) -> None:
 
 
 def _record(source: Path, data: Path, cache: Path) -> JsonDict:
+    case_insensitive = _case_insensitive(source)
     return {"version": 1, "source": str(source), "data": str(data), "cache": str(cache),
             "roots": [_identity(root) for root in (source, data, cache)],
             "entries": [{"name": p.name, "identity": _identity(p), "directory": p.is_dir()}
-                        for p in sorted(source.iterdir()) if p.name not in GUARDS]}
+                        for p in sorted(source.iterdir())
+                        if not _is_guard_name(p.name, case_insensitive=case_insensitive)]}
 
 
 def _read_journal(journal: Path, source: Path, data: Path, cache: Path) -> JsonDict:
@@ -205,10 +224,12 @@ def _read_journal(journal: Path, source: Path, data: Path, cache: Path) -> JsonD
     rows = record.get("entries")
     if not isinstance(rows, list):
         raise MigrationError("Invalid migration journal.")
+    case_insensitive = _case_insensitive(source)
     names = set()
     for row in rows:
         name = row.get("name") if isinstance(row, dict) else None
-        if (not isinstance(name, str) or not name or name in {".", "..", MARKER} | GUARDS
+        if (not isinstance(name, str) or not name or name in {".", "..", MARKER}
+                or _is_guard_name(name, case_insensitive=case_insensitive)
                 or Path(name).name != name or "/" in name or "\\" in name or name in names
                 or not isinstance(row.get("identity"), list) or len(row["identity"]) != 2
                 or not all(isinstance(n, int) for n in row["identity"])
