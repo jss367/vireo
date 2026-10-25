@@ -452,8 +452,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         # Load embedding manifest for display names
         manifest = {}
         if cache_type == "embeddings":
-            from classifier import _load_manifest
-            manifest = _load_manifest()
+            from classifier import _embedding_cache_service
+            manifest = _embedding_cache_service().read_manifest()
 
         files = []
         truncated = False
