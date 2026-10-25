@@ -10,11 +10,11 @@ workspace before scanning.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
+from app_paths import media_root
 from db import Database
 
 # The canonical implementation lives in ``new_images.py``; bound here as a
@@ -205,7 +205,7 @@ class _ScanJobRun:
         self.runner.update_step(job["id"], "scan", status="running")
         effective_cfg = self.thread_db.get_effective_config(cfg.load())
         self.pipeline_cfg = effective_cfg.get("pipeline", {})
-        self.vireo_dir = os.path.dirname(self.config["THUMB_CACHE_DIR"])
+        self.vireo_dir = media_root(self.config["THUMB_CACHE_DIR"])
 
     def announce_root(self, idx: int, root: str) -> None:
         job = self.job

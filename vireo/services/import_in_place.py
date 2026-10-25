@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
+from app_paths import media_root
 from db import Database
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
@@ -374,7 +375,7 @@ def _admit_in_place_job(
 
     runner = service.get_runner()
     thumb_cache_dir = service.config["THUMB_CACHE_DIR"]
-    vireo_dir = os.path.dirname(thumb_cache_dir)
+    vireo_dir = media_root(thumb_cache_dir)
     snapshot_import_lock = None
     if source_snapshot_id is not None:
         snapshot_import_lock = _snapshot_import_lock(

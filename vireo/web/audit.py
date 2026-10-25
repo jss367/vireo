@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 
+from app_paths import media_root
 from flask import Blueprint, jsonify, request
 from metadata import scan_metadata_warning
 from services.local_folder import (
@@ -336,7 +337,7 @@ def create_audit_blueprint(
         runner = get_runner()
         from audit import import_untracked
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         with stage_boundary_lock():
             pending_sources = stage_pending_source_paths(
                 runner.list_jobs if runner is not None else None, db,

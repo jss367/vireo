@@ -38,7 +38,7 @@ NOT_RUNNING_MESSAGE = (
 )
 BAD_TOKEN_MESSAGE = (
     "Vireo rejected the API token. If VIREO_TOKEN is set, make sure it matches "
-    "the token in ~/.vireo/runtime.json; otherwise restart Vireo so a fresh "
+    "the token in runtime.json in Vireo's data folder; otherwise restart Vireo so a fresh "
     "runtime.json is written."
 )
 UNPAIRED_URL_MESSAGE = (

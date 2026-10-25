@@ -50,6 +50,10 @@ def _expanduser_prefers_test_home(monkeypatch):
     HOME to isolate app state. Read HOME dynamically so per-test monkeypatches
     are honored after fixture setup.
     """
+    # HOME redirection must also isolate native storage on Windows and Linux.
+    # Tests of overrides set their own values after this fixture runs.
+    for name in ("LOCALAPPDATA", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
     real_expanduser = os.path.expanduser
 
     def expanduser(path):

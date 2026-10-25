@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 
+from app_paths import media_root
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
@@ -173,14 +174,14 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
         thumb = _dir_stats(config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(
-            os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
+            media_root(config["THUMB_CACHE_DIR"]), "previews"
         )
         preview = _dir_stats(preview_dir)
         paired = _dir_stats(os.path.join(preview_dir, "paired"))
         preview["count"] += paired["count"]
         preview["size"] += paired["size"]
         working = working_copy_stats(
-            os.path.dirname(config["THUMB_CACHE_DIR"])
+            media_root(config["THUMB_CACHE_DIR"])
         )
         emb = _dir_stats(EMB_CACHE_DIR)
         models_size = _dir_size_recursive(DEFAULT_MODELS_DIR)
@@ -189,7 +190,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         offline_count = db.caches.offline_original_cached_count()
         masks = _storage_masks_data(db)
         masks_size = masks["total_bytes"]
-        storage_root = os.path.dirname(config["THUMB_CACHE_DIR"])
+        storage_root = media_root(config["THUMB_CACHE_DIR"])
 
         # HuggingFace cache — only the Vireo-relevant repos, split per model
         # with whether an install still uses each entry (services.hf_cache).
@@ -355,7 +356,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                 "offline_originals": {
                     "count": offline_count,
                     "size": offline_size,
-                    "path": os.path.join(os.path.dirname(config["THUMB_CACHE_DIR"]), "offline"),
+                    "path": os.path.join(media_root(config["THUMB_CACHE_DIR"]), "offline"),
                 },
                 "masks": {"size": masks_size, **masks},
             }
@@ -414,12 +415,12 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         # aged-out snapshot files (no current recipe or edit-history entry
         # points at them) are reclaimed alongside stale live masks.
         import local_masks
-        # Snapshots live under dirname(THUMB_CACHE_DIR) — the same root the
+        # Snapshots live under media_root(THUMB_CACHE_DIR) — the same root the
         # snapshot POST endpoint writes to and every render call site reads
         # from — which is not always dirname(db_path) when create_app is
         # given a custom thumb-dir under a different parent.
         gc = local_masks.gc_edit_masks(
-            db, os.path.dirname(config["THUMB_CACHE_DIR"])
+            db, media_root(config["THUMB_CACHE_DIR"])
         )
         if gc["deleted"]:
             log.info(
@@ -438,7 +439,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         dirs = {
             "thumbnails": config["THUMB_CACHE_DIR"],
             "previews": os.path.join(
-                os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
+                media_root(config["THUMB_CACHE_DIR"]), "previews"
             ),
             "embeddings": EMB_CACHE_DIR,
         }
@@ -501,7 +502,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
     def _clear_storage_cache(cache_type):
         if cache_type == "previews":
             preview_dir = os.path.join(
-                os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
+                media_root(config["THUMB_CACHE_DIR"]), "previews"
             )
             if os.path.isdir(preview_dir):
                 shutil.rmtree(preview_dir)
@@ -610,7 +611,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         )
         locations = {
             "catalog": os.path.dirname(db_path),
-            "generated": os.path.dirname(config["THUMB_CACHE_DIR"]),
+            "generated": media_root(config["THUMB_CACHE_DIR"]),
             "embeddings": EMB_CACHE_DIR,
             "models": DEFAULT_MODELS_DIR,
             "hf_cache": huggingface_cache_dir(),
@@ -663,7 +664,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         dirs = {
             "thumbnails": config["THUMB_CACHE_DIR"],
             "previews": os.path.join(
-                os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
+                media_root(config["THUMB_CACHE_DIR"]), "previews"
             ),
             "embeddings": EMB_CACHE_DIR,
         }
