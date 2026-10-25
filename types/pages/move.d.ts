@@ -12,22 +12,28 @@ interface MoveMergeDetails { sourcePath: string; destinationPath: string; photoC
 interface MoveBrowserData { path: string; dirs?: {path: string; name: string}[]; }
 interface MoveConfig { move_keep_visible_in_other_workspaces?: boolean; ingest?: { recent_destinations?: unknown }; }
 interface MoveVisibility {workspaces?: {name: string; photo_count: number}[];}
-interface Window { vireoThumbnailUrl?: (photo: MovePhoto) => string; }
-declare function escapeHtml(value: unknown): string;
-declare function escapeAttr(value: unknown): string;
-declare function showToast(message: string, kind?: string): void;
-declare function rsyncInstallHint(): string;
-declare function safeFetch<T = unknown>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
-
-declare function safeFetch(url: '/api/folders', init?: RequestInit, options?: {toast?: boolean}): Promise<MoveFolder[]>;
-declare function safeFetch(url: '/api/move-rules', init?: RequestInit): Promise<MoveRule[]>;
-declare function safeFetch(url: '/api/remote-targets', init?: RequestInit): Promise<{targets?: MoveRemoteTarget[]; rsync_available?: boolean}>;
-declare function safeFetch(url: '/api/config', init?: RequestInit, options?: {toast?: boolean}): Promise<MoveConfig>;
-declare function safeFetch(url: '/api/recent-destinations', init?: RequestInit, options?: {toast?: boolean}): Promise<{recent_destinations?: unknown}>;
-declare function safeFetch(url: '/api/move-photos/visibility', init?: RequestInit): Promise<MoveVisibility>;
-declare function safeFetch(url: '/api/move-folder/preflight', init?: RequestInit): Promise<MovePreflight>;
-declare function safeFetch(url: '/api/move-rules/preview', init?: RequestInit): Promise<{photo_ids?: number[]}>;
-declare function safeFetch(url: '/api/jobs/move-folder', init?: RequestInit): Promise<{job_id: number}>;
-declare function safeFetch(url: '/api/jobs/move-photos', init?: RequestInit): Promise<{job_id: number}>;
-declare function safeFetch(url: '/api/browse', init?: RequestInit): Promise<MoveBrowserData>;
-declare function safeFetch(url: '/api/volumes', init?: RequestInit): Promise<NonNullable<MoveBrowserData['dirs']>>;
+// safeFetch as this page calls it: one signature per endpoint it reads.
+interface MoveSafeFetch {
+  (url: '/api/folders', init?: RequestInit, options?: {toast?: boolean}): Promise<MoveFolder[]>;
+  (url: '/api/move-rules', init?: RequestInit): Promise<MoveRule[]>;
+  (url: '/api/remote-targets', init?: RequestInit): Promise<{targets?: MoveRemoteTarget[]; rsync_available?: boolean}>;
+  (url: '/api/config', init?: RequestInit, options?: {toast?: boolean}): Promise<MoveConfig>;
+  (url: '/api/recent-destinations', init?: RequestInit, options?: {toast?: boolean}): Promise<{recent_destinations?: unknown}>;
+  (url: '/api/move-photos/visibility', init?: RequestInit): Promise<MoveVisibility>;
+  (url: '/api/move-folder/preflight', init?: RequestInit): Promise<MovePreflight>;
+  (url: '/api/move-rules/preview', init?: RequestInit): Promise<{photo_ids?: number[]}>;
+  (url: '/api/jobs/move-folder', init?: RequestInit): Promise<{job_id: number}>;
+  (url: '/api/jobs/move-photos', init?: RequestInit): Promise<{job_id: number}>;
+  (url: '/api/browse', init?: RequestInit): Promise<MoveBrowserData>;
+  (url: '/api/volumes', init?: RequestInit): Promise<NonNullable<MoveBrowserData['dirs']>>;
+  <T = unknown>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
+}
+// The shared globals the page's shared.js reads.
+interface Window {
+  vireoThumbnailUrl?: (photo: MovePhoto) => string;
+  escapeHtml(value: unknown): string;
+  escapeAttr(value: unknown): string;
+  showToast?(message: string, kind?: string): void;
+  rsyncInstallHint(): string;
+  safeFetch: MoveSafeFetch;
+}

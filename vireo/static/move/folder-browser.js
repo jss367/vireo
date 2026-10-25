@@ -1,24 +1,29 @@
 // The destination folder browser modal: browsing, the list, selection, and new folders.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { updatePhotoSelectionUI } from './photo-move.js';
+import { updateQuickMoveBtn } from './quick-move-preview.js';
+import { rememberRecentDestination } from './recent-destinations.js';
+import { escapeAttr, escapeHtml, safeFetch } from './shared.js';
 
 /* ---------- Folder Browser ---------- */
 /** @param {string} targetInputId */
-function openBrowser(targetInputId) {
-  browserTargetInput = targetInputId;
+export function openBrowser(targetInputId) {
+  state.browserTargetInput = targetInputId;
   var currentVal = /** @type {HTMLInputElement} */ (document.getElementById(targetInputId)).value.trim();
-  browserPath = currentVal || '';
+  state.browserPath = currentVal || '';
   /** @type {HTMLElement} */ (document.getElementById('moveBrowserModal')).classList.add('open');
   /** @type {HTMLInputElement} */ (document.getElementById('newFolderName')).value = '';
   updateBrowserSource();
-  browseTo(browserPath || null);
+  browseTo(state.browserPath || null);
 }
 
-function updateBrowserSource() {
+export function updateBrowserSource() {
   var source = /** @type {HTMLElement} */ (document.getElementById('moveBrowserSource'));
   var folder = null;
-  if (browserTargetInput === 'quickDestInput') {
+  if (state.browserTargetInput === 'quickDestInput') {
     var fid = parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect')).value);
-    folder = allFolders.find(function(f) { return f.id === fid; });
+    folder = state.allFolders.find(function(f) { return f.id === fid; });
   }
   if (!folder) {
     source.style.display = 'none';
@@ -33,34 +38,34 @@ function updateBrowserSource() {
   source.style.display = 'block';
 }
 
-function closeBrowser() {
+export function closeBrowser() {
   /** @type {HTMLElement} */ (document.getElementById('moveBrowserModal')).classList.remove('open');
-  browserTargetInput = null;
+  state.browserTargetInput = null;
 }
 
 /** @param {string | null} path */
-async function browseTo(path) {
+export async function browseTo(path) {
   // Stamp each browse so a slow initial fetch can't clobber a later
   // shortcut click. Without this, opening the modal with a prefilled
   // destination and immediately clicking Pictures/Volumes can leave the
   // list and browserPath silently reverted to the destination's listing.
-  var seq = ++browseSeq;
+  var seq = ++state.browseSeq;
   var url = '/api/browse';
   if (path === '__pictures__') {
     // When the modal opens with a prefilled destination we skip the
     // browseTo(null) call that would otherwise cache the home path, so
     // resolve it on demand here. Without this, '/Pictures' is sent as an
     // absolute path and lands at the wrong root.
-    if (!browserHomePath) {
+    if (!state.browserHomePath) {
       try {
         var home = await safeFetch('/api/browse');
-        if (seq !== browseSeq) return;
-        browserHomePath = home.path;
+        if (seq !== state.browseSeq) return;
+        state.browserHomePath = home.path;
       } catch (e) {
         return;
       }
     }
-    url = '/api/browse?path=' + encodeURIComponent(browserHomePath + '/Pictures');
+    url = '/api/browse?path=' + encodeURIComponent(state.browserHomePath + '/Pictures');
   } else if (path === '__volumes__') {
     // Mac's /Volumes is a real directory the browse endpoint can list.
     // Windows drive letters and Linux mount roots (/media, /run/media,
@@ -69,8 +74,8 @@ async function browseTo(path) {
     if (navigator.userAgent.indexOf('Mac') < 0) {
       try {
         var volumes = await safeFetch('/api/volumes');
-        if (seq !== browseSeq) return;
-        browserPath = '';
+        if (seq !== state.browseSeq) return;
+        state.browserPath = '';
         renderBrowserList({path: '', dirs: volumes}, {syntheticRoot: true});
       } catch (e) {
         // safeFetch handles error toast
@@ -83,9 +88,9 @@ async function browseTo(path) {
   }
   try {
     /** @type {MoveBrowserData} */ var data = await safeFetch(url);
-    if (seq !== browseSeq) return;
-    browserPath = data.path;
-    if (!path) browserHomePath = data.path;
+    if (seq !== state.browseSeq) return;
+    state.browserPath = data.path;
+    if (!path) state.browserHomePath = data.path;
     renderBrowserList(data);
   } catch (e) {
     // safeFetch handles error toast
@@ -93,7 +98,7 @@ async function browseTo(path) {
 }
 
 /** @param {MoveBrowserData} data @param {{syntheticRoot?: boolean} | undefined} [opts] */
-function renderBrowserList(data, opts) {
+export function renderBrowserList(data, opts) {
   /** @type {HTMLElement} */ (document.getElementById('moveBrowserBreadcrumb')).textContent = data.path || 'Volumes';
 
   var list = /** @type {HTMLElement} */ (document.getElementById('moveBrowserList'));
@@ -123,10 +128,10 @@ function renderBrowserList(data, opts) {
   list.innerHTML = html;
 }
 
-function selectBrowserFolder() {
-  if (!browserTargetInput || !browserPath) return;
-  var selectedPath = browserPath;
-  /** @type {HTMLInputElement} */ (document.getElementById(browserTargetInput)).value = selectedPath;
+export function selectBrowserFolder() {
+  if (!state.browserTargetInput || !state.browserPath) return;
+  var selectedPath = state.browserPath;
+  /** @type {HTMLInputElement} */ (document.getElementById(state.browserTargetInput)).value = selectedPath;
   closeBrowser();
   rememberRecentDestination(selectedPath);
   // Trigger any button state updates
@@ -134,11 +139,11 @@ function selectBrowserFolder() {
   updatePhotoSelectionUI();
 }
 
-async function createNewFolder() {
+export async function createNewFolder() {
   var name = /** @type {HTMLInputElement} */ (document.getElementById('newFolderName')).value.trim();
-  if (!name || !browserPath) return;
+  if (!name || !state.browserPath) return;
 
-  var newPath = browserPath + (browserPath.endsWith('/') ? '' : '/') + name;
+  var newPath = state.browserPath + (state.browserPath.endsWith('/') ? '' : '/') + name;
   try {
     await safeFetch('/api/browse/mkdir', {
       method: 'POST',
@@ -146,7 +151,7 @@ async function createNewFolder() {
       body: JSON.stringify({path: newPath}),
     });
     // Refresh the browser to show the new folder
-    browseTo(browserPath);
+    browseTo(state.browserPath);
     /** @type {HTMLInputElement} */ (document.getElementById('newFolderName')).value = '';
   } catch (e) {
     // safeFetch handles error toast

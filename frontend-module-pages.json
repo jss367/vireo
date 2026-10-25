@@ -105,6 +105,12 @@
     ],
     "sharedWrites": []
   },
+  "move": {
+    "route": "/move",
+    "template": "move.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "shortcuts": {
     "route": "/shortcuts",
     "template": "shortcuts.html",

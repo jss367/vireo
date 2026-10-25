@@ -1,8 +1,16 @@
 // Starting a Quick Move: the preview preflight, the confirm dialogs, and the move-folder job.
-// Classic page script; load boot.js after all definitions.
 
-async function startQuickMove() {
-  if (quickMoveBusy) return;
+import { state } from './state.js';
+import { showConfirm, showMergeConfirm, showMoveConfirm } from './confirm-modal.js';
+import { quickFolderNameResult, quickFolderTemplateResult, quickUsesDateFolders } from './quick-move-form.js';
+import {
+  normalizeRemoteSubpath, setQuickDateSummary, setQuickMoveBusy, setQuickMoveSummary,
+} from './quick-move-preview.js';
+import { quickRemoteTargetId } from './remote-targets.js';
+import { rsyncInstallHint, safeFetch, showToast } from './shared.js';
+
+export async function startQuickMove() {
+  if (state.quickMoveBusy) return;
   var fid = parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect')).value);
   if (!fid) return;
   var remoteId = quickRemoteTargetId();
@@ -22,7 +30,7 @@ async function startQuickMove() {
   // preflight and the move so they can't disagree.
   /** @type {MoveDestination} */ var destBody;
   if (remoteId) {
-    if (!quickRsyncAvailable) {
+    if (!state.quickRsyncAvailable) {
       showToast('No GNU rsync found for remote moves. ' + rsyncInstallHint(), 'error');
       return;
     }
@@ -50,7 +58,7 @@ async function startQuickMove() {
       : {destination: dest, destination_name: nameResult.value};
   }
 
-  var folder = allFolders.find(function(f) { return f.id === fid; });
+  var folder = state.allFolders.find(function(f) { return f.id === fid; });
   var sourcePath = folder ? folder.path : 'folder #' + fid;
   var photoCount = folder ? (folder.photo_count || 0) : '?';
 
@@ -88,7 +96,7 @@ async function startQuickMove() {
       showToast('No tracked photos were found in this folder.', 'error');
       return;
     }
-    if (!moveVisibilityReady) return;
+    if (!state.moveVisibilityReady) return;
     var affected;
     try {
       var visibility = await safeFetch('/api/move-photos/visibility', {
@@ -149,7 +157,7 @@ async function startQuickMove() {
 }
 
 /** @param {MoveDestination} body */
-async function executeQuickMove(body) {
+export async function executeQuickMove(body) {
   try {
     var resp = await safeFetch('/api/jobs/move-folder', {
       method: 'POST',
