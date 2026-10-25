@@ -22,7 +22,7 @@ from db import (
     NEEDS_IDENTIFICATION_RULES,
     Database,
 )
-from services import browse_queries, photo_ingest
+from services import browse_queries, photo_ingest, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +41,7 @@ def _reader(db):
 
 @pytest.fixture
 def folder(db, tmp_path):
-    return db.add_folder(str(tmp_path / "photos"), name="photos")
+    return workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
 
 
 def _photo(db, folder_id, filename, **cols):
@@ -730,7 +730,7 @@ def test_prediction_rules_split_by_row_scope(db, folder):
 
 
 def test_rule_queries_and_restrictions_with_a_where_clause(db, folder, tmp_path):
-    sub = db.add_folder(str(tmp_path / "photos" / "sub"), name="sub", parent_id=folder)
+    sub = workspace_folders.add_folder(db, str(tmp_path / "photos" / "sub"), name="sub", parent_id=folder)
     top = _photo(db, folder, "a.jpg", rating=5)
     nested = _photo(db, sub, "b.jpg", rating=5)
     _photo(db, sub, "c.jpg", rating=1)
@@ -749,7 +749,7 @@ def test_rule_queries_and_restrictions_with_a_where_clause(db, folder, tmp_path)
 
 
 def test_offline_photos_stay_single_in_stacks(db, folder, tmp_path):
-    offline_folder = db.add_folder(str(tmp_path / "gone"), name="gone")
+    offline_folder = workspace_folders.add_folder(db, str(tmp_path / "gone"), name="gone")
     a = _photo(db, folder, "a.jpg", file_hash="h")
     b = _photo(db, offline_folder, "b.jpg", file_hash="h")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (offline_folder,))

@@ -6,7 +6,7 @@ import json
 
 import pytest
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 from e2e.module_pages import install_page_module_exposure
 
@@ -29,8 +29,8 @@ def _seed_scan_with_buckets(db, folder_a, folder_b, n_groups=3):
     import os
     os.makedirs(folder_a, exist_ok=True)
     os.makedirs(folder_b, exist_ok=True)
-    a_fid = db.add_folder(folder_a)
-    b_fid = db.add_folder(folder_b)
+    a_fid = workspace_folders.add_folder(db, folder_a)
+    b_fid = workspace_folders.add_folder(db, folder_b)
     proposals = []
     file_hashes = []
     for i in range(n_groups):
@@ -327,8 +327,8 @@ def test_bulk_decide_scopes_action_to_visible_groups_under_filter(
     os.makedirs(folder_a, exist_ok=True)
     os.makedirs(folder_b, exist_ok=True)
     db = live_server["db"]
-    a_fid = db.add_folder(folder_a)
-    b_fid = db.add_folder(folder_b)
+    a_fid = workspace_folders.add_folder(db, folder_a)
+    b_fid = workspace_folders.add_folder(db, folder_b)
 
     # Three groups in a bucket; two named ``hawk*`` (visible under a
     # ``hawk`` filter), one named ``robin*`` (hidden). Filename is the

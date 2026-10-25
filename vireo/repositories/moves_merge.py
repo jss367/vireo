@@ -1012,8 +1012,9 @@ class MovesMergeRepository:
         * ``prune_nonroot_links_outside_roots`` ->
           ``services.moves_merge.prune_ws_nonroot_links_outside_roots``
         * ``materialize_workspace_descendants``, ``add_workspace_folder``,
-          ``add_workspace_folder_no_commit``, ``folders.update_counts`` -> the
-          ``Database`` methods of the same name
+          ``add_workspace_folder_no_commit`` -> the ``services.workspace_folders``
+          functions of the same name, bound to the database
+        * ``update_folder_counts`` -> ``db.folders.update_counts``
         * ``case_insensitive_root`` -> ``move._case_insensitive_root``
         * ``move_location_state`` -> ``Database._move_location_state_for_merge``
           (the per-collision keyword-edit, review-state and sibling-link
@@ -1350,14 +1351,14 @@ class _StagedTreeMerge:
                     # But any pre-existing ``is_root=0`` link on this
                     # ancestor (or on descendants below it that no
                     # root still covers) would let
-                    # ``_materialize_workspace_descendants`` — called
+                    # ``materialize_workspace_descendants`` — called
                     # by later ``get_workspace_folders()`` reads —
                     # pull the broader subtree back into the workspace
                     # and defeat the scoped merge. Prune those
                     # uncovered non-root links now, matching the
                     # cleanup the ``existing_link is None or
                     # is_root == 0`` branch above already performs
-                    # via ``_prune_ws_nonroot_links_outside_roots``.
+                    # via ``prune_ws_nonroot_links_outside_roots``.
                     self.prune_nonroot_links_outside_roots(
                         ws, probe)
                 break
@@ -1394,7 +1395,7 @@ class _StagedTreeMerge:
         the descendant-root guard above suppresses rooting ``/archive/USA``,
         so no workspace root covers the ``/archive/USA/2027`` intermediate.
         A non-root link there still makes 2027's subtree visible via
-        ``_materialize_workspace_descendants`` (called by
+        ``materialize_workspace_descendants`` (called by
         ``get_workspace_folders``), defeating the scoped-merge behavior.
         """
         ws = self.ws

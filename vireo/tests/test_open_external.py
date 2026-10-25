@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 class _FakeCompleted:
@@ -359,7 +359,7 @@ def test_open_external_falls_back_to_companion_when_raw_decode_fails(
         str(jpg_path), "JPEG", quality=85,
     )
 
-    fid = db.add_folder(str(source_dir), name="ext-raw")
+    fid = workspace_folders.add_folder(db, str(source_dir), name="ext-raw")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="bird.NEF", extension=".nef",
         file_size=raw_path.stat().st_size,
@@ -506,7 +506,7 @@ def test_open_external_converts_nikon_he_nef_for_darktable(
     source_dir.mkdir()
     raw_path = source_dir / "bird.NEF"
     raw_path.write_bytes(b"nef")
-    fid = db.add_folder(str(source_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(source_dir), name="photos")
     pid = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="bird.NEF",

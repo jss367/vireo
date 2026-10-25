@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _source_photo(app_and_db, tmp_path):
     app, db = app_and_db
-    folder = db.add_folder(str(tmp_path), name='Inspection source')
+    folder = workspace_folders.add_folder(db, str(tmp_path), name='Inspection source')
     path = tmp_path / 'source.jpg'
     Image.new('RGB', (600, 400), 'red').save(path)
     pid = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension='.jpg',

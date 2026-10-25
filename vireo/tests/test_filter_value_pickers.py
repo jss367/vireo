@@ -1,7 +1,7 @@
 """Exact-value picker predicates and model choices use library semantics."""
 import config as cfg
 import pytest
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -20,7 +20,7 @@ def _photo(db, folder, name, **cols):
 
 @pytest.mark.parametrize("field", ["camera_make", "camera_model", "lens"])
 def test_equipment_choices_include_any_and_exclude_all(db, tmp_path, field):
-    folder = db.add_folder(str(tmp_path / "photos"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     a = _photo(db, folder, "a.jpg", **{field: "Alpha"})
     b = _photo(db, folder, "b.jpg", **{field: "Beta"})
     c = _photo(db, folder, "c.jpg")
@@ -35,7 +35,7 @@ def test_equipment_choices_include_any_and_exclude_all(db, tmp_path, field):
 
 @pytest.mark.parametrize("field", ["keyword", "species"])
 def test_keyword_choices_match_any_and_exclude_all(db, tmp_path, field):
-    folder = db.add_folder(str(tmp_path / "photos"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     a = _photo(db, folder, "a.jpg")
     b = _photo(db, folder, "b.jpg")
     c = _photo(db, folder, "c.jpg")
@@ -54,7 +54,7 @@ def test_keyword_choices_match_any_and_exclude_all(db, tmp_path, field):
 
 
 def test_model_choices_respect_workspace_and_visible_predictions(db, tmp_path):
-    folder = db.add_folder(str(tmp_path / "photos"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     a = _photo(db, folder, "a.jpg")
     def predict(pid, model, confidence=0.95, status="pending"):
         det = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": confidence}], detector_model=model)[0]
@@ -65,7 +65,7 @@ def test_model_choices_respect_workspace_and_visible_predictions(db, tmp_path):
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
-    folder2 = db.add_folder(str(tmp_path / "elsewhere"))
+    folder2 = workspace_folders.add_folder(db, str(tmp_path / "elsewhere"))
     predict(_photo(db, folder2, "elsewhere.jpg"), "Other workspace model")
     db.set_active_workspace(ws)
     assert db.collections.get_filter_field_values("classifier_model") == [{"value": "Visible model", "count": 1}]

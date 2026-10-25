@@ -14,7 +14,7 @@ from pathlib import Path
 
 from db import Database
 from repositories.culling import CullingRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 VIREO = Path(__file__).resolve().parents[1]
 
@@ -50,7 +50,7 @@ def _prediction(db, photo_id, species, confidence, *, model="m1", box_x=0.1):
 
 
 def test_top_prediction_is_the_most_confident_across_detections(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     pid = _photo(db, fid, "a.jpg")
     bare = _photo(db, fid, "b.jpg")
     _prediction(db, pid, "Robin", 0.4)
@@ -65,7 +65,7 @@ def test_top_prediction_is_the_most_confident_across_detections(db, tmp_path):
 
 
 def test_photo_signals_and_phash_source_read_one_photo(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     pid = _photo(
         db, fid, "a.NEF", quality_score=0.5, sharpness=120.0,
         timestamp="2024-01-01T00:00:00", phash="ff00", working_copy_path="working/1.jpg",
@@ -82,7 +82,7 @@ def test_photo_signals_and_phash_source_read_one_photo(db, tmp_path):
 
 
 def test_set_phash_writes_without_committing(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     pid = _photo(db, fid, "a.jpg")
     db.culling.set_phash(pid, "abcd")
     assert db.in_transaction

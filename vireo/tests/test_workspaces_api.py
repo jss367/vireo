@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from services import workspace_folders, workspace_lifecycle
 
 
 def test_list_workspaces(app_and_db):
@@ -32,7 +33,6 @@ def test_get_active_workspace(app_and_db):
 
 def test_active_workspace_identity_skips_folder_counts(app_and_db, monkeypatch):
     """Navigation can identify the selected workspace without counting photos."""
-    from db import Database
 
     app, _db = app_and_db
     client = app.test_client()
@@ -42,7 +42,7 @@ def test_active_workspace_identity_skips_folder_counts(app_and_db, monkeypatch):
     def fail_folder_lookup(*args, **kwargs):
         raise AssertionError("Workspace identity must not load folder photo counts")
 
-    monkeypatch.setattr(Database, "get_workspace_folder_roots", fail_folder_lookup)
+    monkeypatch.setattr(workspace_folders, "get_workspace_folder_roots", fail_folder_lookup)
     resp = client.get("/api/workspaces/active?include_folders=0")
     assert resp.status_code == 200
     data = resp.get_json()
@@ -312,7 +312,7 @@ def test_pending_archive_cannot_register_after_workspace_deletion(app_and_db):
 
     _, db = app_and_db
     workspace_id = db.create_workspace("Deleted before import starts")
-    db.delete_workspace(workspace_id)
+    workspace_lifecycle.delete_workspace(db, workspace_id)
     with pytest.raises(sqlite3.IntegrityError, match="workspace no longer exists"):
         db.conn.execute(
             "INSERT INTO pending_archives (id, workspace_id, destination, staging_destination, target_json) "
@@ -383,9 +383,9 @@ def test_delete_workspace_shared_local_folder(tmp_path, monkeypatch):
     db.set_active_workspace(default_id)
     first = db.create_workspace("First")
     second = db.create_workspace("Second")
-    folder_id = db.add_folder(str(source), name="photos", link_to_workspace=False)
-    db.add_workspace_folder(first, folder_id)
-    db.add_workspace_folder(second, folder_id)
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
+    workspace_folders.add_workspace_folder(db, first, folder_id)
+    workspace_folders.add_workspace_folder(db, second, folder_id)
     stage_folder(db, folder_id, str(vireo_dir))
     db.close()
 

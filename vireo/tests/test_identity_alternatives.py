@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 from canonical_schema import create_identity_alternatives
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
 
@@ -105,7 +105,7 @@ def test_shared_keyword_intents_follow_identity_history_and_real_sidecar_sync(
     second = db.create_workspace('Shared sync')
     initial = {CANDIDATES[0], 'Unrelated note'} if operation == 'save' else {'Unrelated note'}
     pid, path = _setup_photo_with_xmp(tmp_path, db, keywords=initial)
-    db.add_workspace_folder(second, db.photos.get(pid)['folder_id'])
+    workspace_folders.add_workspace_folder(db, second, db.photos.get(pid)['folder_id'])
     switch = _workspace_switcher(db)
     switch(first)
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
@@ -197,7 +197,7 @@ def test_identity_decision_repairs_sibling_sync_already_publishing(
     second = db.create_workspace('Captured sibling writer')
     initial = {CANDIDATES[0], 'Unrelated note'} if operation == 'resolve' else {'Unrelated note'}
     pid, path = _setup_photo_with_xmp(tmp_path, db, keywords=initial)
-    db.add_workspace_folder(second, db.photos.get(pid)['folder_id'])
+    workspace_folders.add_workspace_folder(db, second, db.photos.get(pid)['folder_id'])
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
     if operation == 'save':
         db.tag_photo(pid, kid, source='accept')
@@ -212,7 +212,7 @@ def test_identity_decision_repairs_sibling_sync_already_publishing(
 
     def decide_before_publish(tree, target):
         if detach_before_decision:
-            db.remove_workspace_folder(second, db.photos.get(pid)['folder_id'])
+            workspace_folders.remove_workspace_folder(db, second, db.photos.get(pid)['folder_id'])
             db.photo_visibility.revoke_grants(second, [pid])
             db.commit()
         response = save(client, [pid]) if operation == 'save' else resolve(client, current_group(client))
@@ -258,12 +258,12 @@ def test_zero_link_save_and_alias_intents_converge_through_resolution_history(ap
     db.add_keyword(scientific, is_species=True)
     pid, path = _setup_photo_with_xmp(tmp_path, db, keywords={scientific, CANDIDATES[0], 'Unrelated note'})
     folder = db.photos.get(pid)['folder_id']
-    db.add_workspace_folder(second, folder)
+    workspace_folders.add_workspace_folder(db, second, folder)
     for name in (scientific, CANDIDATES[0]):
         db.queue_change(pid, 'keyword_add', name, workspace_id=second)
     unrelated = db.queue_change(pid, 'keyword_add', 'Another note', workspace_id=second)
     if detached:
-        db.remove_workspace_folder(second, folder)
+        workspace_folders.remove_workspace_folder(db, second, folder)
         db.photo_visibility.revoke_grants(second, [pid])
         db.commit()
     assert not db.photo_species.get_species_for_photos([pid])
@@ -280,7 +280,7 @@ def test_zero_link_save_and_alias_intents_converge_through_resolution_history(ap
         ).fetchone()
     assert sync_to_xmp(db)['failed'] == 0
     assert not ({scientific, CANDIDATES[0]} & read_keywords(path))
-    db.add_workspace_folder(second, folder)
+    workspace_folders.add_workspace_folder(db, second, folder)
     db.set_active_workspace(second)
     assert sync_to_xmp(db)['failed'] == 0
     sync_from_xmp(db, [pid])
@@ -819,7 +819,7 @@ def test_redo_rejects_invisible_photo_and_rolls_back_visible_batch_items(app_and
     assert save(client, [1, 2]).status_code == 200
     assert client.post('/api/undo').status_code == 200
     redo_id = db.edit_history.oldest_redoable()['id']
-    db.remove_workspace_folder(first, db.photos.get(2)['folder_id'])
+    workspace_folders.remove_workspace_folder(db, first, db.photos.get(2)['folder_id'])
     db.photo_visibility.revoke_grants(first, [2])
     db.commit()
     assert db.photo_visibility.visible_photo_ids([1, 2]) == [1]
@@ -828,7 +828,7 @@ def test_redo_rejects_invisible_photo_and_rolls_back_visible_batch_items(app_and
     assert db.conn.execute('SELECT COUNT(*) FROM photo_identity_alternatives').fetchone()[0] == 0
     assert db.edit_history.oldest_redoable()['id'] == redo_id
     assert db.conn.execute('SELECT action_type FROM edit_history WHERE id=?', (redo_id,)).fetchone()[0] == 'identity_alternatives'
-    db.add_workspace_folder(first, db.photos.get(2)['folder_id'])
+    workspace_folders.add_workspace_folder(db, first, db.photos.get(2)['folder_id'])
     assert client.post('/api/redo').status_code == 200
     assert db.identity_alternatives.photo_ids() == {1, 2}
 
@@ -944,7 +944,7 @@ def resolve(client, group, **changes):
 def test_31_kingbird_frames_are_one_unresolved_group_without_species_or_flag_changes(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    folder = db.add_folder('/kingbirds')
+    folder = workspace_folders.add_folder(db, '/kingbirds')
     ids = [photo_ingest.add_photo(db, folder_id=folder, filename=f'kingbird-{n}.jpg',
                                 extension='.jpg', file_size=100, file_mtime=1) for n in range(31)]
     db.photo_review.set_flag(ids[0], 'flagged')
@@ -1127,7 +1127,7 @@ def test_detached_frames_are_hidden_and_cannot_be_resolved(app_and_db):
     client = app.test_client()
     save(client, [1, 2])
     group = current_group(client)
-    db.remove_workspace_folder(db.require_workspace_id(), db.photos.get(1)['folder_id'])
+    workspace_folders.remove_workspace_folder(db, db.require_workspace_id(), db.photos.get(1)['folder_id'])
     assert db.identity_alternatives.photo_ids() == {2}
     assert current_group(client)['photo_ids'] == [2]
     assert resolve(client, group).status_code == 404
@@ -1141,7 +1141,7 @@ def test_export_uses_unknown_name_and_does_not_write_candidate_species(app_and_d
     source = tmp_path / 'source'
     source.mkdir()
     Image.new('RGB', (16, 16), 'green').save(source / 'bird.jpg')
-    folder = db.add_folder(str(source))
+    folder = workspace_folders.add_folder(db, str(source))
     pid = photo_ingest.add_photo(db, folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=100, file_mtime=1)
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(pid, kid)
@@ -1180,7 +1180,7 @@ def test_taxonomy_only_common_candidate_removes_alias_from_catalog_cache_and_exp
     source = tmp_path / 'alias-source'
     source.mkdir()
     Image.new('RGB', (16, 16), 'green').save(source / 'bird.jpg')
-    folder = db.add_folder(str(source))
+    folder = workspace_folders.add_folder(db, str(source))
     pid = photo_ingest.add_photo(db, folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=100, file_mtime=1)
     alias = db.add_keyword('Tyrannus melancholicus', is_species=True)
     db.tag_photo(pid, alias, source='accept')
@@ -1275,7 +1275,7 @@ def test_species_decisions_and_history_refresh_all_shared_workspace_caches(app_a
     active_ws = db.require_workspace_id()
     folder_shared = db.create_workspace('Shared folder')
     photo_shared = db.create_workspace('Shared photo only')
-    db.add_workspace_folder(folder_shared, db.photos.get(1)['folder_id'])
+    workspace_folders.add_workspace_folder(db, folder_shared, db.photos.get(1)['folder_id'])
     db.photo_visibility.grant(photo_shared, [1])
     db.commit()
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
@@ -1370,7 +1370,7 @@ def test_workspace_switch_before_writer_lock_rejects_shared_photo_edits(app_and_
         assert save(client, [1]).status_code == 200
         group = current_group(client)
     other_ws = db.create_workspace('Shared alternate workspace')
-    db.add_workspace_folder(other_ws, db.photos.get(1)['folder_id'])
+    workspace_folders.add_workspace_folder(db, other_ws, db.photos.get(1)['folder_id'])
     before_species = db.photo_species.get_species_for_photos([1])
     before_state = db.identity_alternatives.for_photos([1])
     history_before = db.edit_history.latest_undoable()

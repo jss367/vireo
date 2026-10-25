@@ -8,7 +8,7 @@ import pytest
 import services.local_workspace as local_workspace
 from db import Database
 from repositories.folders import FolderRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from services.local_workspace import (
     LocalWorkspaceCancelled,
     LocalWorkspaceConflict,
@@ -37,9 +37,9 @@ def local_workspace_env(tmp_path):
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "vireo.db"))
     workspace_id = db._active_workspace_id
-    root_id = db.add_folder(str(source), name="photos")
-    child_id = db.add_folder(
-        str(child),
+    root_id = workspace_folders.add_folder(db, str(source), name="photos")
+    child_id = workspace_folders.add_folder(
+        db, str(child),
         name="2026",
         parent_id=root_id,
         workspace_root=False,
@@ -1002,7 +1002,7 @@ def test_restore_merges_rows_created_at_source_paths_while_staged(local_workspac
     env = local_workspace_env
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
     (env["child"] / "imported.jpg").write_bytes(b"imported")
-    interloper_id = env["db"].add_folder(str(env["child"]), name="2026")
+    interloper_id = workspace_folders.add_folder(env["db"], str(env["child"]), name="2026")
     assert interloper_id != env["child_id"]
     photo_ingest.add_photo(env["db"], interloper_id, "imported.jpg", ".jpg", 8, 0.0)
 
@@ -1143,7 +1143,7 @@ def test_restore_catalog_is_atomic_across_merge_and_state_cleanup(local_workspac
     # An import at the original NAS path while staged materializes a
     # second folder row that will trigger the self-heal merge branch.
     (env["child"] / "imported.jpg").write_bytes(b"imported")
-    interloper_id = env["db"].add_folder(str(env["child"]), name="2026")
+    interloper_id = workspace_folders.add_folder(env["db"], str(env["child"]), name="2026")
     assert interloper_id != env["child_id"]
     photo_ingest.add_photo(env["db"], interloper_id, "imported.jpg", ".jpg", 8, 0.0)
 
@@ -1455,7 +1455,7 @@ def test_stage_cancel_via_begin_commit_cleans_up(local_workspace_env):
 def test_stage_rejects_folders_shared_with_another_workspace(local_workspace_env):
     env = local_workspace_env
     other_workspace = env["db"].create_workspace("Shared")
-    env["db"].add_workspace_folder(other_workspace, env["root_id"])
+    workspace_folders.add_workspace_folder(env["db"], other_workspace, env["root_id"])
 
     with pytest.raises(LocalWorkspaceError, match="also used by another workspace"):
         stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
@@ -1467,16 +1467,16 @@ def test_stage_rejects_folder_covered_by_another_workspace_root(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     first_workspace = db._active_workspace_id
     db.set_active_workspace(None)
-    root_id = db.add_folder(str(source_root), name="photos")
+    root_id = workspace_folders.add_folder(db, str(source_root), name="photos")
     db.set_active_workspace(first_workspace)
-    db.add_workspace_folder(first_workspace, root_id)
+    workspace_folders.add_workspace_folder(db, first_workspace, root_id)
 
     nested = source_root / "2026"
     nested.mkdir()
     (nested / "bird.jpg").write_bytes(b"bird")
     second_workspace = db.create_workspace("Nested")
     db.set_active_workspace(second_workspace)
-    nested_id = db.add_folder(str(nested), name="2026")
+    nested_id = workspace_folders.add_folder(db, str(nested), name="2026")
 
     # The ancestor workspace was linked before the nested folder existed, so
     # it has no exact workspace_folders row for nested_id.
@@ -1499,7 +1499,7 @@ def test_stage_rejects_source_root_from_active_local_workspace(tmp_path):
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "vireo.db"))
     first_workspace = db._active_workspace_id
-    db.add_folder(str(source_root), name="photos")
+    workspace_folders.add_folder(db, str(source_root), name="photos")
     stage_workspace(db, first_workspace, str(vireo_dir))
 
     nested = source_root / "2026"
@@ -1507,7 +1507,7 @@ def test_stage_rejects_source_root_from_active_local_workspace(tmp_path):
     (nested / "new.jpg").write_bytes(b"new")
     second_workspace = db.create_workspace("Nested")
     db.set_active_workspace(second_workspace)
-    db.add_folder(str(nested), name="2026")
+    workspace_folders.add_folder(db, str(nested), name="2026")
 
     with pytest.raises(LocalWorkspaceError, match="overlaps a root used by another workspace"):
         stage_workspace(db, second_workspace, str(vireo_dir))
@@ -1526,8 +1526,8 @@ def test_stage_reports_overlap_when_roots_share_normalized_key(tmp_path, monkeyp
     (other_root / "bug.jpg").write_bytes(b"bug")
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db._active_workspace_id
-    db.add_folder(str(source_root), name="photos")
-    db.add_folder(str(other_root), name="extras")
+    workspace_folders.add_folder(db, str(source_root), name="photos")
+    workspace_folders.add_folder(db, str(other_root), name="extras")
 
     monkeypatch.setattr(local_workspace, "_norm", lambda _path: "COLLIDES")
 
@@ -1543,7 +1543,7 @@ def test_shared_folder_check_handles_more_than_sqlite_variable_limit(tmp_path):
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "vireo.db"))
     workspace_id = db._active_workspace_id
-    root_id = db.add_folder(str(source_root), name="photos")
+    root_id = workspace_folders.add_folder(db, str(source_root), name="photos")
     other_workspace = db.create_workspace("Shared descendant")
 
     rows = [(folder_id, str(source_root / f"folder-{folder_id}"), root_id) for folder_id in range(1000, 2105)]
@@ -1580,7 +1580,7 @@ def test_work_locally_http_job_flow(tmp_path, monkeypatch):
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(source), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos")
     workspace_id = db._active_workspace_id
     db.close()
 
@@ -1691,7 +1691,7 @@ def test_sync_http_rejects_confirm_deletions_without_count(tmp_path, monkeypatch
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(source), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos")
     db.close()
 
     app = create_app(db_path, thumb_cache_dir=str(thumbs))
@@ -1742,7 +1742,7 @@ def test_discard_http_flow_guards_stale_page_state(tmp_path, monkeypatch):
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(source), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos")
     db.close()
 
     app = create_app(db_path, thumb_cache_dir=str(thumbs))
@@ -1795,7 +1795,7 @@ def test_legacy_stage_refuses_when_folder_session_is_active(tmp_path, monkeypatc
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(source), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos")
     stage_folder(db, folder_id, str(vireo_dir))
     db.close()
 
@@ -1865,7 +1865,7 @@ def test_folder_delete_route_holds_stage_boundary_lock_around_guard(tmp_path, mo
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(source), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos")
     db.close()
 
     # Instrument the shared lock by replacing it with a wrapper that
@@ -1964,7 +1964,7 @@ def test_status_endpoint_does_not_surface_unrelated_workspace_jobs(tmp_path, mon
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    db.add_folder(str(source), name="photos")
+    workspace_folders.add_folder(db, str(source), name="photos")
     workspace_id = db._active_workspace_id
     db.close()
 
@@ -2154,7 +2154,7 @@ def test_scan_endpoint_refuses_while_working_locally(tmp_path, monkeypatch):
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    db.add_folder(str(source), name="photos")
+    workspace_folders.add_folder(db, str(source), name="photos")
     workspace_id = db._active_workspace_id
     db.close()
 
@@ -2217,7 +2217,7 @@ def test_scan_endpoint_refuses_while_transition_job_is_pending(tmp_path, monkeyp
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    db.add_folder(str(source), name="photos")
+    workspace_folders.add_folder(db, str(source), name="photos")
     workspace_id = db._active_workspace_id
     db.close()
 
@@ -2276,7 +2276,7 @@ def test_move_folder_endpoint_refuses_while_transition_job_is_pending(tmp_path, 
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(source), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos")
     workspace_id = db._active_workspace_id
     db.close()
 
@@ -2337,7 +2337,7 @@ def test_stage_endpoint_refuses_while_scan_is_paused(tmp_path, monkeypatch):
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    db.add_folder(str(source), name="photos")
+    workspace_folders.add_folder(db, str(source), name="photos")
     workspace_id = db._active_workspace_id
     db.close()
 
@@ -2390,7 +2390,7 @@ def test_workspace_sync_proceeds_while_observational_job_runs(
     db_path = str(vireo_dir / "vireo.db")
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(source), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos")
     workspace_id = db._active_workspace_id
     stage_workspace(db, workspace_id, str(vireo_dir))
     local_path = Path(db.folders.get(folder_id)["path"])

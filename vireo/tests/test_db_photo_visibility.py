@@ -14,11 +14,11 @@ import textwrap
 import pytest
 from db import Database
 from repositories.photo_visibility import PhotoVisibilityRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _photo(db, name="bird.jpg"):
-    fid = db.add_folder(f"/photos/{name}", name=name)
+    fid = workspace_folders.add_folder(db, f"/photos/{name}", name=name)
     return fid, photo_ingest.add_photo(
         db, folder_id=fid, filename=name, extension=".jpg",
         file_size=1000, file_mtime=1.0,
@@ -77,7 +77,7 @@ def test_scoped_methods_read_the_workspace_active_at_the_call(db):
     home = db.require_workspace_id()
     other = db.create_workspace("Other")
     folder, pid = _photo(db)
-    db.add_workspace_folder(other, folder)
+    workspace_folders.add_workspace_folder(db, other, folder)
     db.set_active_workspace(home)
     assert [w["id"] for w in db.photo_visibility.affected_workspaces([pid])] == [other]
     db.set_active_workspace(other)

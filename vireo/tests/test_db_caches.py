@@ -19,7 +19,7 @@ import db as db_module
 import pytest
 from db import Database
 from repositories.caches import CachesRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _reader(db):
@@ -30,7 +30,7 @@ def _reader(db):
 
 
 def _photo(db, name="a.jpg"):
-    folder_id = db.add_folder("/tmp/caches")
+    folder_id = workspace_folders.add_folder(db, "/tmp/caches")
     return photo_ingest.add_photo(db, folder_id, name, ".jpg", file_size=100, file_mtime=1.0)
 
 

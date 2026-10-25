@@ -5,12 +5,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from playwright.sync_api import expect
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 
 def test_species_comparison_selects_ambiguous_bird_and_analyzes_it(page, live_server, tmp_path, monkeypatch):
     db = live_server["db"]
-    folder = db.add_folder(str(tmp_path), name="Subject comparison")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Subject comparison")
     pids, dids = [], []
     for index in range(2):
         pixels = np.full((300, 600, 3), 120, np.uint8)

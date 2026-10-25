@@ -8,7 +8,7 @@ import traceback
 
 import pytest
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -1039,7 +1039,7 @@ def test_snapshot_backed_import_in_place_is_not_pausable(app_and_db, tmp_path):
     snap_root.mkdir()
     frozen = snap_root / "frozen.jpg"
     Image.new("RGB", (8, 8), "red").save(frozen)
-    db.add_folder(str(snap_root), name="snap")
+    workspace_folders.add_folder(db, str(snap_root), name="snap")
     snap_id = db.workspaces.create_new_images_snapshot([str(frozen)])
     snap_resp = client.post("/api/jobs/import-in-place", json={
         "source_snapshot_id": snap_id,
@@ -1072,7 +1072,7 @@ def test_import_photos_checkpoints_before_after_import_chain(
     folder.mkdir()
     photo_path = folder / "landed.jpg"
     Image.new("RGB", (8, 8), "red").save(photo_path)
-    folder_id = db.add_folder(str(folder), name="archive")
+    folder_id = workspace_folders.add_folder(db, str(folder), name="archive")
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="landed.jpg", extension=".jpg",
         file_size=os.path.getsize(photo_path),

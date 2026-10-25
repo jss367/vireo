@@ -9,13 +9,13 @@ from pathlib import Path
 import pytest
 import schema
 from db import AUTO_MATCH_REVIEW_MARKER, Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from services.collection_coverage import collection_coverage
 from services.imports import ImportService
 
 
 def _photos(db, tmp_path, count=3):
-    folder = db.add_folder(str(tmp_path / "originals"), name="originals")
+    folder = workspace_folders.add_folder(db, str(tmp_path / "originals"), name="originals")
     photos = [photo_ingest.add_photo(
         db, folder_id=folder, filename=f"{i}.jpg", extension=".jpg",
         file_size=10, file_mtime=1,
@@ -71,7 +71,7 @@ def test_import_total_survives_removed_members_and_rule_changes(db, tmp_path):
 
 
 def test_reported_example_keeps_3303_original_and_3159_current(db, tmp_path):
-    folder = db.add_folder(str(tmp_path / "originals"), name="originals")
+    folder = workspace_folders.add_folder(db, str(tmp_path / "originals"), name="originals")
     db.conn.executemany(
         "INSERT INTO photos (folder_id, filename, extension) VALUES (?, ?, '.jpg')",
         [(folder, f"{i}.jpg") for i in range(3159)],

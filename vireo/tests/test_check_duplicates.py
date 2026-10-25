@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from db import Database
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def app_and_db(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(tmp_path / "library"), name="library")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "library"), name="library")
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
     return app, db, fid

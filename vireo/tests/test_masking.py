@@ -13,7 +13,7 @@ from PIL import Image
 from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from services import photo_ingest, subject_masks
+from services import photo_ingest, subject_masks, workspace_folders
 
 # -- Schema migration --
 
@@ -42,7 +42,7 @@ def test_update_photo_pipeline_features(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="root")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="root")
     pid = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
 
     db.masks_features.update_pipeline_features(
@@ -73,7 +73,7 @@ def test_get_photos_missing_masks(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="root")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="root")
 
     # Photo with detection, no mask — should appear
     pid1 = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 100, 1.0)

@@ -18,11 +18,11 @@ from repositories.photo_labels import (
     VALID_COLOR_LABELS,
     PhotoLabelRepository,
 )
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _photo(db, name="bird.jpg"):
-    fid = db.add_folder(f"/photos/{name}", name=name)
+    fid = workspace_folders.add_folder(db, f"/photos/{name}", name=name)
     return photo_ingest.add_photo(
         db, folder_id=fid, filename=name, extension=".jpg",
         file_size=1000, file_mtime=1.0,

@@ -5,7 +5,7 @@ import os
 
 from page_scripts import page_with_scripts
 from PIL import Image
-from services import catalog_deletion, photo_ingest
+from services import catalog_deletion, photo_ingest, workspace_folders
 from wait import wait_for_job_via_client
 
 
@@ -366,8 +366,8 @@ def test_batch_delete_progress_marks_catalog_stage_partial_on_revalidation_skip(
     client = app.test_client()
     source_folder = str(tmp_path / "source")
     dest_folder = str(tmp_path / "dest")
-    src_fid = db.add_folder(source_folder, name="source")
-    dst_fid = db.add_folder(dest_folder, name="dest")
+    src_fid = workspace_folders.add_folder(db, source_folder, name="source")
+    dst_fid = workspace_folders.add_folder(db, dest_folder, name="dest")
     pid = photo_ingest.add_photo(
         db, folder_id=src_fid, filename="bird.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -649,7 +649,7 @@ def test_api_batch_delete_disk_partial_failure_deletes_only_successes(
     app, db = app_and_db
     client = app.test_client()
     folder_path = str(tmp_path / "partial")
-    fid = db.add_folder(folder_path, name="partial")
+    fid = workspace_folders.add_folder(db, folder_path, name="partial")
     success_id = photo_ingest.add_photo(
         db, folder_id=fid, filename="success.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -711,8 +711,8 @@ def test_api_batch_delete_skips_row_whose_identity_changed_mid_delete(
     client = app.test_client()
     source_folder = str(tmp_path / "source")
     dest_folder = str(tmp_path / "dest")
-    src_fid = db.add_folder(source_folder, name="source")
-    dst_fid = db.add_folder(dest_folder, name="dest")
+    src_fid = workspace_folders.add_folder(db, source_folder, name="source")
+    dst_fid = workspace_folders.add_folder(db, dest_folder, name="dest")
     pid = photo_ingest.add_photo(
         db, folder_id=src_fid, filename="bird.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -770,7 +770,7 @@ def test_api_batch_delete_treats_concurrently_deleted_row_as_completed(
     app, db = app_and_db
     client = app.test_client()
     folder_path = str(tmp_path / "raced")
-    fid = db.add_folder(folder_path, name="raced")
+    fid = workspace_folders.add_folder(db, folder_path, name="raced")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -887,7 +887,7 @@ def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
     client = app.test_client()
     original_folder = str(tmp_path / "original")
     renamed_folder = str(tmp_path / "renamed")
-    fid = db.add_folder(original_folder, name="original")
+    fid = workspace_folders.add_folder(db, original_folder, name="original")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -946,7 +946,7 @@ def test_api_batch_delete_disk_revalidates_companion_pairing_before_delete(
     app, db = app_and_db
     client = app.test_client()
     folder_path = str(tmp_path / "raw_pair")
-    fid = db.add_folder(folder_path, name="raw_pair")
+    fid = workspace_folders.add_folder(db, folder_path, name="raw_pair")
     raw_id = photo_ingest.add_photo(
         db, folder_id=fid, filename="bird.nef", extension=".nef",
         file_size=10, file_mtime=1.0,
@@ -1115,7 +1115,7 @@ def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
     app, db = app_and_db
     client = app.test_client()
 
-    fid = db.add_folder('/photos/bulk', name='bulk')
+    fid = workspace_folders.add_folder(db, '/photos/bulk', name='bulk')
     bulk_ids = [
         photo_ingest.add_photo(
             db, folder_id=fid,
@@ -1164,7 +1164,7 @@ def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypa
     app, db = app_and_db
     client = app.test_client()
 
-    fid = db.add_folder('/photos/atomic', name='atomic')
+    fid = workspace_folders.add_folder(db, '/photos/atomic', name='atomic')
     bulk_ids = [
         photo_ingest.add_photo(
             db, folder_id=fid,
@@ -1219,7 +1219,7 @@ def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
     app, db = app_and_db
     client = app.test_client()
 
-    fid = db.add_folder('/photos/pcache', name='pcache')
+    fid = workspace_folders.add_folder(db, '/photos/pcache', name='pcache')
     bulk_ids = [
         photo_ingest.add_photo(
             db, folder_id=fid,
@@ -1307,7 +1307,7 @@ def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
     app, db = app_and_db
     client = app.test_client()
 
-    fid = db.add_folder('/photos/pchunk', name='pchunk')
+    fid = workspace_folders.add_folder(db, '/photos/pchunk', name='pchunk')
     bulk_ids = [
         photo_ingest.add_photo(
             db, folder_id=fid,
@@ -1386,7 +1386,7 @@ def test_api_batch_delete_ignores_raw_paths(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
 
-    db.add_folder(str(tmp_path), name=tmp_path.name)
+    workspace_folders.add_folder(db, str(tmp_path), name=tmp_path.name)
     victim = str(tmp_path / "photo1.jpg")
     Image.new("RGB", (10, 10)).save(victim)
 
@@ -1416,7 +1416,7 @@ def _photo_only_in_other_workspace(db, tmp_path):
     db.set_active_workspace(other_ws)
     folder = tmp_path / "other"
     folder.mkdir()
-    fid = db.add_folder(str(folder), name="other")
+    fid = workspace_folders.add_folder(db, str(folder), name="other")
     path = folder / "theirs.jpg"
     Image.new("RGB", (10, 10)).save(str(path))
     pid = photo_ingest.add_photo(
@@ -1715,7 +1715,7 @@ def test_delete_photos_with_companions_chunks_expanded_ids(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    fid = db.add_folder(str(tmp_path / "lib"), name="lib")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "lib"), name="lib")
 
     # 900 primaries + 900 companions = 1800 expanded ids.
     primary_ids = []

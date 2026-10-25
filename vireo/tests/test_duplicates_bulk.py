@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database
-from services import duplicate_resolution, photo_ingest
+from services import duplicate_resolution, photo_ingest, workspace_folders
 
 
 def _add(db, folder_id, filename, file_hash=None, file_mtime=100.0, rating=0):
@@ -64,8 +64,8 @@ def test_bulk_resolve_single_hash_picks_photo_in_keep_folder(tmp_path):
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
     p_a = _add(db, a_fid, "owl.jpg", file_hash="HBR1")
     p_b = _add(db, b_fid, "owl.jpg", file_hash="HBR1")
     _touch(a_dir, "owl.jpg")
@@ -89,8 +89,8 @@ def test_bulk_resolve_multiple_hashes_share_keep_folder(tmp_path):
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
 
     pairs = []
     for h, name in [("H1", "owl.jpg"), ("H2", "hawk.jpg"), ("H3", "finch.jpg")]:
@@ -121,9 +121,9 @@ def test_bulk_resolve_skips_hash_with_no_photo_in_keep_folder(tmp_path):
     a_dir.mkdir()
     b_dir.mkdir()
     c_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
-    c_fid = db.add_folder(str(c_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
+    c_fid = workspace_folders.add_folder(db, str(c_dir))
 
     # H1 has files in /a and /b; H2 has files in /b and /c. Picking /a as
     # keep_folder resolves H1 but skips H2 (no candidate in /a).
@@ -157,7 +157,7 @@ def test_bulk_resolve_unknown_hash_skipped(tmp_path):
     db = Database(str(tmp_path / "t.db"))
     a_dir = tmp_path / "a"
     a_dir.mkdir()
-    db.add_folder(str(a_dir))
+    workspace_folders.add_folder(db, str(a_dir))
 
     result = duplicate_resolution.bulk_resolve_by_folder(db, ["DOES_NOT_EXIST"], str(a_dir))
 
@@ -173,7 +173,7 @@ def test_bulk_resolve_singleton_hash_skipped(tmp_path):
     db = Database(str(tmp_path / "t.db"))
     a_dir = tmp_path / "a"
     a_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
     # Single candidate.
     _add(db, a_fid, "owl.jpg", file_hash="HSOLO")
     _reset_flags(db, "HSOLO")
@@ -196,8 +196,8 @@ def test_bulk_resolve_multiple_in_keep_folder_resolves_among_them(tmp_path):
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
 
     # Need files on disk so resolve_duplicates Rule 0 doesn't bias picks.
     (a_dir / "owl.jpg").write_bytes(b"x")
@@ -227,8 +227,8 @@ def test_bulk_resolve_merges_metadata_onto_forced_winner(tmp_path):
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
     # Winner has rating=2; loser has rating=5. Bulk-resolve should merge to 5.
     p_a = _add(db, a_fid, "owl.jpg", file_hash="HMERGE", rating=2)
     p_b = _add(db, b_fid, "owl.jpg", file_hash="HMERGE", rating=5)
@@ -254,8 +254,8 @@ def test_bulk_resolve_skips_when_keep_folder_candidate_missing_on_disk(tmp_path)
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
     p_a = _add(db, a_fid, "owl.jpg", file_hash="HGONE")
     p_b = _add(db, b_fid, "owl.jpg", file_hash="HGONE")
     # Only the /b copy exists on disk; the /a row is stale.
@@ -284,8 +284,8 @@ def test_bulk_resolve_normalizes_keep_folder_trailing_slash(tmp_path):
     a_dir.mkdir()
     b_dir.mkdir()
     # Folder stored WITH a trailing slash (simulates legacy/relocated rows).
-    a_fid = db.add_folder(str(a_dir) + "/")
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir) + "/")
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
     p_a = _add(db, a_fid, "owl.jpg", file_hash="HSLASH")
     p_b = _add(db, b_fid, "owl.jpg", file_hash="HSLASH")
     _touch(a_dir, "owl.jpg")
@@ -310,8 +310,8 @@ def test_bulk_resolve_skips_when_all_keep_folder_candidates_missing(tmp_path):
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
     p_a1 = _add(db, a_fid, "owl.jpg", file_hash="HALLGONE")
     p_a2 = _add(db, a_fid, "owl-2.jpg", file_hash="HALLGONE")
     p_b = _add(db, b_fid, "owl.jpg", file_hash="HALLGONE")

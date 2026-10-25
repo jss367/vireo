@@ -10,7 +10,7 @@ from burst_evidence import (
     group_folder_bursts,
 )
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _row(pid, filename, timestamp=None, extension=None, flag="none"):
@@ -417,7 +417,7 @@ def test_folder_bursts_rejects_hidden_folders_bad_margin_and_oversized_folders(a
     assert client.get("/api/folders/999999/bursts").status_code == 404
     assert client.get(f"/api/folders/{folder_id}/bursts?margin=-1").status_code == 400
 
-    hidden = db.add_folder("/elsewhere", name="elsewhere", link_to_workspace=False)
+    hidden = workspace_folders.add_folder(db, "/elsewhere", name="elsewhere", link_to_workspace=False)
     assert client.get(f"/api/folders/{hidden}/bursts").status_code == 404
 
     import burst_evidence

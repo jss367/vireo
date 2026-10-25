@@ -4,13 +4,13 @@ from pathlib import Path
 
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def seed_queue(live_server, tmp_path):
     db = live_server['db']
     live_server['app'].config['EDIT_PREVIEW_IN_PROCESS'] = True
-    folder = db.add_folder(str(tmp_path), name='Queue inspection')
+    folder = workspace_folders.add_folder(db, str(tmp_path), name='Queue inspection')
     pids, subjects = [], []
     for index in range(2):
         path = tmp_path / f'queue-{index}.jpg'

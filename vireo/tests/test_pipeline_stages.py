@@ -15,7 +15,7 @@ from db import Database
 from PIL import Image
 from pipeline_stages import media
 from scanner import ScanHooks
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from test_pipeline_job import FakeRunner, _make_job
 
 
@@ -804,7 +804,7 @@ def test_scanned_raw_thumbnail_renders_available_companion(
     companion = photo_dir / "different-stem.jpg"
     Image.new("RGB", (800, 600), "green").save(companion)
     with Database(str(tmp_path / "catalog.db")) as db:
-        folder_id = db.add_folder(str(photo_dir), name="photos")
+        folder_id = workspace_folders.add_folder(db, str(photo_dir), name="photos")
         photo_id = photo_ingest.add_photo(
             db, folder_id, raw.name, ".nef", raw.stat().st_size,
             raw.stat().st_mtime, width=800, height=600,

@@ -29,7 +29,7 @@ from export import (
     sanitize_filename,
 )
 from PIL import Image
-from services import catalog_deletion, photo_ingest
+from services import catalog_deletion, photo_ingest, workspace_folders
 
 
 def test_resolve_template_original():
@@ -272,7 +272,7 @@ def export_env(tmp_path):
     vireo_dir.mkdir()
     dest = tmp_path / "export_out"
 
-    fid = db.add_folder(str(src), name="Safari")
+    fid = workspace_folders.add_folder(db, str(src), name="Safari")
 
     # Create real JPEG files
     img1 = Image.new("RGB", (800, 600), color="red")
@@ -429,8 +429,8 @@ def test_export_photos_reports_every_original_folder(export_env):
     Image.new("RGB", (640, 480), color="green").save(
         str(second_src / "bird3.jpg"), "JPEG", quality=95,
     )
-    second_folder_id = env["db"].add_folder(
-        str(second_src), name="Second Safari",
+    second_folder_id = workspace_folders.add_folder(
+        env["db"], str(second_src), name="Second Safari",
     )
     third_photo_id = photo_ingest.add_photo(
         env["db"], folder_id=second_folder_id,
@@ -462,7 +462,7 @@ def test_export_photos_written_destinations_skip_folders_whose_photos_failed(exp
     env = export_env
     second_src = env["tmp_path"] / "second-src"
     second_src.mkdir()
-    second_folder_id = env["db"].add_folder(str(second_src), name="Second Safari")
+    second_folder_id = workspace_folders.add_folder(env["db"], str(second_src), name="Second Safari")
     unreadable = photo_ingest.add_photo(
         env["db"], folder_id=second_folder_id, filename="gone.jpg", extension=".jpg",
         file_size=500, file_mtime=3.0, timestamp="2024-06-17T10:00:00",
@@ -2440,8 +2440,8 @@ def test_preview_export_renames_verifies_colliding_directory_identities(
     db = Database(str(tmp_path / "identity.db"))
     workspace_id = db.ensure_default_workspace()
     db.set_active_workspace(workspace_id)
-    first_folder = db.add_folder(str(first), name="First")
-    second_folder = db.add_folder(str(second), name="Second")
+    first_folder = workspace_folders.add_folder(db, str(first), name="First")
+    second_folder = workspace_folders.add_folder(db, str(second), name="Second")
     first_photo = photo_ingest.add_photo(
         db, folder_id=first_folder,
         filename="bird.jpg",
@@ -2488,8 +2488,8 @@ def test_preview_export_renames_shares_aliased_destination_roots(export_env):
             alias_directory.symlink_to(env["src"], target_is_directory=True)
         except OSError as exc:
             pytest.skip(f"directory aliases are unavailable: {exc}")
-    alias_folder_id = env["db"].add_folder(
-        str(alias_directory), name="Safari alias",
+    alias_folder_id = workspace_folders.add_folder(
+        env["db"], str(alias_directory), name="Safari alias",
     )
     env["db"].conn.execute(
         "UPDATE photos SET folder_id = ?, filename = ? WHERE id = ?",
@@ -3170,8 +3170,8 @@ def test_export_configured_developed_dir_disambiguates_same_basename(tmp_path):
         str(src_b / "IMG_0001.jpg"), "JPEG", quality=95,
     )
 
-    fid_a = db.add_folder(str(src_a), name="A")
-    fid_b = db.add_folder(str(src_b), name="B")
+    fid_a = workspace_folders.add_folder(db, str(src_a), name="A")
+    fid_b = workspace_folders.add_folder(db, str(src_b), name="B")
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="IMG_0001.jpg", extension=".jpg",
                          file_size=1, file_mtime=1.0)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="IMG_0001.jpg", extension=".jpg",
@@ -3257,7 +3257,7 @@ def test_export_developed_stem_match_is_case_sensitive(tmp_path):
         str(src / "bird1.jpg"), "JPEG", quality=95,
     )
 
-    fid = db.add_folder(str(src), name="Mixed")
+    fid = workspace_folders.add_folder(db, str(src), name="Mixed")
     pid_upper = photo_ingest.add_photo(db, folder_id=fid, filename="Bird1.jpg", extension=".jpg",
                              file_size=1, file_mtime=1.0)
     pid_lower = photo_ingest.add_photo(db, folder_id=fid, filename="bird1.jpg", extension=".jpg",
@@ -3454,7 +3454,7 @@ def test_export_reused_folder_id_does_not_inherit_stale_developed(tmp_path):
     Image.new("RGB", (800, 600), color=(200, 0, 0)).save(
         str(src_old / "IMG_0001.jpg"), "JPEG", quality=95,
     )
-    fid_old = db.add_folder(str(src_old), name="Old")
+    fid_old = workspace_folders.add_folder(db, str(src_old), name="Old")
     pid_old = photo_ingest.add_photo(db, folder_id=fid_old, filename="IMG_0001.jpg", extension=".jpg",
                            file_size=1, file_mtime=1.0)
     # Yellow stale file under the OLD folder's path key — must not bleed
@@ -3478,7 +3478,7 @@ def test_export_reused_folder_id_does_not_inherit_stale_developed(tmp_path):
     Image.new("RGB", (800, 600), color=(0, 0, 200)).save(
         str(src_new / "IMG_0001.jpg"), "JPEG", quality=95,
     )
-    fid_new = db.add_folder(str(src_new), name="New")
+    fid_new = workspace_folders.add_folder(db, str(src_new), name="New")
     pid_new = photo_ingest.add_photo(db, folder_id=fid_new, filename="IMG_0001.jpg", extension=".jpg",
                            file_size=1, file_mtime=2.0)
 
@@ -3533,7 +3533,7 @@ def test_export_case_variant_developed_prefers_lowercase_extension(tmp_path):
     Image.new("RGB", (800, 600), color=(200, 0, 0)).save(
         str(src / "bird1.jpg"), "JPEG", quality=95,
     )
-    fid = db.add_folder(str(src), name="Src")
+    fid = workspace_folders.add_folder(db, str(src), name="Src")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird1.jpg", extension=".jpg",
                         file_size=1, file_mtime=1.0)
 
@@ -3760,7 +3760,7 @@ def test_move_folder_rebases_configured_developed_dir(tmp_path):
     (developed / old_key).mkdir()
     (developed / old_key / "IMG_0001.jpg").write_bytes(b"developed-bytes")
 
-    fid = db.add_folder(str(src), name="birds")
+    fid = workspace_folders.add_folder(db, str(src), name="birds")
 
     dest_parent = tmp_path / "new_parent"
     dest_parent.mkdir()
@@ -3949,7 +3949,7 @@ def test_move_folder_descendant_query_ignores_like_wildcard_matches(tmp_path, mo
     src = src_parent / "birds"
     src.mkdir()
     (src / "IMG_0001.jpg").write_bytes(b"raw")
-    fid = db.add_folder(str(src), name="birds")
+    fid = workspace_folders.add_folder(db, str(src), name="birds")
 
     # Destination dir whose name contains `_`: SQL LIKE treats `_` as any
     # single char. Final moved path becomes `<tmp>/d_st/birds`.
@@ -3963,7 +3963,7 @@ def test_move_folder_descendant_query_ignores_like_wildcard_matches(tmp_path, mo
     unrelated_parent.mkdir(parents=True)
     unrelated = unrelated_parent / "fake"
     unrelated.mkdir()
-    db.add_folder(str(unrelated), name="fake")
+    workspace_folders.add_folder(db, str(unrelated), name="fake")
 
     developed = tmp_path / "darktable_out"
     developed.mkdir()

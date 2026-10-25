@@ -13,7 +13,7 @@ _VIREO_DIR = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 if _VIREO_DIR not in sys.path:
     sys.path.insert(0, _VIREO_DIR)
 
-from services import photo_ingest  # noqa: E402
+from services import photo_ingest, workspace_folders  # noqa: E402
 
 
 def _make_thumb(thumb_dir, photo_id):
@@ -74,10 +74,10 @@ def browse_seed(db_path, thumb_dir, photos_root):
     # fall back to synthetic paths for headless CI.
     base = photos_root if photos_root else "/test/photos"
 
-    f1 = db.add_folder(os.path.join(base, "wildlife"), name="wildlife")
-    f2 = db.add_folder(os.path.join(base, "landscapes"), name="landscapes")
-    f3 = db.add_folder(
-        os.path.join(base, "wildlife", "birds"), name="birds", parent_id=f1
+    f1 = workspace_folders.add_folder(db, os.path.join(base, "wildlife"), name="wildlife")
+    f2 = workspace_folders.add_folder(db, os.path.join(base, "landscapes"), name="landscapes")
+    f3 = workspace_folders.add_folder(
+        db, os.path.join(base, "wildlife", "birds"), name="birds", parent_id=f1
     )
 
     folder_paths = {
@@ -211,7 +211,7 @@ def misses_seed(db_path, thumb_dir, photos_root):
     db.set_active_workspace(ws_id)
 
     base = photos_root if photos_root else "/test/photos"
-    folder_id = db.add_folder(os.path.join(base, "misses_fixture"), name="misses_fixture")
+    folder_id = workspace_folders.add_folder(db, os.path.join(base, "misses_fixture"), name="misses_fixture")
 
     ts = "2026-04-22T10:00:00+00:00"
     specs = [
@@ -274,15 +274,15 @@ def orphan_folder_seed(db_path, thumb_dir, photos_root):
 
     # Parent is linked during creation (add_folder auto-links), child is added
     # with parent_id pointing at it, then the parent is unlinked.
-    parent_id = db.add_folder(os.path.join(base, "archive"), name="archive")
-    child_id = db.add_folder(
-        os.path.join(base, "archive", "2024"), name="2024", parent_id=parent_id
+    parent_id = workspace_folders.add_folder(db, os.path.join(base, "archive"), name="archive")
+    child_id = workspace_folders.add_folder(
+        db, os.path.join(base, "archive", "2024"), name="2024", parent_id=parent_id
     )
     # Independent folder that's always a root — control to prove the tree renders.
-    linked_root_id = db.add_folder(os.path.join(base, "inbox"), name="inbox")
+    linked_root_id = workspace_folders.add_folder(db, os.path.join(base, "inbox"), name="inbox")
 
     # Unlink the parent so it's a "ghost" parent of the child.
-    db.remove_workspace_folder(ws_id, parent_id)
+    workspace_folders.remove_workspace_folder(db, ws_id, parent_id)
 
     # Give the orphan child one photo so the grid isn't empty when filtered.
     photos = []

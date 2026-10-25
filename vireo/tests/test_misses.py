@@ -3,7 +3,7 @@
 classify_miss() is a pure function that derives three miss booleans from
 per-photo features already written by the pipeline. No I/O, no DB access.
 """
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _row(**overrides):
@@ -189,7 +189,7 @@ def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
     # Database.__init__ auto-creates a "Default" workspace and sets it active.
 
     # Insert a folder for the photos.
-    folder_id = db.add_folder("/tmp/fake")
+    folder_id = workspace_folders.add_folder(db, "/tmp/fake")
 
     # Two photos in the same burst — one keeper, one lost-framing miss.
     p_keeper = photo_ingest.add_photo(
@@ -258,7 +258,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
 
     # Folder linked to A only — add it while A is active.
     db.set_active_workspace(ws_a)
-    fa = db.add_folder("/tmp/a", name="a")
+    fa = workspace_folders.add_folder(db, "/tmp/a", name="a")
     p_a = photo_ingest.add_photo(
         db, fa, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
         timestamp="2026-04-22T10:00:00",
@@ -277,7 +277,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
 
     # Folder linked to B — add while B is active.
     db.set_active_workspace(ws_b)
-    fb = db.add_folder("/tmp/b", name="b")
+    fb = workspace_folders.add_folder(db, "/tmp/b", name="b")
     p_b = photo_ingest.add_photo(
         db, fb, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0,
         timestamp="2026-04-22T10:00:01",
@@ -323,7 +323,7 @@ def test_compute_misses_scoped_to_collection_leaves_others_untouched(tmp_path):
     from misses import compute_misses_for_workspace
 
     db = Database(str(tmp_path / "m.db"))
-    folder_id = db.add_folder("/tmp/fake", name="fake")
+    folder_id = workspace_folders.add_folder(db, "/tmp/fake", name="fake")
 
     p_in = photo_ingest.add_photo(
         db, folder_id, "in.jpg", extension=".jpg", file_size=100,
@@ -393,7 +393,7 @@ def test_compute_misses_respects_exclude_photo_ids(tmp_path):
     from misses import compute_misses_for_workspace
 
     db = Database(str(tmp_path / "m.db"))
-    folder_id = db.add_folder("/tmp/fake", name="fake")
+    folder_id = workspace_folders.add_folder(db, "/tmp/fake", name="fake")
 
     p_kept = photo_ingest.add_photo(
         db, folder_id, "kept.jpg", extension=".jpg", file_size=100,
@@ -453,7 +453,7 @@ def test_compute_misses_uses_injected_now_timestamp(tmp_path):
     from misses import compute_misses_for_workspace
 
     db = Database(str(tmp_path / "m.db"))
-    folder_id = db.add_folder("/tmp/fake", name="fake")
+    folder_id = workspace_folders.add_folder(db, "/tmp/fake", name="fake")
     pid = photo_ingest.add_photo(
         db, folder_id, "p.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, timestamp="2026-04-22T10:00:00",
@@ -491,7 +491,7 @@ def _photo_with_weak_detection(db, name, file_mtime, det_conf=0.143):
     Without a classifier prediction this photo is flagged ``no_subject``.
     Returns ``(photo_id, detection_id)``.
     """
-    folder_id = db.add_folder(f"/tmp/{name}", name=name)
+    folder_id = workspace_folders.add_folder(db, f"/tmp/{name}", name=name)
     pid = photo_ingest.add_photo(
         db, folder_id, f"{name}.jpg", extension=".jpg", file_size=100,
         file_mtime=file_mtime, timestamp=f"2026-04-22T10:00:0{file_mtime}",

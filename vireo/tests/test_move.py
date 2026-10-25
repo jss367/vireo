@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from db import Database
 from scanner import ScanOptions
-from services import catalog_deletion, photo_ingest
+from services import catalog_deletion, photo_ingest, workspace_folders
 
 
 def _tmp_folds_case():
@@ -48,8 +48,8 @@ def move_env(tmp_path):
     dst = tmp_path / "dst"
     dst.mkdir()
 
-    fid_src = db.add_folder(str(src), name="src")
-    fid_dst = db.add_folder(str(dst), name="dst")
+    fid_src = workspace_folders.add_folder(db, str(src), name="src")
+    fid_dst = workspace_folders.add_folder(db, str(dst), name="dst")
 
     # Create real files
     (src / "bird1.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
@@ -150,7 +150,7 @@ def test_move_photos_in_place_check_matches_alias_folder_row(move_env):
         os.symlink(env["src"], alias, target_is_directory=True)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable")
-    env["db"].add_folder(str(alias), name="src-alias")
+    workspace_folders.add_folder(env["db"], str(alias), name="src-alias")
 
     result = move_photos(
         db=env["db"], photo_ids=[env["p1"]], destination=str(alias),
@@ -183,7 +183,7 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
     src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
 
     (src / "first.jpg").write_bytes(b"first")
     (src / "first.xmp").write_text("<xmp/>")
@@ -235,7 +235,7 @@ def test_move_folder_by_date_progress_counts_each_photo_once(tmp_path):
     src.mkdir()
     archive = tmp_path / "archive"
     (archive / "2026-07-12").mkdir(parents=True)
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
     for name, stamp in (("a.jpg", "2026-07-12T09:00:00"),
                         ("b.jpg", "2026-07-12T09:01:00"),
                         ("c.jpg", "2026-07-13T09:00:00")):
@@ -267,7 +267,7 @@ def test_move_folder_by_date_copies_shared_xmp_to_each_date(tmp_path):
     src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
 
     (src / "IMG.CR3").write_bytes(b"raw")
     (src / "IMG.JPG").write_bytes(b"jpeg")
@@ -304,7 +304,7 @@ def test_move_photos_reuses_shared_xmp_within_one_destination(tmp_path):
     src = tmp_path / "card"
     src.mkdir()
     destination = tmp_path / "archive"
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
     (src / "IMG.CR3").write_bytes(b"raw")
     (src / "IMG.JPG").write_bytes(b"jpeg")
     (src / "IMG.xmp").write_bytes(b"shared-xmp")
@@ -343,7 +343,7 @@ def test_move_folder_by_date_rebases_developed_outputs(tmp_path):
     src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
 
     (src / "first.jpg").write_bytes(b"first")
     (src / "second.jpg").write_bytes(b"second")
@@ -394,7 +394,7 @@ def test_move_folder_by_date_without_developed_dir_leaves_disk_alone(tmp_path):
     src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
     (src / "first.jpg").write_bytes(b"first")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="first.jpg", extension=".jpg",
@@ -468,13 +468,13 @@ def test_move_folder_relocates_subfolder_renders_for_either_separator(tmp_path, 
     src = path("Staging", "Birds")
     dst = path("Archive", "Birds")
     # The catalog as ``update_catalog`` leaves it: rows already rebased.
-    root = db.add_folder(dst, name="Birds")
-    sub = db.add_folder(path("Archive", "Birds", "Day 1"), name="Day 1",
+    root = workspace_folders.add_folder(db, dst, name="Birds")
+    sub = workspace_folders.add_folder(db, path("Archive", "Birds", "Day 1"), name="Day 1",
                         parent_id=root)
-    db.add_folder(path("Archive", "Birds", "Day 1", "Eagles"), name="Eagles",
+    workspace_folders.add_folder(db, path("Archive", "Birds", "Day 1", "Eagles"), name="Eagles",
                   parent_id=sub)
     # A sibling whose name only shares a prefix is not part of the move.
-    db.add_folder(path("Archive", "Birds2"), name="Birds2")
+    workspace_folders.add_folder(db, path("Archive", "Birds2"), name="Birds2")
 
     developed = tmp_path / "developed"
     renders = {
@@ -561,8 +561,8 @@ def test_move_photos_rejects_stale_default_developed_render_at_destination(
     src.mkdir()
     dst = tmp_path / "dst"
     dst.mkdir()
-    fid_src = db.add_folder(str(src), name="src")
-    db.add_folder(str(dst), name="dst")
+    fid_src = workspace_folders.add_folder(db, str(src), name="src")
+    workspace_folders.add_folder(db, str(dst), name="dst")
 
     (src / "bird.cr3").write_bytes(b"raw")
     pid = photo_ingest.add_photo(
@@ -600,8 +600,8 @@ def test_move_photos_rejects_blocked_default_developed_path(tmp_path):
     src.mkdir()
     dst = tmp_path / "dst"
     dst.mkdir()
-    fid_src = db.add_folder(str(src), name="src")
-    db.add_folder(str(dst), name="dst")
+    fid_src = workspace_folders.add_folder(db, str(src), name="src")
+    workspace_folders.add_folder(db, str(dst), name="dst")
 
     source_file = src / "bird.cr3"
     source_file.write_bytes(b"raw")
@@ -641,8 +641,8 @@ def test_move_photos_rejects_case_folded_stale_developed_render(
     src.mkdir()
     dst = tmp_path / "dst"
     dst.mkdir()
-    fid_src = db.add_folder(str(src), name="src")
-    db.add_folder(str(dst), name="dst")
+    fid_src = workspace_folders.add_folder(db, str(src), name="src")
+    workspace_folders.add_folder(db, str(dst), name="dst")
 
     incoming = src / "img.cr3"
     incoming.write_bytes(b"raw")
@@ -676,9 +676,9 @@ def test_move_photos_out_of_developed_folder_ignores_source_original(
     destination = tmp_path / "archive"
     source = destination / "developed"
     source.mkdir(parents=True)
-    destination_id = db.add_folder(str(destination), name="archive")
-    source_id = db.add_folder(
-        str(source), name="developed", parent_id=destination_id,
+    destination_id = workspace_folders.add_folder(db, str(destination), name="archive")
+    source_id = workspace_folders.add_folder(
+        db, str(source), name="developed", parent_id=destination_id,
     )
     source_file = source / "bird.jpg"
     source_file.write_bytes(b"original")
@@ -713,8 +713,8 @@ def test_move_photos_stale_check_allows_same_source_shared_stem(tmp_path):
     src.mkdir()
     dst = tmp_path / "dst"
     dst.mkdir()
-    fid_src = db.add_folder(str(src), name="src")
-    db.add_folder(str(dst), name="dst")
+    fid_src = workspace_folders.add_folder(db, str(src), name="src")
+    workspace_folders.add_folder(db, str(dst), name="dst")
 
     (src / "IMG.raw").write_bytes(b"raw")
     (src / "IMG.jpg").write_bytes(b"jpeg")
@@ -758,8 +758,8 @@ def test_move_photos_keeps_render_for_unselected_same_stem_photo(tmp_path):
     src.mkdir()
     dst = tmp_path / "dst"
     dst.mkdir()
-    fid = db.add_folder(str(src), name="src")
-    db.add_folder(str(dst), name="dst")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
+    workspace_folders.add_folder(db, str(dst), name="dst")
 
     (src / "IMG.raw").write_bytes(b"raw")
     (src / "IMG.jpg").write_bytes(b"jpeg")
@@ -811,7 +811,7 @@ def test_move_folder_by_date_rebases_default_developed_renders(tmp_path):
     src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
 
     (src / "first.jpg").write_bytes(b"first")
     (src / "second.jpg").write_bytes(b"second")
@@ -855,9 +855,9 @@ def test_move_folder_by_date_preserves_tracked_developed_child(tmp_path):
     tracked_child.mkdir(parents=True)
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
-    child_fid = db.add_folder(
-        str(tracked_child), name="developed", parent_id=fid,
+    fid = workspace_folders.add_folder(db, str(src), name="card")
+    child_fid = workspace_folders.add_folder(
+        db, str(tracked_child), name="developed", parent_id=fid,
     )
 
     # Matching stems reproduce the bug: moving the parent's bird first used
@@ -899,7 +899,7 @@ def test_move_folder_by_date_copies_shared_stem_render_to_each_date(tmp_path):
     src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
 
     (src / "IMG.raw").write_bytes(b"raw")
     (src / "IMG.jpg").write_bytes(b"jpeg")
@@ -950,7 +950,7 @@ def test_move_folder_by_date_copies_shared_stem_render_configured_dir(
     src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
 
     (src / "IMG.CR3").write_bytes(b"raw")
     (src / "IMG.JPG").write_bytes(b"jpg")
@@ -1000,9 +1000,9 @@ def test_move_folder_by_date_rejects_distinct_same_stem_renders(tmp_path):
     second_src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    parent_fid = db.add_folder(str(parent), name="card")
-    first_fid = db.add_folder(str(first_src), name="a", parent_id=parent_fid)
-    second_fid = db.add_folder(str(second_src), name="b", parent_id=parent_fid)
+    parent_fid = workspace_folders.add_folder(db, str(parent), name="card")
+    first_fid = workspace_folders.add_folder(db, str(first_src), name="a", parent_id=parent_fid)
+    second_fid = workspace_folders.add_folder(db, str(second_src), name="b", parent_id=parent_fid)
 
     (first_src / "IMG.CR3").write_bytes(b"first-raw")
     (second_src / "IMG.NEF").write_bytes(b"second-raw")
@@ -1057,7 +1057,7 @@ def test_move_folder_by_date_lists_developed_dir_once_per_source(
     src.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    fid = db.add_folder(str(src), name="card")
+    fid = workspace_folders.add_folder(db, str(src), name="card")
 
     # Three distinct capture-date destinations so the group loop runs
     # three times, each of which used to list the source developed subdir
@@ -1118,7 +1118,7 @@ def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path, te
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     (src / "unknown.jpg").write_bytes(b"x")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="unknown.jpg", extension=".jpg",
@@ -1146,7 +1146,7 @@ def test_folder_subtree_photos_reads_only_date_columns(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1167,7 +1167,7 @@ def test_plan_folder_date_moves_normalizes_dot_components(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1190,7 +1190,7 @@ def test_plan_folder_date_moves_rejects_dot_only_template(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1218,7 +1218,7 @@ def test_plan_folder_date_moves_rejects_template_that_escapes_destination(tmp_pa
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     (src / "photo.jpg").write_bytes(b"x")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
@@ -1240,7 +1240,7 @@ def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1270,7 +1270,7 @@ def test_plan_folder_date_moves_rejects_destination_root_regular_file(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1306,7 +1306,7 @@ def test_plan_folder_date_moves_rejects_parent_of_missing_destination_root(tmp_p
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1336,7 +1336,7 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_parent_of_root(tmp_path
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1367,7 +1367,7 @@ def test_plan_folder_date_moves_rejects_ancestor_occupied_by_file(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1402,7 +1402,7 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_ancestor(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1438,7 +1438,7 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_destination(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1492,8 +1492,8 @@ def test_plan_folder_date_moves_does_not_leak_slash_siblings_on_posix(tmp_path):
     slash_nested.mkdir()
     (slash_nested / "sibling.jpg").write_bytes(b"sibling")
 
-    fid_target = db.add_folder(str(backslash_dir), name="a\\b")
-    fid_nested = db.add_folder(str(slash_nested), name="nested")
+    fid_target = workspace_folders.add_folder(db, str(backslash_dir), name="a\\b")
+    fid_nested = workspace_folders.add_folder(db, str(slash_nested), name="nested")
     photo_ingest.add_photo(
         db, folder_id=fid_target, filename="target.jpg", extension=".jpg",
         file_size=6, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1556,9 +1556,9 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
 
     # Insert the folder rows directly so we can control the exact case that
     # gets stored — add_folder normalizes through the filesystem.
-    parent_fid = db.add_folder(str(parent_disk), name="photos")
-    child_fid = db.add_folder(str(child_disk), name="2026")
-    alias_fid = db.add_folder(str(alias_disk), name="alias")
+    parent_fid = workspace_folders.add_folder(db, str(parent_disk), name="photos")
+    child_fid = workspace_folders.add_folder(db, str(child_disk), name="2026")
+    alias_fid = workspace_folders.add_folder(db, str(alias_disk), name="alias")
     db.conn.execute(
         "UPDATE folders SET path = ? WHERE id = ?",
         ("C:\\Photos", parent_fid),
@@ -1612,8 +1612,8 @@ def test_plan_folder_date_moves_matches_case_alias_on_casefolding_posix(
     parent_disk = tmp_path / "Photos"
     child_disk = parent_disk / "2026"
     child_disk.mkdir(parents=True)
-    parent_fid = db.add_folder(str(parent_disk), name="Photos")
-    child_fid = db.add_folder(str(child_disk), name="2026")
+    parent_fid = workspace_folders.add_folder(db, str(parent_disk), name="Photos")
+    child_fid = workspace_folders.add_folder(db, str(child_disk), name="2026")
     parent_path = str(parent_disk)
     child_alias = str(tmp_path / "photos" / "2026")
     db.conn.execute(
@@ -1670,8 +1670,8 @@ def test_plan_folder_date_moves_matches_symlink_alias_descendants_on_posix(
     except (OSError, NotImplementedError):
         pytest.skip("filesystem does not support symlinks")
 
-    parent_fid = db.add_folder(str(alias_root), name="card")
-    child_fid = db.add_folder(str(target_root / "day"), name="day")
+    parent_fid = workspace_folders.add_folder(db, str(alias_root), name="card")
+    child_fid = workspace_folders.add_folder(db, str(target_root / "day"), name="day")
     child_pid = photo_ingest.add_photo(
         db, folder_id=child_fid, filename="child.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
@@ -1699,7 +1699,7 @@ def test_move_photos_allows_incremental_same_stem_siblings(tmp_path):
     raw.write_bytes(b"raw")
     jpeg.write_bytes(b"jpeg")
     raw_pid = photo_ingest.add_photo(
-        db, folder_id=db.add_folder(str(src), name="src"),
+        db, folder_id=workspace_folders.add_folder(db, str(src), name="src"),
         filename=raw.name, extension=".cr3", file_size=3, file_mtime=1.0,
     )
     source_fid = db.photos.get(raw_pid)["folder_id"]
@@ -1733,8 +1733,8 @@ def test_move_photos_rejects_unknown_destination_same_stem_origin(tmp_path):
     destination = tmp_path / "destination"
     source.mkdir()
     destination.mkdir()
-    source_fid = db.add_folder(str(source), name="source")
-    destination_fid = db.add_folder(str(destination), name="destination")
+    source_fid = workspace_folders.add_folder(db, str(source), name="source")
+    destination_fid = workspace_folders.add_folder(db, str(destination), name="destination")
     incoming = source / "IMG.CR3"
     existing = destination / "IMG.JPG"
     incoming.write_bytes(b"unrelated-raw")
@@ -1775,7 +1775,7 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
     original_source = tmp_path / "original"
     destination = tmp_path / "destination"
     original_source.mkdir()
-    original_fid = db.add_folder(str(original_source), name="original")
+    original_fid = workspace_folders.add_folder(db, str(original_source), name="original")
     original_file = original_source / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
     original_pid = photo_ingest.add_photo(
@@ -1783,7 +1783,7 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
-    db.add_workspace_folder(ws_id, original_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, original_fid)
 
     first = move_photos(db, [original_pid], str(destination))
     assert first["moved"] == 1
@@ -1805,7 +1805,7 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
         (original_fid, str(replacement_source), "replacement"),
     )
     db.conn.commit()
-    db.add_workspace_folder(ws_id, original_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, original_fid)
 
     incoming_file = replacement_source / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
@@ -1846,7 +1846,7 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
     reusable_path = tmp_path / "CARD"
     destination = tmp_path / "archive"
     reusable_path.mkdir()
-    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
     original_pid = photo_ingest.add_photo(
@@ -1866,7 +1866,7 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
-    db.add_workspace_folder(ws_id, original_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, original_fid)
 
     first = move_photos(db, [original_pid], str(destination))
     assert first["moved"] == 1
@@ -1896,8 +1896,8 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
 
     # A brand-new folder appears at the same path with an unrelated photo
     # that happens to share the stem.
-    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
-    db.add_workspace_folder(ws_id, replacement_fid)
+    replacement_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
+    workspace_folders.add_workspace_folder(db, ws_id, replacement_fid)
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
     incoming_pid = photo_ingest.add_photo(
@@ -1938,7 +1938,7 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     reusable_path = tmp_path / "CARD"
     destination = tmp_path / "archive"
     reusable_path.mkdir()
-    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
     original_pid = photo_ingest.add_photo(
@@ -1957,7 +1957,7 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
-    db.add_workspace_folder(ws_id, original_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, original_fid)
 
     first = move_photos(db, [original_pid], str(destination))
     assert first["moved"] == 1
@@ -1974,7 +1974,7 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     # another folder already tracks (e.g. a replacement archive folder).
     target_path = tmp_path / "REPLACEMENT"
     target_path.mkdir()
-    target_fid = db.add_folder(str(target_path), name="REPLACEMENT")
+    target_fid = workspace_folders.add_folder(db, str(target_path), name="REPLACEMENT")
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?",
         (original_fid,),
@@ -2003,8 +2003,8 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     # A brand-new unrelated folder now appears at the freed path with a
     # same-stem photo but a different extension.
     reusable_path.mkdir()
-    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
-    db.add_workspace_folder(ws_id, replacement_fid)
+    replacement_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
+    workspace_folders.add_workspace_folder(db, ws_id, replacement_fid)
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
     incoming_pid = photo_ingest.add_photo(
@@ -2041,11 +2041,11 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
     new_child.mkdir(parents=True)
     destination = tmp_path / "archive"
 
-    old_root_id = db.add_folder(str(old_root), name="OLD")
-    child_id = db.add_folder(
-        str(old_child), name="child", parent_id=old_root_id,
+    old_root_id = workspace_folders.add_folder(db, str(old_root), name="OLD")
+    child_id = workspace_folders.add_folder(
+        db, str(old_child), name="child", parent_id=old_root_id,
     )
-    new_root_id = db.add_folder(str(new_root), name="NEW")
+    new_root_id = workspace_folders.add_folder(db, str(new_root), name="NEW")
 
     moved_file = old_child / "IMG.JPG"
     sibling_file = old_child / "IMG.CR3"
@@ -2101,7 +2101,7 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
     # Reuse the freed old child path with unrelated same-stem content. The
     # rebased provenance must make the destination collision guard reject it.
     old_child.mkdir(parents=True)
-    replacement_id = db.add_folder(str(old_child), name="child")
+    replacement_id = workspace_folders.add_folder(db, str(old_child), name="child")
     incoming = old_child / "IMG.NEF"
     incoming.write_bytes(b"replacement")
     incoming_pid = photo_ingest.add_photo(
@@ -2139,7 +2139,7 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     reusable_path = tmp_path / "CARD"
     destination = tmp_path / "archive"
     reusable_path.mkdir()
-    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
     original_pid = photo_ingest.add_photo(
@@ -2158,7 +2158,7 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
-    db.add_workspace_folder(ws_id, original_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, original_fid)
 
     first = move_photos(db, [original_pid], str(destination))
     assert first["moved"] == 1
@@ -2189,8 +2189,8 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     # A brand-new folder appears at the freed path with an unrelated photo
     # that happens to share the stem.
     reusable_path.mkdir()
-    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
-    db.add_workspace_folder(ws_id, replacement_fid)
+    replacement_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
+    workspace_folders.add_workspace_folder(db, ws_id, replacement_fid)
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
     incoming_pid = photo_ingest.add_photo(
@@ -2230,7 +2230,7 @@ def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
     source_path = tmp_path / "CARD"
     destination = tmp_path / "archive"
     source_path.mkdir()
-    src_fid = db.add_folder(str(source_path), name="CARD")
+    src_fid = workspace_folders.add_folder(db, str(source_path), name="CARD")
     src_file = source_path / "IMG.JPG"
     src_file.write_bytes(b"original-jpeg")
     src_pid = photo_ingest.add_photo(
@@ -2238,7 +2238,7 @@ def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
         extension=".jpg", file_size=src_file.stat().st_size,
         file_mtime=1.0,
     )
-    db.add_workspace_folder(ws_id, src_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, src_fid)
 
     first = move_photos(db, [src_pid], str(destination))
     assert first["moved"] == 1
@@ -2288,8 +2288,8 @@ def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
     source_path = tmp_path / "CARD"
     destination = tmp_path / "archive"
     source_path.mkdir()
-    src_fid = db.add_folder(str(source_path), name="CARD")
-    db.add_workspace_folder(ws_id, src_fid)
+    src_fid = workspace_folders.add_folder(db, str(source_path), name="CARD")
+    workspace_folders.add_workspace_folder(db, ws_id, src_fid)
 
     raw = source_path / "IMG.CR3"
     jpeg = source_path / "IMG.JPG"
@@ -2357,7 +2357,7 @@ def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
     dest_a = tmp_path / "archive" / "2026-07-19"
     dest_b = tmp_path / "archive" / "2026-07-20"
     source_path.mkdir()
-    src_fid = db.add_folder(str(source_path), name="CARD")
+    src_fid = workspace_folders.add_folder(db, str(source_path), name="CARD")
     file_a = source_path / "IMG.JPG"
     file_a.write_bytes(b"jpeg-bytes")
     file_b = source_path / "IMG.CR3"
@@ -2370,7 +2370,7 @@ def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
         db, folder_id=src_fid, filename=file_b.name, extension=".cr3",
         file_size=file_b.stat().st_size, file_mtime=2.0,
     )
-    db.add_workspace_folder(ws_id, src_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, src_fid)
 
     # First sibling moves to date A (source still has the other sibling —
     # provenance should be preserved on this call).
@@ -2419,7 +2419,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     reusable_path = tmp_path / "CARD"
     destination = tmp_path / "archive"
     reusable_path.mkdir()
-    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
     original_pid = photo_ingest.add_photo(
@@ -2438,7 +2438,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
-    db.add_workspace_folder(ws_id, original_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, original_fid)
 
     first = move_photos(db, [original_pid], str(destination))
     assert first["moved"] == 1
@@ -2475,8 +2475,8 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     # A brand-new unrelated folder appears at the freed path with an
     # unrelated photo whose stem matches.
     reusable_path.mkdir()
-    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
-    db.add_workspace_folder(ws_id, replacement_fid)
+    replacement_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
+    workspace_folders.add_workspace_folder(db, ws_id, replacement_fid)
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
     incoming_pid = photo_ingest.add_photo(
@@ -2522,7 +2522,7 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
     reusable_path = tmp_path / "CARD"
     destination = tmp_path / "archive"
     reusable_path.mkdir()
-    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_fid = workspace_folders.add_folder(db, str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
     original_pid = photo_ingest.add_photo(
@@ -2540,7 +2540,7 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
-    db.add_workspace_folder(ws_id, original_fid)
+    workspace_folders.add_workspace_folder(db, ws_id, original_fid)
 
     first = move_photos(db, [original_pid], str(destination))
     assert first["moved"] == 1
@@ -2630,10 +2630,10 @@ def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
     source_a.mkdir()
     source_b.mkdir()
 
-    fid_a = db.add_folder(str(source_a), name="cardA")
-    fid_b = db.add_folder(str(source_b), name="cardB")
-    db.add_workspace_folder(ws_id, fid_a)
-    db.add_workspace_folder(ws_id, fid_b)
+    fid_a = workspace_folders.add_folder(db, str(source_a), name="cardA")
+    fid_b = workspace_folders.add_folder(db, str(source_b), name="cardB")
+    workspace_folders.add_workspace_folder(db, ws_id, fid_a)
+    workspace_folders.add_workspace_folder(db, ws_id, fid_b)
 
     file_a = source_a / "IMG.CR3"
     file_a.write_bytes(b"raw-a")
@@ -2687,10 +2687,10 @@ def test_move_photos_folds_stems_for_configured_developed_volume(
     source_b = tmp_path / "cardB"
     source_a.mkdir()
     source_b.mkdir()
-    fid_a = db.add_folder(str(source_a), name="cardA")
-    fid_b = db.add_folder(str(source_b), name="cardB")
-    db.add_workspace_folder(ws_id, fid_a)
-    db.add_workspace_folder(ws_id, fid_b)
+    fid_a = workspace_folders.add_folder(db, str(source_a), name="cardA")
+    fid_b = workspace_folders.add_folder(db, str(source_b), name="cardB")
+    workspace_folders.add_workspace_folder(db, ws_id, fid_a)
+    workspace_folders.add_workspace_folder(db, ws_id, fid_b)
 
     file_a = source_a / "IMG.CR3"
     file_b = source_b / "img.NEF"
@@ -2736,7 +2736,7 @@ def test_move_photos_rejects_same_source_case_only_stem_collision(
     source = tmp_path / "case-sensitive-source"
     destination = tmp_path / "case-folding-destination"
     source.mkdir()
-    fid = db.add_folder(str(source), name="source")
+    fid = workspace_folders.add_folder(db, str(source), name="source")
     files = {
         "IMG.CR3": b"raw-upper",
         "IMG.JPG": b"jpeg-upper",
@@ -2796,10 +2796,10 @@ def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
     source_a.mkdir()
     source_b.mkdir()
 
-    fid_a = db.add_folder(str(source_a), name="cardA")
-    fid_b = db.add_folder(str(source_b), name="cardB")
-    db.add_workspace_folder(ws_id, fid_a)
-    db.add_workspace_folder(ws_id, fid_b)
+    fid_a = workspace_folders.add_folder(db, str(source_a), name="cardA")
+    fid_b = workspace_folders.add_folder(db, str(source_b), name="cardB")
+    workspace_folders.add_workspace_folder(db, ws_id, fid_a)
+    workspace_folders.add_workspace_folder(db, ws_id, fid_b)
 
     file_a = source_a / "IMG.CR3"
     file_a.write_bytes(b"raw-a")
@@ -2834,7 +2834,7 @@ def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     (src / "photo.jpg").write_bytes(b"x")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="photo.jpg", extension=".jpg",
@@ -2866,7 +2866,7 @@ def test_move_photos_refuses_broken_symlink_destination(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     src = tmp_path / "src"
     src.mkdir()
-    fid = db.add_folder(str(src), name="src")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
     photo = src / "photo.jpg"
     photo.write_bytes(b"x")
     pid = photo_ingest.add_photo(
@@ -3306,7 +3306,7 @@ def test_move_folder_copies_tree(move_env):
     sub = env["src"] / "sub"
     sub.mkdir()
     (sub / "nest.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
-    fid_sub = env["db"].add_folder(str(sub), name="sub", parent_id=env["fid_src"])
+    fid_sub = workspace_folders.add_folder(env["db"], str(sub), name="sub", parent_id=env["fid_src"])
     photo_ingest.add_photo(env["db"], folder_id=fid_sub, filename="nest.jpg", extension=".jpg",
                         file_size=52, file_mtime=3.0)
 
@@ -3369,7 +3369,7 @@ def test_move_folder_no_op_rename_preserves_untrimmed_source_name(tmp_path):
     dst = tmp_path / "archive"
     dst.mkdir()
 
-    fid = db.add_folder(str(src), name=" shoot ")
+    fid = workspace_folders.add_folder(db, str(src), name=" shoot ")
     photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                  file_size=102, file_mtime=1.0)
 
@@ -3413,7 +3413,7 @@ def test_move_folder_no_op_rename_uses_source_leaf_when_name_missing(tmp_path):
     dst = tmp_path / "archive"
     dst.mkdir()
 
-    fid = db.add_folder(str(src), name="shoot")
+    fid = workspace_folders.add_folder(db, str(src), name="shoot")
     # Simulate a legacy row: blank name, trailing separator on path.
     db.conn.execute(
         "UPDATE folders SET name = '', path = ? WHERE id = ?",
@@ -4426,7 +4426,7 @@ def test_move_folder_merge_refuses_tracked_destination(move_env):
     for fn in ("bird1.jpg", "bird1.xmp", "bird2.jpg"):
         (landing / fn).write_bytes((env["src"] / fn).read_bytes())
     # Destination already exists as its own folder row in the DB.
-    env["db"].add_folder(str(landing), name="src")
+    workspace_folders.add_folder(env["db"], str(landing), name="src")
 
     result = move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -4446,7 +4446,7 @@ def test_move_folder_merge_refuses_tracked_descendant(move_env):
     landing = env["dst"] / "src"
     (landing / "sub").mkdir(parents=True)
     # A tracked folder below the destination root.
-    env["db"].add_folder(str(landing / "sub"), name="sub")
+    workspace_folders.add_folder(env["db"], str(landing / "sub"), name="sub")
 
     result = move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -4487,7 +4487,7 @@ def test_move_folder_refuses_tracked_merge_by_default(move_env):
     for fn in ("bird1.jpg", "bird1.xmp", "bird2.jpg"):
         (landing / fn).write_bytes((env["src"] / fn).read_bytes())
     # Destination already exists as its own folder row in the DB.
-    env["db"].add_folder(str(landing), name="src")
+    workspace_folders.add_folder(env["db"], str(landing), name="src")
 
     result = move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
@@ -4515,7 +4515,7 @@ def test_move_folder_merges_into_tracked_when_allowed(move_env):
     # Prior shoot already in the archive on disk + in the catalog as a tracked
     # workspace-root folder.
     (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
-    fid_archive = db.add_folder(str(landing), name="src")
+    fid_archive = workspace_folders.add_folder(db, str(landing), name="src")
     photo_ingest.add_photo(db, folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
                  file_size=52, file_mtime=3.0)
 
@@ -4578,7 +4578,7 @@ def test_move_folder_merge_alias_destination_uses_stored_tracked_path(
     landing = real_dst / "src"
     landing.mkdir(parents=True)
     (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
-    fid_archive = db.add_folder(str(landing), name="src")
+    fid_archive = workspace_folders.add_folder(db, str(landing), name="src")
     photo_ingest.add_photo(db, folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
                  file_size=52, file_mtime=3.0)
 
@@ -4644,7 +4644,7 @@ def test_move_folder_ancestor_merge_reconciles_onto_stored_ancestor(
     # Real tracked ancestor archive with no rows below it yet.
     real_archive = env["tmp_path"] / "realarch"
     real_archive.mkdir()
-    fid_ancestor = db.add_folder(str(real_archive), name="realarch")
+    fid_ancestor = workspace_folders.add_folder(db, str(real_archive), name="realarch")
 
     # Alias destination pointing at the same on-disk directory.
     alias_archive = env["tmp_path"] / "aliasarch"
@@ -4707,7 +4707,7 @@ def test_move_folder_merge_relocates_developed_dir_onto_reconciled_base(
     real_dst = env["tmp_path"] / "realdst2"
     landing = real_dst / "src"
     landing.mkdir(parents=True)
-    fid_archive = db.add_folder(str(landing), name="src")
+    fid_archive = workspace_folders.add_folder(db, str(landing), name="src")
 
     alias_dst = env["tmp_path"] / "alias_dst2"
     try:
@@ -4775,7 +4775,7 @@ def test_move_folder_refuses_descendant_tracked_overlap_even_when_merging(move_e
     # overlap probe is folder-row based.
     landing = env["dst"] / "src"
     inner = landing / "existing-shoot"
-    inner_fid = db.add_folder(str(inner), name="existing-shoot")
+    inner_fid = workspace_folders.add_folder(db, str(inner), name="existing-shoot")
 
     result = move_folder(
         db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
@@ -4814,9 +4814,9 @@ def test_tracked_destination_overlap_prefers_exact_match_over_descendant(move_en
     # Insert the DESCENDANT row first so a plain unordered scan returns it
     # before the exact-match row that arrives later. Neither row needs to
     # exist on disk — the overlap probe is folder-row based.
-    desc_fid = db.add_folder(str(landing / "existing-shoot"),
+    desc_fid = workspace_folders.add_folder(db, str(landing / "existing-shoot"),
                              name="existing-shoot")
-    exact_fid = db.add_folder(str(landing), name="src")
+    exact_fid = workspace_folders.add_folder(db, str(landing), name="src")
     # Confirm the intended insertion order (descendant has the lower rowid,
     # so a naive SELECT would hit it first).
     assert desc_fid < exact_fid
@@ -4843,8 +4843,8 @@ def test_move_folder_accepts_exact_tracked_merge_despite_descendant_row(move_env
 
     # Descendant tracked row first (lower rowid than the exact-match row),
     # then the exact-match row for the landing path itself.
-    db.add_folder(str(landing / "existing-shoot"), name="existing-shoot")
-    fid_archive = db.add_folder(str(landing), name="src")
+    workspace_folders.add_folder(db, str(landing / "existing-shoot"), name="existing-shoot")
+    fid_archive = workspace_folders.add_folder(db, str(landing), name="src")
 
     result = move_folder(
         db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
@@ -4884,7 +4884,7 @@ def test_move_folder_merge_moved_excludes_already_present(move_env):
     landing.mkdir()
     identical_bytes = (env["src"] / "bird1.jpg").read_bytes()
     (landing / "bird1.jpg").write_bytes(identical_bytes)
-    fid_archive = db.add_folder(str(landing), name="src")
+    fid_archive = workspace_folders.add_folder(db, str(landing), name="src")
     # Matching ``file_hash`` on both sides is required for the merge to
     # treat the collision as real (see merge_staged_tree_into_archive's
     # hash-only invariant — size alone can't distinguish a real collision
@@ -4943,7 +4943,7 @@ def test_move_folder_merge_reports_dropped_ids_for_cache_cleanup(move_env):
     landing.mkdir()
     identical_bytes = (env["src"] / "bird1.jpg").read_bytes()
     (landing / "bird1.jpg").write_bytes(identical_bytes)
-    fid_archive = db.add_folder(str(landing), name="src")
+    fid_archive = workspace_folders.add_folder(db, str(landing), name="src")
     # Matching ``file_hash`` on both rows exercises the real-collision
     # drop path (see merge_staged_tree_into_archive's hash-only invariant).
     photo_ingest.add_photo(db, folder_id=fid_archive, filename="bird1.jpg",
@@ -4980,7 +4980,7 @@ def test_move_folder_refuses_missing_tracked_destination_before_copy(move_env):
     env = move_env
     landing = env["dst"] / "src"
     assert not landing.exists()
-    env["db"].add_folder(str(landing), name="src")
+    workspace_folders.add_folder(env["db"], str(landing), name="src")
 
     result = move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
@@ -5000,12 +5000,12 @@ def test_move_folder_refuses_missing_tracked_descendant_before_copy(move_env):
     env = move_env
     source_child = env["src"] / "sub"
     source_child.mkdir()
-    env["db"].add_folder(str(source_child), name="sub")
+    workspace_folders.add_folder(env["db"], str(source_child), name="sub")
 
     landing = env["dst"] / "src"
     tracked_child = landing / "sub"
     assert not landing.exists()
-    env["db"].add_folder(str(tracked_child), name="sub")
+    workspace_folders.add_folder(env["db"], str(tracked_child), name="sub")
 
     result = move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
@@ -5028,7 +5028,7 @@ def test_move_folder_merge_refuses_symlinked_tracked_destination(move_env):
     real_dst = env["tmp_path"] / "realdst"
     landing = real_dst / "src"
     landing.mkdir(parents=True)
-    env["db"].add_folder(str(landing), name="src")  # tracked at its real path
+    workspace_folders.add_folder(env["db"], str(landing), name="src")  # tracked at its real path
 
     link = env["tmp_path"] / "dstlink"
     try:
@@ -5123,7 +5123,7 @@ def test_move_folder_merge_refuses_case_alias_tracked_destination(move_env, monk
     landing.mkdir(parents=True)
     # Pre-populate landing so dest_exists is True and the tracked check runs.
     (landing / "bird1.jpg").write_bytes((env["src"] / "bird1.jpg").read_bytes())
-    env["db"].add_folder(str(landing), name="src")  # tracked at the real path
+    workspace_folders.add_folder(env["db"], str(landing), name="src")  # tracked at the real path
 
     alias_dst = env["tmp_path"] / "alias_dst"
     try:
@@ -5172,7 +5172,7 @@ def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, mo
     # landing /tmp_path/missing_dest/src, but neither path exists on disk.
     stale_landing = stale_parent / "src"
     assert not stale_landing.exists()
-    env["db"].add_folder(str(stale_landing), name="src")
+    workspace_folders.add_folder(env["db"], str(stale_landing), name="src")
 
     monkeypatch.setattr(move_mod.paths, "_is_case_insensitive_path", lambda p: True)
 
@@ -5366,7 +5366,7 @@ def test_tracked_destination_overlap_skips_rows_outside_ci_root(move_env, monkey
     assert not os.path.exists(dest)
 
     above_root = str(env["tmp_path"] / "CI_ROOT" / "dst" / "src")
-    env["db"].add_folder(above_root, name="src")
+    workspace_folders.add_folder(env["db"], above_root, name="src")
 
     # Force the probe True so the case-fold branch is exercised regardless
     # of the host FS (CI tends to be case-sensitive ext4).
@@ -5394,8 +5394,8 @@ def test_tracked_destination_overlap_caches_case_insensitivity_probe(move_env, m
     dest_input = env["tmp_path"] / "missing_dest_cache_probe"
     assert not dest_input.exists()
     for i in range(8):
-        env["db"].add_folder(
-            str(env["tmp_path"] / f"unrelated_{i}" / "leaf"), name="leaf"
+        workspace_folders.add_folder(
+            env["db"], str(env["tmp_path"] / f"unrelated_{i}" / "leaf"), name="leaf"
         )
 
     calls = []
@@ -6835,7 +6835,7 @@ def _catalog_folder_with_current_stats(tmp_path, names=("a.jpg", "b.jpg"),
     src.mkdir()
     dst = tmp_path / "archive"
     dst.mkdir()
-    fid = db.add_folder(str(src), name=root_name)
+    fid = workspace_folders.add_folder(db, str(src), name=root_name)
 
     ids = {}
     for index, name in enumerate(names):
@@ -7011,7 +7011,7 @@ def test_tracked_merge_restamps_mtimes_a_copy_did_not_preserve(
     landing = dst / "shoot"
     landing.mkdir()
     (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
-    fid_archive = db.add_folder(str(landing), name="shoot")
+    fid_archive = workspace_folders.add_folder(db, str(landing), name="shoot")
     prior = photo_ingest.add_photo(db, folder_id=fid_archive, filename="prior.jpg",
                          extension=".jpg", file_size=52, file_mtime=3.0)
 
@@ -7052,7 +7052,7 @@ def test_mtime_plan_ignores_a_sibling_tree_a_like_pattern_would_match(
     decoy = decoy_dir / "decoy.jpg"
     decoy.write_bytes(b"\xff\xd8" + b"\x00" * 64)
     os.utime(decoy, (1577880000, 1577880000))
-    fid_decoy = db.add_folder(str(decoy_dir), name="sub")
+    fid_decoy = workspace_folders.add_folder(db, str(decoy_dir), name="sub")
     decoy_id = photo_ingest.add_photo(
         db, folder_id=fid_decoy, filename="decoy.jpg", extension=".jpg",
         file_size=decoy.stat().st_size, file_mtime=decoy.stat().st_mtime)
@@ -7111,15 +7111,15 @@ def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
     src = tmp_path / "shoot\\1"
     sub = src / "sub"
     sub.mkdir(parents=True)
-    fid = db.add_folder(str(src), name="shoot\\1")
-    fid_sub = db.add_folder(str(sub), name="sub", parent_id=fid)
+    fid = workspace_folders.add_folder(db, str(src), name="shoot\\1")
+    fid_sub = workspace_folders.add_folder(db, str(sub), name="sub", parent_id=fid)
     moved_id = _add(fid_sub, sub, "d.jpg")
 
     # Unrelated tree that normalizes to the same prefix, at the same relative
     # path so the escaped lookup would find a same-sized file.
     decoy_dir = tmp_path / "shoot" / "1" / "sub"
     decoy_dir.mkdir(parents=True)
-    fid_decoy = db.add_folder(str(decoy_dir), name="sub")
+    fid_decoy = workspace_folders.add_folder(db, str(decoy_dir), name="sub")
     decoy_id = _add(fid_decoy, decoy_dir, "d.jpg")
 
     # The copy as the transfer left it: same bytes, a fresh timestamp.
@@ -7664,8 +7664,8 @@ def test_date_move_reports_photos_already_in_each_destination(tmp_path):
     date.mkdir(parents=True)
     (date / "bird.jpg").write_bytes(b"bird")
     with Database(str(tmp_path / "catalog.db")) as db:
-        root_id = db.add_folder(str(archive))
-        date_id = db.add_folder(str(date), parent_id=root_id)
+        root_id = workspace_folders.add_folder(db, str(archive))
+        date_id = workspace_folders.add_folder(db, str(date), parent_id=root_id)
         photo_ingest.add_photo(db, date_id, "bird.jpg", ".jpg", 4, 1.0, timestamp="2026-07-12T09:30:00")
         result = move_folder_by_date(db, root_id, str(archive), "%Y-%m-%d")
         assert result["errors"] == []

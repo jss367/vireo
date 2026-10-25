@@ -11,14 +11,14 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database  # noqa: E402
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _make_db(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
     p1 = photo_ingest.add_photo(
         db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,

@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'vireo'))
 
-from services import photo_ingest  # noqa: E402
+from services import photo_ingest, workspace_folders  # noqa: E402
 
 SCHEMA = 2
 VIEWS = {'quick': 1024, 'fit': 2048, 'native': None}
@@ -180,7 +180,7 @@ def run_worker(spec):
         stat = path.stat()
         with Database(db_path) as db:
             db.set_active_workspace(db.ensure_default_workspace())
-            folder = db.add_folder(str(path.parent))
+            folder = workspace_folders.add_folder(db, str(path.parent))
             photo = photo_ingest.add_photo(
                 db, folder_id=folder, filename=path.name, extension=path.suffix.lower(),
                 file_size=stat.st_size, file_mtime=stat.st_mtime,

@@ -3,13 +3,13 @@
 import sqlite3
 
 import pytest
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from services.pending_changes import queue_location_sync_if_enabled
 
 
 @pytest.mark.parametrize("commit", [False, True])
 def test_location_sync_rejects_photo_outside_explicit_workspace(db, tmp_path, commit):
-    folder = db.add_folder(str(tmp_path / "source"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "source"))
     photo = photo_ingest.add_photo(db, folder, "synthetic.jpg", ".jpg", 1, 1.0)
     other_workspace = db.create_workspace("Other workspace")
     db.queue_change(photo, "location", "existing", workspace_id=other_workspace)
@@ -23,7 +23,7 @@ def test_location_sync_rejects_photo_outside_explicit_workspace(db, tmp_path, co
 @pytest.mark.parametrize("commit", [False, True])
 def test_location_sync_uses_explicit_workspace_and_preserves_commit_choice(db, tmp_path, commit):
     workspace = db.active_workspace_id
-    folder = db.add_folder(str(tmp_path / "source"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "source"))
     photo = photo_ingest.add_photo(db, folder, "synthetic.jpg", ".jpg", 1, 1.0)
     db.set_active_workspace(db.create_workspace("Other workspace"))
 
@@ -67,7 +67,7 @@ def test_collection_service_reads_resolve_workspace_at_use(db):
 @pytest.mark.parametrize("kind", ["folder", "workspace"])
 def test_local_copy_activation_can_be_rolled_back_as_one_transaction(db, tmp_path, kind):
     workspace_id = db.active_workspace_id
-    folder_id = db.add_folder(str(tmp_path / "source"))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "source"))
     original_path = db.folders.get(folder_id)["path"]
     folder = {
         "folder_id": folder_id,
@@ -117,7 +117,7 @@ def test_explicit_local_workspace_ids_do_not_follow_the_active_workspace(db):
 
 
 def test_staging_rebase_detects_a_changed_catalog_path(db, tmp_path):
-    folder_id = db.add_folder(str(tmp_path / "new-source"))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "new-source"))
     folder = {"folder_id": folder_id, "source_path": str(tmp_path / "old-source"),
               "local_path": str(tmp_path / "local")}
     db.local_folders.rebase_folder_if_unchanged(folder)
