@@ -32,6 +32,7 @@ from db import (
     Database,
 )
 from services import photo_ingest, workspace_folders
+from signature_contract import calling_signature
 
 
 def _visible(db, sql, params=()):
@@ -1076,17 +1077,7 @@ def test_keyword_provenance_repository_never_hands_itself_out_as_the_database():
 def test_keyword_provenance_facade_signatures_unchanged():
     # Pin the calling contract independently of annotations, which are
     # checked by the annotation ratchet and the static API fixtures.
-    def calling_signature(name):
-        signature = inspect.signature(getattr(Database, name))
-        return str(signature.replace(
-            parameters=[
-                param.replace(annotation=inspect.Parameter.empty)
-                for param in signature.parameters.values()
-            ],
-            return_annotation=inspect.Signature.empty,
-        ))
-
-    sig = {n: calling_signature(n) for n in _DELEGATING_PROVENANCE_METHODS}
+    sig = {n: calling_signature(getattr(Database, n)) for n in _DELEGATING_PROVENANCE_METHODS}
     assert sig == {
         "tag_photo": (
             "(self, photo_id, keyword_id, source='manual', _commit=True, "

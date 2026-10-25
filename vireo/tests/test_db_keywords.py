@@ -21,6 +21,7 @@ import textwrap
 import pytest
 from db import Database
 from services import photo_ingest, workspace_folders
+from signature_contract import calling_signature
 
 
 def _visible(db, sql, params=()):
@@ -1571,7 +1572,7 @@ def test_keyword_repositories_without_facade_methods_take_no_facade():
 
 
 def test_keyword_facade_signatures_unchanged():
-    sig = {n: str(inspect.signature(getattr(Database, n)))
+    sig = {n: calling_signature(getattr(Database, n))
            for n in _DELEGATING_KEYWORD_METHODS}
     assert sig["add_keyword"] == (
         "(self, name, parent_id=None, is_species=False, kw_type=None, "

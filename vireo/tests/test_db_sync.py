@@ -26,6 +26,7 @@ import pytest
 from db import Database
 from repositories.sync import SyncRepository
 from services import pending_changes, photo_ingest, workspace_folders
+from signature_contract import calling_signature
 
 
 def _visible_rows(db):
@@ -1189,7 +1190,7 @@ def test_sync_queue_function_parameters_unchanged():
 
 
 def test_sync_facade_signatures_unchanged():
-    sig = {n: str(inspect.signature(getattr(Database, n)))
+    sig = {n: calling_signature(getattr(Database, n))
            for n in _DELEGATING_SYNC_METHODS}
     assert sig["queue_change"] == (
         "(self, photo_id, change_type, value, workspace_id=None, _commit=True)"
