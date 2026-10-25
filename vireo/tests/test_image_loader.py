@@ -809,6 +809,59 @@ def test_load_working_image_returns_none_when_no_working_copy_no_folders(tmp_pat
     assert img is None
 
 
+def _photo_row(columns):
+    """A catalog-style ``sqlite3.Row``, which has no ``.get``."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    names = ", ".join(f"? AS {name}" for name in columns)
+    try:
+        return conn.execute(f"SELECT {names}", list(columns.values())).fetchone()
+    finally:
+        conn.close()
+
+
+def test_load_working_image_accepts_sqlite_row(tmp_path):
+    """Jobs pass ``collections.get_photos`` rows straight through."""
+    from image_loader import load_working_image
+    from PIL import Image
+
+    (tmp_path / "working").mkdir()
+    Image.new("RGB", (300, 200), color="green").save(
+        str(tmp_path / "working" / "7.jpg"), "JPEG",
+    )
+    row = _photo_row({
+        "id": 7, "working_copy_path": "working/7.jpg",
+        "folder_id": 1, "filename": "bird.nef",
+    })
+
+    img, source = load_working_image(
+        row, str(tmp_path), max_size=None, return_source=True,
+    )
+
+    assert source == "working_copy"
+    assert img.size == (300, 200)
+
+
+def test_load_working_image_row_without_working_copy_column_loads_original(tmp_path):
+    from image_loader import load_working_image
+    from PIL import Image
+
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    Image.new("RGB", (120, 80), color="red").save(str(photos / "a.jpg"), "JPEG")
+    row = _photo_row({"id": 1, "folder_id": 3, "filename": "a.jpg"})
+
+    img, source = load_working_image(
+        row, str(tmp_path), max_size=None, folders={3: str(photos)},
+        return_source=True,
+    )
+
+    assert source == "original"
+    assert img.size == (120, 80)
+
+
 # ── get_canonical_image_path tests ──────────────────────────────────────────
 
 
