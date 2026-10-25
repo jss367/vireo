@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from db import Database
 from flask import Blueprint, jsonify, request
@@ -16,11 +18,17 @@ from services.local_workspace import (
     sync_back,
 )
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from jobs import JobRunner
+    from services.service_types import ErrorResponse, JobDict, JobWork, JsonDict, JsonError
+    from web.web_types import GetDb, GetRunner
 
-def _stage_callbacks(runner, job):
+
+def _stage_callbacks(runner: JobRunner, job: JobDict) -> tuple[Callable[..., None], Callable[[], bool]]:
     """Build the stage job's ``(report, begin_commit)`` callbacks."""
 
-    def report(current, total, current_bytes, total_bytes, path):
+    def report(current: int, total: int, current_bytes: int, total_bytes: int, path: str) -> None:
         job["progress"].update(
             {
                 "current": current,
@@ -39,7 +47,7 @@ def _stage_callbacks(runner, job):
         )
         runner.push_event(job["id"], "progress", dict(job["progress"]))
 
-    def begin_commit():
+    def begin_commit() -> bool:
         # The catalog rebase is about to run; a cancel landing
         # after this point must not mark the job cancelled while
         # the workspace actually activated.
@@ -57,10 +65,10 @@ def _stage_callbacks(runner, job):
     return report, begin_commit
 
 
-def _sync_callbacks(runner, job):
+def _sync_callbacks(runner: JobRunner, job: JobDict) -> tuple[Callable[[], bool], Callable[..., None]]:
     """Build the sync job's ``(begin_commit, report)`` callbacks."""
 
-    def begin_commit():
+    def begin_commit() -> bool:
         if not runner.begin_uncancellable(job["id"]):
             return False
         runner.update_step(
@@ -72,7 +80,7 @@ def _sync_callbacks(runner, job):
         runner.update_step(job["id"], "publish", status="running")
         return True
 
-    def report(current, total, path):
+    def report(current: int, total: int, path: str) -> None:
         job["progress"].update(
             {
                 "current": current,
@@ -93,26 +101,28 @@ def _sync_callbacks(runner, job):
 
 
 def create_local_workspace_blueprint(
-    get_db, json_error, get_runner, db_path, vireo_dir, invalidate_missing_originals=None
-):
+    get_db: GetDb, json_error: JsonError, get_runner: GetRunner, db_path: str, vireo_dir: str,
+    invalidate_missing_originals: Callable[[int], None] | None = None,
+) -> Blueprint:
     blueprint = Blueprint("local_workspace", __name__)
     transition_lock = threading.RLock()
 
-    def _invalidate_caches(workspace_id):
+    def _invalidate_caches(workspace_id: int) -> None:
         # Stage/sync/discard rewrite folders.path for the whole workspace;
         # the Missing Originals payload caches absolute paths and must not
         # survive a rebase (the service invalidates the new-images cache).
         if invalidate_missing_originals:
             invalidate_missing_originals(workspace_id)
 
-    def _active_context():
+    def _active_context() -> tuple[Database, int, ErrorResponse | None]:
+        """``(db, workspace_id, None)``, or ``(db, 0, error)`` without an active workspace."""
         db = get_db()
         workspace_id = db.active_workspace_id
         if workspace_id is None:
-            return None, None, json_error("No active workspace", 400)
+            return db, 0, json_error("No active workspace", 400)
         return db, workspace_id, None
 
-    def _busy_job(workspace_id):
+    def _busy_job(workspace_id: int) -> JobDict | None:
         # ``pausing``/``paused`` jobs still own the workspace: their worker
         # threads keep their original workspace and root assumptions in
         # memory and will resume writing catalog rows against the pre-
@@ -134,10 +144,10 @@ def create_local_workspace_blueprint(
                 return job
         return None
 
-    def _busy_error(busy, action):
+    def _busy_error(busy: JsonDict, action: str) -> ErrorResponse:
         return json_error(f"Wait for the {busy['type']} job to finish before {action}", 409)
 
-    def _folder_sessions_error(db, workspace_id):
+    def _folder_sessions_error(db: Database, workspace_id: int) -> ErrorResponse | None:
         # The legacy workspace-scoped stage/sync/discard uses ``status()``,
         # which only sees ``local_workspace_folders``. A folder-scoped session
         # (``local_folder_mappings``) affecting one of this workspace's folders
@@ -154,7 +164,9 @@ def create_local_workspace_blueprint(
             )
         return None
 
-    def _start_job_exclusive(workspace_id, job_type, work, validate):
+    def _start_job_exclusive(
+        workspace_id: int, job_type: str, work: JobWork, validate: Callable[[], ErrorResponse | None],
+    ) -> tuple[str | None, JobDict | None, ErrorResponse | None]:
         """Atomically validate workspace state and register its job."""
         with transition_lock:
             busy = _busy_job(workspace_id)
@@ -171,7 +183,7 @@ def create_local_workspace_blueprint(
             return job_id, None, None
 
     @blueprint.get("/api/workspaces/active/local-workspace")
-    def local_workspace_status():
+    def local_workspace_status() -> ResponseReturnValue:
         db, workspace_id, error = _active_context()
         if error:
             return error
@@ -191,13 +203,13 @@ def create_local_workspace_blueprint(
         return jsonify(payload)
 
     @blueprint.post("/api/workspaces/active/local-workspace/stage")
-    def stage_local_workspace():
+    def stage_local_workspace() -> ResponseReturnValue:
         db, workspace_id, error = _active_context()
         if error:
             return error
         runner = get_runner()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
             try:
@@ -235,7 +247,7 @@ def create_local_workspace_blueprint(
             finally:
                 thread_db.close()
 
-        def validate_stage():
+        def validate_stage() -> ErrorResponse | None:
             try:
                 current = status(db, workspace_id, vireo_dir)
             except LocalWorkspaceError as exc:
@@ -259,7 +271,7 @@ def create_local_workspace_blueprint(
             return validation_error
         return jsonify({"job_id": job_id}), 202
 
-    def _validate_sync(db, workspace_id, allow_deletions):
+    def _validate_sync(db: Database, workspace_id: int, allow_deletions: bool) -> ErrorResponse | None:
         try:
             current = status(db, workspace_id, vireo_dir)
         except LocalWorkspaceError as exc:
@@ -282,7 +294,7 @@ def create_local_workspace_blueprint(
         return None
 
     @blueprint.post("/api/workspaces/active/local-workspace/sync")
-    def sync_local_workspace():
+    def sync_local_workspace() -> ResponseReturnValue:
         db, workspace_id, error = _active_context()
         if error:
             return error
@@ -307,7 +319,7 @@ def create_local_workspace_blueprint(
 
         runner = get_runner()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
             try:
@@ -361,7 +373,7 @@ def create_local_workspace_blueprint(
         return jsonify({"job_id": job_id}), 202
 
     @blueprint.post("/api/workspaces/active/local-workspace/discard")
-    def discard_local_workspace():
+    def discard_local_workspace() -> ResponseReturnValue:
         db, workspace_id, error = _active_context()
         if error:
             return error
@@ -373,7 +385,7 @@ def create_local_workspace_blueprint(
 
         runner = get_runner()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
             try:
@@ -399,7 +411,7 @@ def create_local_workspace_blueprint(
             finally:
                 thread_db.close()
 
-        def validate_discard():
+        def validate_discard() -> ErrorResponse | None:
             try:
                 current = status(db, workspace_id, vireo_dir)
             except LocalWorkspaceError as exc:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import threading
 import unicodedata
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from db import Database
 from flask import Blueprint, jsonify, request
@@ -32,11 +34,17 @@ from services.local_folder import (
 from services.local_workspace import destination_case_insensitive, stage_boundary_lock
 from services.local_workspace import local_state as legacy_local_state
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from jobs import JobRunner
+    from services.service_types import ErrorResponse, JobDict, JsonDict, JsonError
+    from web.web_types import GetDb, GetRunner, InvalidateMissingOriginals
 
-def _stage_progress_reporter(runner, job, root_id, name):
+
+def _stage_progress_reporter(runner: JobRunner, job: JobDict, root_id: int, name: str) -> Callable[..., None]:
     """Build the stage job's per-file copy progress callback for one root."""
 
-    def report(current, total, current_bytes, total_bytes, path):
+    def report(current: int, total: int, current_bytes: int, total_bytes: int, path: str) -> None:
         job["progress"].update(
             {
                 "current": current,
@@ -59,7 +67,7 @@ def _stage_progress_reporter(runner, job, root_id, name):
     return report
 
 
-def _folder_sync_steps(root_ids, root_names):
+def _folder_sync_steps(root_ids: list[int], root_names: dict[int, str]) -> list[dict[str, str]]:
     """The sync job's step list.
 
     Two steps per folder, because a sync has two phases with very different
@@ -84,13 +92,15 @@ def _folder_sync_steps(root_ids, root_names):
     ]
 
 
-def _folder_sync_reporters(runner, job, root_id, name, scan_totals, active_step):
+def _folder_sync_reporters(
+    runner: JobRunner, job: JobDict, root_id: int, name: str, scan_totals: dict[int, int], active_step: JsonDict,
+) -> tuple[Callable[..., None], Callable[[], bool], Callable[..., None]]:
     """Build one root's sync callbacks: ``(scan_report, begin_publish, report)``.
 
     ``begin_publish`` records the publishing step in ``active_step["id"]``.
     """
 
-    def scan_report(current, total, path):
+    def scan_report(current: int, total: int, path: str) -> None:
         scan_totals[root_id] = total
         job["progress"].update(
             {
@@ -109,7 +119,7 @@ def _folder_sync_reporters(runner, job, root_id, name, scan_totals, active_step)
         )
         runner.push_event(job["id"], "progress", dict(job["progress"]))
 
-    def begin_publish():
+    def begin_publish() -> bool:
         """Close the checking phase and open the publishing one."""
         if not runner.begin_uncancellable(job["id"]):
             return False
@@ -138,7 +148,7 @@ def _folder_sync_reporters(runner, job, root_id, name, scan_totals, active_step)
         runner.push_event(job["id"], "progress", dict(job["progress"]))
         return True
 
-    def report(current, total, path):
+    def report(current: int, total: int, path: str) -> None:
         job["progress"].update(
             {
                 "current": current,
@@ -160,8 +170,8 @@ def _folder_sync_reporters(runner, job, root_id, name, scan_totals, active_step)
 
 
 def create_local_folder_blueprint(
-    get_db, json_error, get_runner, db_path, vireo_dir, invalidate_missing_originals=None
-):
+    get_db: GetDb, json_error: JsonError, get_runner: GetRunner, db_path: str, vireo_dir: str, invalidate_missing_originals: InvalidateMissingOriginals | None = None
+) -> Blueprint:
     blueprint = Blueprint("local_folder", __name__)
     transition_lock = threading.RLock()
     preflight_lock = threading.Lock()
@@ -174,7 +184,7 @@ def create_local_folder_blueprint(
     last_preflight_seq: dict[tuple[int, str | None], int] = {}
     max_preflight_sequences = 64
 
-    def _trim_preflight_sequences(protected_key=None):
+    def _trim_preflight_sequences(protected_key: tuple[int, str | None] | None = None) -> None:
         while len(last_preflight_seq) > max_preflight_sequences:
             inactive_key = next(
                 (
@@ -192,8 +202,8 @@ def create_local_folder_blueprint(
             last_preflight_seq.pop(inactive_key, None)
 
     def _begin_preflight(
-        workspace_id, preflight_id, preflight_client_id=None, preflight_seq=None
-    ):
+        workspace_id: int, preflight_id: str | None, preflight_client_id: str | None = None, preflight_seq: int | None = None
+    ) -> threading.Event:
         cancelled = threading.Event()
         with preflight_lock:
             active_key = (int(workspace_id), preflight_client_id)
@@ -240,8 +250,8 @@ def create_local_folder_blueprint(
         return cancelled
 
     def _finish_preflight(
-        workspace_id, preflight_id, preflight_client_id, cancelled
-    ):
+        workspace_id: int, preflight_id: str | None, preflight_client_id: str | None, cancelled: threading.Event,
+    ) -> None:
         with preflight_lock:
             active_key = (int(workspace_id), preflight_client_id)
             current = active_preflights.get(active_key)
@@ -249,7 +259,7 @@ def create_local_folder_blueprint(
                 active_preflights.pop(active_key, None)
             _trim_preflight_sequences()
 
-    def _cancel_preflight(workspace_id, preflight_id):
+    def _cancel_preflight(workspace_id: int, preflight_id: str) -> bool:
         with preflight_lock:
             cancellation_key = (int(workspace_id), preflight_id)
             cancelled_preflight_ids[cancellation_key] = None
@@ -268,38 +278,45 @@ def create_local_folder_blueprint(
                     return True
             return False
 
-    def _active_context():
+    def _active_context() -> tuple[Database, int, ErrorResponse | None]:
+        """``(db, workspace_id, None)``, or ``(db, 0, error)`` without an active workspace."""
         db = get_db()
         workspace_id = db.active_workspace_id
         if workspace_id is None:
-            return None, None, json_error("No active workspace", 400)
+            return db, 0, json_error("No active workspace", 400)
         return db, int(workspace_id), None
 
-    def _preflight_context(body):
-        """Bind a queued preflight to the workspace that submitted it."""
+    def _preflight_context(body: JsonDict) -> tuple[Database, int, ErrorResponse | None]:
+        """Bind a queued preflight to the workspace that submitted it.
+
+        ``(db, workspace_id, None)``, or ``(db, 0, error)`` for a bad id.
+        """
         raw_workspace_id = body.get("workspace_id")
         if raw_workspace_id is None:
             # Backward compatibility for clients loaded before workspace-bound
             # preflights were introduced.
             return _active_context()
+        db = get_db()
         if isinstance(raw_workspace_id, bool):
-            return None, None, json_error("workspace_id must be an integer", 400)
+            return db, 0, json_error("workspace_id must be an integer", 400)
         try:
             workspace_id = int(raw_workspace_id)
         except (TypeError, ValueError):
-            return None, None, json_error("workspace_id must be an integer", 400)
-        db = get_db()
+            return db, 0, json_error("workspace_id must be an integer", 400)
         if db.workspaces.get(workspace_id) is None:
-            return None, None, json_error("Workspace not found", 404)
+            return db, 0, json_error("Workspace not found", 404)
         return db, workspace_id, None
 
-    def _active_root_ids(db, workspace_id):
+    def _active_root_ids(db: Database, workspace_id: int) -> list[int]:
         # Ids only: the blocker endpoint is polled every 15s from Browse and
         # must not run the per-root photo-count subquery that
         # ``get_workspace_folder_roots`` pays for (~0.75s on a large catalog).
         return workspace_folders.get_workspace_root_folder_ids(db, workspace_id)
 
-    def _requested_roots(db, workspace_id, body, *, local_only=False):
+    def _requested_roots(
+        db: Database, workspace_id: int, body: JsonDict, *, local_only: bool = False,
+    ) -> tuple[list[int], ErrorResponse | None]:
+        """``(root_ids, None)``, or ``([], error)``."""
         active_roots = set(_active_root_ids(db, workspace_id))
         # A workspace can reach a shared local copy through a recursive
         # ancestor (workspace A links /parent while workspace B stages
@@ -320,20 +337,20 @@ def create_local_folder_blueprint(
         if requested is None:
             if local_only:
                 active_local = {
-                    local_root_for_folder(db, folder_id)
+                    local_root
                     for folder_id in active_roots
-                    if local_root_for_folder(db, folder_id) is not None
+                    if (local_root := local_root_for_folder(db, folder_id)) is not None
                 }
                 return sorted(active_local | descendant_local_roots), None
             return sorted(active_roots), None
         if not isinstance(requested, list) or not requested:
-            return None, json_error("folder_ids must be a non-empty list", 400)
+            return [], json_error("folder_ids must be a non-empty list", 400)
         result = []
         for raw in requested:
             try:
                 folder_id = int(raw)
             except (TypeError, ValueError):
-                return None, json_error("folder_ids must contain integers", 400)
+                return [], json_error("folder_ids must contain integers", 400)
             if folder_id in active_roots:
                 covering = local_root_for_folder(db, folder_id)
                 result.append(covering if local_only and covering is not None else folder_id)
@@ -342,7 +359,7 @@ def create_local_folder_blueprint(
                 # The descendant session's root_folder_id is already a local root.
                 result.append(folder_id)
                 continue
-            return None, json_error(
+            return [], json_error(
                 f"Folder {folder_id} is not a root of the active workspace", 404
             )
         return sorted(set(result)), None
@@ -366,16 +383,16 @@ def create_local_folder_blueprint(
         }
     )
 
-    def _stage_source_paths(db, root_ids):
+    def _stage_source_paths(db: Database, root_ids: list[int] | set[int]) -> list[str]:
         """Pre-stage source paths for ``root_ids`` (before rebase)."""
-        paths = []
+        paths: list[str] = []
         for root_id in root_ids:
             row = db.folders.get(int(root_id))
             if row and row["path"]:
                 paths.append(row["path"])
         return paths
 
-    def _stage_destination_paths(source_paths, destination_bases):
+    def _stage_destination_paths(source_paths: dict[int, str], destination_bases: dict[int, str] | None) -> list[str]:
         """Final absolute local paths a stage will write to.
 
         ``destination_bases`` is the caller-chosen base directory per
@@ -402,7 +419,9 @@ def create_local_folder_blueprint(
             )
         return paths
 
-    def _stage_blocking_job(db, root_ids, workspace_id, destination_bases=None):
+    def _stage_blocking_job(
+        db: Database, root_ids: list[int], workspace_id: int, destination_bases: dict[int, str] | None = None,
+    ) -> JobDict | None:
         """The job that would make a stage of ``root_ids`` return 409.
 
         Same inputs as the stage admission: the sources plus the local
@@ -416,7 +435,7 @@ def create_local_folder_blueprint(
             ),
         )
 
-    def _job_config_paths(config):
+    def _job_config_paths(config: JsonDict) -> list[str]:
         # Different job types record their on-disk paths under different
         # keys. Collecting every shape here keeps ``_busy_job`` honest about
         # what a queued or running import actually walks:
@@ -442,7 +461,10 @@ def create_local_folder_blueprint(
                 paths.append(raw)
         return paths
 
-    def _busy_job(db, root_ids, initiating_workspace_id, *, extra_stage_paths=None):
+    def _busy_job(
+        db: Database, root_ids: list[int] | set[int], initiating_workspace_id: int, *,
+        extra_stage_paths: list[str] | None = None,
+    ) -> JobDict | None:
         workspace_ids = {int(initiating_workspace_id)}
         for root_id in root_ids:
             workspace_ids.update(affected_workspace_ids(db, root_id))
@@ -504,10 +526,10 @@ def create_local_folder_blueprint(
                             return job
         return None
 
-    def _busy_job_error(job):
+    def _busy_job_error(job: JobDict) -> str:
         return f"Wait for the {job['type']} job to finish before working locally"
 
-    def _legacy_error(db, workspace_id):
+    def _legacy_error(db: Database, workspace_id: int) -> ErrorResponse | None:
         if legacy_local_state(db, workspace_id):
             return json_error(
                 "This workspace has a local session created by an earlier Vireo version. "
@@ -516,9 +538,9 @@ def create_local_folder_blueprint(
             )
         return None
 
-    def _folder_names(db, root_ids):
-        names = {}
-        paths = {}
+    def _folder_names(db: Database, root_ids: list[int]) -> tuple[dict[int, str], dict[int, str]]:
+        names: dict[int, str] = {}
+        paths: dict[int, str] = {}
         for root_id in root_ids:
             path = db.folders.source_path(root_id)
             if path is None:
@@ -527,10 +549,14 @@ def create_local_folder_blueprint(
             names[root_id] = os.path.basename(path.rstrip("/\\")) or "Folder"
         return names, paths
 
-    def _stage_destinations(body, root_ids, root_names, source_paths, *, cancel_check=None):
+    def _stage_destinations(
+        body: JsonDict, root_ids: list[int], root_names: dict[int, str], source_paths: dict[int, str], *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> tuple[dict[int, str], ErrorResponse | None]:
+        """``(destination_bases, None)``, or ``({}, error)``."""
         raw_destinations = body.get("destination_bases") or {}
         if not isinstance(raw_destinations, dict):
-            return None, json_error("destination_bases must be an object", 400)
+            return {}, json_error("destination_bases must be an object", 400)
         destination_bases = {}
         final_destinations = []
         for root_id in root_ids:
@@ -538,10 +564,10 @@ def create_local_folder_blueprint(
             if raw is None:
                 continue
             if not isinstance(raw, str) or not raw.strip():
-                return None, json_error("Each local destination must be a non-empty path", 400)
+                return {}, json_error("Each local destination must be a non-empty path", 400)
             destination = os.path.normpath(os.path.expanduser(raw.strip()))
             if not os.path.isabs(destination):
-                return None, json_error("Each local destination must be an absolute path", 400)
+                return {}, json_error("Each local destination must be an absolute path", 400)
             destination_bases[root_id] = destination
             final_path = os.path.abspath(
                 local_path_for_base(destination, root_id, source_paths[root_id])
@@ -567,7 +593,7 @@ def create_local_folder_blueprint(
                 # failures.
                 raise
             except LocalWorkspaceError as exc:
-                return None, json_error(str(exc), 409)
+                return {}, json_error(str(exc), 409)
             final_destinations.append(
                 (
                     root_id,
@@ -589,14 +615,14 @@ def create_local_folder_blueprint(
                 except ValueError:
                     overlaps = False
                 if overlaps:
-                    return None, json_error(
+                    return {}, json_error(
                         f"The selected destinations for {root_names[root_id]} and "
                         f"{root_names[other_id]} overlap. Choose separate locations.",
                         400,
                     )
         return destination_bases, None
 
-    def _job_payload(job):
+    def _job_payload(job: JobDict | None) -> JsonDict | None:
         if job is None:
             return None
         return {
@@ -605,7 +631,7 @@ def create_local_folder_blueprint(
             "status": job["status"],
         }
 
-    def _residency_fingerprint(db, workspace_id, selectable_root_ids):
+    def _residency_fingerprint(db: Database, workspace_id: int, selectable_root_ids: set[int]) -> str:
         # A short residency signature so the blocker poller can spot changes
         # that leave no active job behind. Without it, a stage/sync/discard
         # started in another tab that starts *and* finishes between two of
@@ -634,7 +660,7 @@ def create_local_folder_blueprint(
         ]
         return ";".join(parts)
 
-    def _blocking_status_payload(db, workspace_id):
+    def _blocking_status_payload(db: Database, workspace_id: int) -> JsonDict:
         root_ids = _active_root_ids(db, workspace_id)
         selectable_root_ids = set(root_ids) | set(
             workspace_local_root_ids(db, workspace_id)
@@ -656,7 +682,7 @@ def create_local_folder_blueprint(
         }
 
     @blueprint.get("/api/workspaces/active/local-folders/blocker")
-    def local_folder_blocker():
+    def local_folder_blocker() -> ResponseReturnValue:
         # The full /local-folders payload recursively walks every managed local
         # tree to compute a change summary, so polling it every few seconds to
         # detect newly started jobs keeps the disk busy for large libraries.
@@ -668,7 +694,7 @@ def create_local_folder_blueprint(
         return jsonify(_blocking_status_payload(db, workspace_id))
 
     @blueprint.get("/api/workspaces/active/local-folders")
-    def local_folder_status():
+    def local_folder_status() -> ResponseReturnValue:
         db, workspace_id, error = _active_context()
         if error:
             return error
@@ -706,7 +732,7 @@ def create_local_folder_blueprint(
         return jsonify(payload)
 
     @blueprint.post("/api/workspaces/active/local-folders/preflight")
-    def preflight_local_folders():
+    def preflight_local_folders() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         db, workspace_id, error = _preflight_context(body)
         if error:
@@ -807,7 +833,7 @@ def create_local_folder_blueprint(
         return jsonify(result)
 
     @blueprint.post("/api/workspaces/active/local-folders/preflight/cancel")
-    def cancel_preflight_local_folders():
+    def cancel_preflight_local_folders() -> ResponseReturnValue:
         _db, workspace_id, error = _active_context()
         if error:
             return error
@@ -815,7 +841,8 @@ def create_local_folder_blueprint(
         preflight_id = body.get("preflight_id")
         if not isinstance(preflight_id, str) or not preflight_id.strip():
             return json_error("preflight_id must be a non-empty string", 400)
-        cancel_workspace_id = body.get("workspace_id")
+        # A JSON value: int() rejects anything unusable.
+        cancel_workspace_id: Any = body.get("workspace_id")
         if isinstance(cancel_workspace_id, bool):
             cancel_workspace_id = workspace_id
         else:
@@ -827,7 +854,7 @@ def create_local_folder_blueprint(
             {"cancelled": _cancel_preflight(cancel_workspace_id, preflight_id)}
         )
 
-    def _roots_without_local_coverage(db, root_ids):
+    def _roots_without_local_coverage(db: Database, root_ids: list[int]) -> list[int]:
         # Filter out roots already covered by a local session — either exactly
         # (this root is a staged local root) or as an ancestor of one (a
         # descendant is staged, so the workspace has partial local coverage
@@ -844,7 +871,7 @@ def create_local_folder_blueprint(
         return remaining
 
     @blueprint.post("/api/workspaces/active/local-folders/stage")
-    def stage_local_folders():
+    def stage_local_folders() -> ResponseReturnValue:
         db, workspace_id, error = _active_context()
         if error:
             return error
@@ -872,7 +899,7 @@ def create_local_folder_blueprint(
         )
         runner = get_runner()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
             results = []
@@ -934,30 +961,34 @@ def create_local_folder_blueprint(
             )
         return jsonify({"job_id": job_id, "folder_ids": root_ids}), 202
 
-    def _sync_deletion_confirmations(db, root_ids, counts):
-        """Check each root can sync; return its confirmed deletion count, or an error."""
-        confirmed = {}
+    def _sync_deletion_confirmations(
+        # ``counts`` maps root ids to confirmed deletions: string keys from a
+        # JSON body, so either spelling of an id is accepted.
+        db: Database, root_ids: list[int], counts: dict[Any, Any],
+    ) -> tuple[dict[int, int | None], ErrorResponse | None]:
+        """Check each root can sync; return its confirmed deletion count, or ``{}`` and an error."""
+        confirmed: dict[int, int | None] = {}
         for root_id in root_ids:
             try:
                 current = folder_status(db, root_id, vireo_dir)
             except LocalWorkspaceError as exc:
-                return None, json_error(str(exc), 409)
+                return {}, json_error(str(exc), 409)
             if current.get("state") not in {"active", "recovery"}:
-                return None, json_error(
+                return {}, json_error(
                     f"Folder {root_id} has an incomplete local copy; discard it before continuing",
                     409,
                 )
             if current.get("state") == "recovery" and current.get("recovery_kind") != "sync":
-                return None, json_error(
+                return {}, json_error(
                     f"Folder {root_id} cannot be synced because its local copy is incomplete",
                     409,
                 )
             if current.get("changes_error"):
-                return None, json_error(current["changes_error"], 409)
+                return {}, json_error(current["changes_error"], 409)
             deleted = int((current.get("changes") or {}).get("deleted", 0))
             raw = counts.get(str(root_id), counts.get(root_id))
             if deleted and raw is None:
-                return None, json_error(
+                return {}, json_error(
                     f"Folder {root_id} would delete {deleted} source file(s); confirm deletions first",
                     409,
                 )
@@ -965,11 +996,14 @@ def create_local_folder_blueprint(
                 try:
                     raw = int(raw)
                 except (TypeError, ValueError):
-                    return None, json_error("Deletion confirmation counts must be integers", 400)
+                    return {}, json_error("Deletion confirmation counts must be integers", 400)
             confirmed[root_id] = raw
         return confirmed, None
 
-    def _sync_one_root(runner, job, thread_db, root_id, name, count, scan_totals):
+    def _sync_one_root(
+        runner: JobRunner, job: JobDict, thread_db: Database, root_id: int, name: str, count: int | None,
+        scan_totals: dict[int, int],
+    ) -> JsonDict:
         """Check one local root against source, then publish it, tracking the running step."""
         check_id = f"check-{root_id}"
         # The step to mark if sync stops: begin_publish moves it from the
@@ -1012,7 +1046,7 @@ def create_local_folder_blueprint(
             raise
 
     @blueprint.post("/api/workspaces/active/local-folders/sync")
-    def sync_local_folders():
+    def sync_local_folders() -> ResponseReturnValue:
         db, workspace_id, error = _active_context()
         if error:
             return error
@@ -1034,7 +1068,7 @@ def create_local_folder_blueprint(
             return confirm_error
         runner = get_runner()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
             results = []
@@ -1073,7 +1107,7 @@ def create_local_folder_blueprint(
         return jsonify({"job_id": job_id, "folder_ids": root_ids}), 202
 
     @blueprint.post("/api/workspaces/active/local-folders/discard")
-    def discard_local_folders():
+    def discard_local_folders() -> ResponseReturnValue:
         db, workspace_id, error = _active_context()
         if error:
             return error
@@ -1092,7 +1126,7 @@ def create_local_folder_blueprint(
         acknowledge = body.get("acknowledge_published") is True
         runner = get_runner()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
             results = []

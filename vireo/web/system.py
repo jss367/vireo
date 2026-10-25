@@ -19,10 +19,12 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from collections.abc import Callable, Iterator
 from datetime import UTC
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import config as cfg
 from config import read_raw_config_file, settings_write_lock
@@ -30,6 +32,13 @@ from flask import Blueprint, Response, jsonify, request
 from proc import no_window_kwargs
 from runtime_warnings import runtime_execution_info
 from services.same_shot_duplicates import is_duplicate_review_member
+
+if TYPE_CHECKING:
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from jobs import LogBroadcaster
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+    from web.web_types import AppConfig, GetDb, GetRunner
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +48,7 @@ log = logging.getLogger(__name__)
 _WIN_ERROR_MODE_LOCK = threading.Lock()
 
 
-def _application_version():
+def _application_version() -> str:
     # Best-effort probe: package metadata, then pyproject.toml, then "0.0.0".
     # `package_version("vireo")` normally raises `PackageNotFoundError` when
     # the distribution is missing, but installed metadata that is present yet
@@ -68,7 +77,7 @@ def _application_version():
         return "0.0.0"
 
 
-def _launch_reveal(path, is_folder):
+def _launch_reveal(path: str, is_folder: bool) -> tuple[subprocess.CompletedProcess[str] | None, str | None]:
     """Run the platform's reveal command for ``path``.
 
     Returns ``(proc, None)``, or ``(None, reason)`` when a preflight finds
@@ -146,7 +155,7 @@ def _launch_reveal(path, is_folder):
     return proc, None
 
 
-def _issue_report_app_state(get_db):
+def _issue_report_app_state(get_db: GetDb) -> tuple[Database | None, str, int, int, int]:
     """``(db, ws_name, folder_count, photo_count, pred_count)`` for a report.
 
     ``db`` is None when the catalog could not be opened at all.
@@ -171,7 +180,8 @@ def _issue_report_app_state(get_db):
     return db, ws_name, folder_count, photo_count, pred_count
 
 
-def _redact(obj):
+# ``obj`` is any JSON value, and the result has the same shape.
+def _redact(obj: Any) -> Any:
     """Replace secret- and path-named values in nested dicts and lists."""
     if isinstance(obj, dict):
         out = {}
@@ -189,7 +199,7 @@ def _redact(obj):
     return obj
 
 
-def _redact_issue_report_config(config_values):
+def _redact_issue_report_config(config_values: JsonDict) -> JsonDict:
     """The config with secrets, paths and free-form strings replaced."""
     import config_schema
 
@@ -201,14 +211,15 @@ def _redact_issue_report_config(config_values):
     # let those through whenever a new key was named differently. An
     # arbitrary string stored for an enum key by an older unvalidated
     # write path must NOT slip through on the key name alone.
-    enum_allowlist = {}
+    enum_allowlist: dict[str, frozenset[str]] = {}
     for key, spec in config_schema.SCHEMA.items():
         if spec["type"] == "enum":
             enum_allowlist[key] = frozenset(spec["enum"])
         elif spec["type"] == "list_string" and "items_enum" in spec:
             enum_allowlist[key] = frozenset(spec["items_enum"])
 
-    def _redact_config(obj, dotted=""):
+    # ``obj`` is any JSON value, and the result has the same shape.
+    def _redact_config(obj: Any, dotted: str = "") -> Any:
         if isinstance(obj, dict):
             out = {}
             for k, v in obj.items():
@@ -235,12 +246,12 @@ def _redact_issue_report_config(config_values):
     return _redact_config(config_values)
 
 
-def _issue_report_private_values(db):
+def _issue_report_private_values(db: Database | None) -> tuple[list[str], Callable[[Any], Any]]:
     """``(private_paths, sanitize)``: catalog roots and their scrubber."""
     # Exact catalog roots are private and can also appear in logs. Issue
     # reports retain the diagnostic message while replacing those values;
     # the user can paste a path into the description when it is relevant.
-    private_paths = []
+    private_paths: list[str] = []
     if db is not None:
         try:
             private_paths = [
@@ -252,7 +263,7 @@ def _issue_report_private_values(db):
                 exc_info=True,
             )
 
-    def _sanitize_text(value):
+    def _sanitize_text(value: str) -> str:
         text = str(value)
         for private_path in sorted(private_paths, key=len, reverse=True):
             text = text.replace(private_path, "[PHOTO_PATH]")
@@ -261,7 +272,8 @@ def _issue_report_private_values(db):
             text = text.replace(home, "~")
         return text
 
-    def _sanitize_private_values(value):
+    # ``value`` is any JSON value, and the result has the same shape.
+    def _sanitize_private_values(value: Any) -> Any:
         if isinstance(value, dict):
             return {key: _sanitize_private_values(item) for key, item in value.items()}
         if isinstance(value, list):
@@ -273,7 +285,7 @@ def _issue_report_private_values(db):
     return private_paths, _sanitize_private_values
 
 
-def _issue_report_platform(private_paths):
+def _issue_report_platform(private_paths: list[str]) -> tuple[list[str], JsonDict, JsonDict]:
     """``(filesystems, support_info, execution_info)`` for a report."""
     import config as cfg
 
@@ -289,7 +301,7 @@ def _issue_report_platform(private_paths):
         log.warning("Could not collect platform support info for issue report", exc_info=True)
         filesystems = []
         support_info = {}
-    execution_info = {}
+    execution_info: JsonDict = {}
     try:
         execution_info = runtime_execution_info()
     except Exception:  # broad: inference runtimes raise undocumented errors; the report goes out without them
@@ -297,7 +309,7 @@ def _issue_report_platform(private_paths):
     return filesystems, support_info, execution_info
 
 
-def _send_issue_report(report_url, bundle):
+def _send_issue_report(report_url: str, bundle: JsonDict) -> Response:
     """POST the bundle to ``report_url``; fall back to a download."""
     import urllib.request
 
@@ -320,14 +332,14 @@ def _send_issue_report(report_url, bundle):
 
 
 def create_system_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
+    config: AppConfig,
     *,
-    get_log_broadcaster,
-):
+    get_log_broadcaster: Callable[[], LogBroadcaster],
+) -> Blueprint:
     """Build the system blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``), read
@@ -346,11 +358,11 @@ def create_system_blueprint(
     blueprint = Blueprint("system", __name__)
 
     @blueprint.get("/api/health")
-    def health():
+    def health() -> ResponseReturnValue:
         return jsonify({"status": "ok"})
 
     @blueprint.get("/api/v1/health")
-    def stable_health():
+    def stable_health() -> ResponseReturnValue:
         # The marker lets the native single-instance probe distinguish Vireo
         # from an unrelated service that happens to reuse a stale port.
         from runtime import SERVICE_MARKER
@@ -359,22 +371,22 @@ def create_system_blueprint(
 
     @blueprint.get("/api/version")
     @blueprint.get("/api/v1/version")
-    def version():
+    def version() -> ResponseReturnValue:
         return jsonify({"version": _application_version()})
 
     @blueprint.route("/api/v1/shutdown", methods=["POST"])
-    def api_v1_shutdown():
+    def api_v1_shutdown() -> ResponseReturnValue:
         import signal
         import threading
 
-        def _shutdown():
+        def _shutdown() -> None:
             os.kill(os.getpid(), signal.SIGTERM)
 
         threading.Timer(0.5, _shutdown).start()
         return jsonify({"status": "shutting_down"})
 
     @blueprint.route("/api/shutdown", methods=["POST"])
-    def api_shutdown():
+    def api_shutdown() -> ResponseReturnValue:
         # Require a non-simple header to block cross-site POSTs.
         # Browsers won't send custom headers cross-origin without a CORS
         # preflight, and we don't serve permissive CORS headers, so a
@@ -385,14 +397,14 @@ def create_system_blueprint(
         import signal
         import threading
 
-        def _shutdown():
+        def _shutdown() -> None:
             os.kill(os.getpid(), signal.SIGTERM)
 
         threading.Timer(0.5, _shutdown).start()
         return jsonify({"status": "shutting_down"})
 
     @blueprint.route("/api/setup/complete", methods=["POST"])
-    def api_setup_complete():
+    def api_setup_complete() -> ResponseReturnValue:
         """Mark first-launch setup as done (called after download or skip)."""
         # Lock + raw read-modify-write so a concurrent settings PATCH isn't
         # reverted and we don't pin every DEFAULTS value into the user's
@@ -403,13 +415,14 @@ def create_system_blueprint(
             cfg.save(raw)
         return jsonify({"ok": True})
 
-    def _reveal_target(body):
-        """``(path, is_folder, None)`` for a reveal body, or ``(None, False, error)``."""
+    def _reveal_target(body: JsonDict) -> tuple[str, bool, ErrorResponse | Response | None]:
+        """``(path, is_folder, None)`` for a reveal body, or ``("", False, error)``."""
         pid_raw = body.get("photo_id")
-        fid_raw = body.get("folder_id")
+        # JSON values: int() rejects anything unusable.
+        fid_raw: Any = body.get("folder_id")
 
         if pid_raw is None and fid_raw is None:
-            return None, False, json_error("photo_id or folder_id required")
+            return "", False, json_error("photo_id or folder_id required")
 
         db = get_db()
         is_folder = False
@@ -419,41 +432,41 @@ def create_system_blueprint(
             try:
                 pid_int = int(pid_raw)
             except (TypeError, ValueError):
-                return None, False, json_error("photo_id must be an integer")
+                return "", False, json_error("photo_id must be an integer")
             # Duplicate results are library-wide. Match their thumbnail
             # membership guard without allowing arbitrary hidden photos.
             duplicate_scope = body.get("scope") == "duplicates"
             if duplicate_scope and not is_duplicate_review_member(db, pid_int, get_runner().list_jobs):
-                return None, False, json_error("photo not found", 404)
+                return "", False, json_error("photo not found", 404)
             photo = db.photos.get(pid_int, verify_workspace=not duplicate_scope)
             if not photo:
-                return None, False, json_error("photo not found", 404)
+                return "", False, json_error("photo not found", 404)
             folder_row = db.folders.get(photo["folder_id"])
             folder_path = folder_row["path"] if folder_row else ""
             if not folder_path or not photo["filename"]:
-                return None, False, jsonify({"ok": False, "reason": "no path"})
+                return "", False, jsonify({"ok": False, "reason": "no path"})
             path = os.path.join(folder_path, photo["filename"])
         else:
             try:
                 fid_int = int(fid_raw)
             except (TypeError, ValueError):
-                return None, False, json_error("folder_id must be an integer")
+                return "", False, json_error("folder_id must be an integer")
             folder = db.folders.get(fid_int)
             if not folder:
-                return None, False, json_error("folder not found", 404)
+                return "", False, json_error("folder not found", 404)
             # Reject reveal for folders not linked to the active workspace,
             # matching the photo branch's verify_workspace gate.
             if fid_int not in db.workspace_folders.visible_ids(db.active_workspace_id, [fid_int]):
-                return None, False, json_error("folder not found", 404)
+                return "", False, json_error("folder not found", 404)
             folder_path = folder["path"]
             if not folder_path:
-                return None, False, jsonify({"ok": False, "reason": "no path"})
+                return "", False, jsonify({"ok": False, "reason": "no path"})
             path = folder_path
             is_folder = True
         return path, is_folder, None
 
     @blueprint.route("/api/files/reveal", methods=["POST"])
-    def api_files_reveal():
+    def api_files_reveal() -> ResponseReturnValue:
         """Reveal a photo or folder in the OS file manager.
 
         Body: {"photo_id": <int>} OR {"folder_id": <int>}
@@ -480,6 +493,8 @@ def create_system_blueprint(
             proc, missing = _launch_reveal(path, is_folder)
             if missing is not None:
                 return jsonify({"ok": False, "reason": missing})
+            # _launch_reveal returns the process whenever nothing is missing.
+            proc = cast("subprocess.CompletedProcess[str]", proc)
             # explorer.exe's exit status is not a reliable success signal:
             # `explorer /select,<path>` (and `explorer <folder>`) routinely
             # return 1 even when File Explorer opens correctly, with nothing
@@ -495,7 +510,7 @@ def create_system_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/system/install-exiftool", methods=["POST"])
-    def api_install_exiftool():
+    def api_install_exiftool() -> ResponseReturnValue:
         """Install ExifTool where Vireo can safely automate installation."""
         import subprocess
 
@@ -568,7 +583,7 @@ def create_system_blueprint(
             return jsonify({"success": False, "error": str(e)})
 
     @blueprint.route("/api/recent-destinations", methods=["POST"])
-    def api_recent_destinations_add():
+    def api_recent_destinations_add() -> ResponseReturnValue:
         """Remember a destination selected in a folder picker."""
         import config as cfg
 
@@ -600,7 +615,7 @@ def create_system_blueprint(
         return jsonify({"ok": True, "recent_destinations": recents})
 
     @blueprint.route("/api/exiftool/status")
-    def api_exiftool_status():
+    def api_exiftool_status() -> ResponseReturnValue:
         """Report whether the exiftool binary is installed.
 
         exiftool is the metadata backbone for every scan (capture date, GPS,
@@ -612,7 +627,7 @@ def create_system_blueprint(
         return jsonify(exiftool_status())
 
     @blueprint.route("/api/volumes", methods=["GET"])
-    def api_volumes():
+    def api_volumes() -> ResponseReturnValue:
         """List mounted volumes (macOS/Windows/Linux) to help find SD cards."""
         import platform
         volumes = []
@@ -705,7 +720,7 @@ def create_system_blueprint(
         return jsonify(volumes)
 
     @blueprint.route("/api/system/info")
-    def api_system_info():
+    def api_system_info() -> ResponseReturnValue:
         """Return system information: ONNX Runtime, hardware."""
         info = runtime_execution_info()
         import config as cfg
@@ -746,21 +761,21 @@ def create_system_blueprint(
         return jsonify(info)
 
     @blueprint.route("/api/system/mcp-config")
-    def api_system_mcp_config():
+    def api_system_mcp_config() -> ResponseReturnValue:
         """Client setup for this install, retaining the original Claude fields."""
         from mcp_server import connect_info
 
         return jsonify(connect_info())
 
     @blueprint.post("/api/system/mcp-check")
-    def api_system_mcp_check():
+    def api_system_mcp_check() -> ResponseReturnValue:
         """Probe stdio and read the discovered catalog, never client status."""
         from mcp_diagnostics import check_connection
 
         return jsonify(check_connection())
 
     @blueprint.route("/api/scan/status")
-    def api_scan_status():
+    def api_scan_status() -> ResponseReturnValue:
         db = get_db()
 
         # DB file size
@@ -799,7 +814,7 @@ def create_system_blueprint(
         )
 
     @blueprint.route("/api/logs/stream")
-    def api_log_stream():
+    def api_log_stream() -> ResponseReturnValue:
         """SSE stream of all server log output.
 
         Auto-closes after 6s of inactivity to prevent stale connections
@@ -809,7 +824,7 @@ def create_system_blueprint(
         broadcaster = get_log_broadcaster()
         q = broadcaster.subscribe()
 
-        def generate():
+        def generate() -> Iterator[str]:
             idle_count = 0
             try:
                 while True:
@@ -835,12 +850,12 @@ def create_system_blueprint(
         )
 
     @blueprint.route("/api/logs/recent")
-    def api_logs_recent():
+    def api_logs_recent() -> ResponseReturnValue:
         count = min(max(1, request.args.get("count", 100, type=int)), 1000)
         return jsonify(get_log_broadcaster().get_recent(count))
 
     @blueprint.route("/api/report-issue", methods=["POST"])
-    def api_report_issue():
+    def api_report_issue() -> ResponseReturnValue:
         """Collect diagnostics and optionally send to a configured report URL."""
         import platform
         import sys

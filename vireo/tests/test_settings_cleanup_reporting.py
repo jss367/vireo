@@ -6,6 +6,7 @@ import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 SOURCE = Path(__file__).resolve().parents[1] / "web" / "settings.py"
 KEY = "write_location_keywords_to_xmp"
@@ -37,7 +38,7 @@ def _namespace(db, body=None):
     logs = []
     namespace = {
         "__builtins__": dict(vars(builtins), __import__=fake_import),
-        "json": json, "sqlite3": sqlite3, "LOCATION_KEYWORDS_SETTING": KEY,
+        "json": json, "sqlite3": sqlite3, "cast": cast, "LOCATION_KEYWORDS_SETTING": KEY,
         "log": SimpleNamespace(warning=lambda *args, **kwargs: logs.append((args, kwargs))),
         "settings_write_lock": contextlib.nullcontext(),
         "get_db": lambda: db, "jsonify": lambda payload: payload,
@@ -65,6 +66,9 @@ class _Catalog:
         self.restore_error = restore_error
         self.switches = []
         self.workspaces = SimpleNamespace(get=self.get, update=self.update)
+
+    def require_workspace_id(self):
+        return self.active_workspace_id
 
     def get(self, workspace_id):
         if self.saved and self.name_error:

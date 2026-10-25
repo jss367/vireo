@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 import filter_shortcuts
 from app_paths import media_root
@@ -29,12 +31,19 @@ from working_copy_cache import (
 )
 from working_copy_cache import working_copy_publication_guard, working_copy_stats
 
+if TYPE_CHECKING:
+    from db import Database
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import AppConfig, GetDb
+
 log = logging.getLogger(__name__)
 
 LOCATION_KEYWORDS_SETTING = "write_location_keywords_to_xmp"
 
 
-def queue_location_keyword_cleanup_for_workspace(db, workspace_id):
+def queue_location_keyword_cleanup_for_workspace(db: Database, workspace_id: int) -> bool:
     """Queue ``location`` changes for every located photo in one workspace.
 
     Runs the workspace-scoped backfill under an explicit active-workspace
@@ -57,7 +66,7 @@ def queue_location_keyword_cleanup_for_workspace(db, workspace_id):
         db.set_active_workspace(saved_active)
 
 
-def location_keyword_cleanup_warning(workspace_names):
+def location_keyword_cleanup_warning(workspace_names: list[str] | None) -> str:
     """The save-response warning for a location-keyword cleanup that failed.
 
     ``workspace_names`` lists the workspaces whose cleanup could not be
@@ -86,7 +95,7 @@ def location_keyword_cleanup_warning(workspace_names):
     )
 
 
-def queue_location_keyword_cleanup_reporting(db, workspace_id):
+def queue_location_keyword_cleanup_reporting(db: Database, workspace_id: int) -> str | None:
     """Queue one workspace's cleanup; return a warning if it failed, else None."""
     if queue_location_keyword_cleanup_for_workspace(db, workspace_id):
         return None
@@ -103,7 +112,7 @@ def queue_location_keyword_cleanup_reporting(db, workspace_id):
     return location_keyword_cleanup_warning([name])
 
 
-def workspace_effective_setting(raw_override, global_cfg, key):
+def workspace_effective_setting(raw_override: str | None, global_cfg: JsonDict, key: str) -> bool:
     """Resolve a workspace's effective boolean setting.
 
     ``raw_override`` is the ``workspaces.config_overrides`` column value
@@ -130,8 +139,8 @@ def workspace_effective_setting(raw_override, global_cfg, key):
 
 
 def queue_location_keyword_cleanup_on_global_off(
-    db, previous_global, current_global,
-):
+    db: Database, previous_global: JsonDict, current_global: JsonDict,
+) -> str | None:
     """Queue cleanup in every workspace whose effective setting flipped off.
 
     ``write_location_keywords_to_xmp`` promises in its own description
@@ -192,7 +201,7 @@ def queue_location_keyword_cleanup_on_global_off(
     return location_keyword_cleanup_warning(failed) if failed else None
 
 
-def _with_warning(payload, warning):
+def _with_warning(payload: JsonDict, warning: str | None) -> JsonDict:
     """Add ``warning`` to a successful save's payload when there is one.
 
     Saves without one keep their original response shape.
@@ -202,7 +211,7 @@ def _with_warning(payload, warning):
     return payload
 
 
-def read_workspace_overrides(db):
+def read_workspace_overrides(db: Database) -> JsonDict:
     """Return the active workspace's config_overrides as a dict (or {}).
 
     Coerces non-dict payloads (possible via legacy workspace
@@ -219,14 +228,14 @@ def read_workspace_overrides(db):
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
-def write_workspace_overrides(db, overrides):
+def write_workspace_overrides(db: Database, overrides: JsonDict) -> None:
     db.workspaces.update(
-        db.active_workspace_id,
+        db.require_workspace_id(),
         config_overrides=overrides if overrides else None,
     )
 
 
-def _validate_config_snapshot(body):
+def _validate_config_snapshot(body: JsonDict) -> str | None:
     """Validate and coerce, in place, every schema setting in a ``/api/config`` body.
 
     The curated forms post whole snapshots, and a value stored unvalidated
@@ -263,7 +272,8 @@ def _validate_config_snapshot(body):
 _MISSING = object()
 
 
-def _translate_legacy_default_strategy(pipeline_payload, get_db):
+# ``pipeline_payload`` is the import's raw ``pipeline`` JSON value.
+def _translate_legacy_default_strategy(pipeline_payload: object, get_db: GetDb) -> None:
     """Rewrite a backup's ``default_strategy`` as ``default_process_id``.
 
     ``pipeline_payload`` is the import payload's ``pipeline`` value (any
@@ -305,7 +315,7 @@ def _translate_legacy_default_strategy(pipeline_payload, get_db):
             pipeline_payload["default_process_id"] = translated_pid
 
 
-def _translate_portable_default_process(pipeline_payload, get_db):
+def _translate_portable_default_process(pipeline_payload: object, get_db: GetDb) -> None:
     """Resolve a backup's portable default-process identity to a local id.
 
     ``pipeline_payload`` is the import payload's ``pipeline`` value (any
@@ -358,7 +368,7 @@ def _translate_portable_default_process(pipeline_payload, get_db):
             pipeline_payload["default_process_id"] = None
 
 
-def _schema_import_errors(payload, get_db):
+def _schema_import_errors(payload: JsonDict, get_db: GetDb) -> dict[str, str]:
     """Validate and coerce, in place, every schema setting in an import.
 
     Returns the per-key error map (empty when every value is valid).
@@ -369,7 +379,7 @@ def _schema_import_errors(payload, get_db):
     # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
     # to nothing and would otherwise be written as-is, replacing a numeric
     # leaf with {} on disk and breaking downstream consumers.
-    errors = {}
+    errors: dict[str, str] = {}
 
     # 1. Reject scalars where a schema-backed object subtree is expected
     #    (e.g. {"pipeline": 5}).
@@ -406,13 +416,14 @@ def _schema_import_errors(payload, get_db):
         if (
             pid_val is not _MISSING
             and pid_val is not None
-            and get_db().processes.get(pid_val) is None
+            # Step 2 validated the schema keys, so the id is an int.
+            and get_db().processes.get(cast(int, pid_val)) is None
         ):
             errors[pid_key] = f"unknown process id: {pid_val}"
     return errors
 
 
-def _structured_import_errors(payload, errors):
+def _structured_import_errors(payload: JsonDict, errors: dict[str, str]) -> None:
     """Add shape errors for the non-schema keyboard shortcuts and recents."""
     # Structured non-schema keys still need shape validation, otherwise a
     # malformed payload would write through to the file and crash
@@ -456,7 +467,7 @@ def _structured_import_errors(payload, errors):
                     break
 
 
-def _normalize_imported_export_presets(payload, errors):
+def _normalize_imported_export_presets(payload: JsonDict, errors: dict[str, str]) -> None:
     """Validate and normalize, in place, an import's ``export_presets``."""
     if "export_presets" in payload:
         from export import (
@@ -503,7 +514,7 @@ def _normalize_imported_export_presets(payload, errors):
             payload["export_presets"] = normalized_presets
 
 
-def _normalize_imported_filter_shortcuts(payload, errors):
+def _normalize_imported_filter_shortcuts(payload: JsonDict, errors: dict[str, str]) -> None:
     """Validate and normalize, in place, an import's ``filter_shortcuts``."""
     # filter_shortcuts is EXCLUDED from SCHEMA (custom Settings UI) but
     # the filter bar renders it on five pages, so a malformed import must
@@ -528,7 +539,7 @@ def _normalize_imported_filter_shortcuts(payload, errors):
             )
 
 
-def _keep_install_local_settings(payload, current_raw):
+def _keep_install_local_settings(payload: JsonDict, current_raw: JsonDict) -> None:
     """Carry this machine's migration markers and omitted secrets into ``payload``.
 
     Called under ``settings_write_lock`` with the on-disk config.
@@ -553,7 +564,7 @@ def _keep_install_local_settings(payload, current_raw):
             schema.set_dotted(payload, secret_key, existing)
 
 
-def _apply_config_keyboard_shortcuts(body, current):
+def _apply_config_keyboard_shortcuts(body: JsonDict, current: JsonDict) -> None:
     """Merge a ``/api/config`` body's valid keyboard shortcuts into ``current``."""
     import config as cfg
 
@@ -574,7 +585,7 @@ def _apply_config_keyboard_shortcuts(body, current):
             )
 
 
-def _apply_config_remote_targets(body, current):
+def _apply_config_remote_targets(body: JsonDict, current: JsonDict) -> None:
     """Store a ``/api/config`` body's remote targets in their read-time shape."""
     import config as cfg
 
@@ -598,7 +609,7 @@ def _apply_config_remote_targets(body, current):
         current["remote_targets"] = normalized
 
 
-def _apply_config_filter_shortcuts(body, current):
+def _apply_config_filter_shortcuts(body: JsonDict, current: JsonDict) -> str | None:
     """Store a ``/api/config`` body's quick filters; the refusal message or None."""
     # Quick-filter buttons are rule expressions, so validate them
     # against the field registry here rather than rendering a button
@@ -628,7 +639,7 @@ def _apply_config_filter_shortcuts(body, current):
     return None
 
 
-def _merge_config_body(body, current):
+def _merge_config_body(body: JsonDict, current: JsonDict) -> None:
     """Copy every remaining known key of a ``/api/config`` body into ``current``."""
     import config as cfg
 
@@ -658,7 +669,7 @@ def _merge_config_body(body, current):
                 current[key] = body[key]
 
 
-def _default_process_id_error(current, get_db):
+def _default_process_id_error(current: JsonDict, get_db: GetDb) -> str | None:
     """The refusal message for a bad ``pipeline.default_process_id``, or None."""
     # default_process_id points into saved_processes; _merge_config_body
     # can carry a stale or foreign id into the global config.
@@ -681,12 +692,12 @@ def _default_process_id_error(current, get_db):
 
 
 def create_settings_blueprint(
-    get_db,
-    json_error,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    config: AppConfig,
     *,
-    advance_inat_token_generation,
-):
+    advance_inat_token_generation: Callable[[], None],
+) -> Blueprint:
     """Build the settings blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``,
@@ -702,8 +713,10 @@ def create_settings_blueprint(
     blueprint = Blueprint("settings", __name__)
 
     def _working_copy_quota_confirmation_required(
-        previous, requested_quota_mb, confirmed=False,
-    ):
+        # A raw or validated setting value (int() rejects a bad one), and the
+        # request's confirmation flag, which counts only when it is True.
+        previous: JsonDict, requested_quota_mb: Any, confirmed: object = False,
+    ) -> tuple[Response, int] | None:
         """Return a 409 response for an unconfirmed quota reduction.
 
         Every global-config mutation path calls this while holding
@@ -747,7 +760,7 @@ def create_settings_blueprint(
             "current_working_copy_usage_bytes": usage["size"],
         }), 409
 
-    def _settings_post_save_side_effects(current, previous=None):
+    def _settings_post_save_side_effects(current: JsonDict, previous: JsonDict | None = None) -> str | None:
         """Side effects mirrored from the legacy /api/config POST handler.
 
         Keeps every global settings write behaviorally identical to the old
@@ -820,13 +833,13 @@ def create_settings_blueprint(
         )
 
     @blueprint.route("/api/config")
-    def api_config_get():
+    def api_config_get() -> ResponseReturnValue:
         import config as cfg
 
         return jsonify(cfg.load())
 
     @blueprint.route("/api/config", methods=["POST"])
-    def api_config_set():
+    def api_config_set() -> ResponseReturnValue:
         import config as cfg
         import config_schema as schema
 
@@ -891,7 +904,7 @@ def create_settings_blueprint(
         return jsonify(_with_warning({"ok": True}, warning))
 
     @blueprint.route("/api/settings/schema")
-    def api_settings_schema():
+    def api_settings_schema() -> ResponseReturnValue:
         """Return the SCHEMA dict and the ordered category list.
 
         Consumed by the schema-rendered settings UI to generate widgets.
@@ -928,7 +941,7 @@ def create_settings_blueprint(
         })
 
     @blueprint.route("/api/settings/values")
-    def api_settings_values():
+    def api_settings_values() -> ResponseReturnValue:
         """Return values across all four layers (default / global / workspace / effective).
 
         Each layer is a dotted-flat dict, restricted to keys present in SCHEMA.
@@ -1003,7 +1016,7 @@ def create_settings_blueprint(
         })
 
     @blueprint.route("/api/settings/global", methods=["PATCH"])
-    def api_settings_global_patch():
+    def api_settings_global_patch() -> ResponseReturnValue:
         """Set a single global config value (validated against SCHEMA)."""
         import config as cfg
         import config_schema as schema
@@ -1025,7 +1038,8 @@ def create_settings_blueprint(
         if (
             key == "pipeline.default_process_id"
             and value is not None
-            and get_db().processes.get(value) is None
+            # validate_value checked the id is an int.
+            and get_db().processes.get(cast(int, value)) is None
         ):
             return json_error(f"unknown process id: {value}", status=400)
 
@@ -1048,7 +1062,7 @@ def create_settings_blueprint(
         return jsonify(_with_warning({"ok": True, "key": key, "value": value}, warning))
 
     @blueprint.route("/api/settings/global/<path:key>", methods=["DELETE"])
-    def api_settings_global_delete(key):
+    def api_settings_global_delete(key: str) -> ResponseReturnValue:
         """Remove a key from the global config file (reverts to default)."""
         import config as cfg
         import config_schema as schema
@@ -1076,7 +1090,7 @@ def create_settings_blueprint(
         return jsonify(_with_warning({"ok": True, "key": key}, warning))
 
     @blueprint.route("/api/settings/workspace", methods=["PATCH"])
-    def api_settings_workspace_patch():
+    def api_settings_workspace_patch() -> ResponseReturnValue:
         """Set a single per-workspace override (validated against SCHEMA)."""
         import config_schema as schema
 
@@ -1101,7 +1115,8 @@ def create_settings_blueprint(
         if (
             key == "pipeline.default_process_id"
             and value is not None
-            and db.processes.get(value) is None
+            # validate_value checked the id is an int.
+            and db.processes.get(cast(int, value)) is None
         ):
             return json_error(f"unknown process id: {value}", status=400)
         warning = None
@@ -1121,12 +1136,12 @@ def create_settings_blueprint(
                 )
                 if prev_effective_val and not new_effective_val:
                     warning = queue_location_keyword_cleanup_reporting(
-                        db, db.active_workspace_id,
+                        db, db.require_workspace_id(),
                     )
         return jsonify(_with_warning({"ok": True, "key": key, "value": value}, warning))
 
     @blueprint.route("/api/settings/workspace/<path:key>", methods=["DELETE"])
-    def api_settings_workspace_delete(key):
+    def api_settings_workspace_delete(key: str) -> ResponseReturnValue:
         """Remove a per-workspace override (the key falls back to global/default)."""
         import config_schema as schema
 
@@ -1150,12 +1165,12 @@ def create_settings_blueprint(
                 )
                 if prev_effective_val and not new_effective_val:
                     warning = queue_location_keyword_cleanup_reporting(
-                        db, db.active_workspace_id,
+                        db, db.require_workspace_id(),
                     )
         return jsonify(_with_warning({"ok": True, "key": key}, warning))
 
     @blueprint.route("/api/settings/export")
-    def api_settings_export():
+    def api_settings_export() -> ResponseReturnValue:
         """Download ~/.vireo/config.json as an attachment.
 
         Returns the raw user-overrides file (or "{}" if absent), pretty-printed.
@@ -1220,7 +1235,7 @@ def create_settings_blueprint(
         return resp
 
     @blueprint.route("/api/settings/import", methods=["POST"])
-    def api_settings_import():
+    def api_settings_import() -> ResponseReturnValue:
         """Replace ~/.vireo/config.json with the supplied JSON payload.
 
         Validates every schema-known leaf key in the payload before writing;

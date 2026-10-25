@@ -7,7 +7,10 @@ queueing from ``services.pending_changes``. The batch equivalents stay with
 the batch routes.
 """
 
+from __future__ import annotations
+
 import math
+from typing import TYPE_CHECKING, Any
 
 import places
 from db import KEYWORD_TYPES
@@ -28,10 +31,16 @@ from web.location_edits import (
 )
 from web.responses import photo_not_found_error
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonError
+    from web.location_edits import LocationErrors
+    from web.web_types import GetDb
+
 
 def create_photo_location_keywords_blueprint(
-    get_db, json_error, *, location_errors,
-):
+    get_db: GetDb, json_error: JsonError, *, location_errors: LocationErrors,
+) -> Blueprint:
     """Build the per-photo keyword/location edit blueprint.
 
     ``location_errors`` is the app's one ``web.location_edits.LocationErrors``
@@ -41,7 +50,7 @@ def create_photo_location_keywords_blueprint(
     blueprint = Blueprint("photo_location_keywords", __name__)
 
     @blueprint.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
-    def api_add_keyword(photo_id):
+    def api_add_keyword(photo_id: int) -> ResponseReturnValue:
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
             return photo_not_found_error()
@@ -107,7 +116,7 @@ def create_photo_location_keywords_blueprint(
     @blueprint.route(
         "/api/photos/<int:photo_id>/keywords/<int:keyword_id>", methods=["DELETE"]
     )
-    def api_remove_keyword(photo_id, keyword_id):
+    def api_remove_keyword(photo_id: int, keyword_id: int) -> ResponseReturnValue:
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
             return photo_not_found_error()
@@ -140,7 +149,7 @@ def create_photo_location_keywords_blueprint(
     # Location keywords don't propagate to dc:subject sidecars — structured XMP (exif:GPS*, Iptc4xmpCore:Location) is a future feature.
     @blueprint.route("/api/photos/<int:photo_id>/location", methods=["POST"])
     @atomic_edit(get_db)
-    def api_set_photo_location(photo_id):
+    def api_set_photo_location(photo_id: int) -> ResponseReturnValue:
         """Attach a Google place to ``photo_id`` via the autocomplete flow.
 
         Body: ``{"place_id": "ChIJ..."}``. Looks up the place via
@@ -211,7 +220,7 @@ def create_photo_location_keywords_blueprint(
 
     @blueprint.route("/api/photos/<int:photo_id>/location/text", methods=["POST"])
     @atomic_edit(get_db)
-    def api_set_photo_location_text(photo_id):
+    def api_set_photo_location_text(photo_id: int) -> ResponseReturnValue:
         """Attach a free-text location keyword (no Google data) to ``photo_id``.
 
         Body: ``{"name": "the meadow behind the cabin"}``. Used when the user
@@ -230,8 +239,9 @@ def create_photo_location_keywords_blueprint(
         # loses it.
         if "|" in stripped:
             return json_error(LOCATION_NAME_PIPE_ERROR, 400)
-        latitude = body.get("latitude")
-        longitude = body.get("longitude")
+        # JSON values: float() rejects anything unusable.
+        latitude: Any = body.get("latitude")
+        longitude: Any = body.get("longitude")
         if (latitude is None) != (longitude is None):
             return json_error("latitude and longitude must be provided together", 400)
         if latitude is not None:
@@ -272,7 +282,7 @@ def create_photo_location_keywords_blueprint(
 
     @blueprint.route("/api/photos/<int:photo_id>/location", methods=["DELETE"])
     @atomic_edit(get_db)
-    def api_clear_photo_location(photo_id):
+    def api_clear_photo_location(photo_id: int) -> ResponseReturnValue:
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
         db = get_db()
         edit_error = location_errors.photo_location_edit_error(db, photo_id)
