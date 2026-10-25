@@ -76,6 +76,8 @@ def test_migration_preserves_bytes_inodes_saved_paths_and_default_media_root(leg
         assert not old_lock.acquire(blocking=False)
     assert not journal.exists()
     assert migration.migrate()["status"] == "native"
+    with pytest.raises(migration.MigrationError, match="no unfinished migration"):
+        migration.migrate(rollback=True)
 
 
 @pytest.mark.parametrize("rollback", [False, True])

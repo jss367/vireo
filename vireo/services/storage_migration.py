@@ -269,11 +269,11 @@ def migrate(*, rollback: bool = False) -> JsonDict:
 
     source, data, cache, journal = _paths()
     if not _exists(journal):
+        if rollback:
+            raise MigrationError("There is no unfinished migration to roll back.")
         plan = preview()
         if plan["status"] == "native":
             return plan
-        if rollback:
-            raise MigrationError("There is no unfinished migration to roll back.")
     if source.is_symlink() or not source.is_dir():
         raise MigrationError("Legacy directory is missing or has become a symlink.")
     with ExitStack() as stack:
