@@ -51,6 +51,7 @@ import json
 
 import config as cfg
 from keyword_normalization import keyword_match_key
+from repositories.prediction_review import prediction_review_join, prediction_review_status
 from species_memberships import photo_species_memberships
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
@@ -145,18 +146,16 @@ _HIGHLIGHT_KEYWORD_MATCH = """
 # by an accepted keyword) only when ``photo_species_memberships`` still puts
 # its photo in that species' bucket. The bucket rule also requires another
 # subject to account for the photo's keyword, which this SQL does not check.
-_HIGHLIGHT_PREDICTION_MATCH = """
+_HIGHLIGHT_PREDICTION_MATCH = f"""
                      EXISTS (
                          SELECT 1
                          FROM detections d
                          JOIN predictions pr ON pr.detection_id = d.id
-                         LEFT JOIN prediction_review pr_rev
-                          ON pr_rev.prediction_id = pr.id
-                         AND pr_rev.workspace_id = sh.workspace_id
+                         {prediction_review_join('pr', workspace='sh.workspace_id')}
                          WHERE d.photo_id = sh.photo_id
                            AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
                            AND pr.species IS NOT NULL
-                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                           AND {prediction_review_status()} != 'rejected'
                            AND pr.labels_fingerprint = (
                                SELECT pr2.labels_fingerprint
                                FROM predictions pr2
@@ -173,12 +172,10 @@ _HIGHLIGHT_PREDICTION_MATCH = """
                            AND pr.id = (
                                SELECT pr3.id
                                FROM predictions pr3
-                               LEFT JOIN prediction_review pr3_rev
-                                 ON pr3_rev.prediction_id = pr3.id
-                                AND pr3_rev.workspace_id = sh.workspace_id
+                               {prediction_review_join('pr3', review_alias='pr3_rev', workspace='sh.workspace_id')}
                                WHERE pr3.detection_id = pr.detection_id
                                  AND pr3.species IS NOT NULL
-                                 AND COALESCE(pr3_rev.status, 'pending') != 'rejected'
+                                 AND {prediction_review_status('pr3_rev')} != 'rejected'
                                  AND pr3.labels_fingerprint = (
                                      SELECT pr4.labels_fingerprint
                                      FROM predictions pr4
@@ -473,13 +470,11 @@ class SpeciesCurationRepository:
                           ) AS rn
                    FROM detections d
                    JOIN predictions pr ON pr.detection_id = d.id
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id
-                    AND pr_rev.workspace_id = ?
+                   {prediction_review_join('pr')}
                    WHERE d.photo_id IN (SELECT id FROM scope)
                      AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
                      AND pr.species IS NOT NULL
-                     AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                     AND {prediction_review_status()} != 'rejected'
                      AND pr.labels_fingerprint = (
                          SELECT pr2.labels_fingerprint FROM predictions pr2
                          WHERE pr2.detection_id = pr.detection_id

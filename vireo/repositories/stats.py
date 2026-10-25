@@ -24,6 +24,7 @@ import sqlite3
 from collections.abc import Callable, Iterable, Sequence
 
 from keyword_identity import identity_sql
+from repositories.prediction_review import prediction_review_join, prediction_review_status
 
 
 class StatsRepository:
@@ -1076,15 +1077,14 @@ class StatsRepository:
         # so stale-label predictions from a prior label set don't drift the
         # totals away from the active labeling context.
         prediction_status = self.conn.execute(
-            f"""SELECT COALESCE(pr_rev.status, 'pending') AS status,
+            f"""SELECT {prediction_review_status()} AS status,
                       COUNT(*) AS count
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN photo_workspace_visibility wf
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr')}
                WHERE d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -1093,7 +1093,7 @@ class StatsRepository:
                     ORDER BY pr2.created_at DESC, pr2.id DESC
                     LIMIT 1
                  ){scope_sql}
-               GROUP BY COALESCE(pr_rev.status, 'pending')""",
+               GROUP BY {prediction_review_status()}""",
             (ws, ws, min_conf, *scope_params),
         ).fetchall()
 

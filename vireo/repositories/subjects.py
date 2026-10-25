@@ -22,6 +22,8 @@ import sqlite3
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from repositories.prediction_review import prediction_review_join, prediction_review_status
+
 
 class SubjectsRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -200,10 +202,10 @@ class SubjectsRepository:
         At or above ``floor``, not rejected in ``workspace_id``, and from each
         detection/classifier pair's newest label set; highest confidence first.
         """
-        return self.conn.execute("""SELECT pr.*, COALESCE(rv.status,'pending') AS status
+        return self.conn.execute(f"""SELECT pr.*, {prediction_review_status('rv')} AS status
         FROM predictions pr JOIN detections d ON d.id=pr.detection_id
-        LEFT JOIN prediction_review rv ON rv.prediction_id=pr.id AND rv.workspace_id=?
-        WHERE d.photo_id=? AND pr.confidence>=? AND COALESCE(rv.status,'pending')!='rejected'
+        {prediction_review_join('pr', review_alias='rv')}
+        WHERE d.photo_id=? AND pr.confidence>=? AND {prediction_review_status('rv')}!='rejected'
         AND pr.labels_fingerprint=(SELECT pr2.labels_fingerprint FROM predictions pr2
             WHERE pr2.detection_id=pr.detection_id AND pr2.classifier_model=pr.classifier_model
             ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)

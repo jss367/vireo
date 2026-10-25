@@ -31,6 +31,8 @@ import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
+from repositories.prediction_review import prediction_review_join, prediction_review_status
+
 
 class EditHistoryRepository:
     def __init__(
@@ -92,13 +94,12 @@ class EditHistoryRepository:
         for ids in chunked(list(dict.fromkeys(prediction_ids))):
             placeholders = ",".join("?" for _ in ids)
             for row in self.conn.execute(
-                "SELECT p.id, COALESCE(r.status, 'pending') AS status, "
+                f"SELECT p.id, {prediction_review_status('r')} AS status, "
                 "instances.instance_id AS prediction_instance_id, "
                 "d.photo_id "
                 "FROM predictions p JOIN detections d ON d.id = p.detection_id "
                 "LEFT JOIN prediction_history_instances instances ON instances.prediction_id = p.id "
-                "LEFT JOIN prediction_review r "
-                "ON r.prediction_id = p.id AND r.workspace_id = ? "
+                f"{prediction_review_join('p', 'r')} "
                 f"WHERE p.id IN ({placeholders}) ORDER BY p.id",
                 (ws, *ids),
             ):
@@ -433,14 +434,12 @@ class EditHistoryRepository:
             placeholders = ",".join("?" * len(accepted_ids))
             sibs = self.conn.execute(
                 f"""SELECT pr.id FROM predictions pr
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id
-                    AND pr_rev.workspace_id = ?
+                   {prediction_review_join('pr')}
                    WHERE pr.detection_id = ?
                      AND pr.classifier_model = ?
                      AND pr.labels_fingerprint = ?
                      AND pr.id NOT IN ({placeholders})
-                     AND COALESCE(pr_rev.status, 'pending')
+                     AND {prediction_review_status()}
                          IN ('pending', 'alternative')""",
                 (ws, *scope, *accepted_ids),
             ).fetchall()

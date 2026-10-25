@@ -14,6 +14,7 @@ from keyword_normalization import (
     normalize_keyword_display,
 )
 from new_images import get_shared_cache
+from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.species_taxon_lookup import taxon_lookup_variants
 
 if TYPE_CHECKING:
@@ -714,17 +715,15 @@ _PHOTO_DATE_DESC_ORDER = "p.timestamp IS NULL, p.timestamp DESC, p.filename ASC,
 # catalog (~0.35s even for a 60-photo folder), while the correlated form is
 # index-driven per scoped row — 0.03s on a small workspace and no slower
 # than the CTE on the largest one.
-_TOP_PREDICTION_CONFIDENCE_EXPR = """(
+_TOP_PREDICTION_CONFIDENCE_EXPR = f"""(
             SELECT MAX(conf_pr.confidence)
             FROM detections conf_d
             JOIN predictions conf_pr ON conf_pr.detection_id = conf_d.id
-            LEFT JOIN prediction_review conf_prv
-                   ON conf_prv.prediction_id = conf_pr.id
-                  AND conf_prv.workspace_id = ?
+            {prediction_review_join('conf_pr', review_alias='conf_prv')}
             WHERE conf_d.photo_id = p.id
               AND conf_d.detector_confidence >= ?
               AND conf_pr.species IS NOT NULL
-              AND COALESCE(conf_prv.status, 'pending')
+              AND {prediction_review_status('conf_prv')}
                   NOT IN ('rejected', 'alternative')
               AND conf_pr.labels_fingerprint = (
                   SELECT conf_pr2.labels_fingerprint FROM predictions conf_pr2

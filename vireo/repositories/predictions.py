@@ -74,11 +74,11 @@ caller owns the transaction, and no method here commits unless the
 ``Database`` method it backs did.
 """
 
-
 from collections.abc import Callable
 from typing import Any
 
 from keyword_normalization import normalize_keyword_display
+from repositories.prediction_review import prediction_review_join, prediction_review_status
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (
@@ -785,12 +785,10 @@ class PredictionRepository:
                            pr_rev.individual AS individual
                     FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
-                    LEFT JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id
-                     AND pr_rev.workspace_id = ?
+                    {prediction_review_join('pr')}
                     WHERE d.photo_id IN ({placeholders})
                       AND pr.species IS NOT NULL AND pr.species != ''
-                      AND COALESCE(pr_rev.status, 'pending')
+                      AND {prediction_review_status()}
                           NOT IN ('rejected', 'alternative')
                       AND d.detector_confidence >= ?
                       AND pr.labels_fingerprint = (
@@ -872,7 +870,7 @@ class PredictionRepository:
             base_conditions.append("pr.classifier_model = ?")
             base_params.append(model)
         if status:
-            base_conditions.append("COALESCE(pr_rev.status, 'pending') = ?")
+            base_conditions.append(f"{prediction_review_status()} = ?")
             base_params.append(status)
         # Latest-fingerprint-per-(detection, classifier_model) filter — same
         # pattern used by get_top_prediction_for_photo.
@@ -904,7 +902,7 @@ class PredictionRepository:
             rows.extend(self.conn.execute(
                 f"""SELECT pr.*,
                            pr.classifier_model AS model,
-                           COALESCE(pr_rev.status, 'pending') AS status,
+                           {prediction_review_status()} AS status,
                            pr_rev.individual AS individual,
                            pr_rev.group_id AS group_id,
                            pr_rev.vote_count AS vote_count,
@@ -916,8 +914,7 @@ class PredictionRepository:
                     JOIN detections d ON d.id = pr.detection_id
                     JOIN photos p ON p.id = d.photo_id
                     JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    LEFT JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                    {prediction_review_join('pr')}
                     {where} ORDER BY pr.confidence DESC""",
                 params,
             ).fetchall())
@@ -1033,9 +1030,9 @@ class PredictionRepository:
         """
         ws = self.workspace_id
         primaries = self.conn.execute(
-            """SELECT pr.*,
+            f"""SELECT pr.*,
                       pr.classifier_model AS model,
-                      COALESCE(pr_rev.status, 'pending') AS status,
+                      {prediction_review_status()} AS status,
                       pr_rev.individual AS individual,
                       pr_rev.group_id AS group_id,
                       pr_rev.vote_count AS vote_count,
@@ -1046,8 +1043,7 @@ class PredictionRepository:
                       p.rating, p.flag, p.width, p.height,
                       p.eye_x, p.eye_y, p.eye_conf
                FROM predictions pr
-               JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr', required=True)}
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN photo_workspace_visibility wf
@@ -1081,8 +1077,7 @@ class PredictionRepository:
                            pr.labels_fingerprint,
                            pr.species, pr.confidence
                     FROM predictions pr
-                    JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                    {prediction_review_join('pr', required=True)}
                     WHERE pr_rev.status = 'alternative'
                       AND pr.detection_id IN ({placeholders})
                     ORDER BY pr.confidence DESC""",
@@ -1350,13 +1345,13 @@ class PredictionRepository:
         given (not the bound workspace) and only scopes the review join.
         """
         return self.conn.execute(
-            """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
+            f"""SELECT pr.species, pr.confidence, pr.classifier_model AS model,
                       pr.category, pr.match_score,
                       pr.labels_fingerprint, pr.source_taxon_id,
                       pr.scientific_name, pr.taxonomy_kingdom, pr.taxonomy_phylum,
                       pr.taxonomy_class, pr.taxonomy_order, pr.taxonomy_family,
                       pr.taxonomy_genus,
-                      COALESCE(pr_rev.status, 'pending') AS status,
+                      {prediction_review_status()} AS status,
                       pr_rev.individual AS individual,
                       pr_rev.group_id AS group_id,
                       pr_rev.vote_count AS vote_count,
@@ -1364,8 +1359,7 @@ class PredictionRepository:
                       d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr')}
                WHERE d.photo_id = ?
                  AND d.detector_confidence >= ?
                  AND d.detector_model != 'full-image'
@@ -1425,20 +1419,18 @@ class PredictionRepository:
                               pr.species, pr.confidence,
                               pr.classifier_model,
                               pr_rev.group_id,
-                              COALESCE(pr_rev.status, 'pending') AS status,
+                              {prediction_review_status()} AS status,
                               ROW_NUMBER() OVER (
                                   PARTITION BY d.id
                                   ORDER BY pr.confidence DESC, pr.id DESC
                               ) AS rn
                        FROM detections d
                        JOIN predictions pr ON pr.detection_id = d.id
-                       LEFT JOIN prediction_review pr_rev
-                         ON pr_rev.prediction_id = pr.id
-                        AND pr_rev.workspace_id = ?
+                       {prediction_review_join('pr')}
                        WHERE d.photo_id IN ({placeholders})
                          AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
                          AND pr.species IS NOT NULL
-                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND {prediction_review_status()} != 'rejected'
                          AND pr.labels_fingerprint = (
                              SELECT pr2.labels_fingerprint FROM predictions pr2
                              WHERE pr2.detection_id = pr.detection_id
@@ -1505,22 +1497,20 @@ class PredictionRepository:
         ws = self.workspace_id
         if labels_fingerprint is not None:
             row = self.conn.execute(
-                """SELECT pr.id FROM predictions pr
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                f"""SELECT pr.id FROM predictions pr
+                   {prediction_review_join('pr')}
                    WHERE pr.detection_id = ? AND pr.classifier_model = ?
                      AND pr.labels_fingerprint = ?
-                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                     AND {prediction_review_status()} != 'alternative'
                    ORDER BY pr.confidence DESC LIMIT 1""",
                 (ws, detection_id, model, labels_fingerprint),
             ).fetchone()
         else:
             row = self.conn.execute(
-                """SELECT pr.id FROM predictions pr
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                f"""SELECT pr.id FROM predictions pr
+                   {prediction_review_join('pr')}
                    WHERE pr.detection_id = ? AND pr.classifier_model = ?
-                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                     AND {prediction_review_status()} != 'alternative'
                    ORDER BY pr.confidence DESC LIMIT 1""",
                 (ws, detection_id, model),
             ).fetchone()
@@ -1560,22 +1550,20 @@ class PredictionRepository:
         # 'alternative' in this workspace.
         if labels_fingerprint is not None:
             row = self.conn.execute(
-                """SELECT pr.id FROM predictions pr
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                f"""SELECT pr.id FROM predictions pr
+                   {prediction_review_join('pr')}
                    WHERE pr.detection_id = ? AND pr.classifier_model = ?
                      AND pr.labels_fingerprint = ?
-                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                     AND {prediction_review_status()} != 'alternative'
                    ORDER BY pr.confidence DESC LIMIT 1""",
                 (ws, detection_id, model, labels_fingerprint),
             ).fetchone()
         else:
             row = self.conn.execute(
-                """SELECT pr.id FROM predictions pr
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                f"""SELECT pr.id FROM predictions pr
+                   {prediction_review_join('pr')}
                    WHERE pr.detection_id = ? AND pr.classifier_model = ?
-                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                     AND {prediction_review_status()} != 'alternative'
                    ORDER BY pr.confidence DESC LIMIT 1""",
                 (ws, detection_id, model),
             ).fetchone()
@@ -1628,13 +1616,12 @@ class PredictionRepository:
             return None
 
         agreeing = self.conn.execute(
-            """SELECT pr.id
+            f"""SELECT pr.id
                FROM predictions pr
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr')}
                WHERE pr.detection_id = ?
                  AND lower(trim(pr.species)) = lower(trim(?))
-                 AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                 AND {prediction_review_status()} != 'rejected'
                  AND pr.labels_fingerprint = (
                      SELECT pr2.labels_fingerprint FROM predictions pr2
                      WHERE pr2.detection_id = pr.detection_id
@@ -1721,16 +1708,14 @@ class PredictionRepository:
         has no review row).
         """
         return self.conn.execute(
-            """SELECT pr.id, pr.species, pr.detection_id,
+            f"""SELECT pr.id, pr.species, pr.detection_id,
                       pr.classifier_model AS model,
                       pr.labels_fingerprint, d.photo_id,
                       pr_rev.group_id,
-                      COALESCE(pr_rev.status, 'pending') AS status
+                      {prediction_review_status()} AS status
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id
-                AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr')}
                WHERE pr.id = ?""",
             (self.workspace_id, prediction_id),
         ).fetchone()
@@ -1742,11 +1727,9 @@ class PredictionRepository:
         unknown.
         """
         row = self.conn.execute(
-            """SELECT COALESCE(pr_rev.status, 'pending') AS status
+            f"""SELECT {prediction_review_status()} AS status
                FROM predictions pr
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id
-                AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr')}
                WHERE pr.id = ?""",
             (self.workspace_id, prediction_id),
         ).fetchone()
@@ -1772,9 +1755,7 @@ class PredictionRepository:
                            pr_rev.individual AS individual
                     FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
-                    LEFT JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id
-                     AND pr_rev.workspace_id = ?
+                    {prediction_review_join('pr')}
                     WHERE pr.id IN ({placeholders})""",
                 (ws, *chunk),
             ).fetchall())
@@ -1887,11 +1868,9 @@ class PredictionRepository:
                            pr_rev.group_id IS NOT NULL AS in_group
                     FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
-                    LEFT JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id
-                     AND pr_rev.workspace_id = ?
+                    {prediction_review_join('pr')}
                     WHERE d.photo_id IN ({placeholders})
-                      AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                      AND {prediction_review_status()} != 'alternative'
                     ORDER BY pr.id""",
                 [ws, *chunk],
             ).fetchall())
@@ -1917,9 +1896,7 @@ class PredictionRepository:
                       ON pr.detection_id = pick.detection_id
                      AND pr.classifier_model = pick.classifier_model
                      AND pr.labels_fingerprint = pick.labels_fingerprint
-                    JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id
-                     AND pr_rev.workspace_id = ?
+                    {prediction_review_join('pr', required=True)}
                     WHERE pick.id IN ({placeholders})""",
                 (ws, *chunk),
             ).fetchall())
@@ -1942,14 +1919,12 @@ class PredictionRepository:
         placeholders = ",".join("?" for _ in exclude_ids)
         return [row["id"] for row in self.conn.execute(
             f"""SELECT pr.id FROM predictions pr
-                LEFT JOIN prediction_review pr_rev
-                  ON pr_rev.prediction_id = pr.id
-                 AND pr_rev.workspace_id = ?
+                {prediction_review_join('pr')}
                 WHERE pr.detection_id = ?
                   AND pr.classifier_model = ?
                   AND pr.labels_fingerprint = ?
                   AND pr.id NOT IN ({placeholders})
-                  AND COALESCE(pr_rev.status, 'pending')
+                  AND {prediction_review_status()}
                       IN ('pending', 'alternative', 'accepted')""",
             (self.workspace_id, detection_id, classifier_model,
              labels_fingerprint, *exclude_ids),
@@ -1962,11 +1937,9 @@ class PredictionRepository:
         ``exclude_id`` (the row being decided) is left out.
         """
         return [row["id"] for row in self.conn.execute(
-            """SELECT pr.id
+            f"""SELECT pr.id
                FROM predictions pr
-               JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id
-                AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr', required=True)}
                WHERE pr.detection_id = ?
                  AND pr.classifier_model = ?
                  AND pr.labels_fingerprint = ?
@@ -1989,7 +1962,7 @@ class PredictionRepository:
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT pr.id AS prediction_id, d.photo_id AS photo_id,
-                           COALESCE(pr_rev.status, 'pending') AS status,
+                           {prediction_review_status()} AS status,
                            (pr.labels_fingerprint != (
                                SELECT pr2.labels_fingerprint FROM predictions pr2
                                WHERE pr2.detection_id = pr.detection_id
@@ -1999,9 +1972,7 @@ class PredictionRepository:
                            )) AS is_superseded
                       FROM predictions pr
                       JOIN detections d ON d.id = pr.detection_id
-                      LEFT JOIN prediction_review pr_rev
-                        ON pr_rev.prediction_id = pr.id
-                       AND pr_rev.workspace_id = ?
+                      {prediction_review_join('pr')}
                      WHERE pr.id IN ({placeholders})""",
                 (ws, *chunk),
             ).fetchall())
@@ -2016,12 +1987,10 @@ class PredictionRepository:
         """
         ws = self.workspace_id
         return self.conn.execute(
-            """SELECT pr.id, d.photo_id,
-                      COALESCE(pr_rev.status, 'pending') AS status
+            f"""SELECT pr.id, d.photo_id,
+                      {prediction_review_status()} AS status
                FROM predictions pr
-               JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id
-                AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr', required=True)}
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos ph ON ph.id = d.photo_id
                JOIN photo_workspace_visibility wf

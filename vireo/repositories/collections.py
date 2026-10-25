@@ -39,6 +39,7 @@ import sqlite3
 
 from keyword_identity import identity_sql
 from repositories import UNSET
+from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
@@ -559,8 +560,8 @@ class CollectionRepository:
                 {'AND' if where else 'WHERE'} EXISTS (
                     SELECT 1 FROM detections d
                     JOIN predictions pr ON pr.detection_id = d.id
-                    JOIN prediction_review r ON r.prediction_id = pr.id
-                    WHERE d.photo_id = p.id AND r.workspace_id = ?
+                    {prediction_review_join('pr', review_alias='r', required=True)}
+                    WHERE d.photo_id = p.id
                       AND r.status IN ({placeholders})
                       AND COALESCE(r.individual, '') != ?
                 )""",
@@ -2420,10 +2421,7 @@ class _RuleQueryBuilder:
         # Always join prediction_review so alternatives can be filtered
         # out below — the review_join parameter is retained for callers
         # that also read prv.status in their predicate.
-        review = (
-            " LEFT JOIN prediction_review prv "
-            "ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
-        )
+        review = f" {prediction_review_join('pred', 'prv')}"
         # Filters that represent the *displayed* prediction (confidence,
         # classifier_model, taxonomy_*, plus the status predicates that
         # already read prv.status) must ignore runner-up rows stored
@@ -2432,7 +2430,7 @@ class _RuleQueryBuilder:
         # prediction_confidence <= 0.2 even though /api/predictions
         # (app.py:12386-12388) drops alternatives from top-level results.
         not_alternative = (
-            " AND COALESCE(prv.status, 'pending') != 'alternative'"
+            f" AND {prediction_review_status('prv')} != 'alternative'"
         )
         # Gate by the workspace-effective detector_confidence floor.
         # /api/photos/query's response goes through
@@ -2497,7 +2495,7 @@ class _RuleQueryBuilder:
         params.extend(species_params)
         prediction_sql, prediction_params = self._prediction_exists(
             values_contain(prediction_search_values("pred")
-                           + ["COALESCE(prv.status, 'pending')"]),
+                           + [prediction_review_status('prv')]),
             term_binds(like, value),
         )
         # Once a photo has a species, search matches what the user said it
@@ -2932,19 +2930,19 @@ class _RuleQueryBuilder:
         """
         if op in ("equals", "is"):
             return self._prediction_exists(
-                "COALESCE(prv.status, 'pending') = ?",
+                f"{prediction_review_status('prv')} = ?",
                 [value],
                 review_join=True,
             )
         if op == "is not":
             if self._row_scoped:
                 return self._prediction_exists(
-                    "COALESCE(prv.status, 'pending') != ?",
+                    f"{prediction_review_status('prv')} != ?",
                     [value],
                     review_join=True,
                 )
             exists, params = self._prediction_exists(
-                "COALESCE(prv.status, 'pending') = ?",
+                f"{prediction_review_status('prv')} = ?",
                 [value],
                 review_join=True,
             )
@@ -2956,7 +2954,7 @@ class _RuleQueryBuilder:
             placeholders = ",".join("?" * len(values))
             if op == "in":
                 return self._prediction_exists(
-                    f"COALESCE(prv.status, 'pending') IN ({placeholders})",
+                    f"{prediction_review_status('prv')} IN ({placeholders})",
                     values,
                     review_join=True,
                 )
@@ -2964,12 +2962,12 @@ class _RuleQueryBuilder:
             # inverse set; photo-scoped stays broad via NOT EXISTS.
             if self._row_scoped:
                 return self._prediction_exists(
-                    f"COALESCE(prv.status, 'pending') NOT IN ({placeholders})",
+                    f"{prediction_review_status('prv')} NOT IN ({placeholders})",
                     values,
                     review_join=True,
                 )
             exists, params = self._prediction_exists(
-                f"COALESCE(prv.status, 'pending') IN ({placeholders})",
+                f"{prediction_review_status('prv')} IN ({placeholders})",
                 values,
                 review_join=True,
             )
@@ -2995,18 +2993,18 @@ class _RuleQueryBuilder:
         """
         if _truthy(value):
             return self._prediction_exists(
-                "COALESCE(prv.status, 'pending') = 'pending'",
+                f"{prediction_review_status('prv')} = 'pending'",
                 [],
                 review_join=True,
             )
         if self._row_scoped:
             return self._prediction_exists(
-                "COALESCE(prv.status, 'pending') != 'pending'",
+                f"{prediction_review_status('prv')} != 'pending'",
                 [],
                 review_join=True,
             )
         exists, params = self._prediction_exists(
-            "COALESCE(prv.status, 'pending') = 'pending'",
+            f"{prediction_review_status('prv')} = 'pending'",
             [],
             review_join=True,
         )
