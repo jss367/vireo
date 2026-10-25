@@ -375,12 +375,6 @@ def test_sidecar_alias_missing_own_photo(lib):
     assert db.pending_changes.keyword_sidecar_alias(999999, ws, "Robin") is False
 
 
-# Windows' ``os.path.normcase`` folds case, so there "Dir" and "dir" are one
-# path and alias without a filesystem check; elsewhere case variants alias
-# only when ``os.path.samefile`` says so.
-_NORMCASE_FOLDS_CASE = os.path.normcase("A") == os.path.normcase("a")
-
-
 def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     ws = db._active_workspace_id
     upper = tmp_path / "Dir"
@@ -394,9 +388,10 @@ def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     pu = photo_ingest.add_photo(db, fu, "a.jpg", ".jpg", 1, 1.0)
     pl = photo_ingest.add_photo(db, fl, "a.png", ".png", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
-    # Neither sidecar exists: samefile raises OSError, suppressed -> False
-    # (unless the platform folds case, when the paths are simply equal).
-    assert db.pending_changes.keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
+    # Existing photos provide evidence of the directory's case semantics
+    # even though neither sidecar has been written yet.
+    (upper / "a.jpg").write_text("photo")
+    assert db.pending_changes.keyword_sidecar_alias(pu, ws, "Robin") is os.path.samefile(upper, lower)
     (upper / "a.xmp").write_text("x")
     if not (lower / "a.xmp").exists():
         os.link(upper / "a.xmp", lower / "a.xmp")
@@ -413,7 +408,7 @@ def test_sidecar_alias_case_variant_distinct_files(db, tmp_path):
     px = photo_ingest.add_photo(db, fx, "z.jpg", ".jpg", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
     _insert(db, px, "keyword_add", "Robin", ws)
-    assert db.pending_changes.keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
+    assert db.pending_changes.keyword_sidecar_alias(pu, ws, "Robin") is False
 
 
 # -- remove_pending_changes ------------------------------------------------------------

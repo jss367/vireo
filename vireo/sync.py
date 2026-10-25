@@ -20,6 +20,7 @@ from keyword_identity import (
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from services import moves_merge, pending_changes, photo_locations
+from sidecar_identity import missing_sidecar_identity
 from xmp import SidecarEditor, read_keyword_snapshot
 
 log = logging.getLogger(__name__)
@@ -587,9 +588,9 @@ def _sidecar_target_identities(resolved_paths):
 
     Most sidecars have just one resolved spelling and need no extra stat.
     Conservative alias groups need filesystem evidence: on macOS, realpath
-    can preserve different spellings of the same file. Uncreated aliases or
-    files whose identity cannot be read stay coupled until we can distinguish
-    them; each write still uses its own path, even in that conservative group.
+    can preserve different spellings of the same file. Missing files use the
+    containing directory's case semantics, just as keyword cancellation does.
+    Unreadable identities stay coupled; each write still uses its own path.
     """
     aliases = defaultdict(set)
     for path in resolved_paths.values():
@@ -605,10 +606,13 @@ def _sidecar_target_identities(resolved_paths):
             try:
                 stat = os.stat(path)
             except FileNotFoundError:
-                # Absence cannot prove that two spellings are distinct. A
-                # successful no-op removal must survive beside a failed add:
-                # clearing it here could resurrect the keyword on retry.
-                group[path] = ("missing", canonical)
+                # Probe inside the parent: even Windows directories may
+                # distinguish these names. Without evidence keep the retry
+                # sequence coupled so a failed add cannot outlive a removal.
+                identity = missing_sidecar_identity(path)
+                if identity is None:
+                    break
+                group[path] = ("missing", identity)
             except OSError:
                 break
             else:

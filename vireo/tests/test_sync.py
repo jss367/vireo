@@ -3264,6 +3264,33 @@ def test_keyword_cancellation_does_not_hide_latest_shared_sidecar_intent(
     assert not db.pending_changes.list_all()
 
 
+@pytest.mark.parametrize('different_parent', [False, True])
+def test_keyword_cancellation_before_case_variant_sidecars_are_created(tmp_path, db, different_parent):
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    folder = tmp_path / 'Photos'
+    folder.mkdir()
+    other = tmp_path / 'photos' if different_parent else folder
+    other.mkdir(exist_ok=True)
+    shared = os.path.samefile(folder, other) and not _filesystem_is_case_sensitive(str(folder))
+    photos = []
+    for directory, filename in ((folder, 'A.jpg'), (other, 'a.nef')):
+        (directory / filename).touch()
+        fid = workspace_folders.add_folder(db, str(directory), name=directory.name)
+        photos.append(photo_ingest.add_photo(db, fid, filename, os.path.splitext(filename)[1], 1, 1.0))
+    for pid in photos:
+        db.queue_change(pid, 'keyword_add', 'Osprey')
+    db._flip_pending_keyword_change(photos[1], 'Osprey', 'keyword_add', 'keyword_remove')
+    result = sync_to_xmp(db, create_missing_sidecars=True)
+    assert result['failed'] == 0
+    assert result['synced'] == (2 if shared else 1)
+    assert read_keywords(str(folder / 'A.xmp')) == (set() if shared else {'Osprey'})
+    if not shared:
+        assert not (other / 'a.xmp').exists()
+    assert not db.pending_changes.list_all()
+
+
 def test_keyword_cancellation_distinguishes_case_sensitive_sidecars(tmp_path, db):
     from sync import sync_to_xmp
     from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
