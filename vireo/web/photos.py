@@ -13,6 +13,8 @@ Per-photo edit recipes live in ``web/photo_edit_recipes.py``; per-photo
 keyword and location edits in ``web/photo_location_keywords.py``.
 """
 
+from __future__ import annotations
+
 import contextlib
 import json
 import logging
@@ -20,7 +22,9 @@ import math
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, cast
 
 import config as cfg
 from best_batch import best_batch_scope, build_best_batch_response
@@ -86,7 +90,34 @@ from web.request_args import (
 from web.responses import photo_not_found_error
 from working_copy_cache import working_copy_publication_guard
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+
+    import numpy as np
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from float_image import FloatImage
+    from PIL import Image
+    from services.service_types import ErrorResponse, JobDict, JsonDict, JsonError
+    from services.visual_scope import RuleTree, VisualScope
+    from subject_ranking import SubjectComparison
+    from web.background_jobs import JobLaunch
+    from web.web_types import (
+        AppConfig,
+        GetDb,
+        GetRunner,
+        InvalidateMissingOriginals,
+        MissingOriginalsPayload,
+        RunBatchDelete,
+        StartMissingOriginalsScan,
+    )
+
 log = logging.getLogger(__name__)
+
+# An image a handoff render decodes: Pillow, or a float RAW buffer.
+type AnyImage = Image.Image | FloatImage
+# ``image_loader.load_image`` (tests substitute fakes).
+type LoadImage = Callable[..., AnyImage | None]
 
 
 # A Leaflet marker is substantially heavier than its JSON source row. Keep a
@@ -95,7 +126,7 @@ log = logging.getLogger(__name__)
 MAP_RENDER_PHOTO_LIMIT = 10_000
 
 
-def _map_selection_ids(raw):
+def _map_selection_ids(raw: object) -> list[int]:
     """Validate a Map selection's ``photo_ids``: non-empty integers, deduplicated."""
     if not isinstance(raw, list) or not raw:
         raise ValueError("photo_ids must be a non-empty list")
@@ -105,9 +136,9 @@ def _map_selection_ids(raw):
     return list(dict.fromkeys(raw))
 
 
-def _within_selection(selection_ids, rules):
+def _within_selection(selection_ids: list[int], rules: RuleTree | None) -> JsonDict:
     """``rules`` (None, a flat list or a group) narrowed to the selected photos."""
-    clauses = [{"field": "photo_ids", "value": selection_ids}]
+    clauses: list[JsonDict] = [{"field": "photo_ids", "value": selection_ids}]
     if isinstance(rules, list):
         clauses.extend(rules)
     elif rules is not None:
@@ -115,7 +146,7 @@ def _within_selection(selection_ids, rules):
     return {"mode": "all", "rules": clauses}
 
 
-def _map_selection_summary(db, selection_ids, shown, *, filtered):
+def _map_selection_summary(db: Database, selection_ids: list[int], shown: list[Row], *, filtered: bool) -> dict[str, int]:
     """Account for every selected photo the map shows or leaves off.
 
     The buckets partition the selection, so the Map page can say why each
@@ -145,7 +176,7 @@ def _map_selection_summary(db, selection_ids, shown, *, filtered):
     }
 
 
-def _unplottable_map_focus(db, photo_id):
+def _unplottable_map_focus(db: Database, photo_id: int) -> JsonDict:
     """Explain why a deep-linked photo is absent from the Map's photo set.
 
     ``reason`` is ``not_found`` (no such photo in the active workspace),
@@ -182,8 +213,9 @@ def _unplottable_map_focus(db, photo_id):
     return focus
 
 
-def _text_search_response(db, emb_pairs, query_vec, *, threshold, limit,
-                          ids_only, model_name):
+def _text_search_response(db: Database, emb_pairs: list[tuple[int, bytes]], query_vec: np.ndarray, *,
+                          threshold: float, limit: int,
+                          ids_only: bool, model_name: str) -> Response:
     """Rank ``emb_pairs`` against ``query_vec`` and build the search response."""
     import numpy as np
 
@@ -247,21 +279,24 @@ def _text_search_response(db, emb_pairs, query_vec, *, threshold, limit,
     })
 
 
-def _sort_missing_removals(db, ws_id, photo_ids, delete_sidecars):
+# ``photo_ids`` holds the request's raw JSON ids; non-integers are skipped.
+def _sort_missing_removals(
+    db: Database, ws_id: int, photo_ids: Sequence[Any], delete_sidecars: bool,
+) -> tuple[list[int], list[int], list[int], int, list[str]]:
     """Recheck each photo's original before a Missing Originals removal.
 
     Returns ``(confirmed_ids, restored_ids, folder_offline_ids, skipped,
     sidecar_targets)``: still missing, back on disk, under an unreachable
     folder, unusable ids, and the originals whose sidecars to delete.
     """
-    confirmed_ids = []
-    restored_ids = []
-    folder_offline_ids = []
+    confirmed_ids: list[int] = []
+    restored_ids: list[int] = []
+    folder_offline_ids: list[int] = []
     skipped = 0
-    sidecar_targets = []
-    folder_online_cache = {}
+    sidecar_targets: list[str] = []
+    folder_online_cache: dict[str, bool] = {}
 
-    def folder_accessible(folder_path):
+    def folder_accessible(folder_path: str) -> bool:
         cached = folder_online_cache.get(folder_path)
         if cached is not None:
             return cached
@@ -308,7 +343,7 @@ def _sort_missing_removals(db, ws_id, photo_ids, delete_sidecars):
     return confirmed_ids, restored_ids, folder_offline_ids, skipped, sidecar_targets
 
 
-def _delete_missing_sidecars(sidecar_targets):
+def _delete_missing_sidecars(sidecar_targets: list[str]) -> tuple[int, int]:
     """Delete the XMP sidecars of confirmed-missing originals.
 
     Returns ``(sidecars_deleted, sidecars_skipped)``.
@@ -335,7 +370,7 @@ def _delete_missing_sidecars(sidecar_targets):
     return sidecars_deleted, sidecars_skipped
 
 
-def _score_sharpness_region(db, raw, vireo_dir):
+def _score_sharpness_region(db: Database, raw: object, vireo_dir: str) -> JsonDict:
     """Score one requested region; the region's result row."""
     from image_loader import load_working_image
     from sharpness import _score_from_pil
@@ -346,7 +381,7 @@ def _score_sharpness_region(db, raw, vireo_dir):
             "sharpness": None,
             "error": "region must be an object",
         }
-    raw_photo_id = raw.get("photo_id")
+    raw_photo_id: Any = raw.get("photo_id")  # JSON; int() below rejects bad values
     if isinstance(raw_photo_id, bool):
         return {
             "photo_id": None,
@@ -381,7 +416,7 @@ def _score_sharpness_region(db, raw, vireo_dir):
     if img is None:
         return {"photo_id": photo_id, "sharpness": None, "error": "could not load image"}
 
-    def _float(name, default, region=raw):
+    def _float(name: str, default: float, region: JsonDict = raw) -> float:
         raw_value = region.get(name, default)
         try:
             value = float(raw_value)
@@ -437,7 +472,9 @@ def _score_sharpness_region(db, raw, vireo_dir):
     }
 
 
-def _map_visible_photos(db, photos, focus_photo_id, selection_ids):
+def _map_visible_photos(
+    db: Database, photos: list[Row], focus_photo_id: int | None, selection_ids: list[int] | None,
+) -> tuple[list[Row], JsonDict | None]:
     """The Map's rendered rows: ``(visible_photos, unplottable_focus)``."""
     unplottable_focus = None
     if (
@@ -465,7 +502,7 @@ def _map_visible_photos(db, photos, focus_photo_id, selection_ids):
     return visible_photos, unplottable_focus
 
 
-def _attach_photo_file_fields(db, photo, result):
+def _attach_photo_file_fields(db: Database, photo: Row, result: JsonDict) -> None:
     """Add the on-disk path and XMP sidecar fields to a photo detail."""
     # Read XMP sidecar keywords
     folder = db.folders.get(photo["folder_id"])
@@ -498,18 +535,18 @@ def _attach_photo_file_fields(db, photo, result):
 
 
 def create_photos_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
+    config: AppConfig,
     *,
-    visual_scope,
-    missing_originals_payload,
-    start_missing_originals_scan,
-    invalidate_missing_originals,
-    run_batch_delete,
-):
+    visual_scope: VisualScope,
+    missing_originals_payload: MissingOriginalsPayload,
+    start_missing_originals_scan: StartMissingOriginalsScan,
+    invalidate_missing_originals: InvalidateMissingOriginals,
+    run_batch_delete: RunBatchDelete,
+) -> Blueprint:
     """Build the ``/api/photos`` data blueprint.
 
     ``config`` is ``app.config`` (``THUMB_CACHE_DIR`` is read at request
@@ -528,7 +565,7 @@ def create_photos_blueprint(
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
     @blueprint.route("/api/photos/extensions")
-    def api_photos_extensions():
+    def api_photos_extensions() -> ResponseReturnValue:
         """Return the distinct lowercased file extensions present in the
         active workspace, sorted.
 
@@ -541,7 +578,7 @@ def create_photos_blueprint(
         return jsonify(db.get_workspace_extensions())
 
     @blueprint.route("/api/photos/missing")
-    def api_photos_missing():
+    def api_photos_missing() -> ResponseReturnValue:
         """Return cached Missing Originals scan status without filesystem work."""
         db = get_db()
         try:
@@ -553,7 +590,7 @@ def create_photos_blueprint(
         return jsonify(missing_originals_payload(db, folder_id))
 
     @blueprint.route("/api/photos/missing/check", methods=["POST"])
-    def api_photos_missing_check():
+    def api_photos_missing_check() -> ResponseReturnValue:
         """Start or reuse a background Missing Originals scan."""
         db = get_db()
         try:
@@ -573,7 +610,7 @@ def create_photos_blueprint(
         return jsonify(payload), status_code
 
     @blueprint.route("/api/photos/missing/delete-sidecars", methods=["POST"])
-    def api_photos_missing_delete_sidecars():
+    def api_photos_missing_delete_sidecars() -> ResponseReturnValue:
         """Delete leftover .xmp sidecar files for photos whose original is gone.
 
         Body: ``{"photo_ids": [int, ...]}``.
@@ -654,7 +691,7 @@ def create_photos_blueprint(
         return jsonify({"deleted": deleted, "skipped": skipped})
 
     @blueprint.route("/api/photos/missing/remove", methods=["POST"])
-    def api_photos_missing_remove():
+    def api_photos_missing_remove() -> ResponseReturnValue:
         """Delete Vireo rows for photos whose originals are still gone.
 
         Body: ``{"photo_ids": [int, ...], "delete_sidecars": bool,
@@ -737,7 +774,7 @@ def create_photos_blueprint(
         })
 
     @blueprint.route("/api/photos")
-    def api_photos():
+    def api_photos() -> ResponseReturnValue:
         import config as cfg
         db = get_db()
         page = request.args.get("page", 1, type=int)
@@ -826,7 +863,7 @@ def create_photos_blueprint(
         )
 
     @blueprint.route("/api/photos/query", methods=["POST"])
-    def api_photos_query():
+    def api_photos_query() -> ResponseReturnValue:
         """Universal-filter photo query: a smart-collection rule tree plus
         sort and paging. Response shape matches /api/photos so pages can
         switch fetch paths without re-plumbing their renderers.
@@ -871,7 +908,7 @@ def create_photos_blueprint(
             db.begin()
 
             @after_this_request
-            def _release_focus_snapshot(response):
+            def _release_focus_snapshot(response: Response) -> Response:
                 if db.in_transaction:
                     db.rollback()
                 return response
@@ -892,8 +929,9 @@ def create_photos_blueprint(
             if ordered_ids is not None:
                 # Healthy visual clause: results are the similarity-ranked
                 # matches; sort is relevance by design while it is active.
+                # A healthy clause returns similarities with its ordered ids.
                 return query.visual_response(
-                    visual_info, ordered_ids, sims_by_pid,
+                    visual_info, ordered_ids, cast("dict[int, float]", sims_by_pid),
                 )
             # Unhealthy: fall through to metadata-only results with the
             # status attached so the UI can say why — never silently zero.
@@ -927,7 +965,7 @@ def create_photos_blueprint(
                 db.rollback()
 
     @blueprint.route("/api/photos/ids")
-    def api_photo_ids():
+    def api_photo_ids() -> ResponseReturnValue:
         """Return every photo ID matching the current Browse filters."""
         db = get_db()
         sort = request.args.get("sort", "date")
@@ -973,7 +1011,7 @@ def create_photos_blueprint(
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     @blueprint.route("/api/photos/calendar")
-    def api_photos_calendar():
+    def api_photos_calendar() -> ResponseReturnValue:
         db = get_db()
         claim_search_lane(db)
         from datetime import date
@@ -1008,7 +1046,7 @@ def create_photos_blueprint(
         return jsonify(data)
 
     @blueprint.route("/api/photos/<int:photo_id>")
-    def api_photo_detail(photo_id):
+    def api_photo_detail(photo_id: int) -> ResponseReturnValue:
         db = get_db()
         # verify_workspace: this response exposes the absolute path and
         # xmp_path, so a photo outside the active workspace must 404 —
@@ -1091,7 +1129,7 @@ def create_photos_blueprint(
         return jsonify(result)
 
     @blueprint.route("/api/photos/by-ids", methods=["POST"])
-    def api_photos_by_ids():
+    def api_photos_by_ids() -> ResponseReturnValue:
         """Return selected photos in caller order, scoped to the active workspace."""
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -1127,7 +1165,7 @@ def create_photos_blueprint(
         return jsonify({"photos": photos})
 
     @blueprint.route("/api/photos/companion-count", methods=["POST"])
-    def api_photos_companion_count():
+    def api_photos_companion_count() -> ResponseReturnValue:
         """How many of these photos have a companion file.
 
         The delete dialog's "Also delete N companion files" checkbox is a
@@ -1150,7 +1188,9 @@ def create_photos_blueprint(
             photo_ids.append(raw)
         return jsonify({"count": db.photos.count_with_companions(photo_ids)})
 
-    def _comparison_args(db, values, rows):
+    def _comparison_args(
+        db: Database, values: Mapping[str, Any], rows: list[Row],
+    ) -> tuple[SubjectComparison | None, ErrorResponse | None]:
         from subject_ranking import parse_comparison, resolve_subject
         try:
             comparison = parse_comparison(values)
@@ -1165,7 +1205,7 @@ def create_photos_blueprint(
         return comparison, None
 
     @blueprint.route("/api/photos/<int:photo_id>/best-batch")
-    def api_photo_best_batch(photo_id):
+    def api_photo_best_batch(photo_id: int) -> ResponseReturnValue:
         """Find neighboring burst frames and rank the best photo in that batch."""
         db = get_db()
         max_gap = request.args.get("gap_seconds", 8.0, type=float)
@@ -1188,47 +1228,51 @@ def create_photos_blueprint(
         result, error = build_best_batch_response(db, photo_id, rows, comparison=comparison)
         if error:
             return json_error(error, 404)
+        # build_best_batch_response returns a result whenever error is empty.
+        result = cast("JsonDict", result)
         result["scope_method"] = method_or_error
         attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
-    def _selected_best_batch_rows(db, body):
+    def _selected_best_batch_rows(
+        db: Database, body: object,
+    ) -> tuple[list[int], list[Row], ErrorResponse | None]:
         """``(photo_ids, rows, None)`` for a selected-photos batch body, or
-        ``(None, None, error_response)``.
+        ``([], [], error_response)``.
 
         Shared by the Best Batch and burst-evidence POST routes so both
         accept exactly the same selection: at most 500 integer ids, at least
         two of which the workspace can see in an online folder.
         """
         if not isinstance(body, dict):
-            return None, None, json_error("request body must be a JSON object")
+            return [], [], json_error("request body must be a JSON object")
         raw_ids = body.get("photo_ids", [])
         if not isinstance(raw_ids, list) or not raw_ids:
-            return None, None, json_error("photo_ids required")
+            return [], [], json_error("photo_ids required")
         if len(raw_ids) > 500:
-            return None, None, json_error("too many photo_ids", 400)
+            return [], [], json_error("too many photo_ids", 400)
 
-        photo_ids = []
-        seen = set()
+        photo_ids: list[int] = []
+        seen: set[int] = set()
         for raw in raw_ids:
             if isinstance(raw, bool) or not isinstance(raw, int):
-                return None, None, json_error("photo_ids must be integers", 400)
+                return [], [], json_error("photo_ids must be integers", 400)
             if raw in seen:
                 continue
             seen.add(raw)
             photo_ids.append(raw)
         if len(photo_ids) < 2:
-            return None, None, json_error("at least two selected photos are required", 400)
+            return [], [], json_error("at least two selected photos are required", 400)
 
         rows = db.photos.best_batch_rows_by_ids(photo_ids)
         by_id = {row["id"]: row for row in rows}
         rows = [by_id[pid] for pid in photo_ids if pid in by_id]
         if len(rows) < 2:
-            return None, None, json_error("at least two selected photos are required", 400)
+            return [], [], json_error("at least two selected photos are required", 400)
         return photo_ids, rows, None
 
     @blueprint.route("/api/photos/best-batch", methods=["POST"])
-    def api_selected_photos_best_batch():
+    def api_selected_photos_best_batch() -> ResponseReturnValue:
         """Rank an explicit selected set as a temporary best-batch group."""
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -1242,23 +1286,25 @@ def create_photos_blueprint(
         result, error = build_best_batch_response(db, photo_ids[0], rows, comparison=comparison)
         if error:
             return json_error(error, 404)
+        # build_best_batch_response returns a result whenever error is empty.
+        result = cast("JsonDict", result)
         result["scope_method"] = "selected_photos"
         attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
-    def _evidence_pack_args():
-        """``(margin, focus_size, None)`` from the request, or ``(None, None, error)``."""
+    def _evidence_pack_args() -> tuple[float, int, ErrorResponse | None]:
+        """``(margin, focus_size, None)`` from the request, or ``(0.0, 0, error)``."""
         try:
             margin = numeric_query_arg(request.args, "margin", DEFAULT_CLOSE_CALL_MARGIN,
                                        float, 0, MAX_CLOSE_CALL_MARGIN)
             focus_size = numeric_query_arg(request.args, "focus_size", DEFAULT_FOCUS_CROP_SIZE,
                                            int, MIN_FOCUS_CROP_SIZE, MAX_FOCUS_CROP_SIZE)
         except ValueError as exc:
-            return None, None, json_error(str(exc))
+            return 0.0, 0, json_error(str(exc))
         return margin, focus_size, None
 
     @blueprint.route("/api/photos/<int:photo_id>/burst-evidence")
-    def api_photo_burst_evidence(photo_id):
+    def api_photo_burst_evidence(photo_id: int) -> ResponseReturnValue:
         """The burst around one photo as an evidence pack.
 
         The Best Batch ranking (same scope rules and scorer as
@@ -1297,7 +1343,7 @@ def create_photos_blueprint(
 
     @blueprint.route("/api/photos/burst-evidence", methods=["POST"])
     @background_job
-    def api_selected_photos_burst_evidence(ctx):
+    def api_selected_photos_burst_evidence(ctx: JobLaunch) -> ResponseReturnValue:
         """The evidence pack for an explicit selection (``{"photo_ids": [...]}``).
 
         Same selection contract as ``POST /api/photos/best-batch``; same pack
@@ -1333,7 +1379,9 @@ def create_photos_blueprint(
         pack["scope_method"] = "selected_photos"
         return jsonify(pack)
 
-    def _map_request_scope(db, folder_id):
+    def _map_request_scope(
+        db: Database, folder_id: int | None,
+    ) -> tuple[list[int] | None, RuleTree | None, JsonDict | None]:
         """``(selection_ids, rules, visual_info)`` for a Map request.
 
         Raises ``ValueError`` for a malformed body, rules or visual clause.
@@ -1378,7 +1426,7 @@ def create_photos_blueprint(
         return selection_ids, rules, visual_info
 
     @blueprint.route("/api/photos/geo", methods=["GET", "POST"])
-    def api_photos_geo():
+    def api_photos_geo() -> ResponseReturnValue:
         """Plottable photos for the Map page.
 
         GET reads the filter bar's ``rules`` and ``visual`` from the query
@@ -1452,7 +1500,7 @@ def create_photos_blueprint(
         return jsonify(response)
 
     @blueprint.route("/api/photos/<int:photo_id>/wildlife_excluded", methods=["POST"])
-    def api_set_wildlife_excluded(photo_id):
+    def api_set_wildlife_excluded(photo_id: int) -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         excluded = body.get("excluded")
@@ -1476,7 +1524,7 @@ def create_photos_blueprint(
         return jsonify({"ok": True, "wildlife_excluded": excluded})
 
     @blueprint.route("/api/photos/sharpness/regions", methods=["POST"])
-    def api_photo_region_sharpness():
+    def api_photo_region_sharpness() -> ResponseReturnValue:
         """Score sharpness for explicit per-photo image regions.
 
         The burst-review UI sends the visible crop inside each comparison
@@ -1504,24 +1552,28 @@ def create_photos_blueprint(
         return jsonify({"results": results})
 
     @blueprint.route("/api/photos/analysis-readiness", methods=["POST"])
-    def api_selected_analysis_readiness():
+    def api_selected_analysis_readiness() -> ResponseReturnValue:
         from services.analysis_retry import explain_selected, selected_ids
         db = get_db()
         body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            body = {}
         try:
-            ids = selected_ids(db, body.get("photo_ids") if isinstance(body, dict) else None)
+            ids = selected_ids(db, body.get("photo_ids"))
             return jsonify(explain_selected(db, ids, db.get_effective_config(cfg.load())))
         except ValueError as exc:
             return json_error(str(exc), 400)
 
     @blueprint.route("/api/photos/analysis-retry", methods=["POST"])
     @background_job
-    def api_selected_analysis_retry(ctx):
+    def api_selected_analysis_retry(ctx: JobLaunch) -> ResponseReturnValue:
         from services.analysis_retry import run_retry, selected_ids
         db = get_db()
         body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            body = {}
         try:
-            ids = selected_ids(db, body.get("photo_ids") if isinstance(body, dict) else None)
+            ids = selected_ids(db, body.get("photo_ids"))
         except ValueError as exc:
             return json_error(str(exc), 400)
         expected = body.get("expected_workspace_id")
@@ -1534,7 +1586,7 @@ def create_photos_blueprint(
                          extra={"photo_ids": ids, "workspace_id": db.require_workspace_id()})
 
     @blueprint.route("/api/photos/<int:photo_id>/subjects")
-    def api_photo_subjects(photo_id):
+    def api_photo_subjects(photo_id: int) -> ResponseReturnValue:
         from subjects import payload
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
@@ -1543,13 +1595,13 @@ def create_photos_blueprint(
 
     @blueprint.route("/api/photos/<int:photo_id>/subjects/analyze", methods=["POST"])
     @background_job
-    def api_analyze_photo_subjects(ctx, photo_id):
+    def api_analyze_photo_subjects(ctx: JobLaunch, photo_id: int) -> ResponseReturnValue:
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("not found", 404)
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
 
-        def work(job):
+        def work(job: JobDict) -> None:
             from image_loader import get_canonical_image_path
             from subjects import analyze_photo
             thread_db = ctx.thread_db()
@@ -1569,7 +1621,7 @@ def create_photos_blueprint(
         return ctx.start("analyze-subjects", work, config={"photo_id": photo_id})
 
     @blueprint.route("/api/photos/<int:photo_id>/primary-subject", methods=["PUT"])
-    def api_primary_subject(photo_id):
+    def api_primary_subject(photo_id: int) -> ResponseReturnValue:
         from subjects import payload, select_primary
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
@@ -1590,7 +1642,7 @@ def create_photos_blueprint(
         return jsonify(payload(db, photo_id))
 
     @blueprint.route("/api/photos/open-external", methods=["POST"])
-    def api_photos_open_external():
+    def api_photos_open_external() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids")
         if not isinstance(photo_ids, list) or not photo_ids:
@@ -1638,7 +1690,7 @@ def create_photos_blueprint(
         return jsonify({"opened": len(file_paths)})
 
     @blueprint.route("/api/photos/search")
-    def api_photo_text_search():
+    def api_photo_text_search() -> ResponseReturnValue:
         """Search photos by text query using CLIP cosine similarity."""
         query = request.args.get("q", "").strip()
         if not query:
@@ -1732,7 +1784,7 @@ def create_photos_blueprint(
         )
 
     @blueprint.route("/api/photos/<int:photo_id>/similar")
-    def api_photo_similar(photo_id):
+    def api_photo_similar(photo_id: int) -> ResponseReturnValue:
         """Find photos with similar embeddings to the given photo."""
         import numpy as np
 
@@ -1829,12 +1881,12 @@ class _PhotosQuery:
     builders then serve the healthy visual clause or the rules path.
     """
 
-    def __init__(self, db, payload, json_error):
+    def __init__(self, db: Database, payload: JsonDict, json_error: JsonError) -> None:
         self.db = db
         self.payload = payload
         self.json_error = json_error
 
-    def read_paging(self):
+    def read_paging(self) -> ErrorResponse | None:
         payload = self.payload
         json_error = self.json_error
         rules = payload.get("rules")
@@ -1862,7 +1914,7 @@ class _PhotosQuery:
         self.stacks = stacks
         return None
 
-    def read_scope(self):
+    def read_scope(self) -> ErrorResponse | None:
         json_error = self.json_error
         collection_id = self.payload.get("collection_id")
         if collection_id is not None and (
@@ -1890,7 +1942,7 @@ class _PhotosQuery:
         self.folder_id = folder_id
         return None
 
-    def read_focus(self):
+    def read_focus(self) -> ErrorResponse | None:
         """Browse sends ``focus_photo_id`` when a re-sort has to stay with
         the photo the user has selected: serve the page that photo landed on
         instead of page 1, and report where it is so the caller can anchor
@@ -1930,7 +1982,7 @@ class _PhotosQuery:
         )
         return None
 
-    def read_visual(self):
+    def read_visual(self) -> ErrorResponse | None:
         self.rules = inject_active_visual_model(self.rules)
         try:
             self.visual = validate_visual_arg(self.payload.get("visual"))
@@ -1938,7 +1990,7 @@ class _PhotosQuery:
             return self.json_error(str(exc), 400)
         return None
 
-    def read_availability(self):
+    def read_availability(self) -> ErrorResponse | None:
         include_offline = self.payload.get("include_offline", False)
         include_availability = self.payload.get("include_availability", False)
         if not isinstance(include_offline, bool):
@@ -1953,13 +2005,13 @@ class _PhotosQuery:
         self.include_availability = include_availability
         return None
 
-    def _add_focus_fields(self, response, focus_index, focus_resolved_id):
+    def _add_focus_fields(self, response: JsonDict, focus_index: int | None, focus_resolved_id: int | None) -> None:
         if self.focus_candidates:
             response["focus_index"] = focus_index
             response["focus_page"] = self.page
             response["focus_photo_id"] = focus_resolved_id
 
-    def visual_response(self, visual_info, ordered_ids, sims_by_pid):
+    def visual_response(self, visual_info: JsonDict, ordered_ids: list[int], sims_by_pid: dict[int, float]) -> Response:
         """Serve a healthy visual clause's similarity-ranked matches."""
         ordered_ids, folder_statuses, availability = self._visual_availability(
             ordered_ids,
@@ -1990,14 +2042,17 @@ class _PhotosQuery:
             # underlying (unstacked) total is what they must agree
             # with — never the stack count.
             response["underlying_total"] = len(ordered_ids)
+            # _visual_stack_items builds the stacks whenever Stacks is on.
             response["stack_count"] = sum(
-                len(item["member_ids"]) > 1 for item in stack_items
+                len(item["member_ids"]) > 1 for item in cast("list[JsonDict]", stack_items)
             )
         if availability is not None:
             response.update(availability)
         return jsonify(response)
 
-    def _visual_availability(self, ordered_ids):
+    def _visual_availability(
+        self, ordered_ids: list[int],
+    ) -> tuple[list[int], dict[int, str] | None, dict[str, int] | None]:
         availability = None
         folder_statuses = None
         if self.include_offline or self.include_availability:
@@ -2016,7 +2071,7 @@ class _PhotosQuery:
             }
         return ordered_ids, folder_statuses, availability
 
-    def _visual_ids_response(self, ordered_ids, visual_info):
+    def _visual_ids_response(self, ordered_ids: list[int], visual_info: JsonDict) -> Response:
         db = self.db
         if self.stacks:
             # Same cover-first flattening the paginated visual
@@ -2048,7 +2103,7 @@ class _PhotosQuery:
         return jsonify({"ids": ordered_ids, "total": len(ordered_ids),
                         "visual": visual_info})
 
-    def _visual_stack_items(self, ordered_ids, folder_statuses):
+    def _visual_stack_items(self, ordered_ids: list[int], folder_statuses: dict[int, str] | None) -> list[JsonDict] | None:
         db = self.db
         # Offline members are display-only, so they never join a
         # stack: each one stays its own item and is left out of the
@@ -2070,7 +2125,7 @@ class _PhotosQuery:
             if self.stacks else None
         )
 
-    def _visual_focus(self, stack_items, logical_ids):
+    def _visual_focus(self, stack_items: list[JsonDict] | None, logical_ids: list[int]) -> tuple[int | None, int | None]:
         """A healthy visual clause has every matching id in memory already,
         so the focused page is a list index rather than another query."""
         focus_index = None
@@ -2101,8 +2156,9 @@ class _PhotosQuery:
         return focus_index, focus_resolved_id
 
     def _visual_page_photos(
-        self, logical_ids, stack_items, sims_by_pid, folder_statuses,
-    ):
+        self, logical_ids: list[int], stack_items: list[JsonDict] | None, sims_by_pid: dict[int, float],
+        folder_statuses: dict[int, str] | None,
+    ) -> list[JsonDict]:
         db = self.db
         per_page = self.per_page
         start = (self.page - 1) * per_page
@@ -2136,7 +2192,7 @@ class _PhotosQuery:
                 entry["folder_status"] = folder_statuses.get(entry["id"])
         return photo_dicts
 
-    def rules_ids_response(self, visual_info):
+    def rules_ids_response(self, visual_info: JsonDict | None) -> ErrorResponse | Response:
         """Select-all and other bulk flows need the complete matching id
         set; it must resolve exactly the photos the filtered grid shows, so
         it shares this endpoint rather than a legacy path. Under
@@ -2164,7 +2220,7 @@ class _PhotosQuery:
             payload_out["visual"] = visual_info
         return jsonify(payload_out)
 
-    def rules_page_response(self, visual_info):
+    def rules_page_response(self, visual_info: JsonDict | None) -> ErrorResponse | Response:
         """Serve one page of the rule tree's matches; runs inside the
         focused request's read snapshot."""
         try:
@@ -2202,7 +2258,7 @@ class _PhotosQuery:
             response["visual"] = visual_info
         return jsonify(response)
 
-    def _query_rules_page(self):
+    def _query_rules_page(self) -> _RulesPage:
         db = self.db
         rules = self.rules
         sort = self.sort
@@ -2274,7 +2330,7 @@ class _PhotosQuery:
             focus_resolved_id=focus_resolved_id,
         )
 
-    def _rules_availability(self, underlying_total):
+    def _rules_availability(self, underlying_total: int) -> tuple[int, int]:
         """Availability is always reported in photos, never in stacks: the
         notice reads "N of M photos available", so it has to agree with the
         sidebar collection count and with ``underlying_total`` — ``total``
@@ -2308,15 +2364,16 @@ class _HandoffSource:
     """The source one Open External handoff render decodes, and where the
     render and its cache metadata are written."""
 
-    source_path: str | None
+    source_path: str
     using_working_copy: bool
     fallback_path: str
     fallback_available: bool
-    out_dir: str | None = None
-    out_path: str | None = None
-    meta_path: str | None = None
+    # Set by ``_open_handoff_source`` before anything reads them.
+    out_dir: str = ""
+    out_path: str = ""
+    meta_path: str = ""
     source_mtime: float | None = None
-    expected_meta: dict | None = None
+    expected_meta: JsonDict = field(default_factory=dict)
 
 
 class _OpenExternal:
@@ -2329,7 +2386,7 @@ class _OpenExternal:
     request returns the error response, or None to continue.
     """
 
-    def __init__(self, db, folders, vireo_dir, json_error):
+    def __init__(self, db: Database, folders: dict[int, str], vireo_dir: str, json_error: JsonError) -> None:
         self.db = db
         self.folders = folders
         self.vireo_dir = vireo_dir
@@ -2338,8 +2395,8 @@ class _OpenExternal:
         self.editor_path = ""
         self.app_bundle = None
 
-    def photo_paths(self, photo_ids):
-        photo_paths = []
+    def photo_paths(self, photo_ids: list[int]) -> list[tuple[Row, str]]:
+        photo_paths: list[tuple[Row, str]] = []
         for pid in photo_ids:
             photo = self.db.photos.get(pid)
             if not photo:
@@ -2352,7 +2409,7 @@ class _OpenExternal:
                 ))
         return photo_paths
 
-    def recipe_source(self, photo, recipe, fallback_path):
+    def recipe_source(self, photo: Row, recipe: JsonDict, fallback_path: str) -> tuple[str, bool]:
         from image_loader import RAW_EXTENSIONS
 
         vireo_dir = self.vireo_dir
@@ -2409,7 +2466,7 @@ class _OpenExternal:
                 return original, False
         return fallback_path, False
 
-    def handoff_path(self, photo, fallback_path):
+    def handoff_path(self, photo: Row, fallback_path: str) -> tuple[str | None, str | None]:
         recipe = self.db.get_photo_edit_recipe(photo["id"])
         if not recipe:
             return fallback_path, None
@@ -2486,7 +2543,9 @@ class _OpenExternal:
         return src.out_path, None
 
     @staticmethod
-    def _retry_from_original(src, img, load_kwargs, load_image):
+    def _retry_from_original(
+        src: _HandoffSource, img: AnyImage | None, load_kwargs: JsonDict, load_image: LoadImage,
+    ) -> AnyImage | None:
         """Retry a failed working-copy decode from the original; the image.
 
         On a successful retry ``src`` is re-pointed at the original.
@@ -2513,7 +2572,7 @@ class _OpenExternal:
                 src.expected_meta["source_mtime"] = src.source_mtime
         return img
 
-    def _write_handoff_render(self, photo, recipe, src, img):
+    def _write_handoff_render(self, photo: Row, recipe: JsonDict, src: _HandoffSource, img: AnyImage) -> None:
         """Render ``recipe`` onto ``img`` and publish the handoff JPEG.
 
         Closes ``img`` (and the render) whether or not the write succeeds.
@@ -2558,7 +2617,7 @@ class _OpenExternal:
             if rendered is not img:
                 img.close()
 
-    def _open_handoff_source(self, photo, src):
+    def _open_handoff_source(self, photo: Row, src: _HandoffSource) -> str | None:
         """Confirm the resolved source still exists, lay out the handoff
         output paths, and read the source mtime; return the "source file
         missing" error, or None."""
@@ -2588,7 +2647,7 @@ class _OpenExternal:
         return None
 
     @staticmethod
-    def _cached_handoff_is_fresh(src):
+    def _cached_handoff_is_fresh(src: _HandoffSource) -> bool:
         try:
             if os.path.isfile(src.out_path) and os.path.isfile(src.meta_path):
                 with open(src.meta_path, encoding="utf-8") as f:
@@ -2599,7 +2658,9 @@ class _OpenExternal:
             pass
         return False
 
-    def _companion_fallback(self, photo, src, img, load_image):
+    def _companion_fallback(
+        self, photo: Row, src: _HandoffSource, img: AnyImage | None, load_image: LoadImage,
+    ) -> AnyImage | None:
         # libraw may return the embedded JPEG when it cannot
         # demosaic — that preview is typically much smaller than the
         # full-size companion JPEG, so the handoff would apply the
@@ -2635,7 +2696,7 @@ class _OpenExternal:
                 # both axes — a long-edge-only check misses cases like
                 # a 6000x3376 embedded preview "tying" a 6000x4000
                 # sidecar and losing the short-edge content.
-                if _companion_image_can_replace_raw_result(
+                if companion_img is not None and _companion_image_can_replace_raw_result(
                     companion_img, img, expected_w, expected_h,
                 ):
                     if img is None:
@@ -2662,7 +2723,7 @@ class _OpenExternal:
                     companion_img.close()
         return img
 
-    def select_editor(self, body):
+    def select_editor(self, body: JsonDict) -> ErrorResponse | None:
         json_error = self.json_error
         editors = cfg.get_editors()
         editor_index = body.get("editor_index")
@@ -2688,7 +2749,7 @@ class _OpenExternal:
         self.editor_path = os.path.expanduser(editor) if editor else ""
         return None
 
-    def resolve_app_bundle(self):
+    def resolve_app_bundle(self) -> ErrorResponse | None:
         """On macOS, an .app bundle is a directory — execing it raises EACCES.
         Resolve the bundle when the user gives the parent folder (e.g.
         /Applications/Adobe Lightroom Classic/) and route through `open -a`.
@@ -2725,7 +2786,7 @@ class _OpenExternal:
                     )
         return None
 
-    def is_darktable_editor(self):
+    def is_darktable_editor(self) -> bool:
         parts = [
             self.selected_editor.get("name", "") if self.selected_editor else "",
             self.editor_path,
@@ -2733,7 +2794,9 @@ class _OpenExternal:
         ]
         return "darktable" in " ".join(parts).lower()
 
-    def darktable_paths(self, photo_paths, file_paths):
+    def darktable_paths(
+        self, photo_paths: list[tuple[Row, str]], file_paths: list[str],
+    ) -> tuple[list[str], ErrorResponse | None]:
         from develop import convert_to_dng, is_nikon_high_efficiency_nef
 
         converted_paths = []
@@ -2786,7 +2849,7 @@ class _OpenExternal:
                 out_dir,
             )
             if not conversion["success"]:
-                return None, self.json_error(
+                return [], self.json_error(
                     "Nikon High Efficiency NEF detected, but DNG conversion failed: "
                     f"{conversion['error']}",
                     500,
@@ -2794,7 +2857,7 @@ class _OpenExternal:
             converted_paths.append(conversion["output_path"])
         return converted_paths, None
 
-    def launch(self, file_paths):
+    def launch(self, file_paths: list[str]) -> ErrorResponse | None:
         import subprocess
         import sys
 

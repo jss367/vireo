@@ -29,6 +29,7 @@ See ``docs/plans/2026-10-17-burst-evidence-adjudication-design.md``.
 import math
 import os
 import re
+from typing import Any
 
 from best_batch import (
     DEFAULT_BEST_BATCH_MAX_PHOTOS,
@@ -353,7 +354,7 @@ def _evidence_ambiguity(pack, scoring, margin):
 def build_evidence_pack(
     db, seed_photo_id, rows, *, effective_cfg, margin=DEFAULT_CLOSE_CALL_MARGIN,
     focus_size=DEFAULT_FOCUS_CROP_SIZE, evidence_rows=None, comparison=None,
-):
+) -> dict[str, Any]:
     """The evidence pack for the burst ``rows`` (Best Batch scope rows).
 
     Wraps ``build_best_batch_response``: when the burst can be scored the
