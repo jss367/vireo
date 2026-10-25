@@ -199,6 +199,10 @@ def test_saving_review_cannot_resurrect_a_filtered_group(live_server, page, tmp_
     section.get_by_role("button", name="Mark reviewed").click()
     expect(section.get_by_role("button", name="Mark reviewed")).to_be_disabled()
     expect(section).to_contain_text("Saving review")
+    # Neither a scan nor a catalog reload may replace the snapshot during a save.
+    assert page.evaluate("pageModules.restore.prepareDuplicateScan()") is False
+    page.evaluate("pageModules.restore.tryRestoreLastScan(true)")
+    expect(section.get_by_role("button", name="Mark reviewed")).to_be_disabled()
     page.evaluate("duplicatesState.filterMatchedIds = new Set(); pageModules.results.renderResults(duplicatesState.lastScanResult)")
     expect(section.locator(".same-shot-group")).to_have_count(0)
     assert len(delayed) == 1

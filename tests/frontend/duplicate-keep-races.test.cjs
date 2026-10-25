@@ -38,6 +38,7 @@ function page() {
     state: {
       proposals: [proposal], lastScanResult: {proposals: [proposal]},
       scanInProgress: false, duplicateKeepPending: new Set(),
+      sameShotReviewPending: new Set(),
       duplicateFileTrashState: new Map(), duplicateTrashActive: false,
       duplicateLoadEpoch: 0, excludedDuplicateHashes: new Set(),
       filterReady: Promise.resolve(), pendingFilterRefresh: null,

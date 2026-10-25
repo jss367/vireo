@@ -99,6 +99,8 @@ Keep these intact when changing this code:
   membership additions. Changed evidence gets a different review key. A save
   validates the client key under a SQLite write transaction. Responses update
   only matching current keys and always re-render through the active filters.
+  Scans and catalog reloads wait for pending review saves before replacing the
+  displayed snapshot.
 - Comparison uses the duplicate-authorized thumbnail endpoint, including members
   outside the active workspace. It labels cached thumbnails and missing images
   explicitly; it never claims pixel identity or full-resolution verification.

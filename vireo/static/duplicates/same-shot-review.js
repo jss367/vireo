@@ -73,9 +73,11 @@ export function renderComparisonImages() {
 
 /** @param {SameShotGroup} group @param {'reviewed' | 'keep_all' | null} decision */
 export async function saveSameShotReview(group, decision) {
-  if (state.sameShotReviewPending.has(group.review_key) || state.scanInProgress) return;
+  var snapshot = state.lastScanResult;
+  if (!snapshot || !snapshot.same_shot_groups?.some(function(candidate) { return candidate.review_key === group.review_key; }) ||
+      state.sameShotReviewPending.has(group.review_key) || state.scanInProgress) return;
   state.sameShotReviewPending.add(group.review_key);
-  renderSameShotResults(/** @type {DuplicateScan} */ (state.lastScanResult));
+  renderSameShotResults(snapshot);
   if (state.sameShotComparison) duplicatesEl('sameShotCompareActions').innerHTML = reviewControls(group, false);
   duplicatesEl('sameShotCompareError').textContent = '';
   try {
