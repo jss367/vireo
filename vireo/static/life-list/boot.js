@@ -1,12 +1,25 @@
-// Page startup.
-// Classic page script; loads after every other Life List definition.
+// Page startup: the module the template loads. Binds the template's
+// data-life-on controls and the explorer's delegated listeners, then keeps the
+// old inline script's order: the lightbox and list-control listeners, the
+// shared folder browser, the site-export Escape key, the lifelist:changed
+// refresh, the page hooks, then the first load and the ?view= tab.
 
-// Preserve the inline script's order: the lightbox and list-control
-// listeners, the shared folder browser, the site-export Escape key, the
-// lifelist:changed refresh, then the first load and the ?view= tab.
+import { state } from './state.js';
+import { bindExplorerControls, bindLifeListMarkup } from './events.js';
+import { openExportModal } from './export.js';
+import { bindLifeListControls } from './filters.js';
+import { bindLifeListLightboxEvents } from './lightbox.js';
+import { loadLifeList, restoreLifeListViewPreferences } from './list.js';
+import { createPublishFolderBrowser } from './publish.js';
+import { bindSiteExportEscape } from './site-export.js';
+import { llSwitchTab } from './tabs.js';
+import { registerPageHooks } from './shared.js';
+
+bindLifeListMarkup();
+bindExplorerControls();
 bindLifeListLightboxEvents();
 bindLifeListControls();
-const publishFolderBrowser = createPublishFolderBrowser();
+state.publishFolderBrowser = createPublishFolderBrowser();
 bindSiteExportEscape();
 
 // The representative lightbox panel is shared (see _navbar.html) and
@@ -17,7 +30,7 @@ document.addEventListener('lifelist:changed', function() {
 });
 
 // The shared navbar's undo/redo and native Export command (vireo-page-hooks.js).
-Vireo.registerPageHooks({
+registerPageHooks({
   afterHistoryChange: function() { return loadLifeList(); },
   openExportModal: openExportModal,
 });

@@ -5,6 +5,7 @@
     "../types/page-hooks.d.ts",
     "../vireo/static/life-list/boot.js",
     "../vireo/static/life-list/cards.js",
+    "../vireo/static/life-list/events.js",
     "../vireo/static/life-list/explorer-cards.js",
     "../vireo/static/life-list/explorer-species.js",
     "../vireo/static/life-list/explorer.js",
@@ -14,7 +15,9 @@
     "../vireo/static/life-list/list.js",
     "../vireo/static/life-list/publish.js",
     "../vireo/static/life-list/rank-view.js",
+    "../vireo/static/life-list/shared.js",
     "../vireo/static/life-list/site-export.js",
+    "../vireo/static/life-list/state.js",
     "../vireo/static/life-list/sunburst.js",
     "../vireo/static/life-list/tabs.js"
   ]

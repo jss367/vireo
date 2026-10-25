@@ -158,8 +158,8 @@
 {% include '_navbar.html' %}
 
 <div class="ll-tabs">
-  <div class="ll-tab active" data-tab="list" onclick="llSwitchTab('list')">List</div>
-  <div class="ll-tab" data-tab="explorer" onclick="llSwitchTab('explorer')">Explorer</div>
+  <div class="ll-tab active" data-tab="list" data-life-on="click:llSwitchTab" data-life-arg="list">List</div>
+  <div class="ll-tab" data-tab="explorer" data-life-on="click:llSwitchTab" data-life-arg="explorer">Explorer</div>
 </div>
 
 <div class="ll-tabpanel active" id="tab-list">
@@ -169,8 +169,8 @@
     <label for="speciesSearch">Species</label>
     <div class="search-control">
       <input type="search" id="speciesSearch" placeholder="Cardinal">
-      <button id="lifeSpeciesMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('lifeSpecies', 'match_case', debounceRender)" title="Match case">Aa</button>
-      <button id="lifeSpeciesWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('lifeSpecies', 'whole_word', debounceRender)" title="Match whole word">ab</button>
+      <button id="lifeSpeciesMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" data-life-on="click:toggleMatchCase" title="Match case">Aa</button>
+      <button id="lifeSpeciesWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" data-life-on="click:toggleWholeWord" title="Match whole word">ab</button>
     </div>
   </div>
   <div class="control-group">
@@ -202,21 +202,21 @@
     </label>
   </div>
   <div class="lifelist-actions">
-    <button class="publish-btn" onclick="openExportModal()">Export...</button>
-    <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
-    <button class="publish-btn" onclick="openSiteExportModal()">Export Entire Site</button>
+    <button class="publish-btn" data-life-on="click:openExportModal">Export...</button>
+    <button class="publish-btn" data-life-on="click:openPublishModal">Publish Site</button>
+    <button class="publish-btn" data-life-on="click:openSiteExportModal">Export Entire Site</button>
   </div>
 </div>
 
 <div class="lifelist-meta" id="meta"></div>
 
-<div class="modal-overlay" id="exportModal" onclick="if(event.target===this)closeExportModal()">
+<div class="modal-overlay" id="exportModal" data-life-on="click:exportBackdrop">
   <div class="modal">
     <h3>Export Life List</h3>
     <div class="export-grid">
       <div>
         <label class="modal-label" for="exportFormat">Format</label>
-        <select id="exportFormat" class="modal-input" onchange="updateExportControls()">
+        <select id="exportFormat" class="modal-input" data-life-on="change:updateExportControls">
           <option value="json">JSON data</option>
           <option value="csv">CSV spreadsheet</option>
           <option value="txt">Text list</option>
@@ -225,7 +225,7 @@
       </div>
       <div id="exportDetailWrap">
         <label class="modal-label" for="exportDetail">Rows</label>
-        <select id="exportDetail" class="modal-input" onchange="updateExportControls()">
+        <select id="exportDetail" class="modal-input" data-life-on="change:updateExportControls">
           <option value="species">Species summary</option>
           <option value="photos">Photo rows</option>
         </select>
@@ -248,8 +248,8 @@
     </div>
     <div class="publish-status" id="exportStatus"></div>
     <div class="modal-actions">
-      <button id="exportSubmitBtn" class="modal-btn modal-btn-primary" onclick="downloadLifeListExport()">Export</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeExportModal()">Cancel</button>
+      <button id="exportSubmitBtn" class="modal-btn modal-btn-primary" data-life-on="click:downloadLifeListExport">Export</button>
+      <button class="modal-btn modal-btn-cancel" data-life-on="click:closeExportModal">Cancel</button>
     </div>
   </div>
 </div>
@@ -260,7 +260,7 @@
     <label class="modal-label" for="publishDest">Destination folder</label>
     <div class="publish-path-row">
       <input id="publishDest" class="modal-input" type="text" placeholder="/path/to/site/public">
-      <button class="modal-btn modal-btn-cancel" onclick="browsePublishDest()">Browse</button>
+      <button class="modal-btn modal-btn-cancel" data-life-on="click:browsePublishDest">Browse</button>
     </div>
     <div class="modal-hint">
       Writes data/site.json, data/life-list.json, data/highlights.json, and optimized images.
@@ -270,10 +270,10 @@
       <legend class="modal-label">Content</legend>
       <div class="publish-content-row">
         <label class="publish-option">
-          <input id="publishLifeList" type="checkbox" checked onchange="publishSettingsChanged()">
+          <input id="publishLifeList" type="checkbox" checked data-life-on="change:publishSettingsChanged">
           <span>Include Life List</span>
         </label>
-        <select id="publishLifeListPhotos" class="modal-input" aria-label="Life List photos per species" onchange="publishSettingsChanged()">
+        <select id="publishLifeListPhotos" class="modal-input" aria-label="Life List photos per species" data-life-on="change:publishSettingsChanged">
           <option value="1">Representative photo only</option>
           <option value="3">Up to 3 per species</option>
           <option value="12">Up to 12 per species</option>
@@ -281,10 +281,10 @@
       </div>
       <div class="publish-content-row">
         <label class="publish-option">
-          <input id="publishHighlights" type="checkbox" onchange="publishSettingsChanged()">
+          <input id="publishHighlights" type="checkbox" data-life-on="change:publishSettingsChanged">
           <span>Include Highlights</span>
         </label>
-        <select id="publishHighlightPhotos" class="modal-input" aria-label="Highlight photos per category" onchange="publishSettingsChanged()" disabled>
+        <select id="publishHighlightPhotos" class="modal-input" aria-label="Highlight photos per category" data-life-on="change:publishSettingsChanged" disabled>
           <option value="1">1 per category</option>
           <option value="3" selected>Up to 3 per category</option>
           <option value="12">Up to 12 per category</option>
@@ -293,12 +293,12 @@
     </fieldset>
 
     <label class="publish-option">
-      <input id="publishLocations" type="checkbox" onchange="publishSettingsChanged()">
+      <input id="publishLocations" type="checkbox" data-life-on="change:publishSettingsChanged">
       <span>Include location keywords in the published life list.</span>
     </label>
 
     <label class="modal-label" for="publishMaxSize" style="margin-top:12px;">Image max long edge</label>
-    <select id="publishMaxSize" class="modal-input" onchange="publishSettingsChanged()">
+    <select id="publishMaxSize" class="modal-input" data-life-on="change:publishSettingsChanged">
       <option value="2400">2400 px</option>
       <option value="2048">2048 px</option>
       <option value="1600">1600 px</option>
@@ -310,13 +310,13 @@
     </div>
     <div class="publish-status" id="publishStatus"></div>
     <div class="modal-actions">
-      <button id="publishSubmitBtn" class="modal-btn modal-btn-primary" onclick="startPublishSite()" disabled>Publish</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closePublishModal()">Cancel</button>
+      <button id="publishSubmitBtn" class="modal-btn modal-btn-primary" data-life-on="click:startPublishSite" disabled>Publish</button>
+      <button class="modal-btn modal-btn-cancel" data-life-on="click:closePublishModal">Cancel</button>
     </div>
   </div>
 </div>
 
-<div class="modal-overlay" id="siteExportModal" onclick="if(event.target===this)closeSiteExportModal()">
+<div class="modal-overlay" id="siteExportModal" data-life-on="click:siteExportBackdrop">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="siteExportTitle">
     <h3 id="siteExportTitle">Export Entire Site</h3>
     <p class="modal-hint">Export every photo in the active workspace, including unclassified and unpublished photos, with saved edits as full-resolution JPEGs.</p>
@@ -324,7 +324,7 @@
     <label class="modal-label" for="siteExportDest">Destination folder</label>
     <div class="publish-path-row">
       <input id="siteExportDest" class="modal-input" type="text" placeholder="/path/to/exports">
-      <button class="modal-btn modal-btn-cancel" onclick="browseSiteExportDest()">Browse</button>
+      <button class="modal-btn modal-btn-cancel" data-life-on="click:browseSiteExportDest">Browse</button>
     </div>
     <label class="publish-option">
       <input id="siteExportLocations" type="checkbox">
@@ -333,8 +333,8 @@
     <p class="modal-hint">Follow progress in Jobs. Unreadable photos or unresolved albums are reported as an incomplete export with details in the export folder.</p>
     <div id="siteExportStatus" class="publish-status" role="status"></div>
     <div class="modal-actions">
-      <button id="siteExportSubmit" class="modal-btn modal-btn-primary" onclick="startSiteExport()">Export Entire Site</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeSiteExportModal()">Cancel</button>
+      <button id="siteExportSubmit" class="modal-btn modal-btn-primary" data-life-on="click:startSiteExport">Export Entire Site</button>
+      <button class="modal-btn modal-btn-cancel" data-life-on="click:closeSiteExportModal">Cancel</button>
     </div>
   </div>
 </div>
@@ -355,19 +355,6 @@
 <div class="ll-tabpanel" id="tab-explorer"></div>
 
 <script defer src="/static/vireo-folder-browser.js"></script>
-<script defer src="/static/life-list/list.js"></script>
-<script defer src="/static/life-list/filters.js"></script>
-<script defer src="/static/life-list/cards.js"></script>
-<script defer src="/static/life-list/lightbox.js"></script>
-<script defer src="/static/life-list/export.js"></script>
-<script defer src="/static/life-list/publish.js"></script>
-<script defer src="/static/life-list/site-export.js"></script>
-<script defer src="/static/life-list/explorer.js"></script>
-<script defer src="/static/life-list/explorer-cards.js"></script>
-<script defer src="/static/life-list/sunburst.js"></script>
-<script defer src="/static/life-list/explorer-species.js"></script>
-<script defer src="/static/life-list/rank-view.js"></script>
-<script defer src="/static/life-list/tabs.js"></script>
-<script defer src="/static/life-list/boot.js"></script>
+<script type="module" src="/static/life-list/boot.js"></script>
 </body>
 </html>
