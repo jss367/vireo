@@ -703,6 +703,11 @@ def create_pipeline_blueprint(
             cfg.save(raw)
         return jsonify({"saved": coerced})
 
+    @blueprint.route("/api/pipeline/legacy-detections")
+    def api_legacy_detections() -> ResponseReturnValue:
+        """Upgrade nudge scoped to the active workspace's visible folders."""
+        return jsonify({"folders": get_db().predictions.legacy_detection_folders()})
+
     @blueprint.route("/api/pipeline/page-init")
     def api_pipeline_page_init() -> ResponseReturnValue:
         """Combined endpoint for pipeline page initial load."""

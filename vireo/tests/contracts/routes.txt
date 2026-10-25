@@ -120,6 +120,7 @@ GET          /api/photos/ids
 GET          /api/photos/missing
 GET          /api/photos/search
 GET          /api/pipeline/extract-readiness
+GET          /api/pipeline/legacy-detections
 GET          /api/pipeline/page-init
 GET          /api/pipeline/photo/<int:photo_id>
 GET          /api/pipeline/results

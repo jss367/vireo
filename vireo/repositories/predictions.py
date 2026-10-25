@@ -140,6 +140,27 @@ class PredictionRepository:
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
 
+    def legacy_detection_folders(self) -> list[dict[str, Any]]:
+        """Folders with migration-sentinel predictions in the active workspace.
+
+        Count photos once even when several detections/models carry the
+        sentinel. Do not apply confidence or review filters: those can hide
+        precisely the old, pre-filtered outputs this upgrade nudge explains.
+        """
+        return [dict(row) for row in self.conn.execute("""
+            SELECT f.id, f.path, COUNT(*) AS photo_count
+            FROM photos p
+            JOIN folders f ON f.id = p.folder_id
+            JOIN workspace_folders wf ON wf.folder_id = f.id
+            WHERE wf.workspace_id = ? AND EXISTS (
+                SELECT 1 FROM detections d
+                JOIN predictions pr ON pr.detection_id = d.id
+                WHERE d.photo_id = p.id AND pr.labels_fingerprint = 'legacy'
+            )
+            GROUP BY f.id, f.path
+            ORDER BY f.path, f.id
+        """, (self.workspace_id,)).fetchall()]
+
     @staticmethod
     def _normalized_species(species):
         """``species`` in keyword-storage form, as every prediction stores it."""

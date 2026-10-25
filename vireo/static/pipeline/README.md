@@ -7,6 +7,7 @@ Functions remain global for the page's inline event handlers.
 | File | Responsibility |
 | --- | --- |
 | `page-init.js` | `/api/pipeline/page-init`, `window._pageInitPending`, and the classify and dashboard-action deep links |
+| `legacy-detections.js` | Upgrade nudge, affected-folder list, and queued Reclassify using the selected models and species lists |
 | `sources.js` | Source mode, the collection picker, the folder scope list, and the source summary |
 | `processes.js` | Saved processes: loading, applying, editing, and the create/rename/delete dialog |
 | `preview.js` | Folder preview: fetching, rendering, thumbnails, and per-file selection |

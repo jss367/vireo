@@ -40,6 +40,10 @@ All notable changes to Vireo are documented in this file.
   list instead of scrolling out of reach.
 
 ### Added
+- **Find folders with legacy detections on Process.** An upgrade card lists
+  affected folders and explains why lowering detector confidence cannot reveal
+  previously discarded boxes. **Reclassify all legacy folders** queues a run
+  using the selected models and species lists, with progress and results in Jobs.
 - **Clean up the original folder after organizing photos by date.** Completed
   moves show how many files remain and offer a review in Jobs, including for
   earlier completed moves. An optional, initially unchecked action sends the

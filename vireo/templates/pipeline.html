@@ -601,6 +601,19 @@ body { padding-bottom: 36px; }
 <div class="pipeline-left">
   <h2 style="margin-bottom:20px;font-size:20px;">Process</h2>
 
+  <section id="legacyDetectionsCard" class="stage-card" hidden aria-labelledby="legacyDetectionsTitle" style="padding:16px;">
+    <strong id="legacyDetectionsTitle"></strong>
+    <p style="font-size:13px;color:var(--text-secondary);margin:8px 0;">These photos have detections saved by an older version. Lowering detector confidence cannot reveal boxes that were discarded. Run Reclassify on these folders to enable instant threshold changes.</p>
+    <details>
+      <summary style="cursor:pointer;font-size:13px;">Affected folders</summary>
+      <ul id="legacyDetectionsFolders" style="font-size:12px;overflow-wrap:anywhere;max-height:180px;overflow-y:auto;padding-left:20px;"></ul>
+    </details>
+    <p style="font-size:12px;color:var(--text-dim);margin:8px 0;">Uses the models and species lists selected in Classify below. Processes each listed folder and its subfolders.</p>
+    <button type="button" class="btn btn-primary" id="btnReclassifyLegacy">Reclassify all legacy folders</button>
+    <p id="legacyDetectionsStatus" role="status" style="font-size:13px;margin:8px 0 0;"></p>
+    <a id="legacyDetectionsJobs" href="/jobs" hidden style="font-size:13px;color:var(--accent);">View progress and results in Jobs</a>
+  </section>
+
   <div class="stage-section-header">Setup</div>
 
   <!-- Card 1: Source -->
@@ -1061,6 +1074,7 @@ body { padding-bottom: 36px; }
 <script defer src="/static/pipeline/steps.js"></script>
 <script defer src="/static/pipeline/extract-config.js"></script>
 <script defer src="/static/pipeline/plan.js"></script>
+<script defer src="/static/pipeline/legacy-detections.js"></script>
 <script defer src="/static/pipeline/boot.js"></script>
 
 </body>
