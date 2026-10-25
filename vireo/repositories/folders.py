@@ -1,11 +1,11 @@
 """Persistence for folders: rows, trees, parent repair, health, relocation.
 
-``Database`` keeps the active-workspace state, the new-images cache, the
-pipeline-cache prune and every call into another domain. Where a folder
+``Database`` keeps the active-workspace state and the new-images cache, and
+the façade or a service makes every call into another domain. Where a folder
 method composes other domains mid-transaction (the workspace link in
-``add_folder``, ``delete_photos`` in ``delete_folder``), the façade passes
-the bound method in, so monkeypatches of those methods still apply and the
-call happens at the same point in the SQL; the merge's GPS-review and
+``add_folder``, ``services.catalog_deletion.delete_photos`` in
+``delete_folder``), the caller passes the function in, so monkeypatches of
+it still apply and the call happens at the same point in the SQL; the merge's GPS-review and
 embedded-offer carries are bound once when the façade builds the
 repository. Calls within this domain (``nearest_ancestor_id`` in parent
 repair, ``merge_into_existing`` in ``relocate``) go through the repository
@@ -970,8 +970,8 @@ class FolderRepository:
         """Delete a folder subtree and its photos in one transaction.
 
         Folders another workspace links to are kept and only unlinked from
-        ``active_ws``. The callbacks are the ``Database`` methods
-        ``delete_photos`` and ``_remember_workspace_folder_removals``.
+        ``active_ws``. The callbacks are ``catalog_deletion.delete_photos``
+        and ``Database._remember_workspace_folder_removals``.
         Returns ``(deleted_photo_ids, files)``.
         """
         # Everything under the target, by path, including legacy

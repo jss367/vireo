@@ -5,7 +5,7 @@ import os
 
 from page_scripts import page_with_scripts
 from PIL import Image
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 from wait import wait_for_job_via_client
 
 
@@ -15,7 +15,7 @@ def test_delete_photos_removes_from_db(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]["id"]
 
-    result = db.delete_photos([pid])
+    result = catalog_deletion.delete_photos(db, [pid])
 
     assert result["deleted"] == 1
     assert db.photos.get(pid) is None
@@ -29,7 +29,7 @@ def test_delete_photos_removes_keywords(app_and_db):
     pid = photos[0]["id"]
     assert len(db.photo_keywords.get_for_photo(pid)) > 0
 
-    db.delete_photos([pid])
+    catalog_deletion.delete_photos(db, [pid])
 
     rows = db.conn.execute(
         "SELECT * FROM photo_keywords WHERE photo_id = ?", (pid,)
@@ -47,7 +47,7 @@ def test_delete_photos_removes_predictions(app_and_db):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Cardinal', 0.95, 'test-model')
 
-    db.delete_photos([pid])
+    catalog_deletion.delete_photos(db, [pid])
 
     rows = db.conn.execute(
         """SELECT pr.* FROM predictions pr
@@ -64,7 +64,7 @@ def test_delete_photos_removes_pending_changes(app_and_db):
     pid = photos[0]["id"]
     db.queue_change(pid, "rating", "5")
 
-    db.delete_photos([pid])
+    catalog_deletion.delete_photos(db, [pid])
 
     rows = db.conn.execute(
         "SELECT * FROM pending_changes WHERE photo_id = ?", (pid,)
@@ -82,7 +82,7 @@ def test_delete_photos_updates_folder_count(app_and_db):
     ).fetchone()["photo_count"]
 
     # Delete one photo from this folder
-    db.delete_photos([photos[0]["id"]])
+    catalog_deletion.delete_photos(db, [photos[0]["id"]])
 
     new_count = db.conn.execute(
         "SELECT photo_count FROM folders WHERE id = ?", (fid,)
@@ -99,7 +99,7 @@ def test_delete_photos_cleans_collection_rules(app_and_db):
     rules = [{"field": "photo_ids", "value": [pid1, pid2, 9999]}]
     cid = db.collections.add("Test Collection", json.dumps(rules))
 
-    db.delete_photos([pid1])
+    catalog_deletion.delete_photos(db, [pid1])
 
     row = db.conn.execute("SELECT rules FROM collections WHERE id = ?", (cid,)).fetchone()
     updated_rules = json.loads(row["rules"])
@@ -114,7 +114,7 @@ def test_delete_photos_returns_file_info(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]["id"]
 
-    result = db.delete_photos([pid])
+    result = catalog_deletion.delete_photos(db, [pid])
 
     assert result["deleted"] == 1
     assert len(result["files"]) == 1
@@ -127,7 +127,7 @@ def test_delete_photos_skips_missing_ids(app_and_db):
     """Deleting non-existent photo IDs is silently skipped."""
     app, db = app_and_db
 
-    result = db.delete_photos([99999])
+    result = catalog_deletion.delete_photos(db, [99999])
 
     assert result["deleted"] == 0
     assert result["files"] == []
@@ -139,7 +139,7 @@ def test_delete_photos_batch(app_and_db):
     photos = db.photos.list_page()
     all_ids = [p["id"] for p in photos]
 
-    result = db.delete_photos(all_ids)
+    result = catalog_deletion.delete_photos(db, all_ids)
 
     assert result["deleted"] == len(all_ids)
     for pid in all_ids:
@@ -160,7 +160,7 @@ def test_delete_photos_resolves_companions(app_and_db):
     )
     db.conn.commit()
 
-    result = db.delete_photos([pid1], include_companions=True)
+    result = catalog_deletion.delete_photos(db, [pid1], include_companions=True)
 
     assert result["deleted"] == 2
     assert db.photos.get(pid1) is None
@@ -171,7 +171,7 @@ def test_delete_photos_empty_list(app_and_db):
     """Calling delete_photos with empty list is a no-op."""
     app, db = app_and_db
 
-    result = db.delete_photos([])
+    result = catalog_deletion.delete_photos(db, [])
 
     assert result["deleted"] == 0
 
@@ -464,7 +464,6 @@ def test_delete_modal_marks_catalog_stage_partial_from_finishing_map(
 
 def test_api_batch_delete_tolerates_pipeline_prune_system_exit(app_and_db, monkeypatch):
     """A packaged-app lazy import failure must not strand the delete request."""
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -473,7 +472,7 @@ def test_api_batch_delete_tolerates_pipeline_prune_system_exit(app_and_db, monke
     def fail_prune(self, ids):
         raise SystemExit("packaged executable was moved")
 
-    monkeypatch.setattr(Database, "prune_pipeline_cache_for_ids", fail_prune)
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", fail_prune)
 
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [pid],
@@ -500,7 +499,7 @@ def test_delete_photos_tolerates_pipeline_import_system_exit(app_and_db, monkeyp
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
-    result = db.delete_photos([pid])
+    result = catalog_deletion.delete_photos(db, [pid])
 
     assert result["deleted"] == 1
     assert db.photos.get(pid) is None
@@ -1112,7 +1111,6 @@ def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
     """Route must chunk photo_ids before calling delete_photos so SQLite's
     bound-parameter cap (~999 on legacy builds) can't trip on bulk deletes."""
     import app as appmod
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -1135,13 +1133,13 @@ def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
     monkeypatch.setattr(appmod, "_chunked", small_chunked)
 
     chunks_seen = []
-    real_delete = Database.delete_photos
+    real_delete = catalog_deletion.delete_photos
 
     def spy(self, photo_ids, **kwargs):
         chunks_seen.append(list(photo_ids))
         return real_delete(self, photo_ids, **kwargs)
 
-    monkeypatch.setattr(Database, "delete_photos", spy)
+    monkeypatch.setattr(catalog_deletion, "delete_photos", spy)
 
     resp = client.post("/api/batch/delete", json={
         "photo_ids": bulk_ids,
@@ -1162,7 +1160,6 @@ def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypa
     earlier chunks' commits would survive, leaving the route 500ing after
     deleting only part of the selection."""
     import app as appmod
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -1184,7 +1181,7 @@ def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypa
             yield seq[i:i + size]
     monkeypatch.setattr(appmod, "_chunked", small_chunked)
 
-    real_delete = Database.delete_photos
+    real_delete = catalog_deletion.delete_photos
     calls = {"n": 0}
 
     def flaky(self, photo_ids, **kwargs):
@@ -1193,7 +1190,7 @@ def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypa
             raise RuntimeError("simulated SQLite error mid-loop")
         return real_delete(self, photo_ids, **kwargs)
 
-    monkeypatch.setattr(Database, "delete_photos", flaky)
+    monkeypatch.setattr(catalog_deletion, "delete_photos", flaky)
 
     resp = client.post("/api/batch/delete", json={
         "photo_ids": bulk_ids,
@@ -1218,7 +1215,6 @@ def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
     would orphan their pipeline entries with no way to restore them
     (the cache file is non-transactional)."""
     import app as appmod
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -1271,7 +1267,7 @@ def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
             yield seq[i:i + size]
     monkeypatch.setattr(appmod, "_chunked", small_chunked)
 
-    real_delete = Database.delete_photos
+    real_delete = catalog_deletion.delete_photos
     calls = {"n": 0}
 
     def flaky(self, photo_ids, **kwargs):
@@ -1280,7 +1276,7 @@ def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
             raise RuntimeError("simulated SQLite error mid-loop")
         return real_delete(self, photo_ids, **kwargs)
 
-    monkeypatch.setattr(Database, "delete_photos", flaky)
+    monkeypatch.setattr(catalog_deletion, "delete_photos", flaky)
 
     resp = client.post("/api/batch/delete", json={
         "photo_ids": bulk_ids,
@@ -1670,7 +1666,7 @@ def test_delete_photos_prunes_pipeline_cache(app_and_db):
     with open(cache_path, "w") as f:
         json.dump(cache, f)
 
-    db.delete_photos([pid_to_delete])
+    catalog_deletion.delete_photos(db, [pid_to_delete])
 
     with open(cache_path) as f:
         pruned = json.load(f)
@@ -1693,7 +1689,7 @@ def test_delete_photos_no_pipeline_cache_does_not_raise(app_and_db):
     )
     assert not os.path.exists(cache_path)
 
-    result = db.delete_photos([photos[0]["id"]])
+    result = catalog_deletion.delete_photos(db, [photos[0]["id"]])
     assert result["deleted"] == 1
 
 
@@ -1747,7 +1743,7 @@ def test_delete_photos_with_companions_chunks_expanded_ids(tmp_path):
     # Legacy SQLite cap — 900 input fits, 1800 expanded does not.
     db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
 
-    result = db.delete_photos(primary_ids, include_companions=True)
+    result = catalog_deletion.delete_photos(db, primary_ids, include_companions=True)
 
     assert result["deleted"] == 1800  # primaries + companions
     remaining = db.conn.execute("SELECT COUNT(*) AS n FROM photos").fetchone()["n"]

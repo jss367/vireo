@@ -16,7 +16,7 @@ import sqlite3
 import pytest
 from PIL import Image
 from scanner import ScanHooks, ScanOptions
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 from testing.waits import synchronization_timeout
 
 
@@ -129,7 +129,7 @@ def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
             hooks=ScanHooks(photo=stage._on_scanned_photo, photo_merged=stage._on_merged_photo),
         )
         assert collected == [old_id]
-        writer.delete_photos([old_id])
+        catalog_deletion.delete_photos(writer, [old_id])
         assert photo_ingest.add_photo(writer, unrelated_id, "OTHER.jpg", ".jpg", 256, None) == old_id
         raw_id = photo_ingest.add_photo(writer, unrelated_id, "OTHER.cr3", ".cr3", 256, None)
         stage._scan(
@@ -165,7 +165,7 @@ def test_merged_owner_deleted_before_publication_drops_import_membership(
     jpeg_id = photo_ingest.add_photo(db, folder_id, "IMG_001.jpg", ".jpg", 256, None)
     merged = scanner.companions._pair_raw_jpeg_companions(db)
     assert merged == {jpeg_id: raw_id}
-    writer.delete_photos([raw_id])
+    catalog_deletion.delete_photos(writer, [raw_id])
     if reuse_id:
         assert photo_ingest.add_photo(
             writer, folder_id, "unrelated.jpg", ".jpg", 256, None,
@@ -232,7 +232,7 @@ def test_reused_old_id_drops_import_membership_instead_of_substituting(
     original_jpeg_id = photo_ingest.add_photo(
         db, original_jpeg_folder, original_jpeg_filename, ".jpg", 256, None,
     )
-    writer.delete_photos([original_jpeg_id])
+    catalog_deletion.delete_photos(writer, [original_jpeg_id])
     reused_jpeg_id = photo_ingest.add_photo(
         writer, folder_id, "OTHER.jpg", ".jpg", 256, None,
     )
@@ -317,7 +317,7 @@ def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
     try:
         tally.report_merged_photos(db, merged)
         assert published == [(jpeg_id, raw_id, str(tmp_path / "IMG_001.cr3"))]
-        writer.delete_photos([raw_id])
+        catalog_deletion.delete_photos(writer, [raw_id])
         assert db.photos.get(raw_id) is None
     finally:
         writer.close()
@@ -1172,7 +1172,7 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
             # the receiver is consuming its ID. It must remain locked,
             # even though the earlier attachment commit is already visible.
             try:
-                writer.delete_photos([raw_id])
+                catalog_deletion.delete_photos(writer, [raw_id])
             except sqlite3.OperationalError as error:
                 assert "locked" in str(error)
                 writer.conn.rollback()
@@ -1199,7 +1199,7 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
         assert published == [(raw_id, str(jpeg))]
         assert blocked == [True]
         # The publication guard must release when the scan finishes.
-        writer.delete_photos([raw_id])
+        catalog_deletion.delete_photos(writer, [raw_id])
         assert photo_ingest.add_photo(
             writer, other_folder, "OTHER.jpg", ".jpg", 0, None,
         ) == raw_id
@@ -1291,7 +1291,7 @@ def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind
                               ("prior.jpg", raw_id))
         consumer.conn.commit()
         if wait_kind == "owner_replaced":
-            consumer.delete_photos([raw_id])
+            catalog_deletion.delete_photos(consumer, [raw_id])
             folder_id = consumer.add_folder(str(tmp_path / "other"))
             assert photo_ingest.add_photo(consumer, folder_id, "OTHER.jpg", ".jpg", 0, None) == raw_id
     finally:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 
 from flask import Blueprint, jsonify, request
+from services import moves_merge
 
 
 def _scan_dir_file_count(root_path, file_limit=None, dir_limit=None):
@@ -147,7 +148,7 @@ def create_moves_blueprint(get_db, json_error):
         db = get_db()
         body = request.get_json(silent=True) or {}
         criteria = body.get("criteria", {})
-        photo_ids = db.query_move_rule_matches(criteria)
+        photo_ids = moves_merge.query_move_rule_matches(db, criteria)
         return jsonify({"count": len(photo_ids), "photo_ids": photo_ids})
 
     @blueprint.route("/api/move-folder/preflight", methods=["POST"])

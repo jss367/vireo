@@ -1,14 +1,19 @@
 // Inline rename: the double-click editor and renameKeyword.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { loadKeywords } from './loading.js';
+import { keywordErrorMessage } from './merge-helpers.js';
+import { render } from './render.js';
+import { showToast } from './shared.js';
 
 // -- Inline rename (double-click) --
-function bindKeywordRename() {
+export function bindKeywordRename() {
   /** @type {HTMLElement} */ (document.getElementById('kwBody')).addEventListener('dblclick', function(e) {
     if (!(e.target instanceof Element)) return; const nameSpan = e.target.closest(/** @type {'span'} */ ('.name-text'));
     if (!nameSpan) return;
 
     const kwId = parseInt(nameSpan.dataset.id || '');
-    const kw = allKeywords.find(k => k.id === kwId);
+    const kw = state.allKeywords.find(k => k.id === kwId);
     if (!kw) return;
 
     const td = nameSpan.parentElement; if (!td) return;
@@ -46,7 +51,7 @@ function bindKeywordRename() {
   });
 }
 
-/** @param {number} kwId @param {string} newName */ async function renameKeyword(kwId, newName) {
+/** @param {number} kwId @param {string} newName */ export async function renameKeyword(kwId, newName) {
   try {
     const resp = await fetch('/api/keywords/' + kwId, {
       method: 'PUT',
