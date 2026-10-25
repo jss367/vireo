@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import config as cfg
 from config import read_raw_config_file, settings_write_lock
@@ -12,15 +14,21 @@ from flask import Blueprint, jsonify, request
 from highlights_payload import HighlightsQuery, build_highlights_payload, build_life_list_payload
 from web.background_jobs import make_background_job
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JobDict, JsonDict, JsonError
+    from web.background_jobs import JobLaunch
+    from web.web_types import AppConfig, GetDb, GetRunner, ResolveVisual
+
 
 def _photo_export_work(
-    ctx, photo_ids, destination, *, vireo_dir, naming_template, max_size,
-    quality, output_format, wc_max_size, developed_dir, metadata_fields,
-    export_to_subfolder, subfolder_name, reveal_after_export,
-):
+    ctx: JobLaunch, photo_ids: list[int], destination: str, *, vireo_dir: str, naming_template: str, max_size: int | None,
+    quality: int, output_format: str, wc_max_size: int, developed_dir: str, metadata_fields: list[str] | None,
+    export_to_subfolder: bool, subfolder_name: str | None, reveal_after_export: bool,
+) -> Callable[..., JsonDict]:
     """The ``export`` job's work function for an already-validated request."""
 
-    def work(job):
+    def work(job: JobDict) -> JsonDict:
         from export import export_photos, reveal_exported_files
 
         thread_db = ctx.thread_db()
@@ -28,7 +36,7 @@ def _photo_export_work(
         job["_start_time"] = time.time()
         job["progress"]["total"] = len(photo_ids)
 
-        def progress_cb(current, total, filename):
+        def progress_cb(current: int, total: int, filename: str) -> None:
             job["progress"]["current"] = current
             job["progress"]["total"] = total
             job["progress"]["current_file"] = filename
@@ -78,14 +86,14 @@ def _photo_export_work(
 
 
 def create_export_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
+    config: AppConfig,
     *,
-    resolve_visual,
-):
+    resolve_visual: ResolveVisual,
+) -> Blueprint:
     """Build the export blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``).
@@ -99,12 +107,12 @@ def create_export_blueprint(
 
     @blueprint.route("/api/jobs/panorama", methods=["POST"])
     @background_job
-    def api_job_panorama(ctx):
+    def api_job_panorama(ctx: JobLaunch) -> ResponseReturnValue:
         """Create a panorama from every selected photo in this workspace."""
         from panorama import create_panorama, validate_options
 
         try:
-            options = validate_options(request.get_json(silent=True))
+            options: JsonDict = validate_options(request.get_json(silent=True))
         except ValueError as exc:
             return json_error(str(exc))
         db = get_db()
@@ -117,10 +125,10 @@ def create_export_blueprint(
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         reveal = options.pop("reveal")
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from export import reveal_exported_files
 
-            def progress(current, total, phase):
+            def progress(current: int, total: int, phase: str) -> None:
                 event = {"current": current, "total": total, "phase": phase, "current_file": phase}
                 job["progress"].update(event)
                 ctx.runner.push_event(job["id"], "progress", event)
@@ -142,14 +150,14 @@ def create_export_blueprint(
         return ctx.start("panorama", work, config={**options, "reveal": reveal})
 
     @blueprint.route("/api/export/presets")
-    def api_export_presets_list():
+    def api_export_presets_list() -> ResponseReturnValue:
         """List saved export presets (global; shared by every workspace)."""
         import config as cfg
 
         return jsonify({"presets": cfg.get_export_presets()})
 
     @blueprint.route("/api/export/presets", methods=["POST"])
-    def api_export_presets_save():
+    def api_export_presets_save() -> ResponseReturnValue:
         """Create or replace a saved export preset by name."""
         import config as cfg
         from export import (
@@ -195,7 +203,7 @@ def create_export_blueprint(
         return jsonify({"ok": True, "replaced": replaced, "preset": preset})
 
     @blueprint.route("/api/export/presets/<name>", methods=["DELETE"])
-    def api_export_presets_delete(name):
+    def api_export_presets_delete(name: str) -> ResponseReturnValue:
         """Delete a saved export preset."""
         import config as cfg
 
@@ -214,7 +222,7 @@ def create_export_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/jobs/export/preflight", methods=["POST"])
-    def api_job_export_preflight():
+    def api_job_export_preflight() -> ResponseReturnValue:
         """Preview filenames, destinations and the explicit metadata selection."""
         body = request.get_json(silent=True) or {}
         raw_ids = body.get("photo_ids", [])
@@ -303,7 +311,7 @@ def create_export_blueprint(
 
     @blueprint.route("/api/jobs/export", methods=["POST"])
     @background_job
-    def api_job_export(ctx):
+    def api_job_export(ctx: JobLaunch) -> ResponseReturnValue:
         """Export selected photos to a destination directory."""
         body = request.get_json(silent=True) or {}
         raw_ids = body.get("photo_ids", [])
@@ -396,7 +404,8 @@ def create_export_blueprint(
             },
         )
 
-    def _publish_site_bool(body, key, default):
+    def _publish_site_bool(body: JsonDict, key: str, default: bool) -> tuple[bool, str | None]:
+        """``(value, None)``, or ``(False, message)`` for a non-boolean."""
         raw = body.get(key, default)
         if isinstance(raw, str):
             normalized = raw.strip().lower()
@@ -404,29 +413,30 @@ def create_export_blueprint(
                 return True, None
             if normalized in {"0", "false", "no", "off"}:
                 return False, None
-            return None, f"{key} must be a boolean"
+            return False, f"{key} must be a boolean"
         if not isinstance(raw, bool):
-            return None, f"{key} must be a boolean"
+            return False, f"{key} must be a boolean"
         return raw, None
 
-    def _parse_publish_site_options(body, require_destination=False):
+    def _parse_publish_site_options(body: object, require_destination: bool = False) -> tuple[JsonDict, str | None]:
+        """``(options, None)``, or ``({}, message)`` for a bad body."""
         if not isinstance(body, dict):
-            return None, "request body must be a JSON object"
+            return {}, "request body must be a JSON object"
 
         destination = body.get("destination", "")
         if not isinstance(destination, str):
-            return None, "destination must be a string"
+            return {}, "destination must be a string"
         destination = destination.strip()
         if require_destination and not destination:
-            return None, "destination required"
+            return {}, "destination required"
         if destination and not os.path.isabs(destination):
-            return None, "destination must be an absolute path"
+            return {}, "destination must be an absolute path"
 
         try:
             photos_per_species = int(body.get("photos_per_species", 1))
             limit_per_bucket = int(body.get("limit_per_bucket", 3))
         except (TypeError, ValueError):
-            return None, "photos_per_species and limit_per_bucket must be numbers"
+            return {}, "photos_per_species and limit_per_bucket must be numbers"
         photos_per_species = max(1, min(photos_per_species, 100))
         limit_per_bucket = max(1, min(limit_per_bucket, 100))
 
@@ -434,37 +444,37 @@ def create_export_blueprint(
             body, "include_life_list", True,
         )
         if error:
-            return None, error
+            return {}, error
         include_highlights, error = _publish_site_bool(
             body, "include_highlights", False,
         )
         if error:
-            return None, error
+            return {}, error
         include_locations, error = _publish_site_bool(
             body, "include_locations", False,
         )
         if error:
-            return None, error
+            return {}, error
         if not include_life_list and not include_highlights:
-            return None, "select Life List, Highlights, or both"
+            return {}, "select Life List, Highlights, or both"
 
         max_size = body.get("max_size", 2400)
         if max_size in ("", None):
             max_size = None
         elif isinstance(max_size, bool):
-            return None, "max_size must be a number"
+            return {}, "max_size must be a number"
         else:
             try:
                 max_size = int(max_size)
             except (TypeError, ValueError):
-                return None, "max_size must be a number"
+                return {}, "max_size must be a number"
         quality = body.get("quality", 88)
         if isinstance(quality, bool):
-            return None, "quality must be a number"
+            return {}, "quality must be a number"
         try:
             quality = int(quality)
         except (TypeError, ValueError):
-            return None, "quality must be a number"
+            return {}, "quality must be a number"
         quality = max(1, min(quality, 100))
 
         return {
@@ -478,7 +488,7 @@ def create_export_blueprint(
             "quality": quality,
         }, None
 
-    def _empty_published_life_list(photos_per_species):
+    def _empty_published_life_list(photos_per_species: int) -> JsonDict:
         return {
             "species": [],
             "meta": {
@@ -488,7 +498,7 @@ def create_export_blueprint(
             },
         }
 
-    def _empty_published_highlights(limit_per_bucket):
+    def _empty_published_highlights(limit_per_bucket: int) -> JsonDict:
         return {
             "buckets": [],
             "unidentified": {
@@ -503,7 +513,7 @@ def create_export_blueprint(
             "scope": "workspace",
         }
 
-    def _build_publish_site_payloads(db, options):
+    def _build_publish_site_payloads(db: Database, options: JsonDict) -> tuple[JsonDict, JsonDict]:
         if options["include_life_list"]:
             life_list = build_life_list_payload(
                 db,
@@ -525,7 +535,7 @@ def create_export_blueprint(
             )
         return life_list, highlights
 
-    def _publish_site_photo_ids(life_list, highlights):
+    def _publish_site_photo_ids(life_list: JsonDict, highlights: JsonDict) -> set[int]:
         photo_ids = {
             p["id"]
             for entry in life_list.get("species", [])
@@ -543,7 +553,7 @@ def create_export_blueprint(
         return photo_ids
 
     @blueprint.route("/api/jobs/publish-site/preflight", methods=["POST"])
-    def api_job_publish_site_preflight():
+    def api_job_publish_site_preflight() -> ResponseReturnValue:
         """Return exact content and unique-photo counts for a site publish."""
         options, error = _parse_publish_site_options(
             request.get_json(silent=True),
@@ -565,7 +575,7 @@ def create_export_blueprint(
 
     @blueprint.route("/api/jobs/publish-site", methods=["POST"])
     @background_job
-    def api_job_publish_site(ctx):
+    def api_job_publish_site(ctx: JobLaunch) -> ResponseReturnValue:
         """Publish selected workspace website data and optimized photos."""
         options, error = _parse_publish_site_options(
             request.get_json(silent=True),
@@ -588,7 +598,7 @@ def create_export_blueprint(
         wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from site_publish import publish_site
 
             thread_db = ctx.thread_db()
@@ -600,7 +610,7 @@ def create_export_blueprint(
             photo_ids = _publish_site_photo_ids(life_list, highlights)
             job["progress"]["total"] = len(photo_ids)
 
-            def progress_cb(current, total, filename):
+            def progress_cb(current: int, total: int, filename: str) -> None:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = filename
@@ -653,7 +663,7 @@ def create_export_blueprint(
 
     @blueprint.route("/api/jobs/export-site", methods=["POST"])
     @background_job
-    def api_job_export_site(ctx):
+    def api_job_export_site(ctx: JobLaunch) -> ResponseReturnValue:
         """Export every workspace photo, albums, metadata, and life list."""
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -670,13 +680,13 @@ def create_export_blueprint(
         effective = get_db().get_effective_config(cfg.load())
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from site_export import export_site
 
             thread_db = ctx.thread_db()
             started = time.time()
 
-            def progress(current, total, filename, phase):
+            def progress(current: int, total: int, filename: str, phase: str) -> None:
                 payload = {
                     "current": current, "total": total,
                     "current_file": filename, "phase": phase,

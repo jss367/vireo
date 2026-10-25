@@ -14,6 +14,8 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable, Iterator
+from typing import TYPE_CHECKING
 
 from db import Database
 from flask import Blueprint, jsonify, request
@@ -22,10 +24,17 @@ from services import subject_masks, workspace_config
 from web.background_jobs import make_background_job
 from working_copy_cache import working_copy_stats
 
+if TYPE_CHECKING:
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.service_types import ErrorResponse, JobDict, JsonDict, JsonError
+    from web.background_jobs import JobLaunch
+    from web.web_types import AppConfig, GetDb, GetRunner
+
 log = logging.getLogger(__name__)
 
 
-def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner):
+def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str, config: AppConfig, *, get_runner: GetRunner) -> Blueprint:
     """Build the storage blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``,
@@ -35,14 +44,14 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
     blueprint = Blueprint("storage", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
-    def _retained_config():
+    def _retained_config() -> JsonDict:
         import config as cfg
         return {**cfg.load(), "THUMB_CACHE_DIR": config["THUMB_CACHE_DIR"],
                 "COMPUTATION_CACHE_DIR": config["COMPUTATION_CACHE_DIR"]}
 
     @blueprint.route("/api/storage/retention", methods=["POST"])
     @background_job
-    def api_storage_retention(ctx):
+    def api_storage_retention(ctx: JobLaunch) -> ResponseReturnValue:
         import config as cfg
         import config_schema as schema
         from services.retained_cache import cleanup, source_verifier
@@ -61,7 +70,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
             cfg.save(raw)
         settings = _retained_config()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             with ctx.thread_db() as db:
                 result = cleanup(settings, db.storage.source_folder_paths(),
                                  source_is_readable=source_verifier(db, settings, lambda: ctx.checkpoint(job)),
@@ -76,7 +85,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         return ctx.start("retained-cache-maintenance", work, config=values)
 
     @blueprint.route("/api/storage/retained")
-    def api_storage_retained():
+    def api_storage_retained() -> ResponseReturnValue:
         from services.retained_cache import summary
         settings = _retained_config()
         return jsonify({
@@ -90,7 +99,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
 
     @blueprint.route("/api/storage/retained/clear", methods=["POST"])
     @background_job
-    def api_storage_retained_clear(ctx):
+    def api_storage_retained_clear(ctx: JobLaunch) -> ResponseReturnValue:
         from services.retained_cache import FAMILIES, PRESERVED_FAMILIES, cleanup
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -104,7 +113,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
             return json_error("Confirm that grouping undo and redo snapshots will be removed")
         settings = _retained_config()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             with ctx.thread_db() as db:
                 if family == "grouping-history":
                     db.begin_immediate()
@@ -116,7 +125,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                     return {"deleted": len(ids), "summary":
                             f"Removed {len(ids)} grouping undo and redo snapshots; photo edits were retained."}
 
-                def progress(current, total, path):
+                def progress(current: int, total: int, path: str) -> None:
                     ctx.runner.push_event(job["id"], "progress", {
                         "current": current, "total": total,
                         "current_file": os.path.basename(path), "phase": "Checking retained generated files",
@@ -127,7 +136,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
 
         return ctx.start("retained-cache-cleanup", work, config={"cache_type": family})
 
-    def _storage_masks_data(db):
+    def _storage_masks_data(db: Database) -> JsonDict:
         """Build the shared mask-storage payload once per storage refresh."""
         import config as cfg
 
@@ -146,13 +155,13 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         }
 
     @blueprint.route("/api/storage")
-    def api_storage():
+    def api_storage() -> ResponseReturnValue:
         """Comprehensive storage info for the storage management panel."""
         from classifier import CACHE_DIR as EMB_CACHE_DIR
         from models import DEFAULT_MODELS_DIR
         from storage_breakdown import group_auxiliary_storage
 
-        def _dir_stats(path):
+        def _dir_stats(path: str) -> JsonDict:
             count = 0
             total = 0
             if os.path.isdir(path):
@@ -200,7 +209,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         hf_size = hf_inventory["size"]
         hf_models = hf_inventory["entries"]
 
-        def _is_within(path, root):
+        def _is_within(path: str, root: str) -> bool:
             try:
                 return os.path.commonpath(
                     [os.path.abspath(path), os.path.abspath(root)]
@@ -254,7 +263,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         total = sum(size for _path, size in named_storage) + other_size
         reclaimable = thumb["size"] + preview["size"] + emb["size"]
 
-        def _volume_for_path(path):
+        def _volume_for_path(path: str) -> JsonDict:
             usage_path = os.path.abspath(path)
             while not os.path.exists(usage_path):
                 parent = os.path.dirname(usage_path)
@@ -362,13 +371,13 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         )
 
     @blueprint.route("/api/storage/masks")
-    def api_storage_masks():
+    def api_storage_masks() -> ResponseReturnValue:
         """Per-variant SAM mask summary (counts, bytes, active counts)
         plus stale-mask count for the storage dashboard."""
         return jsonify(_storage_masks_data(get_db()))
 
     @blueprint.route("/api/storage/masks/delete-variant", methods=["POST"])
-    def api_storage_masks_delete_variant():
+    def api_storage_masks_delete_variant() -> ResponseReturnValue:
         """Delete all photo_masks rows + files for the given variant.
         Returns 400 when the variant is currently active for any photo.
         """
@@ -385,7 +394,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         return jsonify({"ok": True, "deleted": n})
 
     @blueprint.route("/api/storage/masks/delete-inactive", methods=["POST"])
-    def api_storage_masks_delete_inactive():
+    def api_storage_masks_delete_inactive() -> ResponseReturnValue:
         """Delete all non-active variant masks across all photos."""
         db = get_db()
         n = db.masks_features.delete_inactive()
@@ -393,7 +402,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         return jsonify({"ok": True, "deleted": n})
 
     @blueprint.route("/api/storage/masks/delete-stale", methods=["POST"])
-    def api_storage_masks_delete_stale():
+    def api_storage_masks_delete_stale() -> ResponseReturnValue:
         """Delete masks whose stored prompt no longer matches the current
         primary detection. Skips active variants."""
         import config as cfg
@@ -430,7 +439,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         })
 
     @blueprint.route("/api/storage/files")
-    def api_storage_files():
+    def api_storage_files() -> ResponseReturnValue:
         """List individual files in a cache directory."""
         from classifier import CACHE_DIR as EMB_CACHE_DIR
 
@@ -463,7 +472,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         from contextlib import ExitStack
         from itertools import chain, zip_longest
 
-        def named_files(entries, prefix):
+        def named_files(entries: Iterable[os.DirEntry[str]], prefix: str) -> Iterator[tuple[os.DirEntry[str], str]]:
             for info in entries:
                 if info.is_file() and info.name != "manifest.json":
                     yield info, prefix
@@ -498,7 +507,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
             "limit": limit,
         })
 
-    def _clear_storage_cache(cache_type):
+    def _clear_storage_cache(cache_type: str) -> Response | ErrorResponse:
         if cache_type == "previews":
             preview_dir = os.path.join(
                 os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
@@ -538,13 +547,13 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
             return json_error("Unknown cache type")
 
     @blueprint.route("/api/storage/clear", methods=["POST"])
-    def api_storage_clear():
+    def api_storage_clear() -> ResponseReturnValue:
         """Clear a specific cache."""
         body = request.get_json(silent=True) or {}
         return _clear_storage_cache(body.get("type", ""))
 
     @blueprint.route("/api/storage/clear-safe", methods=["POST"])
-    def api_storage_clear_safe():
+    def api_storage_clear_safe() -> ResponseReturnValue:
         """Clear every regenerable cache without touching models or originals."""
         for cache_type in ("thumbnails", "previews", "embeddings"):
             _clear_storage_cache(cache_type)
@@ -554,14 +563,14 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         })
 
     @blueprint.route("/api/storage/hf-cache")
-    def api_storage_hf_cache():
+    def api_storage_hf_cache() -> ResponseReturnValue:
         """Per-model Hugging Face cache entries, each marked installed or unused."""
         from services import hf_cache as hf_cache_service
 
         return jsonify(hf_cache_service.inventory())
 
     @blueprint.route("/api/storage/hf-cache/remove", methods=["POST"])
-    def api_storage_hf_cache_remove():
+    def api_storage_hf_cache_remove() -> ResponseReturnValue:
         """Remove Hugging Face cache entries: ``{"unused": true}`` or ``{"keys": [...]}``.
 
         Keys are the ones the inventory handed out; anything else is a 404,
@@ -582,7 +591,11 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
             if body.get("unused"):
                 result = hf_cache_service.remove_unused()
             else:
-                result = hf_cache_service.remove(keys)
+                # Without ``unused``, the check above required a non-empty
+                # list of keys, so ``or []`` never applies; it only narrows
+                # the type. (The route body runs standalone in a test, so it
+                # uses no module-level helper such as ``cast``.)
+                result = hf_cache_service.remove(keys or [])
         except KeyError as exc:
             return json_error(f"Unknown cache entry: {exc.args[0]}", 404)
         except hf_cache_service.DownloadInProgress as exc:
@@ -598,7 +611,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         })
 
     @blueprint.route("/api/storage/open-folder", methods=["POST"])
-    def api_storage_open_folder():
+    def api_storage_open_folder() -> ResponseReturnValue:
         """Open one of Vireo's server-selected storage paths."""
         from classifier import CACHE_DIR as EMB_CACHE_DIR
         from models import DEFAULT_MODELS_DIR
@@ -653,7 +666,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/storage/delete-files", methods=["POST"])
-    def api_storage_delete_files():
+    def api_storage_delete_files() -> ResponseReturnValue:
         """Delete specific files from a cache directory."""
         from classifier import CACHE_DIR as EMB_CACHE_DIR
 
