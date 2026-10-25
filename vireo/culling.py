@@ -19,6 +19,10 @@ from keep_safety import review_culling_suggestions
 
 log = logging.getLogger(__name__)
 
+# How many photos the cull result names when some could not be fingerprinted
+# for scene grouping; ``photos_missing_phash`` keeps the full count.
+UNFINGERPRINTED_PHOTOS_LISTED = 20
+
 _warned_dim_mismatch = False
 
 
@@ -80,6 +84,8 @@ def analyze_for_culling(
             suggested_reviews: int
             suggested_rejects: int
             photos_missing_phash: count of photos that couldn't be hashed
+            unfingerprinted_photos: the first ``UNFINGERPRINTED_PHOTOS_LISTED``
+                of them, each ``{"photo_id", "path", "reason"}``
     """
     import config as cfg
     user_cfg = cfg.load()
@@ -104,6 +110,7 @@ def analyze_for_culling(
             "suggested_keepers": 0,
             "suggested_rejects": 0,
             "photos_missing_phash": 0,
+            "unfingerprinted_photos": [],
         }, {})
 
     predictions = _load_top_predictions(db, photo_ids, pause_callback)
@@ -112,8 +119,9 @@ def analyze_for_culling(
     embeddings, quality, extensions, timestamps, phashes, filenames, missing_phash = signals
 
     # Backfill missing pHashes on the fly
-    if missing_phash:
-        _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_callback, pause_callback)
+    unhashed = _backfill_missing_phashes(
+        db, missing_phash, phashes, vireo_dir, progress_callback, pause_callback,
+    ) if missing_phash else {}
 
     species_map = _group_by_species(photo_ids, predictions, extensions, separate_file_types, pause_callback)
 
@@ -129,13 +137,29 @@ def analyze_for_culling(
         )
         species_groups.append(group)
 
-    photos_missing_phash = sum(1 for pid in photo_ids if pid not in phashes)
+    unfingerprinted = [pid for pid in photo_ids if pid not in phashes]
 
     return review_culling_suggestions({
         "species_groups": species_groups,
         "total_photos": len(photo_ids),
-        "photos_missing_phash": photos_missing_phash,
+        "photos_missing_phash": len(unfingerprinted),
+        "unfingerprinted_photos": _name_unfingerprinted(unfingerprinted, unhashed, filenames),
     }, _current_photo_flags(db, photo_ids))
+
+
+def _name_unfingerprinted(unfingerprinted, unhashed, filenames):
+    """The first ``UNFINGERPRINTED_PHOTOS_LISTED`` photos without a pHash, named.
+
+    ``unhashed`` holds the path and reason for each photo the backfill tried;
+    any other photo had no catalog record to hash from.
+    """
+    return [
+        {"photo_id": pid, **unhashed.get(pid, {
+            "path": filenames.get(pid) or f"photo {pid}",
+            "reason": "its catalog record was not found",
+        })}
+        for pid in unfingerprinted[:UNFINGERPRINTED_PHOTOS_LISTED]
+    ]
 
 
 def _current_photo_flags(db, photo_ids):
@@ -220,19 +244,25 @@ def _load_photo_signals(db, photo_ids, predictions, pause_callback):
 
 
 def _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_callback, pause_callback):
-    """Compute and store pHashes for ``missing_phash``, adding each to ``phashes``."""
+    """Compute and store pHashes for ``missing_phash``, adding each to ``phashes``.
+
+    Returns ``{photo_id: {"path", "reason"}}`` for each photo it could not
+    hash, so the job can name them; each is also logged at warning level.
+    """
     if progress_callback:
         progress_callback("Computing scene hashes...")
     folders_map = {
         r["id"]: r["path"]
         for r in db.folders.all_rows()
     }
+    unhashed = {}
     for pid in missing_phash:
         if pause_callback:
             pause_callback()
         row = db.culling.phash_source(pid)
         if not row:
             continue
+        path = os.path.join(folders_map.get(row["folder_id"], ""), row["filename"])
         # Scope the broad except narrowly to the image-loading + hash step:
         # those have a legitimate "skip this photo" failure mode
         # (corrupt RAW, missing working copy, decode error). DB errors on
@@ -248,13 +278,18 @@ def _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_ca
             if img is None:
                 # Working copy absent/corrupt, or vireo_dir not provided —
                 # try the original source (handles RAW via rawpy).
-                folder_path = folders_map.get(row["folder_id"], "")
-                img = load_image(os.path.join(folder_path, row["filename"]))
+                img = load_image(path)
             if img is None:
+                log.warning(
+                    "Could not compute pHash for photo %d (%s): no working "
+                    "copy or original could be opened", pid, path,
+                )
+                unhashed[pid] = {"path": path, "reason": "Vireo could not open the image"}
                 continue
             h = imagehash.phash(img)
-        except Exception:  # broad: per-photo boundary; decoders raise a wide set and a missing pHash only skips this photo
-            log.debug("Could not compute pHash for photo %d", pid, exc_info=True)
+        except Exception as exc:  # broad: per-photo boundary; decoders raise a wide set and a missing pHash only skips this photo
+            log.warning("Could not compute pHash for photo %d (%s)", pid, path, exc_info=True)
+            unhashed[pid] = {"path": path, "reason": str(exc) or type(exc).__name__}
             continue
         phashes[pid] = h
         db.culling.set_phash(pid, str(h))
@@ -265,6 +300,7 @@ def _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_ca
         # concurrent writer (e.g. a pipeline scan whose next
         # ``add_photo`` INSERT will time out past the 30s busy_timeout).
         db.commit()
+    return unhashed
 
 
 def _group_by_species(photo_ids, predictions, extensions, separate_file_types, pause_callback):

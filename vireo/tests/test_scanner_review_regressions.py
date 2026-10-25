@@ -104,7 +104,7 @@ def test_restricted_generator_survives_discovery_for_empty_leaf_status(leaves):
                                restrict_dirs=(x for x in leaves), frozen_files=None,
                                restrict_files=None, skip_paths=None)
     hooks = SimpleNamespace(status=None, progress=None, photo=None, photo_merged=None,
-                            permission_error=None)
+                            permission_error=None, sidecar_error=None)
     control = SimpleNamespace(cancel_check=None, pause_check=None, cancel_only_check=None)
     ns["__init__"](subject, "/invented/root", resolved, object(), {},
                    catalog_folder_path=object(), catalog_folder_aliases=object(),

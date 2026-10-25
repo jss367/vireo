@@ -7,6 +7,8 @@ import os
 import threading
 from collections.abc import Callable
 
+from app_paths import default_path
+
 
 class SharedDownloadLock:
     """Reentrant thread lock plus a lazily opened process lock outside the cache."""
@@ -26,7 +28,7 @@ class SharedDownloadLock:
         try:
             from filelock import FileLock, Timeout
 
-            path = self.lock_path or os.path.expanduser("~/.vireo/hf-cache-access.lock")
+            path = self.lock_path or default_path("hf_cache_lock")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             lock = FileLock(path, is_singleton=False)
             try:

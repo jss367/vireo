@@ -14,8 +14,18 @@ from classify_job.classify_pass import (
     _classify_summary_parts,
     _publish_classifier_runs_for_raw_results,
 )
-from classify_job.common import ClassificationCancelled, Classifier, TimmClassifier, UnusableLabelsError, log
-from classify_job.detection import _detect_subjects
+from classify_job.common import (
+    ClassificationCancelled,
+    Classifier,
+    TimmClassifier,
+    UnusableLabelsError,
+    _load_job_taxonomy,
+    log,
+    taxonomy_step_summary,
+    taxonomy_step_warning,
+    with_taxonomy_notice,
+)
+from classify_job.detection import DetectionHandoff, _detect_subjects
 from classify_job.label_loading import _load_labels, _record_labels_fingerprint, _reuse_saved_label_embeddings
 from classify_job.label_source import _sources_from_metas, describe_label_source
 from classify_job.run_helpers import _CachePeek, _empty_classify_result, _rearm_label_desc_heal
@@ -53,6 +63,9 @@ class _ClassifyJobRun:
         self.computation_cache_dir = computation_cache_dir
         self.classifier_cache_handle = None
         self.finish_cleared_only = False
+        # The detect phase's photo-id sets for the classify phase. Held here,
+        # never on ``job``: the runner publishes the job dict to /api/jobs.
+        self.detect_handoff = DetectionHandoff()
 
     def _progress(self, current: int, total: int, current_file: str, phase: str, **extra: object) -> None:
         self.runner.push_event(
@@ -444,8 +457,7 @@ class _ClassifyJobRun:
         self._progress(
             0, self.total, "Loading taxonomy...", "Step 2/5: Loading taxonomy",
         )
-        from taxonomy import load_local_taxonomy
-        tax = self.tax = load_local_taxonomy()
+        tax = self.tax = _load_job_taxonomy(job)
 
         # Phase 3: Load labels (uses model_type/model_str from above)
         labels, use_tol, label_metas = _load_labels(
@@ -493,11 +505,12 @@ class _ClassifyJobRun:
         from computation_cache import taxonomy_identity as _taxonomy_identity
         job["_taxonomy_identity"] = _taxonomy_identity(tax)
 
-        tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
+        tax_summary = taxonomy_step_summary(job, tax)
         labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
         runner.update_step(
             job["id"], "load_taxonomy", status="completed",
             summary=f"{tax_summary}, {labels_summary}",
+            **taxonomy_step_warning(job),
         )
 
         log.info(
@@ -672,10 +685,20 @@ class _ClassifyJobRun:
 
     def record_loaded_classifier(self) -> None:
         """Close the load step and stamp what the classifier actually read."""
+        from classify_job.run_helpers import _missing_common_names_notice
+
         job, runner, clf = self.job, self.runner, self.clf
+        # A timm model without its common-name file still classifies
+        # validly, so this is a notice (a completed step's warning on the
+        # Jobs page, and ``common_names_notice`` in the result), not a
+        # failure.
+        notice = _missing_common_names_notice(clf, self.effective_name)
+        if notice:
+            job["_common_names_notice"] = notice
         runner.update_step(
             job["id"], "load_model", status="completed",
             summary=self.effective_name,
+            **({"error": notice} if notice else {}),
         )
 
         # Name the label space on the classify step: "Classify species" alone
@@ -732,6 +755,7 @@ class _ClassifyJobRun:
             reclassify=params.reclassify,
             db=self.db,
             vireo_dir=self.vireo_dir,
+            handoff=self.detect_handoff,
         )
         detection_map, detected = self.detection_map, self.detected
         cancelled_after_detect = (
@@ -747,14 +771,14 @@ class _ClassifyJobRun:
         # tail is dropped — its old state was never touched, so dropping
         # it keeps the cached predictions intact.
         #
-        # The processed subset comes from ``job["_detect_processed_ids"]``,
+        # The processed subset comes from ``detect_handoff.processed_ids``,
         # which is the union of (a) photos with at least one detection and
         # (b) empty-scene photos that recorded a detector_runs row but
         # added nothing to ``detection_map``. Using ``detection_map``
         # alone would miss case (b), stranding empty-scene reclassified
-        # photos with cleared predictions and no replacement. Older test
-        # fakes for ``_detect_subjects`` that don't stash this key fall
-        # back to ``detection_map.keys()`` for backwards compatibility.
+        # photos with cleared predictions and no replacement. Test fakes
+        # for ``_detect_subjects`` that don't record it leave it ``None``,
+        # which falls back to ``detection_map.keys()``.
         self.finish_cleared_only = False
         if not cancelled_after_detect:
             runner.update_step(
@@ -766,12 +790,12 @@ class _ClassifyJobRun:
             job["id"], "detect", status="cancelled",
             summary=f"Cancelled ({detected} animals detected so far)",
         )
-        processed_ids = job.get("_detect_processed_ids")
+        processed_ids = self.detect_handoff.processed_ids
         if processed_ids is None:
             processed_ids = set(detection_map.keys())
         else:
             processed_ids = set(processed_ids) | set(detection_map.keys())
-        processed_ids -= set(job.get("_detect_reused_ids") or ())
+        processed_ids -= self.detect_handoff.reused_ids
         if params.reclassify and processed_ids:
             processed = [p for p in self.photos if p["id"] in processed_ids]
             if processed:
@@ -1012,6 +1036,7 @@ class _ClassifyJobRun:
                 vireo_dir=self.vireo_dir,
                 reclassify=self.params.reclassify,
                 finish_cleared_only=self.finish_cleared_only,
+                non_animal_ids=self.detect_handoff.non_animal_ids,
             )
         self.raw_results = raw_results
         self.failed = failed
@@ -1100,7 +1125,7 @@ class _ClassifyJobRun:
             self.failed,
         )
 
-        return {
+        return with_taxonomy_notice(self.job, {
             "total": total,
             "predictions_stored": group_result["predictions_stored"],
             "burst_groups": group_result["burst_groups"],
@@ -1108,4 +1133,4 @@ class _ClassifyJobRun:
             "already_labeled": group_result["already_labeled"],
             "detected": self.detected,
             "failed": self.failed,
-        }
+        })

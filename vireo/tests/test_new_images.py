@@ -793,6 +793,30 @@ def test_invalidate_new_images_after_scan_normalizes_trailing_slash(tmp_path):
     )
 
 
+def test_invalidate_new_images_after_scan_follows_symlinked_root(tmp_path):
+    """A scan reached through a symlink catalogs the folder under its
+    resolved path (``file_identity.catalog_scan_root``); invalidating with
+    the symlink spelling the user picked must still clear the cache."""
+    from services.scan_work import _invalidate_new_images_after_scan
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG_0001.JPG"))
+    db.add_folder(str(root), name="shoot")
+    link = tmp_path / "shoot-link"
+    link.symlink_to(root, target_is_directory=True)
+
+    db.get_new_images_for_workspace(ws_id)
+    assert db._new_images_cache.get(db._db_path, ws_id) is not None
+
+    _invalidate_new_images_after_scan(db, str(link))
+
+    assert db._new_images_cache.get(db._db_path, ws_id) is None
+
+
 def test_invalidate_new_images_after_scan_preserves_dotdot_segments(tmp_path):
     """Caller-supplied root with ``..`` segments must still match folders stored
     by the scanner as ``str(Path(...))`` — which preserves ``..`` segments.

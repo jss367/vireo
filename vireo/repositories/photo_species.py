@@ -310,6 +310,24 @@ class PhotoSpeciesRepository:
         return found
 
 
+    def equivalent_assignment_ids(self, photo_ids: Collection[int], keyword_id: int) -> dict[int, list[int]]:
+        """Attached IDs for this species, preserving ambiguous same-name taxa."""
+        target = self.conn.execute('SELECT name, taxon_id FROM keywords WHERE id=?', (keyword_id,)).fetchone()
+        if target is None:
+            return {}
+        key = keyword_match_key(target['name'])
+        homonym = self._species_homonym_conflict(target, keyword_id, key)
+        result = {}
+        for row in self.attached_species_rows(photo_ids):
+            same = row['id'] == keyword_id or (
+                target['taxon_id'] is not None and row['taxon_id'] == target['taxon_id']
+            )
+            if not same and not homonym and row['taxon_id'] is None:
+                same = keyword_match_key(row['name']) == key
+            if same:
+                result.setdefault(row['photo_id'], []).append(row['id'])
+        return result
+
     def get_photos_with_equivalent_species(
         self, photo_ids: Collection[int], keyword_id: int,
         exclude_keyword_ids: Iterable[int] | None = None,

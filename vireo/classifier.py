@@ -10,6 +10,7 @@ import os
 
 import numpy as np
 import onnx_runtime
+from app_paths import default_path
 from match_confidence import COSINE
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ class ClassifierLoadPaused(RuntimeError):
 _EMBEDDING_CHECKPOINT_INTERVAL = 10
 
 
-CACHE_DIR = os.path.expanduser("~/.vireo/embedding_cache")
+CACHE_DIR = default_path("embeddings")
 _MANIFEST_PATH = os.path.join(CACHE_DIR, "manifest.json")
 
 # Map model_str identifiers to local model directory names
@@ -57,7 +58,7 @@ _MODEL_DIR_MAP = {
     "hf-hub:imageomics/bioclip-2.5-vith14": "bioclip-2.5-vith14",
 }
 
-_MODELS_ROOT = os.path.expanduser("~/.vireo/models")
+_MODELS_ROOT = default_path("models")
 
 # Context length for CLIP-style tokenizers (pad/truncate to this length)
 _CONTEXT_LENGTH = 77

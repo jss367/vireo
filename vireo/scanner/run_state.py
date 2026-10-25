@@ -18,6 +18,9 @@ from resource_ledger import suspend_resource_wait_timing
 from scanner.status import _call_status_callback
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
     from db import Database
     from scanner.scan_types import (
         CheckCallback,
@@ -99,8 +102,12 @@ class _ScanTally:
         self, counts: dict[str, int], *, progress_callback: ProgressCallback | None,
         photo_callback: PhotoCallback | None, photo_merged_callback: PhotoMergedCallback | None,
         reported_identities: dict[int, PhotoIdentity] | None = None,
+        sidecar_error_callback: Callable[..., Any] | None = None,
     ) -> None:
         self.counts = counts
+        self.sidecar_error_callback = sidecar_error_callback
+        # A RAW and its companion JPEG can share one sidecar; say it once.
+        self.reported_sidecar_failures: set[str] = set()
         self.progress_callback = progress_callback
         self.photo_callback = photo_callback
         self.photo_merged_callback = photo_merged_callback
@@ -136,6 +143,17 @@ class _ScanTally:
         _mine = merged_ids.keys() & self.indexed_photo_ids
         self.counts["merged_companions"] += len(_mine)
         self.counts["indexed"] -= len(_mine)
+
+    def report_sidecar_failure(self, xmp_path: str, filename: str, reason: str) -> None:
+        """Tell the receiver a sidecar's keywords were not imported this scan."""
+        log.warning(
+            "Keywords in %s were not imported for %s: %s", xmp_path, filename, reason,
+        )
+        if xmp_path in self.reported_sidecar_failures:
+            return
+        self.reported_sidecar_failures.add(xmp_path)
+        if self.sidecar_error_callback is not None:
+            self.sidecar_error_callback(xmp_path, filename, reason)
 
     def report_progress(self) -> None:
         if self.progress_callback:

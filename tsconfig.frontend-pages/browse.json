@@ -17,6 +17,7 @@
     "../vireo/static/browse/config.js",
     "../vireo/static/browse/context-menus.js",
     "../vireo/static/browse/detail.js",
+    "../vireo/static/browse/species-provenance.js",
     "../vireo/static/browse/edit-actions.js",
     "../vireo/static/browse/export.js",
     "../vireo/static/browse/folder-health.js",

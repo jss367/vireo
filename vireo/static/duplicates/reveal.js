@@ -1,56 +1,59 @@
 // Duplicates page: feedback for revealing a bucket's folders.
-/** @type {Set<string>} */ var _pendingBucketReveals = new Set();
+
+import { state } from './state.js';
+import { duplicateRequestError, duplicateStringList } from './cleanup.js';
+import { visibleBucket } from './filter.js';
+import { escapeHtml, fileManagerName, revealLabel, safeFetch, showToast } from './shared.js';
 
 /** @param {number} bi @param {Element|null} [button] @returns {string[]} */
-function bucketRevealFolders(bi, button) {
+export function bucketRevealFolders(bi, button) {
   var card = button && button.closest('.bucket-card');
   if (card && card.hasAttribute('data-reveal-paths')) {
     var paths = JSON.parse(card.getAttribute('data-reveal-paths') || '[]'); return duplicateStringList(paths) ? paths : [];
   }
-  var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
+  var bucket = visibleBucket((state.lastScanResult && state.lastScanResult.buckets || [])[bi]);
   return (bucket && bucket.folders || []).slice();
 }
 
 /** @param {number} bi @param {Element|null} [button] */
-function bucketRevealKey(bi, button) {
+export function bucketRevealKey(bi, button) {
   return JSON.stringify(bucketRevealFolders(bi, button).sort());
 }
 
 /** @param {number} bi @param {Element|null} [card] @param {string[]} [folders] */
-function bucketRevealButton(bi, card, folders) {
+export function bucketRevealButton(bi, card, folders) {
   var key = folders ? JSON.stringify(folders.slice().sort()) : bucketRevealKey(bi, card);
-  var pending = _pendingBucketReveals.has(key);
+  var pending = state.pendingBucketReveals.has(key);
   var label = pending
-    ? 'Opening ' + (window.VIREO_FILE_MANAGER_NAME || 'file manager') + '\u2026'
-    : window.VIREO_REVEAL_LABEL;
+    ? 'Opening ' + fileManagerName() + '\u2026'
+    : revealLabel();
   return '<button class="keep-btn reveal-btn" data-reveal-bucket="' + bi + '" ' +
-    'onclick="revealBucketFolders(' + bi + ', this)" ' +
     (pending ? 'disabled ' : '') +
     'title="Reveal all bucket folders in your OS file manager">' +
     escapeHtml(label) + '</button>';
 }
 
 /** @param {string} [completedKey] */
-function refreshBucketRevealButtons(completedKey) {
+export function refreshBucketRevealButtons(completedKey) {
   document.querySelectorAll(/** @type {'button'} */ ('[data-reveal-bucket]')).forEach(function(button) {
     var key = bucketRevealKey(Number(button.dataset.revealBucket), button);
     if (completedKey !== undefined && key !== completedKey) return;
-    var pending = _pendingBucketReveals.has(key);
+    var pending = state.pendingBucketReveals.has(key);
     var card = button.closest('.bucket-card');
     button.disabled = pending || !!(card && card.classList.contains('applying'));
     button.textContent = pending
-      ? 'Opening ' + (window.VIREO_FILE_MANAGER_NAME || 'file manager') + '\u2026'
-      : window.VIREO_REVEAL_LABEL;
+      ? 'Opening ' + fileManagerName() + '\u2026'
+      : revealLabel();
   });
 }
 /** @param {number} bi @param {HTMLButtonElement|null} [button] */
-async function revealBucketFolders(bi, button) {
+export async function revealBucketFolders(bi, button) {
   var folders = bucketRevealFolders(bi, button);
   if (!folders.length) return;
   var key = bucketRevealKey(bi, button);
-  if (_pendingBucketReveals.has(key) || (button && button.disabled)) return;
-  _pendingBucketReveals.add(key);
-  var manager = window.VIREO_FILE_MANAGER_NAME || 'file manager';
+  if (state.pendingBucketReveals.has(key) || (button && button.disabled)) return;
+  state.pendingBucketReveals.add(key);
+  var manager = fileManagerName();
   if (button) {
     button.disabled = true;
     button.textContent = 'Opening ' + manager + '\u2026';
@@ -77,7 +80,7 @@ async function revealBucketFolders(bi, button) {
   } catch (caught) { const e = duplicateRequestError(caught);
     showToast('Reveal failed: ' + (e.message || 'error'), 'error');
   } finally {
-    _pendingBucketReveals.delete(key);
+    state.pendingBucketReveals.delete(key);
     refreshBucketRevealButtons(key);
   }
 }

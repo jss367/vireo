@@ -12,6 +12,8 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any
 
+from app_paths import default_path
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -77,15 +79,15 @@ def auxiliary_paths(db_path: str, thumb_dir: str, config: Mapping[str, Any], db:
         cfg.CONFIG_PATH, cfg.CONFIG_PATH + ".corrupt", models.CONFIG_PATH,
         labels.LABELS_DIR, taxonomy.TAXONOMY_JSON_PATH,
     ]
-    global_root = os.path.expanduser("~/.vireo")
-    paths += [os.path.join(global_root, name) for name in (
-        "labels_active.json", "ssh", "tools", "runtime.json", "runtime.lock",
-        "runtime.json.tmp", "gui-clients", "gui-clients.lock", "vireo.log",
-        "vireo.log.1", "vireo.log.2", "vireo.log.3",
+    paths += [default_path(name) for name in (
+        "active_labels", "ssh", "tools", "runtime", "runtime_lock",
+        "gui_clients", "gui_clients_lock", "log",
     )]
+    paths += [default_path("runtime") + ".tmp"]
+    paths += [default_path("log") + f".{i}" for i in range(1, 4)]
     paths += db.storage.local_copy_paths()
     if sys.platform == "darwin":
-        paths.append(os.path.expanduser("~/Library/Logs/com.vireo.app"))
+        paths.append(default_path("desktop_logs_macos"))
     # Do not combine directory keys in a dict: global config and catalog
     # commonly share a parent and both exact filename patterns must apply.
     patterns = [

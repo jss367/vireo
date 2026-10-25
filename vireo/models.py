@@ -14,13 +14,15 @@ import tempfile
 import threading
 
 import model_verify
+from app_paths import default_path
 from file_replace import replace_file
+from hub_download import DownloadBatch, fetch_hub_file
 from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODELS_DIR = os.path.expanduser("~/.vireo/models")
-CONFIG_PATH = os.path.expanduser("~/.vireo/models.json")
+DEFAULT_MODELS_DIR = default_path("models")
+CONFIG_PATH = default_path("model_config")
 
 # HuggingFace repo containing all ONNX models
 ONNX_REPO = "jss367/vireo-onnx-models"
@@ -512,6 +514,25 @@ def _classify_model_state(model_dir, files):
     return "ok"
 
 
+def _add_missing_optional_files(entry, km, model_dir):
+    """Add a downloaded model's absent optional files to its ``get_models`` entry.
+
+    A missing ``label_descriptions.json`` also carries why Vireo's last
+    attempt to fetch it failed, so Settings can say more than "click Repair".
+    """
+    missing_optional = [
+        f for f in km.get("optional_files") or []
+        if not os.path.isfile(os.path.join(model_dir, f))
+    ]
+    if not missing_optional:
+        return
+    entry["missing_optional_files"] = missing_optional
+    if "label_descriptions.json" in missing_optional:
+        failure = label_descriptions_heal_failure(km.get("model_str") or "")
+        if failure:
+            entry["label_descriptions_error"] = failure
+
+
 def get_models():
     """Return list of all models (known + custom) with download status.
 
@@ -568,14 +589,8 @@ def get_models():
         # trigger for absent optionals (that would mark 2.5 unusable for
         # label-list mode). Keep the list on `missing`/'incomplete' entries
         # too so the same repair pass fetches optionals when it repairs.
-        optional_declared = km.get("optional_files") or []
-        if optional_declared and downloaded:
-            missing_optional = [
-                f for f in optional_declared
-                if not os.path.isfile(os.path.join(model_dir, f))
-            ]
-            if missing_optional:
-                entry["missing_optional_files"] = missing_optional
+        if downloaded:
+            _add_missing_optional_files(entry, km, model_dir)
         result.append(entry)
 
     # Add custom models
@@ -851,30 +866,6 @@ def register_model(model_id, name, model_str, weights_path, description="",
         _save_config(config)
 
 
-def _needs_atomic_publish(filename):
-    """True if `filename` must be published via a temp copy + os.replace.
-
-    Only the small JSON metadata files need this. They can be read by
-    another thread or process *while* a download or self-heal is writing
-    them — the background label_descriptions heal racing a
-    TimmClassifier init is the concrete case — so a reader must see
-    either the whole file or no file at all, never a torn one.
-
-    Deliberately NOT applied to the weight artifacts (.onnx, .onnx.data,
-    .npy). shutil.copy2 is a real byte copy on Windows and Linux (only
-    APFS clones cheaply), so staging those would put a second full-size
-    copy beside a model that is already on disk: a Repair of the 3.9 GB
-    BioCLIP-2.5 fetching one optional metadata file would transiently
-    need ~7.8 GB and can fail with ENOSPC where it previously fit.
-    Nothing reads weights concurrently with a download — an ONNX session
-    opens them once at classifier init, after the download has returned.
-
-    Suffix-based rather than a size threshold on purpose: the rule stays
-    legible and doesn't silently change behaviour as models grow.
-    """
-    return filename.endswith(".json")
-
-
 @contextlib.contextmanager
 def _staged_sibling(dest_path):
     """Yield a unique staging path beside `dest_path` for atomic publish.
@@ -923,7 +914,8 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
                             revision=None):
     """Download a file from HuggingFace with retry on connection failures.
 
-    Uses hf_hub_download for reliable resume. Keeps retrying as long as
+    Writes straight into ``local_dir`` through ``fetch_hub_file`` (one copy
+    on disk, resumable). Keeps retrying as long as
     progress is being made. Stops after 3 consecutive failures with
     no progress.
 
@@ -937,7 +929,7 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
     """
     import time as _time
 
-    from huggingface_hub import hf_hub_download, try_to_load_from_cache
+    from huggingface_hub import try_to_load_from_cache
 
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 
@@ -948,21 +940,10 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
     while True:
         attempt += 1
         try:
-            kwargs = {
-                "repo_id": repo_id,
-                "filename": filename,
-            }
-            if subfolder:
-                kwargs["subfolder"] = subfolder
-            if revision:
-                kwargs["revision"] = revision
-
-            # Detect cache hit before triggering any network activity, so the
-            # log + UI can distinguish "1.2 GB came over the wire" from
-            # "the blob was already in the HF cache and we just cloned it
-            # into the model dir" (a few hundred ms on APFS even for huge
-            # files). Without this distinction a sub-second 'download' of
-            # a multi-GB model looks suspicious instead of correct.
+            # Detect a hub-cache hit (left by an older Vireo, or another
+            # Hugging Face client) before any network activity, so the log
+            # and UI can tell "1.2 GB came over the wire" from "the file was
+            # already in the HF cache and was copied into the model dir".
             from_cache = False
             if attempt == 1:
                 try:
@@ -1006,19 +987,14 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
                     repo_id, label_path, attempt,
                 )
 
-            # Hold the cache lock across fetch and copy so a Storage-page
-            # cleanup cannot remove the cached blob between the two (it
-            # answers "a download is in progress" instead).
-            from services.hf_cache_lock import DOWNLOAD_LOCK
-
-            with DOWNLOAD_LOCK:
-                dest_path = _copy_from_hub_cache(
-                    hf_hub_download(**kwargs), local_dir, filename)
+            dest_path = fetch_hub_file(
+                repo_id, filename, os.path.join(local_dir, filename),
+                subfolder=subfolder, revision=revision)
 
             if from_cache:
                 size_mb = os.path.getsize(dest_path) / 1024 / 1024
                 log.info(
-                    "Linked from cache: %s (%.1f MB, no network transfer)",
+                    "Copied from HF cache: %s (%.1f MB, no network transfer)",
                     dest_path, size_mb,
                 )
             else:
@@ -1042,57 +1018,6 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
             if progress_callback:
                 progress_callback(f"Connection error, retrying in {wait}s...")
             _time.sleep(wait)
-
-
-def _copy_from_hub_cache(cached_path, local_dir, filename):
-    """Clone a hub-cache file into the models directory; return the destination.
-
-    On APFS shutil.copy2 uses clonefile() (copy-on-write, metadata-only), so
-    cloning a 1+ GB blob takes milliseconds and shares disk pages with the
-    cache until either side is modified.
-    """
-    dest_path = os.path.join(local_dir, filename)
-    # filename can be repo-relative (e.g. "onnx/model.onnx" for
-    # custom HF repos with the standard onnx/ layout) — create the
-    # full destination directory, not just local_dir, or copy2
-    # raises FileNotFoundError that the retry loop misclassifies
-    # as a connection failure.
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    if cached_path != dest_path:
-        if _needs_atomic_publish(filename):
-            # Publish atomically. copy2 straight onto dest_path
-            # makes the destination visible while it is still
-            # being written, so a concurrent reader (e.g. the
-            # background label_descriptions heal racing a
-            # TimmClassifier init) can json.load a torn file, and
-            # a process exit mid-copy leaves a truncated file
-            # whose mere existence suppresses future repairs.
-            # Copy beside it, then os.replace (atomic on POSIX
-            # and Windows) so readers only ever see the whole
-            # file or no file. Cheap here: these are small
-            # metadata files — see _needs_atomic_publish for why
-            # the multi-GB weight artifacts must not do this.
-            # The staging name is unique per invocation (see
-            # _staged_sibling) so two concurrent publishers of the
-            # same file never share one staging inode.
-            with _staged_sibling(dest_path) as tmp_path:
-                shutil.copy2(cached_path, tmp_path)
-                replace_file(tmp_path, dest_path)
-        else:
-            # Weights: copy straight into place so a download
-            # never needs 2x the model size on disk. A failed
-            # copy still leaves nothing behind — copy2 has
-            # already truncated any previous copy, so the
-            # half-written remains are worthless and would only
-            # look like a healthy artifact to the next
-            # completeness check.
-            try:
-                shutil.copy2(cached_path, dest_path)
-            except BaseException:  # broad: remove the partial copy on any exit, then re-raise
-                with contextlib.suppress(OSError):
-                    os.unlink(dest_path)
-                raise
-    return dest_path
 
 
 @cache_access
@@ -1353,6 +1278,32 @@ _MAX_HASH_RETRIES = 2  # 1 initial attempt + 2 retries = 3 total per file
 _MIN_BINARY_MODEL_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
+def _prepare_existing_download(local_path, expected_sha, progress_callback):
+    """Keep verified files; release mismatching weights before staging a repair.
+
+    A legacy hub-cache blob plus the installed file plus its staged replacement
+    would otherwise require three weight-sized allocations. Only discard binary
+    artifacts proven to differ from the requested checksum. JSON metadata may
+    have concurrent readers and stays readable until its atomic replacement.
+    """
+    if expected_sha is None or not os.path.isfile(local_path):
+        return False
+    filename = os.path.basename(local_path)
+    if model_verify.sha256_file(local_path) == expected_sha:
+        log.info("%s already present and matches expected SHA256 — skipping download", filename)
+        if progress_callback:
+            progress_callback(f"{filename} already verified, skipping")
+        return True
+    if local_path.endswith((".onnx", ".onnx.data", ".npy")):
+        try:
+            os.unlink(local_path)
+        except OSError as exc:
+            log.warning("Could not release checksum-mismatching weights %s: %s", local_path, exc)
+        else:
+            log.info("Removed checksum-mismatching weights before replacement: %s", local_path)
+    return False
+
+
 def _download_and_verify_file(
     filename, model_dir, hf_subdir, expected_hashes, progress_callback,
     revision=None, optional=False,
@@ -1379,22 +1330,11 @@ def _download_and_verify_file(
     # Repair calls download_model for the whole manifest even when it only
     # needs one file (e.g. the newly optional label_descriptions.json).
     # Re-fetching a 3.9 GB weight blob that is already byte-for-byte
-    # correct costs a full copy out of the HF cache for no benefit, so
+    # correct costs a full download for no benefit, so
     # hash what's on disk first and skip whatever already passes.
     # Only possible when HF gave us an expected hash — without one we
     # can't tell "correct" from "corrupt", so those still get downloaded.
-    pre_sha = expected_hashes.get(filename)
-    if (
-        pre_sha is not None
-        and os.path.isfile(local_path)
-        and model_verify.sha256_file(local_path) == pre_sha
-    ):
-        log.info(
-            "%s already present and matches expected SHA256 — "
-            "skipping download", filename,
-        )
-        if progress_callback:
-            progress_callback(f"{filename} already verified, skipping")
+    if _prepare_existing_download(local_path, expected_hashes.get(filename), progress_callback):
         return
 
     attempts = 0
@@ -1662,6 +1602,33 @@ def label_descriptions_usable(path):
     return load_label_descriptions(path) is not None
 
 
+# Why the last attempt to fetch a timm model's label_descriptions.json failed,
+# per model_str, from the background heal or from Settings' Repair. Kept so
+# Settings › Models and the runs that go on with taxonomy-based names can say
+# why the common-name file is still missing; the next success clears it.
+_LABEL_DESC_HEAL_FAILURES: dict[str, str] = {}
+_LABEL_DESC_HEAL_FAILURES_LOCK = threading.Lock()
+
+
+def _label_desc_heal_ok(model_str):
+    with _LABEL_DESC_HEAL_FAILURES_LOCK:
+        _LABEL_DESC_HEAL_FAILURES.pop(model_str, None)
+    return True
+
+
+def _label_desc_heal_failed(model_str, reason):
+    # Stored without a closing period: it is quoted mid-sentence.
+    with _LABEL_DESC_HEAL_FAILURES_LOCK:
+        _LABEL_DESC_HEAL_FAILURES[model_str] = reason.rstrip(". ")
+    return False
+
+
+def label_descriptions_heal_failure(model_str):
+    """Why the last fetch of ``model_str``'s common-name file failed, or None."""
+    with _LABEL_DESC_HEAL_FAILURES_LOCK:
+        return _LABEL_DESC_HEAL_FAILURES.get(model_str)
+
+
 @cache_access
 def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None):
     """Self-heal a missing label_descriptions.json for a timm model.
@@ -1683,7 +1650,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
     target = os.path.join(model_dir, "label_descriptions.json")
     descs, inspected = read_label_descriptions(target)
     if descs is not None:
-        return True
+        return _label_desc_heal_ok(model_str)
 
     # Present but unparseable when we looked — a torn write from an
     # earlier build or a killed process. Drop it so `list_models` stops
@@ -1707,7 +1674,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             # Someone published a usable mapping between our read and
             # now. The repair already happened; report success and, above
             # all, do not delete it.
-            return True
+            return _label_desc_heal_ok(model_str)
         if current is not None and current == inspected:
             with contextlib.suppress(OSError):
                 os.unlink(target)
@@ -1759,7 +1726,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
                         "Self-healed label_descriptions.json for %s from %s",
                         model_str, ONNX_REPO,
                     )
-                    return True
+                    return _label_desc_heal_ok(model_str)
         finally:
             shutil.rmtree(scratch_dir, ignore_errors=True)
 
@@ -1771,7 +1738,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             "Predictions keep using taxonomy-based common names.",
             model_str, e, exc_info=True,
         )
-        return False
+        return _label_desc_heal_failed(model_str, f"could not fetch the model's upstream config: {e}")
 
     descs = config.get("label_descriptions")
     if not isinstance(descs, dict) or not descs:
@@ -1779,7 +1746,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             "Upstream timm config for %s has no label_descriptions; "
             "cannot self-heal common names.", model_str,
         )
-        return False
+        return _label_desc_heal_failed(model_str, "the model's upstream config has no common names")
 
     # Stage under a name unique to this invocation, never a shared
     # "<target>.tmp": a background heal and a Settings Repair both reach
@@ -1813,15 +1780,15 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
                 "concurrent writer while this heal was staging (%s)",
                 model_str, e,
             )
-            return True
+            return _label_desc_heal_ok(model_str)
         log.warning("Could not write %s: %s", target, e)
-        return False
+        return _label_desc_heal_failed(model_str, f"could not write {target}: {e}")
 
     log.info(
         "Self-healed label_descriptions.json for %s from upstream timm "
         "config (%d entries)", model_str, len(descs),
     )
-    return True
+    return _label_desc_heal_ok(model_str)
 
 
 @cache_access
@@ -1914,6 +1881,7 @@ def download_hf_model(repo_id, progress_callback=None):
     model_id = "hf-" + repo_id.replace("/", "-").lower()
     slug = repo_id.split("/")[-1]
     local_dir = os.path.join(DEFAULT_MODELS_DIR, slug)
+    batch = DownloadBatch(repo_id, local_dir)
 
     # Find ONNX files in the repo
     if progress_callback:
@@ -1921,7 +1889,7 @@ def download_hf_model(repo_id, progress_callback=None):
 
     log.info("Listing files in HuggingFace repo: %s", repo_id)
     try:
-        files = list_repo_files(repo_id)
+        files = list_repo_files(repo_id, revision=batch.revision)
     except Exception as e:
         raise RuntimeError(f"Could not access HuggingFace repo '{repo_id}': {e}")
 
@@ -1929,6 +1897,7 @@ def download_hf_model(repo_id, progress_callback=None):
     onnx_files = [f for f in files if f.endswith(".onnx")]
 
     if not onnx_files:
+        batch.finish()
         raise RuntimeError(
             f"No ONNX model files found in {repo_id}. "
             f"Files: {', '.join(files[:10])}"
@@ -1938,7 +1907,7 @@ def download_hf_model(repo_id, progress_callback=None):
 
     # Download all ONNX files and common config files
     config_files = [f for f in files if f.endswith((".json", ".npy"))]
-    to_download = onnx_files + config_files
+    to_download = batch.pending(onnx_files + config_files)
 
     for fi, filename in enumerate(to_download):
         if progress_callback:
@@ -1948,7 +1917,9 @@ def download_hf_model(repo_id, progress_callback=None):
         _hf_download_with_retry(
             repo_id, filename, local_dir,
             progress_callback=progress_callback,
+            revision=batch.revision,
         )
+        batch.record(filename)
 
     # Determine model_str — use hf-hub: prefix for compatibility
     model_str = f"hf-hub:{repo_id}"
@@ -1959,6 +1930,7 @@ def download_hf_model(repo_id, progress_callback=None):
         model_id, name, model_str, local_dir,
         f"Downloaded from HuggingFace: {repo_id}", managed=True,
     )
+    batch.finish()
 
     log.info("Model registered: %s (%s)", name, local_dir)
     return {"model_id": model_id, "weights_path": local_dir, "name": name}

@@ -96,10 +96,13 @@ def derive_synonyms(label_descriptions, taxonomy_data):
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from vireo.app_paths import default_path
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label-descriptions", default=None)
     parser.add_argument(
-        "--taxonomy", default=os.path.expanduser("~/.vireo/taxonomy.json")
+        "--taxonomy", default=default_path("taxonomy_json")
     )
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     args = parser.parse_args()

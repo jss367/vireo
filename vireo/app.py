@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 import id_conflicts
 import remote_setup
+from app_paths import default_path
 from db import (
     Database,
     IncompatibleDatabaseError,
@@ -160,7 +161,7 @@ def _setup_file_logging(log_dir=None):
     if any(getattr(h, "_vireo_file_handler", False) for h in root.handlers):
         return
     if log_dir is None:
-        log_dir = os.path.expanduser("~/.vireo")
+        log_dir = os.path.dirname(default_path("log"))
     os.makedirs(log_dir, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
         os.path.join(log_dir, "vireo.log"),
@@ -1667,12 +1668,8 @@ def _new_configured_app(db_path, thumb_cache_dir, api_token):
         __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
     )
     app.config["DB_PATH"] = db_path
-    app.config["COMPUTATION_CACHE_DIR"] = os.path.expanduser(
-        "~/.vireo/computation-cache"
-    )
-    app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
-        "~/.vireo/thumbnails"
-    )
+    app.config["COMPUTATION_CACHE_DIR"] = default_path("computation_cache")
+    app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or default_path("thumbnails")
     app.config["API_TOKEN"] = api_token
     app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "::1"]
     app.config["BROWSER_SESSION_COOKIE"] = "vireo_session"
@@ -1967,6 +1964,7 @@ def _register_core_blueprints(app, w):
             json_error,
             db_path,
             app.config,
+            get_runner=lambda: app._job_runner,
             invalid_preview_cache_paths=w.render_cache.invalid_preview_cache_paths,
             clear_preview_cache_invalid=w.render_cache.clear_preview_cache_invalid,
             render_edit_preview=app._preview_workers.render,
@@ -2366,12 +2364,12 @@ def _parse_main_args():
     parser = argparse.ArgumentParser(description="Vireo Photo Browser")
     parser.add_argument(
         "--db",
-        default=os.path.expanduser("~/.vireo/vireo.db"),
+        default=default_path("database"),
         help="Path to SQLite database",
     )
     parser.add_argument(
         "--thumb-dir",
-        default=os.path.expanduser("~/.vireo/thumbnails"),
+        default=default_path("thumbnails"),
         help="Path to thumbnail cache directory",
     )
     parser.add_argument("--port", type=int, default=8080)

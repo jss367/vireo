@@ -532,8 +532,9 @@ def test_top_unrejected_predictions_by_photo(db, cat):
     got = db.predictions.top_unrejected_by_photo([p0, p1, p2, p3, cat["outside"]])
     assert set(got) == {p0, p1, cat["outside"]}
     assert dict(got[p0]) == {
-        "photo_id": p0, "id": jay, "species": "Jay", "confidence": 0.7,
-        "classifier_model": "m1", "group_id": "g", "status": "reviewed",
+        "photo_id": p0, "detection_id": det, "id": jay, "species": "Jay",
+        "confidence": 0.7, "classifier_model": "m1", "group_id": "g",
+        "status": "reviewed",
     }
     # Equal confidence: the higher id wins.
     assert got[p1]["id"] == kite
@@ -545,6 +546,35 @@ def test_top_unrejected_predictions_by_photo(db, cat):
     assert set(db.predictions.top_unrejected_by_photo(padded)) == {p1}
     db.conn.set_trace_callback(None)
     assert len([s for s in dict.fromkeys(statements) if "d.photo_id IN" in s]) == 2
+
+
+def test_top_unrejected_predictions_by_detection_keeps_every_subject(db, cat):
+    """A photo with two subjects keeps each subject's top prediction, most
+    confident first, instead of only the photo's single top species."""
+    p0, p1 = cat["p"][:2]
+    teal_det, wigeon_det = db.detections.save(
+        p0,
+        [{"box": {"x": x, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9,
+          "category": "animal"} for x in (0.1, 0.6)],
+        "md",
+    )
+    db.predictions.add(teal_det, "Green-winged Teal", 0.9, "m1")
+    db.predictions.add(teal_det, "Mallard", 0.3, "m1")
+    db.predictions.add(wigeon_det, "American Wigeon", 0.8, "m1")
+    db.predictions.add(wigeon_det, "Gadwall", 0.85, "m1")
+    db.update_prediction_status(
+        _pred_id(db, wigeon_det, "Gadwall", fp="legacy"), "rejected",
+    )
+    db.predictions.add(_det(db, p1), "Robin", 0.5, "m1")
+
+    got = db.predictions.top_unrejected_by_detection([p0, p1])
+    assert [(r["detection_id"], r["species"]) for r in got[p0]] == [
+        (teal_det, "Green-winged Teal"), (wigeon_det, "American Wigeon"),
+    ]
+    assert [r["species"] for r in got[p1]] == ["Robin"]
+    # The per-photo read is each photo's first subject.
+    assert db.predictions.top_unrejected_by_photo([p0])[p0]["id"] == got[p0][0]["id"]
+    assert db.predictions.top_unrejected_by_detection([]) == {}
 
 
 def test_top_unrejected_predictions_by_photo_workspace_resolution(db, cat):

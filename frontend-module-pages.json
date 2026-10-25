@@ -63,6 +63,14 @@
     "pageHooks": [],
     "sharedWrites": []
   },
+  "duplicates": {
+    "route": "/duplicates",
+    "template": "duplicates.html",
+    "pageHooks": [
+      "startScan"
+    ],
+    "sharedWrites": []
+  },
   "highlights": {
     "route": "/highlights",
     "template": "highlights.html",
@@ -101,6 +109,14 @@
     "route": "/shortcuts",
     "template": "shortcuts.html",
     "pageHooks": [],
+    "sharedWrites": []
+  },
+  "storage": {
+    "route": "/storage",
+    "template": "storage.html",
+    "pageHooks": [
+      "loadStoragePanel"
+    ],
     "sharedWrites": []
   },
   "welcome": {

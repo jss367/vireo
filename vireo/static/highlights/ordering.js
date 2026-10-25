@@ -13,21 +13,37 @@ export function findHighlightPhoto(photoId) {
 }
 
 /**
+ * The entry for a photo, preferring the bucket the lightbox was opened from:
+ * a photo with two species has an entry in each species' bucket.
  * @param {number | null | undefined} photoId
  * @returns {{photo: HighlightsPhoto, photos: HighlightsPhoto[], bucket: HighlightsBucket | null} | null}
  */
 export function findHighlightPhotoWithContainer(photoId) {
-  if (!state.currentData || photoId == null) return null;
-  var buckets = state.currentData.buckets || [];
-  for (var i = 0; i < buckets.length; i++) {
-    var bucket = /** @type {HighlightsBucket} */ (buckets[i]);
+  var hits = findAllHighlightPhotoContainers(photoId);
+  var preferred = hits.find(function(hit) {
+    return (hit.bucket ? hit.bucket.species : null) === state.activeLightboxSpecies;
+  });
+  return preferred || hits[0] || null;
+}
+
+/**
+ * Every loaded entry for a photo, one per bucket it is in.
+ * @param {number | null | undefined} photoId
+ * @returns {{photo: HighlightsPhoto, photos: HighlightsPhoto[], bucket: HighlightsBucket | null}[]}
+ */
+export function findAllHighlightPhotoContainers(photoId) {
+  if (!state.currentData || photoId == null) return [];
+  /** @type {{photo: HighlightsPhoto, photos: HighlightsPhoto[], bucket: HighlightsBucket | null}[]} */
+  var hits = [];
+  (state.currentData.buckets || []).forEach(function(bucket) {
     var photos = bucket.photos || [];
     var match = photos.find(function(p) { return p.id === photoId; });
-    if (match) return { photo: match, photos: photos, bucket: bucket };
-  }
+    if (match) hits.push({ photo: match, photos: photos, bucket: bucket });
+  });
   var unid = state.currentData.unidentified && state.currentData.unidentified.photos || [];
   var unidMatch = unid.find(function(p) { return p.id === photoId; });
-  return unidMatch ? { photo: unidMatch, photos: unid, bucket: null } : null;
+  if (unidMatch) hits.push({ photo: unidMatch, photos: unid, bucket: null });
+  return hits;
 }
 
 // Copy the authoritative full-bucket ordering keys from a bucket-endpoint

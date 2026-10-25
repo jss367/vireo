@@ -9,7 +9,6 @@
     "../types/panel-loaders.d.ts",
     "../types/navbar.d.ts",
     "../types/shared-controllers.d.ts",
-    "../vireo/static/duplicates/categories.js",
     "../vireo/static/keywords-link-place-url.js",
     "../vireo/static/map-selection.js",
     "../vireo/static/map-status.js",

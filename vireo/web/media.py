@@ -87,6 +87,7 @@ from services.original_photo import (
     peg_display_cache_mtime as _peg_display_cache_mtime,
 )
 from services.retained_cache import reader_guard
+from services.same_shot_duplicates import is_duplicate_review_member
 from web.responses import photo_not_found_error
 from working_copy_cache import (
     evict_if_over_quota as evict_working_copy_cache_if_over_quota,
@@ -2936,6 +2937,7 @@ def create_media_blueprint(
     db_path,
     config,
     *,
+    get_runner,
     invalid_preview_cache_paths,
     clear_preview_cache_invalid,
     render_edit_preview,
@@ -3033,9 +3035,8 @@ def create_media_blueprint(
         The duplicate scan is library-wide, so the Duplicates page shows
         copies the active workspace does not, and ``/thumbnails/<filename>``
         404s on those. This route replaces the workspace check with
-        duplicate-group membership (a photo sharing its ``file_hash`` with
-        another row), which is exactly the set that page can show; any
-        other photo still 404s. The folder comes from ``folders.get`` by id,
+        exact-duplicate membership or a still-current same-shot group from
+        the latest completed scan. Other photos still 404. The folder comes from ``folders.get`` by id,
         which is not workspace-scoped, so the source path never falls back
         to a CWD-relative join.
         """
@@ -3046,7 +3047,7 @@ def create_media_blueprint(
             return "", 404
 
         db = get_db()
-        if not db.duplicates.is_group_member(photo_id):
+        if not is_duplicate_review_member(db, photo_id, get_runner().list_jobs):
             return "", 404
         photo = db.photos.get(photo_id)
         if not photo:

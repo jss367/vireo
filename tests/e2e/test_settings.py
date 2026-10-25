@@ -5,6 +5,30 @@ import pytest
 from playwright.sync_api import expect
 
 
+@pytest.mark.parametrize("state", ["ok", "unverified"])
+def test_models_card_names_a_failed_common_name_repair(live_server, page, state):
+    """A timm model missing label_descriptions.json gets Repair. When Vireo's
+    own attempt to fetch the file failed, the card says why instead of
+    leaving that to the log."""
+    model = {
+        "id": "timm-inat21-eva02-l", "name": "iNat21 (EVA-02 Large)",
+        "model_str": "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21",
+        "model_type": "timm", "source": "timm", "downloaded": True, "state": state,
+        "weights_path": "/models/timm", "missing_optional_files": ["label_descriptions.json"],
+        "label_descriptions_error": "could not fetch the model's upstream config: offline",
+    }
+    page.route("**/api/models", lambda route: route.fulfill(
+        json={"models": [model], "active_id": model["id"]},
+    ))
+    page.goto(live_server["url"] + "/settings")
+    card = page.locator("#modelsContent")
+    expect(card).to_contain_text(
+        "Vireo's last attempt to fetch label_descriptions.json failed: could "
+        "not fetch the model's upstream config: offline."
+    )
+    expect(card.get_by_role("button", name="Repair")).to_be_visible()
+
+
 def test_eye_keypoint_threshold_uses_raw_score_units(live_server, page):
     url = live_server["url"]
     page.goto(url + "/settings")

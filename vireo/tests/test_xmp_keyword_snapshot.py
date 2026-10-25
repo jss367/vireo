@@ -64,6 +64,7 @@ def _namespace(*, ownership="hier", failure_at=None, initial_error=None):
         tree = ast.parse((VIREO / name).read_text(encoding="utf-8"))
         _execute([node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in functions], ns)
     ns["filter_removed_import_aliases"] = lambda db, pid, flat, hier, *args: (flat, hier)
+    ns["UNREADABLE_SIDECAR_REASON"] = "invented unreadable reason"
     ns["_import_keyword_lists"] = lambda db, pid, flat, hier: imported.append((set(flat), list(hier)))
     db = SimpleNamespace(
         locations=SimpleNamespace(has_pending_change=lambda photo_id: True),
@@ -177,7 +178,8 @@ def _incremental_boundary(namespace, db):
     db.commit_with_retry = lambda: commits.append("commit")
     db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: None
     owner = SimpleNamespace(db=db, repair_missing_metadata=False,
-                            tally=SimpleNamespace(credit_reused_row=lambda *args: None))
+                            tally=SimpleNamespace(credit_reused_row=lambda *args: None,
+                                                  report_sidecar_failure=lambda *args: None))
     namespace.update(RAW_EXTENSIONS=set(), EMPTY_FILE_SHA256="invented empty hash")
     reuse = _scanner_method(namespace, "triage.py", "_IncrementalTriage", "_reuse_existing_row")
     return existing, commits, lambda mtime=9: reuse(
@@ -287,7 +289,8 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
     owner = SimpleNamespace(
         db=db, vireo_dir=None, extract_full_metadata=False,
         collections=SimpleNamespace(drop_inherited_collection_membership=lambda photo_id: None),
-        tally=SimpleNamespace(credit_indexed=lambda photo_id: None, report_cataloged=lambda *args: None),
+        tally=SimpleNamespace(credit_indexed=lambda photo_id: None, report_cataloged=lambda *args: None,
+                              report_sidecar_failure=lambda *args: None),
         fills=SimpleNamespace(take_pending_companion_fill=lambda *args: None),
         _deferred_hashes=set() if deferred_hashes is None else deferred_hashes,
         _identity_column_updates=lambda item: (["file_hash=?"], [item.file_hash]) if item.file_hash is not None else ([], []),
@@ -372,14 +375,18 @@ def test_companion_boundary_does_not_commit_a_failed_read_as_imported():
 
     ns["ET"].parse = transient_parse
     db.commit_with_retry = lambda: commits.append("commit")
-    image_path = SimpleNamespace(with_suffix=lambda suffix: _MemorySidecar())
-    owner = SimpleNamespace(db=db)
+    image_path = SimpleNamespace(name="photo.jpg", with_suffix=lambda suffix: _MemorySidecar())
+    failures = []
+    owner = SimpleNamespace(db=db, tally=SimpleNamespace(report_sidecar_failure=lambda *args: failures.append(args)))
     companion = _scanner_method(ns, "companion_keep.py", "_KnownCompanionKeeper", "import_companion_sidecar")
     companion(owner, image_path, {"owner_id": 731})
     first_commits = list(commits)
+    # The failed read is reported, not only skipped.
+    assert failures == [(str(_MemorySidecar()), "photo.jpg", "invented unreadable reason")]
     inaccessible[0] = False
     companion(owner, image_path, {"owner_id": 731})
     assert first_commits == [] and commits == ["commit"]
+    assert len(failures) == 1
     assert imported == [({"Paris"}, [])]
 
 

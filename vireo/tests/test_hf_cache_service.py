@@ -438,16 +438,16 @@ def test_shared_blob_between_two_unused_entries_counts_once_in_unused_size(hub):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
-def test_remove_refuses_a_key_that_now_backs_an_installed_model(hub, tmp_path):
-    """The page may have inventoried before the install finished."""
+def test_remove_frees_the_duplicate_of_an_installed_model(hub, tmp_path):
+    """An install never reads the cache, so its cache twin is pure duplicate."""
     from services import hf_cache
 
     blob = hub.add("dinov2-vit-b14/model.onnx", b"d" * 300)
     _install(tmp_path, "dinov2-vit-b14")
 
-    with pytest.raises(ValueError):
-        hf_cache.remove(["jss367/vireo-onnx-models/dinov2-vit-b14"])
-    assert blob.exists()
+    result = hf_cache.remove(["jss367/vireo-onnx-models/dinov2-vit-b14"])
+    assert result["freed"] == 300
+    assert not blob.exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
@@ -683,7 +683,7 @@ def test_cache_directory_pruning_is_refused(tmp_path):
 
 @pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_decides_on_state_collected_under_the_locks(hub, tmp_path, monkeypatch):
-    """An install that lands between the page's inventory and the click is seen."""
+    """An install that lands between the page's inventory and "Remove unused" is seen."""
     from services import hf_cache
 
     blob = hub.add("dinov2-vit-b14/model.onnx", b"d" * 300)
@@ -696,7 +696,5 @@ def test_remove_decides_on_state_collected_under_the_locks(hub, tmp_path, monkey
         return real_collect(cache_dir, models_dir, extra_repos)
 
     monkeypatch.setattr(hf_cache, "_collect", collect_after_install)
-    with pytest.raises(ValueError):
-        hf_cache.remove(["jss367/vireo-onnx-models/dinov2-vit-b14"])
     assert hf_cache.remove_unused()["removed"] == []
     assert blob.exists()

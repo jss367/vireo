@@ -38,6 +38,7 @@ from datetime import date
 
 import certifi
 import requests
+from app_paths import default_path
 from file_replace import replace_file
 
 log = logging.getLogger(__name__)
@@ -589,7 +590,7 @@ DWCA_URL = "https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip"
 # Persistent path for the DWCA-based taxonomy.json. Lives under ~/.vireo so
 # it survives app restarts — in PyInstaller-bundled builds the package
 # directory is an ephemeral _MEI* extraction dir that's rebuilt per run.
-TAXONOMY_JSON_PATH = os.path.expanduser("~/.vireo/taxonomy.json")
+TAXONOMY_JSON_PATH = default_path("taxonomy_json")
 
 # Fallback for dev checkouts that downloaded a taxonomy.json next to this
 # module before the persistent path existed. Named so tests (and the browser
@@ -635,10 +636,20 @@ _taxonomy_cache = None  # (path, stat_key, Taxonomy)
 # us from evicting the fallback cache before parsing, because the corrupt
 # case would otherwise re-parse the multi-GB fallback each time.
 _taxonomy_failed_stats = {}  # {path: stat_key}
+# Why each path in ``_taxonomy_failed_stats`` failed, so a later load that
+# short-circuits on the memo can still tell its caller what is wrong.
+_taxonomy_failed_reasons = {}  # {path: "ValueError: ..."}
 
 
 class _KnownCorruptTaxonomy(Exception):
-    """Raised when a path is known to have failed to parse at its current stat."""
+    """Raised when a path is known to have failed to parse at its current stat.
+
+    ``reason`` is the original parse error's text, when it was recorded.
+    """
+
+    def __init__(self, path, reason=None):
+        super().__init__(path)
+        self.reason = reason
 
 
 # Parse failures that are environmental rather than the file's fault, so a
@@ -667,6 +678,7 @@ def clear_taxonomy_cache():
     with _taxonomy_cache_lock:
         _taxonomy_cache = None
         _taxonomy_failed_stats.clear()
+        _taxonomy_failed_reasons.clear()
 
 
 def _write_taxonomy_json_atomically(path, data):
@@ -759,10 +771,11 @@ def _load_taxonomy_cached(path):
         # rediscover it's still broken.
         failed_stat = _taxonomy_failed_stats.get(path)
         if failed_stat == stat_key:
-            raise _KnownCorruptTaxonomy(path)
+            raise _KnownCorruptTaxonomy(path, _taxonomy_failed_reasons.get(path))
         if failed_stat is not None:
             # File has changed since it last failed; give it another chance.
             _taxonomy_failed_stats.pop(path, None)
+            _taxonomy_failed_reasons.pop(path, None)
 
         cached = _taxonomy_cache
         if cached is not None and cached[0] == path and cached[1] == stat_key:
@@ -863,6 +876,7 @@ def _parse_taxonomy_with_retries(path):
                 # contents happen to change or the process restarts.
                 if not isinstance(parse_error, _TRANSIENT_TAXONOMY_ERRORS):
                     _taxonomy_failed_stats[path] = pre_stat
+                    _taxonomy_failed_reasons[path] = last_error_text
                 raise
             continue
         post_stat = _taxonomy_stat_key(path)
@@ -895,6 +909,7 @@ def _drop_cached_taxonomy_path(path):
     global _taxonomy_cache
     with _taxonomy_cache_lock:
         _taxonomy_failed_stats.pop(path, None)
+        _taxonomy_failed_reasons.pop(path, None)
         cached = _taxonomy_cache
         if cached is not None and cached[0] == path:
             _taxonomy_cache = None
@@ -915,7 +930,7 @@ def _restamp_taxonomy_cache(taxonomy):
             _taxonomy_cache = None
 
 
-def load_local_taxonomy(path=None):
+def load_local_taxonomy(path=None, *, failures=None):
     """Load a Taxonomy from disk, falling back across known paths.
 
     Tries ~/.vireo/taxonomy.json first, then the package-dir legacy path.
@@ -933,6 +948,10 @@ def load_local_taxonomy(path=None):
             retype must fail loudly if the file it just wrote won't parse,
             rather than quietly retyping keywords from a stale legacy copy
             while the taxa tables hold the new download's data.
+        failures: a list that gets ``{"path", "error"}`` appended for every
+            candidate that exists but could not be read, so a caller that
+            goes on without the taxonomy (or with the fallback copy) can
+            say why. An absent file is not a failure.
     """
     candidates = [path] if path else [TAXONOMY_JSON_PATH, LEGACY_TAXONOMY_JSON_PATH]
     for path in candidates:
@@ -948,16 +967,77 @@ def load_local_taxonomy(path=None):
             continue
         try:
             return _load_taxonomy_cached(path)
-        except _KnownCorruptTaxonomy:
+        except _KnownCorruptTaxonomy as known:
             # We've already logged the real error for this stat; skip
             # quietly on subsequent requests so a persistently-broken
-            # preferred file doesn't flood the log.
+            # preferred file doesn't flood the log. The caller still hears
+            # about it: each run that goes without this file says why.
+            if failures is not None:
+                failures.append({
+                    "path": path,
+                    "error": known.reason or "it could not be parsed",
+                })
             continue
-        except Exception as e:  # broad: taxonomy parsing raises undocumented errors; the next candidate is tried
+        except Exception as e:  # broad: taxonomy parsing raises undocumented errors; the next candidate is tried and the caller is told
             log.warning(
                 "Failed to load taxonomy from %s: %s — trying next candidate",
                 path, e, exc_info=True,
             )
+            if failures is not None:
+                failures.append({"path": path, "error": f"{type(e).__name__}: {e}"})
+    return None
+
+
+# What a classification run loses without the taxonomy, kept to what the
+# code does: ``classify_job.store_predictions`` files every prediction as
+# "new" when there is none, and the order/family/genus lookup needs it.
+_RUN_WITHOUT_TAXONOMY_EFFECT = (
+    "Without it, predictions are not checked against your photos' existing "
+    "keywords (each one goes to review as new), and they get no order, "
+    "family or genus from the taxonomy."
+)
+
+
+def _describe_taxonomy_failures(failures):
+    return " or ".join(f"{f['path']} ({f['error']})" for f in failures)
+
+
+def taxonomy_fallback_notice(taxonomy, failures, download_error=None):
+    """Explain a classification run that went without the taxonomy it expected.
+
+    ``failures`` is what ``load_local_taxonomy(failures=...)`` collected for
+    the run and ``download_error`` the text of a requested download that
+    failed. Returns ``None`` when the run used a readable taxonomy, or had
+    none and was not asked to fetch one: an install that never downloaded
+    the taxonomy runs without it on purpose, and Settings already says so.
+    """
+    if taxonomy is None and download_error:
+        return (
+            "This run had no taxonomy: downloading it failed "
+            f"({download_error}). {_RUN_WITHOUT_TAXONOMY_EFFECT} "
+            "Download it in Settings › Taxonomy before the next run."
+        )
+    if taxonomy is None and failures:
+        return (
+            "This run had no taxonomy: Vireo could not read "
+            f"{_describe_taxonomy_failures(failures)}. "
+            f"{_RUN_WITHOUT_TAXONOMY_EFFECT} "
+            "Download it again in Settings › Taxonomy."
+        )
+    if download_error:
+        return (
+            f"Downloading the taxonomy failed ({download_error}), so this "
+            "run used the taxonomy file already on disk."
+        )
+    if failures:
+        # Only the preferred file can fail while a taxonomy still loads,
+        # and the one candidate after it is the legacy copy.
+        return (
+            f"Vireo could not read {_describe_taxonomy_failures(failures)}, "
+            "so this run used the older taxonomy file at "
+            f"{LEGACY_TAXONOMY_JSON_PATH}. Download it again in "
+            "Settings › Taxonomy."
+        )
     return None
 
 
@@ -1446,7 +1526,7 @@ def load_taxonomy(db, data_dir=None):
         data_dir: directory to store downloaded files (default: ~/.vireo/taxonomy/)
     """
     if data_dir is None:
-        data_dir = os.path.expanduser("~/.vireo/taxonomy")
+        data_dir = default_path("taxonomy")
     os.makedirs(data_dir, exist_ok=True)
 
     gz_path = os.path.join(data_dir, "taxa.csv.gz")

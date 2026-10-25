@@ -73,6 +73,7 @@ from xmp.readers import (
     read_sync_preview_metadata,
     read_vireo_location_keywords,
     read_vireo_location_keywords_owned,
+    sidecar_read_problem,
 )
 
 __all__ = [
@@ -99,6 +100,7 @@ __all__ = [
     "read_vireo_location_keywords_owned",
     "remove_keywords",
     "remove_vireo_gps_location",
+    "sidecar_read_problem",
     "write_edit_recipe",
     "write_gps_location",
     "write_pick_flag",

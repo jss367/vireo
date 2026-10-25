@@ -1,11 +1,16 @@
-// Duplicates page: one copy's card in a duplicate group. Classic script
-// sharing the page's globals (escapeHtml, formatBytes, _filterMatchedIds,
-// trashOneLoserFile, keepDuplicateCopy), which duplicates.html and the later
-// duplicates-*.js scripts define after loading this; they are only read when
-// a card renders.
+// Duplicates page: one copy's card in a duplicate group, and the cards'
+// right-click menu (Reveal in the file manager). The card's Keep and Trash
+// buttons carry data-dup-action attributes that events.js handles.
+
+import { state } from './state.js';
+import { duplicateFileTrashIsPending, duplicateRequestError } from './cleanup.js';
+import {
+  escapeHtml, formatBytes, openContextMenu, revealLabel, safeFetch, showRevealFeedback, showToast,
+  thumbnailUrl,
+} from './shared.js';
 
 /** @param {DuplicatePhoto} photo @param {boolean} isWinner @param {string} [reason] @param {boolean} [isResolvedLoser] @param {boolean} [winnerMissingProtect] @param {boolean} [winnerOfflineProtect] */
-function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect, winnerOfflineProtect) {
+export function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect, winnerOfflineProtect) {
   var cls = isWinner ? 'winner' : 'loser';
   // A copy on an offline volume is unknown, not missing — don't apply
   // the ``missing`` styling that renders it as gone.
@@ -15,7 +20,7 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   // The scan is library-wide, so a copy may sit outside the active workspace,
   // where /thumbnails/ 404s. /thumbnails/duplicate/ serves any group member.
   var thumbUrl = photo.id != null
-    ? (window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg')
+    ? thumbnailUrl(photo)
         .replace(/^\/thumbnails\//, '/thumbnails/duplicate/')
     : null;
   var html = '<div class="dup-card ' + cls + '" data-photo-id="' +
@@ -24,13 +29,12 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
     html += '<div class="thumb-wrap"><div class="thumb-placeholder">Loading thumbnail…</div>' +
             '<img class="thumb" loading="lazy" decoding="async" width="180" height="135" src="' + escapeHtml(thumbUrl) +
             '" alt="' + escapeHtml(photo.filename || '') +
-            '" onload="this.parentElement.classList.add(\'loaded\')"' +
-            ' onerror="this.previousElementSibling.textContent=\'No thumbnail\';this.remove()"></div>';
+            '" data-dup-thumb></div>';
   } else {
     html += '<div class="thumb-placeholder">No thumbnail</div>';
   }
   html += '<span class="badge">' + badge + '</span>';
-  if (_filterMatchedIds && photo.id != null && _filterMatchedIds.has(photo.id)) {
+  if (state.filterMatchedIds && photo.id != null && state.filterMatchedIds.has(photo.id)) {
     html += '<span class="filter-match-badge" title="This member matches the active filters">Matches filter</span>';
   }
   if (missing) html += '<span class="missing-tag" title="File is no longer at this path on disk">Missing on disk</span>';
@@ -49,14 +53,15 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   // Overrides the decision: this copy becomes the kept one. Not offered for a
   // copy that is missing or unreachable, which the server refuses anyway.
   if (isResolvedLoser && photo.id != null && !missing && !photo.volume_offline) {
-    var busy = _duplicateTrashActive || duplicateFileTrashIsPending(photo.id) || _duplicateKeepPending.has(photo.id);
-    html += '<button type="button" class="keep-btn" onclick="keepDuplicateCopy(' + photo.id + ')"' +
+    var busy = state.duplicateTrashActive || duplicateFileTrashIsPending(photo.id) || state.duplicateKeepPending.has(photo.id);
+    html += '<button type="button" class="keep-btn" data-dup-action="keep-copy"' +
             (busy ? ' disabled' : '') + '>Keep this copy instead</button>';
   }
   if (isResolvedLoser && photo.id != null && !missing && !winnerMissingProtect) {
-    var trashState = _duplicateFileTrashState.get(photo.id);
-    html += '<button type="button" class="trash-btn" onclick="trashOneLoserFile(' +
-            photo.id + ')"' + ((trashState && trashState.pending) || _duplicateKeepPending.has(photo.id) ? ' disabled' : '') + '>Move file to Trash</button>';
+    var trashState = state.duplicateFileTrashState.get(photo.id);
+    html += '<button type="button" class="trash-btn" data-dup-action="trash-copy"' +
+            ((trashState && trashState.pending) || state.duplicateKeepPending.has(photo.id) ? ' disabled' : '') +
+            '>Move file to Trash</button>';
     html += '<div class="trash-status" data-trash-status>' + escapeHtml(trashState ? trashState.message : '') + '</div>';
   } else if (isResolvedLoser && !missing && winnerMissingProtect) {
     // The kept-file is gone (or its volume is unreachable and we can't
@@ -72,7 +77,7 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
 }
 
 /** @param {number} photoId */
-async function revealDuplicatePhoto(photoId) {
+export async function revealDuplicatePhoto(photoId) {
   try {
     var data = await safeFetch('/api/files/reveal', {
       method: 'POST',
@@ -86,16 +91,21 @@ async function revealDuplicatePhoto(photoId) {
 }
 
 // Delegate so restored results, fresh scans, and filter re-renders all work.
-document.addEventListener('contextmenu', function(e) {
+export function bindDuplicateCardContextMenu() {
+  document.addEventListener('contextmenu', onDuplicateCardContextMenu);
+}
+
+/** @param {MouseEvent} e */
+function onDuplicateCardContextMenu(e) {
   if (!(e.target instanceof Element)) return;
   var card = e.target.closest(/** @type {'div'} */ ('.dup-card[data-photo-id]'));
   var results = /** @type {HTMLElement} */ (document.getElementById('results'));
-  if (!card || !results || !results.contains(card)) return;
+  if (!card || !results || (!results.contains(card) && !card.closest('#sameShotResults'))) return;
   var photoId = Number(card.dataset.photoId);
   if (!Number.isInteger(photoId) || photoId <= 0) return;
   e.preventDefault();
   openContextMenu(e, [{
-    label: window.VIREO_REVEAL_LABEL,
+    label: revealLabel(),
     onClick: function() { revealDuplicatePhoto(photoId); },
   }]);
-});
+}

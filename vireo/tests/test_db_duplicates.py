@@ -591,14 +591,14 @@ def test_merge_tags_through_the_facade_inside_its_transaction(db, folder, monkey
     db.tag_photo(lo, kid, source="accept")
     calls = []
 
-    def _record(photo_id, keyword_id, source="manual", _commit=True):
-        calls.append((photo_id, keyword_id, source, _commit, db.conn.in_transaction))
+    def _record(photo_id, keyword_id, source="manual", _commit=True, *, species_provenance=None):
+        calls.append((photo_id, keyword_id, source, _commit, species_provenance, db.conn.in_transaction))
 
     monkeypatch.setattr(db, "tag_photo", _record)
 
     db._apply_winner_loser_merge(w, [lo])
 
-    assert calls == [(w, kid, "accept", False, True)]
+    assert calls == [(w, kid, "accept", False, None, True)]
     assert not db.conn.in_transaction
     assert _committed_rating(db, w) == 3
 

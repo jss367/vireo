@@ -10,7 +10,7 @@ from image_loader import (
     safe_scan_walk,
 )
 from services import missing_originals
-from xmp import read_keyword_snapshot
+from xmp import read_keyword_snapshot, sidecar_read_problem
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +20,151 @@ log = logging.getLogger(__name__)
 AUDIT_CHECKS = ("drift", "orphans", "untracked", "sidecars", "integrity")
 
 
+# What each drift row may be resolved with. A readable sidecar takes either
+# direction. A corrupt one can only be replaced: the next Sync to XMP writes a
+# fresh sidecar in its place (``SidecarEditor`` starts a new tree over a file
+# that does not parse), but there is nothing in it to read -- and only when the
+# catalog has keywords for the photo, because ``resolve_drift('use_db')`` queues
+# one ``keyword_add`` per current keyword and an empty catalog set queues
+# nothing, so the sync never invokes ``SidecarEditor`` and the corrupt file
+# stays. One that cannot be opened takes neither: the sync cannot write over it
+# and nothing can be read.
+DRIFT_RESOLUTIONS = ["use_db", "use_xmp"]
+_UNREADABLE_SIDECAR_RESOLUTIONS = {"corrupt": ["use_db"], "unreadable": []}
+_UNREADABLE_SIDECAR_ADVICE = {
+    "corrupt": (
+        "Use DB replaces it with the database's keywords at the next Sync to "
+        "XMP. Use XMP cannot apply: there is nothing in it Vireo can read."
+    ),
+    "unreadable": (
+        "Neither resolution can apply until Vireo can open the file. Fix its "
+        "permissions or reconnect its drive, then check for drift again."
+    ),
+}
+_CORRUPT_SIDECAR_NO_KEYWORDS_ADVICE = (
+    "This photo has no keywords in Vireo, so Use DB would not rewrite the "
+    "sidecar. Delete the sidecar file to clear the drift, or add keywords to "
+    "the photo first."
+)
+_UNREADABLE_SIDECAR_ERROR = {
+    "corrupt": "it is not valid XMP ({})",
+    "unreadable": "it could not be opened ({})",
+}
+
+
+def _unreadable_sidecar_drift(photo, folder_path, db_keywords, problem, detail):
+    """The drift row for a sidecar that exists but cannot be read.
+
+    Claims nothing about the sidecar's keywords (``xmp_value`` is None and
+    nothing is listed as added or removed): Vireo never saw them.
+
+    A corrupt sidecar normally offers ``use_db`` -- the next Sync to XMP
+    rewrites the file from the catalog's keywords. When the catalog has no
+    keywords for the photo, ``resolve_drift('use_db')`` would queue nothing
+    and the sync would not touch the sidecar, so the row offers no resolution
+    and the advice says what to do instead.
+    """
+    if problem == "corrupt" and not db_keywords:
+        resolutions = []
+        advice = _CORRUPT_SIDECAR_NO_KEYWORDS_ADVICE
+    else:
+        resolutions = list(_UNREADABLE_SIDECAR_RESOLUTIONS[problem])
+        advice = _UNREADABLE_SIDECAR_ADVICE[problem]
+    return {
+        "photo_id": photo["id"],
+        "filename": photo["filename"],
+        "folder_path": folder_path,
+        "field": "keywords",
+        "db_value": sorted(db_keywords),
+        "xmp_value": None,
+        "added_in_xmp": [],
+        "removed_in_xmp": [],
+        "direction": "sidecar_unreadable",
+        "xmp_problem": problem,
+        "xmp_error": _UNREADABLE_SIDECAR_ERROR[problem].format(detail),
+        "advice": advice,
+        "resolutions": resolutions,
+    }
+
+
+def _photo_drift(db, photo, folder_path):
+    """``photo``'s drift row, or None when its keywords and sidecar agree."""
+    base = os.path.splitext(photo["filename"])[0]
+    xmp_path = os.path.join(folder_path, base + ".xmp")
+
+    db_keywords = {k["name"] for k in db.photo_keywords.get_for_photo(photo["id"])}
+
+    try:
+        os.stat(xmp_path)
+    except (FileNotFoundError, NotADirectoryError):
+        # No XMP file — if DB has keywords, that's a pending sync
+        if not db_keywords:
+            return None
+        return {
+            "photo_id": photo["id"],
+            "filename": photo["filename"],
+            "folder_path": folder_path,
+            "field": "keywords",
+            "db_value": sorted(db_keywords),
+            "xmp_value": [],
+            "added_in_xmp": [],
+            "removed_in_xmp": sorted(db_keywords),
+            "direction": "db_ahead",
+            "resolutions": list(DRIFT_RESOLUTIONS),
+        }
+    except OSError as error:
+        log.warning("Cannot inspect sidecar during drift check: %s", xmp_path, exc_info=True)
+        return _unreadable_sidecar_drift(
+            photo, folder_path, db_keywords, "unreadable", error.strerror or str(error),
+        )
+
+    snapshot = read_keyword_snapshot(xmp_path)
+    if snapshot is None:
+        log.warning("Cannot read sidecar during drift check: %s", xmp_path)
+        problem = sidecar_read_problem(xmp_path) or (
+            "unreadable", "it changed while Vireo was checking it",
+        )
+        return _unreadable_sidecar_drift(photo, folder_path, db_keywords, *problem)
+    xmp_keywords = snapshot[0]
+
+    # Compare case-insensitively: resolve_drift('use_xmp') reconciles
+    # via sync_from_xmp, which treats keywords differing only by case as
+    # already in sync, so a case-only difference reported here would be
+    # permanently unresolvable. Reported values keep the actual strings.
+    db_by_lower = {k.lower(): k for k in db_keywords}
+    xmp_by_lower = {k.lower(): k for k in xmp_keywords}
+
+    if set(xmp_by_lower) == set(db_by_lower):
+        return None
+    added_in_xmp = {
+        kw for low, kw in xmp_by_lower.items() if low not in db_by_lower
+    }
+    removed_in_xmp = {
+        kw for low, kw in db_by_lower.items() if low not in xmp_by_lower
+    }
+
+    # Determine direction
+    if added_in_xmp and not removed_in_xmp:
+        direction = "xmp_ahead"
+    elif removed_in_xmp and not added_in_xmp:
+        direction = "db_ahead"
+    else:
+        direction = "both"
+
+    return {
+        "photo_id": photo["id"],
+        "filename": photo["filename"],
+        "folder_path": folder_path,
+        "field": "keywords",
+        "db_value": sorted(db_keywords),
+        "xmp_value": sorted(xmp_keywords),
+        "added_in_xmp": sorted(added_in_xmp),
+        "removed_in_xmp": sorted(removed_in_xmp),
+        "direction": direction,
+        "resolutions": list(DRIFT_RESOLUTIONS),
+    }
+
+
 def check_drift(db):
     """Find photos where DB and XMP sidecar disagree.
 
@@ -27,89 +172,37 @@ def check_drift(db):
     - XMP modified externally (keywords in XMP not in DB)
     - DB modified by Vireo (keywords in DB not in XMP, pending sync)
 
+    A sidecar that exists but cannot be read is its own row
+    (``direction`` ``"sidecar_unreadable"``): it is not in sync, and Vireo
+    cannot say which keywords it holds.
+
     Returns:
         list of {photo_id, filename, folder_path, field, db_value, xmp_value,
-                 added_in_xmp, removed_in_xmp, direction}
+                 added_in_xmp, removed_in_xmp, direction, resolutions}, plus
+        xmp_problem ("corrupt" | "unreadable"), xmp_error and advice on an
+        unreadable sidecar's row. ``resolutions`` lists the directions
+        ``resolve_drift`` can apply to the row.
     """
     photos = db.photos.list_page(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.folders.tree()}
     drifts = []
 
     for photo in photos:
-        folder_path = folders.get(photo["folder_id"], "")
-        base = os.path.splitext(photo["filename"])[0]
-        xmp_path = os.path.join(folder_path, base + ".xmp")
-
-        db_keywords = {k["name"] for k in db.photo_keywords.get_for_photo(photo["id"])}
-
-        try:
-            os.stat(xmp_path)
-        except (FileNotFoundError, NotADirectoryError):
-            # No XMP file — if DB has keywords, that's a pending sync
-            if db_keywords:
-                drifts.append(
-                    {
-                        "photo_id": photo["id"],
-                        "filename": photo["filename"],
-                        "folder_path": folder_path,
-                        "field": "keywords",
-                        "db_value": sorted(db_keywords),
-                        "xmp_value": [],
-                        "added_in_xmp": [],
-                        "removed_in_xmp": sorted(db_keywords),
-                        "direction": "db_ahead",
-                    }
-                )
-            continue
-        except OSError:
-            log.warning("Cannot inspect sidecar during drift check: %s", xmp_path, exc_info=True)
-            continue
-
-        snapshot = read_keyword_snapshot(xmp_path)
-        if snapshot is None:
-            log.warning("Cannot read sidecar during drift check: %s", xmp_path)
-            continue
-        xmp_keywords = snapshot[0]
-
-        # Compare case-insensitively: resolve_drift('use_xmp') reconciles
-        # via sync_from_xmp, which treats keywords differing only by case as
-        # already in sync, so a case-only difference reported here would be
-        # permanently unresolvable. Reported values keep the actual strings.
-        db_by_lower = {k.lower(): k for k in db_keywords}
-        xmp_by_lower = {k.lower(): k for k in xmp_keywords}
-
-        if set(xmp_by_lower) != set(db_by_lower):
-            added_in_xmp = {
-                kw for low, kw in xmp_by_lower.items() if low not in db_by_lower
-            }
-            removed_in_xmp = {
-                kw for low, kw in db_by_lower.items() if low not in xmp_by_lower
-            }
-
-            # Determine direction
-            if added_in_xmp and not removed_in_xmp:
-                direction = "xmp_ahead"
-            elif removed_in_xmp and not added_in_xmp:
-                direction = "db_ahead"
-            else:
-                direction = "both"
-
-            drifts.append(
-                {
-                    "photo_id": photo["id"],
-                    "filename": photo["filename"],
-                    "folder_path": folder_path,
-                    "field": "keywords",
-                    "db_value": sorted(db_keywords),
-                    "xmp_value": sorted(xmp_keywords),
-                    "added_in_xmp": sorted(added_in_xmp),
-                    "removed_in_xmp": sorted(removed_in_xmp),
-                    "direction": direction,
-                }
-            )
+        drift = _photo_drift(db, photo, folders.get(photo["folder_id"], ""))
+        if drift is not None:
+            drifts.append(drift)
 
     log.info("Drift check: %d discrepancies found", len(drifts))
     return drifts
+
+
+def drift_for_photo(db, photo_id):
+    """One photo's drift row, as ``check_drift`` would list it, or None."""
+    photo = db.photos.get(photo_id)
+    if photo is None:
+        return None
+    folder = db.folders.get(photo["folder_id"])
+    return _photo_drift(db, photo, folder["path"] if folder else "")
 
 
 def check_orphans(db):

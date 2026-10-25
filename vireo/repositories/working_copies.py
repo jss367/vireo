@@ -212,9 +212,16 @@ class WorkingCopyRepository:
             (wc_rel,),
         ).fetchone() is not None
 
-    def mark_failed(self, row: CandidateRow, failure_source: str) -> None:
-        """Stamp the snapshot's row with a failure marker for its current mtime."""
-        self.conn.execute(
+    def mark_failed(self, row: CandidateRow, failure_source: str) -> int:
+        """Stamp the snapshot's row with a failure marker for its current mtime.
+
+        Returns the number of rows the identity-guarded UPDATE matched: zero
+        when the snapshot's identity no longer matches the row at ``id``
+        (deleted, companion/folder changed, or a concurrent publisher
+        installed a working copy), so the caller can tell whether this photo
+        was actually marked failed before reporting it as such.
+        """
+        return self.conn.execute(
             "UPDATE photos SET working_copy_failed_at=datetime('now'),"
             " working_copy_failed_mtime=?,"
             " working_copy_failed_source=?"
@@ -223,7 +230,7 @@ class WorkingCopyRepository:
                 row["file_mtime"], failure_source,
                 *row_identity_params(row),
             ),
-        )
+        ).rowcount
 
     def mark_raw_decode_failed(self, photo_id: int, file_mtime: Any) -> None:
         """Record that the photo's RAW source failed to decode at ``file_mtime``.

@@ -8,6 +8,17 @@ import pytest
 from playwright.sync_api import expect
 from services import photo_ingest
 
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Duplicates page's modules as ``pageModules.<file>`` and its state as
+    ``duplicatesState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "duplicates", "duplicatesState")
+
 
 def _seed_scan_with_buckets(db, folder_a, folder_b, n_groups=3):
     """Insert a synthetic scan result with one bucket of N groups, all
@@ -541,7 +552,7 @@ def test_reveal_pending_survives_filter_rerender(live_server, page, tmp_path, fa
     expect(button).to_be_disabled()
     expect(button).to_contain_text("Opening")
     # Exercise the function guard too, bypassing the disabled DOM control.
-    page.evaluate("revealBucketFolders(0, document.querySelector('.reveal-btn'))")
+    page.evaluate("pageModules.reveal.revealBucketFolders(0, document.querySelector('.reveal-btn'))")
     assert len(requests) == 1
     page.locator(".vf-search input").fill("no-match")
     expect(button).to_have_count(0)
@@ -580,13 +591,13 @@ def test_reveal_refresh_leaves_applying_cards_locked(live_server, page, tmp_path
         card.querySelectorAll('.bucket-actions button').forEach(function(b) {
             b.disabled = true;
         });
-        refreshBucketRevealButtons();
+        pageModules.reveal.refreshBucketRevealButtons();
     """)
     expect(button).to_be_disabled()
     # Releasing the sibling flow restores interactivity on the next refresh.
     page.evaluate("""
         document.querySelector('.bucket-card').classList.remove('applying');
-        refreshBucketRevealButtons();
+        pageModules.reveal.refreshBucketRevealButtons();
     """)
     expect(button).to_be_enabled()
 
@@ -607,10 +618,10 @@ def test_reveal_completion_preserves_applying_action_locks(
     expect(page.locator(".bucket-card")).to_have_count(1)
     if not same_bucket:
         page.evaluate("""() => {
-          const second = JSON.parse(JSON.stringify(_lastScanResult.buckets[0]));
+          const second = JSON.parse(JSON.stringify(duplicatesState.lastScanResult.buckets[0]));
           second.folders = second.folders.map(path => path + '-other');
-          _lastScanResult.buckets.push(second);
-          renderResults(_lastScanResult);
+          duplicatesState.lastScanResult.buckets.push(second);
+          pageModules.results.renderResults(duplicatesState.lastScanResult);
         }""")
     button = page.locator('.bucket-card[data-bi="0"] .reveal-btn')
     label = button.inner_text()
@@ -627,7 +638,7 @@ def test_reveal_completion_preserves_applying_action_locks(
     else:
         card.evaluate("""card => {
           card.setAttribute('data-pending-trash', '[999999]');
-          void retryBucketTrash(card.querySelector('.keep-btn'));
+          void pageModules.cleanup.retryBucketTrash(card.querySelector('.keep-btn'));
         }""")
     expect(card).to_have_class("bucket-card applying")
     expect(card.locator('.reveal-btn')).to_be_disabled()

@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
@@ -324,6 +324,7 @@ class CanonicalSchema:
                 photo_id    INTEGER REFERENCES photos(id),
                 keyword_id  INTEGER REFERENCES keywords(id),
                 source      TEXT,
+                species_provenance TEXT,
                 PRIMARY KEY (photo_id, keyword_id)
             );
 
@@ -736,7 +737,8 @@ class CanonicalSchema:
                 edit_id   INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,
                 photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
                 old_value TEXT,
-                new_value TEXT
+                new_value TEXT,
+                species_provenance TEXT
             );
 
             -- Large per-edit blobs (the before/after encounter snapshots a

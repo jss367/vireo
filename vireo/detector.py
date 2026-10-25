@@ -8,7 +8,7 @@ import os
 import threading
 
 import numpy as np
-from file_replace import replace_file
+from app_paths import default_path
 from resource_ledger import ResourceWaitCancelled
 from services.hf_cache_lock import cache_access
 
@@ -19,7 +19,7 @@ _lock = threading.Lock()
 _download_lock = threading.Lock()
 
 # MegaDetector ONNX model path — downloaded to ~/.vireo/models/megadetector-v6/
-MEGADETECTOR_ONNX_DIR = os.path.expanduser("~/.vireo/models/megadetector-v6")
+MEGADETECTOR_ONNX_DIR = os.path.join(default_path("models"), "megadetector-v6")
 MEGADETECTOR_ONNX_PATH = os.path.join(MEGADETECTOR_ONNX_DIR, "model.onnx")
 
 # MegaDetector input size
@@ -101,28 +101,17 @@ def _hf_download_megadetector_weights(progress_callback=None):
             )
         log.info("MegaDetector weights missing — downloading from Hugging Face")
 
-        tmp_path = MEGADETECTOR_ONNX_PATH + ".download"
         try:
-            import shutil
-
-            from huggingface_hub import hf_hub_download
+            from hub_download import fetch_hub_file
             from models import ONNX_REPO
 
-            cached_path = hf_hub_download(
-                repo_id=ONNX_REPO,
-                filename="model.onnx",
+            # Published by rename, so other threads only ever observe the
+            # missing state or a fully written weights file.
+            fetch_hub_file(
+                ONNX_REPO, "model.onnx", MEGADETECTOR_ONNX_PATH,
                 subfolder="megadetector-v6",
             )
-            # Copy to a sibling temp path then atomically replace so other
-            # threads only ever observe either the old (missing) state or a
-            # fully written weights file — never a partial copy.
-            shutil.copy2(cached_path, tmp_path)
-            replace_file(tmp_path, MEGADETECTOR_ONNX_PATH)
-        except Exception as e:  # broad: remove the partial weights on any failure, then re-raise with the reason
-            import contextlib
-
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_path)
+        except Exception as e:  # broad: the hub client raises a wide set; re-raised with the reason
             raise RuntimeError(
                 f"Failed to download MegaDetector V6 weights: {e}. "
                 "Check your network connection and retry, or download manually "

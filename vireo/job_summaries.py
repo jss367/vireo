@@ -241,7 +241,11 @@ def _classify(result: dict, config: dict) -> tuple[str, list[str]]:
         summary += f" in {_n(groups, 'group')}"
     if failed:
         summary += f", {failed:,} failed"
-    return summary, _error_details(result)
+    # A run that went without the taxonomy (or on its older copy) finished
+    # validly but not the way the user set it up; say so first.
+    notice = result.get("taxonomy_notice")
+    notice_lines = [str(notice)] if notice else []
+    return summary, notice_lines + _error_details(result)
 
 
 def _panorama(result: dict, config: dict) -> tuple[str, list[str]]:
@@ -305,10 +309,15 @@ def _cull(result: dict, config: dict) -> tuple[str, list[str]]:
         details.append(result["keep_review_message"])
     missing = _int(result, "photos_missing_phash")
     if missing:
+        named = [p for p in result.get("unfingerprinted_photos") or [] if isinstance(p, dict)]
         details.append(
             _n(missing, "photo") + " could not be fingerprinted for scene grouping "
-            "and were grouped on their own"
+            + ("and was grouped on its own" if missing == 1 else "and were grouped on their own")
+            + (":" if named else "")
         )
+        details.extend(f"{p.get('path')}: {p.get('reason')}" for p in named)
+        if named and missing > len(named):
+            details.append(f"and {missing - len(named):,} more")
     return summary, details
 
 
@@ -914,6 +923,12 @@ def _generic(result: dict, config: dict) -> tuple[str, list[str]]:
         if key.endswith("_id") or key.endswith("_ids"):
             continue
         if isinstance(value, dict):
+            continue
+        if key.endswith("_notice") and isinstance(value, str):
+            # A sentence the job wrote for the user (the import's
+            # ``working_copy_notice``): a detail line, never a "Key: value" part.
+            if value.strip():
+                details.append(value.strip())
             continue
         if key.endswith("_total") and isinstance(result.get(key[:-6]), list):
             continue  # folded into the list it counts, below

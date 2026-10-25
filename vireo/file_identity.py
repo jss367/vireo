@@ -48,7 +48,56 @@ def catalog_scan_root(db, path):
     so it matches the folder rows the scan wrote instead of the spelling the
     user typed.
     """
-    return catalog_folder_path(db, os.path.abspath(os.fspath(path)))
+    return catalog_scan_roots(db, [path])[0]
+
+
+def catalog_scan_roots(db, paths):
+    """``catalog_scan_root`` for each of ``paths``, in order.
+
+    Any code that looks up catalog rows by a folder the user supplied (a
+    working-copy scope, a cache invalidation) maps the folder here first: a
+    scan reached through a symlink, or a case alias of a cataloged folder,
+    files its rows under the resolved or stored spelling, never the one the
+    user picked. Paths already stored verbatim cost one indexed lookup; the
+    alias table is built at most once, on the first path that is not.
+
+    A supplied path that textually names, or symlinks into, a macOS
+    other-app bundle is left unresolved: ``is_excluded_scan_path`` is the
+    same ``lstat``/``readlink``-only guard that the request-boundary scan
+    walkers use, so a symlink retargeted between the initial check and this
+    deferred mapping does not trigger the macOS TCC prompt here. The
+    catalog has no rows under such a bundle, so returning the supplied
+    spelling is a safe no-op for callers.
+    """
+    from image_loader import is_excluded_scan_path
+
+    aliases = None
+    resolved = []
+    for path in paths:
+        supplied = os.path.abspath(os.fspath(path))
+        if (
+            db.folders.id_by_path(supplied) is None
+            and not is_excluded_scan_path(supplied)
+        ):
+            if aliases is None:
+                aliases = catalog_folder_aliases(db)
+            supplied = catalog_folder_path(db, supplied, aliases=aliases)
+        resolved.append(supplied)
+    return resolved
+
+
+def catalog_file_paths(db, paths):
+    """The catalog spelling of each file in ``paths``: its folder mapped by
+    ``catalog_scan_roots``, its filename kept. For looking up the photo rows
+    a scan wrote for files the caller knows by another spelling.
+    """
+    paths = [os.path.abspath(os.fspath(p)) for p in paths]
+    folders = list(dict.fromkeys(os.path.dirname(p) for p in paths))
+    spelled = dict(zip(folders, catalog_scan_roots(db, folders), strict=True))
+    return [
+        os.path.join(spelled[os.path.dirname(p)], os.path.basename(p))
+        for p in paths
+    ]
 
 
 def distinct_existing_file(path, other, *, timeout=None, allow_missing_source=False):

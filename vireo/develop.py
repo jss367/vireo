@@ -10,8 +10,10 @@ import tempfile
 import threading
 
 try:
+    from .app_paths import default_path
     from .proc import no_window_kwargs
 except ImportError:
+    from app_paths import default_path
     from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
@@ -375,7 +377,7 @@ def darktable_tools_dir():
     the "checked here" list, and the mixed-separator form from expanding a
     forward-slash literal reads as broken.
     """
-    return os.path.join(os.path.expanduser("~"), ".vireo", "tools", "darktable")
+    return os.path.join(default_path("tools"), "darktable")
 
 
 def darktable_uses_tools_dir():

@@ -692,6 +692,7 @@ def _load_run_taxonomy(run: PipelineRun, loaded_models: dict) -> Taxonomy | None
     from models import get_taxonomy_info
     from taxonomy import TAXONOMY_JSON_PATH, find_taxonomy_json
     taxonomy_path = find_taxonomy_json()
+    download_error = None
     if run.params.download_taxonomy and not get_taxonomy_info().get("available"):
         try:
             from taxonomy import download_taxonomy
@@ -705,15 +706,34 @@ def _load_run_taxonomy(run: PipelineRun, loaded_models: dict) -> Taxonomy | None
                     run.runner, run.job["id"], run.stages, "model_loader", msg,
                 )
             )
-        except Exception as e:  # broad: download failures are network/HTTP/IO; the run continues with the local taxonomy
+        except Exception as e:  # broad: download failures are network/HTTP/IO; the run continues with the local taxonomy and notes why
             log.warning("Taxonomy download failed, continuing without: %s", e, exc_info=True)
+            download_error = str(e) or type(e).__name__
 
     # Taxonomy is shared across every classifier in the run.
     # Use load_local_taxonomy() so a corrupt persistent file
     # falls back to the legacy package-dir copy.
-    from taxonomy import load_local_taxonomy
-    tax = load_local_taxonomy()
+    from taxonomy import load_local_taxonomy, taxonomy_fallback_notice
+    failures: list[dict[str, str]] = []
+    tax = load_local_taxonomy(failures=failures)
     loaded_models["tax"] = tax
+    # A run that goes without the taxonomy it was asked to fetch, or past a
+    # taxonomy file it could not read, still classifies validly, so it is a
+    # note (the run stays green) rather than an error. Tagged
+    # ``[taxonomy]``, not ``[model_loader]``: no stage skipped, so the
+    # Process page must not mark the Classify card "Skipped".
+    notice = taxonomy_fallback_notice(tax, failures, download_error)
+    if notice:
+        run.note(f"[taxonomy] {notice}")
+        loaded_models["taxonomy_notice"] = notice
+        reason = (
+            "taxonomy download failed" if download_error
+            else "taxonomy file unreadable"
+        )
+        loaded_models["taxonomy_summary"] = (
+            f"no taxonomy ({reason})" if tax is None
+            else f"older taxonomy copy ({reason})"
+        )
     # Portable identity for the taxonomy backing this pipeline.
     # Threaded through publish and cache-match paths so that
     # classifier runs made against one taxonomy revision are
@@ -755,5 +775,10 @@ def _mark_models_loaded(
     summary = ", ".join(s["name"] for s in resolved_specs)
     if "preload_error" in loaded_models:
         summary += f" ({first_name} failed to preload)"
+    if "taxonomy_summary" in loaded_models:
+        summary += f" — {loaded_models['taxonomy_summary']}"
+    # A completed step with an ``error`` reads as a warning on the Jobs
+    # page, which shows the full notice under the step.
+    notice = {"error": loaded_models["taxonomy_notice"]} if "taxonomy_notice" in loaded_models else {}
     run.runner.update_step(run.job["id"], "model_loader", status="completed",
-                       summary=summary)
+                       summary=summary, **notice)

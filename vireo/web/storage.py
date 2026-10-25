@@ -585,11 +585,6 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                 result = hf_cache_service.remove(keys)
         except KeyError as exc:
             return json_error(f"Unknown cache entry: {exc.args[0]}", 404)
-        except ValueError as exc:
-            return json_error(
-                f"{exc.args[0]} backs an installed model; remove the model in "
-                "Settings → Models to free it", 409,
-            )
         except hf_cache_service.DownloadInProgress as exc:
             return json_error(
                 f"Model cache access is busy ({exc}); try again shortly", 409,

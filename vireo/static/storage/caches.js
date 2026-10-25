@@ -1,8 +1,11 @@
 // The preview, detection and label-embedding caches: status lines, clears,
 // and the embedding matrix with its Compute buttons.
-// Classic page script.
 
-async function loadPreviewCacheStatus() {
+import { storageEscapeAttr, storageEscapeHtml, storageFormatBytes } from './format.js';
+import { loadStoragePanel } from './panel.js';
+import { safeEventSource, safeFetch } from './shared.js';
+
+export async function loadPreviewCacheStatus() {
   var statusEl = /** @type {HTMLElement} */ (document.getElementById('previewCacheStatus'));
   var warnEl = /** @type {HTMLElement} */ (document.getElementById('previewCacheWarning'));
   try {
@@ -25,7 +28,7 @@ async function loadPreviewCacheStatus() {
   }
 }
 
-async function clearPreviewCache() {
+export async function clearPreviewCache() {
   if (!confirm('Clear all cached preview images? They will regenerate on demand from the originals.')) return;
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('clearPreviewCacheBtn'));
   if (btn) btn.disabled = true;
@@ -37,7 +40,7 @@ async function clearPreviewCache() {
   loadPreviewCacheStatus();
 }
 
-async function loadDetectionCacheStats() {
+export async function loadDetectionCacheStats() {
   var el = /** @type {HTMLElement} */ (document.getElementById('detectionCacheStats'));
   try {
     var d = /** @type {{photo_count?: number, model_count?: number}} */ (
@@ -51,7 +54,7 @@ async function loadDetectionCacheStats() {
   }
 }
 
-async function loadEmbeddingCache() {
+export async function loadEmbeddingCache() {
   try {
     var d = /** @type {{total_size: number, entries?: unknown[]}} */ (
       await safeFetch('/api/embedding-cache', {}, { toast: false }));
@@ -63,7 +66,7 @@ async function loadEmbeddingCache() {
   } catch(e) {}
 }
 
-async function clearEmbeddingCache() {
+export async function clearEmbeddingCache() {
   if (!confirm('Clear all cached label embeddings? The next classification run will recompute them.')) return;
   try {
     await safeFetch('/api/embedding-cache', { method: 'DELETE' });
@@ -73,7 +76,7 @@ async function clearEmbeddingCache() {
   loadEmbeddingMatrix();
 }
 
-async function loadEmbeddingMatrix() {
+export async function loadEmbeddingMatrix() {
   try {
     var data = /** @type {StorageEmbeddingMatrix} */ (await safeFetch('/api/embedding-matrix', {}, { toast: false }));
     var models = data.models || [];
@@ -135,7 +138,7 @@ async function loadEmbeddingMatrix() {
 }
 
 /** @param {string} modelId @param {string} labelsFile */
-async function precomputeEmbeddings(modelId, labelsFile) {
+export async function precomputeEmbeddings(modelId, labelsFile) {
   try {
     var data = /** @type {{job_id: string}} */ (await safeFetch('/api/jobs/precompute-embeddings', {
       method: 'POST',

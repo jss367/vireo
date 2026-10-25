@@ -1,34 +1,49 @@
-// Page startup: registers the page hook, binds the template's controls, and
-// starts the filter bar and the last-scan restore.
-// Classic page script; loads after every other Duplicates page script.
+// Page startup: the module the template loads. Registers the page hook,
+// binds the template's controls and the delegated listeners for the markup
+// the page renders, and starts the filter bar and the last-scan restore.
+
+import { duplicatesEl, state } from './state.js';
+import { bindDuplicateCardContextMenu } from './card.js';
+import { bindDuplicateEvents } from './events.js';
+import { refreshFilterMatches } from './filter.js';
+import { applyRejections } from './patterns.js';
+import { tryRestoreLastScan } from './restore.js';
+import { clearResults } from './results.js';
+import { startScan } from './scan.js';
+import { registerPageHooks, VireoFilter } from './shared.js';
 
 // The native menu's Find Duplicates command (vireo-page-hooks.js).
-Vireo.registerPageHooks({startScan: startScan});
+registerPageHooks({startScan: startScan});
 
-/** @param {string} selector @param {() => unknown} action */
-function onDuplicatesClick(selector, action) {
-  var el = /** @type {HTMLElement} */ (document.querySelector(selector));
-  el.addEventListener('click', function() { action(); });
+/** @param {string} id @param {() => unknown} action */
+function onClick(id, action) {
+  duplicatesEl(id).addEventListener('click', function() { action(); });
 }
 
-// The controls that used to carry inline onclick attributes.
-onDuplicatesClick('#scanBtn', startScan);
-onDuplicatesClick('#restoreRetryBtn', function() { return tryRestoreLastScan(); });
-onDuplicatesClick('#catalogRefreshBtn', function() { return tryRestoreLastScan(true); });
-onDuplicatesClick('#applyBtn', applyRejections);
-onDuplicatesClick('#clearResultsBtn', clearResults);
+// The template's controls.
+onClick('scanBtn', startScan);
+onClick('restoreRetryBtn', function() { return tryRestoreLastScan(); });
+onClick('catalogRefreshBtn', function() { return tryRestoreLastScan(true); });
+onClick('applyBtn', applyRejections);
+onClick('clearResultsBtn', clearResults);
+bindDuplicateEvents();
+bindDuplicateCardContextMenu();
 
-document.addEventListener('DOMContentLoaded', () => VireoFilter.init({
-  page: 'duplicates',
-  root: document.getElementById('vireoFilterBar'),
-  scopeLabel: 'Duplicates · Grouped matches',
-  onChange: refreshFilterMatches,
-}).then(refreshFilterMatches).catch(function() {
-  // VireoFilter.init failing means no filter chips will ever load, so
-  // there are no filters for the render to respect. Release
-  // ``tryRestoreLastScan`` immediately — otherwise a cached last scan
-  // would hang unrendered forever waiting for a filter query that
-  // never runs.
-  if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
-}));
+// Module scripts run before DOMContentLoaded, where the classic page started
+// the filter bar and the restore; keep that order.
+document.addEventListener('DOMContentLoaded', function() {
+  VireoFilter.init({
+    page: 'duplicates',
+    root: document.getElementById('vireoFilterBar'),
+    scopeLabel: 'Duplicates · Grouped matches',
+    onChange: refreshFilterMatches,
+  }).then(refreshFilterMatches).catch(function() {
+    // VireoFilter.init failing means no filter chips will ever load, so
+    // there are no filters for the render to respect. Release
+    // ``tryRestoreLastScan`` immediately — otherwise a cached last scan
+    // would hang unrendered forever waiting for a filter query that
+    // never runs.
+    if (state.filterReadyResolve) { state.filterReadyResolve(); state.filterReadyResolve = null; }
+  });
+});
 document.addEventListener('DOMContentLoaded', function(event) { tryRestoreLastScan(event); });

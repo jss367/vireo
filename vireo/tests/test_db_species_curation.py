@@ -853,6 +853,133 @@ def test_species_highlights_eligible_only(db, cur):
     }
 
 
+def _detect_subjects(db, pid, species_conf, model="m1"):
+    """One detection per (species, confidence), each its own subject."""
+    det_ids = db.detections.save(
+        pid,
+        [{"box": {"x": 0.05 + 0.3 * i, "y": 0.1, "w": 0.2, "h": 0.2},
+          "confidence": 0.9, "category": "animal"}
+         for i in range(len(species_conf))],
+        "md",
+    )
+    for det, (species, conf) in zip(det_ids, species_conf, strict=True):
+        db.predictions.add(det, species, conf, model, labels_fingerprint="fp1")
+    return det_ids
+
+
+def test_species_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
+    """A highlight saved from the second-species bucket of a tagged photo
+    stays eligible exactly as long as the photo stays in that bucket.
+
+    card1 is tagged Northern Cardinal. With a Cardinal subject and a Blue
+    Jay subject, ``photo_species_memberships`` puts it in the Blue Jay
+    bucket, so a Blue Jay highlight survives reload. Once the Cardinal
+    prediction is rejected no subject accounts for the keyword, the photo
+    leaves the Blue Jay bucket, and the highlight must stop counting, or
+    the Blue Jay bucket (kept visible by another photo) would report a
+    selected highlight it does not show.
+    """
+    from highlights_payload import HighlightsQuery, build_highlights_payload
+
+    p = cur["p"]
+    cardinal_det, _jay_det = _detect_subjects(
+        db, p["card1"], [("Northern Cardinal", 0.9), ("Blue Jay", 0.8)],
+    )
+    # card2 (genus-only keyword) keeps a Blue Jay bucket on the page.
+    _detect(db, p["card2"], [("Blue Jay", 0.9)])
+    db.species_curation.add_highlight("Blue Jay", p["card1"])
+    db.conn.commit()
+    assert db.species_curation.get_highlights(
+        species="Blue Jay", eligible_only=True
+    ) == {"Blue Jay": {p["card1"]: 1}}
+
+    cardinal_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (cardinal_det,),
+    ).fetchone()["id"]
+    db.update_prediction_status(cardinal_pred, "rejected")
+
+    assert db.species_curation.get_highlights(
+        species="Blue Jay", eligible_only=True
+    ) == {}
+    payload = build_highlights_payload(db, HighlightsQuery(scope="workspace"))
+    jay = next(b for b in payload["buckets"] if b["species"] == "Blue Jay")
+    assert [ph["id"] for ph in jay["photos"]] == [p["card2"]]
+    assert jay["has_highlight_selection"] is False
+    # The stored row is kept, so the selection returns with the subject.
+    assert db.species_curation.get_highlights(species="Blue Jay") == {
+        "Blue Jay": {p["card1"]: 1},
+    }
+
+
+def test_species_highlights_eligible_lower_confidence_subject_bucket(db, cur):
+    """A highlight saved from a lower-confidence subject's prediction
+    bucket of an untagged photo survives on reload.
+
+    ``collect_highlight_buckets`` places the photo in each subject's
+    bucket. Before the fix, the eligibility filter only accepted
+    ``sh.species`` equal to the photo-wide top prediction (``ORDER BY
+    pr.confidence DESC LIMIT 1``), so a highlight starred from the
+    second subject's bucket was dropped. The prediction branch now
+    iterates each detection's top non-rejected prediction.
+    """
+    p = cur["p"]
+    ws = cur["ws"]
+    # Two separate detections on card2 (its genus-rank Turdus keyword
+    # doesn't satisfy the species accepted branch); Blue Jay is the
+    # photo-wide top, Gray Jay is a second subject's top.
+    _detect(db, p["card2"], [("Blue Jay", 0.9)])
+    _detect(db, p["card2"], [("Gray Jay", 0.5)], fingerprint="fp2")
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Gray Jay', ?, 1)",
+        (ws, p["card2"]),
+    )
+    db.conn.commit()
+    assert db.species_curation.get_highlights(
+        species="Gray Jay", eligible_only=True
+    ) == {"Gray Jay": {p["card2"]: 1}}
+
+
+def test_species_highlights_eligible_rejected_sibling_prediction_dropped(
+    db, cur,
+):
+    """A highlight saved against a prediction species that was then
+    rejected per-detection is dropped on reload — the detection's top
+    non-rejected prediction is now a different species.
+    """
+    p = cur["p"]
+    ws = cur["ws"]
+    did = _detect(db, p["card2"], [("Blue Jay", 0.9), ("Gray Jay", 0.5)])
+    # Blue Jay highlight is eligible: it's the detection's top non-rejected
+    # prediction.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Blue Jay', ?, 1)",
+        (ws, p["card2"]),
+    )
+    db.conn.commit()
+    assert p["card2"] in db.species_curation.get_highlights(
+        species="Blue Jay", eligible_only=True
+    ).get("Blue Jay", {})
+    # Reject the Blue Jay prediction; Gray Jay (0.5) becomes the top
+    # non-rejected prediction for this detection. The Blue Jay highlight
+    # loses eligibility because no detection's top prediction now
+    # canonicalizes to Blue Jay.
+    blue_pred_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (did, "Blue Jay"),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
+        "VALUES (?, ?, 'rejected')",
+        (blue_pred_id, ws),
+    )
+    db.conn.commit()
+    assert db.species_curation.get_highlights(
+        species="Blue Jay", eligible_only=True
+    ) == {}
+
+
 def test_species_highlights_eligible_prediction_root_canonicalization(db, cur):
     p = cur["p"]
     ws = cur["ws"]

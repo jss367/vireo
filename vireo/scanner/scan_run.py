@@ -271,6 +271,7 @@ class _ScanRun:
             photo_callback=hooks.photo,
             photo_merged_callback=hooks.photo_merged,
             reported_identities=reported_photo_identities,
+            sidecar_error_callback=hooks.sidecar_error,
         )
         self.discovery = _Discovery(
             root, resolved.root_path, resolved.frozen_files,
