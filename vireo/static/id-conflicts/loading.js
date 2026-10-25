@@ -1,9 +1,14 @@
 // Loading the comparison: collections, the models shown, building and
 // fetching a page of rows (stale responses are dropped), and reloading.
-// Classic page script.
+
+import { state } from './state.js';
+import { populateModelSelects, populateSortSelect } from './controls.js';
+import { updateBatchControls } from './decisions.js';
+import { renderCompare } from './render.js';
+import { escapeHtml, VireoTextSearch } from './shared.js';
 
 /** @param {string} url @param {RequestInit=} options */
-async function jsonFetch(url, options) {
+export async function jsonFetch(url, options) {
   var resp = await fetch(url, options || {});
   var data = await resp.json().catch(function() { return {}; });
   if (!resp.ok || data.error) {
@@ -26,7 +31,7 @@ async function jsonFetch(url, options) {
   return data;
 }
 
-async function loadCollections() {
+export async function loadCollections() {
   try {
     var data = await jsonFetch('/api/collections');
     var sel = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker'));
@@ -64,10 +69,10 @@ async function loadCollections() {
   }
 }
 
-function visibleModels() {
+export function visibleModels() {
   var a = /** @type {HTMLSelectElement} */ (document.getElementById('modelA')).value;
   var b = /** @type {HTMLSelectElement} */ (document.getElementById('modelB')).value;
-  if (!a || a === 'all') return compareModels.slice();
+  if (!a || a === 'all') return state.compareModels.slice();
   var models = [a];
   if (b && b !== a) models.push(b);
   return models;
@@ -76,18 +81,18 @@ function visibleModels() {
 // Sent to the server as the models to compare. "All models" sends nothing at
 // all, so a model that appears while the page is open is included instead of
 // being pinned out by a stale list.
-function requestedModelParams() {
+export function requestedModelParams() {
   var a = /** @type {HTMLSelectElement} */ (document.getElementById('modelA')).value;
   if (!a || a === 'all') return [];
   return visibleModels();
 }
 
-function setVisibleModels() {
+export function setVisibleModels() {
   reloadRows();
 }
 
 /** @param {boolean} active */
-function showLoading(active) {
+export function showLoading(active) {
   var note = /** @type {HTMLElement} */ (document.getElementById('loadingNote'));
   if (note) note.hidden = !active;
   var content = /** @type {HTMLElement} */ (document.getElementById('compareContent'));
@@ -95,24 +100,24 @@ function showLoading(active) {
 }
 
 /** @param {CompareRowsOptions} options */
-function buildRowsUrl(options) {
+export function buildRowsUrl(options) {
   var collId = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker')).value;
   var params = new URLSearchParams();
   params.set('collection_id', collId);
-  if (compareToken) params.set('token', compareToken);
+  if (state.compareToken) params.set('token', state.compareToken);
   requestedModelParams().forEach(function(model) { params.append('model', model); });
-  params.set('min_confidence', String(conflictMinConfidence));
-  params.set('filter', activeFilter);
-  params.set('sort', activeSort);
-  Object.keys(excludeState).forEach(function(id) {
-    if (excludeState[id]) params.append('exclude', id);
+  params.set('min_confidence', String(state.conflictMinConfidence));
+  params.set('filter', state.activeFilter);
+  params.set('sort', state.activeSort);
+  Object.keys(state.excludeState).forEach(function(id) {
+    if (state.excludeState[id]) params.append('exclude', id);
   });
   var search = /** @type {HTMLInputElement} */ (document.getElementById('compareSearch'));
   var q = search ? search.value.trim() : '';
   if (q) params.set('q', q);
   VireoTextSearch.appendParams(params, VireoTextSearch.readOptions('compareSearch'));
-  params.set('page', String(options.page || comparePage));
-  params.set('per_page', String(comparePerPage));
+  params.set('page', String(options.page || state.comparePage));
+  params.set('per_page', String(state.comparePerPage));
   (options.refreshPhotoIds || []).forEach(function(id) {
     params.append('refresh_photo_id', String(id));
   });
@@ -122,11 +127,11 @@ function buildRowsUrl(options) {
 // One request answers everything on screen: the rows for this page, the
 // counts on every chip and tile, and the total the pager reports.
 /** @param {CompareRowsOptions=} options @returns {Promise<void>} */
-async function fetchRows(options) {
+export async function fetchRows(options) {
   options = options || {};
   var collId = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker')).value;
   if (!collId) return;
-  var fullLoadSeq = loadingSeq;
+  var fullLoadSeq = state.loadingSeq;
   showLoading(true);
   // A control the user just touched — filter, sort, search, threshold, pager
   // — must not overtake a decision refresh that is still in flight. The
@@ -138,16 +143,16 @@ async function fetchRows(options) {
   // the comparison the decision produced. Only user controls wait: the
   // refresh's own queries run inside the queue and would deadlock on it.
   if (options.control) {
-    await decisionRefreshQueue;
+    await state.decisionRefreshQueue;
   }
   // Claimed after the wait, so the query the user asked for most recently is
   // the one that wins rather than the one that stopped waiting last.
-  var seq = ++requestSeq;
+  var seq = ++state.requestSeq;
   var data;
   try {
     data = await jsonFetch(buildRowsUrl(options));
   } catch (e) {
-    if (seq !== requestSeq) return;
+    if (seq !== state.requestSeq) return;
     showLoading(false);
     /** @type {HTMLElement} */ (document.getElementById('compareContent')).innerHTML =
       '<div class="compare-empty">Error loading comparison: ' + escapeHtml(e instanceof Error ? e.message : e) + '</div>';
@@ -156,7 +161,7 @@ async function fetchRows(options) {
   // A newer request — or a collection load — has taken over. Its response is
   // the current one; painting this stale body over it would show rows that
   // do not belong to the comparison on screen.
-  if (seq !== requestSeq || fullLoadSeq !== loadingSeq) return;
+  if (seq !== state.requestSeq || fullLoadSeq !== state.loadingSeq) return;
   showLoading(false);
   var modelSelectionReset = applyRowsResponse(data, options);
   // The queue the page opens on is Needs review. When it is empty there is
@@ -169,11 +174,11 @@ async function fetchRows(options) {
     !modelSelectionReset
     && !options.filterResolved
     && (options.initial || options.afterDecision)
-    && activeFilter === 'needs_review'
+    && state.activeFilter === 'needs_review'
     && (data.summary || {}).needs_review === 0
   ) {
-    activeFilter = 'all';
-    comparePage = 1;
+    state.activeFilter = 'all';
+    state.comparePage = 1;
     await fetchRows({filterResolved: true, page: 1});
   }
 }
@@ -182,27 +187,27 @@ async function fetchRows(options) {
 // does not carry, so a corrected re-query is already on its way and the caller
 // must not read anything into these counts.
 /** @param {CompareResponse} data @param {CompareRowsOptions} options */
-function applyRowsResponse(data, options) {
-  compareData = data;
-  compareRows = data.photos || [];
-  compareToken = data.token || compareToken;
-  compareTotal = data.total || 0;
-  comparePage = data.page || 1;
-  comparePerPage = data.per_page || comparePerPage;
-  compareModels = data.models || [];
-  compareFilterDefs = data.filters || compareFilterDefs;
-  compareSortDefs = data.sorts || compareSortDefs;
-  compareExcludeDefs = data.excludes || compareExcludeDefs;
-  compareExcludeDefs.forEach(function(item) {
-    if (!(item.id in excludeState)) excludeState[item.id] = false;
+export function applyRowsResponse(data, options) {
+  state.compareData = data;
+  state.compareRows = data.photos || [];
+  state.compareToken = data.token || state.compareToken;
+  state.compareTotal = data.total || 0;
+  state.comparePage = data.page || 1;
+  state.comparePerPage = data.per_page || state.comparePerPage;
+  state.compareModels = data.models || [];
+  state.compareFilterDefs = data.filters || state.compareFilterDefs;
+  state.compareSortDefs = data.sorts || state.compareSortDefs;
+  state.compareExcludeDefs = data.excludes || state.compareExcludeDefs;
+  state.compareExcludeDefs.forEach(function(item) {
+    if (!(item.id in state.excludeState)) state.excludeState[item.id] = false;
   });
-  var modelSelectionReset = populateModelSelects(compareModels, data.visible_models || []);
+  var modelSelectionReset = populateModelSelects(state.compareModels);
   populateSortSelect();
   // A row that left the page — decided, filtered out, or simply on another
   // page — must not stay in a selection whose batch buttons still claim it.
-  var visible = new Set(compareRows.map(function(photo) { return photo.photo_id; }));
-  Array.from(selectedRows).forEach(function(id) {
-    if (!visible.has(id)) selectedRows.delete(id);
+  var visible = new Set(state.compareRows.map(function(photo) { return photo.photo_id; }));
+  Array.from(state.selectedRows).forEach(function(id) {
+    if (!visible.has(id)) state.selectedRows.delete(id);
   });
   renderCompare();
   // The response was assessed with a specific model the new collection
@@ -223,18 +228,18 @@ function applyRowsResponse(data, options) {
 
 // A full load of the current collection: everything else on this page is a
 // re-query of the same comparison.
-async function loadComparison() {
+export async function loadComparison() {
   var collId = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker')).value;
   var content = /** @type {HTMLElement} */ (document.getElementById('compareContent'));
-  selectedRows.clear();
-  compareToken = null;
-  comparePage = 1;
-  loadingSeq++;
+  state.selectedRows.clear();
+  state.compareToken = null;
+  state.comparePage = 1;
+  state.loadingSeq++;
   updateBatchControls();
 
   if (!collId) {
-    compareData = null;
-    compareRows = [];
+    state.compareData = null;
+    state.compareRows = [];
     ['summaryGrid', 'sortRow', 'excludeRow', 'filterRow', 'pagerRow', 'batchRow']
       .forEach(function(id) { /** @type {HTMLElement} */ (document.getElementById(id)).style.display = 'none'; });
     content.innerHTML = '<div class="compare-empty">Select a collection to compare keywords and predictions.</div>';
@@ -255,9 +260,9 @@ async function loadComparison() {
 // Only those three flags are carried: this also runs as a plain change
 // handler, and handlers are called with arguments of their own.
 /** @param {CompareRowsOptions=} carry */
-function reloadRows(carry) {
-  comparePage = 1;
-  selectedRows.clear();
+export function reloadRows(carry) {
+  state.comparePage = 1;
+  state.selectedRows.clear();
   /** @type {CompareRowsOptions} */
   var options = {page: 1};
   if (carry && carry.initial) options.initial = true;

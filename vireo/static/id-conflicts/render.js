@@ -1,25 +1,31 @@
 // Rendering the summary, the taxonomy note, sort, exclude and filter chips,
 // and the pager; changing sort, filter and excludes.
-// Classic page script.
 
-function renderCompare() {
-  if (!compareData) return;
+import { state } from './state.js';
+import { totalPages } from './controls.js';
+import { updateBatchControls } from './decisions.js';
+import { reloadRows } from './loading.js';
+import { renderTable } from './table.js';
+import { escapeAttr, escapeHtml, VireoViewPreferences } from './shared.js';
+
+export function renderCompare() {
+  if (!state.compareData) return;
   renderSummary();
   renderSorts();
   renderExcludes();
   renderFilters();
   renderPager();
   renderTaxonomyNote();
-  renderTable(compareRows);
+  renderTable(state.compareRows);
   updateBatchControls();
 }
 
 /** @returns {Record<string, number | undefined>} */
-function effectiveSummary() {
-  return (compareData && compareData.summary) || {};
+export function effectiveSummary() {
+  return (state.compareData && state.compareData.summary) || {};
 }
 
-function renderSummary() {
+export function renderSummary() {
   var s = effectiveSummary();
   var items = [
     ['photos', 'Photos'],
@@ -42,77 +48,77 @@ function renderSummary() {
   }).join('');
 }
 
-function renderTaxonomyNote() {
+export function renderTaxonomyNote() {
   /** @type {HTMLElement} */ (document.getElementById('taxonomyNote')).classList.toggle(
     'visible',
-    !!compareData && compareData.taxonomy_available === false
+    !!state.compareData && state.compareData.taxonomy_available === false
   );
 }
 
-function renderSorts() {
+export function renderSorts() {
   var row = /** @type {HTMLElement} */ (document.getElementById('sortRow'));
   row.style.display = '';
-  row.innerHTML = '<span class="row-label">Sort by</span>' + compareSortDefs.map(function(s) {
-    var cls = s.id === activeSort ? 'sort-btn active' : 'sort-btn';
-    return '<button class="' + cls + '" onclick="setSort(\'' + s.id + '\')">' +
+  row.innerHTML = '<span class="row-label">Sort by</span>' + state.compareSortDefs.map(function(s) {
+    var cls = s.id === state.activeSort ? 'sort-btn active' : 'sort-btn';
+    return '<button class="' + cls + '" data-compare-sort="' + escapeAttr(s.id) + '">' +
       escapeHtml(s.label) + '</button>';
   }).join('');
   var select = /** @type {HTMLSelectElement} */ (document.getElementById('sortMode'));
-  if (select) select.value = activeSort;
+  if (select) select.value = state.activeSort;
 }
 
-function renderExcludes() {
-  var counts = (compareData && compareData.exclusion_counts) || {};
+export function renderExcludes() {
+  var counts = (state.compareData && state.compareData.exclusion_counts) || {};
   var row = /** @type {HTMLElement} */ (document.getElementById('excludeRow'));
   row.style.display = '';
-  row.innerHTML = '<span class="row-label">Exclude</span>' + compareExcludeDefs.map(function(f) {
-    var cls = excludeState[f.id] ? 'exclude-btn active' : 'exclude-btn';
-    return '<button class="' + cls + '" onclick="toggleExclude(\'' + f.id + '\')">' +
+  row.innerHTML = '<span class="row-label">Exclude</span>' + state.compareExcludeDefs.map(function(f) {
+    var cls = state.excludeState[f.id] ? 'exclude-btn active' : 'exclude-btn';
+    return '<button class="' + cls + '" data-compare-exclude="' + escapeAttr(f.id) + '">' +
       escapeHtml(f.label) + ' <span>' + escapeHtml(counts[f.id] || 0) + '</span></button>';
   }).join('');
 }
 
-function renderFilters() {
-  var counts = (compareData && compareData.filter_counts) || {};
+export function renderFilters() {
+  var counts = (state.compareData && state.compareData.filter_counts) || {};
   var row = /** @type {HTMLElement} */ (document.getElementById('filterRow'));
   row.style.display = '';
-  row.innerHTML = '<span class="row-label">Filter</span>' + compareFilterDefs.map(function(f) {
-    var cls = f.id === activeFilter ? 'filter-btn active' : 'filter-btn';
-    return '<button class="' + cls + '" onclick="setFilter(\'' + f.id + '\')">' +
+  row.innerHTML = '<span class="row-label">Filter</span>' + state.compareFilterDefs.map(function(f) {
+    var cls = f.id === state.activeFilter ? 'filter-btn active' : 'filter-btn';
+    return '<button class="' + cls + '" data-compare-filter="' + escapeAttr(f.id) + '">' +
       escapeHtml(f.label) + ' <span>' + escapeHtml(counts[f.id] || 0) + '</span></button>';
   }).join('');
 }
 
-function renderPager() {
+export function renderPager() {
   var row = /** @type {HTMLElement} */ (document.getElementById('pagerRow'));
   row.style.display = '';
   var pages = totalPages();
-  var first = compareTotal ? (comparePage - 1) * comparePerPage + 1 : 0;
-  var last = Math.min(compareTotal, comparePage * comparePerPage);
-  /** @type {HTMLElement} */ (document.getElementById('pagerSummary')).textContent = compareTotal
-    ? first + '–' + last + ' of ' + compareTotal + ' (page ' + comparePage + ' of ' + pages + ')'
+  var first = state.compareTotal ? (state.comparePage - 1) * state.comparePerPage + 1 : 0;
+  var last = Math.min(state.compareTotal, state.comparePage * state.comparePerPage);
+  /** @type {HTMLElement} */ (document.getElementById('pagerSummary')).textContent = state.compareTotal
+    ? first + '–' + last + ' of ' + state.compareTotal + ' (page ' + state.comparePage + ' of ' + pages + ')'
     : 'No rows match';
-  /** @type {HTMLButtonElement} */ (document.getElementById('pagerPrev')).disabled = comparePage <= 1;
-  /** @type {HTMLButtonElement} */ (document.getElementById('pagerNext')).disabled = comparePage >= pages;
+  /** @type {HTMLButtonElement} */ (document.getElementById('pagerPrev')).disabled = state.comparePage <= 1;
+  /** @type {HTMLButtonElement} */ (document.getElementById('pagerNext')).disabled = state.comparePage >= pages;
   var perPage = /** @type {HTMLSelectElement} */ (document.getElementById('pagerPerPage'));
-  if (perPage) perPage.value = String(comparePerPage);
+  if (perPage) perPage.value = String(state.comparePerPage);
 }
 
 /** @param {string} id */
-function toggleExclude(id) {
-  excludeState[id] = !excludeState[id];
+export function toggleExclude(id) {
+  state.excludeState[id] = !state.excludeState[id];
   reloadRows();
 }
 
 /** @param {string} sort */
-function setSort(sort) {
-  activeSort = sort;
+export function setSort(sort) {
+  state.activeSort = sort;
   VireoViewPreferences.write('vireo.compare.sort', sort);
   reloadRows();
 }
 
 /** @param {string} filter */
-function setFilter(filter) {
-  activeFilter = filter;
+export function setFilter(filter) {
+  state.activeFilter = filter;
   reloadRows();
 }

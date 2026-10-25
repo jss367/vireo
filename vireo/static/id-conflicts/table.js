@@ -1,12 +1,16 @@
 // The comparison table: each row's photo, signal, keyword and per-model
 // prediction cells, and opening a photo in the lightbox.
-// Classic page script.
+
+import { state } from './state.js';
+import { visibleModels } from './loading.js';
+import { effectiveSummary } from './render.js';
+import { escapeAttr, escapeHtml, formatCaptureDateTime, openLightbox, thumbnailUrl } from './shared.js';
 
 /** @param {ComparePhoto[]} rows */
-function renderTable(rows) {
+export function renderTable(rows) {
   var content = /** @type {HTMLElement} */ (document.getElementById('compareContent'));
   var models = visibleModels();
-  if (!compareTotal && !rows.length) {
+  if (!state.compareTotal && !rows.length) {
     content.innerHTML = (effectiveSummary().photos || 0)
       ? '<div class="compare-empty">No photos match the current filter.</div>'
       : '<div class="compare-empty">This collection has no photos.</div>';
@@ -18,7 +22,7 @@ function renderTable(rows) {
   }
 
   var html = '<div class="table-wrap"><table class="compare-table"><thead><tr>' +
-    '<th class="select-col"><input type="checkbox" title="Select every row on this page" onchange="toggleAllRows(this.checked)"></th>' +
+    '<th class="select-col"><input type="checkbox" title="Select every row on this page" data-compare-select-all></th>' +
     '<th class="photo-col">Photo</th>' +
     '<th>Status</th>' +
     '<th class="signal-col">Signals</th>' +
@@ -32,9 +36,9 @@ function renderTable(rows) {
     var status = photo.status || {};
     var multiSubject = (photo.subjects || []).length > 1;
     html += '<tr data-photo-id="' + photo.photo_id + '">' +
-      '<td><input type="checkbox" ' + (selectedRows.has(photo.photo_id) ? 'checked' : '') +
+      '<td><input type="checkbox" ' + (state.selectedRows.has(photo.photo_id) ? 'checked' : '') +
       (multiSubject ? ' disabled title="Use the subject-specific actions for multi-subject photos"' :
-        ' onchange="toggleRow(' + photo.photo_id + ', this.checked)"') + '></td>' +
+        ' data-compare-row="' + photo.photo_id + '"') + '></td>' +
       '<td>' + renderPhotoCell(photo) + '</td>' +
       '<td><span class="category-pill ' + escapeAttr(status.category) + '">' +
       escapeHtml(status.label) + '</span></td>' +
@@ -50,7 +54,7 @@ function renderTable(rows) {
 }
 
 /** @param {ComparePhoto} photo */
-function renderSignalCell(photo) {
+export function renderSignalCell(photo) {
   var signal = photo.signal || /** @type {CompareSignal} */ ({});
   var statuses = photo.subject_statuses || [];
   var subjects = photo.subjects || [];
@@ -98,7 +102,7 @@ function renderSignalCell(photo) {
 }
 
 /** @param {CompareSubject} subject */
-function subjectBoxLabel(subject) {
+export function subjectBoxLabel(subject) {
   var box = (subject && subject.box) || {};
   if ([box.x, box.y, box.w, box.h].some(function(value) { return value == null; })) return '';
   var x = /** @type {number} */ (box.x), y = /** @type {number} */ (box.y);
@@ -107,13 +111,20 @@ function subjectBoxLabel(subject) {
     '%, y ' + Math.round(y * 100) + '–' + Math.round((y + h) * 100) + '%';
 }
 
+/**
+ * A prediction's action button; events.js runs predictionAction for it.
+ * @param {string} cls @param {number} predId @param {string} action @param {string} disabled @param {string} label
+ */
+function predictionButton(cls, predId, action, disabled, label) {
+  return '<button class="' + cls + '" data-prediction-id="' + predId + '" data-prediction-action="' +
+    action + '"' + disabled + '>' + label + '</button>';
+}
+
 /** @param {ComparePhoto} photo */
-function renderPhotoCell(photo) {
+export function renderPhotoCell(photo) {
   var meta = [];
-  var thumbUrl = window.vireoThumbnailUrl
-    ? window.vireoThumbnailUrl(photo)
-    : '/thumbnails/' + photo.photo_id + '.jpg';
-  if (photo.timestamp) meta.push(window.VireoTime.captureDateTime(photo.timestamp));
+  var thumbUrl = thumbnailUrl(photo);
+  if (photo.timestamp) meta.push(formatCaptureDateTime(photo.timestamp));
   if (photo.rating) meta.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
   if (photo.flag && photo.flag !== 'none') meta.push(photo.flag);
   if (photo.wildlife_excluded) meta.push('not wildlife');
@@ -134,8 +145,8 @@ function renderPhotoCell(photo) {
     }).join('') + '</div>';
   }
   return '<div class="photo-cell">' +
-    '<button type="button" class="photo-thumb-button" title="View larger" onclick="openCompareLightbox(' +
-    photo.photo_id + ')"><img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="' +
+    '<button type="button" class="photo-thumb-button" title="View larger" data-compare-open="' +
+    photo.photo_id + '"><img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="' +
     escapeAttr(photo.filename) + '"></button>' +
     '<div><div class="photo-name">' + escapeHtml(photo.filename) + '</div>' +
     '<div class="photo-meta">' + escapeHtml(meta.join(' · ')) + '</div>' +
@@ -144,8 +155,8 @@ function renderPhotoCell(photo) {
     encodeURIComponent(photo.photo_id) + '">Browse</a></div></div></div>';
 }
 
-function compareLightboxPhotoList() {
-  return compareRows.map(function(photo) {
+export function compareLightboxPhotoList() {
+  return state.compareRows.map(function(photo) {
     return {
       id: photo.photo_id,
       filename: photo.filename || '',
@@ -156,7 +167,7 @@ function compareLightboxPhotoList() {
 }
 
 /** @param {number} photoId */
-function openCompareLightbox(photoId) {
+export function openCompareLightbox(photoId) {
   var list = compareLightboxPhotoList();
   var current = list.find(function(photo) { return photo.id === photoId; });
   if (!current) {
@@ -167,7 +178,7 @@ function openCompareLightbox(photoId) {
 }
 
 /** @param {CompareKeyword} k */
-function isSpeciesKeyword(k) {
+export function isSpeciesKeyword(k) {
   // Mirror the backend species definition. A linked family/genus is a
   // taxonomy keyword, but not a species; unresolved legacy tags retain the
   // old flag/type fallback.
@@ -176,7 +187,7 @@ function isSpeciesKeyword(k) {
 }
 
 /** @param {ComparePhoto} photo */
-function renderKeywordCell(photo) {
+export function renderKeywordCell(photo) {
   var species = (photo.keywords || []).filter(isSpeciesKeyword);
   var other = (photo.keywords || []).filter(function(k) { return !isSpeciesKeyword(k); });
   var html = '';
@@ -198,7 +209,7 @@ function renderKeywordCell(photo) {
 }
 
 /** @param {ComparePhoto} photo @param {string} model */
-function renderPredictionCell(photo, model) {
+export function renderPredictionCell(photo, model) {
   var subjects = photo.subjects || [];
   var statuses = photo.subject_statuses || [];
   if (!subjects.length) return '<span class="empty-cell">No prediction</span>';
@@ -233,7 +244,7 @@ function renderPredictionCell(photo, model) {
       var acceptLabel = displayedCategory === 'additional' ? 'Add additional species' : 'Add keyword';
       var acceptAction = displayedCategory === 'additional' ? 'accept_subject' : 'accept';
       var replaceButton = subjects.length === 1
-        ? '<button class="inline-btn primary" onclick="predictionAction(' + pred.id + ', \'replace\')"' + disabled + '>Replace keyword</button>'
+        ? predictionButton('inline-btn primary', pred.id, 'replace', disabled, 'Replace keyword')
         : '';
       return '<div class="pred' + (belowThreshold ? ' below-threshold' : '') + '">' +
         '<div class="pred-main"><span class="pred-species">' + escapeHtml(pred.species) + '</span>' +
@@ -242,10 +253,10 @@ function renderPredictionCell(photo, model) {
         '<span class="status-pill ' + escapeAttr(status) + '">' + escapeHtml(status) + '</span></div>' +
         '<div class="pred-detail">' + escapeHtml(detail) + '</div>' +
         '<div class="pred-actions">' +
-        '<button class="inline-btn primary" onclick="predictionAction(' + pred.id + ', \'' + acceptAction + '\')"' + disabled + '>' + acceptLabel + '</button>' +
+        predictionButton('inline-btn primary', pred.id, acceptAction, disabled, acceptLabel) +
         replaceButton +
-        '<button class="inline-btn danger" onclick="predictionAction(' + pred.id + ', \'reject\')"' + disabled + '>Reject</button>' +
-        '<button class="inline-btn" onclick="predictionAction(' + pred.id + ', \'reviewed\')"' + disabled + '>Reviewed</button>' +
+        predictionButton('inline-btn danger', pred.id, 'reject', disabled, 'Reject') +
+        predictionButton('inline-btn', pred.id, 'reviewed', disabled, 'Reviewed') +
         '</div></div>';
     }).join('');
     return '<div class="subject-prediction-group">' + heading + predictionsHtml + '</div>';

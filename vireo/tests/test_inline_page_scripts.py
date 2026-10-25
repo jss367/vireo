@@ -74,7 +74,6 @@ SPLIT_PAGES = {
     "/review": "review",
     "/move": "move",
     "/cull": "cull",
-    "/id-conflicts": "id-conflicts",
 }
 
 

@@ -38,17 +38,20 @@ interface CompareRowsOptions {
   filterResolved?: boolean; refreshPhotoIds?: number[]; internal?: boolean;
 }
 interface CompareScope {collectionId: string; loadingSeq: number}
-declare var Vireo: VireoPageHookRegistry & {predictions: {groupedDecisionTracker(): {
-  alreadyDecided(predictionId: number): boolean; record(decision: unknown): void;
-}}};
-declare var VireoTextSearch: {
-  readOptions(namespace: string): {matchCase?: boolean; wholeWord?: boolean};
-  appendParams(params: URLSearchParams, options: {matchCase?: boolean; wholeWord?: boolean}): void;
-  toggle(namespace: string, option: string, callback: () => unknown): void;
-};
-declare var VireoViewPreferences: {read(key: string): string | null; write(key: string, value: string): void};
-declare function escapeHtml(value: unknown): string;
-declare function escapeAttr(value: unknown): string;
-declare function showToast(message: string, kind?: string): void;
-declare function openLightbox(id: number, filename: string, photos: {id: number; filename: string}[]): void;
-interface Window {vireoThumbnailUrl?(photo: ComparePhoto): string}
+// The shared globals the page's shared.js reads.
+interface Window {
+  Vireo: VireoPageHookRegistry & {predictions: {groupedDecisionTracker(): {
+    alreadyDecided(predictionId: number): boolean; record(decision: unknown): void;
+  }}};
+  VireoTextSearch: {
+    readOptions(namespace: string): {matchCase?: boolean; wholeWord?: boolean};
+    appendParams(params: URLSearchParams, options: {matchCase?: boolean; wholeWord?: boolean}): void;
+    toggle(namespace: string, option: string, callback: () => unknown): void;
+  };
+  VireoViewPreferences: {read(key: string): string | null; write(key: string, value: string): void};
+  escapeHtml(value: unknown): string;
+  escapeAttr(value: unknown): string;
+  showToast?(message: string, kind?: string): void;
+  openLightbox(id: number, filename: string, photos: {id: number; filename: string}[]): void;
+  vireoThumbnailUrl?(photo: ComparePhoto): string;
+}
