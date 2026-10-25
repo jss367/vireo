@@ -950,10 +950,24 @@ def _load_working_copy_image(wc_path, max_size, record_access):
     return None
 
 
+@overload
+def load_working_image(
+    photo, vireo_dir, max_size: int | None = ..., folders=..., *, return_source: Literal[False] = ...,
+    record_access: bool = ...,
+) -> Image.Image | None: ...
+
+
+@overload
+def load_working_image(
+    photo, vireo_dir, max_size: int | None = ..., folders=..., *, return_source: Literal[True],
+    record_access: bool = ...,
+) -> tuple[Image.Image | None, str]: ...
+
+
 def load_working_image(
     photo, vireo_dir, max_size: int | None = 1024, folders=None, *, return_source=False,
     record_access=False,
-):
+) -> Image.Image | tuple[Image.Image | None, str] | None:
     """Load a photo's working image — the fast path for all pixel operations.
 
     Uses the pre-extracted working copy JPEG if available,

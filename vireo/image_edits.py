@@ -6,6 +6,7 @@ import copy
 import json
 import math
 import re
+from typing import Any
 
 from PIL import Image
 
@@ -445,7 +446,7 @@ def _normalize_adjustments(adjustments):
     return normalized_adjustments
 
 
-def normalize_recipe(recipe):
+def normalize_recipe(recipe) -> dict[str, Any] | None:
     """Validate and canonicalize a non-destructive image edit recipe.
 
     The crop rectangle uses normalized coordinates in the image space after
@@ -585,7 +586,7 @@ def _normalize_local(local):
     return {"mask": normalized_mask, "regions": normalized_regions}
 
 
-def recipe_to_json(recipe):
+def recipe_to_json(recipe) -> str | None:
     """Return canonical JSON for a normalized recipe, or None for no-op."""
     normalized = normalize_recipe(recipe)
     if normalized is None:

@@ -7,6 +7,7 @@ lookups; an ambiguous name must never silently pick the first matching taxon.
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from keyword_normalization import keyword_match_key
 
@@ -59,7 +60,7 @@ def stored_taxonomy_evidence_sql(alias):
             f"OR {alias}.classifier_model GLOB 'iNat*')")
 
 
-def resolved_prediction_taxonomy(row, resolver):
+def resolved_prediction_taxonomy(row, resolver) -> dict[str, Any]:
     """Taxonomy columns a reader may show for ``row``.
 
     Evidence rows keep what they stored. Otherwise the scientific name comes
