@@ -9,7 +9,7 @@ from job_summaries import describe_result
 from label_source_identities import MARKER_PREFIX, backfill, pending_label_sets
 from labels import SpeciesLabels, fetch_species_list, load_merged_labels
 from labels_fingerprint import compute_fingerprint
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from species_identity import SpeciesResolver
 
 REDHEAD = {"taxon_id": 7056, "scientific_name": "Aythya americana",
@@ -57,7 +57,7 @@ def legacy_list(tmp_path, monkeypatch, db):
 
 
 def _detection(db, tmp_path, name):
-    folder = db.add_folder(str(tmp_path), name="Photos")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Photos")
     pid = photo_ingest.add_photo(db, folder, name, ".jpg", 1000, 1.0, timestamp="2026-09-01T10:00:00")
     return db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5},
                                      "confidence": .99}], detector_model="megadetector-v6")[0]

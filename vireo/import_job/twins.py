@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from import_dedup import stored_metadata_key
 from import_job.cataloging import _invalidate_new_images
 from import_job.state import _counts
+from services import workspace_folders
 
 if TYPE_CHECKING:
     import sqlite3
@@ -182,8 +183,8 @@ def _link_duplicate_twin_dirs(
                 raise RuntimeError("folder row not found")
             if folder_row["status"] == "missing":
                 db.imports.promote_missing_folder(folder_row["id"])
-            db.add_workspace_folder(
-                workspace_id, folder_row["id"], is_root=True,
+            workspace_folders.add_workspace_folder(
+                db, workspace_id, folder_row["id"], is_root=True,
             )
         except Exception as exc:  # broad: per-folder boundary; the failure is recorded and the other folders still link
             db.rollback()

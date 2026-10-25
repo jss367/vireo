@@ -1290,7 +1290,7 @@ class Database:
         """
         return self._active_workspace_id
 
-    def require_workspace_id(self):
+    def require_workspace_id(self) -> int:
         """Return the active workspace id, raising ``RuntimeError`` if none is set."""
         return self._ws_id()
 
@@ -1484,33 +1484,20 @@ class Database:
         set; the row methods (``get``, ``id_for_name``, ``list_all``,
         ``update``, ``set_group_state``, ``forget_label_file``) take an id or
         span every workspace and work with none active. Creating and deleting
-        a workspace stay on ``Database`` (``create_workspace`` /
-        ``delete_workspace``) because they also clear the new-images cache.
+        a workspace also clear the new-images cache, so callers go through
+        ``Database.create_workspace`` (``__init__`` runs it) and
+        ``services.workspace_lifecycle.delete_workspace``.
         """
         return self._workspace_repository()
-
-    def delete_workspace(self, workspace_id):
-        """Delete a workspace and all its scoped data (cascade)."""
-        self._workspace_repository().delete(workspace_id)
-        cleanup_errors = []
-        if self._db_path != ":memory:":
-            from services.result_files import delete_workspace_results
-            cleanup_errors = delete_workspace_results(os.path.dirname(self._db_path), workspace_id)
-        # Drop any cached new-images payload for this workspace. Without this,
-        # if the deleted id is later reused by SQLite for a new workspace,
-        # ``get_new_images_for_workspace`` could serve the prior workspace's
-        # data until TTL expiry.
-        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
-        return cleanup_errors
 
     def _workspace_folder_repository(self):
         """Build the workspace-folder membership repository on this connection.
 
         Every membership method takes its workspace id explicitly, so the
         repository is not bound to the active workspace; callers of
-        ``photo_in_workspace`` and ``visible_ids`` pass it, and the façade
-        methods that default to it (``get_workspace_root_folder_ids`` and the
-        like) resolve it themselves.
+        ``photo_in_workspace`` and ``visible_ids`` pass it, and the
+        ``services.workspace_folders`` functions that default to it
+        (``get_workspace_root_folder_ids`` and the like) resolve it themselves.
         """
         from repositories.workspace_folders import WorkspaceFolderRepository
 
@@ -1531,7 +1518,7 @@ class Database:
         workspace. Membership changes that also walk subtrees, record
         removals or invalidate the new-images cache (``add_workspace_folder``,
         ``remove_workspace_folder_tree``, ``get_workspace_folders``, ...)
-        stay on ``Database``.
+        live in ``services/workspace_folders.py``.
         """
         return self._workspace_folder_repository()
 
@@ -1554,303 +1541,6 @@ class Database:
         nothing in it commits: ``move_cleanup`` opens and ends the transaction.
         """
         return self._source_cleanup_repository()
-
-    def _add_workspace_folder_no_commit(
-            self, workspace_id, folder_id, *, is_root=True, restore_removed=False):
-        """Link a folder + descendants to a workspace WITHOUT committing.
-
-        Same body as ``add_workspace_folder`` minus the ``commit()`` and cache
-        invalidation. Intended for callers that already run inside a larger
-        try/except+rollback transaction (e.g. ``merge_staged_tree_into_
-        archive``) where a mid-body commit would break rollback safety by
-        persisting a preceding UPDATE that an outer failure was meant to
-        undo. The caller is responsible for committing (and for invalidating
-        the workspace's new-images cache) after its own transaction closes.
-        Internal merges preserve removed descendants unless the caller
-        explicitly asks to restore them.
-        """
-        repo = self._workspace_folder_repository()
-        folder_ids = self.folders.subtree_ids_by_path(folder_id)
-        if not restore_removed:
-            removed = repo.removed_ids(workspace_id)
-            # The directly imported/scanned folder is intentional. Known
-            # descendants need their own scan or explicit add to restore
-            # them; registering a parent must not resurrect missing rows.
-            folder_ids = [fid for fid in folder_ids if fid == folder_id or fid not in removed]
-        repo.add_no_commit(
-            workspace_id, folder_id, folder_ids,
-            is_root=is_root, restore_removed=restore_removed)
-
-    def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True,
-                             restore_removed=True):
-        """Link a folder and descendants, restoring explicit removals by default.
-
-        Scanner registration passes ``restore_removed=False``: only the
-        directly visited folder restores membership, not removed descendants.
-        """
-        self._add_workspace_folder_no_commit(
-            workspace_id, folder_id, is_root=is_root, restore_removed=restore_removed)
-        self._workspace_folder_repository().commit()
-        # The folder's untracked files now count toward this workspace's
-        # new-images backlog. Drop any stale cached payload so the next read
-        # recomputes against the updated folder set.
-        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
-
-    def add_workspace_folder_exact(
-            self, workspace_id, folder_id, *, is_root=False):
-        """Link exactly one folder to a workspace, without its descendants.
-
-        Scanner-owned restricted scopes use this when the caller has already
-        selected the exact folders being touched. The regular
-        :meth:`add_workspace_folder` deliberately materializes a whole known
-        subtree for user-selected roots; using it here could attach unrelated
-        catalog folders that happen to sit below the same filesystem parent.
-        """
-        self._workspace_folder_repository().add_exact(
-            workspace_id, folder_id, is_root=is_root)
-        self._new_images_cache.invalidate_workspaces(
-            self._db_path, [workspace_id],
-        )
-
-    def _remember_workspace_folder_removals(self, workspace_id, folder_ids, *, recursive=False):
-        """Record removals in the caller's unlink/delete transaction."""
-        repo = self._workspace_folder_repository()
-        folder_ids = list(folder_ids)
-        roots = repo.removal_root_ids(folder_ids) if recursive else set()
-        repo.remember_removals(workspace_id, folder_ids, roots, recursive=recursive)
-
-    def remove_workspace_folder(self, workspace_id, folder_id):
-        """Unlink a single folder from a workspace."""
-        self._remember_workspace_folder_removals(workspace_id, [folder_id])
-        self._workspace_folder_repository().remove(workspace_id, folder_id)
-        # The folder no longer contributes to this workspace's new-images
-        # backlog. Drop the cached payload so the banner reflects the change.
-        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
-
-    def remove_workspace_folder_tree(self, workspace_id, folder_id):
-        """Unlink a folder and its path descendants from a workspace."""
-        folder_ids = self.folders.subtree_ids_by_path(folder_id)
-        self._remember_workspace_folder_removals(workspace_id, folder_ids, recursive=True)
-        self._workspace_folder_repository().remove_tree(workspace_id, folder_ids)
-        # The folder no longer contributes to this workspace's new-images
-        # backlog. Drop the cached payload so the banner reflects the change.
-        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
-
-    def _materialize_workspace_descendants(self, workspace_id):
-        """Ensure linked folders include all known path descendants.
-
-        Also picks up descendants whose ``folders.path`` was rebased under
-        ``local-folders/`` by staging: a pure ``folders.path`` walk from the
-        ancestor root no longer reaches them, but their
-        ``local_folder_mappings.source_path`` still records the original
-        location and lets us bridge the gap.
-        """
-        repo = self._workspace_folder_repository()
-        candidate_ids = repo.unlinked_descendant_ids(workspace_id)
-        for root_path in repo.linked_paths(workspace_id):
-            candidate_ids.update(self.folders.local_source_descendant_ids(root_path))
-        if candidate_ids:
-            candidate_ids -= repo.linked_ids(workspace_id)
-        candidate_ids -= repo.removed_ids(workspace_id)
-        if not candidate_ids:
-            return
-        repo.link_descendants(workspace_id, candidate_ids)
-        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
-
-    def get_workspace_folders(self, workspace_id):
-        """Return all explicit folder links for a workspace.
-
-        Parent folders are recursive roots: if a linked folder has known
-        descendants in ``folders``, keep those descendants linked internally so
-        existing workspace-scoped photo queries continue to work.
-        """
-        self._materialize_workspace_descendants(workspace_id)
-        return self._workspace_folder_repository().list_folders(workspace_id)
-
-    def get_workspace_root_folder_ids(self, workspace_id=None):
-        """Return just the ids of the workspace's user-facing roots.
-
-        ``get_workspace_folder_roots`` computes a per-root subtree photo
-        count with a correlated prefix scan over ``photos`` — sub-second on
-        a small catalog, ~0.75s on an 88k-photo library. Pollers that only
-        need to know *which* roots exist (the Work Locally blocker poll runs
-        every 15s on Browse) must not pay for counts they discard.
-
-        Defaults to the active workspace (raising ``RuntimeError`` when none
-        is active, like every workspace-scoped accessor); an explicit
-        ``workspace_id`` is accepted for parity with
-        ``get_workspace_folder_roots``, whose callers already hold one.
-        """
-        if workspace_id is None:
-            workspace_id = self._ws_id()
-        # Preserve the recovery side effect of get_workspace_folder_roots:
-        # a descendant can be discovered after its recursive ancestor was
-        # linked, and blocker polling must make that relationship visible to
-        # workspace_local_root_ids even though this fast path skips photo
-        # counts. This only writes when an unmaterialized descendant exists.
-        self._materialize_workspace_descendants(workspace_id)
-        return self._workspace_folder_repository().root_ids(workspace_id)
-
-    def get_workspace_folder_roots(self, workspace_id):
-        """Return user-facing workspace roots, hiding covered descendants.
-
-        Each row carries ``workspace_photo_count``: the number of photos this
-        root contributes to the workspace, counting the whole subtree (the
-        root plus all of its descendant folders that are linked to this
-        workspace), not just photos sitting directly in the root. This matches
-        what the user actually sees in the workspace — visibility is scoped by
-        ``workspace_folders`` membership, so a descendant detached from the
-        workspace is correctly excluded. The ``folders.photo_count`` column is
-        a direct-only count and would read as a misleading "0 photos" for a
-        root whose images all live in subfolders.
-
-        Descendants whose ``folders.path`` has been rebased under
-        ``local-folders/`` by staging are matched via
-        ``local_folder_mappings.source_path`` too, otherwise the ancestor
-        workspace's root would underreport its photos while
-        ``workspace_folders`` still makes them visible.
-        """
-        self._materialize_workspace_descendants(workspace_id)
-        return self._workspace_folder_repository().roots(workspace_id)
-
-    def workspace_has_folder_link(self, folder_id, workspace_id=None):
-        """True iff the workspace has a real or inherited folder link.
-
-        Excludes ``workspace_photos`` grants, which only make a photo
-        visible, not the whole folder. Folder-wide mutations such as
-        ``/api/folders/<id>/relocate`` must gate on this view so a workspace
-        holding only a photo-specific grant for one photo cannot rewrite
-        paths for the hidden sibling photos owned by other workspaces.
-        """
-        if workspace_id is None:
-            workspace_id = self._ws_id()
-        return self._workspace_folder_repository().has_folder_link(
-            workspace_id, folder_id,
-        )
-
-    def get_audit_root_paths(self, workspace_id=None):
-        """Paths of the active workspace's audit scan roots.
-
-        Returns real ``workspace_folders`` roots only -- folders a workspace
-        reaches solely through a ``workspace_photos`` grant are excluded,
-        even when they would otherwise appear parentless in
-        ``folders.tree``. The audit treats the result as storage roots to
-        walk the filesystem under, and including a grant-only folder would
-        let ``/api/audit/untracked`` surface hidden sibling files that
-        ``/api/audit/import-untracked`` would then import under a real
-        workspace link.
-        """
-        if workspace_id is None:
-            workspace_id = self._ws_id()
-        return self._workspace_folder_repository().audit_root_paths(workspace_id)
-
-    def get_workspace_extensions(self):
-        """Return distinct lowercased file extensions for photos in the
-        active workspace, sorted alphabetically.
-
-        Used by the smart-collection rule editor to populate the Extension
-        value dropdown — a free-text input silently failed when users typed
-        ``JPG`` instead of ``.jpg`` or vice versa. Lowercasing here means the
-        UI never has to think about case, and storing-side variations
-        (``.jpg`` vs ``.JPG`` from older imports) collapse into one option.
-        Empty/NULL extensions are skipped. A RAW+JPEG pair contributes both
-        formats, since the extension rule matches a photo by either file.
-
-        Folders whose status is not ``'ok'`` or ``'partial'`` are excluded so
-        the dropdown stays consistent with ``_build_collection_query``, which
-        joins on the same status filter. Otherwise an extension found only in
-        a missing folder would appear as a selectable option but match zero
-        photos when used in a rule — exactly the silent-failure mode this
-        change is meant to prevent.
-        """
-        ws = self._ws_id()
-        return self._workspace_folder_repository().extensions(ws)
-
-    def move_folders_to_workspace(self, source_ws_id, target_ws_id, folder_ids):
-        """Move folders and their workspace-scoped data to another workspace.
-
-        Moves: workspace_folders rows, pending_changes, prediction_review,
-        photo_preferences, and species_highlights. Detections and predictions
-        are global (no workspace_id), so they follow the folder via
-        workspace_folders membership rather than being reassigned. Collections
-        and edit_history stay behind.
-
-        Returns:
-            dict with keys: folders_moved, pending_changes_moved,
-            photo_preferences_moved
-        """
-        if not self.workspaces.get(source_ws_id):
-            raise ValueError(f"Source workspace {source_ws_id} not found")
-        if not self.workspaces.get(target_ws_id):
-            raise ValueError(f"Target workspace {target_ws_id} not found")
-        if source_ws_id == target_ws_id:
-            raise ValueError("Source and target workspace are the same")
-
-        source_folders = self.get_workspace_folders(source_ws_id)
-        source_folder_ids = {f["id"] for f in source_folders}
-        for fid in folder_ids:
-            if fid not in source_folder_ids:
-                raise ValueError(
-                    f"Folder {fid} does not belong to source workspace {source_ws_id}"
-                )
-
-        if not folder_ids:
-                return {
-                    "folders_moved": 0,
-                    "pending_changes_moved": 0,
-                    "photo_preferences_moved": 0,
-                    "species_highlights_moved": 0,
-                }
-
-        selected_folder_ids = set(folder_ids)
-        source_folder_paths = {
-            folder["id"]: _path_for_subtree_match(folder["path"])
-            for folder in source_folders
-            if folder["path"]
-        }
-        remaining_source_paths = [
-            path
-            for fid, path in source_folder_paths.items()
-            if fid not in selected_folder_ids
-        ]
-        for fid in selected_folder_ids:
-            selected_path = source_folder_paths.get(fid)
-            if selected_path and any(
-                selected_path.startswith(path + "/") for path in remaining_source_paths
-            ):
-                raise ValueError(
-                    "Cannot move a folder that is covered by another source "
-                    "workspace folder; move the covering folder or remove it first"
-                )
-
-        moved_folder_ids = []
-        seen_folder_ids = set()
-        for fid in folder_ids:
-            for subtree_id in self.folders.subtree_ids_by_path(fid):
-                if subtree_id in source_folder_ids and subtree_id not in seen_folder_ids:
-                    seen_folder_ids.add(subtree_id)
-                    moved_folder_ids.append(subtree_id)
-
-        (
-            pending_changes_moved,
-            photo_preferences_moved,
-            species_highlights_moved,
-        ) = self._workspace_folder_repository().move_folders(
-            source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
-        )
-
-        # Folders changed membership for BOTH workspaces, so each workspace's
-        # new-images backlog needs to be recomputed on the next read.
-        self._new_images_cache.invalidate_workspaces(
-            self._db_path, [source_ws_id, target_ws_id]
-        )
-
-        return {
-            "folders_moved": len(folder_ids),
-            "pending_changes_moved": pending_changes_moved,
-            "photo_preferences_moved": photo_preferences_moved,
-            "species_highlights_moved": species_highlights_moved,
-        }
 
     def ensure_default_workspace(self):
         """Create the Default workspace if it doesn't exist. Returns its id."""
@@ -1984,35 +1674,6 @@ class Database:
         when they run.
         """
         return self._folder_repository()
-
-    def add_folder(self, path, name=None, parent_id=None, *,
-                   workspace_root=True, link_to_workspace=True):
-        """Insert a folder. Automatically links it to the active workspace.
-
-        ``workspace_root`` controls whether that automatic link is a
-        user-facing workspace root. Scanner-discovered descendants pass
-        ``False`` so recursive roots do not expand over time.
-
-        ``link_to_workspace`` controls whether the auto-link happens at
-        all. Restricted scans (a subfolder of an existing archive tree)
-        pass ``False`` for the parent chain leading up to the restrict
-        roots: those parents only need to exist for ``folders.parent_id``
-        integrity, and letting ``add_workspace_folder`` fire would
-        subtree-cascade every pre-existing descendant of the destination
-        into the active workspace. See PR #1107 review.
-
-        Returns the folder id.
-        """
-        folder_id = self._folder_repository().add(path, name, parent_id)
-        # Auto-link to active workspace
-        if link_to_workspace and self._active_workspace_id is not None:
-            self.add_workspace_folder(
-                self._active_workspace_id,
-                folder_id,
-                is_root=workspace_root,
-                restore_removed=False,
-            )
-        return folder_id
 
     def get_folder_subtree_ids(self, folder_id):
         """Return [folder_id, ...descendant_ids] restricted to the active workspace.
@@ -2429,32 +2090,6 @@ class Database:
         ``services/dashboard_stats.py`` (``get_coverage_stats``, ...).
         """
         return self._stats_repository()
-
-    def workspace_unlinked_folder_count(self, folder_paths):
-        """Count distinct paths in ``folder_paths`` whose folders are not
-        linked to the active workspace.
-
-        A folder path is "unlinked" when either no row exists in ``folders``
-        for that path or a row exists but no ``workspace_folders`` entry
-        connects it to the active workspace.
-
-        Used by the import-mode pipeline plan to decide whether a scan over
-        already-imported files would be a real no-op for the active
-        workspace. ``scanner.scan`` calls ``_ensure_folder`` (which calls
-        ``add_folder``) for each walked directory, and ``add_folder``
-        auto-links the folder to the active workspace via
-        ``workspace_folders``. So when the user re-imports files that were
-        indexed in a different workspace, scan still mutates state by
-        attaching folders to the active workspace — and the plan must
-        report that as ``will-run`` instead of claiming ``done-prior``.
-        """
-        if not folder_paths:
-            return 0
-        ws = self._ws_id()
-        unique = list({p for p in folder_paths if p})
-        if not unique:
-            return 0
-        return self._workspace_folder_repository().unlinked_folder_count(ws, unique)
 
     @staticmethod
     def _append_location_status_filter(conditions, location_status):

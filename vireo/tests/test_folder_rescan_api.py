@@ -11,6 +11,7 @@ schema produced by `JobRunner.start()`.
 
 import time
 
+from services import workspace_folders
 from testing.waits import synchronization_timeout
 
 
@@ -37,7 +38,7 @@ def test_folder_rescan_queues_job(app_and_db, tmp_path):
     # directory so the on-disk existence check passes.
     real_dir = tmp_path / "scan-me"
     real_dir.mkdir()
-    folder_id = db.add_folder(str(real_dir), name="scan-me")
+    folder_id = workspace_folders.add_folder(db, str(real_dir), name="scan-me")
 
     with app.test_client() as c:
         resp = c.post(f"/api/folders/{folder_id}/rescan", json={})
@@ -75,7 +76,7 @@ def test_folder_rescan_invalid_id_returns_404(app_and_db):
 def test_folder_rescan_missing_path_returns_400(app_and_db, tmp_path, monkeypatch):
     app, db = app_and_db
     # Add a folder row whose on-disk path does not exist.
-    fid = db.add_folder(str(tmp_path / "does-not-exist"), name="ghost")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "does-not-exist"), name="ghost")
     with app.test_client() as c:
         resp = c.post(f"/api/folders/{fid}/rescan", json={})
         assert resp.status_code == 400
@@ -91,7 +92,7 @@ def test_folder_rescan_rejects_macos_other_app_bundle(app_and_db, tmp_path):
     app, db = app_and_db
     bundle = tmp_path / "Photos Library.photoslibrary"
     bundle.mkdir()
-    fid = db.add_folder(str(bundle), name="stale-bundle")
+    fid = workspace_folders.add_folder(db, str(bundle), name="stale-bundle")
     with app.test_client() as c:
         resp = c.post(f"/api/folders/{fid}/rescan", json={})
         assert resp.status_code == 400
@@ -112,7 +113,7 @@ def test_folder_rescan_rejects_folder_outside_active_workspace(app_and_db, tmp_p
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    folder_id = db.add_folder(str(real_dir), name="other-ws")
+    folder_id = workspace_folders.add_folder(db, str(real_dir), name="other-ws")
     db.set_active_workspace(default_ws)
 
     with app.test_client() as c:
@@ -128,7 +129,7 @@ def test_folder_rescan_job_config_includes_folder_path(app_and_db, tmp_path):
     real_dir = tmp_path / "scan-config"
     real_dir.mkdir()
     folder_path = str(real_dir)
-    folder_id = db.add_folder(folder_path, name="scan-config")
+    folder_id = workspace_folders.add_folder(db, folder_path, name="scan-config")
 
     with app.test_client() as c:
         resp = c.post(f"/api/folders/{folder_id}/rescan", json={})

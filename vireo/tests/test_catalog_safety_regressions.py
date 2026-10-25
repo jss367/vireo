@@ -6,13 +6,13 @@ import sqlite3
 import pytest
 from PIL import Image
 from scanner import ScanOptions
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def seed(db, path, name="bird.jpg"):
     path.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (32, 24), "red").save(path / name)
-    fid = db.add_folder(str(path), name=path.name)
+    fid = workspace_folders.add_folder(db, str(path), name=path.name)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                        file_size=(path / name).stat().st_size, file_mtime=1)
     return fid, pid
@@ -55,7 +55,7 @@ def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkey
     _, pid = seed(db, tmp_path / "source")
     dst = tmp_path / "destination"
     dst.mkdir()
-    canonical_fid = db.add_folder(str(dst), name="destination")
+    canonical_fid = workspace_folders.add_folder(db, str(dst), name="destination")
     result = move_photos(db, [pid], str(dst) + "/")
     assert result["moved"] == 1
     assert db.photos.get(pid)["folder_id"] == canonical_fid
@@ -63,7 +63,7 @@ def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkey
     rows = db.conn.execute("SELECT p.id, f.path FROM photos p JOIN folders f ON p.folder_id=f.id WHERE filename='bird.jpg'").fetchall()
     assert len(rows) == 1
     # Also protect catalogs that already contain an alias from older versions.
-    alias_fid = db.add_folder(str(dst) + "/", name="legacy alias")
+    alias_fid = workspace_folders.add_folder(db, str(dst) + "/", name="legacy alias")
     alias_pid = photo_ingest.add_photo(db, folder_id=alias_fid, filename="bird.jpg", extension=".jpg", file_size=1, file_mtime=1)
     rows = db.conn.execute("SELECT p.id, f.path FROM photos p JOIN folders f ON p.folder_id=f.id WHERE filename='bird.jpg'").fetchall()
     assert len(rows) == 2
@@ -275,7 +275,7 @@ def test_cropped_raw_route_uses_sensor_dimensions(app_and_db, tmp_path, monkeypa
     # Synthetic TIFF container models Pillow opening a RAW's thumbnail IFD.
     # RAW decoding itself is stubbed; this exercises the route's size bound.
     Image.new("RGB", (160, 120)).save(path, format="TIFF")
-    fid = db.add_folder(str(root), name="raw")
+    fid = workspace_folders.add_folder(db, str(root), name="raw")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename=path.name, extension=".nef", file_size=path.stat().st_size, file_mtime=path.stat().st_mtime)
     db.conn.execute("UPDATE photos SET width=6000,height=4000 WHERE id=?", (pid,))
     db.conn.commit()

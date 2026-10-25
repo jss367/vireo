@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import raw_analysis as ra
 from PIL import Image
-from services import classify_preflight, detection_store, photo_ingest
+from services import classify_preflight, detection_store, photo_ingest, workspace_folders
 
 
 def test_each_subject_gets_its_own_exposure():
@@ -304,7 +304,7 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder = db.add_folder(str(tmp_path))
+    folder = workspace_folders.add_folder(db, str(tmp_path))
     photo = photo_ingest.add_photo(db, folder, "bird.nef", ".nef", 100, 1)
     db.detections.save(photo, [
         {"box": {"x": x, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.9, "category": "animal"}
@@ -330,7 +330,7 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
 
     db = Database(str(tmp_path / "refresh.db"))
     workspace = db._active_workspace_id
-    folder = db.add_folder(str(tmp_path))
+    folder = workspace_folders.add_folder(db, str(tmp_path))
     photo = photo_ingest.add_photo(db, folder, "bird.nef", ".nef", 100, 1)
     detection = db.detections.save(photo, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
@@ -340,7 +340,7 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
                       taxonomy={"genus": "old"}, labels_fingerprint="labels")
     original_id = db.conn.execute("SELECT id FROM predictions").fetchone()[0]
     other_workspace = db.create_workspace("Other")
-    db.add_workspace_folder(other_workspace, folder)
+    workspace_folders.add_workspace_folder(db, other_workspace, folder)
     db.set_active_workspace(other_workspace)
     db.predictions.add(detection, "Robin", 0.2, "model", status="rejected", labels_fingerprint="labels")
     db.set_active_workspace(workspace)
@@ -404,7 +404,7 @@ def test_reinference_refreshes_burst_metadata(tmp_path, status, new_group):
 
     db = Database(str(tmp_path / "burst.db"))
     workspace = db._active_workspace_id
-    folder = db.add_folder(str(tmp_path))
+    folder = workspace_folders.add_folder(db, str(tmp_path))
     photo = photo_ingest.add_photo(db, folder, "bird.nef", ".nef", 100, 1)
     detection = db.detections.save(photo, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
@@ -433,7 +433,7 @@ def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
     from db import Database
 
     db = Database(str(tmp_path / "recipe.db"))
-    folder = db.add_folder(str(tmp_path))
+    folder = workspace_folders.add_folder(db, str(tmp_path))
     photo = photo_ingest.add_photo(db, folder, "bird.nef", ".nef", 100, 1)
     detection = db.detections.save(photo, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},

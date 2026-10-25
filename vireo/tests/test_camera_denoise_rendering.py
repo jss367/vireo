@@ -11,7 +11,7 @@ from export import load_export_image
 from image_edits import apply_recipe_to_loaded_image
 from PIL import Image
 from preview_materializer import render_preview_bytes
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from thumbnails import generate_all
 
 
@@ -22,7 +22,7 @@ def test_camera_metadata_reaches_all_render_paths(app_and_db, tmp_path):
     source = folder / 'noisy.png'
     pixels = np.clip(120 + np.random.default_rng(13).normal(0, 9, (128, 192, 3)), 0, 255).astype(np.uint8)
     Image.fromarray(pixels).save(source)
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename=source.name, extension='.png',
         width=192, height=128, file_size=source.stat().st_size,
@@ -81,7 +81,7 @@ def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_pa
     source = folder / 'noise.png'
     pixels = np.clip(120 + np.random.default_rng(17).normal(0, 9, (96, 144, 3)), 0, 255).astype(np.uint8)
     Image.fromarray(pixels).save(source)
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(db, folder_id=fid, filename=source.name, extension='.png', width=144, height=96,
                        file_size=source.stat().st_size, file_mtime=source.stat().st_mtime)
     recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 85}}
@@ -173,7 +173,7 @@ def test_exports_use_promoted_camera_fields_without_full_exif_or_metadata_embedd
     source = folder / 'nikon.png'
     pixels = np.clip(120 + np.random.default_rng(23).normal(0, 10, (96, 144, 3)), 0, 255).astype(np.uint8)
     Image.fromarray(pixels).save(source)
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(db, folder_id=fid, filename=source.name, extension='.png', width=144, height=96,
                        file_size=source.stat().st_size, file_mtime=source.stat().st_mtime)
     # This is how extraction stores summary-only metadata when full EXIF is disabled.

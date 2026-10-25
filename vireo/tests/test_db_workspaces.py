@@ -25,7 +25,7 @@ from db import (
     normalize_browse_stack_config,
 )
 from repositories.workspaces import WorkspaceRepository
-from services import workspace_config
+from services import workspace_config, workspace_folders, workspace_lifecycle
 
 
 class _RecordingCache:
@@ -192,7 +192,7 @@ def test_update_workspace_without_fields_is_a_noop(db):
 def test_delete_workspace_commits_and_invalidates_cache(db, cache):
     ws_id = db.create_workspace("Gone")
     cache.invalidated.clear()
-    db.delete_workspace(ws_id)
+    workspace_lifecycle.delete_workspace(db, ws_id)
     with _reader(db) as other:
         assert other.execute(
             "SELECT 1 FROM workspaces WHERE id = ?", (ws_id,)
@@ -209,7 +209,7 @@ def test_delete_workspace_translates_pending_nas_error(db, cache):
     )
     cache.invalidated.clear()
     with pytest.raises(ValueError, match="Send pending photos to NAS"):
-        db.delete_workspace(ws_id)
+        workspace_lifecycle.delete_workspace(db, ws_id)
     assert db.workspaces.get(ws_id) is not None
     assert cache.invalidated == []
 
@@ -222,7 +222,7 @@ def test_delete_workspace_reraises_other_integrity_errors(db, cache):
     )
     cache.invalidated.clear()
     with pytest.raises(sqlite3.IntegrityError, match="some other constraint"):
-        db.delete_workspace(ws_id)
+        workspace_lifecycle.delete_workspace(db, ws_id)
     assert cache.invalidated == []
 
 
@@ -282,7 +282,7 @@ def test_min_detector_confidence_takes_minimum_across_workspaces(db):
     low = db.create_workspace("Low", config_overrides={"detector_confidence": 0.05})
     db.create_workspace("High", config_overrides={"detector_confidence": 0.6})
     assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.3}) == 0.05
-    db.delete_workspace(low)
+    workspace_lifecycle.delete_workspace(db, low)
     assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.3}) == 0.3
 
 
@@ -474,7 +474,7 @@ def test_invalidate_new_images_cache_for_folders_chunks_and_scopes(db, cache):
     ws_a = db._ws_id()
     ws_b = db.create_workspace("B")
     db.create_workspace("Unlinked")
-    folder_ids = [db.add_folder(f"/root/f{i}") for i in range(3)]
+    folder_ids = [workspace_folders.add_folder(db, f"/root/f{i}") for i in range(3)]
     db.conn.execute(
         "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
         (ws_b, folder_ids[2]),
@@ -526,14 +526,15 @@ def test_get_workspace_id_by_name_matches_the_exact_name(db):
 # -- structure: the workspace SQL lives in the repository ---------------------
 
 # Coordinated Database methods over repositories/workspaces.py: each adds the
-# new-images cache upkeep or the restore, so it stays on the façade; none may
-# reach the connection directly again. The snapshot id range check moved into
-# ``WorkspaceRepository.get_new_images_snapshot``.
+# new-images cache upkeep or the restore, and ``__init__`` runs them, so they
+# stay on the façade; none may reach the connection directly again. The
+# snapshot id range check moved into
+# ``WorkspaceRepository.get_new_images_snapshot``. ``delete_workspace`` lives in
+# ``services/workspace_lifecycle.py``.
 _DELEGATING_WORKSPACE_METHODS = (
     "_restore_active_workspace",
     "invalidate_new_images_cache_for_folders",
     "create_workspace",
-    "delete_workspace",
     "ensure_default_workspace",
 )
 
@@ -553,9 +554,11 @@ _REMOVED_WORKSPACE_WRAPPERS = (
     "get_new_images_snapshot",
 )
 
-# Repository methods behind a coordinated ``Database`` method. Production code
-# calls the ``Database`` method instead, so the new-images cache stays right.
+# Repository methods behind a coordinated workflow (``Database.create_workspace``
+# and ``workspace_lifecycle.delete_workspace``). Production code calls the
+# workflow instead, so the new-images cache stays right.
 _FACADE_ONLY_REPOSITORY_METHODS = ("create", "delete")
+_WORKFLOW_MODULES = {"services/workspace_lifecycle.py": "delete"}
 
 
 @pytest.mark.parametrize("name", _DELEGATING_WORKSPACE_METHODS)
@@ -575,6 +578,16 @@ def test_workspace_method_delegates_to_repository(name):
     assert "_workspace_repository" in attrs, (
         f"Database.{name} no longer delegates to WorkspaceRepository"
     )
+
+
+def test_delete_workspace_lives_in_the_lifecycle_service():
+    from services import workspace_lifecycle
+
+    assert not hasattr(Database, "delete_workspace")
+    source = inspect.getsource(workspace_lifecycle.delete_workspace)
+    assert ".conn" not in source
+    assert "db.workspaces.delete(workspace_id)" in source
+    assert "db.invalidate_new_images_cache_for_workspace(workspace_id)" in source
 
 
 def test_update_workspace_shares_the_unset_sentinel_with_the_repository():
@@ -645,8 +658,8 @@ def test_active_workspace_methods_raise_before_anything_without_a_workspace(db):
 def test_catalog_wide_methods_work_without_a_workspace(db):
     """The row methods take an id or span every workspace; none needs one active."""
     other = db.create_workspace("Other")
-    folder = db.add_folder("/ws/linked", link_to_workspace=False)
-    db.add_workspace_folder(other, folder)
+    folder = workspace_folders.add_folder(db, "/ws/linked", link_to_workspace=False)
+    workspace_folders.add_workspace_folder(db, other, folder)
     db.set_active_workspace(None)
     repo = db.workspaces
     assert repo.get(other)["name"] == "Other"
@@ -711,8 +724,12 @@ def test_production_code_creates_and_deletes_workspaces_through_the_facade():
         if rel.parts[0] in ("tests", "repositories") or rel.name == "db.py":
             continue
         text = path.read_text(encoding="utf-8")
-        offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
+        allowed = _WORKFLOW_MODULES.get(rel.as_posix())
+        offenders += [
+            f"{rel}: {m.group(0)}" for m in pattern.finditer(text)
+            if m.group(1) != allowed
+        ]
     assert offenders == [], (
-        "Call db.create_workspace / db.delete_workspace "
+        "Call db.create_workspace / workspace_lifecycle.delete_workspace "
         f"instead: {offenders}"
     )

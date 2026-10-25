@@ -14,7 +14,7 @@ import pytest
 from db import Database
 from export import _get_photo_camera_data, _get_photo_exif_data
 from repositories.photo_metadata import PhotoMetadataRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 CAMERA = {
     "camera_make": "Canon", "camera_model": "R5", "lens": "RF 100-500",
@@ -24,7 +24,7 @@ CAMERA = {
 
 @pytest.fixture
 def photos(db, tmp_path):
-    folder = db.add_folder(str(tmp_path), name="photos")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     ids = [
         photo_ingest.add_photo(db, folder_id=folder, filename=name, extension=".jpg",
                      file_size=100, file_mtime=1.0)

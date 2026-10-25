@@ -20,7 +20,7 @@ from card_cleanup import (
     write_manifest,
 )
 from scanner import compute_file_hash as _sha
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _manifest(tmp_path, **overrides):
@@ -311,7 +311,7 @@ def _archive_photo(db, tmp_path, name="IMG_0001.NEF", content=b"raw-one",
     f = folder_path / name
     f.write_bytes(content)
     st = os.stat(f)
-    fid = db.add_folder(str(folder_path))
+    fid = workspace_folders.add_folder(db, str(folder_path))
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename=name, extension=os.path.splitext(name)[1],
         file_size=st.st_size, file_mtime=st.st_mtime,
@@ -944,7 +944,7 @@ def test_scoped_verify_terminal_alias_promotes_to_inside_source(
     except (OSError, NotImplementedError):
         pytest.skip("hardlinks unsupported on this filesystem")
     st = os.stat(alias)
-    fid = db.add_folder(str(folder_path))
+    fid = workspace_folders.add_folder(db, str(folder_path))
     photo_ingest.add_photo(
         db, folder_id=fid, filename="IMG_0001.NEF", extension=".NEF",
         file_size=st.st_size, file_mtime=st.st_mtime,
@@ -991,7 +991,7 @@ def test_scoped_verify_keeps_pending_when_alias_and_transient_row_coexist(
     except (OSError, NotImplementedError):
         pytest.skip("hardlinks unsupported on this filesystem")
     alias_st = os.stat(alias)
-    alias_fid = db.add_folder(str(alias_folder))
+    alias_fid = workspace_folders.add_folder(db, str(alias_folder))
     photo_ingest.add_photo(
         db, folder_id=alias_fid, filename="IMG_0001.NEF", extension=".NEF",
         file_size=alias_st.st_size, file_mtime=alias_st.st_mtime,
@@ -1005,7 +1005,7 @@ def test_scoped_verify_keeps_pending_when_alias_and_transient_row_coexist(
     real_archive = real_folder / "IMG_0001.NEF"
     real_archive.write_bytes(b"raw-one")
     real_st = os.stat(real_archive)
-    real_fid = db.add_folder(str(real_folder))
+    real_fid = workspace_folders.add_folder(db, str(real_folder))
     photo_ingest.add_photo(
         db, folder_id=real_fid, filename="IMG_0001.NEF", extension=".NEF",
         file_size=real_st.st_size, file_mtime=real_st.st_mtime,
@@ -1055,7 +1055,7 @@ def test_scoped_verify_terminal_alias_does_not_mask_persisted_external_failure(
     # reclassification's row scan.
     external_folder = tmp_path / "archive" / "2026"
     external_folder.mkdir(parents=True)
-    external_fid = db.add_folder(str(external_folder))
+    external_fid = workspace_folders.add_folder(db, str(external_folder))
     external_pid = photo_ingest.add_photo(
         db, folder_id=external_fid, filename="IMG_0001.NEF", extension=".NEF",
         file_size=len(b"raw-one"), file_mtime=1000.0,
@@ -1074,7 +1074,7 @@ def test_scoped_verify_terminal_alias_does_not_mask_persisted_external_failure(
     except (OSError, NotImplementedError):
         pytest.skip("hardlinks unsupported on this filesystem")
     alias_st = os.stat(alias)
-    alias_fid = db.add_folder(str(alias_folder))
+    alias_fid = workspace_folders.add_folder(db, str(alias_folder))
     photo_ingest.add_photo(
         db, folder_id=alias_fid, filename="IMG_0001.NEF", extension=".NEF",
         file_size=alias_st.st_size, file_mtime=alias_st.st_mtime,
@@ -1117,7 +1117,7 @@ def test_scoped_verify_surfaces_new_failed_archive_beside_unchecked_alias(
     except (OSError, NotImplementedError):
         pytest.skip("hardlinks unsupported on this filesystem")
     alias_st = os.stat(alias)
-    alias_fid = db.add_folder(str(alias_folder))
+    alias_fid = workspace_folders.add_folder(db, str(alias_folder))
     alias_pid = photo_ingest.add_photo(
         db, folder_id=alias_fid, filename=alias.name, extension=".NEF",
         file_size=alias_st.st_size, file_mtime=alias_st.st_mtime,
@@ -1129,7 +1129,7 @@ def test_scoped_verify_surfaces_new_failed_archive_beside_unchecked_alias(
     failed_archive = failed_folder / "IMG_0001.NEF"
     failed_archive.write_bytes(b"bad-copy")
     failed_st = os.stat(failed_archive)
-    failed_fid = db.add_folder(str(failed_folder))
+    failed_fid = workspace_folders.add_folder(db, str(failed_folder))
     failed_pid = photo_ingest.add_photo(
         db, folder_id=failed_fid, filename=failed_archive.name, extension=".NEF",
         file_size=failed_st.st_size, file_mtime=failed_st.st_mtime,
@@ -1398,7 +1398,7 @@ def test_qualify_rejects_hardlink_alias_of_card_file(db, tmp_path):
     except (OSError, NotImplementedError):
         pytest.skip("hardlinks unsupported on this filesystem")
     st = os.stat(alias)
-    fid = db.add_folder(str(folder_path))
+    fid = workspace_folders.add_folder(db, str(folder_path))
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="IMG_0001.NEF", extension=".NEF",
         file_size=st.st_size, file_mtime=st.st_mtime,

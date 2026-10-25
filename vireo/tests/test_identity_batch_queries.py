@@ -1,7 +1,7 @@
 """Bound full-catalog identity resolution work for a multi-photo decision."""
 import pytest
 from db import Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
 
@@ -9,7 +9,7 @@ from services.identity_alternatives import resolve_alternatives, save_alternativ
 def test_identity_batch_bounds_full_keyword_scans(tmp_path, operation):
     db = Database(str(tmp_path / 'batch.db'))
     try:
-        folder = db.add_folder(str(tmp_path / 'photos'))
+        folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
         photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg', file_size=1, file_mtime=1) for i in range(20)]
         db.conn.executemany("INSERT INTO keywords(name,type,is_species) VALUES (?,'taxonomy',1)", [(f'Catalog species {i}',) for i in range(2000)])
         db.commit()
@@ -42,7 +42,7 @@ def test_identity_batch_bounds_full_keyword_scans(tmp_path, operation):
 def test_resolution_refreshes_identity_after_keyword_creation_in_same_transaction(tmp_path):
     db = Database(str(tmp_path / 'creation.db'))
     try:
-        folder = db.add_folder(str(tmp_path / 'photos'))
+        folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
         photo = photo_ingest.add_photo(db, folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=1, file_mtime=1)
         common = db.add_keyword('Choice')  # promoted by resolution, not a species yet
         alias = db.add_keyword('Scientific alias', is_species=True, source_taxon_id=99001)
@@ -69,7 +69,7 @@ def test_batch_identity_reuse_keeps_each_photo_association_check_live(tmp_path, 
     from services.identity_alternatives import IdentityHistoryStale
     db = Database(str(tmp_path / 'live.db'))
     try:
-        folder = db.add_folder(str(tmp_path / 'photos'))
+        folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
         photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
         keyword = db.add_keyword('Heron', is_species=True)
         original = IdentityAlternativesRepository.set_state
@@ -99,7 +99,7 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
         first = db.require_workspace_id()
         second = db.create_workspace('Shared homonym lookup')
         db.set_active_workspace(first)
-        db.add_workspace_folder(second, db.photos.get(photo)['folder_id'])
+        workspace_folders.add_workspace_folder(db, second, db.photos.get(photo)['folder_id'])
         db.conn.execute('INSERT INTO taxa(id,inat_id,name,rank) VALUES (99001,101,?,?)', ('Puma', rank))
         db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (99002,102,'Puma concolor','Cougar','species')")
         db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES (99002,'Puma')")
@@ -136,7 +136,7 @@ def test_photo_collapse_without_identity_names_skips_taxonomy_scans(tmp_path):
     from repositories.identity_alternatives import remap_identity_keyword_intents
 
     with Database(str(tmp_path / 'ordinary-collapse.db')) as db:
-        folder = db.add_folder(str(tmp_path / 'photos'))
+        folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
         photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg',
                                          extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
         db.conn.executemany("INSERT INTO keywords(name,type,is_species) VALUES (?,'taxonomy',1)",

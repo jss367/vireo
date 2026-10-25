@@ -20,7 +20,7 @@ import db as db_module
 import pytest
 from db import AUTO_MATCH_REVIEW_MARKER, Database
 from repositories.model_runs import ModelRunsRepository
-from services import classify_preflight, detection_store, photo_ingest
+from services import classify_preflight, detection_store, photo_ingest, workspace_folders
 
 MODEL = "BioCLIP-2.5"
 
@@ -38,7 +38,7 @@ def _reader(db):
 
 
 def _folder(db):
-    return db.add_folder("/photos", name="photos")
+    return workspace_folders.add_folder(db, "/photos", name="photos")
 
 
 def _photo(db, name, folder_id=None):

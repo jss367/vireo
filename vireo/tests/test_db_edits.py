@@ -18,7 +18,7 @@ import pytest
 from db import Database
 from image_edits import RecipeError
 from repositories.edits import EditsRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @contextlib.contextmanager
@@ -39,9 +39,9 @@ def _photo(db, folder_id, name):
 @pytest.fixture
 def photos(db, tmp_path):
     """One photo in the active workspace, one in an unlinked folder."""
-    inside_folder = db.add_folder(str(tmp_path / "inside"))
-    outside_folder = db.add_folder(
-        str(tmp_path / "outside"), link_to_workspace=False
+    inside_folder = workspace_folders.add_folder(db, str(tmp_path / "inside"))
+    outside_folder = workspace_folders.add_folder(
+        db, str(tmp_path / "outside"), link_to_workspace=False
     )
     return _photo(db, inside_folder, "in.jpg"), _photo(db, outside_folder, "out.jpg")
 
@@ -204,7 +204,7 @@ def test_get_recipes_empty_input_needs_no_workspace(db):
 
 def test_get_recipes_maps_ids_and_skips_bad_empty_and_missing(db, photos, caplog):
     inside, outside = photos
-    folder = db.add_folder("/tmp/more")
+    folder = workspace_folders.add_folder(db, "/tmp/more")
     bad = _photo(db, folder, "bad.jpg")
     empty = _photo(db, folder, "empty.jpg")
     missing = _photo(db, folder, "missing.jpg")
@@ -229,7 +229,7 @@ def test_get_recipes_accepts_any_iterable(db, photos):
 
 
 def test_get_recipes_chunks_past_the_sqlite_parameter_limit(db, tmp_path):
-    folder = db.add_folder(str(tmp_path / "many"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "many"))
     db.conn.executemany(
         "INSERT INTO photos (folder_id, filename, extension, file_size, file_mtime) "
         "VALUES (?, ?, '.jpg', 1, 1.0)",

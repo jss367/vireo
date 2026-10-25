@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from services.analysis_retry import explain_selected, run_retry
 from testing.waits import synchronization_timeout
 from web.background_jobs import JobCancelled
@@ -15,7 +15,7 @@ from web.background_jobs import JobCancelled
 @pytest.fixture
 def retry_library(app_and_db, tmp_path, monkeypatch):
     app, db = app_and_db
-    folder = db.add_folder(str(tmp_path), name="Selected analysis")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Selected analysis")
     ids = []
     for i in range(3):
         path = tmp_path / f"duck-{i}.jpg"
@@ -253,7 +253,7 @@ def test_visibility_removed_during_inference_never_publishes(retry_library, tmp_
     folder_id = db.photos.get(ids[0])["folder_id"]
     def hide_during_analysis(*args, **kwargs):
         pixels = original(*args, **kwargs)
-        db.remove_workspace_folder(db.require_workspace_id(), folder_id)
+        workspace_folders.remove_workspace_folder(db, db.require_workspace_id(), folder_id)
         return pixels
     monkeypatch.setattr("masking.generate_mask", hide_during_analysis)
     result, _ = execute(db, [ids[0]], tmp_path)
@@ -557,7 +557,7 @@ def test_eye_fingerprint_records_model_attempts_without_stamping_skips(retry_lib
 def test_visibility_lost_between_validation_and_feature_read_does_not_abort_batch(retry_library, tmp_path, monkeypatch, race_read):
     from services import analysis_retry
     _, db, ids, calls = retry_library
-    removed_folder = db.add_folder(str(tmp_path / "removable"), name="Removed during read")
+    removed_folder = workspace_folders.add_folder(db, str(tmp_path / "removable"), name="Removed during read")
     db.conn.execute("UPDATE photos SET folder_id=? WHERE id=?", (removed_folder, ids[0]))
     db.commit()
     original = analysis_retry._current
@@ -566,7 +566,7 @@ def test_visibility_lost_between_validation_and_feature_read_does_not_abort_batc
         if selected == [ids[0]]:
             reads.append(True)
             if len(reads) == race_read:
-                db.remove_workspace_folder(db.require_workspace_id(), removed_folder)
+                workspace_folders.remove_workspace_folder(db, db.require_workspace_id(), removed_folder)
         return original(worker, selected, effective)
     monkeypatch.setattr(analysis_retry, "_current", hide_during_read)
     # The original source remains a scratch image even if the race occurs after detection.

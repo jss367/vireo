@@ -22,7 +22,7 @@ from db import Database
 from detection_id import detection_id
 from repositories.detections import DetectionsRepository
 from repositories.model_runs import ModelRunsRepository
-from services import detection_store, miss_flags, photo_ingest
+from services import detection_store, miss_flags, photo_ingest, workspace_folders
 
 MODEL = "megadetector-v6"
 
@@ -40,7 +40,7 @@ def _reader(db):
 
 
 def _folder(db, path="/photos"):
-    return db.add_folder(path, name=path.strip("/") or "root")
+    return workspace_folders.add_folder(db, path, name=path.strip("/") or "root")
 
 
 def _photo(db, name="a.jpg", folder_id=None, timestamp=None):

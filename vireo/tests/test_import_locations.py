@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import places
 import pytest
-from services import import_locations, photo_ingest
+from services import import_locations, photo_ingest, workspace_folders
 from services.gps_locations import (
     REVERSE_GEOCODE_CACHE_RESOLVER,
     encode_cached_reverse_geocode,
@@ -32,7 +32,7 @@ FAR_AWAY = (40.7851, -73.9683)
 
 @pytest.fixture
 def fid(db):
-    return db.add_folder("/photos", name="photos")
+    return workspace_folders.add_folder(db, "/photos", name="photos")
 
 
 def _photo(db, fid, name, point=None):

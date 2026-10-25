@@ -12,7 +12,7 @@ from keyword_identity import (
     reconcile_location,
     resolve_import_path,
 )
-from services import dashboard_stats, photo_ingest
+from services import dashboard_stats, photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -20,8 +20,8 @@ def catalog(tmp_path):
     db = Database(str(tmp_path / 'identity.db'))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder = db.add_folder(str(tmp_path / 'photos'), name='Photos')
-    db.add_workspace_folder(ws, folder)
+    folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'), name='Photos')
+    workspace_folders.add_workspace_folder(db, ws, folder)
     photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg',
                            file_size=10, file_mtime=1,
                            timestamp=f'2024-0{6 if i < 2 else 7}-15T10:00:00')
@@ -110,8 +110,8 @@ def test_dashboard_does_not_borrow_species_labels_from_other_workspaces(catalog)
     db.tag_photo(photos[0], leaf)
     other = db.create_workspace('Another vocabulary')
     db.set_active_workspace(other)
-    folder = db.add_folder('/other-vocabulary', name='Other')
-    db.add_workspace_folder(other, folder)
+    folder = workspace_folders.add_folder(db, '/other-vocabulary', name='Other')
+    workspace_folders.add_workspace_folder(db, other, folder)
     photo = photo_ingest.add_photo(db, folder_id=folder, filename='other.jpg', extension='.jpg', file_size=10, file_mtime=1)
     db.tag_photo(photo, root)
     db.set_active_workspace(workspace)
@@ -503,7 +503,7 @@ def test_manual_merge_preview_and_cross_workspace_sidecar_updates(catalog):
     ws = db._ws_id()
     other = db.create_workspace('Shared photos')
     folder = db.conn.execute('SELECT folder_id FROM photos WHERE id = ?', (photos[0],)).fetchone()[0]
-    db.add_workspace_folder(other, folder)
+    workspace_folders.add_workspace_folder(db, other, folder)
     selection = [source, target]
     preview = preview_keyword_merge(db, selection, target)
     assert preview['combined_count'] == 3
@@ -1792,8 +1792,8 @@ def test_manual_merge_count_includes_retained_children_and_other_workspaces(cata
     ws = db._ws_id()
     other = db.create_workspace('Other workspace')
     db.set_active_workspace(other)
-    folder = db.add_folder('/other-merge-photos', name='Other photos')
-    db.add_workspace_folder(other, folder)
+    folder = workspace_folders.add_folder(db, '/other-merge-photos', name='Other photos')
+    workspace_folders.add_workspace_folder(db, other, folder)
     photo = photo_ingest.add_photo(db, folder_id=folder, filename='elsewhere.jpg', extension='.jpg', file_size=1, file_mtime=1)
     db.tag_photo(photo, source)
     db.set_active_workspace(ws)
@@ -1930,8 +1930,8 @@ def test_catalog_import_matches_windows_paths_across_separator_and_case(catalog,
     db, _ = catalog
     monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
     monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
-    folder = db.add_folder('D:\\Pictures\\Trip', name='Trip')
-    db.add_workspace_folder(db._ws_id(), folder)
+    folder = workspace_folders.add_folder(db, 'D:\\Pictures\\Trip', name='Trip')
+    workspace_folders.add_workspace_folder(db, db._ws_id(), folder)
     photo = photo_ingest.add_photo(db, folder_id=folder, filename='DSC_1.jpg', extension='.jpg',
                          file_size=10, file_mtime=1, timestamp='2024-06-15T10:00:00')
     monkeypatch.setattr('importer.read_catalog', lambda *args, **kwargs: {
@@ -1960,7 +1960,7 @@ def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp
     ws = db._ws_id()
     other = db.create_workspace('Shared sidecar')
     folder = db.conn.execute('SELECT folder_id FROM photos WHERE id = ?', (photos[1],)).fetchone()[0]
-    db.add_workspace_folder(other, folder)
+    workspace_folders.add_workspace_folder(db, other, folder)
     for workspace in (ws, other):
         db.queue_change(photos[1], 'keyword_remove', 'Old spelling', workspace_id=workspace)
     before = [dict(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
@@ -2040,8 +2040,8 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
     directory = tmp_path / 'merge-photo'
     directory.mkdir()
     Image.new('RGB', (2, 2)).save(directory / 'photo.jpg')
-    folder = db.add_folder(str(directory), name='Merge photo')
-    db.add_workspace_folder(db._ws_id(), folder)
+    folder = workspace_folders.add_folder(db, str(directory), name='Merge photo')
+    workspace_folders.add_workspace_folder(db, db._ws_id(), folder)
     photo = photo_ingest.add_photo(db, folder_id=folder, filename='photo.jpg', extension='.jpg', file_size=1, file_mtime=1)
     old_parent = db.add_keyword('Old parent')
     new_parent = db.add_keyword('New parent')
@@ -2094,8 +2094,8 @@ def test_cancel_unrelated_homonym_add_preserves_existing_hierarchy(app_and_db, t
     client = app.test_client()
     directory = tmp_path / 'homonym-photo'
     directory.mkdir()
-    folder = db.add_folder(str(directory), name='Homonym photo')
-    db.add_workspace_folder(db._ws_id(), folder)
+    folder = workspace_folders.add_folder(db, str(directory), name='Homonym photo')
+    workspace_folders.add_workspace_folder(db, db._ws_id(), folder)
     photo = photo_ingest.add_photo(db, folder_id=folder, filename='photo.jpg', extension='.jpg', file_size=1, file_mtime=1)
     people = db.add_keyword('People', kw_type='individual')
     individual = db.add_keyword('Robin', parent_id=people, kw_type='individual')

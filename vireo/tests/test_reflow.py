@@ -9,7 +9,7 @@ from repositories.masks_features import MaskQuality, PipelineFeatures
 from subject_readiness import REQUIRED_QUALITY_FIELDS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _setup_db(tmp_path):
@@ -21,7 +21,7 @@ def _setup_db(tmp_path):
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
     cfg.save({"pipeline": {"sam2_variant": "sam2-small"}})
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     base = datetime(2026, 3, 20, 10, 0, 0)
     emb = np.ones(768, dtype=np.float32)

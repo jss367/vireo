@@ -14,7 +14,7 @@ import pytest
 from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from services import detection_store, photo_ingest, subject_masks
+from services import detection_store, photo_ingest, subject_masks, workspace_folders
 
 
 def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
@@ -26,7 +26,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
     from dino_embed import embedding_to_blob
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     base_time = datetime(2026, 3, 20, 10, 0, 0)
     all_ids = []
@@ -163,7 +163,7 @@ def test_load_photo_features_no_predictions(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="root")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="root")
     photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 100, 1.0)
 
     photos = load_photo_features(db)
@@ -183,7 +183,7 @@ def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     # Photo A: real detection at conf 0.9 (well above default 0.2 threshold).
     # write_detection_batch records both the detection rows AND a
@@ -241,7 +241,7 @@ def test_load_photo_features_rescues_bracketed_weak_grackle_run(
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     base = datetime(2026, 7, 18, 8, 36, 35, 990000)
     confidences = [0.229, 0.185, 0.156, 0.149, 0.172, 0.193, 0.186, 0.798]
     photo_ids = []
@@ -314,7 +314,7 @@ def test_load_photo_features_does_not_rescue_conflicting_species_anchors(
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     ids = []
     detection_ids = []
     for index, confidence in enumerate((0.9, 0.18, 0.9)):
@@ -356,7 +356,7 @@ def test_load_photo_features_subject_absent_false_when_detector_never_ran(tmp_pa
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     # Photo C: no detections, no detector_runs row — pristine "never run".
     pid_c = photo_ingest.add_photo(db, fid, "c.jpg", ".jpg", 100, 1.0)
@@ -384,7 +384,7 @@ def test_load_photo_features_subject_absent_ignores_non_mdv6_detections(tmp_path
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     # Lower the workspace's detector_confidence to 0.0 so a confidence=0
     # synthetic full-image row WOULD pass the threshold if not filtered.
@@ -418,7 +418,7 @@ def test_load_photo_features_subject_present_when_mdv6_passes_threshold(tmp_path
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     pid = photo_ingest.add_photo(db, fid, "duck.jpg", ".jpg", 100, 1.0)
     detection_store.write_detection_batch(db, pid, "megadetector-v6", [
@@ -440,7 +440,7 @@ def test_load_photo_features_subject_present_false_when_detector_unrun(tmp_path)
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     pid = photo_ingest.add_photo(db, fid, "fresh.jpg", ".jpg", 100, 1.0)
     db.conn.commit()
 
@@ -459,7 +459,7 @@ def test_load_photo_features_subject_absent_true_for_empty_scene_run(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     pid = photo_ingest.add_photo(db, fid, "empty.jpg", ".jpg", 100, 1.0)
     detection_store.write_detection_batch(db, pid, "megadetector-v6", [])  # empty scene
@@ -873,9 +873,9 @@ def _make_db_with_ids(tmp_path, ids, workspace_id=1, link_folder=True):
     catalog = tmp_path / "catalog"
     catalog.mkdir(exist_ok=True)
     db = Database(str(catalog / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     if not link_folder:
-        db.remove_workspace_folder(workspace_id, fid)
+        workspace_folders.remove_workspace_folder(db, workspace_id, fid)
     for pid in ids:
         # add_photo auto-assigns id, so we override via raw SQL after
         # insertion to pin the row to the desired id.
@@ -1034,7 +1034,7 @@ def test_compute_review_readiness_no_masks(tmp_path):
     from pipeline import compute_review_readiness
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     base_time = datetime(2026, 3, 20, 10, 0, 0)
     for i in range(5):
         ts = base_time + timedelta(seconds=i * 2)
@@ -1112,7 +1112,7 @@ def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
     from pipeline import compute_review_readiness
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     base_time = datetime(2026, 3, 20, 10, 0, 0)
     pids = []
     for i in range(4):
@@ -1161,7 +1161,7 @@ def test_compute_review_readiness_below_threshold_uses_ceiling(tmp_path):
     from pipeline import compute_review_readiness
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     base_time = datetime(2026, 3, 20, 10, 0, 0)
     pids = []
     for i in range(5):
@@ -1240,7 +1240,7 @@ def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_pa
     from pipeline import compute_review_readiness
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     pids = [
         photo_ingest.add_photo(
             db, fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
@@ -1286,7 +1286,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
     from pipeline import EYE_KP_FINGERPRINT_VERSION, compute_review_readiness
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     pid = photo_ingest.add_photo(
         db, fid, "photo.jpg", ".jpg", 1000, 1.0,
         timestamp=datetime(2026, 3, 20, 10, 0, 0).isoformat(),
@@ -1384,7 +1384,7 @@ def test_compute_review_readiness_eye_target_excludes_out_of_scope_taxonomy(tmp_
     from pipeline import compute_review_readiness
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     # Out-of-scope species: dragonflies aren't birds or mammals, so the
     # stage's _resolve_keypoint_model returns None and the photo is skipped
     # without stamping a fingerprint. It must not appear in the target.
@@ -1412,7 +1412,7 @@ def test_compute_review_readiness_eye_target_excludes_low_confidence(tmp_path):
     cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     _add_eligible_photo(db, fid, "shy.jpg", 0.3, taxonomy_class="Aves")
 
     out = compute_review_readiness(db)
@@ -1439,7 +1439,7 @@ def test_compute_review_readiness_eye_target_includes_routable_above_gate(tmp_pa
     })
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     _add_eligible_photo(db, fid, "bird.jpg", 0.9, taxonomy_class="Aves")
 
     out = compute_review_readiness(db)
@@ -1470,7 +1470,7 @@ def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
     })
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     _add_eligible_photo(db, fid, "shy.jpg", 0.3, taxonomy_class="Aves")
 
     out_strict = compute_review_readiness(db)
@@ -1520,7 +1520,7 @@ def test_compute_review_readiness_eye_target_honors_workspace_pipeline_override(
         config_overrides={"pipeline": {"eye_classifier_conf_gate": 0.2}},
     )
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     # Species confidence 0.3 sits between the global gate (0.5) and the
     # workspace override (0.2): excluded if the workspace override is
     # ignored, included if it's honored.
@@ -1555,7 +1555,7 @@ def test_compute_review_readiness_suppresses_eye_gap_when_detection_disabled(tmp
     })
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     # An Aves photo above the confidence gate would count toward the eye
     # target if the feature were on — it's the same shape that
     # ``test_..._eye_target_includes_routable_above_gate`` uses to
@@ -1911,7 +1911,7 @@ def test_load_photo_features_preserves_subject_boxes_and_predictions(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id, "two-birds.jpg", ".jpg", 1000, 1.0,
         width=4000, height=3000,
@@ -1971,8 +1971,8 @@ def test_load_photo_features_filters_to_latest_fingerprint(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p")
-    db.add_workspace_folder(ws, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -2015,7 +2015,7 @@ def test_load_photo_features_collection_scoped(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     p1 = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 1000, 1.0, timestamp="2026-01-01T10:00:00")
     p2 = photo_ingest.add_photo(db, fid, "b.jpg", ".jpg", 1000, 1.0, timestamp="2026-01-01T11:00:00")
@@ -2041,7 +2041,7 @@ def test_load_photo_features_scoped_read_allows_later_concurrent_writes(tmp_path
 
     db_path = str(tmp_path / "test.db")
     reader = Database(db_path)
-    fid = reader.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(reader, str(tmp_path), name="photos")
     photo_id = photo_ingest.add_photo(reader, fid, "a.jpg", ".jpg", 1000, 1.0)
     writer = Database(db_path)
     writer.set_active_workspace(reader._active_workspace_id)
@@ -2073,7 +2073,7 @@ def test_load_photo_features_preserves_callers_transaction(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     photo_id = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 1000, 1.0)
     db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (photo_id,))
     assert db.conn.in_transaction is True
@@ -2341,7 +2341,7 @@ def test_load_photo_features_filters_variant_mismatch(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     # Photo A: stored as vit-b14 (768-dim)
     emb_b = np.ones(768, dtype=np.float32) / np.sqrt(768)
@@ -2369,7 +2369,7 @@ def test_load_photo_features_legacy_null_variant_dim_fallback(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     # Legacy 768-dim embedding, NULL variant
     emb_768 = np.ones(768, dtype=np.float32) / np.sqrt(768)
@@ -2392,7 +2392,7 @@ def test_load_photo_features_no_variant_configured_keeps_embeddings(tmp_path):
     from pipeline import load_photo_features
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     emb = np.ones(768, dtype=np.float32) / np.sqrt(768)
     pid = _add_photo_with_embedding(db, fid, "a.jpg", emb, variant=None)
@@ -2416,8 +2416,8 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._active_workspace_id  # auto-created Default workspace
-    fid = db.add_folder(str(tmp_path), name="photos")
-    db.add_workspace_folder(ws_id, fid)
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
+    workspace_folders.add_workspace_folder(db, ws_id, fid)
 
     pid = photo_ingest.add_photo(
         db, fid,
@@ -2562,8 +2562,8 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
     db, pid = _setup_eligible_mammal_photo(tmp_path)
 
     # Add a second eligible photo not in the collection.
-    fid = db.add_folder(str(tmp_path / "other"), name="other")
-    db.add_workspace_folder(db._active_workspace_id, fid)
+    fid = workspace_folders.add_folder(db, str(tmp_path / "other"), name="other")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
     other_pid = photo_ingest.add_photo(
         db, fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
@@ -2639,8 +2639,8 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
     # a single-photo stage would exercise only the tail of the loop and
     # miss the "next iteration's ``abort_check()`` observes the cancel"
     # timing bug this test guards.
-    fid = db.add_folder(str(tmp_path / "other"), name="other")
-    db.add_workspace_folder(db._active_workspace_id, fid)
+    fid = workspace_folders.add_folder(db, str(tmp_path / "other"), name="other")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
     other_pid = photo_ingest.add_photo(
         db, fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
@@ -2735,8 +2735,8 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
 
     db, pid = _setup_eligible_mammal_photo(tmp_path)
 
-    fid = db.add_folder(str(tmp_path / "other"), name="other")
-    db.add_workspace_folder(db._active_workspace_id, fid)
+    fid = workspace_folders.add_folder(db, str(tmp_path / "other"), name="other")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
     other_pid = photo_ingest.add_photo(
         db, fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
@@ -2814,8 +2814,8 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._active_workspace_id
-    fid = db.add_folder(str(tmp_path), name="photos")
-    db.add_workspace_folder(ws_id, fid)
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
+    workspace_folders.add_workspace_folder(db, ws_id, fid)
 
     img_w, img_h = img_size
     img = Image.new("RGB", (img_w, img_h), color=(128, 128, 128))
@@ -3454,8 +3454,8 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._active_workspace_id
-    fid = db.add_folder(str(tmp_path), name="photos")
-    db.add_workspace_folder(ws_id, fid)
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
+    workspace_folders.add_workspace_folder(db, ws_id, fid)
 
     pid = photo_ingest.add_photo(
         db, fid, "bird.jpg", ".jpg", 1000, 1.0,
@@ -4035,7 +4035,7 @@ def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkey
     db = Database(str(tmp_path/'yellowthroat.db'))
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES(1,9721,'Geothlypis trichas','Common Yellowthroat','species')")
     db.conn.commit()
-    fid = db.add_folder(str(tmp_path/'photos'))
+    fid = workspace_folders.add_folder(db, str(tmp_path/'photos'))
     base = datetime(2026, 10, 3, 9, 10, 24, 410000)
     offsets = [0, *[1.68+i*0.05 for i in range(10)], 2.56, 2.63, 2.68]
     ids = []
@@ -4094,7 +4094,7 @@ def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch, detecto
 
     monkeypatch.setattr(cfg, 'CONFIG_PATH', str(tmp_path / 'config.json'))
     db = Database(str(tmp_path / 'top-k.db'))
-    fid = db.add_folder(str(tmp_path / 'photos'))
+    fid = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
     ids = []
     for i in range(3):
         pid = photo_ingest.add_photo(db, fid, f'{i}.jpg', '.jpg', 100, 1,

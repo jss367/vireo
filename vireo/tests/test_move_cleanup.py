@@ -5,7 +5,7 @@ import os
 
 import pytest
 from move_cleanup import cleanup_source, finish_source, review_source
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from testing.waits import synchronization_timeout
 
 
@@ -15,7 +15,7 @@ def cleanup_case(app_and_db, tmp_path):
     source = tmp_path / "original"
     source.mkdir()
     (source / "orphan.xmp").write_text("editing settings")
-    folder_id = db.add_folder(str(source), name="original")
+    folder_id = workspace_folders.add_folder(db, str(source), name="original")
     # Persisted history exercises jobs created before the cleanup feature,
     # including a restart (no matching in-memory job).
     db.conn.execute(
@@ -98,7 +98,7 @@ def test_cleanup_refuses_cataloged_photos_in_another_workspace(cleanup_case):
     db.set_active_workspace(ws)
     child = source / "child"
     child.mkdir()
-    fid = db.add_folder(str(child), name="child")
+    fid = workspace_folders.add_folder(db, str(child), name="child")
     photo_ingest.add_photo(db, folder_id=fid, filename="keep.NEF", extension=".NEF", file_size=1, file_mtime=1)
     with pytest.raises(ValueError, match="cataloged photos"):
         cleanup_source(db, str(source), review["review_token"], lambda paths: pytest.fail("Trash called"))
@@ -140,7 +140,7 @@ def test_cleanup_retires_empty_child_catalog_rows(cleanup_case):
     _, db, source, folder_id = cleanup_case
     child = source / "nested"
     child.mkdir()
-    child_id = db.add_folder(str(child), name="nested", parent_id=folder_id)
+    child_id = workspace_folders.add_folder(db, str(child), name="nested", parent_id=folder_id)
     review = review_source(db, str(source))
 
     def trash(paths):
@@ -156,7 +156,7 @@ def test_shared_empty_folder_and_membership_are_retained(cleanup_case):
     _, db, source, folder_id = cleanup_case
     (source / "orphan.xmp").unlink()
     other_workspace = db.create_workspace("Shared folder workspace")
-    db.add_workspace_folder(other_workspace, folder_id)
+    workspace_folders.add_workspace_folder(db, other_workspace, folder_id)
     result = finish_source(db, str(source))
     assert result["state"] == "unavailable"
     assert "another workspace" in result["error"]
@@ -334,7 +334,7 @@ def test_case_alias_catalog_rows_are_protected(cleanup_case, monkeypatch, tracke
         photo_ingest.add_photo(db, folder_id=folder_id, filename="orphan.NEF", extension=".NEF", file_size=1, file_mtime=1)
     else:
         other = db.create_workspace("Alias workspace")
-        db.add_workspace_folder(other, folder_id)
+        workspace_folders.add_workspace_folder(db, other, folder_id)
     original_exists, original_samefile = os.path.exists, os.path.samefile
 
     def exists(path):
@@ -407,14 +407,14 @@ def test_staged_source_mappings_block_cleanup_after_catalog_rebase(cleanup_case,
 @pytest.mark.parametrize("removed", [False, True])
 def test_recursive_workspace_ownership_respects_explicit_removal(cleanup_case, removed):
     app, db, source, folder_id = cleanup_case
-    parent_id = db.add_folder(str(source.parent), name="Library root")
+    parent_id = workspace_folders.add_folder(db, str(source.parent), name="Library root")
     other = db.create_workspace("Recursive library")
-    db.add_workspace_folder(other, parent_id)
+    workspace_folders.add_workspace_folder(db, other, parent_id)
     # Model a descendant whose inherited membership has not materialized yet.
     db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?", (other, folder_id))
     db.conn.commit()
     if removed:
-        db.remove_workspace_folder_tree(other, folder_id)
+        workspace_folders.remove_workspace_folder_tree(db, other, folder_id)
     response = app.test_client().get(URL)
     if removed:
         assert response.status_code == 200, response.json

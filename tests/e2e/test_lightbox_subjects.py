@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from playwright.sync_api import expect
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 
 def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path):
@@ -19,7 +19,7 @@ def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path
     texture = np.indices((220, 210)).sum(axis=0) // 8 % 2
     pixels[80:300, 380:590] = np.where(texture[..., None], (190, 160, 80), (65, 95, 95))
     Image.fromarray(pixels).save(path)
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_id = photo_ingest.add_photo(db, folder_id, path.name, extension='.jpg',
                            file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                            width=640, height=400)
@@ -69,7 +69,7 @@ def test_existing_photo_can_analyze_without_rerunning_models(live_server, page, 
     db = live_server['db']
     path = tmp_path / 'existing.jpg'
     Image.new('RGB', (320, 240), (80, 95, 90)).save(path)
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     photo_id = photo_ingest.add_photo(db, folder_id, path.name, extension='.jpg',
                            file_size=path.stat().st_size, file_mtime=1, width=320, height=240)
     detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', [

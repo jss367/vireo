@@ -2,6 +2,7 @@
 from copy import deepcopy
 
 import pytest
+from services import workspace_folders
 from services.saved_review import refresh_selected_suggestions
 
 
@@ -117,7 +118,7 @@ def test_species_refresh_persists_current_catalog_analysis_without_catalog_write
     from pipeline import load_results_raw, save_results_raw
     from services import photo_ingest
 
-    folder = db.add_folder(str(tmp_path), name="Species review")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Species review")
     pid = photo_ingest.add_photo(db, folder, "duck.jpg", ".jpg", 100, 1.0)
     db.model_runs.record_detector_run(pid, "megadetector-v6", 0)
     db.commit()

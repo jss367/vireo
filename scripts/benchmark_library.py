@@ -12,7 +12,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "vireo"))
 
-
 BUDGETS_100K = {
     "startup_seconds": 5.0,
     "browse_init_seconds": 2.0,
@@ -29,9 +28,10 @@ BUDGETS_1M = {
 
 def _seed(db_path, photo_count):
     from db import Database
+    from services import workspace_folders
 
     with Database(db_path) as db:
-        folder_id = db.add_folder("/synthetic/library", name="library")
+        folder_id = workspace_folders.add_folder(db, "/synthetic/library", name="library")
         rows = (
             (
                 folder_id,

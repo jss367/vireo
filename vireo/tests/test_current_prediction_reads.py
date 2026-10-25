@@ -1,7 +1,7 @@
 """Regression coverage for the remaining current-prediction ranking surfaces."""
 
 import pytest
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -12,7 +12,7 @@ def catalog(db, tmp_path, monkeypatch):
     # A deliberately different global floor catches readers ignoring workspace config.
     cfg.save({"detector_confidence": 0.95})
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.5})
-    folder = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(db, folder, "bird.jpg", ".jpg", 100, 1.0)
     return pid, folder
 
