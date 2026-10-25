@@ -28,7 +28,10 @@ class SharedDownloadLock:
         try:
             from filelock import FileLock, Timeout
 
-            path = self.lock_path or default_path("hf_cache_lock")
+            # Migrated installs keep a compatibility link at the native lock
+            # path. FileLock opens leaves with O_NOFOLLOW; resolve it first so
+            # both layouts also keep using the same lock when it is recreated.
+            path = os.path.realpath(self.lock_path or default_path("hf_cache_lock"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
             lock = FileLock(path, is_singleton=False)
             try:

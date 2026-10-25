@@ -83,6 +83,24 @@ test('bulk removal counts removable entries and does nothing for retained-only b
   assert.equal(confirms.length, 1);
 });
 
+test('existing-model cache cleanup confirms its scope and leaves retained entries out', async () => {
+  const {c} = page();
+  const confirms = [], posts = [];
+  c.confirm = text => { confirms.push(text); return true; };
+  c._postHfCacheRemove = body => posts.push(body);
+  c.state.hfCacheInventory = {unused_size: 0, entries: [
+    {installed: true, removable: true}, {installed: true, removable: false},
+    {installed: false, removable: true},
+  ]};
+  await c.removeInstalledHfCache();
+  assert.match(confirms[0], /Remove 1 cache entry/);
+  assert.match(confirms[0], /incomplete or a different revision/);
+  assert.equal(JSON.stringify(posts), '[{"installed":true}]');
+  c.confirm = () => false;
+  await c.removeInstalledHfCache();
+  assert.equal(posts.length, 1);
+});
+
 test('unmanaged inventory rows retain their ownership explanation even with an external install', () => {
   const {c} = page();
   for (const installed of [false, true]) {

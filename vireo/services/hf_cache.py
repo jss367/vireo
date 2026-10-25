@@ -638,6 +638,46 @@ def remove_unused(cache_dir: str | None = None, models_dir: str | None = None) -
     return result
 
 
+def remove_installed(cache_dir: str | None = None, models_dir: str | None = None) -> CacheRemoval:
+    """Remove legacy cache entries associated with existing model folders.
+
+    Re-evaluate membership under the same producer/blob guards as individual
+    removals. A folder may be incomplete or a different revision, so this does
+    not assert byte equality or model readiness. Installed files stay untouched.
+    """
+    cache_dir = _cache_dir(cache_dir)
+
+    def select(found: dict[str, JsonDict]) -> list[JsonDict]:
+        groups = [g for g in found.values() if g["installed"] and g["removable"]]
+        # User-provided links are not duplicate copies. Check every selected
+        # installation before deleting anything, including directory links.
+        for group in groups:
+            _require_independent_install(group["install_path"], cache_dir)
+        return groups
+
+    result = _delete_selected(cache_dir, _models_dir(models_dir), select)
+    log.info("Removed %d installed-model cache entries (%d bytes, %d failures)",
+             len(result["removed"]), result["freed"], len(result["failed"]))
+    return result
+
+
+def _require_independent_install(install: str, cache_dir: str) -> None:
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    def check(path: str) -> None:
+        resolved, cache_root = os.path.realpath(path), os.path.realpath(cache_dir)
+        if resolved == cache_root or resolved.startswith(cache_root + os.sep):
+            raise UnsafeCacheCleanup(f"Installed model still reads from this cache: {path}. Keep its cache entry.")
+
+    check(install)
+    for root, dirs, files in os.walk(install, followlinks=False, onerror=walk_error):
+        for name in dirs + files:
+            path = os.path.join(root, name)
+            if os.path.islink(path):
+                check(path)
+
+
 def _purge_keys(
     keys: Sequence[str], cache_dir: str, models_dir: str, *, extra_repos: Sequence[str] = (),
 ) -> int:

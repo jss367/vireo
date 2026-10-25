@@ -76,6 +76,47 @@ def _entries(inv):
     return {e["key"]: e for e in inv["entries"]}
 
 
+def test_bulk_existing_model_cache_cleanup_preserves_installs_and_unused_entries(hub, tmp_path):
+    from services import hf_cache
+
+    install = _install(tmp_path, "dinov2-vit-b14")
+    installed_blob = hub.add("dinov2-vit-b14/model.onnx", b"old cached revision")
+    unused_blob = hub.add("bioclip-2.5-vith14/model.onnx", b"unused cached revision")
+    unrelated = hub.add("model.onnx", b"other client", repo="models--another--client")
+    result = hf_cache.remove_installed()
+    assert result["freed"] == len(b"old cached revision")
+    assert not result["failed"]
+    assert not installed_blob.exists()
+    assert unused_blob.exists() and unrelated.exists()
+    assert (install / "model.onnx").read_bytes() == b"installed"
+
+
+def test_existing_model_cleanup_rechecks_install_presence(hub, tmp_path):
+    from services import hf_cache
+
+    install = _install(tmp_path, "dinov2-vit-b14")
+    blob = hub.add("dinov2-vit-b14/model.onnx", b"cached")
+    assert hf_cache.inventory()["installed_size"] > 0
+    (install / "model.onnx").unlink()
+    install.rmdir()
+    assert hf_cache.remove_installed()["removed"] == []
+    assert blob.exists()
+
+
+def test_existing_model_cleanup_preserves_weights_linked_into_cache(hub, tmp_path):
+    from services import hf_cache
+
+    install = _install(tmp_path, "dinov2-vit-b14")
+    blob = hub.add("dinov2-vit-b14/model.onnx", b"the only weights")
+    weights = install / "model.onnx"
+    weights.unlink()
+    _symlink(blob, weights)
+    with pytest.raises(hf_cache.UnsafeCacheCleanup, match="still reads from this cache"):
+        hf_cache.remove_installed()
+    assert weights.read_bytes() == b"the only weights"
+    assert blob.exists()
+
+
 def test_inventory_splits_installed_from_unused(hub, tmp_path):
     from services import hf_cache
 

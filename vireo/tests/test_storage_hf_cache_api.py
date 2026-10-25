@@ -75,6 +75,25 @@ def test_hf_cache_inventory_route(seeded):
     assert inv["unused_size"] == 5000
 
 
+def test_bulk_existing_model_cache_removal_keeps_installed_weights(seeded, tmp_path):
+    app, blobs = seeded
+    response = app.test_client().post("/api/storage/hf-cache/remove", json={"installed": True})
+    assert response.status_code == 200
+    assert response.get_json()["freed"] == 300
+    assert not blobs["live"].exists()
+    assert blobs["orphan"].exists()
+    assert (tmp_path / "vireo-models/dinov2-vit-b14/model.onnx").read_bytes() == b"installed"
+
+
+@pytest.mark.parametrize("body", [{"installed": "yes"}, {"installed": False},
+                                  {"installed": True, "unused": True},
+                                  {"installed": True, "keys": ["anything"]}])
+def test_bulk_cache_removal_rejects_ambiguous_or_non_boolean_selection(seeded, body):
+    app, blobs = seeded
+    assert app.test_client().post("/api/storage/hf-cache/remove", json=body).status_code == 400
+    assert all(blob.exists() for blob in blobs.values())
+
+
 @pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")
 def test_remove_unused_frees_orphans_and_returns_fresh_inventory(seeded):
     app, blobs = seeded

@@ -18,7 +18,9 @@ python vireo/app.py --port 8080
 
 Default locations are resolved by `vireo/app_paths.py` and the desktop launcher
 from `vireo/data/app_paths.json`. Existing `~/.vireo` installations retain that
-layout. Fresh installs use platform data/cache roots; see
+layout until the offline, opt-in `--migrate-storage apply` command is used.
+Migration keeps compatibility links and locks in `~/.vireo`; never remove
+that folder while the migrated installation is in use. Fresh installs use platform data/cache roots; see
 [the storage locations guide](docs/uninstalling.md#default-folders-and-upgrades).
 
 - **Data root**: catalog `vireo.db`, settings `config.json`, labels, taxonomy,

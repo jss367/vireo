@@ -48,6 +48,11 @@ def initialize_layout() -> None:
     Existing legacy installs are untouched. Both launcher and server do this;
     resolving defaults alone remains read-only.
     """
+    if os.path.lexists(migration_journal()):
+        raise RuntimeError(
+            "Storage migration is unfinished. Quit Vireo and run "
+            "--migrate-storage apply to resume or --migrate-storage rollback to restore."
+        )
     home = os.path.expanduser("~")
     if _uses_legacy(home):
         return
@@ -58,6 +63,17 @@ def initialize_layout() -> None:
             pass
     except FileExistsError:
         pass
+
+
+def migration_journal() -> str:
+    """Recovery record outside both storage layouts, shared with the launcher."""
+    return os.path.join(os.path.expanduser("~"), _LAYOUT["migration_journal"])
+
+
+def native_roots() -> tuple[str, str]:
+    """Platform destinations even when an existing install selects legacy paths."""
+    home = os.path.expanduser("~")
+    return _native_root("data", home), _native_root("cache", home)
 
 
 def default_path(name: str, *, expand_user: bool = True) -> str:

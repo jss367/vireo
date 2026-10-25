@@ -140,5 +140,6 @@
       "path": "vireo.log"
     }
   },
-  "native_marker": "storage-layout-v1"
+  "native_marker": "storage-layout-v1",
+  "migration_journal": ".vireo-storage-migration-v1.json"
 }

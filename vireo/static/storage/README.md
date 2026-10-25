@@ -70,3 +70,8 @@ Browser tests reach the modules through `tests/e2e/module_pages.py`:
   dialog is open.
 - A failed `/api/storage` scan leaves usage unknown (`null`), so Apply cannot
   skip the eviction confirmation on a stale zero.
+- Existing-model cache cleanup is explicit and reselects entries under the
+  service's producer/blob locks. A folder's existence does not promise complete
+  weights or identical revisions; confirmation explains the possible download.
+- The migration instructions use the offline server command. Relocation never
+  executes in an HTTP request or while a server holds its runtime lock.

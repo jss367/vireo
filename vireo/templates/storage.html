@@ -163,6 +163,19 @@ dialog.modal-overlay::backdrop { background: transparent; }
     </div>
     <div id="storageLowSpaceWarning" class="storage-note storage-warning" style="display:none;"></div>
     <div id="storageLocations"></div>
+    <details class="storage-note" id="storageMigrationHelp">
+      <summary>Move an existing installation to standard storage folders</summary>
+      <p>Migration is optional and runs with Vireo closed. Back up your catalog and settings first.
+        Preview with <code>python scripts/migrate_storage.py</code> from a source checkout, then quit
+        Vireo and run <code>python scripts/migrate_storage.py --apply</code>.</p>
+      <p>Desktop installations can run the bundled <code>vireo-server</code> with
+        <code>--migrate-storage preview</code>, then <code>--migrate-storage apply</code>.
+        The preview reports the actual source and destination folders.</p>
+      <p>Files move without a second copy. Compatibility links remain in <code>~/.vireo</code>
+        so saved paths keep working; keep that folder. If interrupted, keep Vireo closed and
+        repeat the apply command, or use <code>--rollback</code> from source
+        (<code>--migrate-storage rollback</code> for the server) to restore the old layout.</p>
+    </details>
     <div class="storage-legend">
       <span class="stat-kind safe">Safe to clear</span> regenerates automatically &nbsp;
       <span class="stat-kind managed">Quota managed</span> removes oldest files over its limit &nbsp;
@@ -362,11 +375,12 @@ dialog.modal-overlay::backdrop { background: transparent; }
     </div>
     <div class="modal-body">
       <div class="modal-desc">
-        Vireo downloads models through the Hugging Face hub cache and then copies them
-        into its own models folder, which is the only place the pipeline reads from.
-        A cache entry is useful only while the model it came from is installed: it lets
-        Repair or a re-download skip the network. Entries for models that are not
-        installed, and files from older snapshots, are dead weight and can be removed.
+        Older Vireo versions stored downloads here and copied them into the models folder.
+        New downloads keep one copy in the models folder. Remove caches for existing
+        model folders to reclaim old cache copies while keeping installed files.
+        An existing folder may be incomplete or hold a different revision; removing its cache
+        can require another download for repair. Other applications sharing a cache may also
+        need to download its files again. Unused entries have no associated model folder.
         Installed models are removed in Settings → Models, which clears their cache entry too.
       </div>
       <div id="hfCacheError" style="color:var(--danger);font-size:12px;margin-bottom:10px;display:none;"></div>
@@ -375,6 +389,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" data-storage-on="click:closeHfCacheModal">Close</button>
+      <button class="btn-danger" id="hfCacheRemoveInstalled" disabled data-storage-on="click:removeInstalledHfCache">Remove caches for existing model folders</button>
       <button class="btn-danger" id="hfCacheRemoveUnused" disabled data-storage-on="click:removeUnusedHfCache">Remove unused entries</button>
     </div>
   </div>
