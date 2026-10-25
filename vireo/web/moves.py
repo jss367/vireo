@@ -13,7 +13,7 @@ import os
 from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
-from services import moves_merge
+from services import moves_merge, workspace_folders
 
 if TYPE_CHECKING:
     from sqlite3 import Row
@@ -226,7 +226,7 @@ def create_moves_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
 
         request_db = get_db()
         folder = request_db.folders.get(folder_id)
-        if not folder or not request_db.workspace_has_folder_link(folder_id):
+        if not folder or not workspace_folders.workspace_has_folder_link(request_db, folder_id):
             return json_error("Folder not found", status=404)
 
         # Remote target: resolve the NAS-side dest and probe it over SSH.

@@ -10,7 +10,7 @@ from e2e.navbar_modules import install_navbar_exposure
 from e2e.threaded_server import start_server, stop_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vireo'))
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _seed_classifier_model(home_dir):
@@ -50,8 +50,8 @@ def seed_e2e_data(db, thumb_dir):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
 
-    f1 = db.add_folder("/photos/park", name="park")
-    f2 = db.add_folder("/photos/yard", name="yard")
+    f1 = workspace_folders.add_folder(db, "/photos/park", name="park")
+    f2 = workspace_folders.add_folder(db, "/photos/yard", name="yard")
 
     photos = []
     for fid, name, ts in [

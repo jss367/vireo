@@ -68,7 +68,7 @@ from render_source import (
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
-from services import browse_queries, workspace_config
+from services import browse_queries, workspace_config, workspace_folders
 from services.photo_review import flag_note
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 from web.app_hooks import claim_search_lane
@@ -576,7 +576,7 @@ def create_photos_blueprint(
         ``.jpg``.
         """
         db = get_db()
-        return jsonify(db.get_workspace_extensions())
+        return jsonify(workspace_folders.get_workspace_extensions(db))
 
     @blueprint.route("/api/photos/missing")
     def api_photos_missing() -> ResponseReturnValue:

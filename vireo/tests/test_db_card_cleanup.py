@@ -14,16 +14,16 @@ import textwrap
 import pytest
 from db import Database
 from repositories.card_cleanup import CardCleanupRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
 def rows(db):
-    archive = db.add_folder("/archive", name="archive")
+    archive = workspace_folders.add_folder(db, "/archive", name="archive")
     a = photo_ingest.add_photo(db, archive, "a.jpg", ".jpg", 100, 1.0, file_hash="H")
     b = photo_ingest.add_photo(db, archive, "b.jpg", ".jpg", 200, 2.0, file_hash="OTHER")
     nohash = photo_ingest.add_photo(db, archive, "c.jpg", ".jpg", 300, 3.0)
-    homeless_folder = db.add_folder("/gone", name="gone")
+    homeless_folder = workspace_folders.add_folder(db, "/gone", name="gone")
     homeless = photo_ingest.add_photo(db, homeless_folder, "d.jpg", ".jpg", 400, 4.0, file_hash="H")
     db.conn.execute("PRAGMA foreign_keys = OFF")
     db.conn.execute("UPDATE photos SET folder_id = 987654 WHERE id = ?", (homeless,))

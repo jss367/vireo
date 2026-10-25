@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from scanner import ScanOptions
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def test_check_drift_detects_xmp_change(tmp_path):
@@ -278,7 +278,7 @@ def test_remove_orphans(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder('/gone', name='gone')
+    fid = workspace_folders.add_folder(db, '/gone', name='gone')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='missing.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
 
@@ -503,7 +503,7 @@ def test_audit_delete_sidecars_route_uses_trash(app_and_db, tmp_path, monkeypatc
     app, db = app_and_db
     root = tmp_path / "lib"
     root.mkdir()
-    db.add_folder(str(root), name="lib")
+    workspace_folders.add_folder(db, str(root), name="lib")
     stray = str(root / "ghost.xmp")
     write_sidecar(stray, flat_keywords={"G"}, hierarchical_keywords=set())
 
@@ -572,7 +572,7 @@ def test_verify_hashes_does_not_baseline_empty_files_back_to_empty_hash(tmp_path
     empty_path.write_bytes(b"")
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(root), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(root), name="photos")
     photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename=empty_path.name,
@@ -715,7 +715,7 @@ def test_accept_current_hash_does_not_store_empty_sha_for_zero_byte_file(tmp_pat
     path.write_bytes(b"original raw bytes")
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(root), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(root), name="photos")
     pid = photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename=path.name,
@@ -1016,7 +1016,7 @@ def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
     db.set_active_workspace(ws_id)
     source_folder = tmp_path / "source"
     source_folder.mkdir()
-    fid = db.add_folder(str(source_folder), name="source")
+    fid = workspace_folders.add_folder(db, str(source_folder), name="source")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="missing.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,

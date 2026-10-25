@@ -19,7 +19,7 @@ from datetime import datetime
 import pytest
 from db import Database
 from repositories.audit import AuditRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _other_conn(db):
@@ -45,17 +45,17 @@ def library(db):
     """Active workspace with one ok folder, one missing folder, and a folder
     that belongs only to another workspace."""
     ws = db._active_workspace_id
-    ok = db.add_folder("/lib/ok", name="ok")
-    partial = db.add_folder("/lib/partial", name="partial")
-    missing = db.add_folder("/lib/missing", name="missing")
+    ok = workspace_folders.add_folder(db, "/lib/ok", name="ok")
+    partial = workspace_folders.add_folder(db, "/lib/partial", name="partial")
+    missing = workspace_folders.add_folder(db, "/lib/missing", name="missing")
     db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?",
                     (partial,))
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?",
                     (missing,))
     other_ws = db.create_workspace("Other")
-    foreign = db.add_folder("/lib/foreign", name="foreign",
+    foreign = workspace_folders.add_folder(db, "/lib/foreign", name="foreign",
                             link_to_workspace=False)
-    db.add_workspace_folder(other_ws, foreign)
+    workspace_folders.add_workspace_folder(db, other_ws, foreign)
     db.conn.commit()
 
     ids = {}

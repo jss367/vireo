@@ -22,7 +22,7 @@ from repositories.companion_pairing import CompanionPairingRepository
 from repositories.keyword_provenance import KeywordProvenanceRepository
 from repositories.scanning import ScanningRepository
 from repositories.working_copies import WorkingCopyRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 VIREO = Path(__file__).resolve().parents[1]
 
@@ -49,8 +49,8 @@ def _committed(db, sql, params=()):
 
 
 def test_set_folder_status_guard_only_moves_partial_rows(db, tmp_path):
-    a = db.add_folder(str(tmp_path / "a"), name="a")
-    b = db.add_folder(str(tmp_path / "b"), name="b")
+    a = workspace_folders.add_folder(db, str(tmp_path / "a"), name="a")
+    b = workspace_folders.add_folder(db, str(tmp_path / "b"), name="b")
     db.scanning.set_folder_status("partial", folder_ids=[a])
     db.scanning.set_folder_status("missing", folder_ids=[b])
     db.scanning.set_folder_status(
@@ -62,7 +62,7 @@ def test_set_folder_status_guard_only_moves_partial_rows(db, tmp_path):
 
 
 def test_set_xmp_mtime_records_and_clears(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     pid = _photo(db, fid, "a.jpg")
     db.scanning.set_xmp_mtime(pid, 12.5)
     assert db.conn.execute("SELECT xmp_mtime FROM photos WHERE id=?", (pid,)).fetchone()[0] == 12.5
@@ -73,7 +73,7 @@ def test_set_xmp_mtime_records_and_clears(db, tmp_path):
 def test_incremental_baseline_rows_match_a_trailing_separator_folder(db, tmp_path):
     import os
 
-    fid = db.add_folder(str(tmp_path) + os.sep, name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path) + os.sep, name="p")
     pid = _photo(db, fid, "a.jpg")
     rows = list(db.scanning.incremental_baseline_rows([(str(tmp_path), "a.jpg")]))
     assert [row["id"] for row in rows] == [pid]
@@ -82,8 +82,8 @@ def test_incremental_baseline_rows_match_a_trailing_separator_folder(db, tmp_pat
 
 
 def test_broken_metadata_rows_select_photos_a_rescan_should_repair(db, tmp_path):
-    fid = db.add_folder(str(tmp_path / "b"), name="b")
-    other = db.add_folder(str(tmp_path / "a"), name="a")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "b"), name="b")
+    other = workspace_folders.add_folder(db, str(tmp_path / "a"), name="a")
     no_time = _photo(db, fid, "z.jpg")
     small_raw = _photo(db, fid, "c.nef", timestamp="2024-01-01T00:00:00", width=640)
     big_raw = _photo(db, fid, "d.nef", timestamp="2024-01-01T00:00:00", width=6000)
@@ -120,7 +120,7 @@ def test_collection_change_counter_counts_this_connections_writes(db):
 
 
 def test_claim_companion_refuses_a_changed_owner(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     raw = _photo(db, fid, "IMG.cr3")
     pairing = db.companion_pairing
     assert pairing.claim_companion(raw, fid, "IMG.cr3", "IMG.jpg")
@@ -134,7 +134,7 @@ def test_claim_companion_refuses_a_changed_owner(db, tmp_path):
 
 
 def test_rows_for_stem_reads_the_stem_range_and_paired_raws(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     raw = _photo(db, fid, "IMG.cr3", companion_path="IMG.jpg")
     jpeg = _photo(db, fid, "IMG.jpeg")
     _photo(db, fid, "IMG_2.jpg")
@@ -144,7 +144,7 @@ def test_rows_for_stem_reads_the_stem_range_and_paired_raws(db, tmp_path):
 
 
 def test_owner_of_prefers_the_raw_with_a_stored_identity(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     _photo(db, fid, "IMG.cr3", companion_path="IMG.jpg")
     vouched = _photo(db, fid, "IMG.nef", companion_path="IMG.jpg")
     db.companion_pairing.record_identity(vouched, "IMG.jpg", 10, None, "h", 2.0)
@@ -154,7 +154,7 @@ def test_owner_of_prefers_the_raw_with_a_stored_identity(db, tmp_path):
 
 
 def test_delete_identities_forgets_only_the_owners_rows_without_commit(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     raw = _photo(db, fid, "IMG.cr3", companion_path="IMG.jpg")
     other = _photo(db, fid, "OTHER.cr3", companion_path="OTHER.jpg")
     db.companion_pairing.record_identity(raw, "IMG.jpg", 10, None, "h", 2.0)
@@ -171,7 +171,7 @@ def test_delete_identities_forgets_only_the_owners_rows_without_commit(db, tmp_p
 
 def test_update_photo_accepts_literal_assignments_without_commit(db, tmp_path):
     """``capture_time`` resets the hash verdict with literal ``=NULL`` clauses."""
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     pid = _photo(db, fid, "a.jpg", hash_status="ok", hash_checked_at="then")
     statements = []
     db.conn.set_trace_callback(statements.append)
@@ -209,7 +209,7 @@ def _wc_snapshot(db, pid):
 
 
 def test_set_working_copy_requires_the_snapshot_identity(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     pid = _photo(db, fid, "a.nef")
     snapshot = _wc_snapshot(db, pid)
     db.companion_pairing.set_companion_path(pid, "a.jpg")
@@ -232,7 +232,7 @@ def test_set_working_copy_requires_the_snapshot_identity(db, tmp_path):
 
 
 def test_quota_eviction_writes_only_touch_rows_still_on_the_expected_path(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     stale = _photo(db, fid, "a.nef", working_copy_path="working/a.jpg")
     replaced = _photo(db, fid, "b.nef", working_copy_path="working/b2.jpg")
     evicted = _photo(db, fid, "c.nef", file_mtime=4.0, working_copy_path="working/c.jpg")
@@ -261,7 +261,7 @@ def test_quota_eviction_writes_only_touch_rows_still_on_the_expected_path(db, tm
 
 
 def test_defer_and_undo_deferral_round_trip(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     pid = _photo(db, fid, "a.nef", file_mtime=None)
     snapshot = _wc_snapshot(db, pid)
     db.working_copies.defer([snapshot])
@@ -286,7 +286,7 @@ def test_load_scope_commits_only_the_transaction_it_opened(db, tmp_path):
 
 
 def test_mark_raw_decode_failed_stamps_the_source_marker_uncommitted(db, tmp_path):
-    fid = db.add_folder(str(tmp_path), name="p")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="p")
     pid = _photo(db, fid, "a.nef", file_mtime=7.5)
     db.working_copies.mark_raw_decode_failed(pid, 7.5)
     assert db.in_transaction

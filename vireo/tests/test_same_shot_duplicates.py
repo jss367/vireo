@@ -6,7 +6,7 @@ import struct
 import pytest
 from db import Database
 from duplicate_scan import revalidate_scan_result, run_duplicate_scan
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from services.same_shot_duplicates import is_duplicate_review_member, scan_same_shot_candidates
 
 
@@ -23,7 +23,7 @@ def metadata(serial="SN-12345", count=386):
 
 
 def seed(db, folder, name, file_hash, *, exif=None, phash="123456789abcdef0", timestamp=None):
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename=name, extension=".jpg", file_size=1000,
         file_mtime=100.0, file_hash=file_hash, timestamp=timestamp,

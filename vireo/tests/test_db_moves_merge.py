@@ -23,7 +23,7 @@ from db import Database
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.workspace_folders import WorkspaceFolderRepository
-from services import moves_merge, photo_ingest
+from services import moves_merge, photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -41,8 +41,8 @@ def _other(db):
 
 
 def _folder(db, path, parent_id=None, *, root=False, link=True):
-    return db.add_folder(
-        path, name=path.rstrip("/").rsplit("/", 1)[-1] or path,
+    return workspace_folders.add_folder(
+        db, path, name=path.rstrip("/").rsplit("/", 1)[-1] or path,
         parent_id=parent_id, workspace_root=root, link_to_workspace=link,
     )
 
@@ -1412,19 +1412,19 @@ def test_embedded_merge_keeps_survivor_manual_provenance(db, tmp_path, same_hash
     ).fetchone()[0] == "manual"
 
 
-def test_merge_links_archive_base_through_the_facade(db, monkeypatch):
+def test_merge_links_archive_base_through_the_service(db, monkeypatch):
     ws = db._active_workspace_id
     base = _folder(db, "/arch", link=False)
     stage = _folder(db, "/stage", link=False)
     _photo(db, stage, "a.raf")
     calls = []
-    real = db.add_workspace_folder
+    real = workspace_folders.add_workspace_folder
 
-    def recorder(workspace_id, folder_id, *, is_root=True, **kw):
+    def recorder(database, workspace_id, folder_id, *, is_root=True, **kw):
         calls.append((workspace_id, folder_id, is_root))
-        return real(workspace_id, folder_id, is_root=is_root, **kw)
+        return real(database, workspace_id, folder_id, is_root=is_root, **kw)
 
-    monkeypatch.setattr(db, "add_workspace_folder", recorder)
+    monkeypatch.setattr(workspace_folders, "add_workspace_folder", recorder)
     counts = moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
     assert calls == [(ws, base, True)]
     assert counts["merged_folders"] == 1 and counts["new_photos"] == 1
@@ -1558,11 +1558,11 @@ def test_merge_into_existing_folder_keeps_photo_in_sharing_workspace(db):
     db.set_active_workspace(ws)
     arch = _folder(db, "/arch", root=True)
     _photo(db, arch, "old.jpg")
-    db.add_workspace_folder(linked, arch)
+    workspace_folders.add_workspace_folder(db, linked, arch)
     stage = _folder(db, "/stage", root=True)
     _photo(db, stage, "new.jpg")
-    db.add_workspace_folder(sharing, stage)
-    db.add_workspace_folder(linked, stage)
+    workspace_folders.add_workspace_folder(db, sharing, stage)
+    workspace_folders.add_workspace_folder(db, linked, stage)
 
     counts = moves_merge.merge_staged_tree_into_archive(db, stage, "/arch")
 
@@ -2042,9 +2042,9 @@ def test_merge_wires_every_callback_to_the_facade():
         "root_ancestor_exists": "db.workspace_folders.root_ancestor_exists",
         "root_descendant_exists": "db.workspace_folders.root_descendant_exists",
         "prune_nonroot_links_outside_roots": "partial(prune_ws_nonroot_links_outside_roots, db)",
-        "materialize_workspace_descendants": "db._materialize_workspace_descendants",
-        "add_workspace_folder": "db.add_workspace_folder",
-        "add_workspace_folder_no_commit": "db._add_workspace_folder_no_commit",
+        "materialize_workspace_descendants": "partial(workspace_folders.materialize_workspace_descendants, db)",
+        "add_workspace_folder": "partial(workspace_folders.add_workspace_folder, db)",
+        "add_workspace_folder_no_commit": "partial(workspace_folders.add_workspace_folder_no_commit, db)",
         "case_insensitive_root": "case_insensitive_root",
         "move_location_state": "db._move_location_state_for_merge",
         "invalidate_new_images": "db.invalidate_new_images_cache_for_workspaces",
@@ -2178,8 +2178,8 @@ def test_collision_preserves_identity_decision_history_and_sharing(db, tmp_path,
     ws = db._active_workspace_id
     sharing = db.create_workspace("Identity sharing")
     db.set_active_workspace(ws)
-    db.add_workspace_folder(ws, t["stage_root"])
-    db.add_workspace_folder(sharing, t["stage_root"])
+    workspace_folders.add_workspace_folder(db, ws, t["stage_root"])
+    workspace_folders.add_workspace_folder(db, sharing, t["stage_root"])
     loser, survivor = ((t["staged"], t["survivor"]) if same_hash
                        else (t["survivor"], t["staged"]))
     with db._commits_held():
@@ -2215,7 +2215,7 @@ def test_collision_refuses_conflicting_identity_without_losing_evidence(db, tmp_
     from services.identity_alternatives import save_alternatives
 
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
-    db.add_workspace_folder(db._active_workspace_id, t["stage_root"])
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, t["stage_root"])
     loser, survivor = ((t["staged"], t["survivor"]) if same_hash
                        else (t["survivor"], t["staged"]))
     with db._commits_held():
@@ -2243,7 +2243,7 @@ def test_collision_deduplicates_batch_identity_history_and_preserves_redo(db, tm
     from services.identity_alternatives import resolve_alternatives, save_alternatives
 
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
-    db.add_workspace_folder(db._active_workspace_id, t["stage_root"])
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, t["stage_root"])
     loser, survivor = ((t["staged"], t["survivor"]) if same_hash
                        else (t["survivor"], t["staged"]))
     with db._commits_held():
@@ -2291,7 +2291,7 @@ def test_collision_rolls_back_when_pending_edit_conflicts_with_identity(db, tmp_
     from services.identity_alternatives import save_alternatives
 
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
-    db.add_workspace_folder(db._active_workspace_id, t["stage_root"])
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, t["stage_root"])
     loser, survivor = ((t["staged"], t["survivor"]) if same_hash
                        else (t["survivor"], t["staged"]))
     db.add_keyword("Heron", is_species=True)
@@ -2311,7 +2311,7 @@ def test_collision_preserves_incompatible_batch_history_by_rolling_back(db, tmp_
     from services.identity_alternatives import save_alternatives
 
     t = _collision_tree(db, tmp_path)
-    db.add_workspace_folder(db._active_workspace_id, t["stage_root"])
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, t["stage_root"])
     kid = db.add_keyword("Heron", is_species=True)
     db.tag_photo(t["staged"], kid, source="manual")
     with db._commits_held():
@@ -2334,7 +2334,7 @@ def test_same_resolution_batch_collapses_with_deduplicated_replay(db, tmp_path, 
     from services.identity_alternatives import resolve_alternatives, save_alternatives
 
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
-    db.add_workspace_folder(db.require_workspace_id(), t['stage_root'])
+    workspace_folders.add_workspace_folder(db, db.require_workspace_id(), t['stage_root'])
     ids = [t['staged'], t['survivor']]
     survivor = t['survivor'] if same_hash else t['staged']
     with db._commits_held():
@@ -2364,7 +2364,7 @@ def test_collision_keeps_higher_rank_taxonomy_outside_species_decision(db, tmp_p
     from services.identity_alternatives import save_alternatives
 
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
-    db.add_workspace_folder(db.require_workspace_id(), t['stage_root'])
+    workspace_folders.add_workspace_folder(db, db.require_workspace_id(), t['stage_root'])
     losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
     tagged = losing if tag_owner == 'losing' else survivor
     identity_photo = survivor if tag_owner == 'losing' else losing
@@ -2396,11 +2396,11 @@ def test_higher_rank_homonym_collision_rollback_survives_sync_and_history(db, tm
 
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
     ws = db.require_workspace_id()
-    db.add_workspace_folder(ws, t['stage_root'])
+    workspace_folders.add_workspace_folder(db, ws, t['stage_root'])
     sharing = db.create_workspace('Homonym sync sharing')
     db.set_active_workspace(ws)
-    db.add_workspace_folder(sharing, t['stage_root'])
-    db.add_workspace_folder(sharing, t['base'])
+    workspace_folders.add_workspace_folder(db, sharing, t['stage_root'])
+    workspace_folders.add_workspace_folder(db, sharing, t['base'])
     losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
     identity_photo, metadata_photo = ((losing, survivor) if identity_owner == 'losing' else (survivor, losing))
     paths = {t['staged']: tmp_path / 'stage/day/dup.xmp', t['survivor']: tmp_path / 'arch/day/dup.xmp'}

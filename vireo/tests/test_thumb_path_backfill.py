@@ -18,7 +18,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _make_jpeg(path, w=200, h=150):
@@ -87,7 +87,7 @@ def test_startup_thumb_path_backfill_sets_unsynced_rows(tmp_path, monkeypatch):
     thumb_dir.mkdir()
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(photos_dir))
+    folder_id = workspace_folders.add_folder(db, str(photos_dir))
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
@@ -136,7 +136,7 @@ def test_startup_thumb_path_backfill_does_not_persist_to_history(tmp_path, monke
     thumb_dir.mkdir()
 
     db = Database(db_path)
-    folder_id = db.add_folder(str(photos_dir))
+    folder_id = workspace_folders.add_folder(db, str(photos_dir))
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),

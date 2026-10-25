@@ -22,7 +22,7 @@ import config as cfg
 import pytest
 from db import Database
 from repositories.stats import StatsRepository
-from services import dashboard_stats, photo_ingest, stage_counts
+from services import dashboard_stats, photo_ingest, stage_counts, workspace_folders
 
 MODEL = "bioclip"
 OTHER_MODEL = "other-model"
@@ -109,12 +109,12 @@ def seed(db):
     ws = db._ws_id()
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    f_other = db.add_folder("/other", name="other")
+    f_other = workspace_folders.add_folder(db, "/other", name="other")
     db.set_active_workspace(ws)
-    f_root = db.add_folder("/lib", name="lib")
-    f_child = db.add_folder("/lib/a", name="a", parent_id=f_root)
-    f_empty = db.add_folder("/lib/empty", name="empty", parent_id=f_root)
-    f_off = db.add_folder("/offline", name="offline")
+    f_root = workspace_folders.add_folder(db, "/lib", name="lib")
+    f_child = workspace_folders.add_folder(db, "/lib/a", name="a", parent_id=f_root)
+    f_empty = workspace_folders.add_folder(db, "/lib/empty", name="empty", parent_id=f_root)
+    f_off = workspace_folders.add_folder(db, "/offline", name="offline")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (f_off,))
 
     p1 = _photo(db, f_root, "p1.jpg", "2024-05-01 07:30:00")

@@ -4,7 +4,7 @@ import io
 import numpy as np
 import pytest
 from PIL import Image
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 from subject_analysis import analyze_detection
 from subject_ranking import SubjectComparison, parse_comparison, resolve_subject
 
@@ -15,7 +15,7 @@ OTHER = "Sparrow"
 @pytest.fixture
 def comparison_library(app_and_db, tmp_path, monkeypatch):
     app, db = app_and_db
-    folder = db.add_folder(str(tmp_path), name="Species comparison")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Species comparison")
     photo_ids, detections = [], {}
     # The soft flycatcher and sharp sparrow are spatially separate. The next
     # two photographs have successively sharper flycatchers and softer sparrows.

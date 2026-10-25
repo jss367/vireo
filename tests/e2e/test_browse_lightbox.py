@@ -7,7 +7,7 @@ import time
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 from e2e.viewport_test_support import install_viewport_test_helpers
 
@@ -659,7 +659,7 @@ def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
     db = live_server["db"]
     folder_path = tmp_path / "eye-track"
     folder_path.mkdir()
-    folder_id = db.add_folder(str(folder_path), name="eye-track")
+    folder_id = workspace_folders.add_folder(db, str(folder_path), name="eye-track")
     photo_ids = []
     for index, eye in enumerate(((0.25, 0.40), (0.75, 0.65)), start=1):
         filename = f"eye-{index}.png"
@@ -833,7 +833,7 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
     db = live_server["db"]
     folder_path = tmp_path / "paired"
     folder_path.mkdir()
-    folder_id = db.add_folder(str(folder_path), name="paired")
+    folder_id = workspace_folders.add_folder(db, str(folder_path), name="paired")
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename="developed.nef",
@@ -989,7 +989,7 @@ def test_non_raw_jpeg_companions_do_not_enable_pair_controls(
     db = live_server["db"]
     folder_path = tmp_path / "non-pair"
     folder_path.mkdir()
-    folder_id = db.add_folder(str(folder_path), name="non-pair")
+    folder_id = workspace_folders.add_folder(db, str(folder_path), name="non-pair")
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename="developed.jpg",

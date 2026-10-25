@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, TypedDict
 
 from file_replace import replace_file
+from services import workspace_folders
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -940,8 +941,8 @@ def _other_local_source_roots(db: Database, workspace_id: int) -> list[str]:
 def _root_records(
     db: Database, workspace_id: int, local_base: Path
 ) -> tuple[list[RootRecord], list[FolderRecord]]:
-    roots = [dict(row) for row in db.get_workspace_folder_roots(workspace_id)]
-    folders = [dict(row) for row in db.get_workspace_folders(workspace_id)]
+    roots = [dict(row) for row in workspace_folders.get_workspace_folder_roots(db, workspace_id)]
+    folders = [dict(row) for row in workspace_folders.get_workspace_folders(db, workspace_id)]
     if not roots:
         raise LocalWorkspaceError("Add at least one folder before working locally")
 

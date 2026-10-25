@@ -1,14 +1,14 @@
 """Pending-transfer estimates describe cataloged originals without scanning disk."""
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def test_transfer_summary_counts_the_staging_tree_and_retains_rejected_photos(app_and_db, tmp_path):
     app, db = app_and_db
     staging = tmp_path / "staging" / "shoot"
     staging.mkdir(parents=True)
-    root = db.add_folder(str(staging))
-    nested = db.add_folder(str(staging / "day"))
-    elsewhere = db.add_folder(str(staging) + "-other")
+    root = workspace_folders.add_folder(db, str(staging))
+    nested = workspace_folders.add_folder(db, str(staging / "day"))
+    elsewhere = workspace_folders.add_folder(db, str(staging) + "-other")
     for folder, name, size in ((root, "keep.NEF", 2**30), (nested, "reject.NEF", 3 * 2**30),
                                (elsewhere, "unrelated.NEF", 10 * 2**30)):
         pid = photo_ingest.add_photo(db, folder, name, ".nef", size, 100)
@@ -46,7 +46,7 @@ def test_transfer_estimates_are_scoped_to_the_active_workspaces_records(app_and_
 def test_catalog_totals_deduplicate_and_chunk_folder_ids(db, tmp_path):
     import sqlite3
 
-    folder = db.add_folder(str(tmp_path))
+    folder = workspace_folders.add_folder(db, str(tmp_path))
     photo_ingest.add_photo(db, folder, "photo.jpg", ".jpg", 1234, 100)
     db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
     ids = [folder] * 10 + list(range(folder, folder + 1200))

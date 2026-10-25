@@ -184,7 +184,7 @@ class WorkspaceRepository:
     def delete(self, workspace_id: int) -> None:
         """Delete a workspace (cascading its scoped rows) and commit.
 
-        Call ``Database.delete_workspace`` instead: it also drops the
+        Call ``services.workspace_lifecycle.delete_workspace`` instead: it also drops the
         workspace's cached new-images payload.
 
         A pending NAS transfer blocks the delete through a trigger; that

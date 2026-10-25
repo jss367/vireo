@@ -19,7 +19,7 @@ from import_dedup import (
 from ingest import ingest
 from PIL import Image
 from PIL.ExifTags import Base as ExifBase
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _save_jpeg(path, *, exif_dt=None, color="red", size=(80, 80)):
@@ -41,7 +41,7 @@ def _seed_photo(db, tmp_path, filename, source_path, timestamp=None,
     fid_row = db.conn.execute(
         "SELECT id FROM folders WHERE path = ?", (str(folder),)
     ).fetchone()
-    fid = fid_row["id"] if fid_row else db.add_folder(str(folder), name=folder_name)
+    fid = fid_row["id"] if fid_row else workspace_folders.add_folder(db, str(folder), name=folder_name)
     db.conn.execute(
         "UPDATE folders SET status = 'ok' WHERE id = ?", (fid,)
     )
@@ -447,7 +447,7 @@ def _seed_paired_catalog(tmp_path, count):
     db = Database(str(tmp_path / "paired.db"))
     library = tmp_path / "paired"
     library.mkdir()
-    fid = db.add_folder(str(library), name="paired")
+    fid = workspace_folders.add_folder(db, str(library), name="paired")
     jpegs = []
     for i in range(count):
         jpeg = library / f"IMG_{i:04d}.jpg"

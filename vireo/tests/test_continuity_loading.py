@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 
 import pytest
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -13,7 +13,7 @@ def sequence_db(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "CONFIG_PATH", str(tmp_path / "config.json"))
     db = Database(str(tmp_path / "photos.db"))
-    folder = db.add_folder(str(tmp_path / "photos"))
+    folder = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     ids = []
     for i in range(3):
         ids.append(

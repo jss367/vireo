@@ -15,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 
-from services import detection_store, stage_counts, subject_masks, workspace_config
+from services import detection_store, stage_counts, subject_masks, workspace_config, workspace_folders
 
 log = logging.getLogger(__name__)
 
@@ -1635,8 +1635,8 @@ def _import_scope(db, params):
     # Hash-dup paths are excluded: ingest skips those files, so their
     # parent dirs aren't walked in copy mode and we mustn't claim
     # scan would link them.
-    unlinked_folder_count = db.workspace_unlinked_folder_count(
-        {os.path.dirname(p) for p in unique_paths if p not in hash_dup_paths}
+    unlinked_folder_count = workspace_folders.workspace_unlinked_folder_count(
+        db, {os.path.dirname(p) for p in unique_paths if p not in hash_dup_paths}
     )
     return (
         photo_ids, new_count, known_count, unlinked_folder_count,

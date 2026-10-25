@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database
 from repositories.duplicates import DuplicatesRepository
-from services import duplicate_resolution, photo_ingest
+from services import duplicate_resolution, photo_ingest, workspace_folders
 
 
 def _add(db, folder_id, filename, file_hash=None, file_mtime=100.0, rating=0):
@@ -40,7 +40,7 @@ def _reset_flags(db, file_hash):
 def test_apply_resolution_rejects_loser_and_merges_rating(tmp_path):
     """The resolver picks a winner, merges max rating, rejects losers."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="HASH1", rating=0)
     p2 = _add(db, fid, "owl (2).jpg", file_hash="HASH1")
     # The add_photo hook auto-rejected one already; reset so we can test
@@ -73,7 +73,7 @@ def test_apply_resolution_skips_already_rejected(tmp_path):
     pair should be a no-op.
     """
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "a.jpg", file_hash="H")
     p2 = _add(db, fid, "b.jpg", file_hash="H")
 
@@ -104,7 +104,7 @@ def test_apply_resolution_skips_already_rejected(tmp_path):
 def test_apply_resolution_merges_keywords(tmp_path):
     """Winner gains loser's keywords (union)."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="H")
     p2 = _add(db, fid, "owl (2).jpg", file_hash="H")
     # Reset hook's auto-rejection so apply_duplicate_resolution sees both.
@@ -126,7 +126,7 @@ def test_apply_resolution_merges_keywords(tmp_path):
 def test_apply_resolution_single_candidate_noop(tmp_path):
     """With <2 candidates we return an empty result with no changes."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "a.jpg", file_hash="H")
     result = duplicate_resolution.apply_duplicate_resolution(db, [p1])
     assert result["winner_id"] is None
@@ -140,7 +140,7 @@ def test_apply_resolution_single_candidate_noop(tmp_path):
 def test_add_photo_auto_rejects_duplicate(tmp_path):
     """Adding a second photo with a duplicate file_hash auto-rejects the loser."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="HDUP")
     p2 = _add(db, fid, "owl (2).jpg", file_hash="HDUP")
 
@@ -159,7 +159,7 @@ def test_auto_resolve_does_not_unreject_existing_loser(tmp_path):
     candidate with a "better" name arrives later.
     """
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     # Step 1 & 2: insert two photos sharing a hash; the hook rejects one.
     old = _add(db, fid, "old.jpg", file_hash="HX")
     loser = _add(db, fid, "loser (2).jpg", file_hash="HX")
@@ -199,7 +199,7 @@ def test_auto_resolve_does_not_unreject_existing_loser(tmp_path):
 def test_add_photo_no_hash_no_hook(tmp_path):
     """add_photo without file_hash does not trigger the hook."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "a.jpg")
     p2 = _add(db, fid, "b.jpg")
     for pid in (p1, p2):
@@ -212,7 +212,7 @@ def test_add_photo_hook_swallows_sqlite_error(tmp_path, monkeypatch):
     import sqlite3
 
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="HBOOM")
 
     # Patch apply_duplicate_resolution on its module so the hook's
@@ -242,7 +242,7 @@ def test_add_photo_hook_swallows_sqlite_error(tmp_path, monkeypatch):
 def test_check_and_resolve_for_hash_covers_scanner_flow(tmp_path):
     """Mimic scanner.py: insert without file_hash, UPDATE it, then call the hook."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
 
     # Scanner path: add_photo with no hash, then UPDATE photos SET file_hash=?
     p1 = photo_ingest.add_photo(
@@ -280,7 +280,7 @@ def test_check_and_resolve_for_hash_covers_scanner_flow(tmp_path):
 def test_find_duplicate_groups_returns_only_multi_groups(tmp_path):
     """Returns hashes with 2+ non-rejected rows; skips singletons."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     # Group A: 2 dups — hook auto-rejects one, reset so scan sees both again.
     a1 = _add(db, fid, "a.jpg", file_hash="HA")
     a2 = _add(db, fid, "a copy.jpg", file_hash="HA")
@@ -308,7 +308,7 @@ def test_find_duplicate_groups_returns_only_multi_groups(tmp_path):
 def test_find_duplicate_groups_empty(tmp_path):
     """No dup groups -> empty list."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     _add(db, fid, "solo.jpg", file_hash="SOLO")
     assert db.duplicates.find_groups() == []
 
@@ -322,7 +322,7 @@ def test_find_duplicate_groups_default_excludes_resolved(tmp_path):
     re-process pairs that already have a winner.
     """
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     # add_photo hook auto-resolves: clean name wins, "-2" loses.
     _add(db, fid, "owl.jpg", file_hash="HRES")
     _add(db, fid, "owl-2.jpg", file_hash="HRES")
@@ -334,7 +334,7 @@ def test_find_duplicate_groups_with_resolved_returns_both_statuses(tmp_path):
     """``include_resolved=True`` surfaces both unresolved and resolved groups
     with a ``status`` discriminator."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     # Resolved group: hook auto-rejects "-2".
     _add(db, fid, "a.jpg", file_hash="HA")
     _add(db, fid, "a-2.jpg", file_hash="HA")
@@ -361,7 +361,7 @@ def test_find_duplicate_groups_skips_purely_rejected_hashes(tmp_path):
     treating the user's unrelated reject as a duplicate-loser cleanup task.
     """
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     pid = _add(db, fid, "lonely.jpg", file_hash="HONLY")
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (pid,))
     db.conn.commit()
@@ -378,7 +378,7 @@ def test_find_duplicate_groups_skips_resolved_with_multiple_kept(tmp_path):
     code path.
     """
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "x.jpg", file_hash="HX")
     p2 = _add(db, fid, "x copy.jpg", file_hash="HX")
     p3 = _add(db, fid, "x-2.jpg", file_hash="HX")
@@ -401,7 +401,7 @@ def test_run_duplicate_scan_emits_resolved_proposal(tmp_path):
     from duplicate_scan import run_duplicate_scan
 
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     _add(db, fid, "owl.jpg", file_hash="HRES2")
     _add(db, fid, "owl-2.jpg", file_hash="HRES2")
     # Hook auto-rejected owl-2.
@@ -427,7 +427,7 @@ def test_run_duplicate_scan_marks_empty_file_groups(tmp_path):
 
     empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     _add(db, fid, "DSC_0001.NEF", file_hash=empty_hash)
     _add(db, fid, "DSC_0002.NEF", file_hash=empty_hash)
     db.conn.execute(
@@ -448,7 +448,7 @@ def test_run_duplicate_scan_attaches_edit_recipes(tmp_path):
     from duplicate_scan import run_duplicate_scan
 
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="HEDIT")
     p2 = _add(db, fid, "owl-copy.jpg", file_hash="HEDIT")
     _reset_flags(db, "HEDIT")
@@ -470,7 +470,7 @@ def test_run_duplicate_scan_excludes_resolved_when_opt_out(tmp_path):
     from duplicate_scan import run_duplicate_scan
 
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     _add(db, fid, "p.jpg", file_hash="HEX")
     _add(db, fid, "p-2.jpg", file_hash="HEX")
 
@@ -491,8 +491,8 @@ def test_run_duplicate_scan_emits_buckets_for_unresolved_groups(tmp_path):
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
 
     # Three groups, each with one file in /a and one in /b. Reset flags so
     # the auto-resolve hook doesn't pre-pick a winner — we want unresolved.
@@ -526,7 +526,7 @@ def test_run_duplicate_scan_chunks_large_groups(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "_SQL_PARAM_CHUNK", 2)
 
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     # 1 winner + 4 rejected siblings sharing a hash. The hook auto-rejects
     # everything but the cleanest filename, so we end up with 1 kept + 4
     # rejected — a "resolved" group with 5 photo_ids in scope.
@@ -557,7 +557,7 @@ def test_auto_resolve_after_xmp_import_merges_loser_keywords(tmp_path):
     assert they are carried over to the winner.
     """
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
 
     # Raw inserts so the auto-hook does not fire prematurely.
     db.conn.execute(
@@ -629,7 +629,7 @@ def test_run_duplicate_scan_skips_rows_rejected_after_find_groups(
     from duplicate_scan import run_duplicate_scan
 
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     ids = []
     for name in ("a.jpg", "b.jpg", "c.jpg"):
         db.conn.execute(
@@ -673,7 +673,7 @@ def test_run_duplicate_scan_positive_case_with_one_rejected(
     from duplicate_scan import run_duplicate_scan
 
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     ids = []
     for name in ("x.jpg", "x (2).jpg", "x (3).jpg"):
         db.conn.execute(
@@ -723,8 +723,8 @@ def test_apply_resolution_promotes_present_over_missing(tmp_path):
     long_dir = tmp_path / "archive" / "deep"
     short_dir.mkdir()
     long_dir.mkdir(parents=True)
-    short_fid = db.add_folder(str(short_dir))
-    long_fid = db.add_folder(str(long_dir))
+    short_fid = workspace_folders.add_folder(db, str(short_dir))
+    long_fid = workspace_folders.add_folder(db, str(long_dir))
 
     # Create *only* the file in the long path. The short-path file does not
     # exist on disk — its DB row is a ghost.
@@ -751,8 +751,8 @@ def test_run_duplicate_scan_marks_missing_files(tmp_path):
     long_dir = tmp_path / "long"
     short_dir.mkdir()
     long_dir.mkdir()
-    short_fid = db.add_folder(str(short_dir))
-    long_fid = db.add_folder(str(long_dir))
+    short_fid = workspace_folders.add_folder(db, str(short_dir))
+    long_fid = workspace_folders.add_folder(db, str(long_dir))
 
     # Only the long-path file exists on disk.
     (long_dir / "owl.jpg").write_bytes(b"x")
@@ -789,8 +789,8 @@ def test_run_duplicate_scan_reopens_resolved_when_winner_missing_and_loser_exist
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
 
     # Both files exist when auto-resolve runs (so the hook resolves the group
     # using Rule 1 — clean filename wins).
@@ -846,8 +846,8 @@ def test_run_duplicate_scan_resolved_winner_missing_all_siblings_missing_stays_r
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
 
     (a_dir / "owl.jpg").write_bytes(b"x")
     (b_dir / "owl-2.jpg").write_bytes(b"x")
@@ -883,8 +883,8 @@ def test_run_duplicate_scan_all_missing_flag(tmp_path):
     b_dir = tmp_path / "b"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
 
     # No files written. Both rows are ghosts.
     _add(db, a_fid, "owl.jpg", file_hash="HALLG")
@@ -908,7 +908,7 @@ def test_null_flag_photos_participate_in_duplicate_resolution(tmp_path):
     duplicate resolution: `flag != 'rejected'` is NULL-false, so a NULL-flag
     twin was treated as if rejected and never resolved."""
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="HASHN")
     p2 = _add(db, fid, "owl (2).jpg", file_hash="HASHN")
     # Simulate the undo path: restore both flags to NULL.

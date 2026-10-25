@@ -4,7 +4,7 @@ import os
 
 import pytest
 from page_scripts import page_with_scripts
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _seed_missing_originals_cache(app, db):
@@ -208,7 +208,7 @@ def test_move_photos_job_with_photo_already_in_destination_completes(
     folder = tmp_path / "already_here"
     folder.mkdir()
     (folder / "heron.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
-    fid = db.add_folder(str(folder), name="already_here")
+    fid = workspace_folders.add_folder(db, str(folder), name="already_here")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="heron.jpg", extension=".jpg",
                        file_size=52, file_mtime=1.0)
 
@@ -429,7 +429,7 @@ def test_move_folder_job_organizes_photos_into_capture_date_folders(
     app, db = app_and_db
     src = tmp_path / "date-job-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="date-job-source")
+    fid = workspace_folders.add_folder(db, str(src), name="date-job-source")
     for index, day in enumerate(("12", "13"), start=1):
         filename = f"dated-{index}.jpg"
         (src / filename).write_bytes(b"photo")
@@ -486,7 +486,7 @@ def test_move_folder_job_single_date_shows_the_date_folder_as_destination(
     app, db = app_and_db
     src = tmp_path / "one-date-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="one-date-source")
+    fid = workspace_folders.add_folder(db, str(src), name="one-date-source")
     for index in (1, 2, 3):
         filename = f"same-day-{index}.jpg"
         (src / filename).write_bytes(b"photo")
@@ -523,7 +523,7 @@ def test_move_folder_job_caps_the_stored_date_folder_list(
     app, db = app_and_db
     src = tmp_path / "many-dates-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="many-dates-source")
+    fid = workspace_folders.add_folder(db, str(src), name="many-dates-source")
     days = range(1, folder_moves.MOVE_DATE_DEST_PREVIEW_LIMIT + 3)
     for day in days:
         filename = f"day-{day:02d}.jpg"
@@ -616,7 +616,7 @@ def test_move_folder_failed_move_recorded_as_failed(app_and_db, tmp_path):
     src = tmp_path / "src_folder"
     src.mkdir()
     (src / "a.jpg").write_bytes(b"data")
-    fid = db.add_folder(str(src), name="src_folder")
+    fid = workspace_folders.add_folder(db, str(src), name="src_folder")
 
     client = app.test_client()
     # destination == source ⇒ resolved dest nests inside the source ⇒ overlap
@@ -656,7 +656,7 @@ def test_move_folder_job_surfaces_post_commit_cleanup_warning(
     src = tmp_path / "cleanup_src"
     src.mkdir()
     (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 20)
-    fid = db.add_folder(str(src), name="cleanup_src")
+    fid = workspace_folders.add_folder(db, str(src), name="cleanup_src")
     photo_ingest.add_photo(
         db, folder_id=fid,
         filename="bird.jpg",
@@ -794,7 +794,7 @@ def test_move_folder_preflight_plans_multiple_capture_date_folders(
     app, db = app_and_db
     src = tmp_path / "dated-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="dated-source")
+    fid = workspace_folders.add_folder(db, str(src), name="dated-source")
     for index, day in enumerate(("12", "13"), start=1):
         filename = f"bird-{index}.jpg"
         (src / filename).write_bytes(b"bird")
@@ -833,7 +833,7 @@ def test_move_folder_preflight_samples_match_the_folders_it_reports(
     app, db = app_and_db
     src = tmp_path / "dated-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="dated-source")
+    fid = workspace_folders.add_folder(db, str(src), name="dated-source")
     # Deliberately out of chronological order: the earliest capture time
     # must win regardless of insertion order.
     for index, day in enumerate(("13", "11"), start=1):
@@ -876,7 +876,7 @@ def test_move_folder_preflight_samples_say_unsorted_without_capture_dates(
     app, db = app_and_db
     src = tmp_path / "undated-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="undated-source")
+    fid = workspace_folders.add_folder(db, str(src), name="undated-source")
     (src / "unknown.jpg").write_bytes(b"x")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="unknown.jpg", extension=".jpg",
@@ -908,7 +908,7 @@ def test_move_folder_preflight_samples_fall_back_to_file_mtime(
     app, db = app_and_db
     src = tmp_path / "mtime-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="mtime-source")
+    fid = workspace_folders.add_folder(db, str(src), name="mtime-source")
     (src / "bird.jpg").write_bytes(b"bird")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="bird.jpg", extension=".jpg",
@@ -936,7 +936,7 @@ def test_move_folder_preflight_rejects_date_destination_occupied_by_file(
     app, db = app_and_db
     src = tmp_path / "dated-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="dated-source")
+    fid = workspace_folders.add_folder(db, str(src), name="dated-source")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=4, file_mtime=1.0, timestamp="2026-07-12T10:00:00",
@@ -967,7 +967,7 @@ def test_move_folder_job_rejects_file_at_date_destination(
     app, db = app_and_db
     src = tmp_path / "conflict-job-source"
     src.mkdir()
-    fid = db.add_folder(str(src), name="conflict-job-source")
+    fid = workspace_folders.add_folder(db, str(src), name="conflict-job-source")
     (src / "bird.jpg").write_bytes(b"bird")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="bird.jpg", extension=".jpg",
@@ -1211,7 +1211,7 @@ def test_move_folder_preflight_preview_reports_transfer_counts(app_and_db, tmp_p
     (src / "a.jpg.xmp").write_bytes(b"sidecar")
     (src / "sub").mkdir()
     (src / "sub" / "c.jpg").write_bytes(b"c")
-    fid = db.add_folder(str(src), name="src_folder")
+    fid = workspace_folders.add_folder(db, str(src), name="src_folder")
 
     # Destination already holds one of the source files (a resume scenario).
     dst = tmp_path / "dest"
@@ -1249,7 +1249,7 @@ def test_move_folder_preflight_preview_caps_destination_scan(app_and_db, tmp_pat
     src = tmp_path / "src_folder"
     src.mkdir()
     (src / "a.jpg").write_bytes(b"a")
-    fid = db.add_folder(str(src), name="src_folder")
+    fid = workspace_folders.add_folder(db, str(src), name="src_folder")
 
     dst = tmp_path / "dest"
     dst.mkdir()
@@ -1393,7 +1393,7 @@ def test_move_folder_preflight_remote_uses_posix_join_for_dest(
     # Use a folder whose path is recorded with POSIX separators so the
     # basename derivation matches the transfer-side derivation in move_folder
     # (which strips both / and \ before taking the basename).
-    fid = db.add_folder("/srv/photos/trip", name="trip")
+    fid = workspace_folders.add_folder(db, "/srv/photos/trip", name="trip")
 
     fake_target = {
         "id": "t1", "name": "nas", "host": "nas", "user": "me",
@@ -1482,7 +1482,7 @@ def test_date_move_all_in_place_reports_successful_rerun(app_and_db, tmp_path, m
     app, db = app_and_db
     source = tmp_path / "date-source"
     source.mkdir()
-    fid = db.add_folder(str(source), name="date-source")
+    fid = workspace_folders.add_folder(db, str(source), name="date-source")
     photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                  file_size=1, file_mtime=1, timestamp="2026-07-12T10:00:00")
     monkeypatch.setattr(move, "move_folder_by_date", lambda *a, **kw: {

@@ -23,7 +23,7 @@ import db as db_module
 import pytest
 from db import Database
 from repositories.masks_features import MaskQuality, MasksFeaturesRepository, PipelineFeatures
-from services import detection_store, photo_ingest, subject_masks
+from services import detection_store, photo_ingest, subject_masks, workspace_folders
 
 BOX = (0.1, 0.2, 0.3, 0.4)
 OTHER_BOX = (0.5, 0.5, 0.2, 0.2)
@@ -46,7 +46,7 @@ def _reader(db):
 
 
 def _folder(db, path="/photos"):
-    return db.add_folder(path, name=os.path.basename(path))
+    return workspace_folders.add_folder(db, path, name=os.path.basename(path))
 
 
 def _photo(db, name, folder_id=None):

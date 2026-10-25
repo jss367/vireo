@@ -9,7 +9,7 @@ import pytest
 from db import Database
 from PIL import Image
 from scanner import ScanOptions
-from services import catalog_deletion, photo_ingest
+from services import catalog_deletion, photo_ingest, workspace_folders, workspace_lifecycle
 
 
 def _touch_image(path):
@@ -39,7 +39,7 @@ def test_count_new_images_detects_unscanned_files(db_with_workspace):
     root = tmp_path / "USA2026"
     _touch_image(str(root / "IMG_0001.JPG"))
     _touch_image(str(root / "IMG_0002.JPG"))
-    db.add_folder(str(root), name="USA2026")
+    workspace_folders.add_folder(db, str(root), name="USA2026")
 
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
@@ -61,7 +61,7 @@ def test_count_new_images_deduplicates_repeated_walk_entries(
     root = tmp_path / "USA2026"
     photo = root / "IMG_0001.JPG"
     _touch_image(str(photo))
-    db.add_folder(str(root), name="USA2026")
+    workspace_folders.add_folder(db, str(root), name="USA2026")
 
     def duplicate_walk(_root, **_kwargs):
         yield str(root), [], ["IMG_0001.JPG", "IMG_0001.JPG", "IMG_0001.JPG"]
@@ -77,7 +77,7 @@ def test_count_new_images_deduplicates_repeated_walk_entries(
 
 def _record_staged_source(db, source, local):
     """A local_folder_mappings root row as Work Locally staging writes it."""
-    fid = db.add_folder(str(local), name=os.path.basename(str(local)),
+    fid = workspace_folders.add_folder(db, str(local), name=os.path.basename(str(local)),
                         link_to_workspace=False)
     db.conn.execute(
         "INSERT INTO local_folders (root_folder_id, state, created_at) "
@@ -103,7 +103,7 @@ def test_count_new_images_prunes_nested_staged_source_and_reports_it(
     staged = root / "2024" / "05-01"
     _touch_image(str(staged / "deep" / "IMG_STAGED.JPG"))
     _touch_image(str(root / "2024" / "06-01" / "IMG_NEW.JPG"))
-    db.add_folder(str(root), name="archive")
+    workspace_folders.add_folder(db, str(root), name="archive")
     _record_staged_source(db, staged, tmp_path / "local" / "05-01")
 
     result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
@@ -122,7 +122,7 @@ def test_count_new_images_skips_root_inside_staged_source(db_with_workspace):
     staged = tmp_path / "archive" / "2024-05-01"
     root = staged / "sub"
     _touch_image(str(root / "IMG_0001.JPG"))
-    db.add_folder(str(root), name="sub")
+    workspace_folders.add_folder(db, str(root), name="sub")
     _record_staged_source(db, staged, tmp_path / "local" / "2024-05-01")
 
     result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
@@ -143,7 +143,7 @@ def test_count_new_images_ignores_broken_symlinks(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "USA2026"
     _touch_image(str(root / "real.jpg"))
-    db.add_folder(str(root), name="USA2026")
+    workspace_folders.add_folder(db, str(root), name="USA2026")
     os.symlink(
         str(root / "missing-target.jpg"),
         str(root / "broken.jpg"),
@@ -167,7 +167,7 @@ def test_count_new_images_skips_excluded_root_itself(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     bundle = tmp_path / "Photos Library.photoslibrary"
     _touch_image(str(bundle / "originals" / "managed.jpg"))
-    db.add_folder(str(bundle), name="Photos Library.photoslibrary")
+    workspace_folders.add_folder(db, str(bundle), name="Photos Library.photoslibrary")
 
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
@@ -190,7 +190,7 @@ def test_count_new_images_skips_root_nested_in_excluded_bundle(db_with_workspace
     db, ws_id, tmp_path = db_with_workspace
     nested = tmp_path / "Photos Library.photoslibrary" / "originals"
     _touch_image(str(nested / "0" / "managed.jpg"))
-    db.add_folder(str(nested), name="originals")
+    workspace_folders.add_folder(db, str(nested), name="originals")
 
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
@@ -229,7 +229,7 @@ def test_count_new_images_rejects_excluded_root_before_statting(
     db, ws_id, tmp_path = db_with_workspace
     bundle = tmp_path / "Photos Library.photoslibrary"
     _touch_image(str(bundle / "originals" / "managed.jpg"))
-    db.add_folder(str(bundle), name="Photos Library.photoslibrary")
+    workspace_folders.add_folder(db, str(bundle), name="Photos Library.photoslibrary")
 
     result = count_new_images_for_workspace(db, ws_id)
     assert result["new_count"] == 0
@@ -240,7 +240,7 @@ def test_count_new_images_returns_all_paths_when_sample_limit_is_none(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder = tmp_path / "photos"
     folder.mkdir()
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
     for i in range(10):
         _touch_image(folder / f"IMG_{i:03d}.JPG")
 
@@ -262,9 +262,9 @@ def test_count_new_images_no_double_counting_with_nested_linked_folders(db_with_
 
     # Register root AND the intermediate dirs as workspace_folders (mirrors what
     # the scanner's Database.add_folder does for every discovered subdirectory).
-    root_id = db.add_folder(str(root), name="USA2026")
-    nested_id = db.add_folder(str(nested), name="day1", parent_id=root_id)
-    db.add_folder(str(deep), name="raw", parent_id=nested_id)
+    root_id = workspace_folders.add_folder(db, str(root), name="USA2026")
+    nested_id = workspace_folders.add_folder(db, str(nested), name="day1", parent_id=root_id)
+    workspace_folders.add_folder(db, str(deep), name="raw", parent_id=nested_id)
 
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
@@ -299,10 +299,10 @@ def test_mapped_roots_excludes_folder_with_any_linked_ancestor(db_with_workspace
 
     # Register the full chain against the workspace, then unlink the
     # intermediate /A/B so only /A and /A/B/C remain linked.
-    a_id = db.add_folder(str(a), name="A")
-    b_id = db.add_folder(str(b), name="B", parent_id=a_id)
-    db.add_folder(str(c), name="C", parent_id=b_id)
-    db.remove_workspace_folder(ws_id, b_id)
+    a_id = workspace_folders.add_folder(db, str(a), name="A")
+    b_id = workspace_folders.add_folder(db, str(b), name="B", parent_id=a_id)
+    workspace_folders.add_folder(db, str(c), name="C", parent_id=b_id)
+    workspace_folders.remove_workspace_folder(db, ws_id, b_id)
 
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
@@ -377,7 +377,7 @@ def test_progress_callback_fires_during_walk_and_on_completion(db_with_workspace
     root = tmp_path / "shoot"
     for i in range(3):
         _touch_image(str(root / f"IMG_{i:03d}.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     events = []
 
@@ -407,7 +407,7 @@ def test_progress_callback_throttled_by_progress_every(db_with_workspace):
     root = tmp_path / "shoot"
     for i in range(5):
         _touch_image(str(root / f"IMG_{i:03d}.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     events = []
     from new_images import count_new_images_for_workspace
@@ -432,7 +432,7 @@ def test_count_new_images_works_without_progress_callback(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_001.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
@@ -444,10 +444,10 @@ def test_count_new_images_basename_collision_across_subdirs(db_with_workspace):
     root = tmp_path / "shoot"
     _touch_image(str(root / "day1" / "IMG_0001.JPG"))
     _touch_image(str(root / "day2" / "IMG_0001.JPG"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Ingest only day1's IMG_0001.JPG.
-    day1_id = db.add_folder(str(root / "day1"), name="day1", parent_id=root_id)
+    day1_id = workspace_folders.add_folder(db, str(root / "day1"), name="day1", parent_id=root_id)
     photo_ingest.add_photo(
         db, folder_id=day1_id, filename="IMG_0001.JPG", extension=".JPG",
         file_size=1, file_mtime=0.0,
@@ -471,7 +471,7 @@ def test_count_new_images_reports_jpg_until_it_is_attached_to_existing_raw(
     root = tmp_path / "shoot"
     # NEF is already in the database; the .jpg sidecar is on disk only.
     _touch_image(str(root / "_D851928.jpg"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
     photo_id = photo_ingest.add_photo(
         db, folder_id=root_id, filename="_D851928.NEF", extension=".nef",
         file_size=1, file_mtime=0.0,
@@ -497,7 +497,7 @@ def test_count_new_images_reports_jpg_companion_for_all_raw_extensions(db_with_w
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     raw_exts = [".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"]
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
     for i, ext in enumerate(raw_exts):
         stem = f"IMG_{i:04d}"
         _touch_image(str(root / f"{stem}.jpg"))
@@ -517,7 +517,7 @@ def test_count_new_images_reports_long_jpeg_extension_companion(db_with_workspac
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_0001.jpeg"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
     photo_ingest.add_photo(
         db, folder_id=root_id, filename="IMG_0001.CR3", extension=".cr3",
         file_size=1, file_mtime=0.0,
@@ -535,7 +535,7 @@ def test_count_new_images_counts_jpg_without_raw_companion(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_0001.jpg"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
     # No photos added — workspace is empty.
 
     from new_images import count_new_images_for_workspace
@@ -553,7 +553,7 @@ def test_count_new_images_counts_raw_alongside_existing_jpg(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_0001.NEF"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
     photo_ingest.add_photo(
         db, folder_id=root_id, filename="IMG_0001.jpg", extension=".jpg",
         file_size=1, file_mtime=0.0,
@@ -577,9 +577,9 @@ def test_count_new_images_jpg_companion_in_different_folder_is_new(db_with_works
     day1 = root / "day1"
     day2 = root / "day2"
     _touch_image(str(day2 / "IMG_0001.jpg"))
-    root_id = db.add_folder(str(root), name="shoot")
-    day1_id = db.add_folder(str(day1), name="day1", parent_id=root_id)
-    db.add_folder(str(day2), name="day2", parent_id=root_id)
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
+    day1_id = workspace_folders.add_folder(db, str(day1), name="day1", parent_id=root_id)
+    workspace_folders.add_folder(db, str(day2), name="day2", parent_id=root_id)
     photo_ingest.add_photo(
         db, folder_id=day1_id, filename="IMG_0001.NEF", extension=".nef",
         file_size=1, file_mtime=0.0,
@@ -596,7 +596,7 @@ def test_db_get_new_images_for_workspace_caches_result(db_with_workspace, monkey
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_0001.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     calls = [0]
     import new_images
@@ -624,9 +624,9 @@ def test_invalidate_cache_for_shared_folder_across_workspaces(tmp_path):
     db.set_active_workspace(ws_a)
     root = tmp_path / "shared"
     _touch_image(str(root / "IMG.JPG"))
-    root_id = db.add_folder(str(root), name="shared")
+    root_id = workspace_folders.add_folder(db, str(root), name="shared")
     db.set_active_workspace(ws_b)
-    db.add_workspace_folder(ws_b, root_id)
+    workspace_folders.add_workspace_folder(db, ws_b, root_id)
 
     # Prime both caches.
     db.set_active_workspace(ws_a)
@@ -647,7 +647,7 @@ def test_scan_job_invalidates_cache(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "a.JPG"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime cache with current state (1 new).
     r1 = db.get_new_images_for_workspace(ws_id)
@@ -669,7 +669,7 @@ def test_two_database_instances_share_cache(tmp_path):
     root = tmp_path / "shoot"
     os.makedirs(root, exist_ok=True)
     Image.new("RGB", (1, 1), "white").save(str(root / "a.JPG"), "JPEG")
-    db_a.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db_a, str(root), name="shoot")
     db_a.get_new_images_for_workspace(ws_id)  # populates shared cache
 
     # A second Database instance (simulating a different thread / request)
@@ -717,7 +717,7 @@ def test_cache_does_not_share_across_different_db_paths(tmp_path):
     # db_a has one image in a linked folder -> new_count == 1.
     root_a = tmp_path / "shoot_a"
     _touch_image(str(root_a / "IMG.JPG"))
-    db_a.add_folder(str(root_a), name="shoot_a")
+    workspace_folders.add_folder(db_a, str(root_a), name="shoot_a")
 
     # Prime db_a's cache AFTER both DBs exist. A cache keyed only on
     # workspace_id would now publish this entry under key=1 — visible to
@@ -753,7 +753,7 @@ def test_count_new_images_skips_dotfiles(db_with_workspace):
     # suffix matches SUPPORTED_EXTENSIONS; the filter must still reject it
     # because of the leading dot.
     _touch_image(str(root / "._IMG_0001.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
@@ -778,7 +778,7 @@ def test_invalidate_new_images_after_scan_normalizes_trailing_slash(tmp_path):
     _touch_image(str(root / "IMG_0001.JPG"))
     # Folder stored in canonical form (no trailing slash), matching what the
     # scanner writes via str(Path(...)).
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime the cache.
     db.get_new_images_for_workspace(ws_id)
@@ -805,7 +805,7 @@ def test_invalidate_new_images_after_scan_follows_symlinked_root(tmp_path):
 
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_0001.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
     link = tmp_path / "shoot-link"
     link.symlink_to(root, target_is_directory=True)
 
@@ -847,7 +847,7 @@ def test_invalidate_new_images_after_scan_preserves_dotdot_segments(tmp_path):
         f"Test precondition: str(Path(...)) must preserve `..` — got {stored!r}. "
         "If your platform's pathlib collapses `..`, this test is moot."
     )
-    db.add_folder(stored, name="y")
+    workspace_folders.add_folder(db, stored, name="y")
 
     # Prime the cache.
     db.get_new_images_for_workspace(ws_id)
@@ -887,15 +887,15 @@ def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(t
     descendant = root / "day1"
     _touch_image(str(descendant / "IMG_0001.JPG"))
 
-    root_id = db_a.add_folder(str(root), name="shoot")
-    descendant_id = db_a.add_folder(
-        str(descendant), name="day1", parent_id=root_id
+    root_id = workspace_folders.add_folder(db_a, str(root), name="shoot")
+    descendant_id = workspace_folders.add_folder(
+        db_a, str(descendant), name="day1", parent_id=root_id
     )
 
     # Create a second workspace that only links the descendant folder, so
     # invalidation via the LIKE query (on the root path) must reach it.
     ws_b = db_a.create_workspace("B")
-    db_a.add_workspace_folder(ws_b, descendant_id)
+    workspace_folders.add_workspace_folder(db_a, ws_b, descendant_id)
 
     # Prime caches for both workspaces via db_a.
     db_a.get_new_images_for_workspace(ws_id)
@@ -989,7 +989,7 @@ def test_get_new_images_for_workspace_race_does_not_repopulate_stale(db_with_wor
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     import new_images
 
@@ -1016,7 +1016,7 @@ def test_scan_handler_invalidates_cache_when_scan_raises(tmp_path, monkeypatch):
     db.set_active_workspace(ws_id)
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime the cache.
     db.get_new_images_for_workspace(ws_id)
@@ -1066,7 +1066,7 @@ def test_pipeline_job_scan_invalidates_cache(tmp_path, monkeypatch):
 
     # Register the source folder against the workspace so
     # count_new_images_for_workspace has something to enumerate.
-    db.add_folder(str(photo_dir), name="photos")
+    workspace_folders.add_folder(db, str(photo_dir), name="photos")
 
     # Prime the cache: two files present, none ingested yet -> new_count=2.
     primed = db.get_new_images_for_workspace(ws_id)
@@ -1133,7 +1133,7 @@ def test_audit_import_untracked_invalidates_cache(db_with_workspace):
     root = tmp_path / "shoot"
     img_path = root / "IMG_0001.JPG"
     _touch_image(str(img_path))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime the cache: one file present, none ingested -> new_count=1.
     primed = db.get_new_images_for_workspace(ws_id)
@@ -1178,7 +1178,7 @@ def test_invalidate_new_images_cache_for_folders_handles_thousands_of_ids(
     # ids. Prime the cache, invalidate, and assert it was cleared.
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     db.get_new_images_for_workspace(ws_id)
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
@@ -1205,7 +1205,7 @@ def test_delete_workspace_clears_cache(tmp_path):
     )
     assert db._new_images_cache.get(db._db_path, ws_tmp) is not None
 
-    db.delete_workspace(ws_tmp)
+    workspace_lifecycle.delete_workspace(db, ws_tmp)
 
     assert db._new_images_cache.get(db._db_path, ws_tmp) is None, (
         "delete_workspace must invalidate the new-images cache entry"
@@ -1229,7 +1229,7 @@ def test_create_workspace_clears_stale_cache_on_id_reuse(tmp_path):
     ws_a = db.create_workspace("A")
     stale_payload = {"new_count": 42, "per_root": [], "sample": ["/stale.JPG"]}
 
-    db.delete_workspace(ws_a)
+    workspace_lifecycle.delete_workspace(db, ws_a)
 
     # Simulate a late write landing in the cache AFTER delete_workspace's
     # invalidation ran. In production this could happen if an in-flight
@@ -1279,7 +1279,7 @@ def test_delete_photos_invalidates_cache(db_with_workspace):
     root = tmp_path / "shoot"
     _touch_image(str(root / "a.JPG"))
     _touch_image(str(root / "b.JPG"))
-    root_id = db.add_folder(str(root), name="shoot")
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Ingest both so they're not "new".
     a_id = photo_ingest.add_photo(
@@ -1324,7 +1324,7 @@ def test_add_workspace_folder_invalidates_cache(tmp_path):
     db.set_active_workspace(ws_b)
     root = tmp_path / "unattached"
     _touch_image(str(root / "IMG.JPG"))
-    folder_id = db.add_folder(str(root), name="unattached")
+    folder_id = workspace_folders.add_folder(db, str(root), name="unattached")
 
     # Prime the cache for ws_a — it has no linked folders yet, so new_count=0.
     db.set_active_workspace(ws_a)
@@ -1334,7 +1334,7 @@ def test_add_workspace_folder_invalidates_cache(tmp_path):
 
     # Link the folder to ws_a. This must invalidate ws_a's cache so the
     # banner reflects the newly-visible untracked file.
-    db.add_workspace_folder(ws_a, folder_id)
+    workspace_folders.add_workspace_folder(db, ws_a, folder_id)
 
     assert db._new_images_cache.get(db._db_path, ws_a) is None, (
         "add_workspace_folder must invalidate the workspace's new-images cache"
@@ -1349,14 +1349,14 @@ def test_remove_workspace_folder_invalidates_cache(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    folder_id = db.add_folder(str(root), name="shoot")
+    folder_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime the cache: one untracked file in this workspace.
     r1 = db.get_new_images_for_workspace(ws_id)
     assert r1["new_count"] == 1
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
-    db.remove_workspace_folder(ws_id, folder_id)
+    workspace_folders.remove_workspace_folder(db, ws_id, folder_id)
 
     assert db._new_images_cache.get(db._db_path, ws_id) is None, (
         "remove_workspace_folder must invalidate the workspace's "
@@ -1377,7 +1377,7 @@ def test_move_folders_to_workspace_invalidates_both_workspaces(tmp_path):
     db.set_active_workspace(ws_a)
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    folder_id = db.add_folder(str(root), name="shoot")
+    folder_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime both caches.
     db.get_new_images_for_workspace(ws_a)
@@ -1386,7 +1386,7 @@ def test_move_folders_to_workspace_invalidates_both_workspaces(tmp_path):
     assert db._new_images_cache.get(db._db_path, ws_b) is not None
 
     # Move folder from ws_a to ws_b.
-    result = db.move_folders_to_workspace(ws_a, ws_b, [folder_id])
+    result = workspace_folders.move_folders_to_workspace(db, ws_a, ws_b, [folder_id])
     assert result["folders_moved"] == 1
 
     assert db._new_images_cache.get(db._db_path, ws_a) is None, (
@@ -1429,7 +1429,7 @@ def test_count_seeds_and_records_durable_mount_history(db_with_workspace, monkey
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "photos"
     _touch_image(str(root / "a.jpg"))
-    db.add_folder(str(root), name="photos")
+    workspace_folders.add_folder(db, str(root), name="photos")
     seeded = []
     recorded = []
 
@@ -1469,8 +1469,8 @@ def test_count_skips_root_on_offline_volume_and_reports_it(db_with_workspace):
     offline = tmp_path / "offline"
     _touch_image(str(online / "a.jpg"))
     _touch_image(str(offline / "b.jpg"))
-    db.add_folder(str(online), name="online")
-    db.add_folder(str(offline), name="offline")
+    workspace_folders.add_folder(db, str(online), name="online")
+    workspace_folders.add_folder(db, str(offline), name="offline")
 
     gate = _FakeReachability(offline_prefixes=(str(offline),))
     result = count_new_images_for_workspace(db, ws_id, reachability=gate)
@@ -1501,8 +1501,8 @@ def test_count_marks_root_offline_when_walk_raises_enotconn(
     _touch_image(str(healthy / "ok.jpg"))
     _touch_image(str(flaky / "first.jpg"))
     _touch_image(str(flaky / "second.jpg"))
-    db.add_folder(str(healthy), name="healthy")
-    db.add_folder(str(flaky), name="flaky")
+    workspace_folders.add_folder(db, str(healthy), name="healthy")
+    workspace_folders.add_folder(db, str(flaky), name="flaky")
 
     real_walk = new_images_module.safe_scan_walk
 
@@ -1541,7 +1541,7 @@ def test_count_keeps_walking_past_permission_errors(db_with_workspace, monkeypat
     root = tmp_path / "root"
     _touch_image(str(root / "a.jpg"))
     _touch_image(str(root / "b.jpg"))
-    db.add_folder(str(root), name="root")
+    workspace_folders.add_folder(db, str(root), name="root")
 
     def walk_with_denied_subdir(top, onerror=None, **kwargs):
         yield top, ["denied"], ["a.jpg"]
@@ -1565,7 +1565,7 @@ def test_count_uses_shared_gate_by_default(db_with_workspace, monkeypatch):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "root"
     _touch_image(str(root / "a.jpg"))
-    db.add_folder(str(root), name="root")
+    workspace_folders.add_folder(db, str(root), name="root")
 
     gate = _FakeReachability(offline_prefixes=(str(root),))
     monkeypatch.setattr(volume_reachability, "get_shared", lambda: gate)
@@ -1587,7 +1587,7 @@ def test_count_probes_reachability_before_any_root_filesystem_check(
     db, ws_id, tmp_path = db_with_workspace
     offline = tmp_path / "offline"
     _touch_image(str(offline / "a.jpg"))
-    db.add_folder(str(offline), name="offline")
+    workspace_folders.add_folder(db, str(offline), name="offline")
 
     touched = []
     monkeypatch.setattr(
@@ -1618,7 +1618,7 @@ def test_count_does_no_unbounded_lookups_on_reachable_mount_shaped_root(
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "nas"
     _touch_image(str(root / "a.jpg"))
-    db.add_folder(str(root), name="nas")
+    workspace_folders.add_folder(db, str(root), name="nas")
 
     touched = []
     monkeypatch.setattr(
@@ -1644,7 +1644,7 @@ def test_count_excludes_bundle_root_on_mount_lexically(db_with_workspace, monkey
     db, ws_id, tmp_path = db_with_workspace
     bundle = tmp_path / "Photos Library.photoslibrary"
     _touch_image(str(bundle / "originals" / "a.jpg"))
-    db.add_folder(str(bundle), name="lib")
+    workspace_folders.add_folder(db, str(bundle), name="lib")
     monkeypatch.setattr(
         new_images_module, "safe_scan_walk",
         lambda *a, **k: pytest.fail("bundle root must not be walked"),
@@ -1669,7 +1669,7 @@ def test_count_excludes_alias_into_bundle_on_mount(db_with_workspace, monkeypatc
     db, ws_id, tmp_path = db_with_workspace
     alias = tmp_path / "PhotoLib"
     alias.symlink_to("/Volumes/Fake/Photos Library.photoslibrary")
-    db.add_folder(str(alias), name="lib")
+    workspace_folders.add_folder(db, str(alias), name="lib")
     monkeypatch.setattr(
         new_images_module, "safe_scan_walk",
         lambda *a, **k: pytest.fail("bundle alias must not be walked"),
@@ -1695,8 +1695,8 @@ def test_count_abandons_stalled_walk_and_reports_root_offline(db_with_workspace,
     wedged = tmp_path / "wedged"
     _touch_image(str(healthy / "ok.jpg"))
     _touch_image(str(wedged / "a.jpg"))
-    db.add_folder(str(healthy), name="healthy")
-    db.add_folder(str(wedged), name="wedged")
+    workspace_folders.add_folder(db, str(healthy), name="healthy")
+    workspace_folders.add_folder(db, str(wedged), name="wedged")
 
     release = threading.Event()
     real_walk = new_images_module.safe_scan_walk
@@ -1754,7 +1754,7 @@ def test_count_caps_stalled_walks_globally(db_with_workspace, monkeypatch):
     roots = [tmp_path / name for name in ("wedged-a", "wedged-b", "wedged-c")]
     for root in roots:
         _touch_image(str(root / "a.jpg"))
-        db.add_folder(str(root), name=root.name)
+        workspace_folders.add_folder(db, str(root), name=root.name)
 
     release = threading.Event()
     started = []
@@ -1982,7 +1982,7 @@ def test_count_progress_and_totals_unchanged_by_worker_thread(db_with_workspace)
         root = tmp_path / name
         for i in range(4):
             _touch_image(str(root / f"IMG_{i}.JPG"))
-        db.add_folder(str(root), name=name)
+        workspace_folders.add_folder(db, str(root), name=name)
     events = []
     result = count_new_images_for_workspace(
         db, ws_id, progress_callback=lambda c, n: events.append((c, n)), progress_every=3,
@@ -2001,7 +2001,7 @@ def test_count_new_images_stamps_when_the_walk_ran(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "USA2026"
     _touch_image(str(root / "IMG_0001.JPG"))
-    db.add_folder(str(root), name="USA2026")
+    workspace_folders.add_folder(db, str(root), name="USA2026")
 
     from new_images import count_new_images_for_workspace
     before = time.time()
@@ -2176,7 +2176,7 @@ def test_staged_alias_timeout_reports_root_unreachable(db_with_workspace, monkey
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "archive"
     _touch_image(str(root / "new.jpg"))
-    db.add_folder(str(root), name="archive")
+    workspace_folders.add_folder(db, str(root), name="archive")
     _record_staged_source(db, root / "day", tmp_path / "local")
     monkeypatch.setattr(volume_reachability, "resolve_alias_bounded", lambda path: None)
     result = new_images.count_new_images_for_workspace(db, ws_id)
@@ -2192,7 +2192,7 @@ def test_offline_staged_share_does_not_hide_unrelated_local_images(db_with_works
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "archive"
     _touch_image(str(root / "new.jpg"))
-    db.add_folder(str(root), name="archive")
+    workspace_folders.add_folder(db, str(root), name="archive")
     source = "/Volumes/offline/day"
     _record_staged_source(db, source, tmp_path / "local")
     monkeypatch.setattr(volume_reachability, "resolve_alias_bounded",
@@ -2212,7 +2212,7 @@ def test_staged_sources_are_resolved_once_across_workspace_roots(db_with_workspa
     for name in ("one", "two"):
         root = tmp_path / name
         _touch_image(str(root / "new.jpg"))
-        db.add_folder(str(root), name=name)
+        workspace_folders.add_folder(db, str(root), name=name)
     source = str(tmp_path / "staged")
     _record_staged_source(db, source, tmp_path / "local")
     calls = []

@@ -25,6 +25,7 @@ from playwright.sync_api import expect
 from e2e.threaded_server import start_server, stop_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "vireo"))
+from services import workspace_folders
 
 
 def _write_jpeg(path, size=(64, 64), color="red"):
@@ -58,8 +59,8 @@ def fresh_server(tmp_path, monkeypatch):
         ws_id = db.ensure_default_workspace()
         db.set_active_workspace(ws_id)
         # Register the folder so it's "known" to the workspace but empty on disk.
-        folder_id = db.add_folder(str(photo_dir), name="photos")
-        db.add_workspace_folder(ws_id, folder_id)
+        folder_id = workspace_folders.add_folder(db, str(photo_dir), name="photos")
+        workspace_folders.add_workspace_folder(db, ws_id, folder_id)
 
         app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
         cleanup.callback(app._cleanup_app_resources)
@@ -310,8 +311,8 @@ def test_banner_count_discloses_unchecked_offline_folder(fresh_server, page, mon
     _write_jpeg(nas_dir / "REMOTE.JPG")
     _write_jpeg(photo_dir / "LOCAL.JPG")
     ws_id = db._active_workspace_id
-    nas_id = db.add_folder(str(nas_dir), name="nas")
-    db.add_workspace_folder(ws_id, nas_id)
+    nas_id = workspace_folders.add_folder(db, str(nas_dir), name="nas")
+    workspace_folders.add_workspace_folder(db, ws_id, nas_id)
 
     monkeypatch.setattr(
         volume_reachability, "get_shared", lambda: _OfflineGate(nas_dir),
@@ -347,8 +348,8 @@ def test_dismissed_count_rearms_when_a_folder_goes_offline(fresh_server, page, m
     nas_dir.mkdir()
     _write_jpeg(photo_dir / "LOCAL.JPG")
     ws_id = db._active_workspace_id
-    nas_id = db.add_folder(str(nas_dir), name="nas")
-    db.add_workspace_folder(ws_id, nas_id)
+    nas_id = workspace_folders.add_folder(db, str(nas_dir), name="nas")
+    workspace_folders.add_workspace_folder(db, ws_id, nas_id)
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")

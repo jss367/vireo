@@ -4,13 +4,20 @@ import pytest
 from db import Database
 from move import move_photos
 from repositories.photo_visibility import PhotoVisibilityRepository
-from services import browse_queries, catalog_deletion, dashboard_stats, missing_originals, photo_ingest
+from services import (
+    browse_queries,
+    catalog_deletion,
+    dashboard_stats,
+    missing_originals,
+    photo_ingest,
+    workspace_folders,
+)
 
 
 def _photo(db, folder, name, content=b"photo"):
     folder.mkdir(exist_ok=True)
     (folder / name).write_bytes(content)
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                        file_size=len(content), file_mtime=1)
     return fid, pid
@@ -25,7 +32,7 @@ def test_move_preserves_only_selected_photo_when_checked(tmp_path, keep_visible)
         source, moved = _photo(db, tmp_path / "source", "moved.jpg")
         _, unselected = _photo(db, tmp_path / "source", "unselected.jpg", b"other")
         destination, unrelated = _photo(db, tmp_path / "destination", "unrelated.jpg", b"unrelated")
-        db.add_workspace_folder(b, source)
+        workspace_folders.add_workspace_folder(db, b, source)
         assert db.photo_visibility.affected_workspaces([moved, unselected]) == [
             {"id": b, "name": "Other", "photo_count": 2}]
         result = move_photos(db, [moved], str(tmp_path / "destination"), keep_visible=keep_visible)
@@ -52,7 +59,7 @@ def test_unchecked_subsequent_move_revokes_prior_photo_grant(tmp_path):
         a = db._active_workspace_id
         b = db.create_workspace("Other")
         source, photo = _photo(db, tmp_path / "source", "photo.jpg")
-        db.add_workspace_folder(b, source)
+        workspace_folders.add_workspace_folder(db, b, source)
         assert move_photos(db, [photo], str(tmp_path / "first"))["moved"] == 1
         assert move_photos(db, [photo], str(tmp_path / "second"), keep_visible=False)["moved"] == 1
         db.set_active_workspace(b)
@@ -65,8 +72,8 @@ def test_unchecked_move_does_not_remove_existing_destination_sharing(tmp_path):
         b = db.create_workspace("Other")
         source, photo = _photo(db, tmp_path / "source", "photo.jpg")
         destination, sibling = _photo(db, tmp_path / "destination", "sibling.jpg", b"sibling")
-        db.add_workspace_folder(b, source)
-        db.add_workspace_folder(b, destination)
+        workspace_folders.add_workspace_folder(db, b, source)
+        workspace_folders.add_workspace_folder(db, b, destination)
         assert move_photos(db, [photo], str(tmp_path / "destination"), keep_visible=False)["moved"] == 1
         db.set_active_workspace(b)
         assert db.photo_visibility.visible_photo_ids([photo, sibling]) == [photo, sibling]
@@ -91,7 +98,7 @@ def test_removing_folder_membership_removes_photo_grants(tmp_path):
         folder, photo = _photo(db, tmp_path / "folder", "photo.jpg")
         db.photo_visibility.grant(b, [photo])
         db.conn.commit()
-        db.remove_workspace_folder(b, folder)
+        workspace_folders.remove_workspace_folder(db, b, folder)
         db.set_active_workspace(b)
         assert db.photo_visibility.visible_photo_ids([photo]) == []
 
@@ -110,7 +117,7 @@ def test_visibility_preview_is_scoped_and_names_affected_workspaces(app_and_db, 
     app, db = app_and_db
     b = db.create_workspace("Birds")
     source, photo = _photo(db, tmp_path / "source", "photo.jpg")
-    db.add_workspace_folder(b, source)
+    workspace_folders.add_workspace_folder(db, b, source)
     client = app.test_client()
     response = client.post("/api/move-photos/visibility", json={"photo_ids": [photo]})
     assert response.status_code == 200
@@ -198,7 +205,7 @@ def test_grant_only_folder_is_not_a_storage_import_root(tmp_path):
         folder, photo = _photo(db, tmp_path / "folder", "photo.jpg")
         db.photo_visibility.grant(b, [photo])
         db.conn.commit()
-        assert db.get_workspace_folders(b) == []
+        assert workspace_folders.get_workspace_folders(db, b) == []
         db.set_active_workspace(b)
         assert folder in {row["id"] for row in db.folders.tree()}
 
@@ -238,7 +245,7 @@ def test_large_affected_selection_is_deduplicated_and_chunked(tmp_path):
     with Database(str(tmp_path / "db")) as db:
         b = db.create_workspace("Other")
         source, photo = _photo(db, tmp_path / "source", "photo.jpg")
-        db.add_workspace_folder(b, source)
+        workspace_folders.add_workspace_folder(db, b, source)
         assert db.photo_visibility.affected_workspaces([photo] * 900 + list(range(10000, 10900))) == [
             {"id": b, "name": "Other", "photo_count": 1}]
 
@@ -252,7 +259,7 @@ def test_move_job_uses_remembered_choice_or_explicit_override(app_and_db, tmp_pa
     app, db = app_and_db
     b = db.create_workspace("Other")
     source, photo = _photo(db, tmp_path / "job-source", "photo.jpg")
-    db.add_workspace_folder(b, source)
+    workspace_folders.add_workspace_folder(db, b, source)
     raw = cfg.read_raw_config_file()
     raw["move_keep_visible_in_other_workspaces"] = saved
     cfg.save(raw)
@@ -323,8 +330,8 @@ def test_date_move_preview_includes_detached_physical_descendants(app_and_db, tm
     b = db.create_workspace('Hidden descendant owner')
     root, visible = _photo(db, tmp_path / 'root', 'visible.jpg')
     child, hidden = _photo(db, tmp_path / 'root' / 'detached', 'hidden.jpg', b'hidden')
-    db.add_workspace_folder(b, child)
-    db.remove_workspace_folder(a, child)
+    workspace_folders.add_workspace_folder(db, b, child)
+    workspace_folders.remove_workspace_folder(db, a, child)
     assert db.photo_visibility.visible_photo_ids([visible, hidden]) == [visible]
     destination = str(tmp_path / 'destination')
     plans = plan_folder_date_moves(db, root, destination, '%Y/%m/%d')
@@ -356,9 +363,9 @@ def test_workspace_folder_transfer_removes_source_grants_atomically(tmp_path, ab
             db.conn.execute(f"CREATE TRIGGER reject_folder_transfer BEFORE DELETE ON workspace_folders WHEN OLD.workspace_id={source} BEGIN SELECT RAISE(ABORT, 'transfer rejected'); END")
             db.conn.commit()
             with pytest.raises(sqlite3.IntegrityError, match='transfer rejected'):
-                db.move_folders_to_workspace(source, target, [folder])
+                workspace_folders.move_folders_to_workspace(db, source, target, [folder])
         else:
-            db.move_folders_to_workspace(source, target, [folder])
+            workspace_folders.move_folders_to_workspace(db, source, target, [folder])
         db.set_active_workspace(source)
         assert bool(db.photo_visibility.visible_photo_ids([photo])) == abort_transfer
         assert bool(db.conn.execute('SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?', (source, photo)).fetchone()) == abort_transfer
@@ -442,8 +449,8 @@ def test_grant_only_folder_is_excluded_from_audit_roots(app_and_db, tmp_path):
     b = db.create_workspace('Other')
     linked_dir = tmp_path / 'linked'
     linked_dir.mkdir()
-    linked_folder = db.add_folder(str(linked_dir))
-    db.add_workspace_folder(b, linked_folder)
+    linked_folder = workspace_folders.add_folder(db, str(linked_dir))
+    workspace_folders.add_workspace_folder(db, b, linked_folder)
     grant_dir = tmp_path / 'grant-only'
     grant_folder, granted = _photo(db, grant_dir, 'granted.jpg')
     _, hidden_sibling = _photo(db, grant_dir, 'hidden.jpg', b'hidden')
@@ -454,7 +461,7 @@ def test_grant_only_folder_is_excluded_from_audit_roots(app_and_db, tmp_path):
     # Direct repository check: the audit root paths exclude the grant-only
     # folder even though ``folders.tree`` surfaces it as a parentless
     # entry (its own synthetic root).
-    audit_roots = db.get_audit_root_paths()
+    audit_roots = workspace_folders.get_audit_root_paths(db)
     assert str(linked_dir) in audit_roots
     assert str(grant_dir) not in audit_roots
     assert any(not row['parent_id'] and row['path'] == str(grant_dir)
@@ -497,7 +504,7 @@ def test_folder_relocate_requires_real_folder_link_not_photo_grant(app_and_db, t
     folder_dir = tmp_path / 'owned-folder'
     folder, owned_photo = _photo(db, folder_dir, 'owned.jpg')
     _, sibling = _photo(db, folder_dir, 'sibling.jpg', b'sibling')
-    db.add_workspace_folder(owner, folder)
+    workspace_folders.add_workspace_folder(db, owner, folder)
     db.photo_visibility.grant(guest, [owned_photo])
     db.conn.commit()
     new_location = tmp_path / 'moved-folder'
@@ -508,7 +515,7 @@ def test_folder_relocate_requires_real_folder_link_not_photo_grant(app_and_db, t
     # listing endpoint keeps the read-only association -- but the mutation
     # route rejects the request.
     assert guest in {row['id'] for row in db.workspace_folders.list_workspaces_for_folder(folder)}
-    assert not db.workspace_has_folder_link(folder, guest)
+    assert not workspace_folders.workspace_has_folder_link(db, folder, guest)
     response = client.post(
         f'/api/folders/{folder}/relocate', json={'path': str(new_location)},
     )
@@ -517,7 +524,7 @@ def test_folder_relocate_requires_real_folder_link_not_photo_grant(app_and_db, t
     assert db.folders.get(folder)['path'] == str(folder_dir)
     # The owner still has mutation rights.
     assert client.post(f'/api/workspaces/{owner}/activate').status_code == 200
-    assert db.workspace_has_folder_link(folder, owner)
+    assert workspace_folders.workspace_has_folder_link(db, folder, owner)
     # Sibling and owned_photo both remain owned by owner.
     db.set_active_workspace(owner)
     assert db.photo_visibility.visible_photo_ids([owned_photo, sibling]) == [owned_photo, sibling]
@@ -539,7 +546,7 @@ def test_mount_loss_rollback_revokes_duplicate_grants_and_demotes_promotion(tmp_
         folder, batch_photo = _photo(db, tmp_path / 'batch', 'batch.jpg')
         _, other_photo = _photo(db, tmp_path / 'other', 'other.jpg')
         unrelated_dir = tmp_path / 'unrelated'
-        unrelated = db.add_folder(str(unrelated_dir))
+        unrelated = workspace_folders.add_folder(db, str(unrelated_dir))
         # Pre-existing grant that must survive the rollback.
         db.photo_visibility.grant(workspace, [pre_existing_photo])
         # Mark the batch's folder missing and the unrelated folder missing,
@@ -612,7 +619,7 @@ def test_grant_only_workspace_cannot_preflight_or_launch_whole_folder_move(app_a
     _, sibling = _photo(db, source, "private.jpg", b"private")
     untracked = source / "untracked.txt"
     untracked.write_bytes(b"untracked")
-    db.add_workspace_folder(owner, folder)
+    workspace_folders.add_workspace_folder(db, owner, folder)
     db.photo_visibility.grant(guest, [shared])
     db.conn.commit()
     client = app.test_client()
@@ -641,8 +648,8 @@ def test_grant_only_folder_cannot_become_a_workspace_scan_or_local_copy_root(app
     _, sibling = _photo(db, tmp_path / "root", "private.jpg", b"private")
     db.photo_visibility.grant(guest, [shared])
     db.conn.commit()
-    assert folder in {row["id"] for row in db.get_workspace_folder_roots(owner)}
-    assert db.get_workspace_folder_roots(guest) == []
+    assert folder in {row["id"] for row in workspace_folders.get_workspace_folder_roots(db, owner)}
+    assert workspace_folders.get_workspace_folder_roots(db, guest) == []
     db.set_active_workspace(guest)
     client = app.test_client()
     assert client.post(f"/api/workspaces/{guest}/activate").status_code == 200
@@ -652,7 +659,7 @@ def test_grant_only_folder_cannot_become_a_workspace_scan_or_local_copy_root(app
     with pytest.raises(LocalWorkspaceError, match="Add at least one folder"):
         _root_records(db, guest, tmp_path / "local")
     assert db.photo_visibility.visible_photo_ids([shared, sibling]) == [shared]
-    assert not db.workspace_has_folder_link(folder)
+    assert not workspace_folders.workspace_has_folder_link(db, folder)
     assert not (tmp_path / "local").exists()
 
 
@@ -664,7 +671,7 @@ def test_grant_only_missing_folder_cannot_delete_hidden_siblings(app_and_db, tmp
     _, sibling = _photo(db, tmp_path / "missing-root", "private.jpg", b"private")
     db.photo_visibility.grant(guest, [shared])
     db.conn.commit()
-    db.remove_workspace_folder(owner, folder)
+    workspace_folders.remove_workspace_folder(db, owner, folder)
     db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (folder,))
     db.conn.commit()
     db.set_active_workspace(guest)
@@ -690,10 +697,10 @@ def test_failed_move_rolls_back_destination_subtree_membership(tmp_path, monkeyp
         source, photo = _photo(db, tmp_path / "source", "moving.jpg")
         destination, sibling = _photo(db, tmp_path / "destination", "private.jpg", b"private")
         child, nested = _photo(db, tmp_path / "destination" / "nested", "hidden.jpg", b"nested")
-        db.add_workspace_folder(owner, destination)
+        workspace_folders.add_workspace_folder(db, owner, destination)
         if not already_linked:
-            db.remove_workspace_folder(active, destination)
-            db.remove_workspace_folder(active, child)
+            workspace_folders.remove_workspace_folder(db, active, destination)
+            workspace_folders.remove_workspace_folder(db, active, child)
         before = [tuple(row) for row in db.conn.execute("SELECT * FROM workspace_folders ORDER BY workspace_id,folder_id")]
         before_visible = db.photo_visibility.visible_photo_ids([photo, sibling, nested])
 
@@ -707,8 +714,8 @@ def test_failed_move_rolls_back_destination_subtree_membership(tmp_path, monkeyp
         assert db.photo_visibility.visible_photo_ids([photo, sibling, nested]) == before_visible
         assert db.photos.get(photo)["folder_id"] == source
         assert (tmp_path / "source" / "moving.jpg").read_bytes() == b"photo"
-        assert db.workspace_has_folder_link(destination) == already_linked
-        assert db.workspace_has_folder_link(child) == already_linked
+        assert workspace_folders.workspace_has_folder_link(db, destination) == already_linked
+        assert workspace_folders.workspace_has_folder_link(db, child) == already_linked
 
 
 def test_highlights_parent_count_includes_granted_child_without_hidden_siblings(tmp_path):
@@ -722,8 +729,8 @@ def test_highlights_parent_count_includes_granted_child_without_hidden_siblings(
         db.photo_visibility.grant(guest, [parent_photo, shared])
         db.conn.commit()
         db.set_active_workspace(guest)
-        assert not db.workspace_has_folder_link(parent)
-        assert not db.workspace_has_folder_link(child)
+        assert not workspace_folders.workspace_has_folder_link(db, parent)
+        assert not workspace_folders.workspace_has_folder_link(db, child)
         candidates = db.species_curation.get_highlights_candidates(parent, min_quality=.1)
         assert [row["id"] for row in candidates] == [shared]
         counts = {row["id"]: row["photo_count"] for row in db.folders.with_quality_data()}
@@ -742,7 +749,7 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
         db.conn.execute("UPDATE folders SET parent_id=? WHERE id=?", (gap, day))
         db.conn.execute("UPDATE photos SET timestamp='2026-05-01',quality_score=.8 WHERE id IN (?,?,?)", (shared, hidden, sibling))
         db.conn.commit()
-        db.add_workspace_folder(owner, gap)
+        workspace_folders.add_workspace_folder(db, owner, gap)
         catalog_deletion.delete_folder(db, gap)  # Unlink the subtree from active, preserving the owner's catalog.
         db.photo_visibility.grant(active, [shared])
         db.conn.commit()

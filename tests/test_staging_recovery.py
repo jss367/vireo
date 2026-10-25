@@ -2,7 +2,7 @@ import os
 
 import pytest
 import staging_recovery
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from staging_recovery import (
     delete_verified_staging,
     discover_orphaned_staging,
@@ -34,7 +34,7 @@ def _write(path, data=b"abc"):
 
 
 def _catalog_photo(db, folder_path, filename, size):
-    folder_id = db.add_folder(str(folder_path), name=os.path.basename(str(folder_path)))
+    folder_id = workspace_folders.add_folder(db, str(folder_path), name=os.path.basename(str(folder_path)))
     return photo_ingest.add_photo(db, folder_id, filename, os.path.splitext(filename)[1], size, 1.0)
 
 

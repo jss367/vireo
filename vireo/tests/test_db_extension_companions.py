@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from services import workspace_folders
 from test_db import _raw_jpeg_pair_db
 
 
@@ -23,7 +24,7 @@ def test_multi_dot_unicode_and_same_format_count(tmp_path, companion):
     assert db.collections.count_photos_for_rules([{'field':'extension','op':'is','value':'.jpg'}])==2
     values={v['value']:v['count'] for v in db.collections.get_filter_field_values('extension')}
     assert values=={'.jpg':2,'.nef':2}
-    assert db.get_workspace_extensions()==['.jpg','.nef']
+    assert workspace_folders.get_workspace_extensions(db)==['.jpg','.nef']
 
 @pytest.mark.parametrize('companion', [
     '/archive.v1/sidecar', r'C:\archive.v1\sidecar',
@@ -40,7 +41,7 @@ def test_companion_extension_uses_basename_splitext(tmp_path, companion):
     db.conn.commit()
     expected = posixpath.splitext(companion.replace('\\', '/').rsplit('/', 1)[-1])[1].lower()
     expected_options = sorted({'.jpg', '.nef'} | ({expected} if expected else set()))
-    assert db.get_workspace_extensions() == expected_options
+    assert workspace_folders.get_workspace_extensions(db) == expected_options
     facets = {v['value']: v['count'] for v in db.collections.get_filter_field_values('extension')}
     counts = {'.jpg': 1, '.nef': 2}
     if expected:

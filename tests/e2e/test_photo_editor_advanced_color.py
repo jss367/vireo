@@ -1,7 +1,7 @@
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _set_range(page, selector, value):
@@ -286,7 +286,7 @@ def color_photo(live_server, tmp_path):
     path = folder / 'color-study.png'
     Image.new('RGB', (600, 400), (0, 128, 0)).save(path)
     db = live_server['db']
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     return photo_ingest.add_photo(db, folder_id=folder_id, filename=path.name, extension='.png',
                         file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                         width=600, height=400)
@@ -498,7 +498,7 @@ def test_point_color_samples_the_displayed_native_resolution(live_server, page, 
     image.paste((180, 40, 40), (1298, 0, 1302, 400))
     image.save(path)
     db = live_server['db']
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     photo_id = photo_ingest.add_photo(db, folder_id=folder_id, filename=path.name, extension='.png',
                             file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                             width=2600, height=400)

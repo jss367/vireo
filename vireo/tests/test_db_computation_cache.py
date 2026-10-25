@@ -21,7 +21,7 @@ import computation_cache
 import pytest
 from db import Database
 from repositories.computation_cache import ComputationCacheRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 HASH = "a" * 64
 RUNTIME = "b" * 64
@@ -39,7 +39,7 @@ def _committed(db, sql, params=()):
 @pytest.fixture
 def catalog(db):
     """One original-backed photo with a detector run, a box and a classifier run."""
-    folder = db.add_folder("/photos", name="photos")
+    folder = workspace_folders.add_folder(db, "/photos", name="photos")
     photo = photo_ingest.add_photo(
         db, folder_id=folder, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 import places
 from db import Database
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from services import workspace_lifecycle
 from services.import_locations import (
     LocationChoiceError,
     apply_location_choices,
@@ -1030,7 +1031,7 @@ class ImportService:
             if active_ws is None:
                 # Without a target workspace ``run_import_job`` would bind
                 # ``active_ws=None`` and its batch scans would insert
-                # folders/photos while ``Database.add_folder`` skipped the
+                # folders/photos while ``workspace_folders.add_folder`` skipped the
                 # workspace link, leaving catalog rows invisible to every
                 # workspace. Reject at the route boundary so the request
                 # never enqueues instead.
@@ -1130,7 +1131,7 @@ class ImportService:
                 "Failed to restore active workspace after a rejected import",
             )
         try:
-            db.delete_workspace(int(created_workspace["id"]))
+            workspace_lifecycle.delete_workspace(db, int(created_workspace["id"]))
         except Exception:
             log.exception(
                 "Failed to delete created import workspace after a rejected import",

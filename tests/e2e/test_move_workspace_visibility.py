@@ -2,6 +2,7 @@
 
 import pytest
 from playwright.sync_api import expect
+from services import workspace_folders
 
 from e2e.module_pages import install_page_module_exposure
 
@@ -20,7 +21,7 @@ def test_move_visibility_checkbox_remembers_choice_and_lists_workspaces(live_ser
     a = db._active_workspace_id
     b = db.create_workspace("Other birds")
     photo = db.conn.execute("SELECT id, folder_id FROM photos ORDER BY id LIMIT 1").fetchone()
-    db.add_workspace_folder(b, photo["folder_id"])
+    workspace_folders.add_workspace_folder(db, b, photo["folder_id"])
     page.goto(live_server["url"] + "/move")
     checkbox = page.get_by_label("Keep visible in other workspaces", exact=True)
     expect(checkbox).to_be_enabled()

@@ -5,12 +5,12 @@ import sqlite3
 import pytest
 from db import Database
 from repositories.identity_alternatives import IdentityMergeConflict, _check_merge_confirmations
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _setup(tmp_path, alias_count):
     db = Database(str(tmp_path / 'lookup.db'))
-    folder = db.add_folder(str(tmp_path / 'photos'))
+    folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
     photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
     common = db.add_keyword('Common alpha', is_species=True, source_taxon_id=88001)
     other = db.add_keyword('Common beta', is_species=True, source_taxon_id=88002)

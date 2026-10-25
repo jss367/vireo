@@ -11,7 +11,7 @@ from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
 from repositories.masks_features import MaskQuality
-from services import catalog_deletion, photo_ingest, saved_processes, subject_masks
+from services import catalog_deletion, photo_ingest, saved_processes, subject_masks, workspace_folders
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -2172,7 +2172,7 @@ def test_find_broken_metadata_folders_filters_missing_files(app_and_db, tmp_path
     present = real_dir / "present.jpg"
     Image.new("RGB", (640, 480)).save(str(present), "JPEG")
 
-    fid = db.add_folder(str(real_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="photos")
     p_present = photo_ingest.add_photo(
         db, folder_id=fid, filename="present.jpg", extension=".jpg",
         file_size=present.stat().st_size, file_mtime=present.stat().st_mtime,
@@ -2293,8 +2293,8 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
     image_file = photos_root / "broken.jpg"
     Image.new("RGB", (640, 480), color="red").save(str(image_file), "JPEG")
 
-    fid = db.add_folder(str(photos_root), name="real_photos")
-    db.add_workspace_folder(db._active_workspace_id, fid)
+    fid = workspace_folders.add_folder(db, str(photos_root), name="real_photos")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="broken.jpg", extension=".jpg",
         file_size=image_file.stat().st_size,
@@ -2371,8 +2371,8 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
     Image.new("RGB", (640, 480), color="red").save(str(tracked), "JPEG")
     Image.new("RGB", (640, 480), color="blue").save(str(untracked), "JPEG")
 
-    fid = db.add_folder(str(photos_root), name="real_photos")
-    db.add_workspace_folder(db._active_workspace_id, fid)
+    fid = workspace_folders.add_folder(db, str(photos_root), name="real_photos")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="tracked.jpg", extension=".jpg",
         file_size=tracked.stat().st_size,
@@ -2494,8 +2494,8 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
     image_file = photos_root / "broken.jpg"
     Image.new("RGB", (640, 480), color="red").save(str(image_file), "JPEG")
 
-    fid = db.add_folder(str(photos_root), name="real_photos")
-    db.add_workspace_folder(db._active_workspace_id, fid)
+    fid = workspace_folders.add_folder(db, str(photos_root), name="real_photos")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="broken.jpg", extension=".jpg",
         file_size=image_file.stat().st_size,
@@ -2707,7 +2707,7 @@ def _seed_photo_with_detection(db, tmp_path, filename, box, model):
     if existing:
         folder_id = existing["id"]
     else:
-        folder_id = db.add_folder(folder_path)
+        folder_id = workspace_folders.add_folder(db, folder_path)
     pid = photo_ingest.add_photo(db, folder_id, filename, ".jpg", 1000, 1.0)
     Image.new("RGB", (16, 16), "black").save(
         os.path.join(folder_path, filename)
@@ -3818,7 +3818,7 @@ def test_pipeline_folder_ids_unlinked_folder_404(app_and_db):
     original_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    foreign_id = db.add_folder("/photos/elsewhere", name="elsewhere")
+    foreign_id = workspace_folders.add_folder(db, "/photos/elsewhere", name="elsewhere")
     db.set_active_workspace(original_ws)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -3900,12 +3900,12 @@ def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db)
     # parent_id is NULL — simulating a legacy row from a pre-parent_id
     # backfill build. Link it to the active workspace so the route's
     # workspace-safety filter can find it.
-    legacy_id = db.add_folder("/photos/2024/Legacy", name="Legacy")
+    legacy_id = workspace_folders.add_folder(db, "/photos/2024/Legacy", name="Legacy")
     db.conn.execute(
         "UPDATE folders SET parent_id = NULL WHERE id = ?", (legacy_id,),
     )
     db.conn.commit()
-    db.add_workspace_folder(db._active_workspace_id, legacy_id, is_root=False)
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, legacy_id, is_root=False)
     legacy_photo = photo_ingest.add_photo(
         db, folder_id=legacy_id, filename="legacy.jpg", extension=".jpg",
         file_size=42, file_mtime=42.0,
@@ -4139,18 +4139,18 @@ def test_pipeline_folder_ids_chunks_wide_subtree(app_and_db, monkeypatch):
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
 
     app, db = app_and_db
-    parent = db.add_folder("/photos/wide", name="wide")
+    parent = workspace_folders.add_folder(db, "/photos/wide", name="wide")
     photo_ids = []
     for i in range(10):
-        sub = db.add_folder(
-            f"/photos/wide/sub{i}", name=f"sub{i}", parent_id=parent,
+        sub = workspace_folders.add_folder(
+            db, f"/photos/wide/sub{i}", name=f"sub{i}", parent_id=parent,
         )
         pid = photo_ingest.add_photo(
             db, folder_id=sub, filename=f"p{i}.jpg", extension=".jpg",
             file_size=100 + i, file_mtime=100.0 + i,
         )
         photo_ids.append(pid)
-    db.add_workspace_folder(db._active_workspace_id, parent)
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, parent)
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -4845,7 +4845,7 @@ def test_import_readiness_surfaces_and_starts_metadata_repair(
     photos.mkdir()
     source = photos / "repair.jpg"
     Image.new("RGB", (32, 24), "green").save(source)
-    folder_id = db.add_folder(str(photos), name="repair-photos")
+    folder_id = workspace_folders.add_folder(db, str(photos), name="repair-photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename=source.name,
@@ -4901,8 +4901,8 @@ def test_import_readiness_skips_excluded_bundle_roots(
     reachable.mkdir()
     bundle = tmp_path / "Photos Library.photoslibrary"
     bundle.mkdir()
-    db.add_folder(str(reachable), name="reachable")
-    db.add_folder(str(bundle), name="legacy-library")
+    workspace_folders.add_folder(db, str(reachable), name="reachable")
+    workspace_folders.add_folder(db, str(bundle), name="legacy-library")
 
     original_isdir = os.path.isdir
     isdir_calls = []
@@ -4950,7 +4950,7 @@ def test_import_readiness_counts_photos_in_stale_missing_folders(
     photos.mkdir()
     source = photos / "needs-repair.jpg"
     Image.new("RGB", (32, 24), "green").save(source)
-    folder_id = db.add_folder(str(photos), name="reconnected")
+    folder_id = workspace_folders.add_folder(db, str(photos), name="reconnected")
     photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename=source.name,
@@ -5007,7 +5007,7 @@ def test_import_readiness_excludes_offline_root_photos_from_repair_count(
     reachable.mkdir()
     reach_src = reachable / "ok.jpg"
     Image.new("RGB", (32, 24), "green").save(reach_src)
-    reach_fid = db.add_folder(str(reachable), name="reachable-drive")
+    reach_fid = workspace_folders.add_folder(db, str(reachable), name="reachable-drive")
     reach_pid = photo_ingest.add_photo(
         db, folder_id=reach_fid,
         filename=reach_src.name,
@@ -5023,7 +5023,7 @@ def test_import_readiness_excludes_offline_root_photos_from_repair_count(
     # Offline root — path lives in the DB, but the directory is not on
     # disk (drive unplugged). The photo under it has NULL EXIF.
     offline_path = str(tmp_path / "unplugged-drive")
-    off_fid = db.add_folder(offline_path, name="unplugged-drive")
+    off_fid = workspace_folders.add_folder(db, offline_path, name="unplugged-drive")
     photo_ingest.add_photo(
         db, folder_id=off_fid,
         filename="orphan.jpg",
@@ -5068,7 +5068,7 @@ def test_import_readiness_excludes_deleted_originals_from_repair_count(
 
     photos = tmp_path / "reachable-with-deleted-original"
     photos.mkdir()
-    folder_id = db.add_folder(str(photos), name=photos.name)
+    folder_id = workspace_folders.add_folder(db, str(photos), name=photos.name)
     photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename="deleted.jpg",
@@ -5895,7 +5895,7 @@ def test_pending_archive_reports_its_staging_folders(app_and_db, tmp_path, monke
     staging = imported["config"]["managed_staging"]["destination"]
     unrelated = tmp_path / "already-on-nas"
     unrelated.mkdir()
-    unrelated_id = db.add_folder(str(unrelated), name="already-on-nas")
+    unrelated_id = workspace_folders.add_folder(db, str(unrelated), name="already-on-nas")
 
     item = app.test_client().get("/api/import/pending-archives").get_json()["items"][0]
     folder_ids = item["folder_ids"]
@@ -5914,7 +5914,7 @@ def test_pending_archive_reports_its_staging_folders(app_and_db, tmp_path, monke
     ), paths
     # A sibling directory whose name merely starts with the staging path must
     # not be swept in with it.
-    near_miss = db.add_folder(staging + "-backup", name="staging-backup")
+    near_miss = workspace_folders.add_folder(db, staging + "-backup", name="staging-backup")
     refreshed = app.test_client().get("/api/import/pending-archives").get_json()
     assert near_miss not in refreshed["items"][0]["folder_ids"]
 
@@ -5937,7 +5937,7 @@ def test_pending_archive_separates_this_workspace_from_the_others(app_and_db, tm
     # Queued on a photo already on the NAS: not this transfer's problem.
     elsewhere = tmp_path / "already-on-nas"
     elsewhere.mkdir()
-    outside = photo_ingest.add_photo(db, db.add_folder(str(elsewhere), name="already-on-nas"),
+    outside = photo_ingest.add_photo(db, workspace_folders.add_folder(db, str(elsewhere), name="already-on-nas"),
                            "elsewhere.jpg", ".jpg", 10, 0)
     db.queue_change(outside, "keyword_add", "Elsewhere")
     assert item()["unsynced_photos"] == 0
@@ -5948,7 +5948,7 @@ def test_pending_archive_separates_this_workspace_from_the_others(app_and_db, tm
     assert item()["unsynced_photos"] == 1
 
     sibling = db.create_workspace("Sibling")
-    db.add_workspace_folder(sibling, db.add_folder(staging), is_root=True)
+    workspace_folders.add_workspace_folder(db, sibling, workspace_folders.add_folder(db, staging), is_root=True)
     db.queue_change(second, "keyword_add", "Kestrel", workspace_id=sibling)
     assert item()["unsynced_photos"] == 1, "a sibling's edit is not ours to write"
     assert item()["unsynced_photos_other_workspaces"] == 1
@@ -9520,7 +9520,7 @@ def test_import_in_place_snapshot_rejects_replaced_restricted_directory(
     second_raw = second / "IMG_0002.nef"
     first_raw.write_bytes(b"first")
     second_raw.write_bytes(b"second")
-    db.add_folder(str(root), name="registered")
+    workspace_folders.add_folder(db, str(root), name="registered")
     snap_id = db.workspaces.create_new_images_snapshot([
         str(first_raw), str(second_raw),
     ])
@@ -9665,7 +9665,7 @@ def test_import_in_place_snapshot_admits_only_frozen_files(
     captured = nested / "captured.jpg"
     late = nested / "late.jpg"
     Image.new("RGB", (16, 16), "red").save(captured)
-    root_id = db.add_folder(str(root), name="registered")
+    root_id = workspace_folders.add_folder(db, str(root), name="registered")
     roots_before = {
         row["folder_id"] for row in db.conn.execute(
             "SELECT folder_id FROM workspace_folders "
@@ -9742,7 +9742,7 @@ def test_import_in_place_snapshot_leaves_out_excluded_folders(
     left_out = trip / "left_out.jpg"
     for path in (kept, left_out):
         Image.new("RGB", (16, 16), "red").save(path)
-    db.add_folder(str(root), name="registered")
+    workspace_folders.add_folder(db, str(root), name="registered")
     snap_id = db.workspaces.create_new_images_snapshot(
         [str(kept), str(left_out)],
     )
@@ -9779,7 +9779,7 @@ def test_import_in_place_snapshot_rejects_bad_exclusions(app_and_db, tmp_path):
     root.mkdir()
     photo = root / "photo.jpg"
     Image.new("RGB", (16, 16), "red").save(photo)
-    db.add_folder(str(root), name="registered")
+    workspace_folders.add_folder(db, str(root), name="registered")
     snap_id = db.workspaces.create_new_images_snapshot([str(photo)])
     photos_before = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
 
@@ -9811,7 +9811,7 @@ def test_import_in_place_snapshot_reports_missing_without_processing(
     app, db = app_and_db
     root = tmp_path / "registered"
     root.mkdir()
-    root_id = db.add_folder(str(root), name="registered")
+    root_id = workspace_folders.add_folder(db, str(root), name="registered")
     vanished = root / "vanished.jpg"
     Image.new("RGB", (16, 16), "red").save(vanished)
     snap_id = db.workspaces.create_new_images_snapshot([str(vanished)])
@@ -9850,7 +9850,7 @@ def test_import_in_place_snapshot_normalizes_raw_companion_and_replay(
     companion = root / "IMG_0001.jpg"
     Image.new("RGB", (16, 16), "red").save(raw, "JPEG")
     Image.new("RGB", (16, 16), "blue").save(companion, "JPEG")
-    root_id = db.add_folder(str(root), name="registered")
+    root_id = workspace_folders.add_folder(db, str(root), name="registered")
     raw_id = photo_ingest.add_photo(
         db, root_id, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime,
     )
@@ -9903,7 +9903,7 @@ def test_import_in_place_snapshot_rejects_path_outside_registered_roots(
     outside = tmp_path / "outside"
     root.mkdir()
     outside.mkdir()
-    db.add_folder(str(root), name="registered")
+    workspace_folders.add_folder(db, str(root), name="registered")
     path = outside / "bird.jpg"
     Image.new("RGB", (16, 16), "red").save(path)
     snap_id = db.workspaces.create_new_images_snapshot([str(path)])
@@ -9929,7 +9929,7 @@ def test_import_in_place_snapshot_preserves_registered_root_spelling(
     )
     captured = os.path.join(lexical_root, "captured.jpg")
     Image.new("RGB", (16, 16), "red").save(captured)
-    root_id = db.add_folder(lexical_root, name="registered")
+    root_id = workspace_folders.add_folder(db, lexical_root, name="registered")
     root_parent_before = db.conn.execute(
         "SELECT parent_id FROM folders WHERE id = ?", (root_id,),
     ).fetchone()["parent_id"]
@@ -9975,7 +9975,7 @@ def test_concurrent_snapshot_imports_serialize_and_report_one_replay(
     root.mkdir()
     captured = root / "captured.jpg"
     Image.new("RGB", (16, 16), "red").save(captured)
-    db.add_folder(str(root), name="registered")
+    workspace_folders.add_folder(db, str(root), name="registered")
     snap_id = db.workspaces.create_new_images_snapshot([str(captured)])
     quick_look_id = _process_id(db, "Quick look")
 
@@ -13857,7 +13857,7 @@ def test_parent_resume_recovers_photos_landed_by_unpaid_descendant(app_and_db, t
             from pathlib import Path
             nas = tmp_path / "nas"
             nas.mkdir()
-            folder_id = db.add_folder(str(nas), name="NAS")
+            folder_id = workspace_folders.add_folder(db, str(nas), name="NAS")
             for pid in set(own) | child_ids:
                 row = db.conn.execute(
                     "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?", (pid,),
@@ -14121,8 +14121,8 @@ def test_import_in_place_collection_follows_case_alias_of_root(
     _app, db = app_and_db
     base = os.path.realpath(str(tmp_path))
     stored = os.path.join(base, "Été")
-    root = db.add_folder(stored, name="Été")
-    day = db.add_folder(os.path.join(stored, "day1"), name="day1", parent_id=root)
+    root = workspace_folders.add_folder(db, stored, name="Été")
+    day = workspace_folders.add_folder(db, os.path.join(stored, "day1"), name="day1", parent_id=root)
     mine = sorted([_add_photo(db, root, "r.jpg"), _add_photo(db, day, "d.jpg")])
 
     def case_insensitive_samefile(a, b):
@@ -14145,8 +14145,8 @@ def test_import_in_place_collection_is_case_sensitive_on_case_sensitive_fs(
     ids = {}
     for top, sub in (("Photos", "Trip"), ("photos", "trip")):
         path = os.path.join(base, top, sub)
-        fid = db.add_folder(path, name=sub)
-        day = db.add_folder(os.path.join(path, "day1"), name="day1", parent_id=fid)
+        fid = workspace_folders.add_folder(db, path, name=sub)
+        day = workspace_folders.add_folder(db, os.path.join(path, "day1"), name="day1", parent_id=fid)
         ids[top] = sorted([_add_photo(db, fid, "a.jpg"), _add_photo(db, day, "b.jpg")])
 
     assert _collect_in_place(db, os.path.join(base, "Photos", "Trip")) == ids["Photos"]
