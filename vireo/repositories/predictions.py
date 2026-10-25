@@ -1345,13 +1345,29 @@ class PredictionRepository:
         the active workspace has not rejected, from its detection's latest
         label set.
 
-        Rows carry ``photo_id``, ``id``, ``species``, ``confidence``,
-        ``classifier_model``, and the active workspace's ``group_id`` and
-        ``status`` (``pending`` without a review row). Ties on confidence go
-        to the higher id; predictions with no species and photos with no
-        such prediction are absent. The workspace's detector floor applies to
-        real detections; full-image anchors remain eligible. Callers verify
-        visibility. Empty input reads nothing and resolves no workspace.
+        Rows carry ``photo_id``, ``detection_id``, ``id``, ``species``,
+        ``confidence``, ``classifier_model``, and the active workspace's
+        ``group_id`` and ``status`` (``pending`` without a review row). Ties
+        on confidence go to the higher id; predictions with no species and
+        photos with no such prediction are absent. The workspace's detector
+        floor applies to real detections; full-image anchors remain eligible.
+        Callers verify visibility. Empty input reads nothing and resolves no
+        workspace.
+        """
+        return {
+            pid: rows[0]
+            for pid, rows in self.top_unrejected_by_detection(photo_ids).items()
+        }
+
+    def top_unrejected_by_detection(self, photo_ids):
+        """``{photo_id: [row, ...]}``: one row per detection, that detection's
+        highest-confidence prediction the active workspace has not rejected,
+        from its latest label set; each photo's list runs highest confidence
+        first (ties to the higher id).
+
+        Rows have the shape ``top_unrejected_by_photo`` documents, so a photo
+        with two subjects keeps both species instead of only the most
+        confident one. Same detector floor, visibility and empty-input rules.
         """
         if not photo_ids:
             return {}
@@ -1362,15 +1378,16 @@ class PredictionRepository:
         for chunk in self._chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
-                f"""SELECT photo_id, id, species, confidence, classifier_model,
-                          group_id, status
+                f"""SELECT photo_id, detection_id, id, species, confidence,
+                          classifier_model, group_id, status
                    FROM (
-                       SELECT d.photo_id, pr.id, pr.species, pr.confidence,
+                       SELECT d.photo_id, d.id AS detection_id, pr.id,
+                              pr.species, pr.confidence,
                               pr.classifier_model,
                               pr_rev.group_id,
                               COALESCE(pr_rev.status, 'pending') AS status,
                               ROW_NUMBER() OVER (
-                                  PARTITION BY d.photo_id
+                                  PARTITION BY d.id
                                   ORDER BY pr.confidence DESC, pr.id DESC
                               ) AS rn
                        FROM detections d
@@ -1389,11 +1406,12 @@ class PredictionRepository:
                              ORDER BY pr2.created_at DESC, pr2.id DESC
                              LIMIT 1
                          )
-                   ) WHERE rn = 1""",
+                   ) WHERE rn = 1
+                   ORDER BY photo_id, confidence DESC, id DESC""",
                 (ws, *chunk, detector_floor),
             ).fetchall()
             for row in rows:
-                results[row["photo_id"]] = row
+                results.setdefault(row["photo_id"], []).append(row)
         return results
 
     def get_for_photo(self, photo_id, model, labels_fingerprint=None):
