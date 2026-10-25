@@ -12,7 +12,7 @@ import threading
 
 import numpy as np
 import onnx_runtime
-from file_replace import replace_file
+from app_paths import default_path
 from PIL import Image, ImageFilter
 from resource_ledger import ResourceWaitCancelled
 from services.hf_cache_lock import cache_access
@@ -52,7 +52,7 @@ _sam2_session_lock = threading.Lock()
 
 def _sam2_model_dir(variant):
     return os.path.join(
-        os.path.expanduser("~"), ".vireo", "models", variant
+        default_path("models"), variant
     )
 
 
@@ -144,30 +144,13 @@ def _hf_download_sam2_weights(variant, progress_callback=None):
         )
 
         try:
-            import contextlib
-            import shutil
-
-            from huggingface_hub import hf_hub_download
+            from hub_download import fetch_hub_file
             from models import ONNX_REPO
 
             for idx, (filename, final_path) in enumerate(missing):
-                tmp_path = final_path + ".download"
-                try:
-                    cached_path = hf_hub_download(
-                        repo_id=ONNX_REPO,
-                        filename=filename,
-                        subfolder=variant,
-                    )
-                    # Copy to a sibling temp path then atomically replace so
-                    # other threads only ever observe either the missing
-                    # state or a fully written weights file — never a
-                    # partial copy.
-                    shutil.copy2(cached_path, tmp_path)
-                    replace_file(tmp_path, final_path)
-                except Exception:  # broad: remove the partial download on any failure, then re-raise
-                    with contextlib.suppress(OSError):
-                        os.unlink(tmp_path)
-                    raise
+                # Published by rename, so other threads only ever observe
+                # the missing state or a fully written weights file.
+                fetch_hub_file(ONNX_REPO, filename, final_path, subfolder=variant)
 
                 if progress_callback:
                     progress_callback(
@@ -225,7 +208,7 @@ def _get_sam2_sessions(variant="sam2-small"):
             )
 
         model_dir = os.path.join(
-            os.path.expanduser("~"), ".vireo", "models", variant
+            default_path("models"), variant
         )
         encoder_path = os.path.join(model_dir, "image_encoder.onnx")
         decoder_path = os.path.join(model_dir, "mask_decoder.onnx")

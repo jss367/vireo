@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 from datetime import UTC, datetime
 
+from app_paths import default_path
 from camera_denoise import cache_matches, cache_save_options
 from file_replace import replace_file
 from image_loader import (
@@ -33,7 +34,7 @@ from render_source import (
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CACHE_DIR = os.path.expanduser("~/.vireo/thumbnails")
+DEFAULT_CACHE_DIR = default_path("thumbnails")
 THUMB_SIZE = 400
 def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
     """Thin wrapper around the shared resolver, returning just the path.

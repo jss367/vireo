@@ -5,6 +5,17 @@ import json
 import pytest
 from playwright.sync_api import expect
 
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Duplicates page's modules as ``pageModules.<file>`` and its state as
+    ``duplicatesState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "duplicates", "duplicatesState")
+
 
 def _show_patterns(live_server, page):
     specs = [
@@ -63,7 +74,7 @@ def test_pending_reject_survives_category_renders(live_server, page, outcome):
         _category(page, category).click()
         expect(page.locator("#applyBtn")).to_be_disabled()
         expect(page.locator("#applyStatus")).to_contain_text("Applying")
-        page.evaluate("applyRejections()")
+        page.evaluate("pageModules.patterns.applyRejections()")
         assert len(pending) == 1
     _category(page, "numbered-across-folders").click()
     if outcome == "success":
@@ -167,9 +178,9 @@ def test_category_limits_reject_and_trash_actions(live_server, page):
 def test_category_counts_respect_library_filters_and_protected_groups(live_server, page):
     _show_patterns(live_server, page)
     page.evaluate("""() => {
-      _filterMatchedIds = new Set([1, 3]);
-      _proposals[0].winner.exists = false;
-      renderResults(_lastScanResult);
+      duplicatesState.filterMatchedIds = new Set([1, 3]);
+      duplicatesState.proposals[0].winner.exists = false;
+      pageModules.results.renderResults(duplicatesState.lastScanResult);
     }""")
     expect(_category(page, "all")).to_contain_text("2 groups · 2 extra copies")
     expect(page.locator(".category-button")).to_have_count(3)
@@ -224,11 +235,11 @@ def test_scoped_rejection_preserves_deferred_and_unsubmitted_groups(live_server,
 def test_partial_cleanup_moves_remaining_actions_to_updated_category(live_server, page):
     _show_patterns(live_server, page)
     page.evaluate("""() => {
-      var group = _proposals.find(p => p.file_hash === 'same1');
+      var group = duplicatesState.proposals.find(p => p.file_hash === 'same1');
       group.status = 'resolved';
       group.losers.push({id: 20, filename: 'DSC_1127-2.NEF',
         path: '/a/DSC_1127-2.NEF', file_size: 1000, exists: true});
-      renderResults(_lastScanResult);
+      pageModules.results.renderResults(duplicatesState.lastScanResult);
     }""")
     requests = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: (
@@ -252,11 +263,11 @@ def test_partial_cleanup_moves_remaining_actions_to_updated_category(live_server
 def test_inflight_cleanup_renders_group_entering_selected_category(live_server, page):
     _show_patterns(live_server, page)
     page.evaluate("""() => {
-      var group = _proposals.find(p => p.file_hash === 'same1');
+      var group = duplicatesState.proposals.find(p => p.file_hash === 'same1');
       group.status = 'resolved';
       group.losers.push({id: 20, filename: 'DSC_1127-2.NEF',
         path: '/a/DSC_1127-2.NEF', file_size: 1000, exists: true});
-      renderResults(_lastScanResult);
+      pageModules.results.renderResults(duplicatesState.lastScanResult);
     }""")
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
@@ -275,11 +286,11 @@ def test_inflight_cleanup_renders_group_entering_selected_category(live_server, 
 def test_inflight_batch_cleanup_keeps_progress_and_retry_after_category_switch(live_server, page):
     _show_patterns(live_server, page)
     page.evaluate("""() => {
-      var group = _proposals.find(p => p.file_hash === 'same1');
+      var group = duplicatesState.proposals.find(p => p.file_hash === 'same1');
       group.status = 'resolved';
       group.losers.push({id: 20, filename: 'DSC_1127-2.NEF',
         path: '/a/DSC_1127-2.NEF', file_size: 1000, exists: true});
-      renderResults(_lastScanResult);
+      pageModules.results.renderResults(duplicatesState.lastScanResult);
     }""")
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
@@ -314,7 +325,7 @@ def test_pending_cleanup_reconciles_newly_matching_cards_and_bulk_retry(live_ser
       function photo(id, path) {
         return {id, path, filename: path.split('/').pop(), file_size: 1000, exists: true};
       }
-      renderResults({proposals: [
+      pageModules.results.renderResults({proposals: [
         {file_hash: 'mixed', status: 'resolved', winner: photo(1, '/a/owl.jpg'),
           losers: [photo(2, '/a/owl-2.jpg'), photo(3, '/b/owl-3.jpg')]},
         {file_hash: 'other', status: 'resolved', winner: photo(11, '/c/hawk.jpg'),
@@ -423,7 +434,7 @@ def test_single_file_trash_state_survives_category_renders(live_server, page, ou
     _category(page, "numbered-same-folder").click()
     expect(button).to_be_disabled()
     expect(status).to_contain_text("Moving to Trash")
-    page.evaluate("trashOneLoserFile(2)")
+    page.evaluate("pageModules.cleanup.trashOneLoserFile(2)")
     assert len(pending) == 1
     if outcome == "network":
         pending[0].abort("connectionfailed")
@@ -461,7 +472,7 @@ def test_bulk_trash_owns_per_file_controls_across_category_renders(live_server, 
     _category(page, "all").click()
     _category(page, "numbered-same-folder").click()
     expect(button).to_be_disabled()
-    page.evaluate("trashOneLoserFile(2)")
+    page.evaluate("pageModules.cleanup.trashOneLoserFile(2)")
     assert len(pending) == 1
     pending[0].fulfill(content_type="application/json", body=json.dumps({
         "trashed": 0, "skipped": [], "failed": [{"id": 2, "error": "batch file is locked"}],
@@ -519,7 +530,7 @@ def test_finishing_batch_does_not_release_a_newer_single_file_retry(live_server,
           winner: photo(100 + i * 2, 'bird-' + i + '.jpg'),
           losers: [photo(101 + i * 2, 'bird-' + i + '-2.jpg')]});
       }
-      renderResults({proposals, buckets: []});
+      pageModules.results.renderResults({proposals, buckets: []});
     }""")
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
@@ -539,7 +550,7 @@ def test_finishing_batch_does_not_release_a_newer_single_file_retry(live_server,
     expect(page.locator("#trashAllProgress")).to_contain_text("Cleanup finished with problems")
     expect(button).to_be_disabled()
     expect(page.locator(".dup-card[data-photo-id='101'] [data-trash-status]")).to_contain_text("Moving to Trash")
-    page.evaluate("trashOneLoserFile(101)")
+    page.evaluate("pageModules.cleanup.trashOneLoserFile(101)")
     assert len(pending) == 3
     pending[2].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
     expect(page.locator(".dup-card[data-photo-id='101']")).to_have_class("dup-card loser trashed")
@@ -560,7 +571,7 @@ def test_bulk_owned_files_block_single_requests_across_category_renders(live_ser
     expect(button).to_be_disabled()
     _category(page, "numbered-same-folder").click()
     expect(button).to_be_disabled()
-    page.evaluate("trashOneLoserFile(2)")
+    page.evaluate("pageModules.cleanup.trashOneLoserFile(2)")
     assert [r.request.post_data_json for r in pending] == [{"photo_ids": [2]}]
     if outcome == "network":
         pending[0].abort("connectionfailed")
@@ -651,7 +662,7 @@ def test_pinned_folder_reveal_uses_original_paths_after_new_scan(live_server, pa
     page.locator(".bucket-card .keep-btn:not(.reveal-btn)").first.click()
     expect(page.locator("#duplicateBucketOperationList [data-retry-trash]")).to_be_visible()
     page.evaluate("""() => {
-      renderResults({proposals: [{file_hash: 'newscan', status: 'unresolved',
+      pageModules.results.renderResults({proposals: [{file_hash: 'newscan', status: 'unresolved',
         winner: {id: 101, filename: 'bird.jpg', path: '/new/c/bird.jpg', exists: true},
         losers: [{id: 102, filename: 'bird.jpg', path: '/new/d/bird.jpg', exists: true}]}],
         buckets: [{folders: ['/new/c', '/new/d'], group_count: 1,
@@ -667,7 +678,7 @@ def test_bulk_finalizer_preserves_newer_single_retry_claim(live_server, page):
     page.evaluate("""() => {
       function photo(id) {return {id, path: '/a/owl-' + id + '.jpg',
         filename: 'owl-' + id + '.jpg', file_size: 1000, exists: true};}
-      renderResults({proposals: [{file_hash: 'many', status: 'resolved',
+      pageModules.results.renderResults({proposals: [{file_hash: 'many', status: 'resolved',
         winner: {id: 1, path: '/a/owl.jpg', filename: 'owl.jpg', file_size: 1000, exists: true},
         losers: Array.from({length: 30}, (_, i) => photo(i + 2))}], buckets: []});
     }""")
@@ -693,10 +704,10 @@ def test_bulk_finalizer_preserves_newer_single_retry_claim(live_server, page):
         button.click()
     expect(button).to_be_disabled()
     pending[1].fulfill(content_type="application/json", body='{"trashed": 5, "skipped": [], "failed": []}')
-    page.wait_for_function("!_duplicateTrashActive")
+    page.wait_for_function("!duplicatesState.duplicateTrashActive")
     expect(button).to_be_disabled()
-    assert page.evaluate("duplicateFileTrashIsPending(2)")
-    page.evaluate("trashOneLoserFile(2)")
+    assert page.evaluate("pageModules.cleanup.duplicateFileTrashIsPending(2)")
+    page.evaluate("pageModules.cleanup.trashOneLoserFile(2)")
     assert len(pending) == 3
     assert pending[2].request.post_data_json == {"photo_ids": [2]}
     pending[2].fulfill(content_type="application/json", body=json.dumps({
@@ -728,7 +739,7 @@ def test_reveal_and_pinned_cleanup_use_only_rendered_bucket_folders(live_server,
       proposals.push({file_hash: 'hidden', status: 'unresolved',
         winner: photo(207, '/a/bird.jpg', true),
         losers: [photo(208, '/b/bird-2.jpg', true), photo(209, '/c/bird-3.jpg', true)]});
-      renderResults({proposals, buckets: [{folders: ['/a', '/b', '/c'], group_count: 3,
+      pageModules.results.renderResults({proposals, buckets: [{folders: ['/a', '/b', '/c'], group_count: 3,
         file_hashes: ['visible0', 'visible1', 'hidden'], total_size: 6000,
         example_filenames: ['owl0.jpg', 'owl1.jpg', 'bird.jpg']}]});
     }""")
@@ -779,7 +790,7 @@ def test_ordinary_bucket_reveal_uses_visible_folders(live_server, page, filter_k
       function photo(id, path, exists = true) {
         return {id, path, filename: path.split('/').pop(), file_size: 1000, exists};
       }
-      renderResults({proposals: [
+      pageModules.results.renderResults({proposals: [
         {file_hash: 'same1', status: 'unresolved', winner: photo(1, '/a/owl.jpg'),
           losers: [photo(2, '/b/owl.jpg'), photo(3, '/c/owl.jpg', false)]},
         {file_hash: 'same2', status: 'unresolved', winner: photo(11, '/a/hawk.jpg'),
@@ -793,7 +804,7 @@ def test_ordinary_bucket_reveal_uses_visible_folders(live_server, page, filter_k
     if filter_kind == "category":
         _category(page, "same-name-across-folders").click()
     else:
-        page.evaluate("_filterMatchedIds = new Set([1, 11]); renderResults(_lastScanResult)")
+        page.evaluate("duplicatesState.filterMatchedIds = new Set([1, 11]); pageModules.results.renderResults(duplicatesState.lastScanResult)")
     expect(page.locator(".bucket-card .bucket-headline code")).to_have_text(["/a", "/b"])
     requests, pending = [], []
 
@@ -808,10 +819,10 @@ def test_ordinary_bucket_reveal_uses_visible_folders(live_server, page, filter_k
         button.click()
     expect(button).to_be_disabled()
     assert requests == [{"paths": ["/a", "/b"]}], requests
-    page.evaluate("renderResults(_lastScanResult)")
+    page.evaluate("pageModules.results.renderResults(duplicatesState.lastScanResult)")
     expect(button).to_be_disabled()
     expect(button).to_contain_text("Opening")
-    page.evaluate("revealBucketFolders(0, document.querySelector('.bucket-card .reveal-btn'))")
+    page.evaluate("pageModules.reveal.revealBucketFolders(0, document.querySelector('.bucket-card .reveal-btn'))")
     assert len(requests) == 1
     pending[0].fulfill(content_type="application/json", body=json.dumps({
         "revealed": ["/a", "/b"], "failed": [], "skipped": [],
@@ -820,8 +831,8 @@ def test_ordinary_bucket_reveal_uses_visible_folders(live_server, page, filter_k
     expect(button).to_have_text(original_label)
     # Pin the filtered view before a later scan reuses its bucket index.
     page.evaluate("""() => {
-      pinDuplicateBucketOperation(document.querySelector('.bucket-card'), 0);
-      renderResults({proposals: [], buckets: [{folders: ['/new/c', '/new/d'],
+      pageModules.cleanup.pinDuplicateBucketOperation(document.querySelector('.bucket-card'), 0);
+      pageModules.results.renderResults({proposals: [], buckets: [{folders: ['/new/c', '/new/d'],
         group_count: 1, file_hashes: ['newscan'], total_size: 1000, example_filenames: []}]});
     }""")
     pinned = page.locator("#duplicateBucketOperationList .reveal-btn")

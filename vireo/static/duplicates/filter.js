@@ -1,16 +1,20 @@
 // The filter bar: which duplicate groups match the active filters (a
 // matching member reveals its whole group), the render that waits for a
 // filter refresh in flight, and the filter-restricted view of a bucket.
-// Classic page script.
 
-async function refreshFilterMatches() {
-  var myEpoch = ++_filterEpoch;
+import { state } from './state.js';
+import { groupMatchesFilter } from './patterns.js';
+import { renderResults } from './results.js';
+import { safeFetch, showToast, VireoFilter } from './shared.js';
+
+export async function refreshFilterMatches() {
+  var myEpoch = ++state.filterEpoch;
   var settlePending = function() {};
   /** @type {Promise<void>} */
   var thisRefresh = new Promise(function(resolve) { settlePending = function() { resolve(); }; });
-  _pendingFilterRefresh = thisRefresh;
+  state.pendingFilterRefresh = thisRefresh;
   try {
-    var hasFilters = window.VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
+    var hasFilters = VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
       && !VireoFilter.isMuted();
     var visualInfo = null;
     var nextMatchedIds = null;
@@ -25,13 +29,13 @@ async function refreshFilterMatches() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         }, { toast: false }));
-        if (myEpoch !== _filterEpoch) return;  // superseded — drop
+        if (myEpoch !== state.filterEpoch) return;  // superseded — drop
         nextMatchedIds = new Set(data.ids || []);
         visualInfo = data.visual || null;
       } catch (e) {
-        if (myEpoch !== _filterEpoch) return;  // superseded — drop
+        if (myEpoch !== state.filterEpoch) return;  // superseded — drop
         // Failing the query (400 on a stale/deep-linked rule, transient
-        // network error) must NOT null out _filterMatchedIds — the old
+        // network error) must NOT null out state.filterMatchedIds — the old
         // behaviour let ``groupMatchesFilter`` treat null as "no filters
         // active" and widen the render to the entire scan while the chips
         // stayed on-screen, silently re-enabling resolve/bulk controls for
@@ -44,16 +48,16 @@ async function refreshFilterMatches() {
         }
       }
     }
-    _filterMatchedIds = nextMatchedIds;
-    if (window.VireoFilter && VireoFilter.setResultTotal) {
-      VireoFilter.setResultTotal(_filterMatchedIds ? _filterMatchedIds.size : null);
+    state.filterMatchedIds = nextMatchedIds;
+    if (VireoFilter && VireoFilter.setResultTotal) {
+      VireoFilter.setResultTotal(state.filterMatchedIds ? state.filterMatchedIds.size : null);
     }
     // Surface the visual clause's status so the filter bar's visual chip
     // can warn on fallback. Without this, a Duplicates filter with an
     // unresolvable visual clause (no model / no embeddings / encoding
     // failed) would show the chip while groups + bulk actions ran on the
     // broadened metadata-only match set.
-    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+    if (VireoFilter && VireoFilter.setVisualInfo) {
       VireoFilter.setVisualInfo(visualInfo);
     }
     // Never re-render a cached snapshot while a new scan is in flight.
@@ -61,37 +65,37 @@ async function refreshFilterMatches() {
     // button, so filter edits (or pause/resume) mid-scan would otherwise
     // resurrect stale duplicate cards + actions and even let the user
     // kick off a second overlapping scan.
-    if (_lastScanResult && !_scanInProgress) renderResults(_lastScanResult);
+    if (state.lastScanResult && !state.scanInProgress) renderResults(state.lastScanResult);
     // Release ``tryRestoreLastScan`` — the first pass has now set
-    // ``_filterMatchedIds`` (or left it null when no filters are active),
+    // ``state.filterMatchedIds`` (or left it null when no filters are active),
     // so restoring a cached scan can safely render.
-    if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
+    if (state.filterReadyResolve) { state.filterReadyResolve(); state.filterReadyResolve = null; }
   } finally {
     // Only clear the pointer if a newer refresh hasn't already claimed
     // it — otherwise we'd drop the tracker for the newest in-flight
     // query and defeat the mid-scan wait in ``renderScanWhenFilterReady``.
-    if (_pendingFilterRefresh === thisRefresh) _pendingFilterRefresh = null;
+    if (state.pendingFilterRefresh === thisRefresh) state.pendingFilterRefresh = null;
     settlePending();
   }
 }
 
 // Await any in-flight ``refreshFilterMatches`` before rendering a
 // just-completed scan. Loops so a filter edit that starts DURING the
-// wait (replacing ``_pendingFilterRefresh``) is also awaited — without
+// wait (replacing ``state.pendingFilterRefresh``) is also awaited — without
 // this the initial post-scan render would use the older refresh's
-// ``_filterMatchedIds`` and the newer refresh's line-576 re-render
+// ``state.filterMatchedIds`` and the newer refresh's line-576 re-render
 // would show a brief flash of the outdated filter state.
 /** @param {DuplicateScan | null | undefined} result */
-async function renderScanWhenFilterReady(result) {
-  while (_pendingFilterRefresh) {
-    var current = _pendingFilterRefresh;
+export async function renderScanWhenFilterReady(result) {
+  while (state.pendingFilterRefresh) {
+    var current = state.pendingFilterRefresh;
     try { await current; } catch (e) { /* handled inside refresh */ }
-    if (_pendingFilterRefresh === current) break;
+    if (state.pendingFilterRefresh === current) break;
   }
   renderResults(/** @type {DuplicateScan} */ (result || {}));
 }
 
-// Return a filter-restricted view of a bucket. When ``_filterMatchedIds``
+// Return a filter-restricted view of a bucket. When ``state.filterMatchedIds``
 // is active, keep only file_hashes whose proposal matches the filter,
 // and recompute group_count/total_size/example_filenames from that
 // subset. Returns ``null`` when no groups survive the filter. Callers
@@ -104,10 +108,10 @@ async function renderScanWhenFilterReady(result) {
  * @param {DuplicateBucket | undefined} bucket
  * @returns {DuplicateBucket | null}
  */
-function visibleBucket(bucket) {
+export function visibleBucket(bucket) {
   if (!bucket) return null;
-  if (!_filterMatchedIds && _duplicateCategory === 'all') return bucket;
-  var proposals = (_lastScanResult && _lastScanResult.proposals) || [];
+  if (!state.filterMatchedIds && state.duplicateCategory === 'all') return bucket;
+  var proposals = (state.lastScanResult && state.lastScanResult.proposals) || [];
   /** @type {Record<string, DuplicateProposal>} */
   var proposalsByHash = {};
   proposals.forEach(function(p) { proposalsByHash[p.file_hash] = p; });

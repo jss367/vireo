@@ -51,6 +51,7 @@ from scanner.scan_run import scan
 from scanner.working_copies import (
     _extract_working_copies,
     backfill_working_copies,
+    import_working_copy_notice,
     working_copy_backfill_candidate_count,
 )
 
@@ -69,6 +70,7 @@ __all__ = [
     "backfill_working_copies",
     "compute_fd_hash",
     "compute_file_hash",
+    "import_working_copy_notice",
     "is_excluded_scan_path",
     "scan",
     "working_copy_backfill_candidate_count",

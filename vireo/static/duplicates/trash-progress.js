@@ -1,14 +1,13 @@
 // Trash progress: the batched cleanup's progress line and which skips the
 // user can act on.
-// Classic page script.
 
 /** @param {number | null | undefined} n */
-function formatCount(n) {
+export function formatCount(n) {
   return Number(n || 0).toLocaleString();
 }
 
 /** @param {HTMLElement | null} container @param {DuplicateTrashProgress} progress */
-function updateTrashProgress(container, progress) {
+export function updateTrashProgress(container, progress) {
   if (!container) return;
   var total = progress.total || 0;
   var completed = Math.min(progress.completed || 0, total);
@@ -49,7 +48,7 @@ function updateTrashProgress(container, progress) {
 }
 
 /** @param {DuplicateSkip} s */
-function isActionableSkip(s) {
+export function isActionableSkip(s) {
   // "file already missing" completes the DB row (see applyTrashBatchToCards)
   // and its card renders "Cleaned up" like a successful trash. Counting it
   // as skipped in the progress detail contradicts the card state — a

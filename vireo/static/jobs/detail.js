@@ -84,7 +84,11 @@ function renderHistoryOverview() {
   var pane = jobsElement('jobDetailPane', HTMLElement);
   if (!jobsPollState.history.loaded) {
     pane.innerHTML = '<div class="jobs-overview-empty">' +
-      (jobsPollState.history.error ? 'Job history could not be loaded. Retrying automatically.' : 'Loading job history…') + '</div>';
+      (jobsPollState.history.error
+        ? escapeHtml('Job history could not be loaded.' +
+          (jobsPollState.history.errorDetail ? ' ' + jobsPollState.history.errorDetail : '') +
+          ' Retrying automatically.')
+        : 'Loading job history…') + '</div>';
     return;
   }
   var typeFilter = jobsElement('filterType', HTMLSelectElement).value;

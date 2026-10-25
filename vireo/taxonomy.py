@@ -38,6 +38,7 @@ from datetime import date
 
 import certifi
 import requests
+from app_paths import default_path
 from file_replace import replace_file
 
 log = logging.getLogger(__name__)
@@ -589,7 +590,7 @@ DWCA_URL = "https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip"
 # Persistent path for the DWCA-based taxonomy.json. Lives under ~/.vireo so
 # it survives app restarts — in PyInstaller-bundled builds the package
 # directory is an ephemeral _MEI* extraction dir that's rebuilt per run.
-TAXONOMY_JSON_PATH = os.path.expanduser("~/.vireo/taxonomy.json")
+TAXONOMY_JSON_PATH = default_path("taxonomy_json")
 
 # Fallback for dev checkouts that downloaded a taxonomy.json next to this
 # module before the persistent path existed. Named so tests (and the browser
@@ -1525,7 +1526,7 @@ def load_taxonomy(db, data_dir=None):
         data_dir: directory to store downloaded files (default: ~/.vireo/taxonomy/)
     """
     if data_dir is None:
-        data_dir = os.path.expanduser("~/.vireo/taxonomy")
+        data_dir = default_path("taxonomy")
     os.makedirs(data_dir, exist_ok=True)
 
     gz_path = os.path.join(data_dir, "taxa.csv.gz")

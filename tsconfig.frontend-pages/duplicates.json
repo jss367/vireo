@@ -3,17 +3,21 @@
   "files": [
     "../types/pages/duplicates.d.ts",
     "../types/page-hooks.d.ts",
-    "../vireo/static/duplicates/state.js",
-    "../vireo/static/duplicates/scan.js",
-    "../vireo/static/duplicates/filter.js",
-    "../vireo/static/duplicates/results.js",
-    "../vireo/static/duplicates/resolved.js",
-    "../vireo/static/duplicates/trash-progress.js",
+    "../vireo/static/duplicates/boot.js",
     "../vireo/static/duplicates/card.js",
-    "../vireo/static/duplicates/restore.js",
-    "../vireo/static/duplicates/reveal.js",
-    "../vireo/static/duplicates/patterns.js",
+    "../vireo/static/duplicates/categories.js",
     "../vireo/static/duplicates/cleanup.js",
-    "../vireo/static/duplicates/boot.js"
+    "../vireo/static/duplicates/events.js",
+    "../vireo/static/duplicates/filter.js",
+    "../vireo/static/duplicates/patterns.js",
+    "../vireo/static/duplicates/resolved.js",
+    "../vireo/static/duplicates/restore.js",
+    "../vireo/static/duplicates/results.js",
+    "../vireo/static/duplicates/reveal.js",
+    "../vireo/static/duplicates/same-shot.js",
+    "../vireo/static/duplicates/scan.js",
+    "../vireo/static/duplicates/shared.js",
+    "../vireo/static/duplicates/state.js",
+    "../vireo/static/duplicates/trash-progress.js"
   ]
 }

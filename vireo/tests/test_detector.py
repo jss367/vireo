@@ -771,7 +771,10 @@ def test_ensure_weights_noop_when_present(tmp_path, monkeypatch):
     import sys
     import types
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -807,7 +810,10 @@ def test_ensure_weights_downloads_when_missing(tmp_path, monkeypatch):
     import sys
     import types
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -839,7 +845,10 @@ def test_ensure_weights_raises_on_download_failure(tmp_path, monkeypatch):
     import sys
     import types
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -879,7 +888,10 @@ def test_ensure_weights_atomic_and_serialized(tmp_path, monkeypatch):
     import sys
     import types
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 

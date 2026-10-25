@@ -4,7 +4,7 @@
 import { escapeAttr, hasLightbox, openLightbox, sharedThumbnailUrl } from './shared.js';
 import { isHighlightsAdvancedMode } from './loading.js';
 import { formatPercent, formatScore } from './scope.js';
-import { moveSpeciesHighlight, photoSpeciesName, removeSpeciesHighlight } from './species.js';
+import { moveSpeciesHighlight, otherTaggedSpecies, photoSpeciesName, removeSpeciesHighlight } from './species.js';
 import { state } from './state.js';
 
 /** @param {HighlightsPhoto | null | undefined} p */
@@ -41,6 +41,11 @@ export function renderCard(p, idx) {
   var rep = p.is_species_representative
     ? '<span class="card-chip reason">Representative</span>'
     : '';
+  var others = otherTaggedSpecies(p);
+  var alsoTagged = others.length
+    ? '<span class="card-chip reason" title="' + escapeAttr('Also tagged: ' + others.join(', ')) + '">+'
+      + others.length + ' species</span>'
+    : '';
   var order = p.is_highlighted
     ? '<div class="highlight-order">'
       + '<button type="button" data-highlight-order="up" data-photo-id="' + p.id + '" data-species="' + escapeAttr(photoSpeciesName(p)) + '">Up</button>'
@@ -58,7 +63,7 @@ export function renderCard(p, idx) {
     + order
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
     + '<div class="card-filename" title="' + escapeAttr(p.filename) + '">' + escapeAttr(p.filename) + '</div>'
-    + '<div class="card-info">' + scoreChip + conf + rep + reasons + '</div>'
+    + '<div class="card-info">' + scoreChip + conf + rep + alsoTagged + reasons + '</div>'
     + '</div>';
 }
 
@@ -73,6 +78,7 @@ export function attachCardClicks(container, photoSet) {
       var photo = photoSet.find(function(p) { return p.id === pid; });
       if (hasLightbox() && photo) {
         state.activeLightboxPhotoId = pid;
+        state.activeLightboxSpecies = photo.bucket_species || null;
         openLightbox(pid, photo.filename, photoSet);
       }
     });

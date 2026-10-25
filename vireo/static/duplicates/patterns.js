@@ -1,45 +1,48 @@
-// Duplicates page: category rendering and review/cleanup state. Classic
-// script sharing page globals, read after DOMContentLoaded.
+// Duplicates page: category rendering, the group checkboxes and the apply
+// bar, and updating the page after copies are cleaned up.
 
-var _duplicateCategory = 'all';
-/** @type {Set<string>} */ var _excludedDuplicateHashes = new Set();
-var _duplicateApplyInProgress = false;
-var _duplicateApplyMessage = '';
+import { state } from './state.js';
+import { DuplicateCategories } from './categories.js';
+import { duplicateRequestError } from './cleanup.js';
+import { pruneResolvedHashesFromScan } from './resolved.js';
+import { clearResults, renderResults } from './results.js';
+import { formatCount } from './trash-progress.js';
+import { escapeHtml, formatBytes, safeFetch, showToast } from './shared.js';
 
-function rememberDuplicateSelections() {
+export function rememberDuplicateSelections() {
   document.querySelectorAll(/** @type {'input'} */ ('.group-check')).forEach(function(cb) {
-    var proposal = _proposals[Number(cb.getAttribute('data-gi'))];
+    var proposal = state.proposals[Number(cb.getAttribute('data-gi'))];
     if (!proposal) return;
-    if (cb.checked) _excludedDuplicateHashes.delete(proposal.file_hash);
-    else _excludedDuplicateHashes.add(proposal.file_hash);
+    if (cb.checked) state.excludedDuplicateHashes.delete(proposal.file_hash);
+    else state.excludedDuplicateHashes.add(proposal.file_hash);
   });
 }
 
 /** @param {DuplicateProposal} group */
-function groupMatchesPhotoFilter(group) {
-  if (!_filterMatchedIds) return true;
+export function groupMatchesPhotoFilter(group) {
+  if (!state.filterMatchedIds) return true;
   var members = [group.winner].concat(group.other_kept || [], group.losers || []);
   return members.some(function(p) {
-    return p && p.id != null && _filterMatchedIds?.has(p.id);
+    return p && p.id != null && state.filterMatchedIds?.has(p.id);
   });
 }
 
 /** @param {DuplicateProposal} group */
-function groupMatchesFilter(group) {
+export function groupMatchesFilter(group) {
   return groupMatchesPhotoFilter(group) &&
-    (_duplicateCategory === 'all' || DuplicateCategories.classify(group) === _duplicateCategory);
+    (state.duplicateCategory === 'all' || DuplicateCategories.classify(group) === state.duplicateCategory);
 }
 
 /** @param {string} id */
-function selectDuplicateCategory(id) {
-  _duplicateCategory = id;
-  if (_lastScanResult && !_scanInProgress) renderResults(_lastScanResult);
+export function selectDuplicateCategory(id) {
+  state.duplicateCategory = id;
+  if (state.lastScanResult && !state.scanInProgress) renderResults(state.lastScanResult);
   var button = document.querySelector(/** @type {'button'} */ ('[data-duplicate-category="' + id + '"]'));
   if (button) button.focus();
 }
 
 /** @param {DuplicateCategory[]} categories */
-function renderCategorySummary(categories) {
+export function renderCategorySummary(categories) {
   var total = categories.reduce(function(sum, c) {
     sum.groups += c.groups; sum.extras += c.extras; sum.bytes += c.bytes;
     return sum;
@@ -50,8 +53,7 @@ function renderCategorySummary(categories) {
     '<div class="category-grid" role="group" aria-label="Filter duplicate patterns">';
   [total].concat(categories).forEach(function(c) {
     html += '<button type="button" class="category-button" data-duplicate-category="' + c.id +
-      '" aria-pressed="' + (_duplicateCategory === c.id) +
-      '" onclick="selectDuplicateCategory(\'' + c.id + '\')">' +
+      '" aria-pressed="' + (state.duplicateCategory === c.id) + '">' +
       '<span class="category-title">' + escapeHtml(c.label) + '</span>' +
       '<span class="category-counts">' + formatCount(c.groups) + ' group' + (c.groups === 1 ? '' : 's') +
       ' &middot; ' + formatCount(c.extras) + ' extra ' + (c.extras === 1 ? 'copy' : 'copies') +
@@ -61,13 +63,13 @@ function renderCategorySummary(categories) {
 }
 
 /** @param {DuplicateProposal} group */
-function renderCategoryBadge(group) {
+export function renderCategoryBadge(group) {
   return '<span class="category-badge">' +
     escapeHtml(DuplicateCategories.label(DuplicateCategories.classify(group))) + '</span>';
 }
 
 /** @param {DuplicateScan} result @param {DuplicateProposal[]} unresolved @param {DuplicateProposal[]} resolved */
-function renderSummaryBar(result, unresolved, resolved) {
+export function renderSummaryBar(result, unresolved, resolved) {
   var extras = unresolved.reduce(function(n, p) { return n + (p.losers || []).length; }, 0);
   var bytes = resolved.reduce(function(n, p) {
     return n + (p.losers || []).reduce(function(size, l) { return size + (l.file_size || 0); }, 0);
@@ -93,8 +95,8 @@ function renderSummaryBar(result, unresolved, resolved) {
 }
 
 /** @param {Set<number>} photoIds */
-function forgetCleanedDuplicateCopies(photoIds) {
-  if (!_lastScanResult) return;
+export function forgetCleanedDuplicateCopies(photoIds) {
+  if (!state.lastScanResult) return;
   rememberDuplicateSelections();
   photoIds.forEach(function(id) {
     var card = document.querySelector('.dup-card[data-photo-id="' + id + '"]');
@@ -105,7 +107,7 @@ function forgetCleanedDuplicateCopies(photoIds) {
   });
   /** @type {Set<string>} */ var emptyHashes = new Set();
   /** @type {Array<{proposal:DuplicateProposal;cleaned:number}>} */ var changedGroups = [];
-  (_lastScanResult.proposals || []).forEach(function(p) {
+  (state.lastScanResult.proposals || []).forEach(function(p) {
     if (p.status !== 'resolved') return;
     var previousCount = (p.losers || []).length;
     p.losers = (p.losers || []).filter(function(l) { return !photoIds.has(l.id); });
@@ -128,7 +130,7 @@ function forgetCleanedDuplicateCopies(photoIds) {
       var button = card.querySelector(/** @type {'button'} */ ('.trash-btn'));
       statuses.set(card.getAttribute('data-photo-id') || '', {text: status.textContent, disabled: !!(button && button.disabled)});
     });
-    renderResults(_lastScanResult);
+    renderResults(state.lastScanResult);
     document.querySelectorAll(/** @type {'div'} */ ('.dup-card[data-photo-id] [data-trash-status]')).forEach(function(status) {
       var card = status.closest(/** @type {'div'} */ ('.dup-card')); if (!card) return;
       var saved = statuses.get(card.getAttribute('data-photo-id') || '');
@@ -152,8 +154,8 @@ function forgetCleanedDuplicateCopies(photoIds) {
       notice.setAttribute('role', 'status');
       notice.innerHTML = change.cleaned + ' extra ' + (change.cleaned === 1 ? 'copy' : 'copies') +
         ' cleaned up. Remaining copies now appear under ' + escapeHtml(DuplicateCategories.label(category)) + '. ' +
-        '<button type="button" class="btn-secondary" onclick="selectDuplicateCategory(\'' + category +
-        '\')">View remaining copies</button>';
+        '<button type="button" class="btn-secondary" data-show-category="' + escapeHtml(category) +
+        '">View remaining copies</button>';
       card.replaceWith(notice);
     } else {
       var badge = card.querySelector(/** @type {'div'} */ ('.category-badge'));
@@ -168,59 +170,59 @@ function forgetCleanedDuplicateCopies(photoIds) {
   refreshDuplicateSummaries();
 }
 
-// Re-render the category counts and summary bar from ``_lastScanResult``
+// Re-render the category counts and summary bar from ``state.lastScanResult``
 // without rebuilding the group list.
-function refreshDuplicateSummaries() {
-  if (!_lastScanResult) return;
-  var categories = DuplicateCategories.summarize(_lastScanResult.proposals.filter(groupMatchesPhotoFilter));
-  if (_duplicateCategory !== 'all' && !categories.some(function(c) { return c.id === _duplicateCategory; })) {
-    categories.push({id: _duplicateCategory, label: DuplicateCategories.label(_duplicateCategory),
+export function refreshDuplicateSummaries() {
+  if (!state.lastScanResult) return;
+  var categories = DuplicateCategories.summarize(state.lastScanResult.proposals.filter(groupMatchesPhotoFilter));
+  if (state.duplicateCategory !== 'all' && !categories.some(function(c) { return c.id === state.duplicateCategory; })) {
+    categories.push({id: state.duplicateCategory, label: DuplicateCategories.label(state.duplicateCategory),
       groups: 0, extras: 0, bytes: 0});
   }
   var summary = document.querySelector(/** @type {'div'} */ ('.category-summary'));
   if (summary) summary.outerHTML = renderCategorySummary(categories);
-  var visible = _lastScanResult.proposals.filter(groupMatchesFilter);
+  var visible = state.lastScanResult.proposals.filter(groupMatchesFilter);
   var bar = document.querySelector(/** @type {'div'} */ ('.summary-bar'));
-  if (bar) bar.outerHTML = renderSummaryBar(_lastScanResult,
+  if (bar) bar.outerHTML = renderSummaryBar(state.lastScanResult,
     visible.filter(function(p) { return p.status !== 'resolved'; }),
     visible.filter(function(p) { return p.status === 'resolved'; }));
 }
 
 /** @returns {DuplicateProposal[]} */
-function getCheckedGroups() {
+export function getCheckedGroups() {
   /** @type {DuplicateProposal[]} */ var checked = [];
   document.querySelectorAll(/** @type {'input'} */ ('.group-check')).forEach(function(cb) {
     if (cb.checked) {
       var gi = parseInt(cb.getAttribute('data-gi') || '', 10);
-      var proposal = _proposals[gi]; if (!isNaN(gi) && proposal) checked.push(proposal);
+      var proposal = state.proposals[gi]; if (!isNaN(gi) && proposal) checked.push(proposal);
     }
   });
   return checked;
 }
 
-function updateApplyCount() {
+export function updateApplyCount() {
   rememberDuplicateSelections();
   var checked = getCheckedGroups();
   var loserCount = 0;
   checked.forEach(function(g) { loserCount += (g.losers || []).length; });
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('applyBtn'));
-  btn.textContent = _duplicateApplyInProgress ? 'Applying...' :
+  btn.textContent = state.duplicateApplyInProgress ? 'Applying...' :
     'Reject ' + loserCount + ' extra ' + (loserCount === 1 ? 'copy' : 'copies');
-  btn.disabled = _duplicateApplyInProgress || loserCount === 0;
-  /** @type {HTMLElement} */ (document.getElementById('applyStatus')).textContent = _duplicateApplyMessage;
+  btn.disabled = state.duplicateApplyInProgress || loserCount === 0;
+  /** @type {HTMLElement} */ (document.getElementById('applyStatus')).textContent = state.duplicateApplyMessage;
   /** @type {HTMLElement} */ (document.getElementById('applyBar')).style.display =
-    document.querySelector(/** @type {'input'} */ ('.group-check')) || _duplicateApplyInProgress || _duplicateApplyMessage ? '' : 'none';
+    document.querySelector(/** @type {'input'} */ ('.group-check')) || state.duplicateApplyInProgress || state.duplicateApplyMessage ? '' : 'none';
 }
 
-async function applyRejections() {
-  if (_duplicateApplyInProgress) return;
+export async function applyRejections() {
+  if (state.duplicateApplyInProgress) return;
   var checked = getCheckedGroups();
   if (checked.length === 0) return;
   var hashes = checked.map(function(g) { return g.file_hash; }).filter(Boolean);
   if (hashes.length === 0) return;
 
-  _duplicateApplyInProgress = true;
-  _duplicateApplyMessage = 'Applying your earlier selection...';
+  state.duplicateApplyInProgress = true;
+  state.duplicateApplyMessage = 'Applying your earlier selection...';
   updateApplyCount();
 
   try {
@@ -248,23 +250,23 @@ async function applyRejections() {
       'Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's') + deferredToast,
       toastKind,
     );
-    _duplicateApplyMessage = deferred.length
+    state.duplicateApplyMessage = deferred.length
       ? deferred.length + ' group' + (deferred.length === 1 ? '' : 's') +
         ' deferred (restore source access, rescan, and try again)'
       : '';
     pruneResolvedHashesFromScan(resolvedHashes);
-    if (_scanInProgress) return;
-    if (!_lastScanResult || !_lastScanResult.proposals.length) {
+    if (state.scanInProgress) return;
+    if (!state.lastScanResult || !state.lastScanResult.proposals.length) {
       clearResults();
     } else {
-      renderResults(_lastScanResult);
+      renderResults(state.lastScanResult);
     }
   } catch (caught) { const e = duplicateRequestError(caught);
     showToast(e.message || 'Apply failed', 'error');
-    _duplicateApplyMessage = 'Reject failed for your earlier selection: ' + (e.message || 'request failed');
+    state.duplicateApplyMessage = 'Reject failed for your earlier selection: ' + (e.message || 'request failed');
     // safeFetch already shows a toast on failure.
   } finally {
-    _duplicateApplyInProgress = false;
+    state.duplicateApplyInProgress = false;
     updateApplyCount();
   }
 }

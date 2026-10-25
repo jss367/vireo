@@ -781,6 +781,72 @@ def test_self_heal_failure_keeps_classifier_working(tmp_path):
         tc._HEAL_THREADS[model_str].join(timeout=5)
 
 
+def test_a_failed_heal_is_named_by_the_runs_that_use_fallback_names(
+    tmp_path, monkeypatch,
+):
+    """A heal that raised used to leave only a log line while predictions
+    quietly kept taxonomy-based names. The classifier says it ran without
+    the file, and the notice its runs report names the failure and Repair;
+    a classifier with the file reports nothing."""
+    import models
+    import timm_classifier as tc
+    from timm_classifier import TimmClassifier, missing_common_names_notice
+
+    _reset_heal_state()
+    monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {})
+    model_dir = _make_model_dir(tmp_path)
+    (model_dir / "label_descriptions.json").unlink()
+    fake_session = _make_fake_session()
+
+    model_str = "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21"
+    with patch("timm_classifier._MODELS_ROOT", str(tmp_path)), \
+         patch("timm_classifier.onnx_runtime.create_session", return_value=fake_session), \
+         patch("models.ensure_timm_label_descriptions", side_effect=OSError("offline")):
+        clf = TimmClassifier(model_str)
+        tc._HEAL_THREADS[model_str].join(timeout=synchronization_timeout(5))
+
+    assert clf.label_descriptions_missing is True
+    assert models.label_descriptions_heal_failure(model_str) == "OSError: offline"
+    assert missing_common_names_notice(clf, "iNat21 (EVA-02 Large)") == (
+        "iNat21 (EVA-02 Large) is missing its common-name file "
+        "(label_descriptions.json), so this run named species from the "
+        "taxonomy alone, and species the taxonomy does not name show their "
+        "scientific name. Vireo's last attempt to fetch it failed: "
+        "OSError: offline. Click Repair on iNat21 (EVA-02 Large) in "
+        "Settings › Models to fetch it."
+    )
+
+    healthy = _make_fake_classifier(tmp_path / "healthy")
+    assert healthy.label_descriptions_missing is False
+    assert missing_common_names_notice(healthy, "iNat21 (EVA-02 Large)") is None
+
+
+def test_common_names_notice_says_a_heal_is_running(tmp_path, monkeypatch):
+    """While the background heal is running again, the notice says so and
+    still names why the previous attempt failed."""
+    import models
+    import timm_classifier as tc
+    from timm_classifier import missing_common_names_notice
+
+    _reset_heal_state()
+    model_dir = _make_model_dir(tmp_path)
+    clf = MagicMock(label_descriptions_missing=True, _model_str="m", _model_dir=str(model_dir))
+    with tc._HEAL_LOCK:
+        tc._HEAL_STATE[("m", tc._installation_generation(str(model_dir)))] = "in_flight"
+    try:
+        monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {})
+        first = missing_common_names_notice(clf, "iNat21")
+        monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {"m": "OSError: offline"})
+        retry = missing_common_names_notice(clf, "iNat21")
+    finally:
+        _reset_heal_state()
+    assert " Vireo was fetching the file in the background while this run used the model. " in first
+    assert (
+        " Vireo's last attempt to fetch it failed (OSError: offline), and it "
+        "was trying again while this run used the model. " in retry
+    )
+
+
 def test_present_label_descriptions_skips_self_heal(tmp_path):
     """No self-heal attempt when the file is already on disk."""
     from timm_classifier import TimmClassifier

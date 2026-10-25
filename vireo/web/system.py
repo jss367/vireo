@@ -29,6 +29,7 @@ from config import read_raw_config_file, settings_write_lock
 from flask import Blueprint, Response, jsonify, request
 from proc import no_window_kwargs
 from runtime_warnings import runtime_execution_info
+from services.same_shot_duplicates import is_duplicate_review_member
 
 log = logging.getLogger(__name__)
 
@@ -422,7 +423,7 @@ def create_system_blueprint(
             # Duplicate results are library-wide. Match their thumbnail
             # membership guard without allowing arbitrary hidden photos.
             duplicate_scope = body.get("scope") == "duplicates"
-            if duplicate_scope and not db.duplicates.is_group_member(pid_int):
+            if duplicate_scope and not is_duplicate_review_member(db, pid_int, get_runner().list_jobs):
                 return None, False, json_error("photo not found", 404)
             photo = db.photos.get(pid_int, verify_workspace=not duplicate_scope)
             if not photo:

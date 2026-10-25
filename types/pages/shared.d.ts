@@ -28,16 +28,6 @@ interface MapGeoResponse {
   total_without_coordinates: number; total_photos: number; total_geolocated: number;
   truncated: boolean; total_filtered: number; render_limit: number;
 }
-interface DuplicateMember {
-  path?: string; filename?: string; file_size?: number;
-}
-interface DuplicateCategoryGroup {
-  winner: DuplicateMember; other_kept?: DuplicateMember[]; losers?: DuplicateMember[];
-  empty_file_group?: boolean;
-}
-interface DuplicateCategorySummary {
-  id: string; label: string; groups: number; extras: number; bytes: number;
-}
 interface Window { VIREO_RSYNC_INSTALL?: {hint?: string}; }
 
 interface KeymapShortcut { key: string; action(event: KeyboardEvent): unknown; }
@@ -119,6 +109,7 @@ interface PendingArchive {
   id: string | number; name: string; destination: string; collection_id?: number | null;
   state: string; unsynced_photos?: number; unsynced_photos_other_workspaces?: number;
   unsynced_photos_here_with_sibling_edits?: number; source_available?: boolean; error?: string;
+  created_at?: string; photo_count?: number; cataloged_bytes?: number | null;
 }
 interface Window {vireoPendingArchives?: PendingArchive[];}
 

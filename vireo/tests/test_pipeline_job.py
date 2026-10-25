@@ -19066,3 +19066,44 @@ def test_extract_masks_distinguishes_zero_boxes_from_missing_execution(
     _stub_extract_masks_heavy_ops(monkeypatch)
     _, result = _run_extract_masks_only(db_path, ws_id, collection_id)
     assert result["stages"]["extract_masks"]["outcomes"]["counts"] == {reason: 1}
+
+
+def test_pipeline_notes_a_timm_model_without_common_names(tmp_path, monkeypatch):
+    """A timm model without label_descriptions.json names species from the
+    taxonomy alone. When Vireo's repair of that file failed, only the log
+    said so; the run now records a ``[common_names]`` note (it stays green:
+    the predictions are valid) and the model's step carries the notice."""
+    from types import SimpleNamespace
+
+    import models
+    from pipeline_stages.classification import _ClassifyPass
+
+    monkeypatch.setattr(
+        models, "_LABEL_DESC_HEAL_FAILURES",
+        {"m": "the model's upstream config has no common names"},
+    )
+    runner = FakeRunner()
+    notes = []
+    stage = SimpleNamespace(run=SimpleNamespace(
+        note=notes.append, runner=runner, job={"id": "job"},
+    ))
+    clf = SimpleNamespace(
+        label_descriptions_missing=True, _model_str="m", _model_dir=str(tmp_path),
+    )
+
+    notice = _ClassifyPass._note_missing_common_names(stage, clf, "iNat21", "classify:t")
+
+    assert notice.startswith("iNat21 is missing its common-name file")
+    assert (
+        "Vireo's last attempt to fetch it failed: the model's upstream "
+        "config has no common names." in notice
+    )
+    assert notes == [f"[common_names] {notice}"]
+    assert runner.step_updates == [("job", "classify:t", {"error": notice})]
+
+    # Any other classifier says nothing.
+    notes.clear()
+    assert _ClassifyPass._note_missing_common_names(
+        stage, SimpleNamespace(), "BioCLIP", "classify:b",
+    ) is None
+    assert notes == []

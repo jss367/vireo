@@ -7,6 +7,7 @@ so these tests run without real model weights.
 import json
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -109,6 +110,8 @@ def test_ensure_keypoint_weights_missing_files_triggers_download(tmp_path, monke
 
     import huggingface_hub
 
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: SimpleNamespace(
+        model_info=lambda _: SimpleNamespace(sha="a" * 40)))
     monkeypatch.setattr(
         huggingface_hub, "hf_hub_download", _fake_hub_download
     )
@@ -122,6 +125,45 @@ def test_ensure_keypoint_weights_missing_files_triggers_download(tmp_path, monke
     # Both files land at the expected on-disk location.
     assert (tmp_path / "rtmpose-animal" / "model.onnx").is_file()
     assert (tmp_path / "rtmpose-animal" / "config.json").is_file()
+
+
+def test_keypoint_retry_keeps_weights_downloaded_before_config_failure(tmp_path, monkeypatch):
+    """Retrying a failed companion fetch must not retransmit the completed model."""
+    from pathlib import Path
+
+    import huggingface_hub
+    import keypoints as kp
+
+    monkeypatch.setattr(kp, "MODELS_DIR", str(tmp_path))
+    downloads = []
+    revisions = []
+    server_revision = "a" * 40
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: SimpleNamespace(
+        model_info=lambda _: SimpleNamespace(sha=server_revision)))
+
+    def download(*, filename, local_dir, subfolder, **kwargs):
+        downloads.append(filename)
+        revisions.append(kwargs.get("revision"))
+        if filename == "config.json" and downloads.count(filename) == 1:
+            raise ConnectionError("config temporarily unavailable")
+        destination = Path(local_dir) / subfolder / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"completed weights" if filename == "model.onnx" else b"{}")
+        return str(destination)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    with pytest.raises(RuntimeError, match="config temporarily unavailable"):
+        kp.ensure_keypoint_weights("rtmpose-animal")
+
+    model_path = tmp_path / "rtmpose-animal" / "model.onnx"
+    assert model_path.read_bytes() == b"completed weights"
+    assert not (model_path.parent / "config.json").exists()
+    server_revision = "b" * 40
+    assert kp.ensure_keypoint_weights("rtmpose-animal") == str(model_path)
+    assert downloads == ["model.onnx", "config.json", "config.json"]
+    assert revisions == ["a" * 40] * 3
+    assert model_path.read_bytes() == b"completed weights"
+    assert (model_path.parent / "config.json").read_bytes() == b"{}"
 
 
 def _write_rtmpose_config(model_dir):

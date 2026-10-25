@@ -24,6 +24,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# ``ScanHooks.sidecar_error``'s reason when ``read_keyword_snapshot`` returned
+# None: the reader logs which (corrupt, or the open failed) but answers only None.
+UNREADABLE_SIDECAR_REASON = "Vireo could not read it, or it is not valid XMP"
+
 
 def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -> bool:
     """Import readable XMP keywords; False leaves the sidecar retryable."""

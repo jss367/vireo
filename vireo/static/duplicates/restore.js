@@ -1,10 +1,13 @@
 // Duplicates page: initial catalog/scan loading and restored-result banners.
-// Classic script sharing the page globals, read only after DOMContentLoaded.
 
-var _duplicateLoadEpoch = 0;
+import { state } from './state.js';
+import { clearDuplicateTrashProgress, duplicateRequestError } from './cleanup.js';
+import { renderResults } from './results.js';
+import { hideRestoredBanner, setEmptyVisible } from './scan.js';
+import { formatDateTime, safeFetch, showToast } from './shared.js';
 
-function cancelDuplicateLoad() {
-  ++_duplicateLoadEpoch;
+export function cancelDuplicateLoad() {
+  ++state.duplicateLoadEpoch;
   /** @type {HTMLElement} */ (document.getElementById('initialLoading')).style.display = 'none';
   /** @type {HTMLElement} */ (document.getElementById('loadError')).style.display = 'none';
   /** @type {HTMLButtonElement} */ (document.getElementById('scanBtn')).disabled = false;
@@ -12,24 +15,24 @@ function cancelDuplicateLoad() {
 
 // Keep's response applies to the displayed snapshot. A scan or restore must
 // wait for it so it cannot install a catalog result captured before the switch.
-function duplicateResultsReloadBlocked() {
-  if (!_duplicateKeepPending.size) return false;
+export function duplicateResultsReloadBlocked() {
+  if (!state.duplicateKeepPending.size) return false;
   showToast('Wait for the switch to finish before loading duplicate results.', 'info');
   return true;
 }
 
-function prepareDuplicateScan() {
-  if (_scanInProgress || duplicateResultsReloadBlocked()) return false;
+export function prepareDuplicateScan() {
+  if (state.scanInProgress || duplicateResultsReloadBlocked()) return false;
   cancelDuplicateLoad();
   return true;
 }
 
 /** @param {boolean|Event} [forceCleanup] */
-async function tryRestoreLastScan(forceCleanup) {
-  if (_scanInProgress || duplicateResultsReloadBlocked()) return;
+export async function tryRestoreLastScan(forceCleanup) {
+  if (state.scanInProgress || duplicateResultsReloadBlocked()) return;
   clearDuplicateTrashProgress();
-  var epoch = ++_duplicateLoadEpoch;
-  function current() { return epoch === _duplicateLoadEpoch && !_scanInProgress; }
+  var epoch = ++state.duplicateLoadEpoch;
+  function current() { return epoch === state.duplicateLoadEpoch && !state.scanInProgress; }
   /** @type {HTMLElement} */ (document.getElementById('initialLoading')).style.display = '';
   /** @type {HTMLElement} */ (document.getElementById('loadError')).style.display = 'none';
   /** @type {HTMLButtonElement} */ (document.getElementById('scanBtn')).disabled = true;
@@ -37,8 +40,10 @@ async function tryRestoreLastScan(forceCleanup) {
   hideRestoredBanner();
   // A refresh must not leave older cleanup buttons actionable beneath the
   // loading/error state. A subsequent filter edit must not revive them either.
-  _lastScanResult = null;
-  _proposals = [];
+  state.lastScanResult = null;
+  state.sameShotVisibleLimit = 50;
+  /** @type {HTMLElement} */ (document.getElementById('sameShotResults')).innerHTML = '';
+  state.proposals = [];
   /** @type {HTMLElement} */ (document.getElementById('results')).innerHTML = '';
   /** @type {HTMLElement} */ (document.getElementById('summary')).style.display = 'none';
   /** @type {HTMLElement} */ (document.getElementById('applyBar')).style.display = 'none';
@@ -57,11 +62,11 @@ async function tryRestoreLastScan(forceCleanup) {
     }
     if (!current()) return;
     // Respect the first filter pass and any newer query still in flight.
-    await _filterReady;
-    while (_pendingFilterRefresh) {
-      var pending = _pendingFilterRefresh;
+    await state.filterReady;
+    while (state.pendingFilterRefresh) {
+      var pending = state.pendingFilterRefresh;
       await pending;
-      if (_pendingFilterRefresh === pending) break;
+      if (state.pendingFilterRefresh === pending) break;
     }
     if (!current()) return;
     if (cleanup && !result.proposals.length &&
@@ -99,7 +104,7 @@ async function tryRestoreLastScan(forceCleanup) {
 }
 
 /** @param {string} [isoStr] */
-function formatTimeAgo(isoStr) {
+export function formatTimeAgo(isoStr) {
   if (!isoStr) return '';
   // job_history timestamps are naive local-time ISO strings written by
   // datetime.now().isoformat() in vireo/jobs.py. Pass them through as-is so
@@ -110,19 +115,18 @@ function formatTimeAgo(isoStr) {
   if (sec < 60) return 'just now';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
   if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
-  return window.VireoTime.dateTime(d);
+  return formatDateTime(d);
 }
 
 // Whether a new scan would show the same groups, from the counts
 // last-scan compares against the catalog. Only asks for a rescan when one
 // would actually show something different.
 /** @param {DuplicateScan} result */
-function restoredFreshnessText(result) {
+export function restoredFreshnessText(result) {
   var added = result.new_group_count || 0;
   var changed = result.changed_group_count || 0;
   if (!added && !changed) {
-    return ' Still up to date: no duplicates have been added or changed ' +
-      'in your catalog since then.';
+    return ' Exact-byte groups are unchanged in your catalog. Scan again to refresh possible same-shot copies.';
   }
   var parts = [];
   if (added) {

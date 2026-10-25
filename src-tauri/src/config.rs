@@ -29,7 +29,7 @@ impl LaunchConfig {
 
 /// Resolve the path to `~/.vireo/config.json`.
 pub fn config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".vireo").join("config.json"))
+    crate::app_paths::default_path("config")
 }
 
 /// Read and parse the config file, returning defaults on any failure.

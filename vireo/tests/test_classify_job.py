@@ -5152,7 +5152,7 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
 
     captured_photos = []
 
-    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None, handoff=None):
         captured_photos.extend([p["id"] for p in photos])
         return ({}, 0)
 
@@ -5735,7 +5735,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
     from unittest.mock import patch
 
     import config as cfg
-    from classify_job.detection import _detect_subjects
+    from classify_job.detection import DetectionHandoff, _detect_subjects
     from db import Database
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
@@ -5759,6 +5759,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
 
     runner = FakeRunner()
     job = _make_job()
+    handoff = DetectionHandoff()
     photos = [{"id": pid, "filename": "a.jpg", "folder_id": folder_id}]
 
     # detect_animals returns None → _detect_batch hits its early-continue
@@ -5773,9 +5774,10 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
             job=job,
             reclassify=True,
             db=db,
+            handoff=handoff,
         )
 
-    assert pid not in job.get("_detect_processed_ids", set())
+    assert pid not in handoff.processed_ids
     assert [d["id"] for d in detection_store.get_detections(db, pid, min_conf=0)] == [det]
     assert db.conn.execute(
         "SELECT COUNT(*) FROM predictions WHERE detection_id = ?", (det,),
@@ -6676,7 +6678,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     # detection. Flip cancel on as it returns.
     detect_called = {"n": 0}
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None, handoff=None):
         detect_called["n"] += 1
         assert reclassify is True
         runner.flipped = True
@@ -6820,7 +6822,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
 
     mock_clf = ProbeCheckingClassifier()
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None, handoff=None):
         assert reclassify is True
         runner.flipped = True
         return ({1: [{"id": 101, "box_x": 0, "box_y": 0,
@@ -7131,7 +7133,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
 
     Regression for the Codex P1 review on commit faa47a43ad
     (vireo/classify_job.py line 1861 — "Track re-detected empty photos
-    before returning"). The gate uses ``job["_detect_processed_ids"]``
+    before returning"). The gate uses ``DetectionHandoff.processed_ids``
     rather than ``detection_map.keys()`` so empty-scene photos are
     included in the rebuild subset.
     """
@@ -7200,17 +7202,17 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
 
     # Stub _detect_subjects: photo 1 was processed but found empty
     # (recorded a detector_runs row, no detection_map entry). Photo 2 was
-    # never reached. The processed set is stashed on the job so
+    # never reached. The processed set is recorded on the handoff so
     # run_classify_job's rebuild gate can include the empty-scene photo
     # — using detection_map.keys() alone would miss it.
     detect_called = {"n": 0}
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None, handoff=None):
         detect_called["n"] += 1
         assert reclassify is True
-        # Mirror what production _detect_subjects does: stash the processed
-        # set on job for run_classify_job to consume on cancel.
-        job["_detect_processed_ids"] = {1}
+        # Mirror what production _detect_subjects does: record the processed
+        # set on the handoff for run_classify_job to consume on cancel.
+        handoff.processed_ids = {1}
         runner.flipped = True
         return ({}, 0)
 
@@ -7247,7 +7249,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     assert mock_db_instance.predictions.add.call_count >= 1, (
         "Post-detect cancel on reclassify with an empty-scene processed "
         "photo must classify it via the full-image fallback. Without the "
-        "_detect_processed_ids tracking, the photo is stranded with "
+        "processed_ids tracking, the photo is stranded with "
         "cleared predictions and no replacement."
     )
     # All add_prediction calls must be for the empty-scene photo's
@@ -9528,3 +9530,64 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
         f"got {events}"
     )
     assert runner.paused is False
+
+
+def test_classify_job_names_a_timm_model_without_common_names(tmp_path, monkeypatch):
+    """A timm classifier built without label_descriptions.json names species
+    from the taxonomy alone; when Vireo's repair of the file failed, only
+    the log said so. The job's "Load model" step carries the notice as a
+    warning and its result adds ``common_names_notice``."""
+    from unittest.mock import MagicMock, patch
+
+    import models
+
+    monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {
+        "hf-hub:timm/x": "could not fetch the model's upstream config: offline",
+    })
+    img_path = tmp_path / "bird.jpg"
+    Image.new("RGB", (200, 200), color="blue").save(str(img_path))
+    db = MagicMock()
+    db.collections.get_photos.return_value = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10, "timestamp": "2024-01-15T10:00:00"},
+    ]
+    db.folders.tree.return_value = [{"id": 10, "path": str(tmp_path), "name": "t"}]
+    db.predictions.get_existing_photo_ids.return_value = set()
+    db.masks_features.get_embedding.return_value = None
+    db.model_runs.cache_coverage_counts.return_value = (0, 0, 0)
+    db.get_subject_types.return_value = set()
+    db.photo_keywords.filter_out_subject_tagged.side_effect = lambda pids, _types: list(pids)
+    model = {
+        "id": "timm-x", "name": "iNat21", "model_str": "hf-hub:timm/x",
+        "weights_path": str(tmp_path), "model_type": "timm", "downloaded": True,
+    }
+    preds = [{"species": "Northern Cardinal", "score": 0.95, "taxonomy": None}]
+    clf = MagicMock(
+        label_descriptions_missing=True, _model_str="hf-hub:timm/x",
+        _model_dir=str(tmp_path), label_space_size=10000,
+    )
+    clf.classify.return_value = preds
+    clf.classify_batch.return_value = [preds]
+    runner = FakeRunner()
+    params = ClassifyParams("col-1", None, None, None, None, 10, 0.85, False)
+
+    with patch("classify_job.run.Database", return_value=db), \
+         patch("classify_job.job_run.get_active_model", return_value=model), \
+         patch("classify_job.job_run.get_models", return_value=[model]), \
+         patch("taxonomy.load_local_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_labels", return_value=(None, False, [])), \
+         patch("classify_job.job_run.TimmClassifier", return_value=clf), \
+         patch("timm_classifier._spawn_label_desc_heal", return_value=None), \
+         patch("classify_job.job_run._detect_subjects", return_value=({}, 0)):
+        result = run_classify_job(_make_job(), runner, str(tmp_path / "t.db"), 1, params)
+
+    notice = (
+        "iNat21 is missing its common-name file (label_descriptions.json), so "
+        "this run named species from the taxonomy alone, and species the "
+        "taxonomy does not name show their scientific name. Vireo's last "
+        "attempt to fetch it failed: could not fetch the model's upstream "
+        "config: offline. Click Repair on iNat21 in Settings › Models to "
+        "fetch it."
+    )
+    assert result["common_names_notice"] == notice
+    load_model = [kw for step, kw in runner.steps if step == "load_model" and kw.get("status") == "completed"]
+    assert load_model[-1]["error"] == notice

@@ -51,6 +51,7 @@ import json
 
 import config as cfg
 from keyword_normalization import keyword_match_key
+from species_memberships import photo_species_memberships
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
 # highlights whose photo is reachable, not rejected and still in the bucket.
@@ -102,18 +103,21 @@ _HIGHLIGHT_ELIGIBILITY_JOINS = """
 # row named `Puma`) does not satisfy a species highlight —
 # sibling species queries already exclude that photo from the
 # species bucket via `(t.rank = 'species' OR t.rank IS NULL)`.
-# The prediction-fallback branch below applies the same
-# `(t.rank = 'species' OR t.rank IS NULL)` filter to the
-# NOT EXISTS condition: a photo carrying only a higher-rank
-# taxonomy keyword (e.g. genus/family) is no longer part of
-# any species accepted bucket, and get_highlights_candidates
-# / collect_highlight_buckets will place it in a prediction
-# bucket (bp.species is NULL). Without the rank filter here,
-# the saved highlight would vanish on reload because the
-# NOT EXISTS still sees the higher-rank taxonomy row.
-_HIGHLIGHT_ELIGIBILITY_FILTER = """
-                 AND COALESCE(p.flag, 'none') != 'rejected'
-                 AND (
+# The prediction branch iterates each detection's top
+# non-rejected prediction and checks whether its
+# canonicalized species equals ``sh.species``. This mirrors
+# :meth:`_highlight_subject_predictions` and the
+# per-subject bucket memberships :func:`photo_species_memberships`
+# opens, so a highlight saved from a second subject's bucket
+# (an untagged photo's lower-confidence detection, or an
+# already-tagged photo's secondary subject) survives on
+# reload. Branch 2 therefore does not require the photo to
+# be keyword-free: a Teal-tagged photo whose Wigeon subject
+# predicts Wigeon can hold a Wigeon highlight that
+# ``collect_highlight_buckets`` places in the Wigeon bucket.
+# Whether it does is decided in ``get_highlights`` by the
+# bucket rule itself (see ``_HIGHLIGHT_PREDICTION_MATCH``).
+_HIGHLIGHT_KEYWORD_MATCH = """
                      EXISTS (
                          SELECT 1
                          FROM photo_keywords pk
@@ -136,160 +140,147 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = """
                                    )
                                )
                            )
-                     )
-                     OR (
-                         NOT EXISTS (
-                             SELECT 1
-                             FROM photo_keywords pk
-                             JOIN keywords k ON k.id = pk.keyword_id
-                              AND (k.is_species = 1 OR k.type = 'taxonomy')
-                             LEFT JOIN taxa t ON t.id = k.taxon_id
-                             WHERE pk.photo_id = sh.photo_id
-                               AND (t.rank = 'species' OR t.rank IS NULL)
-                         )
-                         AND sh.species = (
-                             SELECT COALESCE(
-                                 (
-                                     -- Root-first, exact spelling:
-                                     -- mirror ``resolve_species_display_name``'s
-                                     -- case 2 preference for an
-                                     -- exact-spelling same-name top-level
-                                     -- species row. Keeps intentional
-                                     -- ASCII/typography homonyms (e.g.
-                                     -- general ``Robin`` +
-                                     -- taxonomy ``robin``) routed to
-                                     -- their own stored spelling instead
-                                     -- of collapsing them onto one.
-                                     -- (SQLite doesn't support
-                                     -- correlated column references in a
-                                     -- subquery ORDER BY, so the exact
-                                     -- preference is expressed as its
-                                     -- own subquery rather than an
-                                     -- ORDER BY key on a NOCASE match.)
-                                     SELECT root_exact.name
-                                     FROM keywords root_exact
-                                     WHERE root_exact.name = pr.species
-                                       AND root_exact.parent_id IS NULL
-                                       AND (
-                                           root_exact.is_species = 1
-                                           OR root_exact.type = 'taxonomy'
-                                       )
-                                     ORDER BY (root_exact.type = 'taxonomy') DESC,
-                                              root_exact.id ASC
+                     )"""
+# A prefilter only: ``get_highlights`` keeps a row matched here alone (not
+# by an accepted keyword) only when ``photo_species_memberships`` still puts
+# its photo in that species' bucket. The bucket rule also requires another
+# subject to account for the photo's keyword, which this SQL does not check.
+_HIGHLIGHT_PREDICTION_MATCH = """
+                     EXISTS (
+                         SELECT 1
+                         FROM detections d
+                         JOIN predictions pr ON pr.detection_id = d.id
+                         LEFT JOIN prediction_review pr_rev
+                          ON pr_rev.prediction_id = pr.id
+                         AND pr_rev.workspace_id = sh.workspace_id
+                         WHERE d.photo_id = sh.photo_id
+                           AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                           AND pr.species IS NOT NULL
+                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                           AND pr.labels_fingerprint = (
+                               SELECT pr2.labels_fingerprint
+                               FROM predictions pr2
+                               WHERE pr2.detection_id = pr.detection_id
+                                 AND pr2.classifier_model = pr.classifier_model
+                               ORDER BY pr2.created_at DESC, pr2.id DESC
+                               LIMIT 1
+                           )
+                           -- Top non-rejected prediction for THIS detection
+                           -- (newest fingerprint per classifier model).
+                           -- Mirrors _highlight_subject_predictions' per-
+                           -- detection ROW_NUMBER() pick, so a photo
+                           -- joins each subject's bucket.
+                           AND pr.id = (
+                               SELECT pr3.id
+                               FROM predictions pr3
+                               LEFT JOIN prediction_review pr3_rev
+                                 ON pr3_rev.prediction_id = pr3.id
+                                AND pr3_rev.workspace_id = sh.workspace_id
+                               WHERE pr3.detection_id = pr.detection_id
+                                 AND pr3.species IS NOT NULL
+                                 AND COALESCE(pr3_rev.status, 'pending') != 'rejected'
+                                 AND pr3.labels_fingerprint = (
+                                     SELECT pr4.labels_fingerprint
+                                     FROM predictions pr4
+                                     WHERE pr4.detection_id = pr3.detection_id
+                                       AND pr4.classifier_model = pr3.classifier_model
+                                     ORDER BY pr4.created_at DESC, pr4.id DESC
                                      LIMIT 1
-                                 ),
-                                 (
-                                     -- Root-first, NOCASE fallback:
-                                     -- mirror
-                                     -- ``resolve_species_display_name``'s
-                                     -- case 1 — when a single same-name
-                                     -- top-level species row exists,
-                                     -- ``add_highlight`` stored
-                                     -- the highlight under its stored
-                                     -- spelling regardless of the
-                                     -- caller's casing. Without this
-                                     -- branch, the hierarchy-alias
-                                     -- canonicalization below could pick
-                                     -- a different-taxon leaf sharing
-                                     -- the label (e.g. root ``Robin``
-                                     -- for one taxon plus a hierarchy
-                                     -- leaf ``Robin`` under a different
-                                     -- taxon), canonicalize to that
-                                     -- leaf's root spelling, and drop
-                                     -- the saved highlight on reload.
-                                     SELECT root_direct.name
-                                     FROM keywords root_direct
-                                     WHERE root_direct.name = pr.species COLLATE NOCASE
-                                       AND root_direct.parent_id IS NULL
-                                       AND (
-                                           root_direct.is_species = 1
-                                           OR root_direct.type = 'taxonomy'
-                                       )
-                                     ORDER BY (root_direct.type = 'taxonomy') DESC,
-                                              root_direct.id ASC
-                                     LIMIT 1
-                                 ),
-                                 (
-                                     -- Hierarchy-alias fallback:
-                                     -- canonicalize only when the raw
-                                     -- prediction label resolves to a
-                                     -- unique linked taxon. When multiple
-                                     -- hierarchy leaves share the label
-                                     -- but point at different taxa, keep
-                                     -- the raw ``pr.species`` so buckets
-                                     -- key on the ambiguous label instead
-                                     -- of an arbitrary root.
-                                     -- Ambiguity count and the target-leaf
-                                     -- restriction here must mirror
-                                     -- ``resolve_species_display_name`` — the
-                                     -- canonicalizer ``add_highlight``
-                                     -- and ``collect_highlight_buckets`` use
-                                     -- when writing ``sh.species``. That
-                                     -- helper considers all linked hierarchy
-                                     -- taxa regardless of rank. If this
-                                     -- subquery restricted the count to
-                                     -- species-rank taxa, a mixed
-                                     -- species+higher-rank alias (e.g.
-                                     -- species ``Puma`` and genus ``Puma``)
-                                     -- would count as 1 here and canonicalize
-                                     -- to the species root while
-                                     -- ``add_highlight`` kept the raw
-                                     -- ``pr.species`` — the eligibility
-                                     -- compare below would then drop the
-                                     -- highlight on reload.
-                                     SELECT root.name
-                                     FROM keywords k_pred
-                                     JOIN keywords root
-                                       ON root.parent_id IS NULL
-                                      AND root.taxon_id = k_pred.taxon_id
-                                      AND (
-                                          root.is_species = 1
-                                          OR root.type = 'taxonomy'
-                                      )
-                                     WHERE k_pred.name = pr.species COLLATE NOCASE
-                                       AND k_pred.parent_id IS NOT NULL
-                                       AND k_pred.taxon_id IS NOT NULL
-                                       AND (
-                                           k_pred.is_species = 1
-                                           OR k_pred.type = 'taxonomy'
-                                       )
-                                       AND (
-                                           SELECT COUNT(DISTINCT k2.taxon_id)
-                                           FROM keywords k2
-                                           WHERE k2.name = pr.species COLLATE NOCASE
-                                             AND k2.parent_id IS NOT NULL
-                                             AND k2.taxon_id IS NOT NULL
-                                             AND (
-                                                 k2.is_species = 1
-                                                 OR k2.type = 'taxonomy'
-                                             )
-                                       ) = 1
-                                     ORDER BY root.id
-                                     LIMIT 1
-                                 ),
-                                 pr.species
-                             )
-                             FROM detections d
-                             JOIN predictions pr ON pr.detection_id = d.id
-                             LEFT JOIN prediction_review pr_rev
-                              ON pr_rev.prediction_id = pr.id
-                             AND pr_rev.workspace_id = sh.workspace_id
-                             WHERE d.photo_id = sh.photo_id
-                               AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
-                               AND pr.species IS NOT NULL
-                               AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                               AND pr.labels_fingerprint = (
-                                   SELECT pr2.labels_fingerprint
-                                   FROM predictions pr2
-                                   WHERE pr2.detection_id = pr.detection_id
-                                     AND pr2.classifier_model = pr.classifier_model
-                                   ORDER BY pr2.created_at DESC, pr2.id DESC
+                                 )
+                               ORDER BY pr3.confidence DESC, pr3.id DESC
+                               LIMIT 1
+                           )
+                           AND sh.species = COALESCE(
+                               (
+                                   -- Root-first, exact spelling:
+                                   -- mirror ``resolve_species_display_name``'s
+                                   -- case 2 preference for an
+                                   -- exact-spelling same-name top-level
+                                   -- species row. Keeps intentional
+                                   -- ASCII/typography homonyms (e.g.
+                                   -- general ``Robin`` +
+                                   -- taxonomy ``robin``) routed to
+                                   -- their own stored spelling instead
+                                   -- of collapsing them onto one.
+                                   SELECT root_exact.name
+                                   FROM keywords root_exact
+                                   WHERE root_exact.name = pr.species
+                                     AND root_exact.parent_id IS NULL
+                                     AND (
+                                         root_exact.is_species = 1
+                                         OR root_exact.type = 'taxonomy'
+                                     )
+                                   ORDER BY (root_exact.type = 'taxonomy') DESC,
+                                            root_exact.id ASC
                                    LIMIT 1
-                               )
-                             ORDER BY pr.confidence DESC, pr.id DESC
-                             LIMIT 1
-                         ) COLLATE NOCASE
-                     )
+                               ),
+                               (
+                                   -- Root-first, NOCASE fallback:
+                                   -- mirror
+                                   -- ``resolve_species_display_name``'s
+                                   -- case 1 — when a single same-name
+                                   -- top-level species row exists,
+                                   -- ``add_highlight`` stored
+                                   -- the highlight under its stored
+                                   -- spelling regardless of the
+                                   -- caller's casing.
+                                   SELECT root_direct.name
+                                   FROM keywords root_direct
+                                   WHERE root_direct.name = pr.species COLLATE NOCASE
+                                     AND root_direct.parent_id IS NULL
+                                     AND (
+                                         root_direct.is_species = 1
+                                         OR root_direct.type = 'taxonomy'
+                                     )
+                                   ORDER BY (root_direct.type = 'taxonomy') DESC,
+                                            root_direct.id ASC
+                                   LIMIT 1
+                               ),
+                               (
+                                   -- Hierarchy-alias fallback:
+                                   -- canonicalize only when the raw
+                                   -- prediction label resolves to a
+                                   -- unique linked taxon. See
+                                   -- ``resolve_species_display_name``.
+                                   SELECT root.name
+                                   FROM keywords k_pred
+                                   JOIN keywords root
+                                     ON root.parent_id IS NULL
+                                    AND root.taxon_id = k_pred.taxon_id
+                                    AND (
+                                        root.is_species = 1
+                                        OR root.type = 'taxonomy'
+                                    )
+                                   WHERE k_pred.name = pr.species COLLATE NOCASE
+                                     AND k_pred.parent_id IS NOT NULL
+                                     AND k_pred.taxon_id IS NOT NULL
+                                     AND (
+                                         k_pred.is_species = 1
+                                         OR k_pred.type = 'taxonomy'
+                                     )
+                                     AND (
+                                         SELECT COUNT(DISTINCT k2.taxon_id)
+                                         FROM keywords k2
+                                         WHERE k2.name = pr.species COLLATE NOCASE
+                                           AND k2.parent_id IS NOT NULL
+                                           AND k2.taxon_id IS NOT NULL
+                                           AND (
+                                               k2.is_species = 1
+                                               OR k2.type = 'taxonomy'
+                                           )
+                                     ) = 1
+                                   ORDER BY root.id
+                                   LIMIT 1
+                               ),
+                               pr.species
+                           ) COLLATE NOCASE
+                     )"""
+_HIGHLIGHT_ELIGIBILITY_FILTER = f"""
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND (
+{_HIGHLIGHT_KEYWORD_MATCH}
+                     OR
+{_HIGHLIGHT_PREDICTION_MATCH}
                  )"""
 
 
@@ -342,13 +333,21 @@ class SpeciesCurationRepository:
         single photo so the photo-detail endpoint can compute its highlight
         eligibility without rebuilding every workspace bucket.
 
-        Each row carries:
-          * ``species`` — accepted species keyword (NULL if none accepted)
-          * ``prediction_id`` / ``predicted_species`` /
-            ``predicted_confidence`` — top-confidence non-rejected prediction
-            across the photo's detections (NULL if no usable prediction
-            exists). Real detections use the workspace's detector floor;
-            full-image anchors remain eligible. Accepted keywords are unaffected.
+        Each row is a dict that carries every species the photo holds:
+
+          * ``species_names`` — the photo's accepted species keywords, most
+            recently tagged first (empty if none accepted)
+          * ``subject_predictions`` — one entry per detection: that
+            detection's top-confidence non-rejected prediction from its
+            latest label set (``detection_id``, ``prediction_id``,
+            ``species``, ``confidence``), highest confidence first. Real
+            detections use the workspace's detector floor; full-image anchors
+            remain eligible. Accepted keywords are unaffected.
+
+        and, for callers that only want one species per photo, the primary
+        of each: ``species`` (the most recent accepted keyword, NULL if
+        none) and ``prediction_id`` / ``predicted_species`` /
+        ``predicted_confidence`` (the top subject prediction, NULL if none).
 
         Photos with ``quality_score >= min_quality`` that are not
         user-rejected are returned. When ``min_quality <= 0`` (the default),
@@ -371,42 +370,47 @@ class SpeciesCurationRepository:
         if photo_id is None:
             photo_filter = ""
             photo_params = ()
-            bp_filter = ""
-            bp_params = ()
-            tp_filter = ""
-            tp_params = ()
-            kw_filter = ""
-            kw_params = ()
         else:
             photo_filter = "AND p.id = ?"
             photo_params = (photo_id,)
-            # Push the single-photo predicate into every derived subquery so
-            # SQLite never materializes workspace-wide keyword/prediction
-            # aggregations just to discard them at the outer join.
-            bp_filter = "AND pk.photo_id = ?"
-            bp_params = (photo_id,)
-            tp_filter = "AND d.photo_id = ?"
-            tp_params = (photo_id,)
-            kw_filter = "WHERE pk.photo_id = ?"
-            kw_params = (photo_id,)
-        return self._highlight_candidate_rows(
-            ws, min_quality, folder_filter, folder_params,
-            (
-                photo_filter, photo_params, bp_filter, bp_params,
-                tp_filter, tp_params, kw_filter, kw_params,
-            ),
+        scope_sql = f"""SELECT p.id
+               FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ?
+                 {folder_filter}
+                 {photo_filter}
+                 AND (p.quality_score >= ?
+                      OR (? <= 0 AND p.quality_score IS NULL))
+                 AND (p.flag IS NULL OR p.flag != 'rejected')"""
+        scope_params = (
+            ws, *folder_params, *photo_params, min_quality, min_quality,
         )
+        rows = [
+            dict(row) for row in
+            self._highlight_candidate_rows(scope_sql, scope_params)
+        ]
+        species_names = self._highlight_species_names(scope_sql, scope_params)
+        subjects = self._highlight_subject_predictions(
+            ws, scope_sql, scope_params,
+        )
+        for row in rows:
+            names = species_names.get(row["id"], [])
+            preds = subjects.get(row["id"], [])
+            row["species_names"] = names
+            row["subject_predictions"] = preds
+            row["species"] = names[0] if names else None
+            top = preds[0] if preds else None
+            row["prediction_id"] = top["prediction_id"] if top else None
+            row["predicted_species"] = top["species"] if top else None
+            row["predicted_confidence"] = top["confidence"] if top else None
+        return rows
 
-    def _highlight_candidate_rows(
-        self, ws, min_quality, folder_filter, folder_params, photo_filters,
-    ):
-        """Run the ``get_highlights_candidates`` query over a resolved scope."""
-        (
-            photo_filter, photo_params, bp_filter, bp_params,
-            tp_filter, tp_params, kw_filter, kw_params,
-        ) = photo_filters
+    def _highlight_candidate_rows(self, scope_sql, scope_params):
+        """The photo columns of ``get_highlights_candidates`` over its scope."""
         return self.conn.execute(
-            f"""SELECT p.id, p.folder_id, p.filename, p.extension,
+            f"""WITH scope AS ({scope_sql})
+               SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
                       f.name AS folder_name, f.path AS folder_path,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
@@ -417,86 +421,83 @@ class SpeciesCurationRepository:
                       p.subject_y_median, p.noise_estimate,
                       p.eye_tenengrad,
                       p.dino_subject_embedding, p.dino_global_embedding,
-                      bp.species,
-                      tp.prediction_id,
-                      tp.predicted_species,
-                      tp.predicted_confidence,
                       kw.keyword_names
-               FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               LEFT JOIN (
-                   SELECT photo_id, name AS species FROM (
-                       SELECT pk.photo_id, k.name,
-                              ROW_NUMBER() OVER (
-                                  PARTITION BY pk.photo_id
-                                  ORDER BY pk.rowid DESC
-                              ) AS rn
-                       FROM photo_keywords pk
-                       JOIN keywords k ON k.id = pk.keyword_id
-                       LEFT JOIN taxa t ON t.id = k.taxon_id
-                       WHERE (k.is_species = 1 OR k.type = 'taxonomy')
-                         AND (t.rank = 'species' OR t.rank IS NULL)
-                         {bp_filter}
-                   ) WHERE rn = 1
-               ) bp ON bp.photo_id = p.id
-               LEFT JOIN (
-                   SELECT photo_id,
-                          id AS prediction_id,
-                          species AS predicted_species,
-                          confidence AS predicted_confidence
-                   FROM (
-                       SELECT d.photo_id, pr.id, pr.species, pr.confidence,
-                              ROW_NUMBER() OVER (
-                                  PARTITION BY d.photo_id
-                                  ORDER BY pr.confidence DESC, pr.id DESC
-                              ) AS rn
-                       FROM detections d
-                       JOIN predictions pr ON pr.detection_id = d.id
-                       LEFT JOIN prediction_review pr_rev
-                         ON pr_rev.prediction_id = pr.id
-                        AND pr_rev.workspace_id = ?
-                       WHERE (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
-                         AND pr.species IS NOT NULL
-                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                         AND pr.labels_fingerprint = (
-                             SELECT pr2.labels_fingerprint FROM predictions pr2
-                             WHERE pr2.detection_id = pr.detection_id
-                               AND pr2.classifier_model = pr.classifier_model
-                             ORDER BY pr2.created_at DESC, pr2.id DESC
-                             LIMIT 1
-                         )
-                         {tp_filter}
-                   ) WHERE rn = 1
-               ) tp ON tp.photo_id = p.id
+               FROM scope
+               JOIN photos p ON p.id = scope.id
+               JOIN folders f ON f.id = p.folder_id
                LEFT JOIN (
                    SELECT pk.photo_id,
                           group_concat(DISTINCT k.name) AS keyword_names
                    FROM photo_keywords pk
                    JOIN keywords k ON k.id = pk.keyword_id
-                   {kw_filter}
+                   WHERE pk.photo_id IN (SELECT id FROM scope)
                    GROUP BY pk.photo_id
                ) kw ON kw.photo_id = p.id
-               WHERE wf.workspace_id = ?
-                 {folder_filter}
-                 {photo_filter}
-                 AND (p.quality_score >= ?
-                      OR (? <= 0 AND p.quality_score IS NULL))
-                 AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
-            (
-                *bp_params,
-                ws,
-                self._detector_floor(),
-                *tp_params,
-                *kw_params,
-                ws,
-                *folder_params,
-                *photo_params,
-                min_quality,
-                min_quality,
-            ),
+            scope_params,
         ).fetchall()
+
+    def _highlight_species_names(self, scope_sql, scope_params):
+        """``{photo_id: [name, ...]}``: each scoped photo's species-rank
+        keywords, most recently tagged first."""
+        names = {}
+        for row in self.conn.execute(
+            f"""WITH scope AS ({scope_sql})
+               SELECT pk.photo_id, k.name
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               LEFT JOIN taxa t ON t.id = k.taxon_id
+               WHERE pk.photo_id IN (SELECT id FROM scope)
+                 AND (k.is_species = 1 OR k.type = 'taxonomy')
+                 AND (t.rank = 'species' OR t.rank IS NULL)
+               ORDER BY pk.photo_id, pk.rowid DESC""",
+            scope_params,
+        ):
+            names.setdefault(row["photo_id"], []).append(row["name"])
+        return names
+
+    def _highlight_subject_predictions(self, ws, scope_sql, scope_params):
+        """``{photo_id: [subject, ...]}``: each scoped photo's detections'
+        top non-rejected prediction, highest confidence first."""
+        subjects = {}
+        for row in self.conn.execute(
+            f"""WITH scope AS ({scope_sql})
+               SELECT photo_id, detection_id, id AS prediction_id, species,
+                      confidence
+               FROM (
+                   SELECT d.photo_id, d.id AS detection_id, pr.id, pr.species,
+                          pr.confidence,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY d.id
+                              ORDER BY pr.confidence DESC, pr.id DESC
+                          ) AS rn
+                   FROM detections d
+                   JOIN predictions pr ON pr.detection_id = d.id
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id
+                    AND pr_rev.workspace_id = ?
+                   WHERE d.photo_id IN (SELECT id FROM scope)
+                     AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                     AND pr.species IS NOT NULL
+                     AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                     AND pr.labels_fingerprint = (
+                         SELECT pr2.labels_fingerprint FROM predictions pr2
+                         WHERE pr2.detection_id = pr.detection_id
+                           AND pr2.classifier_model = pr.classifier_model
+                         ORDER BY pr2.created_at DESC, pr2.id DESC
+                         LIMIT 1
+                     )
+               ) WHERE rn = 1
+               ORDER BY photo_id, confidence DESC, id DESC""",
+            (*scope_params, ws, self._detector_floor()),
+        ):
+            subjects.setdefault(row["photo_id"], []).append({
+                "detection_id": row["detection_id"],
+                "prediction_id": row["prediction_id"],
+                "species": row["species"],
+                "confidence": row["confidence"],
+            })
+        return subjects
 
     def get_life_list_candidates(self, species=None):
         """Return (photo x accepted-identification-keyword) life-list rows.
@@ -1193,8 +1194,11 @@ class SpeciesCurationRepository:
         """Return ordered highlighted photo ids for the active workspace.
 
         When ``eligible_only`` is true, omit rejected photos and photos that
-        are no longer eligible for the Highlights page. Stored rows are kept
-        intact so un-rejecting a photo restores its selection.
+        are no longer in the species' Highlights bucket. Stored rows are kept
+        intact so un-rejecting a photo restores its selection. A highlight
+        held through an accepted keyword is matched in SQL; one held through
+        a prediction is kept only while ``photo_species_memberships`` (the
+        rule that builds the buckets) still puts the photo in that bucket.
 
         Eligibility mirrors :meth:`get_highlights_candidates` at the default
         quality floor: not-yet-analyzed (``quality_score IS NULL``) photos
@@ -1209,34 +1213,67 @@ class SpeciesCurationRepository:
         ws = self.workspace_id
         eligibility_joins = ""
         eligibility_filter = ""
+        keyword_match = "1"
         if eligible_only:
             eligibility_joins = _HIGHLIGHT_ELIGIBILITY_JOINS
             eligibility_filter = _HIGHLIGHT_ELIGIBILITY_FILTER
+            keyword_match = _HIGHLIGHT_KEYWORD_MATCH
         eligibility_params = (self._detector_floor(),) if eligible_only else ()
-        if species:
-            rows = self.conn.execute(
-                f"""SELECT sh.species, sh.photo_id, sh.rank
-                   FROM species_highlights sh
-                   {eligibility_joins}
-                   WHERE sh.workspace_id = ? AND sh.species = ?
-                   {eligibility_filter}
-                   ORDER BY sh.rank, sh.created_at, sh.photo_id""",
-                (ws, species, *eligibility_params),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                f"""SELECT sh.species, sh.photo_id, sh.rank
-                   FROM species_highlights sh
-                   {eligibility_joins}
-                   WHERE sh.workspace_id = ?
-                   {eligibility_filter}
-                   ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
-                (ws, *eligibility_params),
-            ).fetchall()
+        species_filter = "AND sh.species = ?" if species else ""
+        species_params = (species,) if species else ()
+        rows = self.conn.execute(
+            f"""SELECT sh.species, sh.photo_id, sh.rank,
+                      ({keyword_match}) AS keyword_match
+               FROM species_highlights sh
+               {eligibility_joins}
+               WHERE sh.workspace_id = ? {species_filter}
+               {eligibility_filter}
+               ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
+            (ws, *species_params, *eligibility_params),
+        ).fetchall()
+        if eligible_only:
+            rows = self._in_prediction_bucket(ws, rows)
         result = {}
         for r in rows:
             result.setdefault(r["species"], {})[r["photo_id"]] = r["rank"]
         return result
+
+    def _in_prediction_bucket(self, ws, rows):
+        """Drop the prediction-held highlights whose photo is no longer in
+        that species' bucket under ``photo_species_memberships``."""
+        if all(r["keyword_match"] for r in rows):
+            return rows
+        scope_sql = (
+            "SELECT DISTINCT photo_id AS id FROM species_highlights "
+            "WHERE workspace_id = ?"
+        )
+        names = self._highlight_species_names(scope_sql, (ws,))
+        subjects = self._highlight_subject_predictions(ws, scope_sql, (ws,))
+        cache = {}
+
+        def canonicalize(name):
+            if name not in cache:
+                cache[name] = self.resolve_species_display_name(name)
+            return cache[name]
+
+        buckets_by_photo = {}
+        kept = []
+        for r in rows:
+            if r["keyword_match"]:
+                kept.append(r)
+                continue
+            pid = r["photo_id"]
+            if pid not in buckets_by_photo:
+                buckets_by_photo[pid] = {
+                    keyword_match_key(m.species)
+                    for m in photo_species_memberships({
+                        "species_names": names.get(pid, []),
+                        "subject_predictions": subjects.get(pid, []),
+                    }, canonicalize)
+                }
+            if keyword_match_key(r["species"]) in buckets_by_photo[pid]:
+                kept.append(r)
+        return kept
 
     def add_highlight(self, species, photo_id, _commit=True):
         """Add a photo to a species' ordered highlights, appending if new.

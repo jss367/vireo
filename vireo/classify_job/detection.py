@@ -11,6 +11,7 @@ import math
 import os
 import sqlite3
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from classify_job.common import compute_sharpness, detect_animals, get_primary_detection, log
@@ -25,6 +26,27 @@ if TYPE_CHECKING:
     from db import Database
     from jobs import JobRunner
     from services.service_types import JobDict
+
+
+@dataclass
+class DetectionHandoff:
+    """What the detect phase tells the classify phase about the photos.
+
+    Kept off the job dict on purpose: the runner publishes that dict, and
+    ``/api/jobs`` jsonifies it on every poll, so it may hold only JSON
+    values. These are sets of photo ids (one per photo on a reclassify),
+    which ``jsonify`` cannot encode and a poll response should not carry.
+
+    ``processed_ids``: photos whose detections this run rewrote (reclassify
+    only); ``None`` until ``_detect_subjects`` records it. ``reused_ids``:
+    reclassify photos whose redetection failed, classified on their stored
+    boxes. ``non_animal_ids``: photos whose only confident boxes are people
+    or vehicles, which the classify pass skips.
+    """
+
+    processed_ids: set[int] | None = None
+    reused_ids: set[int] = field(default_factory=set)
+    non_animal_ids: set[int] = field(default_factory=set)
 
 
 def _stored_detection_list(db: Database, photo_id: int, min_conf: float | None = None) -> list[DetectionDict]:
@@ -629,8 +651,10 @@ class _DetectSubjectsRun:
     def __init__(
         self, photos: Sequence[sqlite3.Row], folders: dict[int, str], runner: JobRunner,
         job: JobDict, reclassify: bool, db: Database, vireo_dir: str | None,
+        handoff: DetectionHandoff,
     ) -> None:
         self.photos = photos
+        self.handoff = handoff
         self.folders = folders
         self.runner = runner
         self.job = job
@@ -643,7 +667,7 @@ class _DetectSubjectsRun:
         # Track photos whose detections this run rewrote (write_detection_batch
         # in reclassify mode). Declared up here so the except handlers and early
         # returns can stash whatever was accumulated before the failure. The caller
-        # reads ``job["_detect_processed_ids"]`` to decide which photos to classify
+        # reads ``handoff.processed_ids`` to decide which photos to classify
         # on a post-detect cancel — using ``detection_map.keys()`` alone would miss
         # empty-scene photos whose retired boxes took their predictions with them.
         self.processed_for_rebuild: set[int] = set()
@@ -682,10 +706,10 @@ class _DetectSubjectsRun:
         self.job["_detector_runtime_fingerprint"] = detector_runtime
 
     def reset_job_detect_state(self) -> None:
-        job = self.job
-        job["_detect_reused_ids"] = self.reused_stored_ids
-        job["_detect_cancelled"] = False
-        job["_non_animal_photo_ids"] = set()
+        self.handoff.reused_ids = self.reused_stored_ids
+        self.handoff.non_animal_ids = set()
+        self.handoff.processed_ids = None
+        self.job["_detect_cancelled"] = False
 
     def backfill_cached_subject_analysis(self) -> None:
         """Run ``_detect_batch``'s detector-less cached-row pass."""
@@ -940,6 +964,7 @@ class _DetectSubjectsRun:
 def _detect_subjects(
     photos: Sequence[sqlite3.Row], folders: dict[int, str], runner: JobRunner, job: JobDict,
     reclassify: bool, db: Database, vireo_dir: str | None = None,
+    handoff: DetectionHandoff | None = None,
 ) -> tuple[DetectionMap, int]:
     """Run MegaDetector on photos, storing quality metrics.
 
@@ -960,9 +985,8 @@ def _detect_subjects(
     ``detection_map`` holds only classifier candidates: MegaDetector animal
     boxes at or above the workspace's ``detector_confidence``, the same set
     the cached path and the pipeline classify. Photos whose only confident
-    boxes are people or vehicles are listed in
-    ``job["_non_animal_photo_ids"]`` so ``_classify_photos`` skips them
-    instead of classifying the whole frame as a species.
+    boxes are people or vehicles go in ``handoff.non_animal_ids`` (see
+    ``DetectionHandoff``) so ``_classify_photos`` skips them.
 
     A Stop that arrives while a detector inference slot is being awaited
     (``ResourceWaitCancelled``) keeps the boxes detected so far and sets
@@ -978,8 +1002,9 @@ def _detect_subjects(
         {photo_id: [list_of_detection_dicts]} and detected_count is the
         number of photos with at least one classifier candidate.
     """
+    handoff = handoff if handoff is not None else DetectionHandoff()
     run = _DetectSubjectsRun(
-        photos, folders, runner, job, reclassify, db, vireo_dir,
+        photos, folders, runner, job, reclassify, db, vireo_dir, handoff,
     )
     run.resolve_cached_detector_runs()
     run.reset_job_detect_state()
@@ -1003,7 +1028,7 @@ def _detect_subjects(
         # failure, instead of failing the whole job — which on a reclassify
         # run would strike after predictions/detections were already purged.
         if not run.ensure_detector_weights():
-            job["_detect_processed_ids"] = run.processed_for_rebuild
+            handoff.processed_ids = run.processed_for_rebuild
             return {}, 0
 
         run.detect_photos()
@@ -1030,10 +1055,10 @@ def _detect_subjects(
         detection_map, non_animal_ids = _classifier_candidates(
             detection_map, cast("float", run.det_conf_threshold),
         )
-        job["_non_animal_photo_ids"] = non_animal_ids
+        handoff.non_animal_ids = non_animal_ids
         detected = len(detection_map)
 
-    job["_detect_processed_ids"] = run.processed_for_rebuild
+    handoff.processed_ids = run.processed_for_rebuild
     return detection_map, detected
 
 

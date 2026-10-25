@@ -14,6 +14,7 @@ import time
 
 import numpy as np
 import onnx_runtime
+from app_paths import default_path
 from match_confidence import LOGIT
 
 log = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ _MODEL_DIR_MAP = {
     "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21": "timm-inat21-eva02-l",
 }
 
-_MODELS_ROOT = os.path.expanduser("~/.vireo/models")
+_MODELS_ROOT = default_path("models")
 
 # Bounded retry for the background label_descriptions.json heal.
 #
@@ -233,6 +234,9 @@ def _spawn_label_desc_heal(model_dir, model_str):
                         model_str, exc,
                         exc_info=True,
                     )
+                    _models_mod._label_desc_heal_failed(
+                        model_str, f"{type(exc).__name__}: {exc}",
+                    )
         with _HEAL_LOCK:
             _HEAL_STATE[key] = "done" if ok else "failed"
             if ok:
@@ -262,6 +266,51 @@ def _spawn_label_desc_heal(model_dir, model_str):
         _HEAL_THREADS[model_str] = thread
     thread.start()
     return thread
+
+
+def _label_desc_heal_in_flight(model_dir, model_str):
+    """Whether a background heal for this installation is running now."""
+    key = (model_str, _installation_generation(model_dir))
+    with _HEAL_LOCK:
+        return _HEAL_STATE.get(key) == "in_flight"
+
+
+def missing_common_names_notice(clf, model_name):
+    """Say a run used a timm model without its common-name file, or None.
+
+    Without ``label_descriptions.json`` the classifier names species from
+    the taxonomy alone (``_resolve_common_name``), so any species the
+    taxonomy does not name shows its scientific name. The run's predictions
+    are still valid, so callers report this as a notice, not a failure. It
+    says what Vireo's own repair is doing, because a failed repair used to
+    be visible only in the log.
+    """
+    if not getattr(clf, "label_descriptions_missing", False):
+        return None
+    import models as _models_mod
+
+    model_str = getattr(clf, "_model_str", "")
+    text = (
+        f"{model_name} is missing its common-name file "
+        "(label_descriptions.json), so this run named species from the "
+        "taxonomy alone, and species the taxonomy does not name show their "
+        "scientific name."
+    )
+    in_flight = _label_desc_heal_in_flight(getattr(clf, "_model_dir", ""), model_str)
+    failure = _models_mod.label_descriptions_heal_failure(model_str)
+    if failure and in_flight:
+        text += (
+            f" Vireo's last attempt to fetch it failed ({failure}), and it "
+            "was trying again while this run used the model."
+        )
+    elif failure:
+        text += f" Vireo's last attempt to fetch it failed: {failure}."
+    elif in_flight:
+        text += (
+            " Vireo was fetching the file in the background while this run "
+            "used the model."
+        )
+    return text + f" Click Repair on {model_name} in Settings › Models to fetch it."
 
 
 def _common_names_from_descriptions(descs):
@@ -343,6 +392,9 @@ class TimmClassifier:
         # having to pass them in from every caller.
         self._model_dir = model_dir
         self._model_str = model_str
+        # Read by the runs that use this instance, so they can say their
+        # species names came from the taxonomy alone.
+        self.label_descriptions_missing = descs is None
 
         # Spawn the heal off the startup path — the network probes can
         # take a full HF timeout when offline, and classifier construction

@@ -1,7 +1,10 @@
 type CullAction = 'keep' | 'review' | 'reject';
+/** One detected animal; ``predictions`` are [species, confidence, model, identity key]. */
+interface CullSubject {detection_id?: number; is_primary?: boolean; predictions?: [string, number, ...unknown[]][];}
 interface CullSourcePhoto {
   id: number; filename: string; timestamp?: string | null;
-  confirmed_species?: string | string[]; species_top5?: [string, number][];
+  confirmed_species?: string | string[]; confirmed_species_list?: string[];
+  species_top5?: [string, number][]; subjects?: CullSubject[];
   flag_confirmation_status?: 'confirmed' | 'unverified';
   flag?: string; rating?: number; width?: number; height?: number;
   quality_composite?: number | null; subject_sharpness?: number | null; label?: string;
@@ -9,7 +12,7 @@ interface CullSourcePhoto {
 type CullBurst = number[] | {photo_ids: number[]};
 interface CullEncounter {
   photo_ids: number[]; photo_count?: number; bursts?: CullBurst[]; burst_count?: number;
-  confirmed_species?: string | string[]; species?: string | string[];
+  confirmed_species?: string | string[]; confirmed_species_list?: string[]; species?: string | string[];
   species_predictions?: {species: string | string[]}[];
   time_range?: [string | null, string | null];
 }
@@ -19,6 +22,10 @@ interface CullDisplayPhoto {
   action: CullAction; decision_source: string; suggested_action: CullAction;
   favorite?: boolean; group_index?: number; quality_score?: number | null; sharpness?: number | null;
   timestamp?: string | null; pipeline_label?: string;
+  /** The photo's other species, when it is listed under more than one. */
+  also_species?: string[];
+  /** The species whose favorites suggested this photo. */
+  suggested_for?: string;
 }
 interface CullSceneGroup {photos: CullDisplayPhoto[]; scene_id?: number; label?: string;}
 interface CullSpeciesGroup {
@@ -29,6 +36,8 @@ interface CullData {
   species_groups: CullSpeciesGroup[]; total_photos: number; suggested_keepers?: number;
   suggested_reviews?: number; suggested_rejects?: number; pinned_count?: number; confirmed_count?: number;
   saved_flag_count?: number; pinned_offscreen?: number; pipeline_summary?: Record<string, unknown>;
+  /** Photos listed under more than one species (each counted once in the totals). */
+  multi_species_photos?: number;
 }
 /** A scene group by its species and group index (null when nothing is focused). */
 interface CullGroupRef {speciesIdx: number | null; groupIdx: number | null;}

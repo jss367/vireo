@@ -10,12 +10,13 @@ import shutil
 import tempfile
 import threading
 
+from app_paths import default_path
 from file_replace import replace_file
 from filter_shortcuts import DEFAULT_SHORTCUTS
 
 log = logging.getLogger(__name__)
 
-CONFIG_PATH = os.path.expanduser("~/.vireo/config.json")
+CONFIG_PATH = default_path("config")
 
 _lock = threading.Lock()
 

@@ -32,7 +32,11 @@ from scanner.cache_invalidation import _invalidate_derived_caches
 from scanner.companions import _COMPANION_JPEG_EXTENSIONS
 from scanner.exif_fields import _extract_dimensions, _extract_timestamp
 from scanner.hashing import EMPTY_FILE_SHA256
-from scanner.keywords import _import_embedded_keywords_for_photo, _import_keywords_for_photo
+from scanner.keywords import (
+    UNREADABLE_SIDECAR_REASON,
+    _import_embedded_keywords_for_photo,
+    _import_keywords_for_photo,
+)
 from services import duplicate_resolution, photo_ingest
 
 if TYPE_CHECKING:
@@ -293,6 +297,9 @@ class _FileIndexer:
                 # correctly recognizes the deferred state even when a prior
                 # successful scan left a non-NULL acknowledgement behind.
                 sidecar_import_deferred = True
+                self.tally.report_sidecar_failure(
+                    str(xmp_path), image_path.name, UNREADABLE_SIDECAR_REASON,
+                )
                 if item.row_already_existed:
                     db.scanning.defer_xmp_import(photo_id, clear_mtime=True)
                     db.commit_with_retry()

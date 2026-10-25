@@ -71,6 +71,41 @@ def test_pipeline_plan_requires_source_and_clears_counts(live_server, page, sour
     assert len(requests) == request_count
 
 
+def test_pipeline_names_a_species_list_it_cannot_read(live_server, page):
+    """A selected species list that cannot be read blocks Classify (the run
+    would fail on the same read). The page used to say "Needs labels" and
+    "download one in Settings › Labels" for a list the user already has;
+    it now names the list and the error."""
+    error = ('Vireo could not read the species list "Birds of Here" '
+             "([Errno 13] Permission denied: '/labels/birds.txt')")
+    summary = (f"Blocked — {error}. Fix the file or pick another list in "
+               "Settings › Labels, or turn Classify off.")
+
+    def blocked_plan(route):
+        plan = route.fetch().json()
+        plan["stages"]["Classify"] = {
+            "state": "blocked",
+            "summary": summary,
+            "detail": {"blocked_models": ["BioCLIP 2"], "pending": 0,
+                       "eligible": 0, "label_read_error": error},
+        }
+        route.fulfill(json=plan)
+
+    page.route("**/api/pipeline/plan", blocked_plan)
+    page.goto(f'{live_server["url"]}/pipeline')
+    page.wait_for_function("!window._pageInitPending")
+    page.locator("#folderScopeList input[type=checkbox]").first.check()
+
+    expect(page.locator("#pillClassify")).to_have_text("Can't read labels")
+    expect(page.locator("#btnStartPipeline")).to_be_disabled()
+    status = page.locator("#pipelineActionStatus")
+    expect(status).to_have_text(
+        f"{error}. Fix the file or pick another list in Settings › Labels, "
+        "or turn Classify off to run the other stages."
+    )
+    expect(status).not_to_contain_text("download one")
+
+
 def test_pipeline_late_plan_cannot_restore_counts_after_source_cleared(live_server, page):
     page.goto(f'{live_server["url"]}/pipeline')
     page.wait_for_function("!window._pageInitPending")
@@ -1111,3 +1146,28 @@ def test_extract_step_outcome_prefers_nested_over_top_level_errors(
     assert "Reconnect" in outcome["status"], (
         f"Nested error wins over top-level; got {outcome!r}"
     )
+
+
+def test_pipeline_common_names_note_is_not_a_skip(live_server, page):
+    """A timm model that ran without its common-name file classified every
+    photo, so its note shows in the banner without claiming a stage was
+    skipped, and the Classify card keeps its own outcome."""
+    page.goto(f'{live_server["url"]}/pipeline')
+    page.evaluate("""
+        var note = '[common_names] iNat21 is missing its common-name file ' +
+          '(label_descriptions.json), so this run named species from the ' +
+          'taxonomy alone.';
+        _onPipelineComplete({
+          status: 'completed',
+          result: {ok: true, stages: {classify: {classified: 3, total: 3}},
+                   errors: [note], notes: [note]},
+        });
+    """)
+    expect(page.get_by_test_id("pipeline-note-banner")).to_be_visible()
+    expect(page.locator("#pipelineNoteTitle")).to_have_text("This run finished with a note")
+    expect(page.locator("#pipelineNoteText")).to_have_text(
+        "iNat21 is missing its common-name file (label_descriptions.json), "
+        "so this run named species from the taxonomy alone."
+    )
+    expect(page.locator("#pillClassify")).not_to_have_text("Skipped")
+    expect(page.get_by_test_id("pipeline-error-banner")).to_be_hidden()

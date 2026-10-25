@@ -1,9 +1,26 @@
 // Rendering a scan: the summary, the Bulk decide buckets, Needs review and
 // the resolved cleanup list, each group's warnings, and Clear results.
-// Classic page script.
+
+import { duplicatesEl, state } from './state.js';
+import { DuplicateCategories } from './categories.js';
+import {
+  bulkResolveByFolder, clearDuplicateTrashProgress, duplicateBucketIsPinned,
+  duplicateFileTrashIsPending, refreshDuplicateTrashControls,
+} from './cleanup.js';
+import { visibleBucket } from './filter.js';
+import {
+  groupMatchesFilter, groupMatchesPhotoFilter, renderCategorySummary, renderSummaryBar,
+  updateApplyCount,
+} from './patterns.js';
+import { isBulkTrashProtected, renderResolvedGroup, renderUnresolvedGroup } from './resolved.js';
+import { cancelDuplicateLoad } from './restore.js';
+import { bucketRevealButton } from './reveal.js';
+import { renderSameShotResults } from './same-shot.js';
+import { hideProgress, hideRestoredBanner, setEmptyVisible } from './scan.js';
+import { escapeHtml, formatBytes } from './shared.js';
 
 /** Every group is hidden by the active filters: say so, and hide the stale summary and apply bar. @param {number} hiddenByFilter */
-function renderAllGroupsFiltered(hiddenByFilter) {
+export function renderAllGroupsFiltered(hiddenByFilter) {
   setEmptyVisible(false);
   // Hide the previously-rendered summary and sticky apply bar so a
   // stale "Reject N extra copies" button (or the summary counts) does
@@ -19,7 +36,7 @@ function renderAllGroupsFiltered(hiddenByFilter) {
 }
 
 /** The scan has no groups left: explain why (cleanup done, out of date, or clean). @param {DuplicateScan} result */
-function renderNoDuplicateGroups(result) {
+export function renderNoDuplicateGroups(result) {
   setEmptyVisible(false);
   duplicatesEl('summary').style.display = 'none';
   duplicatesEl('applyBar').style.display = 'none';
@@ -48,9 +65,9 @@ function renderNoDuplicateGroups(result) {
       (changedCount === 1 ? ' group from it has' : ' groups from it have') +
       ' changed since. Run a new scan to check for duplicates.</div>';
   } else {
-    results.innerHTML = _duplicateBucketOperations.size
+    results.innerHTML = state.duplicateBucketOperations.size
       ? '<div class="no-results">Duplicate review is complete. Pending cleanup is shown above.</div>'
-      : '<div class="no-results">No duplicates found. Your library is clean.</div>';
+      : '<div class="no-results">No exact-byte duplicates found in these results.</div>';
   }
   updateApplyCount();
 }
@@ -59,7 +76,7 @@ function renderNoDuplicateGroups(result) {
  * The Bulk decide section, or '' when no bucket has two visible groups.
  *
  * Iterate over the unfiltered bucket list so `bi` stays a stable index
- * into ``_lastScanResult.buckets``. Filtering with ``.filter`` first and
+ * into ``state.lastScanResult.buckets``. Filtering with ``.filter`` first and
  * re-indexing the result would let a partial bulk-resolve (which can drop
  * a bucket to ``group_count === 1`` without removing it from the array)
  * shift later indexes, so subsequent button clicks would resolve the
@@ -71,7 +88,7 @@ function renderNoDuplicateGroups(result) {
  *
  * @param {DuplicateScan} result
  */
-function bulkDecideSectionHtml(result) {
+export function bulkDecideSectionHtml(result) {
   var allBuckets = result.buckets || [];
   var visibleBuckets = allBuckets.map(function(bucket, bi) {
     return duplicateBucketIsPinned(result, bi) ? null : visibleBucket(bucket);
@@ -93,7 +110,7 @@ function bulkDecideSectionHtml(result) {
 }
 
 /** @param {DuplicateProposal[]} unresolved */
-function needsReviewSectionHtml(unresolved) {
+export function needsReviewSectionHtml(unresolved) {
   if (!unresolved.length) return '';
   var html = '<div class="section-header"><div>' +
     '<h2>Needs review</h2>' +
@@ -107,7 +124,7 @@ function needsReviewSectionHtml(unresolved) {
 }
 
 /** @param {DuplicateScan} result @param {DuplicateProposal[]} resolved */
-function resolvedSectionHtml(result, resolved) {
+export function resolvedSectionHtml(result, resolved) {
   var resolvedGroupCount = resolved.length;
   if (!resolvedGroupCount) return '';
   var emptyFileGroupCount = resolved.reduce(function(n, p) {
@@ -130,13 +147,13 @@ function resolvedSectionHtml(result, resolved) {
   // Auto-expand if the user came from the disk-cleanup banner. Detection
   // is intentionally simple — query string is the most direct way to
   // pass intent through a hard navigation without needing storage state.
-  var autoExpand = result.catalog_cleanup || _duplicateCategory !== 'all' ||
+  var autoExpand = result.catalog_cleanup || state.duplicateCategory !== 'all' ||
     new URLSearchParams(window.location.search).get('show') === 'resolved';
   var listClass = 'resolved-list' + (autoExpand ? ' expanded' : '');
   var toggleClass = 'resolved-toggle' + (autoExpand ? ' expanded' : '');
   var html = '<div class="section-header">' +
     '<div>' +
-      '<h2 class="' + toggleClass + '" id="resolvedToggle" onclick="toggleResolvedSection()">' +
+      '<h2 class="' + toggleClass + '" id="resolvedToggle" data-dup-action="toggle-resolved">' +
         '<span class="chev">&#9656;</span> ' +
         (result.catalog_cleanup ? 'Rejected copies — cleanup pending' : 'Resolved — cleanup pending') +
       '</h2>' +
@@ -156,7 +173,7 @@ function resolvedSectionHtml(result, resolved) {
   // "Nothing to trash" and confuses users about what cleanup is left.
   html += '<div class="section-actions">';
   if (bulkTrashableLoserCount > 0) {
-    html += '<button class="btn-secondary" onclick="trashAllLoserFiles()" id="trashAllBtn">' +
+    html += '<button class="btn-secondary" data-dup-action="trash-all" id="trashAllBtn">' +
         'Move ' + bulkTrashableLoserCount + ' extra ' +
         (bulkTrashableLoserCount === 1 ? 'copy' : 'copies') + ' to Trash' +
       '</button>';
@@ -170,14 +187,15 @@ function resolvedSectionHtml(result, resolved) {
 }
 
 /** @param {DuplicateScan} result */
-function renderResults(result) {
+export function renderResults(result) {
   hideProgress();
   /** @type {HTMLButtonElement} */ (duplicatesEl('scanBtn')).disabled = false;
 
-  _lastScanResult = result;
-  _proposals = result.proposals || [];
-  var categories = DuplicateCategories.summarize(_proposals.filter(groupMatchesPhotoFilter));
-  if (!categories.some(function(c) { return c.id === _duplicateCategory; })) _duplicateCategory = 'all';
+  state.lastScanResult = result;
+  state.proposals = result.proposals || [];
+  renderSameShotResults(result);
+  var categories = DuplicateCategories.summarize(state.proposals.filter(groupMatchesPhotoFilter));
+  if (!categories.some(function(c) { return c.id === state.duplicateCategory; })) state.duplicateCategory = 'all';
 
   // Split proposals so the two sections render independently. Unresolved
   // groups still need a user decision (the apply flow); resolved groups
@@ -188,8 +206,8 @@ function renderResults(result) {
   /** @type {DuplicateProposal[]} */
   var resolved = [];
   var hiddenByFilter = 0;
-  _proposals.forEach(function(p, gi) {
-    p._gi = gi;  // stable index back into _proposals for checkbox lookup
+  state.proposals.forEach(function(p, gi) {
+    p._gi = gi;  // stable index back into state.proposals for checkbox lookup
     if (!groupMatchesFilter(p)) { hiddenByFilter += 1; return; }
     if (p.status === 'resolved') resolved.push(p);
     else unresolved.push(p);
@@ -198,7 +216,7 @@ function renderResults(result) {
     renderAllGroupsFiltered(hiddenByFilter);
     return;
   }
-  if (_proposals.length === 0) {
+  if (state.proposals.length === 0) {
     renderNoDuplicateGroups(result);
     return;
   }
@@ -215,7 +233,7 @@ function renderResults(result) {
 }
 
 /** @param {DuplicateProposal} group */
-function renderGroupWarning(group) {
+export function renderGroupWarning(group) {
   // Severity, high to low:
   //  - all_missing: every file in the group is gone — nothing to keep.
   //  - all_offline: every copy is on an unreachable volume — state unknown,
@@ -300,7 +318,7 @@ function renderGroupWarning(group) {
 }
 
 /** @param {DuplicateBucket} bucket @param {number} bi */
-function renderBucket(bucket, bi) {
+export function renderBucket(bucket, bi) {
   var folders = bucket.folders || [];
   var folderListHtml = folders.map(function(f) {
     return '<code>' + escapeHtml(f) + '</code>';
@@ -321,8 +339,7 @@ function renderBucket(bucket, bi) {
   html += '<div class="bucket-actions">';
   folders.forEach(function(folder, /** @type {number} */ fi) {
     var label = folder.split('/').filter(Boolean).pop() || folder;
-    html += '<button class="keep-btn" onclick="bulkResolveByFolderIdx(' +
-            bi + ', ' + fi + ')">' +
+    html += '<button class="keep-btn" data-keep-folder="' + fi + '">' +
       'Keep ' + escapeHtml(label) + ' for all ' + bucket.group_count +
       '</button>';
   });
@@ -337,12 +354,12 @@ function renderBucket(bucket, bi) {
 }
 
 /** @param {number} bi @param {number} fi */
-function bulkResolveByFolderIdx(bi, fi) {
+export function bulkResolveByFolderIdx(bi, fi) {
   // ``visibleBucket`` restricts to filter-matching groups so the button
   // acts only on what the user sees. Without it, a bucket with one
   // matching and one hidden group would still submit both file_hashes,
   // rejecting (and with delete enabled, trashing) the hidden group.
-  var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
+  var bucket = visibleBucket((state.lastScanResult && state.lastScanResult.buckets || [])[bi]);
   if (!bucket) return;
   // After a partial prune a bucket can drop to ``group_count < 2`` and be
   // filtered out of the next render. A button left in the DOM from a stale
@@ -354,22 +371,24 @@ function bulkResolveByFolderIdx(bi, fi) {
   return bulkResolveByFolder(bi, folder);
 }
 
-function clearResults() {
+export function clearResults() {
   cancelDuplicateLoad();
   clearDuplicateTrashProgress();
-  _proposals = [];
-  _duplicateCategory = 'all';
-  _excludedDuplicateHashes.clear();
-  _currentJobId = null;
+  state.proposals = [];
+  state.duplicateCategory = 'all';
+  state.excludedDuplicateHashes.clear();
+  state.currentJobId = null;
   // Drop the cached scan snapshot too. Otherwise a later filter-bar
   // change (or pause/resume) would call ``refreshFilterMatches`` and
   // re-render the stale results the user just cleared, resurrecting the
   // duplicate groups and their bulk/apply actions.
-  _lastScanResult = null;
+  state.lastScanResult = null;
+  state.sameShotVisibleLimit = 50;
+  /** @type {HTMLElement} */ (document.getElementById('sameShotResults')).innerHTML = '';
   /** @type {HTMLElement} */ (document.getElementById('results')).innerHTML = '';
   /** @type {HTMLElement} */ (document.getElementById('summary')).style.display = 'none';
   /** @type {HTMLElement} */ (document.getElementById('applyBar')).style.display = 'none';
-  if (!_duplicateApplyInProgress) _duplicateApplyMessage = '';
+  if (!state.duplicateApplyInProgress) state.duplicateApplyMessage = '';
   updateApplyCount();
   hideRestoredBanner();
   setEmptyVisible(true);

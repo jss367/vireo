@@ -20,6 +20,8 @@ import threading
 import time
 import urllib.parse
 
+from app_paths import default_path
+
 # `mount` line: "<source> on <mount point> (<fstype>, opt, ...)".
 # Sources for the network filesystems we accept happen to be space-free
 # (smbfs/afp URL-encode spaces; nfs is host:/path), but macOS also emits
@@ -186,8 +188,7 @@ def friendly_host_name(host, resolver=None):
 def vireo_key_paths():
     """Paths of the dedicated wizard-managed keypair. Lives under ~/.vireo
     (not ~/.ssh) so setup never touches or clobbers user-managed keys."""
-    priv = os.path.join(os.path.expanduser("~"), ".vireo", "ssh",
-                        "vireo_ed25519")
+    priv = os.path.join(default_path("ssh"), "vireo_ed25519")
     return priv, priv + ".pub"
 
 

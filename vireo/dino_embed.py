@@ -13,6 +13,7 @@ import threading
 
 import numpy as np
 import onnx_runtime
+from app_paths import default_path
 from file_replace import replace_file
 from services.hf_cache_lock import cache_access
 
@@ -55,7 +56,7 @@ _dinov2_session_lock = threading.Lock()
 
 def _dinov2_model_path(variant):
     model_dir = os.path.join(
-        os.path.expanduser("~"), ".vireo", "models", f"dinov2-{variant}"
+        default_path("models"), f"dinov2-{variant}"
     )
     return model_dir, os.path.join(model_dir, "model.onnx")
 
@@ -79,9 +80,8 @@ def dinov2_status(variant):
 
 def _fetch_dinov2_pair(variant, tmp_path, tmp_data_path, progress_callback):
     """Download the DINOv2 graph and sidecar into their ``.download`` paths."""
-    import shutil
-
-    from huggingface_hub import HfApi, hf_hub_download
+    from hub_download import fetch_hub_file
+    from huggingface_hub import HfApi
     from models import ONNX_REPO
 
     # Resolve a pinned revision upfront so BOTH fetches target the
@@ -101,26 +101,20 @@ def _fetch_dinov2_pair(variant, tmp_path, tmp_data_path, progress_callback):
         )
         pinned_rev = None
 
-    cached_graph = hf_hub_download(
-        repo_id=ONNX_REPO,
-        filename="model.onnx",
-        subfolder=f"dinov2-{variant}",
-        revision=pinned_rev,
+    fetch_hub_file(
+        ONNX_REPO, "model.onnx", tmp_path,
+        subfolder=f"dinov2-{variant}", revision=pinned_rev,
     )
-    shutil.copy2(cached_graph, tmp_path)
 
     if progress_callback:
         progress_callback(
             f"Downloading DINOv2 {variant} weights sidecar...", 1, 2,
         )
 
-    cached_data = hf_hub_download(
-        repo_id=ONNX_REPO,
-        filename="model.onnx.data",
-        subfolder=f"dinov2-{variant}",
-        revision=pinned_rev,
+    fetch_hub_file(
+        ONNX_REPO, "model.onnx.data", tmp_data_path,
+        subfolder=f"dinov2-{variant}", revision=pinned_rev,
     )
-    shutil.copy2(cached_data, tmp_data_path)
 
 
 def _promote_dinov2_pair(
@@ -320,7 +314,7 @@ def _get_dinov2_session(variant="vit-b14"):
             return _session
 
         model_dir = os.path.join(
-            os.path.expanduser("~"), ".vireo", "models", f"dinov2-{variant}"
+            default_path("models"), f"dinov2-{variant}"
         )
         model_path = os.path.join(model_dir, "model.onnx")
 

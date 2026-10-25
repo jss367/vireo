@@ -5221,6 +5221,7 @@ class Database:
 
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
+        'audit_remove_orphans', 'audit_resolve', 'keyword_clean',
         'identity_alternatives_superseded',
         'prediction_reject', 'discard',
         # Legacy rows lack the before-state required for a lossless replay.

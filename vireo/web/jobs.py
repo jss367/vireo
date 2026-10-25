@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 from db import Database
 from flask import Blueprint, Response, jsonify, request
+from job_runner.history import JobHistoryUnavailable
 from web.background_jobs import make_background_job
 from web.request_args import reject_visual_collection
 from werkzeug.exceptions import BadRequest
@@ -80,10 +81,17 @@ def create_jobs_blueprint(
         runner = get_runner()
         db = get_db()
         active = [_strip_heavy_for_list(j) for j in runner.list_jobs()]
-        history = [_strip_heavy_for_list(j) for j in runner.get_history(db, limit=10)]
+        # An unreadable history must not take the active list down with it,
+        # and must not pass for "no jobs have run" either: name the failure.
+        history_error = None
+        try:
+            history = [_strip_heavy_for_list(j) for j in runner.get_history(db, limit=10)]
+        except JobHistoryUnavailable as exc:
+            history = []
+            history_error = str(exc)
         ws_rows = db.workspaces.list_all()
         ws_names = {w["id"]: w["name"] for w in ws_rows}
-        return jsonify({
+        payload = {
             "active": active,
             "history": history,
             # Vireo is overriding the system's idle-sleep setting while a
@@ -96,7 +104,10 @@ def create_jobs_blueprint(
             },
             "active_workspace_id": db.active_workspace_id,
             "workspace_names": ws_names,
-        })
+        }
+        if history_error is not None:
+            payload["history_error"] = history_error
+        return jsonify(payload)
 
     @blueprint.post("/api/jobs/runtime-warning/dismiss")
     def api_job_runtime_warning_dismiss():
@@ -111,7 +122,11 @@ def create_jobs_blueprint(
     def api_job_history():
         db = get_db()
         limit = min(max(1, request.args.get("limit", 10, type=int)), 1000)
-        return jsonify(get_runner().get_history(db, limit=limit))
+        try:
+            return jsonify(get_runner().get_history(db, limit=limit))
+        except JobHistoryUnavailable as exc:
+            # The Jobs page shows this text in its history error state.
+            return json_error(str(exc), 503, code="job_history_unavailable")
 
     @blueprint.get("/api/jobs/<job_id>")
     def api_job_status(job_id):
@@ -782,6 +797,7 @@ def create_jobs_blueprint(
                 "keep_review_message": result.get("keep_review_message"),
                 "species_count": len(result["species_groups"]),
                 "photos_missing_phash": result.get("photos_missing_phash", 0),
+                "unfingerprinted_photos": result.get("unfingerprinted_photos", []),
             }
 
         def work(job):

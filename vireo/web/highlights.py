@@ -31,6 +31,7 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
 from services import prediction_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
+from species_memberships import photo_species_memberships
 from web.request_args import request_bool_arg
 
 
@@ -43,11 +44,19 @@ class _HighlightsRelabel:
     then write inside the caller's transaction.
     """
 
-    def __init__(self, db, photo_ids, species, top_predictions):
+    def __init__(self, db, photo_ids, species, top_predictions, from_species=None):
         self.db = db
         self.photo_ids = photo_ids
         self.species = species
         self.top_predictions = top_predictions
+        # A relabel from one species bucket replaces only that species on a
+        # photo that carries several; None relabels the photo's whole species.
+        self.from_species = from_species
+        self._canonicalize = species_canonicalizer(db)
+        self._from_key = (
+            _species_key(self._canonicalize, from_species)
+            if from_species else None
+        )
         self.ws_id = None
         self.predicted_species_by_pid = {}
         self.current_species_by_pid = {}
@@ -152,9 +161,18 @@ class _HighlightsRelabel:
             self.photo_ids
         ).items():
             for name in names:
+                if not self._is_source_species(name):
+                    continue
                 key = keyword_match_key(name)
                 if key:
                     current_species_by_pid.setdefault(pid, set()).add(key)
+
+    def _is_source_species(self, name):
+        """Whether the relabel replaces ``name``: always for a whole-photo
+        relabel, and only the bucket's own species for a scoped one."""
+        if self._from_key is None:
+            return True
+        return _species_key(self._canonicalize, name) == self._from_key
 
     def _accept_curation_source(self, pid, old_species_name):
         """Shared filter for the highlight, preference, and rep passes.
@@ -328,7 +346,13 @@ class _HighlightsRelabel:
             db.update_prediction_status(pred["id"], "rejected", _commit=False)
             self.rejected_prediction_ids.append(pred["id"])
 
-        old_rows = db.photo_species.species_rank_keywords_for_photo(pid)
+        # A scoped relabel keeps the photo's other species. It still lists
+        # the target keyword when the photo already carries it, so undo
+        # (which untags the new keyword, then retags these) keeps it.
+        old_rows = [
+            row for row in db.photo_species.species_rank_keywords_for_photo(pid)
+            if row["id"] == kid or self._is_source_species(row["name"])
+        ]
         old_primary = old_rows[0] if old_rows else None
         if old_primary is not None:
             self.has_old_species = True
@@ -422,7 +446,12 @@ class _HighlightsRelabel:
             if self.has_old_species
             else "keyword_add"
         )
-        if action_type == "species_replace":
+        if action_type == "species_replace" and self.from_species:
+            desc = (
+                f'Replaced "{self.from_species}" with "{species}" '
+                f'on {len(self.photo_ids)} photos'
+            )
+        elif action_type == "species_replace":
             desc = f'Replaced species with "{species}" on {len(self.photo_ids)} photos'
         else:
             desc = f'Set species "{species}" on {len(self.photo_ids)} photos'
@@ -434,6 +463,190 @@ class _HighlightsRelabel:
             is_batch=len(self.items) > 1,
             _commit=False,
         )
+
+
+def _species_key(canonicalize, name):
+    """The match key of ``name``'s canonical spelling, the identity Highlights
+    buckets key on."""
+    return keyword_match_key(canonicalize(name) or name)
+
+
+def _parse_optional_species(body, field):
+    """``(name, error)`` for an optional species string in ``body[field]``."""
+    value = body.get(field)
+    if value is None:
+        return None, None
+    if not isinstance(value, str) or not value.strip():
+        return None, f"{field} must be a non-empty string"
+    return normalize_keyword_display(value.strip()), None
+
+
+def _subject_prediction(row):
+    return {
+        "detection_id": row["detection_id"],
+        "prediction_id": row["id"],
+        "species": row["species"],
+        "confidence": row["confidence"],
+    }
+
+
+def _top_prediction_confirm_targets(db, photo_ids):
+    """Whole-photo confirm: each photo's top prediction, unless the photo
+    already carries any species."""
+    top_predictions = db.predictions.top_unrejected_by_photo(photo_ids)
+    accepted_photo_ids = db.photo_species.photo_ids_with_species_rank_keyword(photo_ids)
+    targets, skips = {}, {}
+    for pid in photo_ids:
+        if pid in accepted_photo_ids:
+            skips[pid] = "already_confirmed"
+        elif pid not in top_predictions:
+            skips[pid] = "no_prediction"
+        else:
+            targets[pid] = top_predictions[pid]
+    return targets, skips
+
+
+def _species_confirm_targets(db, photo_ids, species):
+    """Confirm from one species bucket: the subject prediction that put each
+    photo in ``species``'s bucket, so a photo with another species already
+    tagged still gets this one, and a photo already tagged with it is
+    skipped. Membership follows ``photo_species_memberships``, the rule the
+    page used to build the bucket."""
+    canonicalize = species_canonicalizer(db)
+    target_key = _species_key(canonicalize, species)
+    subjects_by_pid = db.predictions.top_unrejected_by_detection(photo_ids)
+    names_by_pid = db.photo_species.get_species_for_photos(photo_ids)
+    targets, skips = {}, {}
+    for pid in photo_ids:
+        rows = subjects_by_pid.get(pid, [])
+        memberships = photo_species_memberships({
+            "species_names": list(names_by_pid.get(pid, [])),
+            "subject_predictions": [_subject_prediction(r) for r in rows],
+        }, canonicalize)
+        membership = next((
+            m for m in memberships
+            if keyword_match_key(m.species) == target_key
+        ), None)
+        if membership is not None and membership.accepted_name is not None:
+            skips[pid] = "already_confirmed"
+        elif membership is None or membership.prediction is None:
+            skips[pid] = "no_prediction"
+        else:
+            pred_id = membership.prediction["prediction_id"]
+            targets[pid] = next(r for r in rows if r["id"] == pred_id)
+    return targets, skips
+
+
+def _relabel_source_predictions(db, photo_ids, from_species):
+    """``{photo_id: row}``: the prediction a relabel rejects on each photo.
+
+    A whole-photo relabel rejects the photo's top prediction. A relabel from
+    one species bucket rejects only the subject prediction naming that
+    species, so the photo's other subjects keep theirs.
+    """
+    if not from_species:
+        return db.predictions.top_unrejected_by_photo(photo_ids)
+    canonicalize = species_canonicalizer(db)
+    from_key = _species_key(canonicalize, from_species)
+    result = {}
+    for pid, rows in db.predictions.top_unrejected_by_detection(photo_ids).items():
+        match = next((
+            r for r in rows
+            if _species_key(canonicalize, r["species"]) == from_key
+        ), None)
+        if match is not None:
+            result[pid] = match
+    return result
+
+
+def _confirm_group_key(pred):
+    if pred["group_id"]:
+        return ("group", pred["classifier_model"], pred["group_id"])
+    return ("prediction", pred["id"])
+
+
+def _confirm_edit_items(pred, result):
+    """Edit-history items for one confirm accept.
+
+    Mirror api_accept_prediction: encode ``no_tag`` for entries where the
+    photo already carried the target via an equivalent hierarchical/root
+    row so undo/redo do not untag a keyword the user deliberately kept.
+
+    Highlights shows ``reviewed`` predictions with a Confirm button, so
+    confirming one is a deliberate re-decision. Record that prior status so
+    undo puts the row back to ``reviewed`` rather than ``pending``, a status
+    it no longer had.
+    """
+    items = []
+    for a in result["affected"]:
+        meta = {}
+        if not a.get("changed_tag", True):
+            meta["no_tag"] = True
+        if (a["prediction_id"] == pred["id"]
+                and pred["status"] == "reviewed"):
+            meta["prior_status"] = "reviewed"
+        if meta:
+            old_value = json.dumps(
+                {"prediction_id": a["prediction_id"], **meta},
+            )
+        else:
+            old_value = str(a["prediction_id"])
+        items.append({
+            "photo_id": a["photo_id"],
+            "old_value": old_value,
+            "new_value": str(result["keyword_id"]),
+        })
+    return items
+
+
+def _accept_confirm_targets(db, photo_ids, targets, skips, exact_rows):
+    """Accept each target prediction once per burst group and record the
+    edits; ``exact_rows`` limits a grouped accept to the target rows
+    themselves, not every row of the group on those photos."""
+    pids_by_key = {}
+    for pid in photo_ids:
+        if pid in targets:
+            pids_by_key.setdefault(_confirm_group_key(targets[pid]), []).append(pid)
+    processed = set()
+    affected = []
+    skipped = []
+    for pid in photo_ids:
+        if pid in skips:
+            skipped.append({"photo_id": pid, "reason": skips[pid]})
+            continue
+        pred = targets[pid]
+        key = _confirm_group_key(pred)
+        if key in processed:
+            continue
+        processed.add(key)
+        key_pids = pids_by_key[key]
+        limits = {"photo_ids": key_pids}
+        if exact_rows:
+            limits["prediction_ids"] = [targets[p]["id"] for p in key_pids]
+        result = db.accept_prediction(pred["id"], _commit=False, **limits)
+        if result is None:
+            skipped.append({"photo_id": pid, "reason": "prediction_not_found"})
+            continue
+        if not result["affected"]:
+            skipped.extend(
+                {"photo_id": confirm_pid, "reason": "prediction_not_found"}
+                for confirm_pid in key_pids
+            )
+            continue
+        items = _confirm_edit_items(pred, result)
+        desc = f'Accepted prediction: added "{result["species"]}"'
+        if len(items) > 1:
+            desc += f" to {len(items)} photos"
+        db.record_edit(
+            "prediction_accept",
+            desc,
+            str(result["keyword_id"]),
+            items,
+            is_batch=len(items) > 1,
+            _commit=False,
+        )
+        affected.extend(items)
+    return affected, skipped
 
 
 def create_highlights_blueprint(get_db, json_error):
@@ -741,7 +954,12 @@ def create_highlights_blueprint(get_db, json_error):
 
     @blueprint.route("/api/highlights/confirm", methods=["POST"])
     def api_highlights_confirm():
-        """Confirm highlight photos by accepting their top prediction.
+        """Confirm highlight photos by accepting a prediction on each.
+
+        With ``species`` (the bucket the user confirmed from), each photo's
+        prediction for that species is accepted, so a photo already tagged
+        with another species gains this one. Without it, each photo's top
+        prediction is accepted and photos carrying any species are skipped.
 
         A prediction-decision route, so it takes the shared writer lock: it
         reads which photos already carry a species and which prediction is top
@@ -753,104 +971,26 @@ def create_highlights_blueprint(get_db, json_error):
         photo_ids, error = _parse_highlight_photo_ids(body)
         if error:
             return json_error(error)
+        species, error = _parse_optional_species(body, "species")
+        if error:
+            return json_error(error)
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
         return prediction_decisions.under_prediction_decision_lock(
-            db, lambda: _highlights_confirm_under_lock(db, photo_ids),
+            db, lambda: _highlights_confirm_under_lock(db, photo_ids, species),
             json_error=json_error,
         )
 
-    def _highlights_confirm_under_lock(db, photo_ids):
+    def _highlights_confirm_under_lock(db, photo_ids, species):
         try:
-            top_predictions = db.predictions.top_unrejected_by_photo(photo_ids)
-            accepted_photo_ids = db.photo_species.photo_ids_with_species_rank_keyword(photo_ids)
-            processed = set()
-            confirmable_photo_ids_by_key = {}
-            for pid in photo_ids:
-                if pid in accepted_photo_ids:
-                    continue
-                pred = top_predictions.get(pid)
-                if pred is None:
-                    continue
-                key = (
-                    "group",
-                    pred["classifier_model"],
-                    pred["group_id"],
-                ) if pred["group_id"] else ("prediction", pred["id"])
-                confirmable_photo_ids_by_key.setdefault(key, []).append(pid)
-            affected = []
-            skipped = []
-            for pid in photo_ids:
-                if pid in accepted_photo_ids:
-                    skipped.append({"photo_id": pid, "reason": "already_confirmed"})
-                    continue
-                pred = top_predictions.get(pid)
-                if pred is None:
-                    skipped.append({"photo_id": pid, "reason": "no_prediction"})
-                    continue
-                key = (
-                    "group",
-                    pred["classifier_model"],
-                    pred["group_id"],
-                ) if pred["group_id"] else ("prediction", pred["id"])
-                if key in processed:
-                    continue
-                processed.add(key)
-                result = db.accept_prediction(
-                    pred["id"],
-                    photo_ids=confirmable_photo_ids_by_key.get(key, [pid]),
-                    _commit=False,
-                )
-                if result is None:
-                    skipped.append({"photo_id": pid, "reason": "prediction_not_found"})
-                    continue
-                if not result["affected"]:
-                    skipped.extend(
-                        {"photo_id": confirm_pid, "reason": "prediction_not_found"}
-                        for confirm_pid in confirmable_photo_ids_by_key.get(key, [pid])
-                    )
-                    continue
-                # Mirror api_accept_prediction: encode ``no_tag`` for
-                # entries where the photo already carried the target via
-                # an equivalent hierarchical/root row so undo/redo do not
-                # untag a keyword the user deliberately kept.
-                #
-                # Highlights shows ``reviewed`` predictions with a Confirm
-                # button, so confirming one is a deliberate re-decision. Record
-                # that prior status so undo puts the row back to ``reviewed``
-                # rather than ``pending``, a status it no longer had.
-                items = []
-                for a in result["affected"]:
-                    meta = {}
-                    if not a.get("changed_tag", True):
-                        meta["no_tag"] = True
-                    if (a["prediction_id"] == pred["id"]
-                            and pred["status"] == "reviewed"):
-                        meta["prior_status"] = "reviewed"
-                    if meta:
-                        old_value = json.dumps(
-                            {"prediction_id": a["prediction_id"], **meta},
-                        )
-                    else:
-                        old_value = str(a["prediction_id"])
-                    items.append({
-                        "photo_id": a["photo_id"],
-                        "old_value": old_value,
-                        "new_value": str(result["keyword_id"]),
-                    })
-                desc = f'Accepted prediction: added "{result["species"]}"'
-                if len(items) > 1:
-                    desc += f" to {len(items)} photos"
-                db.record_edit(
-                    "prediction_accept",
-                    desc,
-                    str(result["keyword_id"]),
-                    items,
-                    is_batch=len(items) > 1,
-                    _commit=False,
-                )
-                affected.extend(items)
+            if species is None:
+                targets, skips = _top_prediction_confirm_targets(db, photo_ids)
+            else:
+                targets, skips = _species_confirm_targets(db, photo_ids, species)
+            affected, skipped = _accept_confirm_targets(
+                db, photo_ids, targets, skips, exact_rows=species is not None,
+            )
             db.commit()
         except Exception:
             db.rollback()
@@ -886,6 +1026,9 @@ def create_highlights_blueprint(get_db, json_error):
         # dst_existed=false; undo would then delete the user's
         # pre-existing highlight/preference/rep.
         species = db.resolve_species_display_name(species)
+        from_species, error = _parse_optional_species(body, "from_species")
+        if error:
+            return json_error(error)
         # Multi-homonym reconciliation. resolve_species_display_name
         # preserves the caller's spelling when two intentionally-distinct
         # root species keywords share a NOCASE key (legacy general
@@ -912,14 +1055,17 @@ def create_highlights_blueprint(get_db, json_error):
         # that picks *which* row gets rejected is exactly the read that must
         # not race a concurrent decision on that row.
         return prediction_decisions.under_prediction_decision_lock(
-            db, lambda: _highlights_relabel_under_lock(db, photo_ids, species),
+            db, lambda: _highlights_relabel_under_lock(
+                db, photo_ids, species, from_species,
+            ),
             json_error=json_error,
         )
 
-    def _highlights_relabel_under_lock(db, photo_ids, species):
+    def _highlights_relabel_under_lock(db, photo_ids, species, from_species):
         relabel = _HighlightsRelabel(
             db, photo_ids, species,
-            db.predictions.top_unrejected_by_photo(photo_ids),
+            _relabel_source_predictions(db, photo_ids, from_species),
+            from_species=from_species,
         )
         relabel.snapshot_curation()
         try:
@@ -936,6 +1082,13 @@ def create_highlights_blueprint(get_db, json_error):
         return jsonify({
             "ok": True,
             "keyword_id": kid,
+            # The canonical stored spelling (after resolve_species_display_name
+            # and add_keyword's casing convention). The lightbox retargets its
+            # active bucket to this exact string, so a request submitted as
+            # ``black phoebe`` points the still-open controls at the stored
+            # ``Black Phoebe`` bucket rather than falling back to another
+            # bucket of a multi-species photo.
+            "species": relabel.species,
             "affected": relabel.items,
             "rejected_prediction_ids": relabel.rejected_prediction_ids,
         })

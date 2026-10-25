@@ -19,7 +19,11 @@ from scanner.companions import (
     _fill_primary_metadata_gaps,
     _read_metadata_transfer_rows,
 )
-from scanner.keywords import _import_embedded_keywords_for_photo, _import_keywords_for_photo
+from scanner.keywords import (
+    UNREADABLE_SIDECAR_REASON,
+    _import_embedded_keywords_for_photo,
+    _import_keywords_for_photo,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -202,14 +206,23 @@ class _KnownCompanionKeeper:
             imported = _import_keywords_for_photo(
                 self.db, known["owner_id"], str(xmp_path),
             )
-        except Exception:  # broad: XMP parsing raises undocumented errors; one bad sidecar must not stop the scan
+        except Exception as exc:  # broad: XMP parsing raises undocumented errors; one bad sidecar must not stop the scan, and the tally reports it
             log.exception(
                 "Failed to import companion sidecar %s for owner %s",
                 xmp_path, known["owner_id"],
             )
+            self.tally.report_sidecar_failure(
+                str(xmp_path), image_path.name, str(exc) or type(exc).__name__,
+            )
             return
         if imported:
             self.db.commit_with_retry()
+        else:
+            # Unreadable: nothing was imported. The companion is re-read,
+            # and this retried, on the next scan.
+            self.tally.report_sidecar_failure(
+                str(xmp_path), image_path.name, UNREADABLE_SIDECAR_REASON,
+            )
 
     def keep_known_companion(
         self, image_path: Path, folder_id: int, file_size: int, file_mtime: float,

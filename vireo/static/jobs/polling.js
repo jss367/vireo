@@ -10,7 +10,7 @@ function renderJobsPollWarning() {
     var label = name === 'active' ? 'Active jobs' : 'Job history';
     return label + (lane.loaded
       ? ' could not be refreshed. Showing the last successful list.'
-      : ' could not be loaded.');
+      : ' could not be loaded.') + (lane.errorDetail ? ' ' + lane.errorDetail : '');
   });
   var message = messages.length ? messages.join(' ') + ' Retrying automatically.' : '';
   var status = /** @type {HTMLElement} */ (document.getElementById('jobsPollMessage'));
@@ -53,6 +53,17 @@ function retryJobsPolling() {
   }
 }
 
+/** The server's own account of a failed jobs request ('' when it gave none).
+ * @param {{json: () => Promise<unknown>}} response @returns {Promise<string>} */
+async function jobsServerError(response) {
+  try {
+    var body = await response.json();
+    return isJobsRecord(body) && typeof body.error === 'string' ? body.error : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 /** @template T @param {'active'|'history'} name @param {string} url @param {(data:unknown)=>asserts data is T} validate @param {(data:T)=>void} apply @param {boolean=} background */ async function fetchJobsSnapshot(name, url, validate, apply, background) {
   var lane = jobsPollState[name];
   if (background && lane.pending) return false;
@@ -64,20 +75,28 @@ function retryJobsPolling() {
   renderJobsPollWarning();
   // A hung connection must eventually release the lane for automatic/manual retry.
   var timeout = setTimeout(function() { controller.abort(); }, 15000);
+  // E.g. "Vireo could not read the job history from its catalog (...)":
+  // shown with the warning so a read failure is not mistaken for a network one.
+  var errorDetail = '';
   try {
     var response = await fetch(url, {cache: 'no-store', signal: controller.signal});
-    if (!response.ok) throw new Error('Jobs request failed');
+    if (!response.ok) {
+      errorDetail = await jobsServerError(response);
+      throw new Error('Jobs request failed');
+    }
     var data = await response.json();
     if (generation !== lane.generation) return false;
     if (controller.signal.aborted) throw new Error('Jobs request timed out');
     validate(data);
     lane.loaded = true;
     lane.error = false;
+    lane.errorDetail = '';
     apply(data);
     return true;
   } catch (_) {
     if (generation === lane.generation) {
       lane.error = true;
+      lane.errorDetail = errorDetail;
       // A failed first load is unknown, rather than an empty job list.
       if (!lane.loaded) {
         updateList();

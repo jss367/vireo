@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from image_loader import RAW_EXTENSIONS
 from scanner.companions import _companion_stat_unchanged
 from scanner.hashing import EMPTY_FILE_SHA256
-from scanner.keywords import _import_keywords_for_photo
+from scanner.keywords import UNREADABLE_SIDECAR_REASON, _import_keywords_for_photo
 from services import duplicate_resolution
 
 if TYPE_CHECKING:
@@ -244,6 +244,9 @@ class _IncrementalTriage:
             else:
                 db.scanning.defer_xmp_import(existing["id"])
                 db.commit_with_retry()
+                self.tally.report_sidecar_failure(
+                    str(xmp_path), existing["filename"], UNREADABLE_SIDECAR_REASON,
+                )
         elif not xmp_unchanged or xmp_import_pending:
             # Removal settles a deferred read too; there are no keywords left
             # to import. Keep acknowledgement and guard clearing atomic.

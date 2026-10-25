@@ -342,7 +342,7 @@ def test_sam2_sessions_missing_model(tmp_path):
 
     from unittest.mock import patch
 
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         try:
             masking._get_sam2_sessions("sam2-small")
             assert False, "Should have raised FileNotFoundError"
@@ -406,7 +406,7 @@ def test_sam2_sessions_reloads_for_different_variant(tmp_path):
         call_count[0] += 1
         return result
 
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         with patch("masking.onnx_runtime.create_session", side_effect=mock_create_session):
             enc, dec = masking._get_sam2_sessions("sam2-small")
 
@@ -446,7 +446,7 @@ def test_sam2_sessions_drop_coreml_on_apple(tmp_path):
     def mock_get_providers():
         return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
 
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         with patch("masking.onnx_runtime.create_session",
                    side_effect=mock_create_session):
             with patch("masking.onnx_runtime.get_providers",
@@ -489,7 +489,7 @@ def test_sam2_sessions_keep_cuda_on_linux_gpu(tmp_path):
     def mock_get_providers():
         return ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         with patch("masking.onnx_runtime.create_session",
                    side_effect=mock_create_session):
             with patch("masking.onnx_runtime.get_providers",
@@ -687,7 +687,10 @@ def test_ensure_sam2_weights_noop_when_present(tmp_path, monkeypatch):
         download_calls.append(kwargs)
         raise AssertionError("hf_hub_download must not be called when files exist")
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -725,7 +728,10 @@ def test_ensure_sam2_weights_downloads_both_files(tmp_path, monkeypatch):
         seen_requests.append((kwargs["filename"], kwargs["subfolder"]))
         return str(cache_dir / kwargs["filename"])
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -773,7 +779,10 @@ def test_ensure_sam2_weights_downloads_only_missing_file(tmp_path, monkeypatch):
         requested.append(kwargs["filename"])
         return str(cache_dir / kwargs["filename"])
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -800,7 +809,10 @@ def test_ensure_sam2_weights_raises_on_download_failure(tmp_path, monkeypatch):
     def fake_hf_hub_download(**kwargs):
         raise ConnectionError("network unreachable")
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 

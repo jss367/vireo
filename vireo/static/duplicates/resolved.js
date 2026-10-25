@@ -1,24 +1,29 @@
 // Pruning resolved groups from the last scan in place, and rendering the
 // unresolved and resolved groups (with the protected-winner rule the bulk
 // Trash action shares).
-// Classic page script.
 
-// Locally prune the given resolved hashes from _lastScanResult so the
+import { state } from './state.js';
+import { renderCard } from './card.js';
+import { renderCategoryBadge } from './patterns.js';
+import { renderGroupWarning } from './results.js';
+import { escapeHtml } from './shared.js';
+
+// Locally prune the given resolved hashes from state.lastScanResult so the
 // next render drops matching buckets and unresolved groups. Avoids an
 // expensive re-scan round-trip on libraries with thousands of dups.
 // Mirrors bucket_unresolved_proposals and duplicate_scan aggregates.
 /** @param {Set<string>} resolvedHashes */
-function pruneResolvedHashesFromScan(resolvedHashes) {
-  if (!_lastScanResult) return;
-  _lastScanResult.proposals = (_lastScanResult.proposals || []).filter(
+export function pruneResolvedHashesFromScan(resolvedHashes) {
+  if (!state.lastScanResult) return;
+  state.lastScanResult.proposals = (state.lastScanResult.proposals || []).filter(
     function(p) { return !resolvedHashes.has(p.file_hash); }
   );
   /** @type {Record<string, DuplicateProposal>} */
   var proposalsByHash = {};
-  (_lastScanResult.proposals || []).forEach(function(p) {
+  (state.lastScanResult.proposals || []).forEach(function(p) {
     proposalsByHash[p.file_hash] = p;
   });
-  _lastScanResult.buckets = (_lastScanResult.buckets || []).map(function(b) {
+  state.lastScanResult.buckets = (state.lastScanResult.buckets || []).map(function(b) {
     var keptHashes = (b.file_hashes || []).filter(
       function(h) { return !resolvedHashes.has(h); }
     );
@@ -39,15 +44,15 @@ function pruneResolvedHashesFromScan(resolvedHashes) {
       example_filenames: newExamples,
     });
   });
-  var prunedProposals = _lastScanResult.proposals;
-  _lastScanResult.group_count = prunedProposals.length;
-  _lastScanResult.loser_count = prunedProposals.reduce(function(n, p) {
+  var prunedProposals = state.lastScanResult.proposals;
+  state.lastScanResult.group_count = prunedProposals.length;
+  state.lastScanResult.loser_count = prunedProposals.reduce(function(n, p) {
     return p.status === 'unresolved' ? n + (p.losers || []).length : n;
   }, 0);
-  _lastScanResult.resolved_group_count = prunedProposals.reduce(function(n, p) {
+  state.lastScanResult.resolved_group_count = prunedProposals.reduce(function(n, p) {
     return p.status === 'resolved' ? n + 1 : n;
   }, 0);
-  _lastScanResult.resolved_loser_count = prunedProposals.reduce(function(n, p) {
+  state.lastScanResult.resolved_loser_count = prunedProposals.reduce(function(n, p) {
     return p.status === 'resolved' ? n + (p.losers || []).length : n;
   }, 0);
 }
@@ -61,11 +66,11 @@ function pruneResolvedHashesFromScan(resolvedHashes) {
 //
 // ``resolvedHashes`` is the subset of bucket.file_hashes that
 // bulk-resolve actually resolved (i.e. excluding any it returned in
-// ``skipped``). The retry uses it to prune _lastScanResult so a
+// ``skipped``). The retry uses it to prune state.lastScanResult so a
 // partial resolve doesn't drop the skipped hashes' unresolved groups
 // from the page.
 /** @param {DuplicateProposal} group */
-function renderUnresolvedGroup(group) {
+export function renderUnresolvedGroup(group) {
   var winner = group.winner || /** @type {DuplicatePhoto} */ ({});
   var losers = group.losers || [];
   var hash = group.file_hash || '';
@@ -74,7 +79,7 @@ function renderUnresolvedGroup(group) {
   var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '">';
   html += '<div class="dup-group-header">';
   html += '<label><input type="checkbox" class="group-check" data-gi="' + gi + '"' +
-          (_excludedDuplicateHashes.has(hash) ? '' : ' checked') + ' onchange="updateApplyCount()"> ' +
+          (state.excludedDuplicateHashes.has(hash) ? '' : ' checked') + '> ' +
           'Include this group (' + losers.length + ' to reject)</label>';
   html += renderCategoryBadge(group);
   html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
@@ -90,7 +95,7 @@ function renderUnresolvedGroup(group) {
 }
 
 /** @param {DuplicateProposal} group */
-function renderResolvedGroup(group) {
+export function renderResolvedGroup(group) {
   var winner = group.winner || /** @type {DuplicatePhoto} */ ({});
   var losers = group.losers || [];
   var hash = group.file_hash || '';
@@ -139,7 +144,7 @@ function renderResolvedGroup(group) {
   return html;
 }
 
-function toggleResolvedSection() {
+export function toggleResolvedSection() {
   var toggle = /** @type {HTMLElement} */ (document.getElementById('resolvedToggle'));
   var list = /** @type {HTMLElement} */ (document.getElementById('resolvedList'));
   if (!toggle || !list) return;
@@ -155,6 +160,6 @@ function toggleResolvedSection() {
 // bulk-button label and the bulk action share it so the count never
 // advertises files ``trashAllLoserFiles`` would skip.
 /** @param {DuplicateProposal | null | undefined} p */
-function isBulkTrashProtected(p) {
+export function isBulkTrashProtected(p) {
   return !!(p && p.winner && p.winner.exists === false);
 }

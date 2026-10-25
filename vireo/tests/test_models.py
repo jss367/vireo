@@ -2106,7 +2106,10 @@ def _stub_hf_module(monkeypatch, hf_hub_download_fn, try_to_load_from_cache_fn):
     import sys
     import types
 
+    from huggingface_hub import errors
+
     stub = types.ModuleType("huggingface_hub")
+    stub.errors = errors
     stub.hf_hub_download = hf_hub_download_fn
     stub.try_to_load_from_cache = try_to_load_from_cache_fn
     monkeypatch.setitem(sys.modules, "huggingface_hub", stub)
@@ -2127,10 +2130,13 @@ def test_hf_download_with_retry_reports_cache_hit(tmp_path, monkeypatch, caplog)
     def fake_lookup(repo_id, filename, revision=None):
         return str(cached_blob)
 
-    def fake_download(repo_id, filename, subfolder=None, revision=None):
-        # Simulate hf_hub_download returning the same cached path it would
-        # normally return when nothing needs to be fetched.
-        return str(cached_blob)
+    def fake_download(repo_id, filename, subfolder=None, revision=None, local_dir=None):
+        # Simulate hf_hub_download copying the cached blob into local_dir.
+        out = os.path.join(local_dir, subfolder or "", filename)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, "wb") as f:
+            f.write(cached_blob.read_bytes())
+        return out
 
     _stub_hf_module(monkeypatch, fake_download, fake_lookup)
 
@@ -2150,7 +2156,7 @@ def test_hf_download_with_retry_reports_cache_hit(tmp_path, monkeypatch, caplog)
     )
     log_text = caplog.text
     assert "already in HF cache" in log_text
-    assert "Linked from cache" in log_text
+    assert "Copied from HF cache" in log_text
     assert "no network transfer" in log_text
     # The dest must exist (copied from cache)
     assert (dest_dir / "model.onnx").exists()
@@ -2163,17 +2169,17 @@ def test_hf_download_with_retry_reports_network_download(tmp_path, monkeypatch, 
 
     import models
 
-    cached_blob = tmp_path / "fake-cache" / "blobs" / "abc123"
-
     def fake_lookup(repo_id, filename, revision=None):
         # Cache miss
         return None
 
-    def fake_download(repo_id, filename, subfolder=None, revision=None):
-        # Pretend the network fetch landed here.
-        cached_blob.parent.mkdir(parents=True, exist_ok=True)
-        cached_blob.write_bytes(b"weights" * 100)
-        return str(cached_blob)
+    def fake_download(repo_id, filename, subfolder=None, revision=None, local_dir=None):
+        # Pretend the network fetch landed in local_dir.
+        out = os.path.join(local_dir, filename)
+        os.makedirs(local_dir, exist_ok=True)
+        with open(out, "wb") as f:
+            f.write(b"weights" * 100)
+        return out
 
     _stub_hf_module(monkeypatch, fake_download, fake_lookup)
 
@@ -2202,15 +2208,15 @@ def test_hf_download_with_retry_cache_lookup_failure_falls_back(tmp_path, monkey
 
     import models
 
-    cached_blob = tmp_path / "fake-cache" / "blobs" / "abc123"
-
     def fake_lookup(repo_id, filename, revision=None):
         raise RuntimeError("HF cache lookup unavailable")
 
-    def fake_download(repo_id, filename, subfolder=None, revision=None):
-        cached_blob.parent.mkdir(parents=True, exist_ok=True)
-        cached_blob.write_bytes(b"weights" * 100)
-        return str(cached_blob)
+    def fake_download(repo_id, filename, subfolder=None, revision=None, local_dir=None):
+        out = os.path.join(local_dir, filename)
+        os.makedirs(local_dir, exist_ok=True)
+        with open(out, "wb") as f:
+            f.write(b"weights" * 100)
+        return out
 
     _stub_hf_module(monkeypatch, fake_download, fake_lookup)
 
@@ -2875,6 +2881,69 @@ def test_ensure_label_descriptions_survives_network_failure(
     assert not (tmp_path / "label_descriptions.json").exists()
 
 
+def test_failed_label_descriptions_repair_is_remembered_until_one_succeeds(
+    tmp_path, monkeypatch,
+):
+    """A repair that could not fetch the common-name file used to say so
+    only in the log. Its reason is kept for Settings and for the runs that
+    go on with taxonomy-based names, and the next success clears it."""
+    import models
+
+    monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {})
+    monkeypatch.setattr(models, "_download_optional_files", lambda *a, **k: None)
+
+    def offline(_model_str):
+        raise OSError("Network is unreachable")
+
+    monkeypatch.setattr(models, "_load_upstream_timm_config", offline)
+    assert models.ensure_timm_label_descriptions(str(tmp_path), _TIMM_MODEL_STR) is False
+    assert models.label_descriptions_heal_failure(_TIMM_MODEL_STR) == (
+        "could not fetch the model's upstream config: Network is unreachable"
+    )
+
+    monkeypatch.setattr(
+        models, "_load_upstream_timm_config", lambda _m: {"architecture": "eva02"},
+    )
+    assert models.ensure_timm_label_descriptions(str(tmp_path), _TIMM_MODEL_STR) is False
+    assert models.label_descriptions_heal_failure(_TIMM_MODEL_STR) == (
+        "the model's upstream config has no common names"
+    )
+
+    monkeypatch.setattr(
+        models, "_load_upstream_timm_config",
+        lambda _m: {"label_descriptions": {"Bubulcus ibis": "Cattle Egret, Bird"}},
+    )
+    assert models.ensure_timm_label_descriptions(str(tmp_path), _TIMM_MODEL_STR) is True
+    assert models.label_descriptions_heal_failure(_TIMM_MODEL_STR) is None
+
+
+def test_get_models_names_a_failed_common_name_repair(tmp_path, monkeypatch):
+    """Settings › Models offers Repair for a missing label_descriptions.json;
+    when Vireo's own attempt to fetch it failed, the entry says why."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {})
+    model_dir = tmp_path / "models" / "timm-inat21-eva02-l"
+    model_dir.mkdir(parents=True)
+    for name in ["model.onnx", "model.onnx.data", "class_names.json", "config.json"]:
+        (model_dir / name).write_bytes(b"stub")
+
+    def entry():
+        return next(m for m in models.get_models() if m["id"] == "timm-inat21-eva02-l")
+
+    assert "label_descriptions.json" in entry()["missing_optional_files"]
+    assert "label_descriptions_error" not in entry()
+
+    models._LABEL_DESC_HEAL_FAILURES[_TIMM_MODEL_STR] = "the model's upstream config has no common names"
+    assert entry()["label_descriptions_error"] == "the model's upstream config has no common names"
+
+    # Once the file is installed the stale reason is not shown.
+    (model_dir / "label_descriptions.json").write_text('{"Bubulcus ibis": "Cattle Egret, Bird"}')
+    assert "label_descriptions_error" not in entry()
+
+
 def test_ensure_label_descriptions_via_onnx_repo_publishes_atomically(
     tmp_path, monkeypatch
 ):
@@ -3274,250 +3343,86 @@ def test_label_descriptions_with_non_string_values_are_unusable(tmp_path):
         ), name
 
 
-def test_hf_download_publishes_file_atomically(tmp_path, monkeypatch):
-    """The destination must never be visible half-written.
+def _local_dir_download(contents, during=None):
+    """A fake hf_hub_download that writes into ``local_dir``, as the real one does."""
+    def fake(repo_id, filename, subfolder=None, revision=None, local_dir=None):
+        assert local_dir is not None, "a download without local_dir fills the hub cache"
+        if during is not None:
+            during(filename)
+        rel = f"{subfolder}/{filename}" if subfolder else filename
+        path = os.path.join(local_dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(contents[filename])
+        return path
+    return fake
 
-    copy2 straight onto the destination lets a concurrent reader (the
-    background label_descriptions heal racing a TimmClassifier init)
-    json.load a partial file, and a crash mid-copy leaves a truncated
-    file behind. Copy beside it, then os.replace."""
+
+def test_hf_download_publishes_every_file_by_rename_without_copying(tmp_path, monkeypatch):
+    """Weights and metadata alike land beside the model and are renamed in.
+
+    A reader (the background label_descriptions heal racing a
+    TimmClassifier init) never sees a half-written destination, and no
+    file is ever byte-copied: shutil.copy2 is a full copy on every
+    platform, APFS included, so copying out of the hub cache stored each
+    model twice."""
     import shutil as _shutil
 
     import huggingface_hub
     import models
 
-    cached = tmp_path / "cache" / "label_descriptions.json"
-    cached.parent.mkdir()
-    cached.write_text(json.dumps({"Bubulcus ibis": "Cattle Egret, Bird"}))
-
     dest_dir = tmp_path / "model"
     dest_dir.mkdir()
-    final = dest_dir / "label_descriptions.json"
-
-    monkeypatch.setattr(
-        huggingface_hub, "hf_hub_download", lambda **kw: str(cached),
-    )
-    monkeypatch.setattr(
-        huggingface_hub, "try_to_load_from_cache", lambda **kw: None,
-    )
-
-    observed = {}
-    real_copy2 = _shutil.copy2
-
-    def _spy_copy2(src, dst):
-        observed["dst"] = str(dst)
-        # Mid-copy the reader watches `final`; it must not exist yet.
-        observed["final_existed_during_copy"] = final.exists()
-        return real_copy2(src, dst)
-
-    monkeypatch.setattr(models.shutil, "copy2", _spy_copy2)
-
-    out = models._hf_download_with_retry(
-        models.ONNX_REPO, "label_descriptions.json", str(dest_dir),
-    )
-
-    assert out == str(final)
-    assert observed["dst"] != str(final)
-    assert observed["final_existed_during_copy"] is False
-    assert json.loads(final.read_text()) == {
-        "Bubulcus ibis": "Cattle Egret, Bird"
+    contents = {
+        "model.onnx": b"graph",
+        "model.onnx.data": b"weights" * 100,
+        "tol_embeddings.npy": b"vectors" * 100,
+        "label_descriptions.json": json.dumps({"Bubulcus ibis": "Cattle Egret, Bird"}).encode(),
     }
-    # No temp turds left behind.
-    assert sorted(p.name for p in dest_dir.iterdir()) == [
-        "label_descriptions.json"
-    ]
+    seen_during = {}
+
+    def during(filename):
+        seen_during[filename] = (dest_dir / filename).exists()
+
+    def no_copy(*_args, **_kwargs):
+        raise AssertionError("downloads must not byte-copy model files")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _local_dir_download(contents, during))
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda **kw: None)
+    monkeypatch.setattr(_shutil, "copy2", no_copy)
+    monkeypatch.setattr(_shutil, "copyfile", no_copy)
+
+    for name, blob in contents.items():
+        out = models._hf_download_with_retry(models.ONNX_REPO, name, str(dest_dir))
+        assert out == str(dest_dir / name)
+        assert (dest_dir / name).read_bytes() == blob
+
+    assert seen_during == dict.fromkeys(contents, False)
+    assert sorted(p.name for p in dest_dir.iterdir()) == sorted(contents)
 
 
-def test_hf_download_cleans_up_partial_weights_on_copy_failure(
-    tmp_path, monkeypatch
-):
-    """A failed copy leaves neither a temp file nor a partial destination,
-    so the retry loop starts from a clean slate.
-
-    Weights are copied straight into place (no staging), so the thing
-    that must be cleaned up here is the truncated destination itself."""
-    import shutil as _shutil
+def test_hf_download_failure_leaves_no_destination(tmp_path, monkeypatch):
+    """A failed transfer publishes nothing, so the completeness check never
+    mistakes a partial file for a healthy artifact."""
+    import time as _time_mod
 
     import huggingface_hub
     import models
 
-    cached = tmp_path / "cache" / "model.onnx"
-    cached.parent.mkdir()
-    cached.write_bytes(b"weights")
-
     dest_dir = tmp_path / "model"
     dest_dir.mkdir()
 
-    monkeypatch.setattr(
-        huggingface_hub, "hf_hub_download", lambda **kw: str(cached),
-    )
-    monkeypatch.setattr(
-        huggingface_hub, "try_to_load_from_cache", lambda **kw: None,
-    )
-
-    real_copy2 = _shutil.copy2
-
-    def _partial_then_fail(src, dst):
-        # Simulate a disk-full / interrupted copy: bytes land, then boom.
-        real_copy2(src, dst)
+    def fail(**_kwargs):
         raise OSError("no space left on device")
 
-    monkeypatch.setattr(models.shutil, "copy2", _partial_then_fail)
-    # _hf_download_with_retry sleeps between attempts; don't pay for it.
-    import time as _time_mod
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fail)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda **kw: None)
     monkeypatch.setattr(_time_mod, "sleep", lambda s: None)
 
-    with pytest.raises(RuntimeError):
-        models._hf_download_with_retry(
-            models.ONNX_REPO, "model.onnx", str(dest_dir),
-        )
-
-    assert list(dest_dir.iterdir()) == []
-
-
-def test_hf_download_streams_weights_without_temp_copy(tmp_path, monkeypatch):
-    """Multi-GB weight artifacts must NOT be staged through a temp copy.
-
-    copy2 is a real byte copy on Windows and Linux (only APFS clones), so
-    staging would put a second full-size copy of a 3.9 GB model beside the
-    one already on disk and can fail with ENOSPC on a Repair that
-    previously fit. Nothing reads weights concurrently with a download, so
-    there is nothing to protect against."""
-    import shutil as _shutil
-
-    import huggingface_hub
-    import models
-
-    dest_dir = tmp_path / "model"
-    dest_dir.mkdir()
-
-    real_copy2 = _shutil.copy2
-    seen = []
-
-    def _spy_copy2(src, dst):
-        seen.append(str(dst))
-        return real_copy2(src, dst)
-
-    monkeypatch.setattr(models.shutil, "copy2", _spy_copy2)
-    monkeypatch.setattr(
-        huggingface_hub, "try_to_load_from_cache", lambda **kw: None,
-    )
-
-    for name, blob in (
-        ("model.onnx", b"graph"),
-        ("model.onnx.data", b"weights" * 100),
-        ("tol_embeddings.npy", b"vectors" * 100),
-    ):
-        cached = tmp_path / "cache" / name
-        cached.parent.mkdir(exist_ok=True)
-        cached.write_bytes(blob)
-        monkeypatch.setattr(
-            huggingface_hub, "hf_hub_download",
-            lambda _p=str(cached), **kw: _p,
-        )
-
-        seen.clear()
-        out = models._hf_download_with_retry(
-            models.ONNX_REPO, name, str(dest_dir),
-        )
-
-        final = dest_dir / name
-        assert out == str(final)
-        # Copied straight to the final path — no second full-size copy.
-        assert seen == [str(final)], f"{name} was staged through {seen}"
-        assert final.read_bytes() == blob
-
-    # And no staging turds of any kind were left behind.
-    assert not [p.name for p in dest_dir.iterdir() if ".part-" in p.name]
-
-
-def test_hf_download_stages_metadata_through_temp(tmp_path, monkeypatch):
-    """The flip side: the small JSON metadata files a classifier can read
-    mid-heal are still staged and os.replace'd into place."""
-    import shutil as _shutil
-
-    import huggingface_hub
-    import models
-
-    dest_dir = tmp_path / "model"
-    dest_dir.mkdir()
-
-    real_copy2 = _shutil.copy2
-    seen = []
-
-    def _spy_copy2(src, dst):
-        seen.append(str(dst))
-        return real_copy2(src, dst)
-
-    monkeypatch.setattr(models.shutil, "copy2", _spy_copy2)
-    monkeypatch.setattr(
-        huggingface_hub, "try_to_load_from_cache", lambda **kw: None,
-    )
-
-    for name in ("label_descriptions.json", "class_names.json",
-                 "config.json", "tokenizer.json", "tol_classes.json"):
-        cached = tmp_path / "cache" / name
-        cached.parent.mkdir(exist_ok=True)
-        cached.write_text(json.dumps({"k": name}))
-        monkeypatch.setattr(
-            huggingface_hub, "hf_hub_download",
-            lambda _p=str(cached), **kw: _p,
-        )
-
-        seen.clear()
-        out = models._hf_download_with_retry(
-            models.ONNX_REPO, name, str(dest_dir),
-        )
-
-        final = dest_dir / name
-        assert out == str(final)
-        assert seen and seen[0] != str(final), f"{name} was not staged"
-        assert seen[0].startswith(str(final) + ".part-")
-        assert json.loads(final.read_text()) == {"k": name}
-
-    assert not [p.name for p in dest_dir.iterdir() if ".part-" in p.name]
-
-
-def test_hf_download_cleans_up_temp_on_metadata_copy_failure(
-    tmp_path, monkeypatch
-):
-    """A failed metadata copy leaves the temp behind for nobody: no
-    `.part-` file, and no destination invented out of a partial write."""
-    import shutil as _shutil
-
-    import huggingface_hub
-    import models
-
-    cached = tmp_path / "cache" / "label_descriptions.json"
-    cached.parent.mkdir()
-    cached.write_text(json.dumps({"Bubulcus ibis": "Cattle Egret, Bird"}))
-
-    dest_dir = tmp_path / "model"
-    dest_dir.mkdir()
-
-    monkeypatch.setattr(
-        huggingface_hub, "hf_hub_download", lambda **kw: str(cached),
-    )
-    monkeypatch.setattr(
-        huggingface_hub, "try_to_load_from_cache", lambda **kw: None,
-    )
-
-    real_copy2 = _shutil.copy2
-
-    def _partial_then_fail(src, dst):
-        real_copy2(src, dst)
-        raise OSError("no space left on device")
-
-    monkeypatch.setattr(models.shutil, "copy2", _partial_then_fail)
-    import time as _time_mod
-    monkeypatch.setattr(_time_mod, "sleep", lambda s: None)
-
-    with pytest.raises(RuntimeError):
-        models._hf_download_with_retry(
-            models.ONNX_REPO, "label_descriptions.json", str(dest_dir),
-        )
-
-    assert list(dest_dir.iterdir()) == []
+    for name in ("model.onnx", "label_descriptions.json"):
+        with pytest.raises(RuntimeError):
+            models._hf_download_with_retry(models.ONNX_REPO, name, str(dest_dir))
+        assert not (dest_dir / name).exists()
 
 
 def test_download_model_skips_already_verified_files(tmp_path, monkeypatch):

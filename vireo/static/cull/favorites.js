@@ -21,11 +21,16 @@ function hasCullFilters() {
     !!/** @type {HTMLInputElement} */ (document.getElementById('cullDateTo')).value;
 }
 
-/** @param {CullSourcePhoto} photo @param {CullEncounter | null} [encounter] @param {Record<number, CullSourcePhoto>} [photoMap] */
+/**
+ * Every species a photo is listed under: its own (confirmed, else each
+ * subject's top prediction), else its encounter's.
+ *
+ * @param {CullSourcePhoto} photo @param {CullEncounter | null} [encounter] @param {Record<number, CullSourcePhoto>} [photoMap]
+ * @returns {string[]}
+ */
 function cullPhotoSpecies(photo, encounter, photoMap) {
-  if (photo.confirmed_species) return speciesName(photo.confirmed_species);
-  if (photo.species_top5 && photo.species_top5.length) return topSpeciesForPhoto(photo);
-  return speciesForEncounter(encounter || {}, photoMap || {});
+  var names = speciesListForPhoto(photo);
+  return names.length ? names : speciesListForEncounter(encounter || {}, photoMap || {});
 }
 
 /** @param {CullSourcePhoto} photo */
@@ -35,9 +40,9 @@ function cullPhotoDay(photo) {
   return /^\d{4}-\d{2}-\d{2}/.test(photo.timestamp || '') ? (photo.timestamp || '').substring(0, 10) : '';
 }
 
-/** @param {CullSourcePhoto} photo @param {string} species */
+/** A photo matches when any of its species is selected. @param {CullSourcePhoto} photo @param {string[]} species */
 function cullPhotoMatches(photo, species) {
-  if (cullSelectedSpecies.size && !cullSelectedSpecies.has(species)) return false;
+  if (cullSelectedSpecies.size && !species.some(function(name) { return cullSelectedSpecies.has(name); })) return false;
   return cullPhotoMatchesDate(photo);
 }
 
@@ -57,7 +62,7 @@ function cullSourcePhotos() {
   var map = {};
   (results.photos || []).forEach(function(p) { map[p.id] = p; });
   var seen = new Set();
-  /** @type {{photo: CullSourcePhoto, species: string}[]} */
+  /** @type {{photo: CullSourcePhoto, species: string[]}[]} */
   var photos = [];
   (results.encounters || []).forEach(function(enc) {
     (enc.photo_ids || []).forEach(function(id) {
@@ -80,7 +85,9 @@ function renderCullSpeciesOptions() {
   /** @type {Record<string, number>} */
   var counts = Object.create(null);
   cullSourcePhotos().forEach(function(entry) {
-    if (cullPhotoMatchesDate(entry.photo)) counts[entry.species] = (counts[entry.species] || 0) + 1;
+    // A photo of two species counts toward each one's chip.
+    if (!cullPhotoMatchesDate(entry.photo)) return;
+    entry.species.forEach(function(name) { counts[name] = (counts[name] || 0) + 1; });
   });
   cullSelectedSpecies.forEach(function(name) { if (!counts[name]) counts[name] = 0; });
   var search = /** @type {HTMLInputElement} */ (document.getElementById('cullSpeciesSearch')).value.toLocaleLowerCase();
@@ -194,12 +201,47 @@ function assignCullFavorites(sg) {
       });
     }
   });
+  countCullSpeciesActions(sg);
+}
+
+/** @param {CullSpeciesGroup} sg */
+function countCullSpeciesActions(sg) {
   sg.keepers = 0; sg.reviews = 0;
   sg.scene_groups.forEach(function(group) {
     group.photos.forEach(function(p) {
       if (p.action === 'keep') sg.keepers++;
       else if (p.action === 'review') sg.reviews++;
     });
+  });
+}
+
+/**
+ * A photo listed under two species has one flag. When one species suggests
+ * it as a favorite, Apply flags it, so show it as that suggestion under its
+ * other species too instead of as undecided there.
+ *
+ * @param {CullSpeciesGroup[]} speciesGroups
+ */
+function shareCullSuggestedFavorites(speciesGroups) {
+  /** @type {Record<number, string>} */
+  var suggestedFor = Object.create(null);
+  speciesGroups.forEach(function(sg) {
+    sg.scene_groups.forEach(function(group) {
+      group.photos.forEach(function(p) {
+        if (p.favorite && p.decision_source === 'auto' && !(p.photo_id in suggestedFor)) suggestedFor[p.photo_id] = sg.species;
+      });
+    });
+  });
+  speciesGroups.forEach(function(sg) {
+    sg.scene_groups.forEach(function(group) {
+      group.photos.forEach(function(p) {
+        var origin = suggestedFor[p.photo_id];
+        if (origin === undefined || p.decision_source !== 'auto') return;
+        if (!p.favorite) { p.favorite = true; p.action = 'keep'; }
+        p.suggested_for = origin;
+      });
+    });
+    countCullSpeciesActions(sg);
   });
 }
 
@@ -251,12 +293,16 @@ function cullCardHtml(photo, si, pi, poseKey, favorite) {
   }
   var thumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + id + '.jpg';
   var status = favorite ? (photo.decision_source === 'auto' ? 'Suggested' : 'Picked by you') : photo.action === 'reject' ? 'Rejected' : 'Undecided';
+  if (favorite && photo.suggested_for && photo.suggested_for !== sg.species) status += ' for ' + escapeHtml(photo.suggested_for);
+  // The same photo is listed under each species it shows; one decision covers all.
+  var also = (photo.also_species || []).length
+    ? '<div class="cull-also-species" title="This photo shows more than one species. Its decision is the same under each.">Also under ' + escapeHtml((photo.also_species || []).join(', ')) + '</div>' : '';
   var click = favorite ? 'selectCullReference(' + si + ',' + id + ')' : 'openCullComparison(' + si + ',' + id + ')';
   var html = '<div class="' + cardClass + '" data-photo-id="' + id + '" data-filename="' + escapeAttr(photo.filename) + '">' +
     '<div class="cull-card-image">' + badge + source + '<button class="cull-image-button" onclick="' + click + '" aria-label="' + escapeAttr((favorite ? 'Select reference: ' : 'Compare: ') + photo.filename) + '">' +
     '<img src="' + escapeAttr(thumb) + '" alt="' + escapeAttr(photo.filename) + '" loading="lazy"></button></div>' +
     '<div class="cull-card-info"><div class="cull-quality">' + status + (reference ? ' · Reference' : '') + '</div>' +
-    '<div class="cull-filename">' + escapeHtml(photo.filename) + '</div><div class="cull-card-controls">';
+    '<div class="cull-filename">' + escapeHtml(photo.filename) + '</div>' + also + '<div class="cull-card-controls">';
   if (!favorite) html += '<button onclick="setCullAction(' + id + ',\'keep\')">Add favorite</button>';
   else html += '<button onclick="setCullAction(' + id + ',\'review\')">Remove favorite</button>';
   html += photo.action === 'reject' ? '<button onclick="setCullAction(' + id + ',\'review\')">Undecided</button>' : '<button onclick="setCullAction(' + id + ',\'reject\')">Reject</button>';
@@ -392,9 +438,19 @@ function closeCullRejected() {
   if (dialog && dialog.open) dialog.close();
 }
 
+/** Each photo on screen once, though a two-species photo is listed twice. */
+function cullDistinctPhotos() {
+  var seen = new Set();
+  return (cullData ? cullData.species_groups : []).flatMap(function(sg) { return cullGroupsForSpecies(sg); }).flatMap(function(g) { return g.photos; }).filter(function(p) {
+    if (seen.has(p.photo_id)) return false;
+    seen.add(p.photo_id);
+    return true;
+  });
+}
+
 function reviewCullRejected() {
   if (cullOperationPending()) return;
-  var rejected = (cullData ? cullData.species_groups : []).flatMap(function(sg) { return cullGroupsForSpecies(sg); }).flatMap(function(g) { return g.photos; }).filter(function(p) { return p.action === 'reject'; });
+  var rejected = cullDistinctPhotos().filter(function(p) { return p.action === 'reject'; });
   var list = /** @type {HTMLElement} */ (document.getElementById('cullRejectedPhotos'));
   list.replaceChildren();
   rejected.forEach(function(p) {
@@ -413,7 +469,7 @@ function reviewCullRejected() {
 
 async function deleteCullRejected() {
   if (cullOperationPending()) return;
-  var ids = (cullData ? cullData.species_groups : []).flatMap(function(sg) { return cullGroupsForSpecies(sg); }).flatMap(function(g) { return g.photos; }).filter(function(p) { return p.action === 'reject'; }).map(function(p) { return p.photo_id; });
+  var ids = cullDistinctPhotos().filter(function(p) { return p.action === 'reject'; }).map(function(p) { return p.photo_id; });
   if (!ids.length) return;
   cullBusy = true; updateCullApplyButton();
   try {

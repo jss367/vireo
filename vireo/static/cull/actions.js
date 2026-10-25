@@ -66,10 +66,14 @@ async function applyCulling() {
   var unflag = [];
   /** @type {Record<string, CullAction>} */
   var appliedPins = {};
+  var seen = new Set();
   cullData.species_groups.forEach(function(sg) {
     var groups = sg.scene_groups || sg.pose_groups || [];
     groups.forEach(function(pg) {
       pg.photos.forEach(function(p) {
+        // A photo showing two species is listed under each; send it once.
+        if (seen.has(p.photo_id)) return;
+        seen.add(p.photo_id);
         if (p.decision_source === 'manual') appliedPins[p.photo_id] = p.action;
         if (p.action === 'keep') keepers.push(p.photo_id);
         else if (p.action === 'reject') rejects.push(p.photo_id);
