@@ -71,6 +71,7 @@ from render_source import (
 from services import browse_queries, workspace_config, workspace_folders
 from services.photo_review import flag_note
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
+from sidecar_identity import delete_orphaned_sidecars
 from web.app_hooks import claim_search_lane
 from web.background_jobs import make_background_job
 from web.location_edits import (
@@ -298,6 +299,10 @@ def _sort_missing_removals(
     folder_online_cache: dict[str, bool] = {}
 
     def folder_accessible(folder_path: str) -> bool:
+        # A path that stats as a directory but cannot be enumerated (a
+        # NAS/share ACL denial, no search permission) makes
+        # ``os.path.exists`` unreliable for every child, so it counts as
+        # offline too.
         cached = folder_online_cache.get(folder_path)
         if cached is not None:
             return cached
@@ -342,33 +347,6 @@ def _sort_missing_removals(
         if delete_sidecars:
             sidecar_targets.append(src)
     return confirmed_ids, restored_ids, folder_offline_ids, skipped, sidecar_targets
-
-
-def _delete_missing_sidecars(sidecar_targets: list[str]) -> tuple[int, int]:
-    """Delete the XMP sidecars of confirmed-missing originals.
-
-    Returns ``(sidecars_deleted, sidecars_skipped)``.
-    """
-    sidecars_deleted = 0
-    sidecars_skipped = 0
-    for src in sidecar_targets:
-        stem, _ = os.path.splitext(src)
-        removed_one = False
-        for candidate in (stem + ".xmp", stem + ".XMP",
-                          src + ".xmp", src + ".XMP"):
-            if os.path.isfile(candidate):
-                try:
-                    os.remove(candidate)
-                    removed_one = True
-                except OSError as e:
-                    log.warning(
-                        "Failed to delete sidecar %s: %s", candidate, e
-                    )
-        if removed_one:
-            sidecars_deleted += 1
-        else:
-            sidecars_skipped += 1
-    return sidecars_deleted, sidecars_skipped
 
 
 def _score_sharpness_region(db: Database, raw: object, vireo_dir: str) -> JsonDict:
@@ -632,63 +610,15 @@ def create_photos_blueprint(
         ws_id = db.active_workspace_id
         if ws_id is None:
             return json_error("No active workspace", 400)
-        deleted = 0
-        skipped = 0
-        folder_online_cache = {}
-        for raw_id in photo_ids:
-            try:
-                pid = int(raw_id)
-            except (TypeError, ValueError):
-                skipped += 1
-                continue
-            row = db.photos.file_in_workspace(pid, ws_id)
-            if not row:
-                skipped += 1
-                continue
-            folder_path = row["folder_path"]
-            folder_online = folder_online_cache.get(folder_path)
-            if folder_online is None:
-                # Match /api/photos/missing/remove: a path that stats as a
-                # directory but can't be enumerated (NAS/share ACL denial,
-                # missing search permission) makes ``os.path.exists(src)``
-                # unreliable for every child, so we'd otherwise unlink
-                # sidecars belonging to originals we couldn't actually
-                # verify were missing.
-                folder_online = False
-                if os.path.isdir(folder_path):
-                    try:
-                        with os.scandir(folder_path):
-                            folder_online = True
-                    except OSError:
-                        folder_online = False
-                folder_online_cache[folder_path] = folder_online
-            if not folder_online:
-                # Folder is currently unreachable — we can't tell whether
-                # the original was restored before the mount went offline,
-                # so skip the sidecar (a valid original could have a
-                # matching .xmp we would wrongly delete once the volume
-                # comes back).
-                skipped += 1
-                continue
-            src = os.path.join(folder_path, row["filename"])
-            if os.path.exists(src):
-                # Original came back — refuse to touch the sidecar.
-                skipped += 1
-                continue
-            stem, _ = os.path.splitext(src)
-            removed_one = False
-            for candidate in (stem + ".xmp", stem + ".XMP",
-                              src + ".xmp", src + ".XMP"):
-                if os.path.isfile(candidate):
-                    try:
-                        os.remove(candidate)
-                        removed_one = True
-                    except OSError as e:
-                        log.warning("Failed to delete sidecar %s: %s", candidate, e)
-            if removed_one:
-                deleted += 1
-            else:
-                skipped += 1
+        # The same per-photo recheck as /api/photos/missing/remove: rows
+        # outside the workspace, under an unreachable folder, or whose
+        # original came back are skipped without touching their sidecars.
+        (
+            _confirmed_ids, restored_ids, folder_offline_ids, skipped,
+            sidecar_targets,
+        ) = _sort_missing_removals(db, ws_id, photo_ids, True)
+        deleted, sidecars_skipped = delete_orphaned_sidecars(sidecar_targets)
+        skipped += len(restored_ids) + len(folder_offline_ids) + sidecars_skipped
         return jsonify({"deleted": deleted, "skipped": skipped})
 
     @blueprint.route("/api/photos/missing/remove", methods=["POST"])
@@ -737,7 +667,7 @@ def create_photos_blueprint(
         sidecars_deleted = 0
         sidecars_skipped = 0
         if delete_sidecars:
-            sidecars_deleted, sidecars_skipped = _delete_missing_sidecars(
+            sidecars_deleted, sidecars_skipped = delete_orphaned_sidecars(
                 sidecar_targets,
             )
 

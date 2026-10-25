@@ -556,13 +556,13 @@ def test_move_photos_failed_copy_skips_one_photo_and_leaves_no_partial(
 # -- move_photos: uppercase .XMP sidecars travel with their photo -------------
 
 
-def test_xmp_path_finds_uppercase_sidecar(tmp_path):
-    from move import _xmp_path
+def test_stem_sidecar_finds_uppercase_sidecar(tmp_path):
+    from sidecar_identity import stem_sidecar
 
     photo = _jpeg(tmp_path / "IMG_9.JPG")
     (tmp_path / "IMG_9.XMP").write_text("<x/>")
 
-    found = _xmp_path(str(photo))
+    found = stem_sidecar(str(photo))
 
     assert found is not None
     assert os.path.samefile(found, tmp_path / "IMG_9.XMP")

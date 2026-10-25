@@ -36,6 +36,7 @@ from app_paths import media_root
 from db import _SQLITE_PARAM_CHUNK_SIZE as SQLITE_PARAM_CHUNK_SIZE
 from db import Database, MissingPhotosCancelled
 from photo_payload import attach_nested_edit_recipes
+from sidecar_identity import photo_sidecars
 
 if TYPE_CHECKING:
     from jobs import JobRunner
@@ -592,7 +593,6 @@ class MissingOriginals:
             check_cancelled()
             pid = row["id"]
             src = os.path.join(row["folder_path"], row["filename"])
-            stem, _ext = os.path.splitext(src)
             # Working copy: the DB path wins when set, but legacy rows from
             # before working_copy_path was tracked can still have a file at
             # the default <vireo>/working/<id>.jpg location — and the batch
@@ -616,12 +616,7 @@ class MissingOriginals:
                 "has_thumb": os.path.isfile(os.path.join(thumb_dir, f"{pid}.jpg")),
                 "has_preview": pid in preview_pids,
                 "has_working_copy": has_wc,
-                "has_xmp_sidecar": (
-                    os.path.isfile(stem + ".xmp")
-                    or os.path.isfile(stem + ".XMP")
-                    or os.path.isfile(src + ".xmp")
-                    or os.path.isfile(src + ".XMP")
-                ),
+                "has_xmp_sidecar": bool(photo_sidecars(src)),
             })
         attach_nested_edit_recipes(db, out)
         return out
