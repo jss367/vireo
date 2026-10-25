@@ -113,29 +113,35 @@ jobs:
               ])
               .write();
 
-  # Impact-selected unit tests on Linux. ``scripts/select_tests.py``
-  # maps the PR's diff onto the per-test coverage recorded by the last
-  # post-merge "Full tests" run (test-main.yml) and runs just the tests
-  # that executed the changed functions. The complete suite on all three
-  # OSes still runs after merge; harness changes (conftest, pyproject,
-  # these workflows, vireo/data) or the ``ci-full-suite`` label force the
-  # full suite here. No map (cache miss) also falls back to the full suite,
-  # so selection can only ever narrow a run, never skip one by accident.
+  # Impact-selected unit tests on Linux and Windows.
+  # ``scripts/select_tests.py`` maps the PR's diff onto the per-test
+  # coverage recorded by the last post-merge "Full tests" run
+  # (test-main.yml) and runs just the tests that executed the changed
+  # functions. The complete suite on all three OSes still runs after
+  # merge; harness changes (conftest, pyproject, these workflows,
+  # vireo/data) or the ``ci-full-suite`` label force the full suite
+  # here. No map (cache miss) also falls back to the full suite, so
+  # selection can only ever narrow a run, never skip one by accident.
   #
-  # The run is split across four parallel jobs per OS (``--shard K/4`` from
-  # ``scripts/selected_tests_plugin.py``): every shard makes the same
-  # selection and runs every fourth test of it, so a full-suite fallback
-  # takes about a quarter of the wall time. The ``test`` gate below
-  # requires all of them. Windows always runs the full unit suite because
-  # Linux coverage cannot record tests or branches that only run on Windows.
+  # The run is split across four parallel jobs per OS (``--shard K/4``
+  # from ``scripts/selected_tests_plugin.py``): every shard makes the
+  # same selection and runs every fourth test of it, so a full-suite
+  # fallback takes about a quarter of the wall time. The ``test`` gate
+  # below requires all of them. The coverage map is recorded on Linux
+  # (``enableCrossOsArchive`` lets the Windows runner read it), so a
+  # Windows-only test or branch is not in it: a change that only a
+  # Windows-only test exercises is caught by the post-merge full suite
+  # on main, not here (the ``ci-full-suite`` label runs it on the PR).
   #
-  # Windows verifies the complete suite before merge. Most red runs of Full
-  # tests on main have come from the Windows leg alone: POSIX paths in a new
-  # test, CRLF checkouts of harnessed JS, a file held open across
-  # ``os.replace``. In most of them the failing test was new or edited in
-  # the breaking PR, so it was in that PR's selection and fails here before
-  # merge instead. macOS stays post-merge only; it has not been the one to
-  # break main.
+  # Red runs of Full tests on main have mostly come from the Windows
+  # leg: POSIX paths in a new test, CRLF checkouts of harnessed JS, a
+  # file held open across ``os.replace``. In most of them the failing
+  # test was new or edited in the breaking PR, so it is in that PR's
+  # selection and fails here before merge instead. The Windows leg
+  # still gets the same bounded rerun as the post-merge full suite in
+  # both modes (one retry per failing test, with every test that passed
+  # only on its rerun surfaced as a warning annotation). macOS stays
+  # post-merge only; it has not been the one to break main.
   unit:
     needs: changes
     # Linux keeps its original ``unit (K)`` check names; Windows shards are
