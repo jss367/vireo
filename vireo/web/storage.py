@@ -26,6 +26,44 @@ from working_copy_cache import working_copy_stats
 log = logging.getLogger(__name__)
 
 
+def _assemble_storage_locations(
+    *, db_path, storage_root, thumb_root, emb_dir, models_dir, hf_cache,
+    emb_size, models_size, hf_size, other_entries, is_within,
+):
+    """Named locations for /api/storage, with the storage_root label and the
+    thumbnail entry adjusted for split cache/data layouts (fresh installs).
+    Advertising storage_root as "containing thumbnails" when they live in a
+    separate cache root would be a user-visible untruth, and omitting the
+    cache root would hide its free-space warnings and Open folder affordance.
+    """
+    from services.storage_paths import location_id as managed_location_id
+
+    locations = [("catalog", "Catalog and masks", os.path.dirname(db_path))]
+    if is_within(thumb_root, storage_root):
+        locations.append((
+            "generated",
+            "Thumbnails, previews, working copies, and offline originals",
+            storage_root,
+        ))
+    else:
+        locations.append((
+            "generated", "Previews, working copies, and offline originals",
+            storage_root,
+        ))
+        locations.append(("thumbnails", "Thumbnails", thumb_root))
+    if emb_size:
+        locations.append(("embeddings", "Label embeddings", emb_dir))
+    if models_size:
+        locations.append(("models", "Downloaded models", models_dir))
+    if hf_size:
+        locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+    for entry in other_entries:
+        path = entry["path"] if os.path.isdir(entry["path"]) else os.path.dirname(entry["path"])
+        if not any(is_within(path, existing) for _id, _label, existing in locations):
+            locations.append((managed_location_id(path), "Additional managed storage", path))
+    return locations
+
+
 def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner):
     """Build the storage blueprint.
 
@@ -289,25 +327,13 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                 "capacity": capacity_bytes,
             }
 
-        raw_locations = [
-            ("catalog", "Catalog and masks", os.path.dirname(db_path)),
-            (
-                "generated",
-                "Thumbnails, previews, working copies, and offline originals",
-                storage_root,
-            ),
-        ]
-        if emb["size"]:
-            raw_locations.append(("embeddings", "Label embeddings", EMB_CACHE_DIR))
-        if models_size:
-            raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
-        if hf_size:
-            raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
-        from services.storage_paths import location_id as managed_location_id
-        for entry in other_entries:
-            path = entry["path"] if os.path.isdir(entry["path"]) else os.path.dirname(entry["path"])
-            if not any(_is_within(path, existing) for _id, _label, existing in raw_locations):
-                raw_locations.append((managed_location_id(path), "Additional managed storage", path))
+        raw_locations = _assemble_storage_locations(
+            db_path=db_path, storage_root=storage_root,
+            thumb_root=os.path.abspath(config["THUMB_CACHE_DIR"]),
+            emb_dir=EMB_CACHE_DIR, models_dir=DEFAULT_MODELS_DIR, hf_cache=hf_cache,
+            emb_size=emb["size"], models_size=models_size, hf_size=hf_size,
+            other_entries=other_entries, is_within=_is_within,
+        )
 
         locations_by_path = {}
         for location_id, label, path in raw_locations:
@@ -612,6 +638,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         locations = {
             "catalog": os.path.dirname(db_path),
             "generated": media_root(config["THUMB_CACHE_DIR"]),
+            "thumbnails": config["THUMB_CACHE_DIR"],
             "embeddings": EMB_CACHE_DIR,
             "models": DEFAULT_MODELS_DIR,
             "hf_cache": huggingface_cache_dir(),

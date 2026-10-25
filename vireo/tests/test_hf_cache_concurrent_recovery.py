@@ -111,7 +111,8 @@ def storage_inventory_routes(fs, service_ns):
           "working_copy_stats": lambda _p: {"count": 0, "size": 0, "path": "/invented/generated/working"},
           "_storage_masks_data": lambda _db: {"total_bytes": 0, "path": "/invented/catalog/masks"},
           "shutil": S(disk_usage=lambda _p: S(free=100, total=200)), "sys": S(platform="invented")}
-    selected(Path("web/storage.py"), {"api_storage", "api_storage_hf_cache"}, ns)
+    selected(Path("web/storage.py"),
+             {"_assemble_storage_locations", "api_storage", "api_storage_hf_cache"}, ns)
     return ns
 
 

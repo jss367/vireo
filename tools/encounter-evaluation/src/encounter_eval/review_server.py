@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .common import configure_repo, shared_default_path
 from .review import KINDS, build_queue, connect, metadata, same_photo, save_review
 from .review_tags import ensure_tag_sync, sync_review_tags
 
@@ -76,7 +77,9 @@ def make_server(queue, *, port=0, media_root=None, update_vireo_tags=False):
         if meta.get('format_version') != 1:
             raise ValueError('Unsupported review database')
     token = secrets.token_urlsafe(32)
-    media_root = Path(media_root or Path.home() / '.vireo').resolve()
+    # Previews, working copies and thumbnails live under the current Vireo
+    # data root; fresh installs put that outside ``~/.vireo``.
+    media_root = Path(media_root or shared_default_path('data')).resolve()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -202,7 +205,8 @@ def main(argv=None):
     build = sub.add_parser('build')
     build.add_argument('--run', type=Path, required=True)
     build.add_argument('--output', type=Path, required=True)
-    build.add_argument('--db', type=Path, default=Path.home()/'.vireo/vireo.db')
+    build.add_argument('--db', type=Path,
+                       help='Vireo catalog; defaults to the current installation\'s database path')
     build.add_argument('--agreement-sample', type=int, default=200)
     build.add_argument('--seed', type=int, default=42)
     serve = sub.add_parser('serve')
@@ -213,8 +217,13 @@ def main(argv=None):
     serve.add_argument('--update-vireo-tags', action='store_true',
                        help='Also apply saved reviews to Vireo species tags and queue normal XMP sync')
     args = p.parse_args(argv)
+    # The catalog and the data root both honor the current installation's
+    # platform layout, so resolve defaults after configure_repo makes
+    # ``app_paths`` importable.
+    configure_repo()
     if args.command == 'build':
-        print(json.dumps(build_queue(args.run, args.output, args.db, agreement_sample=args.agreement_sample, seed=args.seed), indent=2))
+        db = args.db if args.db is not None else shared_default_path('database')
+        print(json.dumps(build_queue(args.run, args.output, db, agreement_sample=args.agreement_sample, seed=args.seed), indent=2))
     else:
         server = make_server(args.queue, port=args.port, media_root=args.media_root,
                              update_vireo_tags=args.update_vireo_tags)

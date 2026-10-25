@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .algorithms import run_algorithm
-from .common import configure_repo, digest, encode, write_json
+from .common import configure_repo, digest, encode, shared_default_path, write_json
 from .library import Taxonomy, inference_features, prepare, read_bundle, timestamp
 from .scoring import score, summarize
 
@@ -72,7 +72,9 @@ def comparison_cases(photos, answers, before, after):
 
 
 def _preview(pid, presentation):
-    root = Path.home()/'.vireo'
+    # Previews, working copies and thumbnails live under the current Vireo
+    # data root; fresh installs put that outside ``~/.vireo``.
+    root = shared_default_path('data')
     candidates = [root/'previews'/f'{pid}_{s}.jpg' for s in (960,1920,3840)]
     # Full-size JPEG working copy: present for many photos without a preview.
     candidates.append(root/'working'/f'{pid}.jpg')
@@ -86,6 +88,8 @@ def _preview(pid, presentation):
 
 def run(output, db, *, baseline_revision='HEAD', scopes, split_registries=None):
     repo = configure_repo()
+    if db is None:
+        db = shared_default_path('database')
     from bursts import detect_bursts
     from pipeline import load_photo_features
 
@@ -225,7 +229,8 @@ def run(output, db, *, baseline_revision='HEAD', scopes, split_registries=None):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',type=Path,required=True)
-    p.add_argument('--db',type=Path,default=Path.home()/'.vireo/vireo.db')
+    p.add_argument('--db',type=Path,
+                   help='Vireo catalog; defaults to the current installation\'s database path')
     p.add_argument('--baseline-revision',default='HEAD')
     p.add_argument('--scope',action='append',required=True,help='Workspace ID, optionally followed by :YYYY-MM-DD; repeatable')
     p.add_argument('--split-registry', action='append', required=True,
