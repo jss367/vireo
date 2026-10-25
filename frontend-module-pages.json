@@ -81,6 +81,12 @@
     ],
     "sharedWrites": []
   },
+  "id-conflicts": {
+    "route": "/id-conflicts",
+    "template": "id_conflicts.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "jobs": {
     "route": "/jobs",
     "template": "jobs.html",
