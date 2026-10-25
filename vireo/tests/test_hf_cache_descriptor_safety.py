@@ -557,7 +557,8 @@ class SharedGuardTests(unittest.TestCase):
         ns = {"__builtins__": {**vars(builtins), "__import__": importer},
               "functools": functools, "Callable": Callable,
               "threading": S(RLock=lambda: thread_lock, local=S),
-              "os": S(path=S(dirname=posixpath.dirname), makedirs=lambda *_a, **_k: None)}
+              "os": S(path=S(dirname=posixpath.dirname, realpath=posixpath.normpath),
+                      makedirs=lambda *_a, **_k: None)}
         definitions(Path("services/hf_cache_lock.py"), ns)
         first = ns["SharedDownloadLock"]("/invented/state/guard")
         other = ns["SharedDownloadLock"]("/invented/state/guard")

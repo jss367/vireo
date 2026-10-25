@@ -599,7 +599,7 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
 
     @blueprint.route("/api/storage/hf-cache/remove", methods=["POST"])
     def api_storage_hf_cache_remove() -> ResponseReturnValue:
-        """Remove Hugging Face cache entries: ``{"unused": true}`` or ``{"keys": [...]}``.
+        """Remove cache entries by keys, unused entries, or existing model folders.
 
         Keys are the ones the inventory handed out; anything else is a 404,
         so the request cannot name a path of its own.
@@ -609,15 +609,21 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
             return json_error("Expected a JSON object")
+        if sum(key in body for key in ("keys", "unused", "installed")) != 1:
+            return json_error("Choose exactly one of keys, unused, or installed")
+        if any(key in body and body[key] is not True for key in ("unused", "installed")):
+            return json_error("unused and installed must be true when supplied")
         keys = body.get("keys")
-        if not body.get("unused") and (
+        if not (body.get("unused") or body.get("installed")) and (
             not isinstance(keys, list) or not keys
             or not all(isinstance(k, str) for k in keys)
         ):
-            return json_error("keys (a list of entry keys) or unused: true required")
+            return json_error("keys (a list of entry keys), unused: true, or installed: true required")
         try:
             if body.get("unused"):
                 result = hf_cache_service.remove_unused()
+            elif body.get("installed"):
+                result = hf_cache_service.remove_installed()
             else:
                 # Without ``unused``, the check above required a non-empty
                 # list of keys, so ``or []`` never applies; it only narrows

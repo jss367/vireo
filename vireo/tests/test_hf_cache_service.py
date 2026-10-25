@@ -6,6 +6,7 @@ the developer's real cache.
 """
 
 import hashlib
+import json
 import os
 import time
 
@@ -74,6 +75,173 @@ def _install(tmp_path, dirname):
 
 def _entries(inv):
     return {e["key"]: e for e in inv["entries"]}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_bulk_existing_model_cache_cleanup_preserves_installs_and_unused_entries(hub, tmp_path):
+    from services import hf_cache
+
+    install = _install(tmp_path, "dinov2-vit-b14")
+    installed_blob = hub.add("dinov2-vit-b14/model.onnx", b"old cached revision")
+    unused_blob = hub.add("bioclip-2.5-vith14/model.onnx", b"unused cached revision")
+    unrelated = hub.add("model.onnx", b"other client", repo="models--another--client")
+    result = hf_cache.remove_installed()
+    assert result["freed"] == len(b"old cached revision")
+    assert not result["failed"]
+    assert not installed_blob.exists()
+    assert unused_blob.exists() and unrelated.exists()
+    assert (install / "model.onnx").read_bytes() == b"installed"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_rechecks_install_presence(hub, tmp_path):
+    from services import hf_cache
+
+    install = _install(tmp_path, "dinov2-vit-b14")
+    blob = hub.add("dinov2-vit-b14/model.onnx", b"cached")
+    assert hf_cache.inventory()["installed_size"] > 0
+    (install / "model.onnx").unlink()
+    install.rmdir()
+    assert hf_cache.remove_installed()["removed"] == []
+    assert blob.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_preserves_weights_linked_into_cache(hub, tmp_path):
+    from services import hf_cache
+
+    install = _install(tmp_path, "dinov2-vit-b14")
+    blob = hub.add("dinov2-vit-b14/model.onnx", b"the only weights")
+    weights = install / "model.onnx"
+    weights.unlink()
+    _symlink(blob, weights)
+    with pytest.raises(hf_cache.UnsafeCacheCleanup, match="still reads from this cache"):
+        hf_cache.remove_installed()
+    assert weights.read_bytes() == b"the only weights"
+    assert blob.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_rejects_when_registered_weights_live_in_cache(hub, tmp_path):
+    """A stale default directory must not mask a cache-backed registered path.
+
+    The default install directory exists but is empty, while the model's
+    registered ``weights_path`` points into the Hub snapshot that backs the
+    active install. Validation must inspect every existing install candidate,
+    not just the first one, before deleting the cache that serves the model.
+    """
+    from services import hf_cache
+
+    stale_default = tmp_path / "models" / "bioclip-vit-b-16"
+    stale_default.mkdir(parents=True)
+    files = ("image_encoder.onnx", "image_encoder.onnx.data", "text_encoder.onnx",
+             "text_encoder.onnx.data", "tokenizer.json", "config.json")
+    blobs = [hub.add(f"bioclip-vit-b-16/{name}", f"bytes {name}".encode()) for name in files]
+    snapshot_install = blobs[0].parent.parent / "snapshots" / "rev1" / "bioclip-vit-b-16"
+    (tmp_path / "models.json").write_text(json.dumps(
+        {"models": [{"id": "bioclip-vit-b-16", "weights_path": str(snapshot_install)}]}
+    ))
+
+    with pytest.raises(hf_cache.UnsafeCacheCleanup, match="still reads from this cache"):
+        hf_cache.remove_installed()
+    for blob in blobs:
+        assert blob.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_rejects_when_custom_registration_points_at_cache_file(hub, tmp_path):
+    """A custom-API registration pointing at a cache file must preserve the cache.
+
+    A legacy install for the known ``bioclip-vit-b-16`` leaves a stale default
+    directory under ``models/`` while the custom-model API registers a
+    separate wrapper whose ``weights_path`` is a plain file inside the Hub
+    cache for the same repository. Without the fix, ``_collect`` filters that
+    file out of the install candidates, ``remove_installed`` validates only
+    the stale directory, and the cache that the wrapper reads out of is
+    deleted. Install-candidate filtering must retain file-backed
+    registrations so validation sees the cache-backed path and refuses
+    deletion.
+    """
+    from services import hf_cache
+
+    stale_default = tmp_path / "models" / "bioclip-vit-b-16"
+    stale_default.mkdir(parents=True)
+    blob = hub.add("model.onnx", b"legacy wrapper weights",
+                   repo="models--imageomics--bioclip")
+    (tmp_path / "models.json").write_text(json.dumps({"models": [
+        {"id": "legacy-bioclip-wrapper", "name": "Legacy wrapper",
+         "model_str": "hf-hub:imageomics/bioclip",
+         "weights_path": str(blob), "description": "custom", "managed": False},
+    ]}))
+    before = blob.read_bytes()
+
+    with pytest.raises(hf_cache.UnsafeCacheCleanup, match="still reads from this cache"):
+        hf_cache.remove_installed()
+    assert blob.exists() and blob.read_bytes() == before
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_rejects_when_registered_symlink_resolves_into_cache(hub, tmp_path):
+    """A custom-API registration symlinked to a cache file must preserve the cache.
+
+    The stale default directory under ``models/`` is paired with a custom
+    wrapper whose ``weights_path`` is a symlink living outside the cache
+    that resolves to a Hub blob for the same repository. Install-candidate
+    filtering must retain symlinks to files so validation resolves the
+    symlink, sees the cache-backed target, and refuses deletion. The
+    symlink and its target cache blob must stay intact.
+    """
+    from services import hf_cache
+
+    stale_default = tmp_path / "models" / "bioclip-vit-b-16"
+    stale_default.mkdir(parents=True)
+    blob = hub.add("model.onnx", b"shared weights",
+                   repo="models--imageomics--bioclip")
+    link = tmp_path / "registered-weights.onnx"
+    _symlink(blob, link)
+    (tmp_path / "models.json").write_text(json.dumps({"models": [
+        {"id": "legacy-bioclip-wrapper", "name": "Legacy wrapper",
+         "model_str": "hf-hub:imageomics/bioclip",
+         "weights_path": str(link), "description": "custom", "managed": False},
+    ]}))
+
+    with pytest.raises(hf_cache.UnsafeCacheCleanup, match="still reads from this cache"):
+        hf_cache.remove_installed()
+    assert blob.exists() and blob.read_bytes() == b"shared weights"
+    assert link.is_symlink() and link.read_bytes() == b"shared weights"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_removes_cache_when_custom_file_is_independent(hub, tmp_path):
+    """An independent file-backed custom registration does not block cleanup.
+
+    The custom wrapper's ``weights_path`` is a file outside the cache (no
+    symlink into Hub blobs). Validation retains it as an install candidate
+    alongside the stale default directory, inspects both, and finds them
+    independent of the cache — so legacy cache entries are freed as
+    expected. This guards against false positives from broadening the
+    install-candidate filter.
+    """
+    from services import hf_cache
+
+    stale_default = tmp_path / "models" / "bioclip-vit-b-16"
+    stale_default.mkdir(parents=True)
+    independent = tmp_path / "custom-install" / "model.onnx"
+    independent.parent.mkdir()
+    independent.write_bytes(b"independent weights")
+    blob = hub.add("model.onnx", b"legacy cached revision",
+                   repo="models--imageomics--bioclip")
+    (tmp_path / "models.json").write_text(json.dumps({"models": [
+        {"id": "legacy-bioclip-wrapper", "name": "Legacy wrapper",
+         "model_str": "hf-hub:imageomics/bioclip",
+         "weights_path": str(independent), "description": "custom", "managed": False},
+    ]}))
+
+    result = hf_cache.remove_installed()
+    assert result["freed"] == len(b"legacy cached revision")
+    assert not result["failed"]
+    assert not blob.exists()
+    assert independent.read_bytes() == b"independent weights"
 
 
 def test_inventory_splits_installed_from_unused(hub, tmp_path):

@@ -209,9 +209,13 @@ def _onnx_repo_dir_name() -> str:
     return "models--" + ONNX_REPO.replace("/", "--")
 
 
-def _is_install_dir(path: str) -> bool:
-    """A model directory, even an empty one a download has just created."""
-    return bool(path) and os.path.isdir(path)
+def _is_install_candidate(path: str) -> bool:
+    """A registered install location: a directory (even an empty one a download
+    just created) or a file that `weights_path` points to directly, including
+    symlinks resolving to either. Broken symlinks and non-existent paths are
+    not candidates: the registration is stale and cleanup has nothing to guard.
+    """
+    return bool(path) and (os.path.isdir(path) or os.path.isfile(path))
 
 
 def _within(path: str, root: str) -> bool:
@@ -380,11 +384,13 @@ def _collect(
                 key, name, candidates = repo, f"{repo}: repository metadata", []
             else:
                 key, name, candidates = repo, repo, by_repo.get(repo, [])
-            install = next((d for d in candidates if _is_install_dir(d)), None)
+            existing = list(dict.fromkeys(d for d in candidates if _is_install_candidate(d)))
+            install = existing[0] if existing else None
             found[key] = {
                 "key": key, "name": name, "repo_dir": repo_dir, "cleanup_eligible": cleanup_eligible,
                 "files": data["files"], "blobs": data["blobs"],
                 "installed": install is not None, "install_path": install,
+                "install_paths": existing,
             }
         dangling = _unreferenced_blobs(repo_dir, referenced)
         if dangling:
@@ -392,7 +398,7 @@ def _collect(
             found[key] = {
                 "key": key, "name": f"{repo}: files no download refers to",
                 "repo_dir": repo_dir, "files": list(dangling), "blobs": dangling, "cleanup_eligible": cleanup_eligible,
-                "installed": False, "install_path": None, "dangling": True,
+                "installed": False, "install_path": None, "install_paths": [], "dangling": True,
             }
     _size_groups(found)
     return total, found
@@ -636,6 +642,54 @@ def remove_unused(cache_dir: str | None = None, models_dir: str | None = None) -
     log.info("Removed %d unused HF cache entries (%d bytes, %d failures)",
              len(result["removed"]) + len(result["failed"]), result["freed"], len(result["failed"]))
     return result
+
+
+def remove_installed(cache_dir: str | None = None, models_dir: str | None = None) -> CacheRemoval:
+    """Remove legacy cache entries associated with existing model folders.
+
+    Re-evaluate membership under the same producer/blob guards as individual
+    removals. A folder may be incomplete or a different revision, so this does
+    not assert byte equality or model readiness. Installed files stay untouched.
+    """
+    cache_dir = _cache_dir(cache_dir)
+
+    def select(found: dict[str, JsonDict]) -> list[JsonDict]:
+        groups = [g for g in found.values() if g["installed"] and g["removable"]]
+        # User-provided links are not duplicate copies. A stale default
+        # directory does not mask a registered weights path that reads out
+        # of this cache, so every existing install candidate is checked,
+        # not only the one surfaced as ``install_path``.
+        for group in groups:
+            for path in group["install_paths"]:
+                _require_independent_install(path, cache_dir)
+        return groups
+
+    result = _delete_selected(cache_dir, _models_dir(models_dir), select)
+    log.info("Removed %d installed-model cache entries (%d bytes, %d failures)",
+             len(result["removed"]), result["freed"], len(result["failed"]))
+    return result
+
+
+def _require_independent_install(install: str, cache_dir: str) -> None:
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    def check(path: str) -> None:
+        resolved, cache_root = os.path.realpath(path), os.path.realpath(cache_dir)
+        if resolved == cache_root or resolved.startswith(cache_root + os.sep):
+            raise UnsafeCacheCleanup(f"Installed model still reads from this cache: {path}. Keep its cache entry.")
+
+    check(install)
+    # A file-backed install candidate (``weights_path`` pointing to a single
+    # file or a symlink to one) has nothing to walk; the top-level realpath
+    # check above already catches a cache-backed registration.
+    if not os.path.isdir(install):
+        return
+    for root, dirs, files in os.walk(install, followlinks=False, onerror=walk_error):
+        for name in dirs + files:
+            path = os.path.join(root, name)
+            if os.path.islink(path):
+                check(path)
 
 
 def _purge_keys(

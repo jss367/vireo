@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 
@@ -35,6 +36,40 @@ def test_storage_shows_named_categories_and_escaped_file_paths(live_server, page
     expect(details.locator("code").filter(has_text=backup.name)).to_be_visible()
     expect(details.locator(".storage-breakdown-row").filter(has_text=backup.name)).to_contain_text("6 KB")
     expect(details.locator("img")).to_have_count(0)
+
+
+def test_existing_model_cache_cleanup_confirms_and_keeps_weights(live_server, page, tmp_path, monkeypatch):
+    import models
+
+    cache = tmp_path / "hub"
+    blob = cache / "models--jss367--vireo-onnx-models/blobs" / hashlib.sha256(b"cached").hexdigest()
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"cached")
+    link = cache / "models--jss367--vireo-onnx-models/snapshots/rev/bioclip-2/image_encoder.onnx"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(os.path.relpath(blob, link.parent))
+    except OSError:
+        pytest.skip("Hugging Face cache cleanup requires symlinks")
+    monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+    weights = Path(models.DEFAULT_MODELS_DIR) / "bioclip-2/image_encoder.onnx"
+    before = weights.read_bytes()
+    page.goto(f"{live_server['url']}/storage")
+    page.locator("#storageMigrationHelp summary").click()
+    expect(page.locator("#storageMigrationHelp")).to_contain_text("--migrate-storage preview")
+    page.locator('[data-storage-manage="hf-cache"]').click()
+    button = page.locator("#hfCacheRemoveInstalled")
+    expect(button).to_be_enabled()
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    button.click()
+    assert blob.exists()
+    page.once("dialog", lambda dialog: dialog.accept())
+    button.click()
+    expect(page.locator("#hfCacheRows")).to_contain_text("No Vireo models")
+    assert not blob.exists()
+    assert weights.read_bytes() == before
+    if screenshot := os.environ.get("VIREO_MIGRATION_SCREENSHOT"):
+        page.screenshot(path=screenshot)
 
 
 def test_quota_apply_aborts_when_pending_storage_autosave_fails(

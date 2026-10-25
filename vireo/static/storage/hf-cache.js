@@ -30,6 +30,7 @@ export async function openHfCacheModal() {
   /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'block';
   /** @type {HTMLElement} */ (document.getElementById('hfCacheRows')).textContent = '';
   /** @type {HTMLButtonElement} */ (document.getElementById('hfCacheRemoveUnused')).disabled = true;
+  /** @type {HTMLButtonElement} */ (document.getElementById('hfCacheRemoveInstalled')).disabled = true;
   modal.classList.add('open');
   await loadHfCacheRows();
 }
@@ -120,9 +121,13 @@ export function renderHfCacheRows() {
   btn.textContent = inv.unused_size
     ? 'Remove unused entries · ' + storageFormatBytes(inv.unused_size)
     : 'No unused entries';
+  var installed = inv.entries.filter(function(entry) { return entry.installed && entry.removable !== false; });
+  var installedBtn = /** @type {HTMLButtonElement} */ (document.getElementById('hfCacheRemoveInstalled'));
+  installedBtn.disabled = !installed.length;
+  installedBtn.textContent = 'Remove caches for existing model folders' + (installed.length ? ' · ' + installed.length : '');
 }
 
-/** @param {{keys?:string[];unused?:boolean}} body @param {string} failure */
+/** @param {{keys?:string[];unused?:boolean;installed?:boolean}} body @param {string} failure */
 export async function _postHfCacheRemove(body, failure) {
   /** @type {HTMLElement} */ (document.getElementById('hfCacheError')).style.display = 'none';
   try {
@@ -167,4 +172,16 @@ export async function removeUnusedHfCache() {
       storageFormatBytes(inv.unused_size) + ') that no installed model uses? ' +
       'Installing those models again will download them from Hugging Face.')) return;
   await _postHfCacheRemove({unused: true}, 'Failed to remove unused cache entries');
+}
+
+export async function removeInstalledHfCache() {
+  var inv = state.hfCacheInventory;
+  if (!inv) return;
+  var count = inv.entries.filter(function(entry) { return entry.installed && entry.removable !== false; }).length;
+  if (!count) return;
+  if (!confirm('Remove ' + count + ' cache ' + (count === 1 ? 'entry' : 'entries') +
+      ' associated with existing model folders? Installed files stay in place. ' +
+      'A folder may be incomplete or a different revision; repair may need another download. ' +
+      'Other applications sharing these caches may also need to download them again.')) return;
+  await _postHfCacheRemove({installed: true}, 'Failed to remove caches for existing model folders');
 }

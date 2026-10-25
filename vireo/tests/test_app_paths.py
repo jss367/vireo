@@ -294,7 +294,7 @@ def test_native_storage_report_and_safe_cleanup_preserve_media(app_and_db, monke
         assert path.read_bytes() == b"keep photo content"
 
 
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("legacy", [False, True, "migrated"])
 def test_real_headless_startup_uses_selected_catalog_and_runtime(legacy, fresh_home, tmp_path):
     import time
 
@@ -302,6 +302,16 @@ def test_real_headless_startup_uses_selected_catalog_and_runtime(legacy, fresh_h
 
     if legacy:
         (fresh_home / ".vireo").mkdir(parents=True)
+    if legacy == "migrated":
+        from db import Database
+        from services.storage_migration import migrate
+
+        database = Database(str(fresh_home / ".vireo/vireo.db"))
+        database.close()
+        original = fresh_home / ".vireo/working/unique.raw"
+        original.parent.mkdir()
+        original.write_bytes(b"unique managed original")
+        migrate()
     expected_db = Path(default_path("database"))
     expected_runtime = Path(default_path("runtime"))
     log_path = tmp_path / "startup.log"
@@ -331,6 +341,10 @@ def test_real_headless_startup_uses_selected_catalog_and_runtime(legacy, fresh_h
             if not legacy:
                 assert (expected_db.parent / "storage-layout-v1").exists()
                 assert not (fresh_home / ".vireo").exists()
+            elif legacy == "migrated":
+                assert (expected_db.parent / "storage-layout-v1").exists()
+                assert (fresh_home / ".vireo/working/unique.raw").read_bytes() == b"unique managed original"
+                assert os.path.samefile(expected_db, fresh_home / ".vireo/vireo.db")
         finally:
             process.terminate()
             try:

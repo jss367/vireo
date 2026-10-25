@@ -1,4 +1,4 @@
-//! Defaults shared with Python. Existing legacy installations never move.
+//! Defaults shared with Python. Legacy installations move only via offline opt-in migration.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ struct Layout {
     roots: HashMap<String, HashMap<String, Root>>,
     native: HashMap<String, Location>,
     native_marker: String,
+    migration_journal: String,
 }
 
 fn layout() -> &'static Layout {
@@ -75,10 +76,21 @@ fn native_root(
     base.join(&root.suffix)
 }
 
+fn ensure_no_pending_migration(home: &Path) -> std::io::Result<()> {
+    if entry_exists(&home.join(&layout().migration_journal)) {
+        return Err(std::io::Error::other(
+            "Storage migration is unfinished. Quit Vireo and run the sidecar with \
+             --migrate-storage apply to resume or --migrate-storage rollback to restore.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn initialize_layout() -> std::io::Result<()> {
     let Some(home) = dirs::home_dir() else {
         return Ok(());
     };
+    ensure_no_pending_migration(&home)?;
     let data = path_in(&home, "data");
     if data == home.join(".vireo") {
         return Ok(());
@@ -125,6 +137,17 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn unfinished_storage_migration_blocks_launcher_startup() {
+        let home = test_home();
+        assert!(ensure_no_pending_migration(&home).is_ok());
+        std::fs::write(home.join(&layout().migration_journal), "{}").unwrap();
+        let error = ensure_no_pending_migration(&home).unwrap_err();
+        assert!(error.to_string().contains("--migrate-storage rollback"));
+        assert!(!home.join("Library/Application Support/Vireo").exists());
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

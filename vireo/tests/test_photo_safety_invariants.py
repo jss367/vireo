@@ -653,6 +653,53 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             map(sorted, map(dict.items, rows_before))
         ), "rescanning an unchanged folder changed the catalog rows"
 
+    @rule(interrupted=st.booleans(), rollback=st.booleans())
+    def migrate_offline_managed_photo_storage(self, interrupted, rollback):
+        """Relocation and its recovery keep managed photos and catalog paths usable."""
+        from pathlib import Path
+
+        import scanner
+        from services import storage_migration
+
+        self.next_seed += 1
+        home = Path(self.root) / f"storage-migration-{self.next_seed}"
+        source, native, cache = home / "legacy", home / "data", home / "cache"
+        source.mkdir(parents=True)
+        probe = source / "probe"
+        try:
+            probe.symlink_to(source, target_is_directory=True)
+            probe.unlink()
+        except OSError:
+            event("storage migration: symlinks unavailable")
+            return
+        photo = source / "working" / f"MANAGED_{self.next_seed}.jpg"
+        _write_photo(str(photo), self.next_seed, self._new_capture_time(0))
+        scanner.scan(str(photo.parent), self.db,
+                     options=ScanOptions(thumb_cache_dir=self.thumbs))
+        self.snapshot = self._disk_snapshot()
+        before_hash = _sha256(str(photo))
+        journal = home / "journal.json"
+        real_link = storage_migration._link
+
+        def fail_after_move(path, target, directory):
+            if path.parent == source:
+                raise OSError("simulated migration crash")
+            real_link(path, target, directory)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(storage_migration, "_paths", lambda: (source, native, cache, journal))
+            if interrupted:
+                with pytest.MonkeyPatch.context() as crash:
+                    crash.setattr(storage_migration, "_link", fail_after_move)
+                    with pytest.raises(OSError, match="simulated migration crash"):
+                        storage_migration.migrate()
+                storage_migration.migrate(rollback=rollback)
+            else:
+                storage_migration.migrate()
+        assert _sha256(str(photo)) == before_hash
+        assert not journal.exists()
+        event(f"storage migration: interrupted={interrupted}, rollback={interrupted and rollback}")
+
     @rule(incremental=st.booleans())
     def scan_own_folder_into_a_collection(self, incremental):
         """Scan the folder and collect what it reported the way Process and

@@ -8,7 +8,7 @@ import {
   closeStorageModal, deleteAllFiles, deleteSelectedFiles, openStorageModal, selectAllFiles,
   updateSelectedInfo,
 } from './files-modal.js';
-import { closeHfCacheModal, openHfCacheModal, removeUnusedHfCache } from './hf-cache.js';
+import { closeHfCacheModal, openHfCacheModal, removeInstalledHfCache, removeUnusedHfCache } from './hf-cache.js';
 import { closeMasksModal, deleteInactiveMasks, deleteStaleMasks, openMasksModal } from './masks.js';
 import { renderStorageCards } from './overview.js';
 import {
@@ -82,6 +82,7 @@ const STORAGE_HANDLERS = {
   hfCacheBackdrop: function(event, el) { if (event.target === el) closeHfCacheModal(); },
   closeHfCacheModal: function() { closeHfCacheModal(); },
   removeUnusedHfCache: function() { return removeUnusedHfCache(); },
+  removeInstalledHfCache: function() { return removeInstalledHfCache(); },
 };
 
 function bindStorageMarkup() {

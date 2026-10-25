@@ -2395,6 +2395,10 @@ def _parse_main_args():
         help="Download and import the iNaturalist taxonomy, then exit",
     )
     parser.add_argument(
+        "--migrate-storage", choices=("preview", "apply", "rollback"),
+        help="Preview or apply an offline storage migration, or roll back an interrupted one, then exit",
+    )
+    parser.add_argument(
         "--check-exiftool",
         action="store_true",
         help="Verify the bundled/system ExifTool, print its version, and exit",
@@ -2557,10 +2561,12 @@ def _open_browser_when_ready(port):
 
 
 def main():
+    args = _parse_main_args()
+    if args.migrate_storage:
+        from services.storage_migration import run_cli
+        raise SystemExit(run_cli(args.migrate_storage))
     initialize_layout()
     _setup_file_logging()
-
-    args = _parse_main_args()
 
     if args.mcp:
         # Not an instance: no port, no runtime.json, no single-instance
