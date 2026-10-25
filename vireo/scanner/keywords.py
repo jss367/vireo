@@ -227,6 +227,7 @@ def _import_keyword_lists(
         # the user may have typed it in Lightroom, or Vireo may have written
         # it out itself — so this is one of the few writers that declines to
         # claim manual authorship.
+        assert parent_id is not None  # A valid hierarchy has at least one segment.
         db.tag_photo(photo_id, parent_id, source=KEYWORD_SOURCE_UNKNOWN)
         hierarchy_leaf_keys.add(keyword_match_key(parts[-1]))
 

@@ -19,11 +19,11 @@ from config import _deep_merge
 from db import normalize_browse_stack_config
 
 if TYPE_CHECKING:
-    from db import Database
+    from db import BrowseStackConfig, Database
     from services.service_types import JsonDict
 
 
-def browse_stack_settings(db: Database, global_config: JsonDict | None = None) -> JsonDict:
+def browse_stack_settings(db: Database, global_config: JsonDict | None = None) -> BrowseStackConfig:
     """Resolve Browse's stack settings for the active workspace.
 
     Reads through ``get_effective_config`` so a per-workspace override of

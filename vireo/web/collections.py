@@ -35,7 +35,7 @@ from web.request_args import (
 if TYPE_CHECKING:
     from sqlite3 import Row
 
-    from db import Database
+    from db import BrowseStackConfig, Database
     from flask.typing import ResponseReturnValue
     from services.service_types import JsonDict, JsonError
     from web.web_types import GetDb, MissingOriginalsPayload
@@ -189,7 +189,7 @@ def _parse_focus_photo_ids(raw: str | None) -> tuple[list[int], str | None]:
 
 
 def _collection_photos_page(
-    db: Database, collection_id: int, *, stacks: bool, stack_cfg: JsonDict | None, sort: str, page: int,
+    db: Database, collection_id: int, *, stacks: bool, stack_cfg: BrowseStackConfig | None, sort: str, page: int,
     per_page: int, underlying_total: int,
 ) -> tuple[list[Row], int, int | None]:
     """``(photos, total, stack_count)`` for one page of a collection."""

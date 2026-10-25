@@ -856,7 +856,7 @@ class _SpeciesConfirmation:
         if not replacement_covered:
             return
         survivors = self.db.get_photos_with_equivalent_species(
-            replacement_covered, self.kid,
+            replacement_covered, cast(int, self.kid),
             exclude_keyword_ids=excluded_ids,
         )
         lost_equivalence = set(replacement_covered) - survivors
@@ -886,7 +886,7 @@ class _SpeciesConfirmation:
 
     def tag_new_species(self, ws_id: int) -> None:
         for pid in self.newly_tagged:
-            self.db.tag_photo(pid, self.kid, source="manual", _commit=False,
+            self.db.tag_photo(pid, cast(int, self.kid), source="manual", _commit=False,
                               provenance=self.provenance, _record_provenance=True)
             queue_keyword_add(
                 self.db, pid, self.species, workspace_id=ws_id, _commit=False,

@@ -1,12 +1,15 @@
 """SQLite database for Vireo photo browser metadata cache."""
 
+from __future__ import annotations
+
 import contextlib
 import json
 import logging
 import os
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict
 
 from keyword_identity import resolve_import_alias
 from keyword_normalization import (
@@ -17,6 +20,9 @@ from new_images import get_shared_cache
 from repositories.species_taxon_lookup import taxon_lookup_variants
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
+    from canonical_schema import CanonicalSchema
     from repositories.audit import AuditRepository
     from repositories.caches import CachesRepository
     from repositories.card_cleanup import CardCleanupRepository
@@ -61,13 +67,27 @@ if TYPE_CHECKING:
     from repositories.source_cleanup import SourceCleanupRepository
     from repositories.species_curation import SpeciesCurationRepository
     from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
+    from repositories.species_provenance import SpeciesProvenanceRepository
     from repositories.stats import StatsRepository
+    from repositories.storage import StorageRepository
     from repositories.subjects import SubjectsRepository
     from repositories.sync import SyncRepository
     from repositories.taxa import TaxaRepository
     from repositories.working_copies import WorkingCopyRepository
     from repositories.workspace_folders import WorkspaceFolderRepository
     from repositories.workspaces import WorkspaceRepository
+
+# Config, recipes, place details, prediction results and history payloads are
+# heterogeneous JSON dictionaries. Their values intentionally use Any; IDs,
+# control flags, repository accessors and transaction APIs have concrete types.
+
+
+class BrowseStackConfig(TypedDict):
+    """Normalized Browse stack settings, independent of the full app config."""
+
+    time_gap: float
+    split_mode: str
+
 
 log = logging.getLogger(__name__)
 
@@ -132,14 +152,14 @@ _KEYWORD_SOURCE_RANK = {
 _KEYWORD_SOURCE_UNRECOGNIZED_RANK = 1
 
 
-def keyword_source_rank(source):
+def keyword_source_rank(source: str | None) -> int:
     """Position of ``source`` in the provenance lattice (higher = stronger)."""
     if source is None:
         return _KEYWORD_SOURCE_RANK[KEYWORD_SOURCE_UNKNOWN]
     return _KEYWORD_SOURCE_RANK.get(source, _KEYWORD_SOURCE_UNRECOGNIZED_RANK)
 
 
-def keyword_source_max(*sources):
+def keyword_source_max(*sources: str | None) -> str | None:
     """Return the strongest of ``sources``: the fold for converging rows.
 
     Ties keep the first argument, so callers pass the incoming/stronger
@@ -154,7 +174,7 @@ def keyword_source_max(*sources):
     return best
 
 
-def keyword_source_rank_sql(expr):
+def keyword_source_rank_sql(expr: str) -> str:
     """SQL for ``keyword_source_rank(expr)``, from the same ordering."""
     whens = " ".join(
         f"WHEN {expr} = '{value}' THEN {rank}"
@@ -168,7 +188,7 @@ def keyword_source_rank_sql(expr):
     )
 
 
-def keyword_source_max_sql(left, right):
+def keyword_source_max_sql(left: str, right: str) -> str:
     """SQL for ``keyword_source_max(left, right)``.
 
     ``left`` and ``right`` are SQL expressions and are each substituted twice
@@ -225,7 +245,9 @@ class IncompatibleDatabaseError(RuntimeError):
     the app, not discarding the database.
     """
 
-    def __init__(self, db_path, cause=None, newer=False):
+    def __init__(
+        self, db_path: str | os.PathLike[str], cause: str | None = None, newer: bool = False
+    ) -> None:
         self.db_path = db_path
         self.cause = cause
         self.newer = newer
@@ -309,7 +331,9 @@ def _sqlite_keyword_text_match(value, token, match_case=0, whole_word=0):
     return 1 if token in value else 0
 
 
-def text_search_match(value, token, match_case=False, whole_word=False):
+def text_search_match(
+    value: str | None, token: str | None, match_case: bool = False, whole_word: bool = False
+) -> bool:
     return bool(_sqlite_keyword_text_match(value, token, match_case, whole_word))
 
 
@@ -488,7 +512,7 @@ BROWSE_STACK_SPLIT_MODES = ("break", "partition")
 BURST_GAP_TOLERANCE_SECONDS = 0.001
 
 
-def normalize_browse_stack_config(config=None):
+def normalize_browse_stack_config(config: object = None) -> BrowseStackConfig:
     """Return ``{"time_gap", "split_mode"}`` for Browse's stack projection.
 
     Accepts either an already-normalized stack dict or a full (effective)
@@ -592,13 +616,15 @@ class _Connection(sqlite3.Connection):
 
     _commit_holds = 0
 
-    def commit(self):
+    def commit(self) -> None:
         if self._commit_holds:
             return
         super().commit()
 
 
-def commit_with_retry(conn, max_retries=5, base_delay=0.1):
+def commit_with_retry(
+    conn: sqlite3.Connection, max_retries: int = 5, base_delay: float = 0.1
+) -> None:
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
 
     Parallel scan workers can still race past the 30s ``busy_timeout`` PRAGMA
@@ -619,7 +645,13 @@ def commit_with_retry(conn, max_retries=5, base_delay=0.1):
             time.sleep(base_delay * (2 ** attempt))
 
 
-def execute_with_retry(conn, sql, params=(), max_retries=5, base_delay=0.1):
+def execute_with_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: Sequence[object] | Mapping[str, object] = (),
+    max_retries: int = 5,
+    base_delay: float = 0.1,
+) -> sqlite3.Cursor:
     """Run ``conn.execute(sql, params)`` with retry on transient
     "locked"/"busy" errors. Returns the cursor.
 
@@ -630,6 +662,9 @@ def execute_with_retry(conn, sql, params=(), max_retries=5, base_delay=0.1):
     ``add_photo`` INSERT timed out, killing the scan stage). This helper
     extends ``busy_timeout`` with bounded retry/backoff so brief contention
     bursts don't abort callers mid-write.
+
+    A negative retry budget raises ``ValueError`` instead of silently
+    skipping the statement and returning no cursor.
     """
     for attempt in range(max_retries + 1):
         try:
@@ -639,6 +674,7 @@ def execute_with_retry(conn, sql, params=(), max_retries=5, base_delay=0.1):
             if ("locked" not in msg and "busy" not in msg) or attempt == max_retries:
                 raise
             time.sleep(base_delay * (2 ** attempt))
+    raise ValueError("max_retries must be nonnegative")
 
 
 def _inclusive_date_to(date_to):
@@ -1018,7 +1054,7 @@ class Database:
         db_path: path to the SQLite database file (created if missing)
     """
 
-    def __init__(self, db_path, *, initialize_schema=True):
+    def __init__(self, db_path: str | os.PathLike[str], *, initialize_schema: bool = True) -> None:
         db_dir = os.path.dirname(db_path)
         if db_path != ":memory:" and db_dir:
             os.makedirs(db_dir, exist_ok=True)
@@ -1026,7 +1062,8 @@ class Database:
         # (db_path, workspace_id) so instances against different SQLite files
         # don't cross-read each other's cached results (workspace_id=1 is
         # reused across every database as the default workspace).
-        self._db_path = db_path
+        # Path-like inputs share the same cache key as their string form.
+        self._db_path = os.fspath(db_path)
         self._species_provenance_before: dict[tuple[int, int], dict[str, Any] | None] = {}
         # ``conn`` exists only while the connection is open: ``close`` deletes
         # it, so its type is the connection, never ``None``. ``close`` and
@@ -1048,7 +1085,7 @@ class Database:
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=30000000")  # 30 MB
         self.conn.execute("PRAGMA busy_timeout=30000")  # 30 s — tolerate parallel scan writers
-        self._active_workspace_id = None
+        self._active_workspace_id: int | None = None
         self._new_images_cache = get_shared_cache()
         if not initialize_schema:
             self._restore_active_workspace()
@@ -1106,7 +1143,7 @@ class Database:
             raise RuntimeError("Vireo database has no workspace after schema initialization")
         self.set_active_workspace(last_id)
 
-    def close(self):
+    def close(self) -> None:
         """Close the underlying sqlite3 connection.
 
         Safe to call multiple times. Without an explicit close, the
@@ -1129,18 +1166,23 @@ class Database:
             del self.conn
 
     @property
-    def closed(self):
+    def closed(self) -> bool:
         """True once ``close`` has run (or ``__init__`` never connected)."""
         return not hasattr(self, "conn")
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> Literal[False]:
         self.close()
         return False
 
-    def __del__(self):
+    def __del__(self) -> None:
         # Safety net for callers that don't use the context manager or call
         # close() explicitly. __del__ may run during interpreter shutdown
         # when sqlite3 is already torn down — swallow everything.
@@ -1156,20 +1198,20 @@ class Database:
     # commits, as ``db.conn.commit()`` always was.
 
     @property
-    def in_transaction(self):
+    def in_transaction(self) -> bool:
         """True while the connection has an open transaction."""
         return self.conn.in_transaction
 
-    def commit(self):
+    def commit(self) -> None:
         """Commit the open transaction (a no-op while commits are held)."""
         self.conn.commit()
 
-    def rollback(self):
+    def rollback(self) -> None:
         """Roll back the open transaction."""
         self.conn.rollback()
         self._species_provenance_before = {}
 
-    def commit_with_retry(self):
+    def commit_with_retry(self) -> None:
         """Commit like ``commit``, retrying while SQLite reports locked or busy.
 
         ``db.commit_with_retry`` (the module function) on this connection:
@@ -1178,7 +1220,7 @@ class Database:
         """
         commit_with_retry(self.conn)
 
-    def begin_immediate(self):
+    def begin_immediate(self) -> None:
         """Open a transaction that holds SQLite's writer lock from the start.
 
         ``BEGIN IMMEDIATE`` waits up to the connection's ``busy_timeout`` for
@@ -1188,7 +1230,7 @@ class Database:
         """
         self.conn.execute("BEGIN IMMEDIATE")
 
-    def begin(self):
+    def begin(self) -> None:
         """Open a deferred transaction, so the reads that follow share one snapshot.
 
         Plain ``BEGIN``: no lock is taken until the first statement, and every
@@ -1200,7 +1242,7 @@ class Database:
         self.conn.execute("BEGIN")
 
     @contextlib.contextmanager
-    def transaction(self):
+    def transaction(self) -> Iterator[None]:
         """``with db.conn:``: commit when the block exits, roll back if it raises.
 
         This is sqlite3's own connection context manager, so its commit is
@@ -1211,7 +1253,7 @@ class Database:
         with self.conn:
             yield
 
-    def set_progress_handler(self, handler, n):
+    def set_progress_handler(self, handler: Callable[[], int] | None, n: int) -> None:
         """``sqlite3.Connection.set_progress_handler`` on this connection.
 
         ``handler`` runs every ``n`` SQLite VM instructions, and a truthy
@@ -1220,7 +1262,7 @@ class Database:
         """
         self.conn.set_progress_handler(handler, n)
 
-    def _canonical_schema(self):
+    def _canonical_schema(self) -> CanonicalSchema:
         """Build the canonical-schema setup on this connection."""
         from canonical_schema import CanonicalSchema
 
@@ -1232,7 +1274,7 @@ class Database:
     # ------------------------------------------------------------------
     # Saved processes (user-editable process presets; global, not scoped)
     # ------------------------------------------------------------------
-    def _processes_repository(self):
+    def _processes_repository(self) -> ProcessesRepository:
         """Build the saved-processes repository on this connection.
 
         Saved processes are global (not workspace-scoped), so no active
@@ -1255,7 +1297,7 @@ class Database:
         """
         return self._processes_repository()
 
-    def repair_stale_folder_parents(self):
+    def repair_stale_folder_parents(self) -> int:
         """Repair parent links left behind by older folder moves.
 
         Only non-NULL links that contradict the saved paths are changed.
@@ -1271,18 +1313,18 @@ class Database:
 
     # -- Workspaces --
 
-    def set_active_workspace(self, workspace_id):
+    def set_active_workspace(self, workspace_id: int | None) -> None:
         """Set the active workspace for scoped queries."""
         self._active_workspace_id = workspace_id
 
-    def _ws_id(self):
+    def _ws_id(self) -> int:
         """Return active workspace id, raising if none set."""
         if self._active_workspace_id is None:
             raise RuntimeError("No active workspace set")
         return self._active_workspace_id
 
     @property
-    def active_workspace_id(self):
+    def active_workspace_id(self) -> int | None:
         """The active workspace id, or ``None`` when no workspace is active.
 
         The public read of the active-workspace state for code outside this
@@ -1294,7 +1336,7 @@ class Database:
         """Return the active workspace id, raising ``RuntimeError`` if none is set."""
         return self._ws_id()
 
-    def get_new_images_for_workspace(self, workspace_id):
+    def get_new_images_for_workspace(self, workspace_id: int) -> dict[str, Any]:
         """Return new-images result for workspace, using cache when fresh.
 
         Race-safe: we snapshot the cache generation before the (potentially
@@ -1315,31 +1357,31 @@ class Database:
         )
         return result
 
-    def invalidate_new_images_cache_for_folders(self, folder_ids):
+    def invalidate_new_images_cache_for_folders(self, folder_ids: Collection[int]) -> None:
         """Clear cache for every workspace linked to any of the given folder_ids."""
         if not folder_ids:
             return
         ws_ids = self._workspace_repository().ids_for_folders(folder_ids)
         self._new_images_cache.invalidate_workspaces(self._db_path, ws_ids)
 
-    def invalidate_new_images_cache_for_workspace(self, workspace_id):
+    def invalidate_new_images_cache_for_workspace(self, workspace_id: int) -> None:
         """Clear path-dependent new-image results for one workspace."""
         self._new_images_cache.invalidate_workspaces(
             self._db_path, [workspace_id]
         )
 
-    def invalidate_new_images_cache_for_workspaces(self, workspace_ids):
+    def invalidate_new_images_cache_for_workspaces(self, workspace_ids: Iterable[int]) -> None:
         """Clear new-image results for several workspaces under one cache lock."""
         self._new_images_cache.invalidate_workspaces(self._db_path, workspace_ids)
 
-    def _verify_photo_in_workspace(self, photo_id):
+    def _verify_photo_in_workspace(self, photo_id: int) -> None:
         """Raise ValueError if the photo is not in the active workspace."""
         if not self.workspace_folders.photo_in_workspace(photo_id, self._ws_id()):
             raise ValueError(
                 f"Photo {photo_id} does not belong to the active workspace"
             )
 
-    def _photo_syncable_in_workspace(self, photo_id):
+    def _photo_syncable_in_workspace(self, photo_id: int) -> bool:
         """Return True if the workspace may write this photo's sidecar.
 
         Library membership, or a ``workspace_sync_only_photos`` grant --
@@ -1353,14 +1395,19 @@ class Database:
             photo_id, self._ws_id()
         )
 
-    def _verify_photo_syncable_in_workspace(self, photo_id):
+    def _verify_photo_syncable_in_workspace(self, photo_id: int) -> None:
         """Raise ValueError if the workspace may not write this sidecar."""
         if not self._photo_syncable_in_workspace(photo_id):
             raise ValueError(
                 f"Photo {photo_id} does not belong to the active workspace"
             )
 
-    def create_workspace(self, name, config_overrides=None, ui_state=None):
+    def create_workspace(
+        self,
+        name: str,
+        config_overrides: dict[str, Any] | None = None,
+        ui_state: dict[str, Any] | None = None,
+    ) -> int:
         """Create a new workspace. Returns the workspace id."""
         from services.result_files import highest_workspace_id
         id_floor = (
@@ -1375,7 +1422,7 @@ class Database:
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
         return workspace_id
 
-    def get_effective_config(self, global_config):
+    def get_effective_config(self, global_config: dict[str, Any]) -> dict[str, Any]:
         """Return config with workspace overrides applied over global config.
 
         Args:
@@ -1426,7 +1473,7 @@ class Database:
     # safety margin. Module-level constant so tests can monkeypatch.
     _FILTER_SUBJECT_CHUNK = 800
 
-    def _photo_visibility_repository(self):
+    def _photo_visibility_repository(self) -> PhotoVisibilityRepository:
         """Build the photo-visibility repository on this connection.
 
         It receives ``self._ws_id`` uncalled: the grant and revoke writes take
@@ -1454,7 +1501,7 @@ class Database:
         """
         return self._photo_visibility_repository()
 
-    def _workspace_repository(self):
+    def _workspace_repository(self) -> WorkspaceRepository:
         """Build the workspace repository on this connection.
 
         It receives ``self._ws_id`` uncalled: the active-workspace methods
@@ -1490,7 +1537,7 @@ class Database:
         """
         return self._workspace_repository()
 
-    def _workspace_folder_repository(self):
+    def _workspace_folder_repository(self) -> WorkspaceFolderRepository:
         """Build the workspace-folder membership repository on this connection.
 
         Every membership method takes its workspace id explicitly, so the
@@ -1524,7 +1571,7 @@ class Database:
 
     # -- Move source cleanup (``move_cleanup`` owns the transaction) --
 
-    def _source_cleanup_repository(self):
+    def _source_cleanup_repository(self) -> SourceCleanupRepository:
         """Build the (catalog-wide) move-source-cleanup repository on this connection."""
         from repositories.source_cleanup import SourceCleanupRepository
 
@@ -1542,14 +1589,14 @@ class Database:
         """
         return self._source_cleanup_repository()
 
-    def ensure_default_workspace(self):
+    def ensure_default_workspace(self) -> int:
         """Create the Default workspace if it doesn't exist. Returns its id."""
         default_id = self._workspace_repository().default_id()
         if default_id is not None:
             return default_id
         return self.create_workspace("Default")
 
-    def _species_curation_repository(self):
+    def _species_curation_repository(self) -> SpeciesCurationRepository:
         """Build the species-curation repository on this connection.
 
         The active workspace is resolved lazily (``Database._ws_id`` is
@@ -1589,7 +1636,7 @@ class Database:
 
     # -- Reference taxonomy (``taxonomy.py`` loaders own the commits) --
 
-    def _taxa_repository(self):
+    def _taxa_repository(self) -> TaxaRepository:
         """Build the (catalog-wide) reference-taxonomy repository on this connection."""
         from repositories.taxa import TaxaRepository
 
@@ -1609,7 +1656,7 @@ class Database:
 
     # -- Species identity repairs (callers own the transactions) --
 
-    def _species_identity_repair_repository(self):
+    def _species_identity_repair_repository(self) -> SpeciesIdentityRepairRepository:
         """Build the (catalog-wide) species-identity repair repository on this connection."""
         from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
 
@@ -1630,7 +1677,7 @@ class Database:
 
     # -- Folders --
 
-    def _folder_repository(self):
+    def _folder_repository(self) -> FolderRepository:
         """Build the folder repository on this connection.
 
         It receives ``self._ws_id`` uncalled: the workspace-scoped reads
@@ -1675,7 +1722,7 @@ class Database:
         """
         return self._folder_repository()
 
-    def get_folder_subtree_ids(self, folder_id):
+    def get_folder_subtree_ids(self, folder_id: int) -> list[int]:
         """Return [folder_id, ...descendant_ids] restricted to the active workspace.
 
         The root is always included as-is so callers' own workspace filter on
@@ -1690,7 +1737,7 @@ class Database:
 
     # -- Library integrity verification --
 
-    def _audit_repository(self):
+    def _audit_repository(self) -> AuditRepository:
         """Build the audit repository on this connection.
 
         It receives ``self._ws_id`` uncalled: the audit-run and integrity
@@ -1721,7 +1768,7 @@ class Database:
 
     # -- Card cleanup (``card_cleanup`` owns the gates and the commits) --
 
-    def _card_cleanup_repository(self):
+    def _card_cleanup_repository(self) -> CardCleanupRepository:
         """Build the (catalog-wide) card-cleanup repository on this connection."""
         from repositories.card_cleanup import CardCleanupRepository
 
@@ -1741,7 +1788,7 @@ class Database:
 
     # -- Move operations --
 
-    def _moves_merge_repository(self):
+    def _moves_merge_repository(self) -> MovesMergeRepository:
         """Build the moves/merge repository on this connection.
 
         Folders, photos and keywords are catalog-wide, so the repository takes
@@ -1897,7 +1944,7 @@ class Database:
         """
         return self._photos_repository()
 
-    def _photos_repository(self):
+    def _photos_repository(self) -> PhotoRepository:
         """Build the core photo-row repository on this connection.
 
         Photo rows are global, so the workspace is passed as
@@ -1928,7 +1975,7 @@ class Database:
             facade=self,
         )
 
-    def _duplicates_repository(self):
+    def _duplicates_repository(self) -> DuplicatesRepository:
         """Build the duplicates repository on this connection.
 
         Every duplicate method is catalog-wide (photos are global), so the
@@ -2064,7 +2111,7 @@ class Database:
         ("rating", "p.rating IS NOT NULL AND p.rating > 0"),
     ]
 
-    def _stats_repository(self):
+    def _stats_repository(self) -> StatsRepository:
         """Build the stats repository on this connection.
 
         It receives ``self._ws_id`` uncalled, and each workspace-scoped read
@@ -2129,7 +2176,7 @@ class Database:
                 "location_status must be 'exif', 'assigned', or 'none'"
             )
 
-    def _location_repository(self):
+    def _location_repository(self) -> LocationRepository:
         """Build the locations repository on this connection.
 
         Photos and keywords are catalog-wide; the few workspace-scoped
@@ -2163,8 +2210,9 @@ class Database:
         """
         return self._location_repository()
 
-    def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True,
-                                       _commit=True):
+    def update_photo_wildlife_excluded(
+        self, photo_id: int, excluded: bool, verify_workspace: bool = True, _commit: bool = True
+    ) -> None:
         """Set whether a photo is excluded from wildlife detection/classification.
 
         ``_commit=False`` leaves the write in the caller's open transaction.
@@ -2175,7 +2223,7 @@ class Database:
             photo_id, excluded, _commit=_commit,
         )
 
-    def _photo_review_repository(self):
+    def _photo_review_repository(self) -> PhotoReviewRepository:
         from repositories.photo_review import PhotoReviewRepository
 
         return PhotoReviewRepository(
@@ -2204,7 +2252,7 @@ class Database:
 
     from repositories.photo_labels import VALID_COLOR_LABELS
 
-    def _photo_label_repository(self):
+    def _photo_label_repository(self) -> PhotoLabelRepository:
         """Build the color-label repository on this connection.
 
         It receives ``self._ws_id`` uncalled, and every repository method
@@ -2231,7 +2279,7 @@ class Database:
         """
         return self._photo_label_repository()
 
-    def _edits_repository(self):
+    def _edits_repository(self) -> EditsRepository:
         """Build the edits repository on this connection.
 
         Recipes and presets are not workspace-scoped, so this never calls
@@ -2261,13 +2309,21 @@ class Database:
         """
         return self._edits_repository()
 
-    def get_photo_edit_recipe(self, photo_id, verify_workspace=False):
+    def get_photo_edit_recipe(
+        self, photo_id: int, verify_workspace: bool = False
+    ) -> dict[str, Any] | None:
         """Return the normalized edit recipe dict for a photo, or None."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
         return self._edits_repository().get_photo_recipe(photo_id)
 
-    def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True, _commit=True):
+    def set_photo_edit_recipe(
+        self,
+        photo_id: int,
+        recipe: Mapping[str, Any] | str | None,
+        verify_workspace: bool = True,
+        _commit: bool = True,
+    ) -> dict[str, Any] | None:
         """Set or clear a non-destructive edit recipe for a photo.
 
         Returns the normalized recipe dict, or None when the provided recipe is
@@ -2280,7 +2336,7 @@ class Database:
             photo_id, recipe, _commit=_commit
         )
 
-    def clear_photo_edit_recipe(self, photo_id, verify_workspace=True):
+    def clear_photo_edit_recipe(self, photo_id: int, verify_workspace: bool = True) -> bool:
         """Remove a photo's edit recipe. Returns True if a row was removed."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
@@ -2293,7 +2349,7 @@ class Database:
     # ------------------------------------------------------------------
     # caches: preview_cache LRU and offline originals (db.caches)
     # ------------------------------------------------------------------
-    def _caches_repository(self):
+    def _caches_repository(self) -> CachesRepository:
         """Build the preview/offline-original cache repository on this connection.
 
         Both caches are catalog-wide, so the repository takes no workspace id.
@@ -2323,7 +2379,7 @@ class Database:
 
     # -- Scanner catalog pass, companion pairing, working copies --
 
-    def _scanning_repository(self):
+    def _scanning_repository(self) -> ScanningRepository:
         """Build the scanner's catalog-pass repository on this connection.
 
         A scan catalogs photos globally, so it takes no workspace id.
@@ -2342,7 +2398,7 @@ class Database:
         """
         return self._scanning_repository()
 
-    def _companion_pairing_repository(self):
+    def _companion_pairing_repository(self) -> CompanionPairingRepository:
         """Build the RAW+JPEG companion-pairing repository on this connection.
 
         Pairing is catalog-wide, so it takes no workspace id.
@@ -2361,7 +2417,7 @@ class Database:
         """
         return self._companion_pairing_repository()
 
-    def _working_copy_repository(self):
+    def _working_copy_repository(self) -> WorkingCopyRepository:
         """Build the working-copy extraction repository on this connection.
 
         The ``working_copy_*`` columns are catalog-wide, so it takes no
@@ -2382,7 +2438,7 @@ class Database:
         """
         return self._working_copy_repository()
 
-    def _masks_features_repository(self):
+    def _masks_features_repository(self) -> MasksFeaturesRepository:
         """Build the masks/features repository on this connection.
 
         Mask, feature and embedding rows are catalog-wide. The repository
@@ -2427,7 +2483,7 @@ class Database:
         """
         return self._masks_features_repository()
 
-    def _subjects_repository(self):
+    def _subjects_repository(self) -> SubjectsRepository:
         """Build the subject-analysis repository on this connection.
 
         ``detection_subjects``, ``photo_subject_state`` and
@@ -2452,7 +2508,7 @@ class Database:
         """
         return self._subjects_repository()
 
-    def _culling_repository(self):
+    def _culling_repository(self) -> CullingRepository:
         """Build the (catalog-wide) culling-analysis repository on this connection."""
         from repositories.culling import CullingRepository
 
@@ -2533,7 +2589,7 @@ class Database:
         """
         return self._keyword_repository()
 
-    def _keyword_repository(self):
+    def _keyword_repository(self) -> KeywordRepository:
         """Build the keyword repository on this connection.
 
         The active workspace is resolved lazily (``Database._ws_id`` is
@@ -2669,7 +2725,7 @@ class Database:
         """
         return self._photo_species_repository()
 
-    def _keyword_provenance_repository(self):
+    def _keyword_provenance_repository(self) -> KeywordProvenanceRepository:
         """Build the keyword-provenance repository on this connection.
 
         It holds the ``photo_keywords`` writers that create or converge an
@@ -2728,7 +2784,7 @@ class Database:
 
         return KeywordMergeRepository(self.conn)
 
-    def detect_keyword_case_convention(self):
+    def detect_keyword_case_convention(self) -> str | None:
         """Detect the casing convention used by existing species keywords.
 
         Returns:
@@ -2775,9 +2831,11 @@ class Database:
         return word[0].upper() + word[1:]
 
     def resolve_species_display_name(
-        self, name, apply_case_convention=True,
-        case_convention=_DETECT_CASE_CONVENTION,
-    ):
+        self,
+        name: str,
+        apply_case_convention: bool = True,
+        case_convention: object = _DETECT_CASE_CONVENTION,
+    ) -> str:
         """Predict the stored species name that add_keyword(is_species=True) would use.
 
         Species relabel endpoints snapshot curation dst_existed before
@@ -2833,7 +2891,7 @@ class Database:
             name, apply_case_convention=apply_case_convention, case_convention=case_convention,
         )
 
-    def species_case_convention(self):
+    def species_case_convention(self) -> str | None:
         """The casing ``add_keyword`` would apply to a brand-new species name.
 
         The configured override wins; otherwise it is detected from the
@@ -2913,8 +2971,16 @@ class Database:
             name, source_taxon_id, parent_id=parent_id, _commit=_commit,
         )
 
-    def add_keyword(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True, source_taxon_id=None,
-                    _resolve_alias=False):
+    def add_keyword(
+        self,
+        name: str,
+        parent_id: int | None = None,
+        is_species: bool = False,
+        kw_type: str | None = None,
+        _commit: bool = True,
+        source_taxon_id: int | None = None,
+        _resolve_alias: bool = False,
+    ) -> int:
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
 
         If a keyword with the same name but different casing exists, reuses
@@ -2974,7 +3040,7 @@ class Database:
             keyword_id, allow_leaf=allow_leaf,
         )
 
-    def merge_taxonomy_root_twins(self):
+    def merge_taxonomy_root_twins(self) -> int:
         """Fold each top-level species twin into the row filed in the tree.
 
         The pairs are ``KeywordTreeRepository.taxonomy_root_twins``. Both rows
@@ -2994,7 +3060,7 @@ class Database:
             log.info("merged %d top-level species keyword twin(s)", merged)
         return merged
 
-    def repair_misclassified_location_ancestors(self):
+    def repair_misclassified_location_ancestors(self) -> int:
         """Restore every location-tree node damaged by legacy taxonomy marking.
 
         This is intentionally idempotent and narrowly structural: only a
@@ -3134,7 +3200,7 @@ class Database:
             chain.append(component_id)
         return chain
 
-    def upsert_place_chain(self, details):
+    def upsert_place_chain(self, details: Mapping[str, Any]) -> int:
         """Upsert a Google Place + its parent chain. Returns the leaf id.
 
         ``details`` is the normalized dict produced by
@@ -3185,7 +3251,7 @@ class Database:
             )
         return leaf_id
 
-    def set_photo_location(self, photo_id, leaf_keyword_id):
+    def set_photo_location(self, photo_id: int, leaf_keyword_id: int) -> None:
         """Set ``photo_id``'s location to ``leaf_keyword_id``.
 
         Removes any existing ``type='location'`` keyword links for the photo,
@@ -3208,7 +3274,7 @@ class Database:
                 source=KEYWORD_SOURCE_MANUAL, _commit=False,
             )
 
-    def get_or_create_text_location(self, name):
+    def get_or_create_text_location(self, name: str | None) -> int:
         """Find or create a free-text ``type='location'`` keyword.
 
         No ``place_id``, no coords, no parent. Whitespace is stripped from
@@ -3372,9 +3438,16 @@ class Database:
         )
 
     def tag_photo(
-        self, photo_id, keyword_id, source: str | None = KEYWORD_SOURCE_MANUAL, _commit=True,
-        *, provenance=None, species_provenance: str | None = None, _record_provenance=False,
-    ):
+        self,
+        photo_id: int,
+        keyword_id: int,
+        source: str | None = KEYWORD_SOURCE_MANUAL,
+        _commit: bool = True,
+        *,
+        provenance: dict[str, Any] | None = None,
+        species_provenance: str | None = None,
+        _record_provenance: bool = False,
+    ) -> None:
         """Associate a keyword with a photo.
 
         Args:
@@ -3423,7 +3496,7 @@ class Database:
         if _commit:
             self.commit()
 
-    def _meta_repository(self):
+    def _meta_repository(self) -> MetaRepository:
         """Build the (catalog-wide) db_meta repository on this connection."""
         from repositories.meta import MetaRepository
 
@@ -3450,7 +3523,7 @@ class Database:
         """Fresh API for workspace-local copies; ids are explicit per call."""
         return self._local_workspace_repository()
 
-    def _local_folder_repository(self):
+    def _local_folder_repository(self) -> LocalFolderRepository:
         """Build the (catalog-wide) folder-level local-copy repository on this connection."""
         from repositories.local_folders import LocalFolderRepository
 
@@ -3467,7 +3540,7 @@ class Database:
         """
         return self._local_folder_repository()
 
-    def _exif_search_repository(self):
+    def _exif_search_repository(self) -> ExifSearchRepository:
         """Build the (catalog-wide) EXIF search text backfill on this connection."""
         from repositories.exif_search import ExifSearchRepository
 
@@ -3484,7 +3557,7 @@ class Database:
         """
         return self._exif_search_repository()
 
-    def _photo_metadata_repository(self):
+    def _photo_metadata_repository(self) -> PhotoMetadataRepository:
         """Build the (catalog-wide) photo camera-metadata reads on this connection."""
         from repositories.photo_metadata import PhotoMetadataRepository
 
@@ -3502,12 +3575,14 @@ class Database:
         return self._photo_metadata_repository()
 
     @property
-    def species_provenance(self):
+    def species_provenance(self) -> SpeciesProvenanceRepository:
         """Per-species assignment evidence, independent of photographer flags."""
         from repositories.species_provenance import SpeciesProvenanceRepository
         return SpeciesProvenanceRepository(self.conn)
 
-    def untag_photo(self, photo_id, keyword_id, _commit=True, *, _record_history=False):
+    def untag_photo(
+        self, photo_id: int, keyword_id: int, _commit: bool = True, *, _record_history: bool = False
+    ) -> None:
         """Remove a keyword association from a photo.
 
         Stays a ``Database`` method beside ``tag_photo``: the structural
@@ -3528,8 +3603,11 @@ class Database:
         return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photos_with_equivalent_species(
-        self, photo_ids, keyword_id, exclude_keyword_ids=None,
-    ):
+        self,
+        photo_ids: Collection[int],
+        keyword_id: int,
+        exclude_keyword_ids: Iterable[int] | None = None,
+    ) -> set[int]:
         """Return submitted photo ids already carrying the target species.
 
         Species identity is the linked taxon when available, not a particular
@@ -3547,14 +3625,14 @@ class Database:
             photo_ids, keyword_id, exclude_keyword_ids=exclude_keyword_ids,
         )
 
-    def get_life_list_unmatched_species(self):
+    def get_life_list_unmatched_species(self) -> list[str]:
         """Backward-compatible list of uncounted identification names."""
         return [
             row["name"]
             for row in self.species_curation.get_life_list_uncounted_identifications()
         ]
 
-    def get_species_representatives(self, eligible_only=False):
+    def get_species_representatives(self, eligible_only: bool = False) -> dict[str, int]:
         """Return {species: main_photo_id} for compatibility callers."""
         return {
             species: photo_ids[0]
@@ -3564,7 +3642,7 @@ class Database:
             if photo_ids
         }
 
-    def set_species_representative(self, species, photo_id, _commit=True):
+    def set_species_representative(self, species: str, photo_id: int, _commit: bool = True) -> None:
         """Mark a photo as a representative for a species globally.
 
         Multiple photos can represent a species. Re-selecting an existing
@@ -3577,16 +3655,24 @@ class Database:
         )
 
     def rename_photo_preferences_species(
-        self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
-    ):
+        self,
+        old_species: str,
+        new_species: str,
+        photo_workspace_pairs: Collection[tuple[int, int]] | None = None,
+        _commit: bool = True,
+    ) -> int:
         """Rename stored representative-photo preferences across workspaces."""
         return self._species_curation_repository().rename_photo_preferences(
             old_species, new_species, photo_workspace_pairs=photo_workspace_pairs, _commit=_commit,
         )
 
     def rename_species_highlights_species(
-        self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
-    ):
+        self,
+        old_species: str,
+        new_species: str,
+        photo_workspace_pairs: Collection[tuple[int, int]] | None = None,
+        _commit: bool = True,
+    ) -> int:
         """Rename ordered species-highlight rows to a new species bucket.
 
         Companion to :meth:`rename_photo_preferences_species` for the
@@ -3635,7 +3721,7 @@ class Database:
                     f"already exists under this parent"
                 )
 
-    def update_keyword(self, keyword_id, **kwargs):
+    def update_keyword(self, keyword_id: int, **kwargs: Any) -> int:
         """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name.
 
         On a name change, re-runs the same taxonomy auto-detection that
@@ -3737,7 +3823,7 @@ class Database:
 
     # -- Predictions --
 
-    def _prediction_repository(self):
+    def _prediction_repository(self) -> PredictionRepository:
         """Build the prediction repository on this connection.
 
         The active workspace is resolved lazily (``Database._ws_id`` is
@@ -3961,7 +4047,9 @@ class Database:
     # absent and what each endpoint then does with those rows.
     DECIDED_PREDICTION_STATUSES = ("accepted", "rejected", "reviewed")
 
-    def update_prediction_status(self, prediction_id, status, _commit=True):
+    def update_prediction_status(
+        self, prediction_id: int, status: str, _commit: bool = True
+    ) -> None:
         """Update per-workspace review status for a prediction.
 
         Review state lives in ``prediction_review`` keyed by
@@ -3974,8 +4062,9 @@ class Database:
         """
         return self._prediction_repository().update_status(prediction_id, status, _commit=_commit)
 
-    def update_predictions_status_by_photo(self, photo_id, status,
-                                           _commit=True):
+    def update_predictions_status_by_photo(
+        self, photo_id: int, status: str, _commit: bool = True
+    ) -> None:
         """Upsert review status for every prediction of a photo in the active workspace.
 
         Review state is workspace-scoped (``prediction_review``); detections
@@ -4005,7 +4094,7 @@ class Database:
             photo_id, status, _commit=_commit,
         )
 
-    def ungroup_prediction(self, prediction_id, _commit=True):
+    def ungroup_prediction(self, prediction_id: int, _commit: bool = True) -> None:
         """Remove a prediction from its group in the active workspace.
 
         ``group_id`` lives in ``prediction_review``; this only clears the
@@ -4015,12 +4104,12 @@ class Database:
 
     def accept_prediction(
         self,
-        prediction_id,
-        replace_species=False,
-        photo_ids=None,
-        prediction_ids=None,
-        _commit=True,
-    ):
+        prediction_id: int,
+        replace_species: bool = False,
+        photo_ids: Collection[int] | None = None,
+        prediction_ids: Collection[int] | None = None,
+        _commit: bool = True,
+    ) -> dict[str, Any] | None:
         """Accept a prediction: mark as accepted and add species keyword.
 
         If the prediction belongs to a group, derives the consensus species
@@ -4080,7 +4169,9 @@ class Database:
             prediction_ids=prediction_ids, _commit=_commit,
         )
 
-    def accept_subject_species(self, prediction_id, _commit=True):
+    def accept_subject_species(
+        self, prediction_id: int, _commit: bool = True
+    ) -> dict[str, Any] | None:
         """Accept agreeing model predictions for one detected subject.
 
         Compare uses this for an additional-species suggestion: the species
@@ -4105,7 +4196,7 @@ class Database:
 
     # -- Detections --
 
-    def _model_runs_repository(self):
+    def _model_runs_repository(self) -> ModelRunsRepository:
         """Build the model-runs repository on this connection.
 
         Every model-run table is catalog-wide, so the repository takes no
@@ -4139,7 +4230,7 @@ class Database:
         """
         return self._model_runs_repository()
 
-    def _computation_cache_repository(self):
+    def _computation_cache_repository(self) -> ComputationCacheRepository:
         """Build the (catalog-wide) computation-cache repository on this connection."""
         from repositories.computation_cache import ComputationCacheRepository
 
@@ -4158,13 +4249,19 @@ class Database:
         """
         return self._computation_cache_repository()
 
-    def set_review_status(self, prediction_id, workspace_id, status,
-                           individual=None, group_id=None):
+    def set_review_status(
+        self,
+        prediction_id: int,
+        workspace_id: int,
+        status: str,
+        individual: str | None = None,
+        group_id: str | None = None,
+    ) -> None:
         return self._prediction_repository().set_review_status(
             prediction_id, workspace_id, status, individual=individual, group_id=group_id,
         )
 
-    def _detections_repository(self):
+    def _detections_repository(self) -> DetectionsRepository:
         """Build the detections repository on this connection.
 
         ``detections`` is catalog-wide, so the repository takes no workspace
@@ -4199,7 +4296,7 @@ class Database:
         """
         return self._detections_repository()
 
-    def _pipeline_features_repository(self):
+    def _pipeline_features_repository(self) -> PipelineFeaturesRepository:
         """Build the pipeline feature-load repository on this connection.
 
         Its workspace-scoped reads take the workspace id from the caller,
@@ -4225,7 +4322,7 @@ class Database:
 
     # -- Pending Changes --
 
-    def _sync_repository(self):
+    def _sync_repository(self) -> SyncRepository:
         """Build the pending-changes repository on this connection.
 
         The repository gets ``self._ws_id`` as a resolver rather than an id,
@@ -4262,7 +4359,14 @@ class Database:
         """
         return self._sync_repository()
 
-    def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
+    def queue_change(
+        self,
+        photo_id: int,
+        change_type: str,
+        value: str,
+        workspace_id: int | None = None,
+        _commit: bool = True,
+    ) -> str | None:
         """Add a change to the sync queue, skipping redundant intents.
 
         Returns the inserted pending change token, or None if already queued.
@@ -4278,7 +4382,14 @@ class Database:
             photo_id, change_type, value, workspace_id=workspace_id, _commit=_commit,
         )
 
-    def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
+    def remove_pending_changes(
+        self,
+        photo_id: int,
+        change_type: str | None = None,
+        value: str | None = None,
+        workspace_id: int | None = None,
+        _commit: bool = True,
+    ) -> int:
         """Delete matching pending changes, preserving captured keyword intents.
 
         Return the number of rows removed.
@@ -4309,7 +4420,9 @@ class Database:
             repo.commit()
         return len(removed)
 
-    def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
+    def queue_flag_change_if_enabled(
+        self, photo_id: int, flag: str | None, workspace_id: int | None = None, _commit: bool = True
+    ) -> str | None:
         """Queue a flag write when the active config opts into XMP flag sync."""
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         flag = flag or "none"
@@ -4342,7 +4455,7 @@ class Database:
 
     # -- Edit History --
 
-    def _edit_history_repository(self):
+    def _edit_history_repository(self) -> EditHistoryRepository:
         """Build the edit-history repository on this connection.
 
         It receives ``self._ws_id`` uncalled: the methods that act on the
@@ -4386,9 +4499,17 @@ class Database:
         return self._edit_history_repository()
 
     def record_edit(
-        self, action_type, description, new_value, items, is_batch=False, _commit=True,
-        *, source=None, reason=None,
-    ):
+        self,
+        action_type: str,
+        description: str,
+        new_value: str | None,
+        items: Iterable[Mapping[str, Any]],
+        is_batch: bool = False,
+        _commit: bool = True,
+        *,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> int:
         """Record an edit action with per-photo before/after values.
 
         Clears the redo stack (any undone entries) since a new action invalidates them.
@@ -4424,7 +4545,7 @@ class Database:
         'prediction_reviewed', 'prediction_replace_species',
     )
 
-    def undo_last_edit(self):
+    def undo_last_edit(self) -> dict[str, Any] | None:
         """Undo the most recent undoable edit. Returns the undone entry dict, or None.
 
         Non-undoable entries (prediction_reject, discard) are skipped.
@@ -4483,7 +4604,7 @@ class Database:
                 history.mark_undone(entry['id'])
         return entry
 
-    def redo_last_undo(self):
+    def redo_last_undo(self) -> dict[str, Any] | None:
         """Redo the most recently undone edit. Returns the entry dict, or None.
 
         Replays in chronological order (ASC) so sequential undos are redone
@@ -4568,7 +4689,7 @@ class Database:
             ) from None
 
     @contextlib.contextmanager
-    def _commits_held(self):
+    def _commits_held(self) -> Iterator[None]:
         """Run an undo/redo replay as one transaction.
 
         The replay's setters each commit, which would end the caller's
@@ -5016,7 +5137,7 @@ class Database:
         'identity_alternatives': _redo_identity_alternatives,
     }
 
-    def _edit_old_value_meta(self, old_value):
+    def _edit_old_value_meta(self, old_value: str | int | None) -> dict[str, Any]:
         """Parse edit item old_value, including newer JSON metadata payloads."""
         if not old_value:
             return {"keyword_id": None, "keyword_ids": []}
@@ -5099,7 +5220,7 @@ class Database:
             return
         self.update_prediction_status(int(pred_id), "rejected", _commit=False)
 
-    def prune_edit_history(self):
+    def prune_edit_history(self) -> dict[str, int]:
         """Apply the configured history bound after a caller-owned edit transaction commits."""
         return self._prune_edit_history()
 
@@ -5125,7 +5246,7 @@ class Database:
         """
         return self._collection_repository()
 
-    def _collection_repository(self):
+    def _collection_repository(self) -> CollectionRepository:
         """Build the collections repository on this connection.
 
         The repository gets ``self._ws_id`` as a resolver rather than an id,
@@ -5168,17 +5289,17 @@ class Database:
             suggest_value_exprs=self._SUGGEST_VALUE_EXPRS,
         )
 
-    def remap_collection_photo_ids(self, mapping):
+    def remap_collection_photo_ids(self, mapping: Mapping[int, int | None]) -> int:
         """Point every workspace's ``photo_ids`` rules at surviving photos; no commit."""
         from repositories.collections import remap_collection_photo_ids
         return remap_collection_photo_ids(self.conn, mapping)
 
-    def photo_ids_named_by_collections(self):
+    def photo_ids_named_by_collections(self) -> set[int]:
         """Every photo id named by a ``photo_ids`` rule in any workspace."""
         from repositories.collections import photo_ids_named_by_collections
         return photo_ids_named_by_collections(self.conn)
 
-    def prune_collection_ids_of_missing_photos(self):
+    def prune_collection_ids_of_missing_photos(self) -> list[dict[str, Any]]:
         """Drop ``photo_ids`` entries naming deleted photos, in every workspace; commits."""
         from repositories.collections import prune_collection_ids_of_missing_photos
         return prune_collection_ids_of_missing_photos(self.conn, commit=commit_with_retry)
@@ -5443,7 +5564,7 @@ class Database:
 
     # ------ iNaturalist submissions ------
 
-    def _inat_repository(self):
+    def _inat_repository(self) -> InatRepository:
         """Build the (catalog-wide) iNaturalist repository on this connection."""
         from repositories.inat import InatRepository
 
@@ -5461,7 +5582,7 @@ class Database:
 
     # -- Job history (``JobRunner`` owns the table and its own writes) --
 
-    def _job_history_repository(self):
+    def _job_history_repository(self) -> JobHistoryRepository:
         """Build the (catalog-wide) job-history repository on this connection."""
         from repositories.job_history import JobHistoryRepository
 
@@ -5481,7 +5602,7 @@ class Database:
 
     # -- Pending NAS transfers --
 
-    def _pending_archive_repository(self):
+    def _pending_archive_repository(self) -> PendingArchiveRepository:
         """Build the pending-NAS-transfer repository on this connection.
 
         It receives ``self._ws_id`` uncalled: the workspace-scoped listing and
@@ -5507,7 +5628,7 @@ class Database:
 
     # -- Import job catalog reads --
 
-    def _imports_repository(self):
+    def _imports_repository(self) -> ImportRepository:
         """Build the (catalog-wide) import-job repository on this connection."""
         from repositories.imports import ImportRepository
 
@@ -5526,7 +5647,7 @@ class Database:
         return self._imports_repository()
 
     @property
-    def storage(self):
+    def storage(self) -> StorageRepository:
         """Global managed-storage inspection; never retains an active scope."""
         from repositories.storage import StorageRepository
         return StorageRepository(self.conn)
