@@ -18,15 +18,15 @@ def sidecars(tmp_path, db, monkeypatch):
     """
     folder = tmp_path / 'Photos'
     folder.mkdir()
-    (folder / 'A.jpg').write_text('photo')
-    (folder / 'a.nef').write_text('photo')
-
-    def setup(folds, different_parent, sidecar_inodes=None):
+    def setup(folds, different_parent, sidecar_inodes=None, filenames=('A.jpg', 'a.nef'), name_key=str.casefold):
+        for name in filenames:
+            (folder / name).write_text('photo')
         other = folder.with_name('photos') if different_parent else folder
         folders = [workspace_folders.add_folder(db, str(p), name=p.name) for p in (folder, other)]
         photos = [photo_ingest.add_photo(db, fid, name, os.path.splitext(name)[1], 1, 1.0)
-                  for fid, name in zip(folders, ('A.jpg', 'a.nef'), strict=True)]
-        paths = [str(folder / 'A.xmp'), str(other / 'a.xmp')]
+                  for fid, name in zip(folders, filenames, strict=True)]
+        paths = [str(p / (os.path.splitext(name)[0] + '.xmp'))
+                 for p, name in zip((folder, other), filenames, strict=True)]
         stat, scandir, realpath = os.stat, os.scandir, os.path.realpath
 
         def mapped(path):
@@ -37,7 +37,10 @@ def sidecars(tmp_path, db, monkeypatch):
                 name = os.path.basename(path)
                 names = [p.name for p in folder.iterdir()]
                 if folds:
-                    name = next((entry for entry in names if entry.casefold() == name.casefold()), name)
+                    match = next((entry for entry in names if name_key(entry) == name_key(name)), None)
+                    if match is None:
+                        raise FileNotFoundError(path)
+                    name = match
                 elif name not in names:
                     raise FileNotFoundError(path)
                 return str(folder / name)
@@ -165,3 +168,23 @@ def test_dangling_directory_entry_is_not_case_sensitivity_evidence(tmp_path, mon
     monkeypatch.setattr(os, 'scandir', lambda _path: Entries())
     monkeypatch.setattr(os, 'stat', missing)
     assert directory_folds_case(str(tmp_path)) is None
+
+
+@pytest.mark.parametrize('different_parent', [False, True])
+@pytest.mark.parametrize('names, shared', [
+    (('straße.jpg', 'STRASSE.nef'), False),
+    (('café.jpg', 'CAFÉ.nef'), True),
+])
+def test_missing_unicode_names_use_actual_directory_lookups(db, sidecars, different_parent, names, shared):
+    # Simulate case-insensitive NTFS: simple Unicode case pairs alias, but
+    # the multi-character ß/SS expansion does not. Casefold alone merges both.
+    photos, paths = sidecars(True, different_parent, filenames=names, name_key=str.lower)
+    assert directory_folds_case(os.path.dirname(paths[0])) is True
+    db.queue_change(photos[0], 'keyword_add', 'Robin')
+    db.queue_change(photos[1], 'keyword_add', 'Robin')
+    assert db.pending_changes.keyword_sidecar_alias(photos[0], db._active_workspace_id, 'Robin') is shared
+    identities = _sidecar_target_identities(dict(zip(paths, paths, strict=True)))
+    assert (identities[paths[0]] == identities[paths[1]]) is shared
+    db._flip_pending_keyword_change(photos[0], 'Robin', 'keyword_add', 'keyword_remove')
+    own = [row['change_type'] for row in db.pending_changes.list_all() if row['photo_id'] == photos[0]]
+    assert own == (['keyword_remove'] if shared else [])

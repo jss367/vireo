@@ -15,9 +15,12 @@ def directory_folds_case(directory: str) -> bool | None:
         with os.scandir(directory) as entries:
             names = {entry.name for entry in entries}
         for name in names:
-            swapped = name.swapcase()
-            if swapped == name:
+            # Toggle one ASCII letter: Unicode swapcase can expand a
+            # character (ß -> SS), which tests more than case sensitivity.
+            index = next((i for i, c in enumerate(name) if c.isascii() and c.isalpha()), None)
+            if index is None:
                 continue
+            swapped = name[:index] + name[index].swapcase() + name[index + 1:]
             # Two listed spellings prove sensitivity even if they are hard
             # links or symlinks to the same file.
             if swapped in names:
@@ -38,6 +41,46 @@ def directory_folds_case(directory: str) -> bool | None:
     return None
 
 
+def _missing_name_key(directory: str, name: str) -> str | None:
+    """Use original-photo lookups to prove Unicode stem equivalence.
+
+    Unicode casefold is only a candidate filter. For example, NTFS can keep
+    straße and STRASSE distinct, while other filesystems may join them. Keep
+    an existing entry's extension and substitute the missing sidecar's stem;
+    samefile then asks this directory how those exact characters compare.
+    """
+    stem, extension = os.path.splitext(name)
+    try:
+        with os.scandir(directory) as entries:
+            names = {entry.name for entry in entries}
+        equivalents = []
+        for entry in names:
+            entry_stem, entry_extension = os.path.splitext(entry)
+            if entry_stem.casefold() != stem.casefold():
+                continue
+            if entry_stem == stem:
+                equivalents.append(entry_stem)
+                continue
+            alternate = stem + entry_extension
+            # Separate listed entries are separate names, even if a user
+            # made them hard links or symlinks to the same inode.
+            if alternate in names:
+                continue
+            try:
+                if os.path.samefile(os.path.join(directory, entry), os.path.join(directory, alternate)):
+                    equivalents.append(entry_stem)
+            except FileNotFoundError:
+                continue
+    except OSError:
+        return None
+    canonical = min(equivalents) + extension if equivalents else name
+    # ASCII case equivalence was already proven by directory_folds_case.
+    # Preserve every other character instead of expanding Unicode names.
+    if not equivalents and not name.isascii():
+        return None
+    return canonical.translate(str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))
+
+
 def missing_sidecar_identity(path: str) -> tuple[int, int, str] | None:
     """Identify a future sidecar using its existing containing directory.
 
@@ -54,7 +97,8 @@ def missing_sidecar_identity(path: str) -> tuple[int, int, str] | None:
     folds = directory_folds_case(parent)
     if not stat.st_ino or folds is None:
         return None
-    return stat.st_dev, stat.st_ino, name.casefold() if folds else name
+    key = _missing_name_key(parent, name) if folds else name
+    return (stat.st_dev, stat.st_ino, key) if key is not None else None
 
 
 def sidecar_paths_alias(own: str, other: str) -> bool:
