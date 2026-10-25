@@ -1,6 +1,17 @@
 import pytest
 from playwright.sync_api import expect
 
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Jobs page's modules as ``pageModules.<file>`` and its state as
+    ``jobsState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "jobs", "jobsState")
+
 
 @pytest.mark.parametrize("result", [
     {"error": "Not enough free space on this computer for temporary processing. Free up space or import fewer photos."},
@@ -54,20 +65,20 @@ def test_import_failure_before_copy_offers_retry(live_server, page, result):
         **job["config"], "parent_import_job_id": job["id"],
     }, "result": {"cancelled": True, "photo_ids": [123], "tags_applied": False,
                    "chained": False, "landed_files": {"/local/photo.jpg": [1, 2, "hash"]}}}
-    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, child])
+    page.evaluate("rows => { jobsState.historyJobs = rows; pageModules.detail.renderHistoryDetail(rows[0]); }", [job, child])
     expect(button).to_be_visible()
     expect(direct).to_have_count(0)
     before_copy = {**child, "id": "before-copy-child", "status": "failed",
                    "result": {"import_not_started": True}}
     grandchild = {**child, "config": {**child["config"], "parent_import_job_id": before_copy["id"]}}
-    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, grandchild, before_copy])
+    page.evaluate("rows => { jobsState.historyJobs = rows; pageModules.detail.renderHistoryDetail(rows[0]); }", [job, grandchild, before_copy])
     expect(direct).to_have_count(0)
-    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, before_copy])
+    page.evaluate("rows => { jobsState.historyJobs = rows; pageModules.detail.renderHistoryDetail(rows[0]); }", [job, before_copy])
     expect(direct).to_be_visible()
     before_copy["result"] = {"never_started": True}
-    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, grandchild, before_copy])
+    page.evaluate("rows => { jobsState.historyJobs = rows; pageModules.detail.renderHistoryDetail(rows[0]); }", [job, grandchild, before_copy])
     expect(direct).to_have_count(0)
-    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, before_copy])
+    page.evaluate("rows => { jobsState.historyJobs = rows; pageModules.detail.renderHistoryDetail(rows[0]); }", [job, before_copy])
     expect(direct).to_be_visible()
 
     # A completed child owns the recovery; the old row points to it.
@@ -75,7 +86,7 @@ def test_import_failure_before_copy_offers_retry(live_server, page, result):
              "started_at": "2026-08-16T22:00:00", "config": {
                  **job["config"], "parent_import_job_id": job["id"],
              }, "result": {"ok": True, "tags_applied": True, "chained": True}}
-    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, child])
+    page.evaluate("rows => { jobsState.historyJobs = rows; pageModules.detail.renderHistoryDetail(rows[0]); }", [job, child])
     expect(button).to_have_count(0)
     expect(direct).to_have_count(0)
     expect(page.get_by_role("button", name="Show that import")).to_be_visible()
@@ -93,14 +104,14 @@ def test_failed_import_retry_recovers_after_pending_redraw(live_server, page):
     page.route("**/api/jobs/import-photos", lambda route: pending.append(route))
     _serve_jobs_page(live_server, page, job, history=True)
     page.get_by_role("button", name="Retry import", exact=True).click()
-    page.evaluate("() => renderHistoryDetail(historyJobs[0])")
+    page.evaluate("() => pageModules.detail.renderHistoryDetail(jobsState.historyJobs[0])")
     expect(page.get_by_role("button", name="Retry in progress…", exact=True)).to_be_disabled()
     pending[0].fulfill(status=400, json={"error": "Still no space"})
     expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="Retry directly to NAS", exact=True)).to_be_enabled()
     with page.expect_request("**/api/jobs/import-photos"):
         page.get_by_role("button", name="Retry directly to NAS", exact=True).click()
-    page.evaluate("() => renderHistoryDetail(historyJobs[0])")
+    page.evaluate("() => pageModules.detail.renderHistoryDetail(jobsState.historyJobs[0])")
     pending[1].fulfill(status=400, json={"error": "NAS offline"})
     expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="Retry directly to NAS", exact=True)).to_be_enabled()
@@ -126,7 +137,7 @@ def test_direct_nas_retry_uses_live_server_eligibility(live_server, page, allowe
     page.route("**/api/import/*/recovery-options", options)
     page.route("**/api/jobs/import-photos", retry)
     _serve_jobs_page(live_server, page, job, history=True)
-    page.wait_for_function("historyJobs[0].import_recovery_options !== undefined")
+    page.wait_for_function("jobsState.historyJobs[0].import_recovery_options !== undefined")
     direct = page.get_by_role("button", name="Retry directly to NAS", exact=True)
     if allowed_at_render:
         expect(direct).to_be_visible()
@@ -388,7 +399,7 @@ def test_import_resume_checks_pipeline_outside_history_window(live_server, page,
 
     page.route("**/api/import/*/recovery-options", options)
     _serve_jobs_page(live_server, page, job, history=True)
-    page.wait_for_function("historyJobs[0].import_resume_allowed === " + str(resumable).lower())
+    page.wait_for_function("jobsState.historyJobs[0].import_resume_allowed === " + str(resumable).lower())
     assert requests
     resume = page.get_by_role("button", name="Resume import", exact=True)
     if resumable:

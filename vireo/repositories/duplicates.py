@@ -15,8 +15,8 @@ wrappers on ``Database``. Resolution goes through
 friends) and ``Database._apply_winner_loser_merge``, not the plan and
 ``reject`` methods here.
 
-Also streams camera metadata for review-only same-shot candidates and reads
-their saved review membership. Those reads do not change exact-byte cleanup.
+Also streams camera metadata for review-only same-shot candidates and stores
+their library-wide review notes. Those notes do not change exact-byte cleanup.
 Not to be confused with the top-level ``duplicates`` module, the pure resolver.
 """
 
@@ -72,6 +72,30 @@ class DuplicatesRepository:
     def transaction(self) -> sqlite3.Connection:
         """The connection as a context manager: commit on success, roll back on error."""
         return self.conn
+
+    def begin_review_write(self) -> None:
+        """Serialize the catalog snapshot check and its review note write."""
+        self.conn.execute("BEGIN IMMEDIATE")
+
+    def same_shot_reviews(self, keys: Sequence[str]) -> dict[str, sqlite3.Row]:
+        reviews = {}
+        for batch in chunked(keys):
+            rows = self.conn.execute(
+                f"SELECT * FROM same_shot_reviews WHERE group_key IN ({','.join('?' * len(batch))})", batch,
+            )
+            reviews.update({row["group_key"]: row for row in rows})
+        return reviews
+
+    def save_same_shot_review(self, group_key: str, review_key: str, decision: str | None) -> None:
+        if decision is None:
+            self.conn.execute("DELETE FROM same_shot_reviews WHERE group_key=?", (group_key,))
+        else:
+            self.conn.execute(
+                "INSERT INTO same_shot_reviews (group_key,review_key,decision) VALUES (?,?,?) "
+                "ON CONFLICT(group_key) DO UPDATE SET review_key=excluded.review_key, "
+                "decision=excluded.decision,updated_at=datetime('now')",
+                (group_key, review_key, decision),
+            )
 
     def same_shot_rows(self, photo_ids: Sequence[int] | None = None) -> Iterator[sqlite3.Row]:
         """Stream live, nonempty photos' camera metadata without reading originals.

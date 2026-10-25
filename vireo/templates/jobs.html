@@ -331,10 +331,10 @@
       <button type="button" class="btn-retry" id="retryJobsPolling">Retry now</button>
     </div>
     <div class="jobs-filter-bar">
-      <select id="filterType" onchange="applyFilters()">
+      <select id="filterType">
         <option value="">All types</option>
       </select>
-      <select id="filterStatus" onchange="applyFilters()">
+      <select id="filterStatus">
         <option value="">All status</option>
         <option value="completed">Completed</option>
         <option value="failed">Failed</option>
@@ -356,18 +356,6 @@
 </div>
 
 <script defer src="/static/import-recovery.js"></script>
-<script defer src="/static/jobs/state.js"></script>
-<script defer src="/static/jobs/format.js"></script>
-<script defer src="/static/jobs/move-route.js"></script>
-<script defer src="/static/jobs/source-cleanup.js"></script>
-<script defer src="/static/jobs/import-retry.js"></script>
-<script defer src="/static/jobs/job-card.js"></script>
-<script defer src="/static/jobs/steps.js"></script>
-<script defer src="/static/jobs/polling.js"></script>
-<script defer src="/static/jobs/list.js"></script>
-<script defer src="/static/jobs/selection.js"></script>
-<script defer src="/static/jobs/detail.js"></script>
-<script defer src="/static/jobs/actions.js"></script>
-<script defer src="/static/jobs/boot.js"></script>
+<script type="module" src="/static/jobs/boot.js"></script>
 </body>
 </html>

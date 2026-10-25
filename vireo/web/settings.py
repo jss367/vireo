@@ -15,6 +15,7 @@ import os
 import sqlite3
 
 import filter_shortcuts
+from app_paths import media_root
 from config import read_raw_config_file, settings_write_lock
 from flask import Blueprint, g, jsonify, make_response, request
 from preview_cache import (
@@ -731,7 +732,7 @@ def create_settings_blueprint(
         if requested_quota_mb >= previous_quota_mb or confirmed is True:
             return None
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         # Measure usage under the publication guard so the value returned to
         # the client is a snapshot no concurrent publisher is mutating.
         with working_copy_publication_guard():
@@ -790,7 +791,7 @@ def create_settings_blueprint(
             with working_copy_publication_guard():
                 quota_db.photos.clear_working_copy_evictions()
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         evict_preview_cache_if_over_quota(quota_db, vireo_dir)
         if current_working_copy_quota < previous_working_copy_quota:
             # Cache writers and startup already enforce an unchanged quota.

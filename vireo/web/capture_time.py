@@ -9,16 +9,23 @@ module.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from flask import Blueprint, jsonify, request
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonError
+    from web.web_types import GetDb
 
-def create_capture_time_blueprint(get_db, json_error):
+
+def create_capture_time_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     """Build the capture-time preview blueprint. Nothing beyond ``get_db``
     and ``json_error`` is injected."""
     blueprint = Blueprint("capture_time", __name__)
 
     @blueprint.route("/api/capture-time/preview", methods=["POST"])
-    def api_capture_time_preview():
+    def api_capture_time_preview() -> ResponseReturnValue:
         """Preview a capture-time correction for selected photos."""
         from capture_time import build_capture_time_preview
 

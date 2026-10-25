@@ -1070,6 +1070,18 @@
   ],
   [
    "table",
+   "same_shot_reviews",
+   "same_shot_reviews",
+   "CREATE TABLE same_shot_reviews (\n        group_key TEXT PRIMARY KEY,\n        review_key TEXT NOT NULL,\n        decision TEXT NOT NULL CHECK(decision IN ('reviewed', 'keep_all')),\n        updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_same_shot_reviews_1",
+   "same_shot_reviews",
+   null
+  ],
+  [
+   "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
    "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"

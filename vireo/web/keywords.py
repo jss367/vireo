@@ -16,11 +16,20 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from services.maintenance_history import clean_keywords_with_history
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 from web.settings import LOCATION_KEYWORDS_SETTING, workspace_effective_setting
+
+if TYPE_CHECKING:
+    from sqlite3 import Row
+
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import GetDb
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +39,7 @@ _COORDINATE_LIMITS = {"latitude": 90.0, "longitude": 180.0}
 _KEYWORD_UPDATE_FIELDS = {"name", "type", "taxon_id", *_COORDINATE_LIMITS}
 
 
-def _keyword_update_fields(body):
+def _keyword_update_fields(body: JsonDict) -> tuple[JsonDict, str | None]:
     """Return ``(fields, error)`` for a keyword PUT body.
 
     ``fields`` keeps only the keys update_keyword may write. The body used
@@ -60,7 +69,7 @@ def _keyword_update_fields(body):
     return fields, None
 
 
-def _location_pipe_rename_error(body, old_row):
+def _location_pipe_rename_error(body: JsonDict, old_row: Row | None) -> str | None:
     """The refusal for a ``|`` in a rename that lands on a location, or None."""
     # Reject '|' in a rename that lands on a location keyword before we
     # ever touch the row. ``get_or_create_text_location`` refuses pipes
@@ -85,14 +94,14 @@ def _location_pipe_rename_error(body, old_row):
     return None
 
 
-def _location_rename_requeue_skips(db, affected):
+def _location_rename_requeue_skips(db: Database, affected: list[Row]) -> dict[int, bool]:
     """``{workspace_id: skip}`` for a location-to-location rename.
 
     A workspace with ``write_location_keywords_to_xmp`` on skips the
     keyword_remove + keyword_add requeue; see
     ``_queue_keyword_rename_sidecars``.
     """
-    skip_keyword_requeue_by_ws = {}
+    skip_keyword_requeue_by_ws: dict[int, bool] = {}
     import config as cfg
 
     try:
@@ -114,7 +123,7 @@ def _location_rename_requeue_skips(db, affected):
     return skip_keyword_requeue_by_ws
 
 
-def _queue_keyword_rename_sidecars(db, old_row, new_row, affected):
+def _queue_keyword_rename_sidecars(db: Database, old_row: Row, new_row: Row, affected: list[Row]) -> None:
     """Carry a keyword rename into species preferences and queued XMP edits."""
     old_name = old_row["name"]
     new_name = new_row["name"]
@@ -174,7 +183,7 @@ def _queue_keyword_rename_sidecars(db, old_row, new_row, affected):
         queue_keyword_add(db, row["photo_id"], new_name, workspace_id=row["workspace_id"])
 
 
-def _queue_location_retype_add(db, old_row, new_row, affected):
+def _queue_location_retype_add(db: Database, old_row: Row | None, new_row: Row | None, affected: list[Row]) -> None:
     """Keep the flat leaf of a location keyword retyped without a rename."""
     # A location→non-location retype with no name change queues a
     # ``location`` change (``_queue_location_path_changes``) but no
@@ -199,7 +208,9 @@ def _queue_location_retype_add(db, old_row, new_row, affected):
             )
 
 
-def _queue_location_path_changes(db, old_row, new_row, location_affected):
+def _queue_location_path_changes(
+    db: Database, old_row: Row | None, new_row: Row | None, location_affected: list[Row],
+) -> None:
     """Requeue ``location`` sync for every photo under a changed location."""
     # If a location keyword's name or type changed, requeue a
     # ``location`` change for every descendant-tagged photo so
@@ -229,7 +240,7 @@ def _queue_location_path_changes(db, old_row, new_row, location_affected):
             db.commit()
 
 
-def create_keywords_blueprint(get_db, json_error):
+def create_keywords_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     """Build the keywords blueprint.
 
     Nothing beyond ``get_db`` and ``json_error`` is injected: sidecar
@@ -239,23 +250,23 @@ def create_keywords_blueprint(get_db, json_error):
     blueprint = Blueprint("keywords", __name__)
 
     @blueprint.route("/api/keywords/all")
-    def api_all_keywords():
+    def api_all_keywords() -> ResponseReturnValue:
         db = get_db()
         keywords = db.keyword_tree.list_all()
         return jsonify([dict(k) for k in keywords])
 
     @blueprint.route('/api/keywords/identities')
-    def api_keyword_identities():
+    def api_keyword_identities() -> ResponseReturnValue:
         from keyword_identity import grouped_keywords
         return jsonify(grouped_keywords(get_db()))
 
     @blueprint.route('/api/keywords/location-matches')
-    def api_keyword_location_matches():
+    def api_keyword_location_matches() -> ResponseReturnValue:
         from keyword_identity import location_candidates
         return jsonify(location_candidates(get_db()))
 
     @blueprint.route('/api/keywords/reconcile-location', methods=['POST'])
-    def api_reconcile_keyword_location():
+    def api_reconcile_keyword_location() -> ResponseReturnValue:
         from keyword_identity import reconcile_location
         body = request.get_json(silent=True)
         if not isinstance(body, dict) or any(
@@ -270,7 +281,7 @@ def create_keywords_blueprint(get_db, json_error):
 
     @blueprint.route('/api/keywords/merge-preview', methods=['POST'])
     @blueprint.route('/api/keywords/merge', methods=['POST'])
-    def api_merge_keywords():
+    def api_merge_keywords() -> ResponseReturnValue:
         from keyword_identity import merge_keywords, preview_keyword_merge
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -289,13 +300,13 @@ def create_keywords_blueprint(get_db, json_error):
         return jsonify(result)
 
     @blueprint.route("/api/keywords")
-    def api_keywords():
+    def api_keywords() -> ResponseReturnValue:
         db = get_db()
         keywords = db.keyword_tree.get_tree()
         return jsonify([dict(k) for k in keywords])
 
     @blueprint.route("/api/keywords/duplicates")
-    def api_keyword_duplicates():
+    def api_keyword_duplicates() -> ResponseReturnValue:
         """Find case-insensitive duplicate keywords within current workspace.
 
         Groups by the same slot key as merge_duplicate_keywords()
@@ -324,7 +335,7 @@ def create_keywords_blueprint(get_db, json_error):
         return jsonify(results)
 
     @blueprint.route("/api/keywords/clean", methods=["POST"])
-    def api_clean_keywords():
+    def api_clean_keywords() -> ResponseReturnValue:
         """Merge case-insensitive duplicate keywords."""
         db = get_db()
         merged = clean_keywords_with_history(db)
@@ -332,7 +343,7 @@ def create_keywords_blueprint(get_db, json_error):
         return jsonify({"ok": True, "merged": merged})
 
     @blueprint.route("/api/keywords/<int:keyword_id>", methods=["PUT"])
-    def api_update_keyword(keyword_id):
+    def api_update_keyword(keyword_id: int) -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         body, invalid = _keyword_update_fields(body)
@@ -403,7 +414,7 @@ def create_keywords_blueprint(get_db, json_error):
         return jsonify({"ok": True, "keyword_id": effective_id, "merged": merged})
 
     @blueprint.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
-    def api_delete_keyword(keyword_id):
+    def api_delete_keyword(keyword_id: int) -> ResponseReturnValue:
         db = get_db()
         # Queue sidecar removals for all affected workspaces
         kw_row = db.keywords.get_row(keyword_id)

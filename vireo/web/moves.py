@@ -10,12 +10,23 @@ cleanup after a completed move lives in ``web/move_cleanup.py``.
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from services import moves_merge
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
 
-def _scan_dir_file_count(root_path, file_limit=None, dir_limit=None):
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.service_types import ErrorResponse, JsonError
+    from web.web_types import GetDb
+
+
+def _scan_dir_file_count(
+    root_path: str, file_limit: int | None = None, dir_limit: int | None = None,
+) -> tuple[int, bool]:
     """Count files (non-directory entries) under ``root_path`` with a lazy
     ``os.scandir`` walk. ``os.scandir`` yields entries one at a time, so with
     ``file_limit``/``dir_limit`` set we bail the moment either cap is reached
@@ -69,7 +80,7 @@ def _scan_dir_file_count(root_path, file_limit=None, dir_limit=None):
     return file_count, truncated
 
 
-def create_moves_blueprint(get_db, json_error):
+def create_moves_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     """Build the move-rules and move-folder preflight blueprint.
 
     These routes need only the database and the JSON error helper; the
@@ -80,7 +91,7 @@ def create_moves_blueprint(get_db, json_error):
     blueprint = Blueprint("moves", __name__)
 
     @blueprint.route("/api/move-photos/visibility", methods=["POST"])
-    def api_photo_move_visibility():
+    def api_photo_move_visibility() -> ResponseReturnValue:
         from web.request_args import parse_selection_photo_ids
 
         body = request.get_json(silent=True)
@@ -106,13 +117,13 @@ def create_moves_blueprint(get_db, json_error):
         return jsonify({"workspaces": db.photo_visibility.affected_workspaces(photo_ids)})
 
     @blueprint.route("/api/move-rules", methods=["GET"])
-    def api_list_move_rules():
+    def api_list_move_rules() -> ResponseReturnValue:
         db = get_db()
         rules = db.moves_merge.list_rules()
         return jsonify([dict(r) for r in rules])
 
     @blueprint.route("/api/move-rules", methods=["POST"])
-    def api_create_move_rule():
+    def api_create_move_rule() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         name = body.get("name", "").strip()
@@ -124,7 +135,7 @@ def create_moves_blueprint(get_db, json_error):
         return jsonify({"ok": True, "id": rule_id})
 
     @blueprint.route("/api/move-rules/<int:rule_id>", methods=["PUT"])
-    def api_update_move_rule(rule_id):
+    def api_update_move_rule(rule_id: int) -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         kwargs = {}
@@ -138,13 +149,13 @@ def create_moves_blueprint(get_db, json_error):
         return jsonify({"ok": True})
 
     @blueprint.route("/api/move-rules/<int:rule_id>", methods=["DELETE"])
-    def api_delete_move_rule(rule_id):
+    def api_delete_move_rule(rule_id: int) -> ResponseReturnValue:
         db = get_db()
         db.moves_merge.delete_rule(rule_id)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/move-rules/preview", methods=["POST"])
-    def api_move_rule_preview():
+    def api_move_rule_preview() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         criteria = body.get("criteria", {})
@@ -152,7 +163,7 @@ def create_moves_blueprint(get_db, json_error):
         return jsonify({"count": len(photo_ids), "photo_ids": photo_ids})
 
     @blueprint.route("/api/move-folder/preflight", methods=["POST"])
-    def api_move_folder_preflight():
+    def api_move_folder_preflight() -> ResponseReturnValue:
         """Report the resolved destination for a folder move and whether it
         already exists, so the UI can offer a merge/resume confirmation
         instead of silently failing on an existing destination. Handles both
@@ -248,8 +259,9 @@ def create_moves_blueprint(get_db, json_error):
     return blueprint
 
 
-def _remote_preflight_response(get_db, json_error, folder, *,
-                               remote_target_id, subpath, destination_name):
+def _remote_preflight_response(get_db: GetDb, json_error: JsonError, folder: Row, *,
+                               remote_target_id: str, subpath: str,
+                               destination_name: str) -> ErrorResponse | Response:
     """Answer the move-folder preflight for a remote (SSH) target."""
     import posixpath
 
@@ -295,8 +307,8 @@ def _remote_preflight_response(get_db, json_error, folder, *,
     })
 
 
-def _date_organized_preflight_response(get_db, json_error, folder_id,
-                                       destination, folder_template):
+def _date_organized_preflight_response(get_db: GetDb, json_error: JsonError, folder_id: int,
+                                       destination: str, folder_template: str) -> ErrorResponse | Response:
     """Answer the move-folder preflight for a capture-date organized move."""
     import move as move_mod
     from ingest import folder_template_samples
@@ -335,7 +347,7 @@ def _date_organized_preflight_response(get_db, json_error, folder_id,
     })
 
 
-def _local_preflight_response(folder, destination, destination_name, mode):
+def _local_preflight_response(folder: Row, destination: str, destination_name: str, mode: str) -> Response:
     """Answer the move-folder preflight for a local-path destination."""
     from move import preview_merge, resolve_folder_dest
 

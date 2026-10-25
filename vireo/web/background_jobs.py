@@ -21,9 +21,19 @@ request validation: returning any Flask response before calling
 ``ctx.start`` short-circuits without starting a job.
 """
 
-import functools
+from __future__ import annotations
 
-from flask import jsonify
+import functools
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Concatenate, Protocol
+
+from flask import Response, jsonify
+
+if TYPE_CHECKING:
+    from db import Database
+    from jobs import JobRunner
+    from services.service_types import JobDict, JobWork, JsonDict
+    from web.web_types import GetDb, GetRunner
 
 
 class JobCancelled(Exception):
@@ -40,13 +50,16 @@ class JobLaunch:
 
     __slots__ = ("runner", "workspace_id", "db_path", "_db_factory")
 
-    def __init__(self, runner, workspace_id, db_path, db_factory):
+    def __init__(
+        self, runner: JobRunner, workspace_id: int | None, db_path: str,
+        db_factory: Callable[[str], Database],
+    ) -> None:
         self.runner = runner
         self.workspace_id = workspace_id
         self.db_path = db_path
         self._db_factory = db_factory
 
-    def thread_db(self):
+    def thread_db(self) -> Database:
         """Open a worker-thread database bound to the request's workspace.
 
         Call this *inside* the work closure: SQLite connections are not
@@ -58,7 +71,7 @@ class JobLaunch:
             db.set_active_workspace(self.workspace_id)
         return db
 
-    def checkpoint(self, job):
+    def checkpoint(self, job: JobDict) -> None:
         """Pause or exit between completed units of work.
 
         Call only after releasing transactions, shared locks, and active
@@ -67,7 +80,11 @@ class JobLaunch:
         if self.runner.is_cancelled(job["id"]):
             raise JobCancelled("Job cancelled")
 
-    def start_job(self, job_type, work, config=None, **kwargs):
+    def start_job(
+        self, job_type: str, work: JobWork, config: JsonDict | None = None,
+        # Forwarded to JobRunner.start, whose keywords are untyped.
+        **kwargs: Any,
+    ) -> str:
         """Register ``work`` with the runner and return the new job id.
 
         ``workspace_id`` defaults to the request's active workspace; any
@@ -77,20 +94,33 @@ class JobLaunch:
         kwargs.setdefault("workspace_id", self.workspace_id)
         return self.runner.start(job_type, work, config=config, **kwargs)
 
-    def start(self, job_type, work, config=None, *, extra=None, **kwargs):
+    def start(
+        self, job_type: str, work: JobWork, config: JsonDict | None = None, *,
+        extra: JsonDict | None = None,
+        # Forwarded to JobRunner.start, whose keywords are untyped.
+        **kwargs: Any,
+    ) -> Response:
         """Start the job and return the standard ``{"job_id": ...}`` response.
 
         ``extra`` adds keys alongside ``job_id`` for routes whose clients
         expect more than the id (for example a ``total`` for progress UIs).
         """
         job_id = self.start_job(job_type, work, config=config, **kwargs)
-        payload = {"job_id": job_id}
+        payload: JsonDict = {"job_id": job_id}
         if extra:
             payload.update(extra)
         return jsonify(payload)
 
 
-def make_background_job(get_runner, get_db, db_path, db_factory):
+class BackgroundJob(Protocol):
+    """The ``@background_job`` decorator: binds a :class:`JobLaunch` first."""
+
+    def __call__[**P, R](self, view: Callable[Concatenate[JobLaunch, P], R], /) -> Callable[P, R]: ...
+
+
+def make_background_job(
+    get_runner: GetRunner, get_db: GetDb, db_path: str, db_factory: Callable[[str], Database],
+) -> BackgroundJob:
     """Build the ``@background_job`` decorator for one application.
 
     ``get_runner`` and ``get_db`` are called per request (the runner is
@@ -98,9 +128,9 @@ def make_background_job(get_runner, get_db, db_path, db_factory):
     is the class used for worker-thread connections, normally ``Database``.
     """
 
-    def background_job(view):
+    def background_job[**P, R](view: Callable[Concatenate[JobLaunch, P], R], /) -> Callable[P, R]:
         @functools.wraps(view)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             ctx = JobLaunch(
                 get_runner(),
                 get_db().active_workspace_id,

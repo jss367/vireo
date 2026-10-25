@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .algorithms import run_algorithm
-from .common import code_identity, configure_repo, digest, restore_features, write_json
+from .common import code_identity, configure_repo, digest, restore_features, shared_default_path, write_json
 from .continuity import apply_continuity
 from .continuity_compare import _preview
 from .continuity_followup import pair_references
@@ -104,7 +104,9 @@ def _encounter_traces(photos, grouping_config):
 
 
 def pending_preview(pid, size=1920):
-    return (Path.home() / ".vireo" / "previews" / f"{pid}_{size}.jpg").as_uri()
+    # Previews live under the current Vireo data root; fresh installs put
+    # that outside ``~/.vireo``.
+    return (shared_default_path("data") / "previews" / f"{pid}_{size}.jpg").as_uri()
 
 
 def _order_key(seed, case_id):

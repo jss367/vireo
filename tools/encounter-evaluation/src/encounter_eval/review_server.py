@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .common import configure_repo, shared_default_path
 from .review import KINDS, build_queue, connect, metadata, same_photo, save_review
 from .review_tags import ensure_tag_sync, sync_review_tags
 
@@ -41,7 +42,7 @@ def photo_payload(conn, pid):
     return photo
 
 
-def image_path(conn, pid, media_root, large):
+def image_path(conn, pid, media_root, thumbnails_root, large):
     row = conn.execute('SELECT data FROM photos WHERE id=?', (pid,)).fetchone()
     if not row:
         return None
@@ -54,14 +55,16 @@ def image_path(conn, pid, media_root, large):
         if now is None or not same_photo(photo, dict(now)):
             return None
     root = Path(media_root).resolve()
+    thumbs = Path(thumbnails_root).resolve()
     paths = [root / 'previews' / f'{pid}_{size}.jpg' for size in ([3840, 1920, 960] if large else [960, 1920])]
     thumb = photo.get('thumbnail')
     if thumb:
         p = Path(thumb)
-        paths.append(p if p.is_absolute() else root / 'thumbnails' / p)
-    paths.append(root / 'thumbnails' / f'{pid}.jpg')
+        paths.append(p if p.is_absolute() else thumbs / p)
+    paths.append(thumbs / f'{pid}.jpg')
     for path in paths:
-        if path.resolve().is_relative_to(root) and path.is_file():
+        resolved = path.resolve()
+        if (resolved.is_relative_to(root) or resolved.is_relative_to(thumbs)) and path.is_file():
             return path
     return None
 
@@ -76,7 +79,13 @@ def make_server(queue, *, port=0, media_root=None, update_vireo_tags=False):
         if meta.get('format_version') != 1:
             raise ValueError('Unsupported review database')
     token = secrets.token_urlsafe(32)
-    media_root = Path(media_root or Path.home() / '.vireo').resolve()
+    # Previews and working copies live under the data root; fresh installs put
+    # thumbnails on the platform cache root. A user-supplied media root keeps
+    # its sibling thumbnails layout so custom installs still resolve both.
+    user_media_root = media_root is not None
+    media_root = Path(media_root or shared_default_path('data')).resolve()
+    thumbnails_root = (media_root / 'thumbnails') if user_media_root else Path(shared_default_path('thumbnails'))
+    thumbnails_root = thumbnails_root.resolve()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -147,7 +156,7 @@ def make_server(queue, *, port=0, media_root=None, update_vireo_tags=False):
                         rows = conn.execute("SELECT * FROM species WHERE name LIKE ? ESCAPE '\\' OR scientific LIKE ? ESCAPE '\\' ORDER BY length(name),name LIMIT 30", ('%'+escaped+'%', '%'+escaped+'%')).fetchall()
                     self.send(200, [dict(r) for r in rows])
                 elif parsed.path.startswith('/image/'):
-                    path = image_path(conn, int(parsed.path.rsplit('/', 1)[-1]), media_root, query.get('large') == ['1'])
+                    path = image_path(conn, int(parsed.path.rsplit('/', 1)[-1]), media_root, thumbnails_root, query.get('large') == ['1'])
                     if path:
                         self.send(200, path.read_bytes(), 'image/jpeg')
                     else:
@@ -202,7 +211,8 @@ def main(argv=None):
     build = sub.add_parser('build')
     build.add_argument('--run', type=Path, required=True)
     build.add_argument('--output', type=Path, required=True)
-    build.add_argument('--db', type=Path, default=Path.home()/'.vireo/vireo.db')
+    build.add_argument('--db', type=Path,
+                       help='Vireo catalog; defaults to the current installation\'s database path')
     build.add_argument('--agreement-sample', type=int, default=200)
     build.add_argument('--seed', type=int, default=42)
     serve = sub.add_parser('serve')
@@ -213,8 +223,13 @@ def main(argv=None):
     serve.add_argument('--update-vireo-tags', action='store_true',
                        help='Also apply saved reviews to Vireo species tags and queue normal XMP sync')
     args = p.parse_args(argv)
+    # The catalog and the data root both honor the current installation's
+    # platform layout, so resolve defaults after configure_repo makes
+    # ``app_paths`` importable.
+    configure_repo()
     if args.command == 'build':
-        print(json.dumps(build_queue(args.run, args.output, args.db, agreement_sample=args.agreement_sample, seed=args.seed), indent=2))
+        db = args.db if args.db is not None else shared_default_path('database')
+        print(json.dumps(build_queue(args.run, args.output, db, agreement_sample=args.agreement_sample, seed=args.seed), indent=2))
     else:
         server = make_server(args.queue, port=args.port, media_root=args.media_root,
                              update_vireo_tags=args.update_vireo_tags)

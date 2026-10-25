@@ -12,7 +12,7 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any
 
-from app_paths import default_path
+from app_paths import default_path, media_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,7 +63,7 @@ def auxiliary_paths(db_path: str, thumb_dir: str, config: Mapping[str, Any], db:
     import taxonomy
 
     catalog = os.path.dirname(os.path.abspath(db_path))
-    generated = os.path.dirname(os.path.abspath(thumb_dir))
+    generated = media_root(os.path.abspath(thumb_dir))
     paths = [os.path.join(generated, name) for name in (
         "originals", "external-edits", "external-dng", "inat-uploads",
         "inat-exports", "edit-masks", "staging", "local-folders", "local-workspaces",

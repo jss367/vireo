@@ -3,6 +3,17 @@
 import pytest
 from playwright.sync_api import expect
 
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Jobs page's modules as ``pageModules.<file>`` and its state as
+    ``jobsState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "jobs", "jobsState")
+
 JOB = {
     "id": "polling-test", "type": "scan", "status": "running",
     "started_at": "2026-10-16T00:00:00", "config": {}, "steps": [], "errors": [],
@@ -26,7 +37,7 @@ def mount_jobs(live_server, page, initial_failure=None):
         json={"error": "Unavailable"} if initial_failure == "history" else history,
     ))
     page.goto(live_server["url"] + "/jobs")
-    page.wait_for_function("""Object.values(jobsPollState).every(lane =>
+    page.wait_for_function("""Object.values(jobsState.jobsPollState).every(lane =>
       !lane.pending && (lane.loaded || lane.error))""")
     page.evaluate("""() => {
       window.pollRequests = [];
@@ -42,7 +53,7 @@ def mount_jobs(live_server, page, initial_failure=None):
 def test_jobs_refresh_failure_keeps_data_and_keyboard_retry_recovers(live_server, page, lane, failure):
     mount_jobs(live_server, page)
     page.evaluate("""({lane, failure}) => {
-      window.failedRefresh = lane === 'active' ? fetchJobs() : fetchHistory();
+      window.failedRefresh = lane === 'active' ? pageModules.polling.fetchJobs() : pageModules.polling.fetchHistory();
       const request = pollRequests[0];
       if (failure === 'network') request.reject(new Error('offline'));
       else if (failure === 'json') request.resolve({ok: true, json: async () => { throw new Error('invalid JSON'); }});
@@ -72,7 +83,7 @@ def test_jobs_refresh_failure_keeps_data_and_keyboard_retry_recovers(live_server
 
 def test_jobs_poll_timer_does_not_overlap_and_automatically_recovers(live_server, page):
     mount_jobs(live_server, page)
-    page.evaluate("() => { window.slowRefresh = fetchJobs(); }")
+    page.evaluate("() => { window.slowRefresh = pageModules.polling.fetchJobs(); }")
     page.clock.fast_forward(4000)
     # The navbar has a separate poller; count only requests belonging to the
     # Jobs page's controller, whose fetch always carries an abort signal.

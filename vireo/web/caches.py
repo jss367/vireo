@@ -16,16 +16,27 @@ import json
 import logging
 import os
 import tempfile
+from typing import TYPE_CHECKING
 
+from app_paths import media_root
 from flask import Blueprint, jsonify, make_response, request
 from keep_safety import review_culling_suggestions
 from photo_payload import attach_nested_edit_recipes
 from services import detection_store
 
+if TYPE_CHECKING:
+    from computation_cache import ArtifactStore
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonError
+    from web.web_types import AppConfig, GetDb
+
 log = logging.getLogger(__name__)
 
 
-def create_caches_blueprint(get_db, json_error, db_path, config):
+def create_caches_blueprint(
+    get_db: GetDb, json_error: JsonError, db_path: str, config: AppConfig,
+) -> Blueprint:
     """Build the derived-caches blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR`` for the
@@ -36,7 +47,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
     blueprint = Blueprint("caches", __name__)
 
     @blueprint.route("/api/detections/<int:photo_id>")
-    def api_detections(photo_id):
+    def api_detections(photo_id: int) -> ResponseReturnValue:
         """Get all detections for a photo."""
         db = get_db()
         # Detections are global, but exposing them for photos outside the
@@ -47,13 +58,13 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         dets = detection_store.get_detections(db, photo_id)
         return jsonify([dict(d) for d in dets])
 
-    def _computation_store():
+    def _computation_store() -> ArtifactStore:
         from computation_cache import ArtifactStore
 
         return ArtifactStore(config["COMPUTATION_CACHE_DIR"])
 
     @blueprint.route("/api/computation-cache")
-    def api_computation_cache_status():
+    def api_computation_cache_status() -> ResponseReturnValue:
         """Return local portable-object and currently exportable-run counts."""
         from computation_cache import exportable_run_counts
 
@@ -66,7 +77,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         })
 
     @blueprint.route("/api/computation-cache/export")
-    def api_computation_cache_export():
+    def api_computation_cache_export() -> ResponseReturnValue:
         """Download portable detector/classifier results as a cache bundle."""
         import datetime as _datetime
 
@@ -121,7 +132,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         return response
 
     @blueprint.route("/api/computation-cache/import", methods=["POST"])
-    def api_computation_cache_import():
+    def api_computation_cache_import() -> ResponseReturnValue:
         """Validate, store, and immediately apply an uploaded cache bundle."""
         import zipfile
 
@@ -175,7 +186,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
             **applied,
         })
 
-    def _recommended_preview_cache_mb(db):
+    def _recommended_preview_cache_mb(db: Database) -> int:
         """Recommend a quota that fits one preview per photo across the
         whole library.
 
@@ -197,7 +208,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         return max(1, int(recommended_bytes / 1024 / 1024) + 1)
 
     @blueprint.route("/api/preview-cache")
-    def api_preview_cache():
+    def api_preview_cache() -> ResponseReturnValue:
         """Return counts and totals for both preview cache families, plus quota."""
         import config as cfg
         db = get_db()
@@ -212,7 +223,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         })
 
     @blueprint.route("/api/preview-cache/clear", methods=["POST"])
-    def api_preview_cache_clear():
+    def api_preview_cache_clear() -> ResponseReturnValue:
         """Delete every preview_cache file and row, including legacy and
         untracked files in the previews directory.
 
@@ -225,7 +236,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         import re
 
         db = get_db()
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
 
         tracked = db.caches.preview_entry_count()
@@ -286,7 +297,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         })
 
     @blueprint.route("/api/detection-cache/stats")
-    def api_detection_cache_stats():
+    def api_detection_cache_stats() -> ResponseReturnValue:
         """Return global detector-cache stats for the settings page.
 
         `detector_runs` is shared across workspaces, so the numbers do
@@ -296,7 +307,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         return jsonify(db.model_runs.get_global_detection_stats())
 
     @blueprint.route("/api/culling/results")
-    def api_culling_results():
+    def api_culling_results() -> ResponseReturnValue:
         """Return the most recent culling analysis results for the active workspace."""
         db = get_db()
         cache_path = os.path.join(os.path.dirname(db_path), f"culling_results_ws{db.active_workspace_id}.json")
@@ -324,7 +335,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         return jsonify(results)
 
     @blueprint.route("/api/culling/apply", methods=["POST"])
-    def api_culling_apply():
+    def api_culling_apply() -> ResponseReturnValue:
         """Apply culling decisions — flag keepers and reject others.
 
         ``unflag`` carries the photos the user explicitly moved back to

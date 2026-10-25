@@ -16,9 +16,10 @@ of the support commitment yet.
 - Vireo enables long-path awareness. Windows must also have **Enable Win32
   long paths** turned on for deeply nested libraries; Settings reports when
   that system policy is disabled.
-- Uninstalling Vireo removes the application but preserves `.vireo` under the
-  user's home directory, including the catalog, settings, downloaded models,
-  and logs. XMP files and photos are never application-owned and are not
+- Uninstalling Vireo removes the application but preserves its data. Fresh
+  installations use `%LOCALAPPDATA%\Vireo` (caches under `Cache`); existing
+  installations keep `.vireo` under the home directory. See the
+  [uninstall guide](uninstalling.md) for backup and cleanup locations. XMP files and photos are never application-owned and are not
   removed.
 
 ## Optional integrations

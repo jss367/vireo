@@ -247,7 +247,7 @@ def create_session_with_self_heal(model_path, redownload=None):
                 f"self-heal redownload. Original error: {first_err}. "
                 f"Retry error: {second_err}. "
                 "Open Settings → Models and click Repair, or check "
-                "~/.vireo/vireo.log for details."
+                "vireo.log in Vireo's data folder for details."
             ) from second_err
 
 

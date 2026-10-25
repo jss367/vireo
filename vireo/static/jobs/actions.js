@@ -1,8 +1,19 @@
 // Detail pane buttons: cleanup, show job, retry/resume import, pause, cancel.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { renderHistoryDetail, toggleStep } from './detail.js';
+import {
+  hasActiveRetryFor, importResumeTakeover, importRetryBody, importTakeoverNote,
+} from './import-retry.js';
+import {
+  fetchHistory, fetchImportRecoveryOptions, fetchJobs, refreshHistoryImportRecovery,
+} from './polling.js';
+import { selectJob } from './selection.js';
+import { requestSourceCleanup } from './source-cleanup.js';
+import { directNasImportRetryBody, importFailedBeforeStart, showToast } from './shared.js';
 
 // Event delegation for detail pane clicks (step toggle, pause/resume, cancel)
-function bindDetailPaneActions() {
+export function bindDetailPaneActions() {
   /** @type {HTMLElement} */ (document.getElementById('jobDetailPane')).addEventListener('click', function(e) {
     if (!(e.target instanceof Element)) return;
     let cleanupButton = e.target.closest('[data-review-source], [data-clean-source]');
@@ -14,15 +25,15 @@ function bindDetailPaneActions() {
     let showJobBtn = e.target.closest('[data-show-job]');
     if (showJobBtn) {
       let showJobId = showJobBtn.getAttribute('data-show-job'); if (!showJobId) return;
-      let inActive = activeJobs.some(function(job) { return job.id === showJobId; });
+      let inActive = state.activeJobs.some(function(job) { return job.id === showJobId; });
       selectJob(showJobId, inActive ? 'active' : 'history');
       return;
     }
     let restartInPlaceBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-restart-in-place]'));
     if (restartInPlaceBtn) {
       let restartId = restartInPlaceBtn.getAttribute('data-restart-in-place'); if (!restartId) return;
-      if (inPlaceRestarts[restartId]) return;
-      inPlaceRestarts[restartId] = {pending: true};
+      if (state.inPlaceRestarts[restartId]) return;
+      state.inPlaceRestarts[restartId] = {pending: true};
       restartInPlaceBtn.disabled = true;
       restartInPlaceBtn.textContent = 'Restarting…';
       fetch('/api/jobs/import-in-place/' + encodeURIComponent(restartId) + '/restart', {
@@ -37,21 +48,21 @@ function bindDetailPaneActions() {
           return {jobId: data.job_id || data.restart_job_id, alreadyRestarted: !response.ok};
         });
       }).then(function(data) {
-        inPlaceRestarts[restartId] = {jobId: data.jobId};
+        state.inPlaceRestarts[restartId] = {jobId: data.jobId};
         if (typeof showToast === 'function') {
           showToast(data.alreadyRestarted ? 'This import was already restarted. Showing the later run.' :
             'Import restarted. Rescanning the original selection; unchanged catalog records are reused.', 'info');
         }
-        selectedJobId = data.jobId;
-        selectedSource = 'active';
-        currentView = data.jobId;
+        state.selectedJobId = data.jobId;
+        state.selectedSource = 'active';
+        state.currentView = data.jobId;
         fetchJobs();
       }).catch(function(error) {
-        delete inPlaceRestarts[restartId];
+        delete state.inPlaceRestarts[restartId];
         restartInPlaceBtn.disabled = false;
         restartInPlaceBtn.textContent = 'Restart import';
-        if (selectedJobId === restartId) {
-          let originalImport = activeJobs.concat(historyJobs).find(function(job) { return job.id === restartId; });
+        if (state.selectedJobId === restartId) {
+          let originalImport = state.activeJobs.concat(state.historyJobs).find(function(job) { return job.id === restartId; });
           if (originalImport) renderHistoryDetail(originalImport);
         }
         if (typeof showToast === 'function') showToast(error.message, 'error');
@@ -62,18 +73,18 @@ function bindDetailPaneActions() {
     let retryImportBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-retry-import-job]'));
     let recoveryCheckBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-check-import-recovery]'));
     if (recoveryCheckBtn) {
-      let recoveryJob = historyJobs.find(function(job) {
+      let recoveryJob = state.historyJobs.find(function(job) {
         return job.id === recoveryCheckBtn.getAttribute('data-check-import-recovery');
       });
       if (recoveryJob) {
         refreshHistoryImportRecovery(recoveryJob);
-        if (selectedJobId === recoveryJob.id) renderHistoryDetail(recoveryJob);
+        if (state.selectedJobId === recoveryJob.id) renderHistoryDetail(recoveryJob);
       }
       return;
     }
     if (retryImportBtn) {
       let retryJobId = retryImportBtn.getAttribute('data-retry-import-job'); if (!retryJobId) return;
-      let retryJob = activeJobs.concat(historyJobs).find(function(job) {
+      let retryJob = state.activeJobs.concat(state.historyJobs).find(function(job) {
         return job.id === retryJobId;
       });
       if (retryJob && (retryJob.import_resume_pending ||
@@ -86,7 +97,7 @@ function bindDetailPaneActions() {
       }
       let retryBody = importRetryBody(retryJob);
       let directToNas = retryImportBtn.hasAttribute('data-retry-direct-to-nas');
-      if (directToNas) retryBody = directNasImportRetryBody(retryJob, retryBody, historyJobs);
+      if (directToNas) retryBody = directNasImportRetryBody(retryJob, retryBody, state.historyJobs);
       if (!retryBody) {
         if (typeof showToast === 'function') {
           showToast('The original import settings are no longer available.', 'error');
@@ -108,12 +119,12 @@ function bindDetailPaneActions() {
       }
       // A resume that finished between renders took this row over; the
       // server would refuse with a 409, so say so without sending it.
-      let lateTakeover = importResumeTakeover(retryJob, historyJobs);
+      let lateTakeover = importResumeTakeover(retryJob, state.historyJobs);
       if (lateTakeover.by) {
         if (typeof showToast === 'function') {
           showToast(importTakeoverNote(lateTakeover), 'info');
         }
-        if (retryJob && selectedJobId === retryJobId) renderHistoryDetail(retryJob);
+        if (retryJob && state.selectedJobId === retryJobId) renderHistoryDetail(retryJob);
         return;
       }
       // Preserve the original count-specific label so the error path
@@ -128,14 +139,14 @@ function bindDetailPaneActions() {
       let isResume = retryImportBtn.hasAttribute('data-import-resume');
       retryImportBtn.disabled = true;
       retryImportBtn.textContent = isResume ? 'Resuming…' : 'Starting retry…';
-      pendingImportRetries[retryJobId] = true;
+      state.pendingImportRetries[retryJobId] = true;
       let retryButtons = /** @type {HTMLElement} */ (document.getElementById('jobDetailPane')).querySelectorAll(/** @type {'button'} */ ('button[data-retry-import-job]'));
       retryButtons.forEach(function(button) { button.disabled = true; });
       let eligibility = Promise.resolve();
       if (directToNas) {
         eligibility = fetchImportRecoveryOptions(retryJobId)
           .then(function(options) {
-            let current = historyJobs.find(function(job) { return job.id === retryJobId; });
+            let current = state.historyJobs.find(function(job) { return job.id === retryJobId; });
             if (current) current.import_recovery_options = options;
             if (options.direct_to_nas_allowed !== true) {
               throw new Error(options.error || 'Direct-to-NAS retry is no longer available. Retry with the original settings.');
@@ -156,23 +167,23 @@ function bindDetailPaneActions() {
           return data;
         });
       }).then(function(data) {
-        delete pendingImportRetries[retryJobId];
+        delete state.pendingImportRetries[retryJobId];
         if (typeof showToast === 'function') {
           showToast(isResume
             ? 'Import resumed. Files already imported will be skipped.'
             : 'Import retry started. Successful files will be skipped.', 'info');
         }
-        selectedJobId = data.job_id;
-        selectedSource = 'active';
-        currentView = data.job_id;
+        state.selectedJobId = data.job_id;
+        state.selectedSource = 'active';
+        state.currentView = data.job_id;
         fetchJobs();
       }).catch(function(error) {
-        delete pendingImportRetries[retryJobId];
+        delete state.pendingImportRetries[retryJobId];
         retryButtons.forEach(function(button) { button.disabled = false; });
         retryImportBtn.disabled = false;
         retryImportBtn.textContent = retryOriginalLabel;
-        if (selectedJobId === retryJobId) {
-          let failedRetryParent = historyJobs.find(function(job) { return job.id === retryJobId; });
+        if (state.selectedJobId === retryJobId) {
+          let failedRetryParent = state.historyJobs.find(function(job) { return job.id === retryJobId; });
           if (failedRetryParent) renderHistoryDetail(failedRetryParent);
         }
         if (typeof showToast === 'function') showToast(error.message, 'error');
@@ -206,7 +217,7 @@ function bindDetailPaneActions() {
         }
         return r.json();
       }).then(function(data) {
-        let job = activeJobs.find(function(j) { return j.id === jobId; });
+        let job = state.activeJobs.find(function(j) { return j.id === jobId; });
         if (job && data.status) job.status = data.status;
         if (typeof showToast === 'function') {
           showToast(
@@ -233,7 +244,7 @@ function bindDetailPaneActions() {
       cancelBtn.disabled = true;
       cancelBtn.textContent = 'Cancelling…';
       cancelBtn.classList.add('cancelling');
-      cancellingJobIds[jobId] = true;
+      state.cancellingJobIds[jobId] = true;
       fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
         .then(function(r) {
           if (r.ok) {
@@ -243,7 +254,7 @@ function bindDetailPaneActions() {
             return r.json().then(function(data) {
               let msg = (data && data.error) || 'Unable to cancel job';
               if (typeof showToast === 'function') showToast(msg, 'error');
-              delete cancellingJobIds[jobId];
+              delete state.cancellingJobIds[jobId];
               cancelBtn.disabled = false;
               cancelBtn.textContent = 'Cancel';
               cancelBtn.classList.remove('cancelling');
@@ -252,7 +263,7 @@ function bindDetailPaneActions() {
         })
         .catch(function() {
           if (typeof showToast === 'function') showToast('Unable to cancel job', 'error');
-          delete cancellingJobIds[jobId];
+          delete state.cancellingJobIds[jobId];
           cancelBtn.disabled = false;
           cancelBtn.textContent = 'Cancel';
           cancelBtn.classList.remove('cancelling');

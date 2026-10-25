@@ -16,6 +16,7 @@ turn into a 400. Helpers that must answer with a response take the app's
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from flask import request
 from services.missing_originals import (
@@ -28,6 +29,13 @@ from services.visual_scope import (
     inject_active_visual_model,
     validate_visual_arg,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from db import Database
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+    from services.visual_scope import RuleTree, VisualClause
 
 # Largest photo selection the Browse selection panels will act on. Owned here
 # rather than inline so the producer (``/api/selection/*``, which reads a
@@ -48,13 +56,13 @@ MAX_PER_PAGE = 500
 MAX_FOCUS_PHOTO_IDS = 200
 
 
-def request_bool_arg(name):
+def request_bool_arg(name: str) -> bool:
     """Return whether query param ``name`` holds a truthy flag value."""
     raw = request.args.get(name, "")
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def request_flag_filter():
+def request_flag_filter() -> Literal["none", "flagged", "rejected"] | None:
     """Parse the optional ``flag`` query param (``none``/``flagged``/``rejected``)."""
     flag = request.args.get("flag", None)
     if flag in (None, ""):
@@ -64,7 +72,7 @@ def request_flag_filter():
     return flag
 
 
-def request_location_status_filter():
+def request_location_status_filter() -> str | None:
     """Parse the optional ``location_status`` query param (``exif``/``assigned``/``none``)."""
     value = (request.args.get("location_status") or "").strip().lower()
     if not value:
@@ -76,7 +84,7 @@ def request_location_status_filter():
     return value
 
 
-def request_rules_arg():
+def request_rules_arg() -> RuleTree | None:
     """Parse the optional ``rules`` query param (a JSON universal-filter
     rule tree). Returns None when absent; raises ValueError on invalid
     JSON so callers surface a 400. The active visual model is injected
@@ -93,7 +101,7 @@ def request_rules_arg():
     return inject_active_visual_model(rules)
 
 
-def request_visual_arg():
+def request_visual_arg() -> VisualClause | None:
     """Parse the optional ``visual`` query param (JSON clause)."""
     raw = request.args.get("visual")
     if not raw:
@@ -105,7 +113,7 @@ def request_visual_arg():
     return validate_visual_arg(parsed)
 
 
-def request_missing_originals_folder_id(db):
+def request_missing_originals_folder_id(db: Database) -> int | None:
     """Read the Missing Originals ``folder_id`` scope from the query or body.
 
     A JSON body's ``folder_id`` wins over the query param. Returns ``None``
@@ -120,7 +128,16 @@ def request_missing_originals_folder_id(db):
     return resolve_missing_originals_folder_id(db, folder_id)
 
 
-def dashboard_scope_args():
+class DashboardScope(TypedDict):
+    """The Dashboard scope, as ``services.dashboard_stats`` takes it."""
+
+    folder_id: int | None
+    collection_id: int | None
+    date_from: str | None
+    date_to: str | None
+
+
+def dashboard_scope_args() -> DashboardScope:
     """Read the Dashboard's folder/collection/date scope query params."""
     return {
         "folder_id": request.args.get("folder_id", None, type=int),
@@ -130,13 +147,13 @@ def dashboard_scope_args():
     }
 
 
-def focus_candidate_ids(focus_photo_id, focus_photo_ids):
+def focus_candidate_ids(focus_photo_id: int | None, focus_photo_ids: Iterable[int] | None) -> list[int]:
     """The photos a focused request may be placed by, in caller order.
 
     ``focus_photo_id`` stays first when both are given: it is the card
     the caller actually wants, and the list is its fallback.
     """
-    candidates = []
+    candidates: list[int] = []
     for pid in ([focus_photo_id] if focus_photo_id is not None else []) + list(
         focus_photo_ids or []
     ):
@@ -145,7 +162,7 @@ def focus_candidate_ids(focus_photo_id, focus_photo_ids):
     return candidates
 
 
-def reject_visual_collection(db, collection_id, *, json_error):
+def reject_visual_collection(db: Database, collection_id: object, *, json_error: JsonError) -> ErrorResponse | None:
     """Return a 400 response if the collection is visual, else None.
 
     The consumers that call ``db.collections.get_photos`` /
@@ -175,35 +192,37 @@ def reject_visual_collection(db, collection_id, *, json_error):
     return None
 
 
-def parse_selection_photo_ids(db, body, *, json_error, limit=MAX_SELECTION_PHOTOS):
+def parse_selection_photo_ids(
+    db: Database, body: JsonDict, *, json_error: JsonError, limit: int | None = MAX_SELECTION_PHOTOS,
+) -> tuple[list[int], ErrorResponse | None]:
     """Validate a selection payload's ``photo_ids``.
 
-    Returns ``(photo_ids, None)`` or ``(None, error_response)``. Shared by
+    Returns ``(photo_ids, None)`` or ``([], error_response)``. Shared by
     the keyword and prediction selection panels so both enforce the same
     cap and workspace scoping — a selection that is safe to read keywords
     for is exactly the selection that is safe to read predictions for.
     """
     raw_ids = body.get("photo_ids", [])
     if not isinstance(raw_ids, list) or not raw_ids:
-        return None, json_error("photo_ids required")
+        return [], json_error("photo_ids required")
 
-    photo_ids = []
-    seen = set()
+    photo_ids: list[int] = []
+    seen: set[int] = set()
     for raw in raw_ids:
         if isinstance(raw, bool) or not isinstance(raw, int):
-            return None, json_error("photo_ids must be integers")
+            return [], json_error("photo_ids must be integers")
         if raw not in seen:
             photo_ids.append(raw)
             seen.add(raw)
     if not photo_ids:
-        return None, json_error("photo_ids required")
+        return [], json_error("photo_ids required")
     if limit is not None and len(photo_ids) > limit:
-        return None, json_error("too many photo_ids", 400)
+        return [], json_error("too many photo_ids", 400)
 
     visible_ids = set(db.photo_visibility.visible_photo_ids(photo_ids))
     for pid in photo_ids:
         if pid not in visible_ids:
-            return None, json_error(
+            return [], json_error(
                 f"Photo {pid} does not belong to the active workspace", 403
             )
     return photo_ids, None

@@ -12,6 +12,7 @@
     "../vireo/static/jobs/move-route.js",
     "../vireo/static/jobs/polling.js",
     "../vireo/static/jobs/selection.js",
+    "../vireo/static/jobs/shared.js",
     "../vireo/static/jobs/source-cleanup.js",
     "../vireo/static/jobs/state.js",
     "../vireo/static/jobs/steps.js"
