@@ -86,14 +86,26 @@ def test_unrelated_photos_fail_without_output(panorama_env):
     assert not list(folder.glob("*panorama*"))
 
 
-def test_no_silent_omission_of_selected_frames(panorama_env, monkeypatch):
-    stitcher = Mock()
-    stitcher.estimateTransform.return_value = 0
-    stitcher.component.return_value = [0]
-    monkeypatch.setattr(cv2, "Stitcher_create", lambda mode: stitcher)
-    with pytest.raises(ValueError, match="Could not match all selected photos: view1.png"):
-        run_panorama(panorama_env)
-    stitcher.composePanorama.assert_not_called()
+@pytest.mark.parametrize("position", [0, 1, 2])
+def test_no_silent_omission_of_selected_frames(panorama_env, position):
+    db, folder, ids = panorama_env
+    path = folder / "unrelated.png"
+    Image.new("RGB", (600, 300), "blue").save(path)
+    unrelated_id = photo_ingest.add_photo(
+        db, folder_id=db.photos.get_by_ids(ids)[ids[0]]["folder_id"],
+        filename=path.name, extension=".png", file_size=path.stat().st_size,
+        file_mtime=path.stat().st_mtime, width=600, height=300,
+    )
+    selection = ids.copy()
+    selection.insert(position, unrelated_id)
+    # The real stitcher can align the overlapping pair and report success
+    # while discarding this frame. No partial-selection panorama may be saved.
+    originals = {p.name: p.read_bytes() for p in folder.iterdir()}
+    with pytest.raises(ValueError, match="Could not stitch all selected photos"):
+        run_panorama(panorama_env, photo_ids=selection)
+    assert not list(folder.glob("*panorama*"))
+    for name, data in originals.items():
+        assert (folder / name).read_bytes() == data
 
 
 def test_cancel_after_save_removes_only_new_output(panorama_env):
