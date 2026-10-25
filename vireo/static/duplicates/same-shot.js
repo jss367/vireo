@@ -1,7 +1,10 @@
 // Camera-exposure candidates never enter exact-byte proposals or cleanup actions.
 
+import { duplicatesEl, state } from './state.js';
+import { escapeHtml, formatBytes, revealLabel, thumbnailUrl } from './shared.js';
+
 /** @param {DuplicateScan} result */
-function renderSameShotResults(result) {
+export function renderSameShotResults(result) {
   var panel = duplicatesEl('sameShotResults');
   if (!result.same_shot_scanned) {
     panel.innerHTML = result.catalog_cleanup ? '' :
@@ -10,9 +13,9 @@ function renderSameShotResults(result) {
   }
   var all = result.same_shot_groups || [];
   var groups = all.filter(function(group) {
-    return !_filterMatchedIds || group.photos.some(function(photo) { return _filterMatchedIds?.has(photo.id); });
+    return !state.filterMatchedIds || group.photos.some(function(photo) { return state.filterMatchedIds?.has(photo.id); });
   });
-  var shown = groups.slice(0, _sameShotVisibleLimit);
+  var shown = groups.slice(0, state.sameShotVisibleLimit);
   var html = '<div class="section-header"><div><h2>Possible same-shot copies</h2>' +
     '<p class="section-sub">Showing ' + shown.length + ' of ' + groups.length + ' matching group' + (groups.length === 1 ? '' : 's') +
     '. Camera body serial and shutter count match; catalog file hashes differ. ' +
@@ -31,7 +34,7 @@ function renderSameShotResults(result) {
 }
 
 /** @param {SameShotGroup} group */
-function renderSameShotGroup(group) {
+export function renderSameShotGroup(group) {
   var evidence = group.visual_evidence === 'matching'
     ? 'Stored visual hashes also match. This supports the match; it does not prove identical image data.'
     : group.visual_evidence === 'different'
@@ -45,8 +48,8 @@ function renderSameShotGroup(group) {
 }
 
 /** @param {SameShotPhoto} photo */
-function renderSameShotCard(photo) {
-  var thumb = (window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg')
+export function renderSameShotCard(photo) {
+  var thumb = thumbnailUrl(photo)
     .replace(/^\/thumbnails\//, '/thumbnails/duplicate/');
   var workspaces = photo.workspaces && photo.workspaces.length ? 'In ' + photo.workspaces.join(', ') : 'Not in any workspace';
   return '<div class="dup-card" data-photo-id="' + photo.id + '">' +
@@ -60,5 +63,5 @@ function renderSameShotCard(photo) {
     '<div class="meta">' + formatBytes(photo.file_size || 0) +
     (photo.rating ? ' · ' + photo.rating + '★' : '') + '</div>' +
     '<button type="button" class="keep-btn" data-same-shot-reveal="' + photo.id + '">' +
-    escapeHtml(window.VIREO_REVEAL_LABEL) + '</button></div>';
+    escapeHtml(revealLabel()) + '</button></div>';
 }

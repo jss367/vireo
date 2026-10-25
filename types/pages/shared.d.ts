@@ -28,16 +28,6 @@ interface MapGeoResponse {
   total_without_coordinates: number; total_photos: number; total_geolocated: number;
   truncated: boolean; total_filtered: number; render_limit: number;
 }
-interface DuplicateMember {
-  path?: string; filename?: string; file_size?: number;
-}
-interface DuplicateCategoryGroup {
-  winner: DuplicateMember; other_kept?: DuplicateMember[]; losers?: DuplicateMember[];
-  empty_file_group?: boolean;
-}
-interface DuplicateCategorySummary {
-  id: string; label: string; groups: number; extras: number; bytes: number;
-}
 interface Window { VIREO_RSYNC_INSTALL?: {hint?: string}; }
 
 interface KeymapShortcut { key: string; action(event: KeyboardEvent): unknown; }

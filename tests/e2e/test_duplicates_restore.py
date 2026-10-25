@@ -6,8 +6,20 @@ the most recent completed ``duplicate-scan`` row in ``job_history``.
 """
 import json
 
+import pytest
 from playwright.sync_api import expect
 from services import photo_ingest
+
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Duplicates page's modules as ``pageModules.<file>`` and its state as
+    ``duplicatesState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "duplicates", "duplicatesState")
 
 
 def _seed_prior_scan(db, stale_group=False, only_stale=False):
@@ -318,7 +330,7 @@ def test_cleared_results_cannot_be_revived_by_a_late_response(live_server, page)
     expect(page.locator("#initialLoading")).to_be_visible()
     assert len(pending) == 1
     response = pending[0].fetch()
-    page.evaluate("clearResults()")
+    page.evaluate("pageModules.results.clearResults()")
     pending[0].fulfill(response=response)
     # Clearing the loading state also keeps the scan control usable.
     page.wait_for_function("document.getElementById('scanBtn').disabled === false")
@@ -369,7 +381,7 @@ def test_distant_duplicate_thumbnails_wait_until_scrolled_into_view(live_server,
     expect(page.locator("#catalogBanner")).to_be_visible()
     page.evaluate("""() => {
       document.getElementById('results').innerHTML = '<div style="height:20000px"></div>' +
-        renderCard({id: 999999, filename: 'distant.jpg'}, true, null, false);
+        pageModules.card.renderCard({id: 999999, filename: 'distant.jpg'}, true, null, false);
     }""")
     distant = page.locator('img[alt="distant.jpg"]')
     expect(distant).to_have_attribute("loading", "lazy")

@@ -1,5 +1,5 @@
 /* Filename/folder patterns within already verified exact-duplicate groups. */
-var DuplicateCategories = (function() {
+export const DuplicateCategories = (function() {
   var definitions = [
     {id: 'numbered-same-folder', label: 'Numbered copies in one folder'},
     {id: 'same-name-across-folders', label: 'Same name across folders'},

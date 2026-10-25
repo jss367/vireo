@@ -3,10 +3,22 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from duplicate_scan import run_duplicate_scan
 from PIL import Image, ImageDraw
 from playwright.sync_api import expect
 from services import photo_ingest
+
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Duplicates page's modules as ``pageModules.<file>`` and its state as
+    ``duplicatesState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "duplicates", "duplicatesState")
 
 
 def seed_same_shot_review(db, tmp_path):
@@ -68,12 +80,12 @@ def test_same_shot_review_has_no_cleanup_actions_and_respects_filters(live_serve
         Path(screenshot).parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=screenshot, full_page=True)
     # Matching one member must show the complete group, including other workspaces.
-    page.evaluate("id => { _filterMatchedIds = new Set([id]); renderResults(_lastScanResult); }", a)
+    page.evaluate("id => { duplicatesState.filterMatchedIds = new Set([id]); pageModules.results.renderResults(duplicatesState.lastScanResult); }", a)
     expect(section.locator(".dup-card")).to_have_count(2)
-    page.evaluate("_filterMatchedIds = new Set(); renderResults(_lastScanResult)")
+    page.evaluate("duplicatesState.filterMatchedIds = new Set(); pageModules.results.renderResults(duplicatesState.lastScanResult)")
     expect(section.locator(".same-shot-group")).to_have_count(0)
     expect(section).to_contain_text("No possible same-shot groups match the active photo filters")
-    page.evaluate("_filterMatchedIds = null; renderResults(_lastScanResult)")
+    page.evaluate("duplicatesState.filterMatchedIds = null; pageModules.results.renderResults(duplicatesState.lastScanResult)")
     page.route("**/api/files/reveal", lambda route: route.fulfill(
         json={"ok": True, "path": "example.jpg"}))
     with page.expect_request("**/api/files/reveal") as reveal:
@@ -84,9 +96,9 @@ def test_same_shot_review_has_no_cleanup_actions_and_respects_filters(live_serve
     # A large candidate set should render in batches rather than building
     # thousands of cards before the user can interact with the page.
     page.evaluate("""() => {
-      const result = {..._lastScanResult};
+      const result = {...duplicatesState.lastScanResult};
       result.same_shot_groups = Array(51).fill(result.same_shot_groups[0]);
-      renderResults(result);
+      pageModules.results.renderResults(result);
     }""")
     expect(section.locator(".same-shot-group")).to_have_count(50)
     expect(section).to_contain_text("Showing 50 of 51 matching groups")
