@@ -25,10 +25,13 @@ class ReviewCardConflict(ValueError):
 
 
 def review_card_components(rows: list[JsonDict]) -> list[list[JsonDict]]:
-    """Connected components of same-species groups with overlapping photos.
+    """Connected components of same-species groups keyed to the detected subject.
 
     Build with two indexes rather than pairwise group intersections. Status is
     part of the key so an accepted lead can never hide still-pending evidence.
+    Cross-model rows join by ``detection_id`` (not ``photo_id``) so two separate
+    detections of the same species in one photo remain two independent cards;
+    each subject stays reviewable in isolation.
     ``consensus_species_key`` is the identity that an accept actually applies.
     """
     parents = list(range(len(rows)))
@@ -43,14 +46,14 @@ def review_card_components(rows: list[JsonDict]) -> list[list[JsonDict]]:
         parents[root(left)] = root(right)
 
     groups: dict[tuple[object, ...], int] = {}
-    photos: dict[tuple[object, ...], int] = {}
+    detections: dict[tuple[object, ...], int] = {}
     for index, row in enumerate(rows):
         key = (row['consensus_species_key'], row['status'])
         if row.get('group_id'):
             group = (*key, row.get('model'), row['group_id'])
             join(index, groups.setdefault(group, index))
-        photo = (*key, row['photo_id'])
-        join(index, photos.setdefault(photo, index))
+        detection = (*key, row['detection_id'])
+        join(index, detections.setdefault(detection, index))
     components: dict[int, list[JsonDict]] = {}
     for index, row in enumerate(rows):
         components.setdefault(root(index), []).append(row)

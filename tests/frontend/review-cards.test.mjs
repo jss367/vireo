@@ -86,6 +86,53 @@ test('hiding a connecting frame splits cards instead of submitting a disconnecte
   assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[3])), [4, 5]);
 });
 
+test('two detections in one photo stay on separate cards and decide independently', async () => {
+  const ctx = harness();
+  // One photo with two detections (left + right), both classified by two
+  // models. Each row has its own detection_id but shares photo_id.
+  ctx.predictions = [
+    {...row(10, 20, 'bio', null, .9), detection_id: 100, card_id: 'left'},
+    {...row(11, 20, 'inat', null, .9), detection_id: 100, card_id: 'left'},
+    {...row(12, 20, 'bio', null, .9), detection_id: 200, card_id: 'right'},
+    {...row(13, 20, 'inat', null, .9), detection_id: 200, card_id: 'right'},
+  ];
+  ctx.allPredictions = ctx.predictions;
+  assert.equal(ctx.getVisibleItems().length, 2);
+  assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[0])), [10, 11]);
+  assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[2])), [12, 13]);
+  // Accepting the left card submits only its two members and leaves the right
+  // card's rows pending, so the other subject stays independently reviewable.
+  let sent;
+  ctx.safeFetch = async (url, options) => {
+    sent = {url, body: JSON.parse(options.body)};
+    return {prediction_ids: [10, 11]};
+  };
+  await ctx.acceptPrediction(10);
+  assert.deepEqual(sent.body.review_prediction_ids.sort(), [10, 11]);
+  assert.equal(ctx.predictions[0].status, 'accepted');
+  assert.equal(ctx.predictions[1].status, 'accepted');
+  assert.equal(ctx.predictions[2].status, 'pending');
+  assert.equal(ctx.predictions[3].status, 'pending');
+});
+
+test('a hidden connecting frame does not merge separate detections in one photo', () => {
+  const ctx = harness();
+  // Two detections in photo 20 keep their own cards even after a confidence
+  // filter removes one row from each: the reconnection keys on detection_id,
+  // not photo_id, so the shared frame cannot stitch the subjects together.
+  ctx.predictions = [
+    {...row(20, 20, 'bio', 'gL', .95), detection_id: 100, card_id: 'left'},
+    {...row(21, 20, 'inat', 'iL', .5), detection_id: 100, card_id: 'left'},
+    {...row(22, 20, 'bio', 'gR', .5), detection_id: 200, card_id: 'right'},
+    {...row(23, 20, 'inat', 'iR', .95), detection_id: 200, card_id: 'right'},
+  ];
+  ctx.allPredictions = ctx.predictions;
+  ctx.minConfidence = .75;
+  assert.deepEqual(ids(ctx.getVisibleItems()), [20, 23]);
+  assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[0])), [20]);
+  assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[3])), [23]);
+});
+
 test('different species, disjoint cards and previous decisions stay separate', () => {
   const ctx = harness();
   const other = {...row(6, 11, 'other', null, .7), card_id: 'other-species', species: 'Other', consensus_species_key: 'taxon:2'};

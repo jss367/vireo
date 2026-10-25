@@ -26,8 +26,9 @@ function indexVisibleReviewCards(rows) {
     var keys = [base];
     if (reviewEvidenceFilter === 'all' && currentModel === 'all' && !currentLabelsFingerprint && p.card_id) {
       // A confidence filter can hide the frame that connected two groups.
-      // Reconnect the remaining nodes within the server's card boundaries.
-      keys = [JSON.stringify([base, p.model, p.group_id || p.id]), JSON.stringify([base, 'photo', p.photo_id])];
+      // Reconnect the remaining nodes within the server's card boundaries,
+      // keyed on detection_id so two detected subjects in one photo stay apart.
+      keys = [JSON.stringify([base, p.model, p.group_id || p.id]), JSON.stringify([base, 'detection', p.detection_id])];
     }
     keys.forEach(function(key) {
       var other = links.get(key);

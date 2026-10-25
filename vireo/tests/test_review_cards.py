@@ -250,6 +250,94 @@ def test_merging_uses_the_species_accept_applies_not_a_minority_frame_label(app_
     assert all('Other bird' not in {k['name'] for k in db.photo_keywords.get_for_photo(pid)} for pid in photos)
 
 
+def _seed_two_detections_same_photo(db):
+    """One photo carrying two distinct detections of the same species.
+
+    Two models classify each detection as the same taxon. The expected shape
+    is two cards (one per detection), each spanning both models; a card
+    decision must not touch the other detected subject.
+    """
+    photo = db.photos.list_page()[0]['id']
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, 'species')",
+        (BLUE['taxon_id'], BLUE['scientific_name'], 'Blue Tit'),
+    )
+    left = db.detections.save(photo, [{
+        'box': {'x': .05, 'y': .1, 'w': .3, 'h': .4}, 'confidence': .9,
+        'category': 'animal',
+    }], detector_model='MDV6')[0]
+    right = db.detections.save(photo, [{
+        'box': {'x': .55, 'y': .1, 'w': .3, 'h': .4}, 'confidence': .9,
+        'category': 'animal',
+    }], detector_model='MDV6-right')[0]
+    ids_by_detection: dict[int, list[int]] = {left: [], right: []}
+    for detection in (left, right):
+        for model, name in [('BioCLIP', 'Eurasian Blue Tit'), ('iNat21', 'Blue Tit')]:
+            db.predictions.add(detection, name, .9, model,
+                               labels_fingerprint='current', taxonomy=BLUE)
+            ids_by_detection[detection].append(
+                db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0],
+            )
+    db.commit()
+    return photo, ids_by_detection
+
+
+def test_two_detections_in_one_photo_stay_in_separate_cards(app_and_db):
+    app, db = app_and_db
+    _, ids_by_detection = _seed_two_detections_same_photo(db)
+    left_ids, right_ids = ids_by_detection.values()
+    rows = {p['id']: p for p in app.test_client().get('/api/predictions').get_json()['predictions']}
+    assert {rows[pid]['card_id'] for pid in left_ids} == {rows[left_ids[0]]['card_id']}
+    assert {rows[pid]['card_id'] for pid in right_ids} == {rows[right_ids[0]]['card_id']}
+    assert rows[left_ids[0]]['card_id'] != rows[right_ids[0]]['card_id']
+
+
+@pytest.mark.parametrize('decision,status', [('accept', 'accepted'), ('reject', 'rejected')])
+def test_decision_on_one_detection_leaves_the_other_subject_reviewable(
+    app_and_db, decision, status,
+):
+    app, db = app_and_db
+    _, ids_by_detection = _seed_two_detections_same_photo(db)
+    left_ids, right_ids = ids_by_detection.values()
+    client = app.test_client()
+    response = client.post(
+        f'/api/predictions/{left_ids[0]}/{decision}', json=_body(db, left_ids),
+    )
+    assert response.status_code == 200, response.get_json()
+    key = 'prediction_ids' if decision == 'accept' else 'rejected_prediction_ids'
+    assert set(response.get_json()[key]) == set(left_ids)
+    assert _statuses(db, left_ids) == [status] * len(left_ids)
+    # The other subject's predictions must remain pending and independently
+    # decidable through its own card.
+    assert _statuses(db, right_ids) == ['pending'] * len(right_ids)
+    assert client.post(
+        f'/api/predictions/{right_ids[0]}/{decision}', json=_body(db, right_ids),
+    ).status_code == 200
+    assert _statuses(db, right_ids) == [status] * len(right_ids)
+    # Undo must restore only the most recent subject's decision, leaving the
+    # earlier subject's decision intact.
+    assert client.post('/api/undo').status_code == 200
+    assert _statuses(db, right_ids) == ['pending'] * len(right_ids)
+    assert _statuses(db, left_ids) == [status] * len(left_ids)
+    # Redo re-applies that decision without touching the other subject.
+    assert client.post('/api/redo').status_code == 200
+    assert _statuses(db, right_ids) == [status] * len(right_ids)
+    assert _statuses(db, left_ids) == [status] * len(left_ids)
+
+
+@pytest.mark.parametrize('decision', ['accept', 'reject'])
+def test_submitting_both_subjects_as_one_card_is_refused(app_and_db, decision):
+    app, db = app_and_db
+    _, ids_by_detection = _seed_two_detections_same_photo(db)
+    left_ids, right_ids = ids_by_detection.values()
+    merged = [*left_ids, *right_ids]
+    response = app.test_client().post(
+        f'/api/predictions/{left_ids[0]}/{decision}', json=_body(db, merged),
+    )
+    assert response.status_code == 409
+    assert _statuses(db, merged) == ['pending'] * len(merged)
+
+
 @pytest.mark.parametrize('decision', ['accept', 'reject'])
 def test_visibility_loss_refuses_every_member(app_and_db, decision):
     app, db = app_and_db
