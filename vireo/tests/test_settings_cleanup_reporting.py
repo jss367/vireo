@@ -43,6 +43,10 @@ def _namespace(db, body=None):
         "get_db": lambda: db, "jsonify": lambda payload: payload,
         "request": SimpleNamespace(get_json=lambda **kwargs: body or {}),
         "read_raw_config_file": lambda: {},
+        # ``services.photo_locations``: the backfill runs on the fake catalog.
+        "photo_locations": SimpleNamespace(
+            queue_location_changes_for_tagged_photos=lambda db: db.queue_location_changes_for_tagged_photos(),
+        ),
     }
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in HELPERS]

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import places
 import pytest
-from services import import_locations, photo_ingest, workspace_folders
+from services import gps_locations, import_locations, photo_ingest, workspace_folders
 from services.gps_locations import (
     REVERSE_GEOCODE_CACHE_RESOLVER,
     encode_cached_reverse_geocode,
@@ -189,7 +189,7 @@ def test_a_google_place_you_already_have_is_suggested_as_your_keyword(db, monkey
 
 def test_street_addresses_cached_by_the_old_resolver_are_looked_up_again(db, monkeypatch):
     lat, lng = RIVER[0]
-    db.reverse_geocode_cache_put(lat, lng, place_id="street", response_json=json.dumps({
+    gps_locations.reverse_geocode_cache_put(db, lat, lng, place_id="street", response_json=json.dumps({
         "place_id": "street", "name": "2525 Bacon St, San Diego, CA 92107, USA",
         "_vireo_result_language": "en",
     }))
@@ -200,7 +200,7 @@ def test_street_addresses_cached_by_the_old_resolver_are_looked_up_again(db, mon
     result = suggest_import_locations(db, _files([RIVER[0]]), api_key="KEY", language="en")
 
     assert result["groups"][0]["suggestion"]["name"] == "Ocean Beach"
-    cached = db.reverse_geocode_cache_get(lat, lng)
+    cached = gps_locations.reverse_geocode_cache_get(db, lat, lng)
     assert cached["place_id"] == "ocean-beach"
 
 

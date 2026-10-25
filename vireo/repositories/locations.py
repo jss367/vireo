@@ -305,7 +305,7 @@ class LocationRepository:
         """Return ``{photo_id: [broadest, ..., leaf]}`` for chosen leaf rows.
 
         ``leaves`` is ``LocationRepository.get_photo_leaves``'s result; see
-        ``Database.get_photo_location_paths``.
+        ``services.photo_locations.get_photo_location_paths``.
         """
         # One cache for the whole batch: a shoot shares a place, so thousands
         # of photos resolve the same handful of chains.

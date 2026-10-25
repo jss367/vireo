@@ -36,6 +36,7 @@ from render_source import (
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
+from services import photo_locations
 from services.retained_cache import guarded_reader
 from species_identity import SpeciesResolver, resolved_prediction_taxonomy
 from web.background_jobs import make_background_job
@@ -457,7 +458,7 @@ def _observation_defaults(db, photo, photo_id, data, pred):
         if "observed_on" in data
         else (photo["timestamp"][:10] if photo["timestamp"] else None)
     )
-    loc = db.get_effective_photo_location(photo_id)
+    loc = photo_locations.get_effective_photo_location(db, photo_id)
     photo_lat = loc["latitude"] if loc else None
     photo_lng = loc["longitude"] if loc else None
     return taxon, observed_on, photo_lat, photo_lng
@@ -536,7 +537,7 @@ def create_inat_blueprint(
         species = pred["species"] if pred else ""
         scientific = (_prediction_scientific_name(db, pred) or "") if pred else ""
 
-        loc = db.get_effective_photo_location(photo_id)
+        loc = photo_locations.get_effective_photo_location(db, photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
         # The browser uploader does not document query parameters for

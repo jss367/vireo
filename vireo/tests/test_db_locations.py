@@ -20,7 +20,7 @@ import textwrap
 
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, KEYWORD_SOURCE_MANUAL, Database
-from services import photo_ingest, workspace_folders
+from services import gps_locations, photo_ingest, photo_locations, workspace_folders
 
 # -- helpers ------------------------------------------------------------------
 
@@ -249,7 +249,7 @@ def test_count_photos_without_coordinates_skips_missing_folders(db, fid):
     db.conn.commit()
 
     assert db.locations.count_photos_without_coordinates() == 1
-    assert db.count_photos_without_gps() == 1
+    assert db.locations.count_photos_without_coordinates() == 1
     db.set_active_workspace(db.create_workspace("Empty"))
     assert db.locations.count_photos_without_coordinates() == 0
 
@@ -281,7 +281,7 @@ def test_assigned_photo_location_picks_deepest_then_newest(db, fid):
     for kid in (root, older, newer):
         _link(db, pid, kid)
 
-    assert db.get_assigned_photo_location(pid) == {
+    assert photo_locations.get_assigned_photo_location(db, pid) == {
         "photo_id": pid,
         "latitude": -2.0,
         "longitude": 34.0,
@@ -294,8 +294,8 @@ def test_assigned_photo_location_picks_deepest_then_newest(db, fid):
 def test_assigned_photo_location_none_without_coords(db, fid):
     pid = _photo(db, fid, "a.jpg", 1.0, 2.0)
     _link(db, pid, _kw(db, "Text only"))
-    assert db.get_assigned_photo_location(pid) is None
-    assert db.get_assigned_photo_location(999_999, verify_workspace=False) is None
+    assert photo_locations.get_assigned_photo_location(db, pid) is None
+    assert photo_locations.get_assigned_photo_location(db, 999_999, verify_workspace=False) is None
 
 
 def test_assigned_photo_location_workspace_guards(db, fid, monkeypatch):
@@ -304,9 +304,9 @@ def test_assigned_photo_location_workspace_guards(db, fid, monkeypatch):
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
-        db.get_assigned_photo_location(pid)
+        photo_locations.get_assigned_photo_location(db, pid)
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
-        db.get_assigned_photo_location(pid, allow_sync_only=True)
+        photo_locations.get_assigned_photo_location(db, pid, allow_sync_only=True)
 
     db.conn.execute(
         "INSERT INTO workspace_sync_only_photos (workspace_id, photo_id) "
@@ -315,12 +315,12 @@ def test_assigned_photo_location_workspace_guards(db, fid, monkeypatch):
     )
     db.conn.commit()
     with pytest.raises(ValueError):
-        db.get_assigned_photo_location(pid)
-    assert db.get_assigned_photo_location(pid, allow_sync_only=True)["place_id"] == "pl"
+        photo_locations.get_assigned_photo_location(db, pid)
+    assert photo_locations.get_assigned_photo_location(db, pid, allow_sync_only=True)["place_id"] == "pl"
 
     # verify_workspace=False never consults the active workspace.
     db.set_active_workspace(None)
-    assert db.get_assigned_photo_location(pid, verify_workspace=False)["latitude"] == 1.0
+    assert photo_locations.get_assigned_photo_location(db, pid, verify_workspace=False)["latitude"] == 1.0
 
 
 def test_effective_photo_locations_empty_input_needs_no_workspace(db):
@@ -349,8 +349,8 @@ def test_effective_photo_locations_shapes_and_omissions(db, fid):
             "place_id": "pp",
         },
     }
-    assert db.get_effective_photo_location(bare) is None
-    assert db.get_effective_photo_location(half)["source"] == "keyword"
+    assert photo_locations.get_effective_photo_location(db, bare) is None
+    assert photo_locations.get_effective_photo_location(db, half)["source"] == "keyword"
 
 
 def test_effective_photo_locations_reports_first_missing_photo(db, fid):
@@ -401,10 +401,10 @@ def test_photo_location_keyword_ids_prefers_coordinates_then_depth(db, fid):
     _link(db, b, coord_root)
     _link(db, b, _kw(db, "Bird", kw_type="general"))
 
-    assert db.get_photo_location_keyword_ids([a, b, a, 999]) == {
+    assert photo_locations.get_photo_location_keyword_ids(db, [a, b, a, 999]) == {
         a: child, b: coord_root,
     }
-    assert db.get_photo_location_keyword_ids([]) == {}
+    assert photo_locations.get_photo_location_keyword_ids(db, []) == {}
 
 
 def test_photo_location_leaves_chunk_and_dedupe(db, fid):
@@ -438,12 +438,12 @@ def test_photo_location_paths_walk_share_and_stop(db, fid):
     _link(db, c, y)
 
     statements = _trace(db)
-    paths = db.get_photo_location_paths([a, b, c])
+    paths = photo_locations.get_photo_location_paths(db, [a, b, c])
     assert paths == {a: ["Kenya", "Mara"], b: ["Kenya", "Mara"], c: ["X", "Y"]}
     # One parent lookup per ancestor step, shared across photos in the batch.
     walks = _selects(statements, "SELECT name, parent_id, type FROM keywords")
     assert len(walks) == 3
-    assert db.get_photo_location_paths([]) == {}
+    assert photo_locations.get_photo_location_paths(db, []) == {}
 
 
 def test_has_pending_location_change_reads_across_workspaces(db, fid):
@@ -470,7 +470,7 @@ def test_queue_location_changes_backfill_commits_and_is_idempotent(db, fid):
     _link(db, b, kid)
     db.queue_change(a, "location", "effective")
 
-    assert db.queue_location_changes_for_tagged_photos() == {
+    assert photo_locations.queue_location_changes_for_tagged_photos(db) == {
         "photos": 2, "queued": 1, "already_queued": 1,
     }
     assert not db.conn.in_transaction
@@ -482,7 +482,7 @@ def test_queue_location_changes_backfill_commits_and_is_idempotent(db, fid):
     assert [tuple(r) for r in rows] == [
         (a, "effective", db._ws_id()), (b, "effective", db._ws_id()),
     ]
-    assert db.queue_location_changes_for_tagged_photos()["queued"] == 0
+    assert photo_locations.queue_location_changes_for_tagged_photos(db)["queued"] == 0
 
 
 def test_queue_location_changes_route_through_facade_queue_change(
@@ -500,8 +500,8 @@ def test_queue_location_changes_route_through_facade_queue_change(
         return photo_id == a
 
     monkeypatch.setattr(db, "queue_change", recorder)
-    with caplog.at_level(logging.INFO, logger="db"):
-        result = db.queue_location_changes_for_tagged_photos()
+    with caplog.at_level(logging.INFO, logger="services.photo_locations"):
+        result = photo_locations.queue_location_changes_for_tagged_photos(db)
     ws = db._ws_id()
     assert calls == [
         (a, "location", "effective", ws, False),
@@ -514,7 +514,7 @@ def test_queue_location_changes_route_through_facade_queue_change(
 def test_queue_location_changes_requires_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.queue_location_changes_for_tagged_photos()
+        photo_locations.queue_location_changes_for_tagged_photos(db)
 
 
 # -- set / clear photo location -----------------------------------------------------
@@ -943,7 +943,7 @@ def test_reverse_geocode_cache_put_commits_and_stamps_time(db, monkeypatch):
     import db as db_module
 
     monkeypatch.setattr(db_module.time, "time", lambda: 1_700_000_000.9)
-    db.reverse_geocode_cache_put(37.77449, -122.41939, "pl", '{"a": 1}')
+    gps_locations.reverse_geocode_cache_put(db, 37.77449, -122.41939, "pl", '{"a": 1}')
     assert not db.conn.in_transaction
     with _reader(db) as other:
         row = other.execute(
@@ -951,22 +951,22 @@ def test_reverse_geocode_cache_put_commits_and_stamps_time(db, monkeypatch):
             "FROM place_reverse_geocode_cache"
         ).fetchone()
     assert tuple(row) == (37774, -122419, "pl", '{"a": 1}', 1_700_000_000)
-    assert db.reverse_geocode_cache_get(37.7745, -122.4185) is None
-    assert db.reverse_geocode_cache_get(37.7744, -122.4194) == {
+    assert gps_locations.reverse_geocode_cache_get(db, 37.7745, -122.4185) is None
+    assert gps_locations.reverse_geocode_cache_get(db, 37.7744, -122.4194) == {
         "place_id": "pl", "response": '{"a": 1}',
     }
 
 
 def test_reverse_geocode_cache_put_upserts_negative_result(db):
-    db.reverse_geocode_cache_put(1.0, 2.0, "pl", "{}")
-    db.reverse_geocode_cache_put(1.0001, 2.0001, None, "[]")
-    assert db.reverse_geocode_cache_get(1.0, 2.0) == {
+    gps_locations.reverse_geocode_cache_put(db, 1.0, 2.0, "pl", "{}")
+    gps_locations.reverse_geocode_cache_put(db, 1.0001, 2.0001, None, "[]")
+    assert gps_locations.reverse_geocode_cache_get(db, 1.0, 2.0) == {
         "place_id": None, "response": "[]",
     }
     assert db.conn.execute(
         "SELECT COUNT(*) FROM place_reverse_geocode_cache"
     ).fetchone()[0] == 1
-    assert Database._reverse_geocode_grid(-0.0004, 0.0006) == (0, 1)
+    assert gps_locations.reverse_geocode_grid(-0.0004, 0.0006) == (0, 1)
 
 
 def test_get_first_linked_location_keywords_picks_lowest_rowid(db, fid):
@@ -1044,17 +1044,25 @@ def test_gps_discrepancy_rows_pick_the_sync_leaf_and_review(db, fid):
 # photo_keywords writer, so it delegates to KeywordProvenanceRepository
 # (test_keyword_provenance_contract keys it to repositories/keyword_provenance.py).
 _DELEGATING_LOCATION_METHODS = (
-    "get_assigned_photo_location",
-    "get_photo_location_paths",
-    "queue_location_changes_for_tagged_photos",
     "_restore_misclassified_location_ancestor",
     "repair_misclassified_location_ancestors",
     "upsert_place_chain",
     "set_photo_location",
     "get_or_create_text_location",
-    "reverse_geocode_cache_get",
-    "reverse_geocode_cache_put",
 )
+
+# The location reads moved to ``services/photo_locations.py`` and the
+# reverse-geocode cache to ``services/gps_locations.py``; they reach the SQL
+# through ``db.locations``.
+_SERVICE_LOCATION_READS = {
+    "get_assigned_photo_location": photo_locations,
+    "get_photo_location_keyword_ids": photo_locations,
+    "get_photo_location_paths": photo_locations,
+    "queue_location_changes_for_tagged_photos": photo_locations,
+    "get_effective_photo_location": photo_locations,
+    "reverse_geocode_cache_get": gps_locations,
+    "reverse_geocode_cache_put": gps_locations,
+}
 
 # The forwarding wrappers this domain used to have on ``Database``; callers
 # reach the same methods through ``db.locations`` now.
@@ -1077,6 +1085,8 @@ _REMOVED_LOCATION_WRAPPERS = (
     "get_located_keywords_in_workspace",
     "delete_location_gps_review",
     "save_location_gps_reviews",
+    # An alias of ``locations.count_photos_without_coordinates``.
+    "count_photos_without_gps",
 )
 
 
@@ -1103,6 +1113,21 @@ def test_location_method_delegates_to_repository(name):
     )
 
 
+@pytest.mark.parametrize("name", sorted(_SERVICE_LOCATION_READS))
+def test_location_read_lives_in_a_service(name):
+    assert not hasattr(Database, name), f"Database.{name} came back; call the service"
+    assert not hasattr(Database, "_reverse_geocode_grid")
+    source = inspect.getsource(getattr(_SERVICE_LOCATION_READS[name], name))
+    assert ".conn" not in source
+    assert "db.locations." in source
+
+
+def test_location_backfill_queues_through_the_facade():
+    """The backfill queues through ``Database.queue_change`` (a FACADE_METHODS name)."""
+    source = inspect.getsource(photo_locations.queue_location_changes_for_tagged_photos)
+    assert "queue_change=db.queue_change" in source
+
+
 @pytest.mark.parametrize(
     ("name", "facade_calls"),
     [
@@ -1110,7 +1135,6 @@ def test_location_method_delegates_to_repository(name):
             "_location_repository",
             {"get_folder_subtree_ids", "_build_query_from_rules", "_merge_keyword_into"},
         ),
-        ("queue_location_changes_for_tagged_photos", {"queue_change"}),
         (
             "repair_misclassified_location_ancestors",
             {"_restore_misclassified_location_ancestor"},

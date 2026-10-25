@@ -11,7 +11,7 @@ from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
 from repositories.masks_features import MaskQuality
-from services import catalog_deletion, photo_ingest, saved_processes, subject_masks, workspace_folders
+from services import catalog_deletion, photo_ingest, photo_locations, saved_processes, subject_masks, workspace_folders
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -8366,7 +8366,7 @@ def test_import_location_choices_stop_when_cancelled_during_planning(
     assert job["result"]["tagging"]["skipped"] == "import cancelled"
     assert job["result"]["after_import_skipped"] == "import cancelled"
     assert "process_job_id" not in job["result"]
-    assert db.get_assigned_photo_location(photo_id) is None
+    assert photo_locations.get_assigned_photo_location(db, photo_id) is None
 
 
 @pytest.mark.parametrize("field,value,error", [
@@ -8461,16 +8461,16 @@ def test_import_applies_the_location_chosen_for_each_photos_gps_cell(
     assert result["tagging"]["locations_added"] == 1
     assert looked_up == ["import-gps-place"]
     photo_id = result["photo_ids"][0]
-    location = db.get_assigned_photo_location(photo_id)
+    location = photo_locations.get_assigned_photo_location(db, photo_id)
     assert location["keyword_location_name"] == "Central Park"
     # The choice nobody's GPS fell in created nothing.
     assert db.conn.execute(
         "SELECT 1 FROM keywords WHERE name = ?", ("Somewhere else",),
     ).fetchone() is None
     assert client.post("/api/undo").status_code == 200
-    assert db.get_assigned_photo_location(photo_id) is None
+    assert photo_locations.get_assigned_photo_location(db, photo_id) is None
     assert client.post("/api/redo").status_code == 200
-    assert db.get_assigned_photo_location(photo_id)["keyword_location_name"] == "Central Park"
+    assert photo_locations.get_assigned_photo_location(db, photo_id)["keyword_location_name"] == "Central Park"
 
 
 @pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])

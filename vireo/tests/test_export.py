@@ -29,7 +29,7 @@ from export import (
     sanitize_filename,
 )
 from PIL import Image
-from services import catalog_deletion, photo_ingest, workspace_folders
+from services import catalog_deletion, gps_locations, photo_ingest, photo_locations, workspace_folders
 
 
 def test_resolve_template_original():
@@ -735,7 +735,7 @@ def test_export_photos_uses_bulk_location_lookup(export_env, monkeypatch):
         raise AssertionError("export should use the bulk location lookup")
 
     monkeypatch.setattr(
-        env["db"], "get_effective_photo_location", fail_single_lookup
+        photo_locations, "get_effective_photo_location", fail_single_lookup
     )
     result = export_photos(
         db=env["db"],
@@ -780,7 +780,7 @@ def test_export_preserves_matching_capture_offset_and_place(export_env, output_f
                ]}
     leaf = db.upsert_place_chain(details)
     db.set_photo_location(pid, leaf)
-    db.reverse_geocode_cache_put(32.761, -117.209, "river", json.dumps(details))
+    gps_locations.reverse_geocode_cache_put(db, 32.761, -117.209, "river", json.dumps(details))
     db.set_photo_edit_recipe(pid, {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}})
     db.commit()
     result = export_photos(db, env["vireo_dir"], [pid], env["dest"], options={

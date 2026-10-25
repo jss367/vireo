@@ -40,6 +40,7 @@ from location_review import distance_meters
 from services.gps_locations import (
     location_keyword_photo_ids,
     resolve_place_for_point,
+    reverse_geocode_grid,
     summarize_details,
 )
 
@@ -75,7 +76,7 @@ _M_PER_DEG_LAT = 111_320.0
 
 def cell_key(lat: float, lng: float) -> str:
     """The grid cell a point belongs to, as ``"<lat_grid>,<lng_grid>"``."""
-    lat_grid, lng_grid = Database._reverse_geocode_grid(lat, lng)
+    lat_grid, lng_grid = reverse_geocode_grid(lat, lng)
     return f"{lat_grid},{lng_grid}"
 
 

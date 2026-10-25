@@ -19,7 +19,7 @@ from keyword_identity import (
     validate_import_locations,
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
-from services import moves_merge, pending_changes
+from services import moves_merge, pending_changes, photo_locations
 from xmp import SidecarEditor, read_keyword_snapshot
 
 log = logging.getLogger(__name__)
@@ -508,7 +508,7 @@ def _plan_merged_keyword_hierarchies(db, plans):
         return
     rows = db.keyword_tree.parent_rows()
     paths = keyword_paths(rows)
-    location_leaves = db.get_photo_location_keyword_ids([
+    location_leaves = photo_locations.get_photo_location_keyword_ids(db, [
         pid for pid, plan in plans.items() if plan.sync_location_keywords
     ])
     for photo_id, plan in plans.items():
@@ -813,7 +813,7 @@ class _XmpSyncRun:
                 photo_id for photo_id, plan in self.plans.items()
                 if plan.sync_location_keywords
             ]
-            self.location_paths = self.db.get_photo_location_paths(keyword_photo_ids)
+            self.location_paths = photo_locations.get_photo_location_paths(self.db, keyword_photo_ids)
 
     def load_assigned_locations(self):
         if not self.sync_locations:
@@ -822,8 +822,8 @@ class _XmpSyncRun:
             if not plan.sync_location:
                 continue
             try:
-                self.locations[photo_id] = self.db.get_assigned_photo_location(
-                    photo_id,
+                self.locations[photo_id] = photo_locations.get_assigned_photo_location(
+                    self.db, photo_id,
                     verify_workspace=self.require_workspace_membership,
                     # A sync-only grant authorizes writing this sidecar;
                     # the path map above already honors it, and the
