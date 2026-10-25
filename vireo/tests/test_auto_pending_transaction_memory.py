@@ -16,7 +16,7 @@ SUPPORT = runpy.run_path(str(Path(__file__).with_name("test_bulk_pending_transac
 
 @contextlib.contextmanager
 def _flow():
-    with SUPPORT["_flow"]() as (conn, scan, db, repo, merges, trace):
+    with SUPPORT["_flow"](expected_manual_review=False) as (conn, scan, db, repo, merges, trace):
         sentinel = object()
         db = _TransactionOwner(**vars(db), _memory_connection=conn)
         paths = repo.keep_folder_preflight.__func__.__globals__["os"].path
