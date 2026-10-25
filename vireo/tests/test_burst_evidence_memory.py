@@ -61,7 +61,35 @@ def nested(file, ns, names):
     )
 
 
-pure = {"math": math, "os": types.SimpleNamespace(path=posixpath), "re": re, "datetime": datetime}
+def _config_literal_defaults():
+    """The literal top-level entries of ``config.DEFAULTS``, read from source."""
+    tree = ast.parse((ROOT / "config.py").read_text(encoding="utf-8"))
+    table = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "DEFAULTS" for target in node.targets)
+    )
+    defaults = {}
+    for key, value in zip(table.keys, table.values, strict=True):
+        with contextlib.suppress(ValueError):
+            defaults[ast.literal_eval(key)] = ast.literal_eval(value)
+    return defaults
+
+
+CONFIG_DEFAULTS = _config_literal_defaults()
+
+
+def config_value(values, key, section=None):
+    """Inert ``config.config_value`` over the source's literal defaults."""
+    defaults = CONFIG_DEFAULTS if section is None else CONFIG_DEFAULTS[section]
+    return (values or {}).get(key, defaults[key])
+
+
+pure = {
+    "math": math, "os": types.SimpleNamespace(path=posixpath), "re": re, "datetime": datetime,
+    "config_value": config_value,
+}
 load(
     "best_batch.py",
     pure,
@@ -249,6 +277,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
             sep="/",
         ),
         "config": {"THUMB_CACHE_DIR": "/invented/cache/thumbs"},
+        "config_value": config_value,
         "media_root": posixpath.dirname,
         "db_path": "/invented/catalog/db.sqlite",
         "request": types.SimpleNamespace(args=Args(args or {})),

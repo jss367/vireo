@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from classify_job.common import compute_sharpness, detect_animals, get_primary_detection, log
+from config import config_value
 from resource_ledger import ResourceWaitCancelled
 from services import detection_store
 
@@ -287,7 +288,7 @@ class _DetectBatchRun:
         if self.det_conf_threshold is None:
             import config as cfg
             effective_cfg = self.db.get_effective_config(cfg.load())
-            self.det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+            self.det_conf_threshold = config_value(effective_cfg, "detector_confidence")
 
     def _portable_identity(self, photo: sqlite3.Row, detector_runtime: str) -> tuple[str | None, str | None]:
         """Return ``(input_fingerprint, photo_hash)`` for a portable run.
@@ -715,7 +716,7 @@ class _DetectSubjectsRun:
         """Run ``_detect_batch``'s detector-less cached-row pass."""
         import config as cfg
         effective_cfg = self.db.get_effective_config(cfg.load())
-        self.det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+        self.det_conf_threshold = config_value(effective_cfg, "detector_confidence")
         _detect_batch(
             self.photos, self.folders, self.runner, self.job, self.reclassify,
             self.db,
@@ -796,7 +797,7 @@ class _DetectSubjectsRun:
         # workspace-effective config so per-workspace overrides apply.
         import config as cfg
         effective_cfg = db.get_effective_config(cfg.load())
-        self.det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+        self.det_conf_threshold = config_value(effective_cfg, "detector_confidence")
 
         # Process one photo at a time so we can report per-photo progress
         self.detection_map = {}

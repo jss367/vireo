@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 
+from config import config_value
 from export_metadata import export_metadata_args as _export_metadata_args
 from export_metadata import timestamp_parts
 from image_edits import apply_recipe_to_loaded_image
@@ -773,7 +774,7 @@ class _PhotoExportBatch:
         self.output_ext = self.format_info["extension"]
         self.quality = normalize_quality(options.get("quality", 92))
         try:
-            self.wc_max = int(options.get("working_copy_max_size", 4096))
+            self.wc_max = int(config_value(options, "working_copy_max_size"))
         except (ValueError, TypeError):
             self.wc_max = 4096
         self.developed_dir = options.get("developed_dir") or ""
@@ -2173,7 +2174,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
     if max_size is not None:
         max_size = int(max_size)
     try:
-        wc_max = int(options.get("working_copy_max_size", 4096))
+        wc_max = int(config_value(options, "working_copy_max_size"))
     except (ValueError, TypeError):
         wc_max = 4096
     vireo_dir = options.get("vireo_dir") or ""

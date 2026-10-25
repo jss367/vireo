@@ -16,6 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from config import config_value
 from image_loader import (
     RAW_EXTENSIONS,
     extract_working_copy,
@@ -139,7 +140,7 @@ def _working_copy_quota_mb(load_config: Callable[[], Mapping[str, Any]]) -> int:
     """The working-copy cache ceiling in MB from ``load_config()``."""
     try:
         return int(
-            load_config().get("working_copy_cache_max_mb", 20480)
+            config_value(load_config(), "working_copy_cache_max_mb")
         )
     except (TypeError, ValueError):
         return 20480

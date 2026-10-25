@@ -30,6 +30,7 @@ from classify_job.label_loading import _load_labels, _record_labels_fingerprint,
 from classify_job.label_source import _sources_from_metas, describe_label_source
 from classify_job.run_helpers import _CachePeek, _empty_classify_result, _rearm_label_desc_heal
 from classify_job.store_predictions import _store_grouped_predictions
+from config import config_value
 from models import get_active_model, get_models
 from services import detection_store
 
@@ -233,9 +234,7 @@ class _ClassifyJobRun:
         import config as cfg
 
         cache_effective_cfg = self.db.get_effective_config(cfg.load())
-        peek.detector_confidence = cache_effective_cfg.get(
-            "detector_confidence", 0.2,
-        )
+        peek.detector_confidence = config_value(cache_effective_cfg, "detector_confidence")
         # Peek the local taxonomy identity so the expected classifier
         # runtimes computed inside ``_all_photos_cache_satisfied`` include
         # the taxonomy axis. Otherwise the check would compute expected
@@ -1000,7 +999,7 @@ class _ClassifyJobRun:
 
         import config as cfg
         effective_cfg = thread_db.get_effective_config(cfg.load())
-        top_k = effective_cfg.get("top_k_predictions", 5)
+        top_k = config_value(effective_cfg, "top_k_predictions")
 
         runner.update_step(job["id"], "classify", status="running")
         # ``finish_cleared_only`` runs after Cancel deliberately: detection

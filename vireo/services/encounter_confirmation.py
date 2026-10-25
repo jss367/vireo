@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
+from config import config_value
+
 if TYPE_CHECKING:
     from db import Database
     from services.service_types import JsonDict
@@ -32,7 +34,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
             row["id"] for rows in edit.old_rows_by_photo.values() for row in rows
         })
     import config as cfg
-    threshold = db.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+    threshold = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     selected = set(edit.photo_ids)
     rows = []
     for row in evidence:

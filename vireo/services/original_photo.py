@@ -38,6 +38,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+from config import config_value
 from file_replace import replace_file
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
@@ -788,7 +789,7 @@ class OriginalExtraction:
             self.wc_rel = f"working/{original.photo_id}.jpg"
             self.wc_abs = os.path.join(original.vireo_dir, self.wc_rel)
         working_copy_config = cfg.load()
-        self.quality = working_copy_config.get("working_copy_quality", 92)
+        self.quality = config_value(working_copy_config, "working_copy_quality")
 
         # Unedited RAW primaries use their camera-rendered full-size preview
         # when available. Edited renders took the recipe branch above and keep

@@ -16,6 +16,7 @@ from contextlib import closing
 from typing import TYPE_CHECKING
 
 from artifact_flight import ArtifactProducerFailed
+from config import config_value
 from preview_cache import evict_if_over_quota as evict_preview_cache_if_over_quota
 from preview_materializer import PreviewMaterializationError, materialize_preview
 
@@ -89,7 +90,7 @@ class _PreviewWarmup:
             return {**self._result(0), "note": "skipped (preview_max_size=0)"}
         self.max_size = int(raw_size or 1920)
 
-        self.preview_quality = effective.get("preview_quality", 90)
+        self.preview_quality = config_value(effective, "preview_quality")
         self.preview_dir = os.path.join(vireo_dir, "previews")
         os.makedirs(self.preview_dir, exist_ok=True)
 

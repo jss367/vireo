@@ -23,6 +23,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
+from config import config_value
 from db import KEYWORD_SOURCE_CONFLICT_SQL
 from services import workspace_folders
 
@@ -204,7 +205,5 @@ def query_move_rule_matches(db: Database, criteria: Mapping[str, Any]) -> list[i
         # rule matches what the UI actually shows: a photo whose only
         # predictions sit on below-threshold detections must NOT count
         # as "has predictions".
-        move_min_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        move_min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     return db.moves_merge.query_rule_matches(criteria, workspace_id, move_min_conf)

@@ -14,6 +14,7 @@ from datetime import datetime
 
 import imagehash
 import numpy as np
+from config import config_value
 from image_loader import load_image, load_working_image
 from keep_safety import review_culling_suggestions
 
@@ -90,11 +91,11 @@ def analyze_for_culling(
     import config as cfg
     user_cfg = cfg.load()
     if redundancy_threshold is None:
-        redundancy_threshold = user_cfg.get("redundancy_threshold", 0.88)
+        redundancy_threshold = config_value(user_cfg, "redundancy_threshold")
     if time_window is None:
-        time_window = user_cfg.get("cull_time_window", 60)
+        time_window = config_value(user_cfg, "cull_time_window")
     if phash_threshold is None:
-        phash_threshold = user_cfg.get("cull_phash_threshold", 19)
+        phash_threshold = config_value(user_cfg, "cull_phash_threshold")
 
     # Get photos with predictions and embeddings
     if collection_id:
@@ -182,7 +183,7 @@ def _load_top_predictions(db, photo_ids, pause_callback):
     # model spaces is meaningless, so the photo's embedding must come from
     # the same model that named its species.
     import config as cfg
-    detector_floor = db.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+    detector_floor = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     predictions = {}
     from species_identity import SpeciesResolver
     species_resolver = SpeciesResolver(db=db)

@@ -39,6 +39,7 @@ from burst_evidence import (
     numeric_query_arg,
 )
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
+from config import config_value
 from db import Database
 from file_replace import replace_file
 from flask import Blueprint, after_this_request, jsonify, request
@@ -779,7 +780,7 @@ def create_photos_blueprint(
         import config as cfg
         db = get_db()
         page = request.args.get("page", 1, type=int)
-        default_per_page = cfg.load().get("photos_per_page", 50)
+        default_per_page = config_value(cfg.load(), "photos_per_page")
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
@@ -2594,7 +2595,7 @@ class _OpenExternal:
                     vireo_dir, photo["id"], recipe,
                 ),
             )
-            quality = cfg.load().get("working_copy_quality", 92)
+            quality = config_value(cfg.load(), "working_copy_quality")
             fd, tmp_path = tempfile.mkstemp(
                 prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=src.out_dir,
             )

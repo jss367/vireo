@@ -16,6 +16,7 @@ from artifact_flight import (
     preview_prefetch_slots,
 )
 from camera_denoise import cache_matches as _camera_cache_matches
+from config import config_value
 from flask import (
     Response,
     make_response,
@@ -167,7 +168,7 @@ def _materialize_requested_preview(
     """Render the preview; ``None`` when the source could not be decoded."""
     import config as cfg
 
-    preview_quality = cfg.load().get("preview_quality", 90)
+    preview_quality = config_value(cfg.load(), "preview_quality")
     try:
         return materialize_preview(
             db,
@@ -236,7 +237,7 @@ class _PreviewServer:
         try:
             data = source_frame_bytes(
                 db, photo_id, size, media_root(self._config["THUMB_CACHE_DIR"]),
-                effective.get("preview_quality", 90),
+                config_value(effective, "preview_quality"),
                 lambda photo, folder: _focus_source_image(self._config, photo, folder, "auto"),
             )
         except SourceFrameUnavailable:
