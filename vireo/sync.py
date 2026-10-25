@@ -19,7 +19,7 @@ from keyword_identity import (
     validate_import_locations,
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
-from services import pending_changes
+from services import moves_merge, pending_changes
 from xmp import SidecarEditor, read_keyword_snapshot
 
 log = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
         # Photo-scoped, never unioned into ``folders``: widening the grant
         # back to folder scope would let an unrelated photo in the same
         # folder resolve to a valid sidecar path on the next sync.
-        granted_paths = db.get_sync_only_photo_paths()
+        granted_paths = moves_merge.get_sync_only_photo_paths(db)
     paths = {}
     for photo_id, (folder_id, filename) in db.photos.get_filenames(photo_ids).items():
         base = os.path.splitext(filename)[0]

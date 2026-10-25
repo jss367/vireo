@@ -1,11 +1,17 @@
 // The merge dialog's map: lazy Leaflet loading and plotting every candidate
 // point plus the kept one.
-// Classic page script; load boot.js after all definitions.
 
-/** @returns {Promise<KeywordLeaflet>} */ function loadLeaflet() {
-  if (window._vireoLeafletPromise) return window._vireoLeafletPromise;
-  window._vireoLeafletPromise = new Promise(function(resolve, reject) {
-    if (window.L) { resolve(window.L); return; }
+import { state } from './state.js';
+import { mergeDialog, mergeMapEl, mergeMapNote } from './merge-state.js';
+import { escapeHtml, leaflet } from './shared.js';
+
+/** @type {Promise<KeywordLeaflet> | null} */ let leafletPromise = null;
+
+/** @returns {Promise<KeywordLeaflet>} */ export function loadLeaflet() {
+  if (leafletPromise) return leafletPromise;
+  leafletPromise = new Promise(function(resolve, reject) {
+    const loaded = leaflet();
+    if (loaded) { resolve(loaded); return; }
     const link = document.createElement('link');
     link.rel = 'stylesheet';
     link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
@@ -13,17 +19,20 @@
     const script = document.createElement('script');
     script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
     script.async = true;
-    script.onload = function() { if (window.L) resolve(window.L); else reject(new Error('Could not load the map.')); };
-    script.onerror = function() { reject(new Error('Could not load the map.')); };
+    script.addEventListener('load', function() {
+      const loadedNow = leaflet();
+      if (loadedNow) resolve(loadedNow); else reject(new Error('Could not load the map.'));
+    });
+    script.addEventListener('error', function() { reject(new Error('Could not load the map.')); });
     document.head.appendChild(script);
   });
-  return window._vireoLeafletPromise;
+  return leafletPromise;
 }
 
 /* Plot every selected keyword that has a point, plus the point the merge
    will keep, so "which of these is the right place" is answerable without
    leaving the dialog. */
-/** @param {KeywordMergePreview} data */ async function renderMergeMap(data) {
+/** @param {KeywordMergePreview} data */ export async function renderMergeMap(data) {
   /** @type {Array<{latitude:number;longitude:number;label:string;kept:boolean}>} */ const points = [];
   [data.target, ...data.sources].forEach(record => {
     if (record.latitude != null && record.longitude != null) {
@@ -60,14 +69,14 @@
   }
   if (!mergeDialog.open) return;
   mergeMapNote.hidden = true;
-  if (!mergeMap) {
-    mergeMap = L.map(mergeMapEl, {attributionControl: true});
+  if (!state.mergeMap) {
+    state.mergeMap = L.map(mergeMapEl, {attributionControl: true});
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors', maxZoom: 19
-    }).addTo(mergeMap);
+    }).addTo(state.mergeMap);
   }
-  if (mergeMapLayer) mergeMapLayer.remove();
-  mergeMapLayer = L.layerGroup(points.map(point => {
+  if (state.mergeMapLayer) state.mergeMapLayer.remove();
+  state.mergeMapLayer = L.layerGroup(points.map(point => {
     const marker = point.kept
       ? L.marker([point.latitude, point.longitude], {title: point.label, zIndexOffset: 1000})
       : L.circleMarker([point.latitude, point.longitude], {
@@ -76,8 +85,8 @@
     // Leaflet inserts a string tooltip via innerHTML, so a keyword path
     // carrying markup from imported XMP would run in the app's origin.
     return marker.bindTooltip(escapeHtml(point.label));
-  })).addTo(mergeMap);
-  mergeMap.invalidateSize();
-  mergeMap.fitBounds(L.latLngBounds(points.map(p => [p.latitude, p.longitude])),
+  })).addTo(state.mergeMap);
+  state.mergeMap.invalidateSize();
+  state.mergeMap.fitBounds(L.latLngBounds(points.map(p => [p.latitude, p.longitude])),
                      {padding: [28, 28], maxZoom: 14});
 }

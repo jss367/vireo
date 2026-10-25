@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from scanner.keywords import SidecarFailures
+
 if TYPE_CHECKING:
     from collections.abc import Collection
     from pathlib import Path
@@ -160,6 +162,11 @@ class _ImportRunState:
     # stopped the whole pass, if one did.
     wc_failed_paths: list[str] = field(default_factory=list)
     wc_pass_error: str | None = None
+    # One line per sidecar whose keywords a batch scan could not import
+    # (``ScanHooks.sidecar_error``). The photo was imported but is missing
+    # those keywords: a failed item for the job's verdict, not for the card
+    # (``safe_to_format`` is about the originals).
+    sidecar_failures: SidecarFailures = field(default_factory=SidecarFailures)
 
 
 @dataclass

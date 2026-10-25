@@ -4,17 +4,30 @@ These tests cover the **non-Google** parts of the flow:
   - The 📍 Link... button only appears on `type='location'` keywords with
     no `place_id` (and is hidden otherwise).
   - The modal opens on click and closes on Cancel / Escape.
-  - The link API path itself wires through correctly when triggered via the
-    test-only `window.__linkPlaceForTest` hook (which simulates "user picked
-    a Google suggestion" without driving the Google Places UI).
+  - The link API path itself wires through correctly when triggered by
+    calling link-place.js's `submitLinkPlace` through `pageModules` (which
+    simulates "user picked a Google suggestion" without driving the Google
+    Places UI).
 
 We deliberately don't drive `google.maps.places.Autocomplete` here — that
-needs a real API key + network roundtrip. Tests instead call the JS test
-hook OR `/api/keywords/<id>/link-place` directly, with `places.place_details`
+needs a real API key + network roundtrip. Tests instead call
+`submitLinkPlace` OR `/api/keywords/<id>/link-place` directly, with `places.place_details`
 monkeypatched.
 """
 
+import pytest
 from playwright.sync_api import expect
+
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Keywords page's modules as ``pageModules.<file>`` and its state as
+    ``keywordsState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "keywords", "keywordsState")
 
 # Canned Place Details response for the link-place call. Shape matches
 # `places.place_details` (see vireo/places.py).
@@ -181,7 +194,7 @@ def test_unlinked_locations_filter_chip_count_and_filter(live_server, page):
 
 
 def test_link_attaches_place_id_via_test_hook(live_server, page, monkeypatch):
-    """Driving the JS submit hook (the same path the place_changed listener
+    """Calling submitLinkPlace (the same path the place_changed listener
     takes once a Google suggestion is picked) should:
       * POST /api/keywords/<id>/link-place
       * Update the row to show a linked badge instead of the Link button
@@ -206,7 +219,7 @@ def test_link_attaches_place_id_via_test_hook(live_server, page, monkeypatch):
     # a non-empty place_id; the canned monkeypatched place_details returns
     # _CANNED_DETAILS regardless of the argument.
     page.evaluate(
-        "([id, pid]) => window.__linkPlaceForTest(id, pid)",
+        "([id, pid]) => pageModules.linkPlace.submitLinkPlace(id, pid)",
         [kw_id, _CANNED_PLACE_ID],
     )
 

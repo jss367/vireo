@@ -999,17 +999,18 @@ class MovesMergeRepository:
             invalidate_new_images, update_folder_counts, KEYWORD_SOURCE_CONFLICT_SQL):
         """Fold a staged folder subtree into a tracked archive; returns counts.
 
-        See ``Database.merge_staged_tree_into_archive`` for the contract. The
-        keyword arguments are the façade methods and hooks the body composes,
-        passed in so monkeypatches of ``Database`` methods, the per-instance
-        new-images cache and ``move._case_insensitive_root`` still apply, and
-        so the workspace is resolved only after the staged-root lookup:
+        See ``services.moves_merge.merge_staged_tree_into_archive`` for the
+        contract. The keyword arguments are the façade methods, service
+        functions and hooks the body composes, passed in so monkeypatches of
+        them, the per-instance new-images cache and
+        ``move._case_insensitive_root`` still apply, and so the workspace is
+        resolved only after the staged-root lookup:
 
-        * ``workspace_id_fn`` -> ``Database._ws_id``
+        * ``workspace_id_fn`` -> ``Database.require_workspace_id``
         * ``root_ancestor_exists`` / ``root_descendant_exists`` ->
-          ``Database._active_ws_root_{ancestor,descendant}_exists``
+          ``db.workspace_folders.root_{ancestor,descendant}_exists``
         * ``prune_nonroot_links_outside_roots`` ->
-          ``Database._prune_ws_nonroot_links_outside_roots``
+          ``services.moves_merge.prune_ws_nonroot_links_outside_roots``
         * ``materialize_workspace_descendants``, ``add_workspace_folder``,
           ``add_workspace_folder_no_commit``, ``folders.update_counts`` -> the
           ``Database`` methods of the same name

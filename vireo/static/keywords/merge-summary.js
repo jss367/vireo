@@ -1,7 +1,10 @@
 // renderMergeSummary(): what the merge will do, in prose.
-// Classic page script; load boot.js after all definitions.
 
-/** @param {KeywordMergePreview} data */ function renderMergeSummary(data) {
+import { formatCoords, osmLink } from './merge-helpers.js';
+import { mergePreview } from './merge-state.js';
+import { escapeHtml } from './shared.js';
+
+/** @param {KeywordMergePreview} data */ export function renderMergeSummary(data) {
   const resolved = data.resolved;
   /** @param {KeywordMergeChild} child */ const childLine = child => {
     const where = child.to_path ? escapeHtml(child.to_path.join(' → ')) : '';

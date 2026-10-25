@@ -684,7 +684,7 @@ def test_forced_working_source_cannot_decode_original():
     events = []
     ns = {"os": types.SimpleNamespace(path=types.SimpleNamespace(join=posixpath.join, exists=lambda path: False)),
           "load_image": forbidden, "_load_working_copy_image": forbidden}
-    load("image_loader.py", ns, {"load_working_image"})
+    load("image_loader.py", ns, {"load_working_image", "_photo_field"})
     assert ns["load_working_image"]({"working_copy_path": "invented-missing", "folder_id": 1, "filename": "invented.raw"},
                                      "/invented", folders=None, return_source=True) == (None, "original")
     helper_ns = {"os": types.SimpleNamespace(path=posixpath), "config": {"THUMB_CACHE_DIR": "/invented/thumbs"}}

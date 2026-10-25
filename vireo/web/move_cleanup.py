@@ -1,23 +1,36 @@
 """Optional source cleanup for completed date-organized folder moves."""
 
+from __future__ import annotations
+
 import json
 import threading
 from contextlib import ExitStack
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from jobs import WorkspaceBusyError
 from move_cleanup import cleanup_source, review_source
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from flask.typing import ResponseReturnValue
+    from services.photo_deletion import PathOutcome
+    from services.service_types import JsonError
+    from web.web_types import GetDb, GetRunner, GuardMoveFolder
+
 CLEANUP_LABEL = "the cleanup of a moved folder's source"
 
 
-def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
-                                  guard_move_folder):
+def create_move_cleanup_blueprint(
+    get_db: GetDb, get_runner: GetRunner, json_error: JsonError,
+    trash_paths: Callable[[Sequence[str]], PathOutcome], guard_move_folder: GuardMoveFolder,
+) -> Blueprint:
     blueprint = Blueprint("move_cleanup", __name__)
     cleanup_lock = threading.Lock()
 
     @blueprint.route("/api/jobs/<job_id>/source-cleanup", methods=["GET", "POST"])
-    def source_cleanup(job_id):
+    def source_cleanup(job_id: str) -> ResponseReturnValue:
         db, runner = get_db(), get_runner()
         # Completed history is authoritative, including cleanup receipts saved
         # after the worker finished. The runner's snapshot may predate cleanup.

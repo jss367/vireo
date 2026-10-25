@@ -18,21 +18,28 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from services import prediction_decisions
 from services.render_cache import queue_edit_recipe_sync
 
+if TYPE_CHECKING:
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+    from web.web_types import GetDb, InvalidatePhotoRenderCache
+
 log = logging.getLogger(__name__)
 
 
 def create_history_blueprint(
-    get_db,
-    json_error,
-    db_path,
+    get_db: GetDb,
+    json_error: JsonError,
+    db_path: str,
     *,
-    invalidate_photo_render_cache,
-):
+    invalidate_photo_render_cache: InvalidatePhotoRenderCache,
+) -> Blueprint:
     """Build the undo/redo and edit-history blueprint.
 
     ``db_path`` locates the pipeline cache directory beside the catalog.
@@ -46,13 +53,13 @@ def create_history_blueprint(
     """
     blueprint = Blueprint("history", __name__)
 
-    def _edit_recipe_history_updates(db, edit_id):
+    def _edit_recipe_history_updates(db: Database, edit_id: int) -> dict[str, JsonDict | None]:
         from image_edits import recipe_to_json
         photo_ids = db.edit_history.item_photo_ids(edit_id)
         if not photo_ids:
             return {}
         invalidate_photo_render_cache(db, photo_ids)
-        updates = {}
+        updates: dict[str, JsonDict | None] = {}
         for photo_id in photo_ids:
             recipe = db.get_photo_edit_recipe(photo_id)
             updates[str(photo_id)] = recipe
@@ -61,7 +68,7 @@ def create_history_blueprint(
             )
         return updates
 
-    def _refresh_pipeline_cache_species_from_edit(db, entry):
+    def _refresh_pipeline_cache_species_from_edit(db: Database, entry: JsonDict) -> bool:
         """Rewrite the pipeline cache's species fields to match the DB after
         undo / redo of a species-affecting edit.
 
@@ -130,7 +137,10 @@ def create_history_blueprint(
             return False
         return True
 
-    def _history_response(db, result, operation, edit_recipe_updates):
+    def _history_response(
+        db: Database, result: JsonDict, operation: str,
+        edit_recipe_updates: dict[str, JsonDict | None] | None,
+    ) -> JsonDict:
         """The undo/redo response for ``result``, the entry just reversed.
 
         A pipeline cache that could not be refreshed adds
@@ -141,7 +151,7 @@ def create_history_blueprint(
         refresh then resyncs the same photos a failed one left stale).
         """
         cache_refreshed = _refresh_pipeline_cache_species_from_edit(db, result)
-        response = {
+        response: JsonDict = {
             "ok": True,
             "undone" if operation == "Undo" else "redone": result["description"],
             "entry_id": result["id"],
@@ -159,7 +169,7 @@ def create_history_blueprint(
             )
         return response
 
-    def _history_flags_changed(db, entry):
+    def _history_flags_changed(db: Database, entry: JsonDict) -> bool:
         action = entry["action_type"]
         if action == "pipeline_grouping":
             payload = json.loads(entry["new_value"])
@@ -171,7 +181,7 @@ def create_history_blueprint(
         return db.edit_history.has_changed_items(entry["id"])
 
     @blueprint.route("/api/undo", methods=["POST"])
-    def api_undo():
+    def api_undo() -> ResponseReturnValue:
         """Undo the most recent undoable edit.
 
         A prediction-decision route, so it takes the shared writer lock:
@@ -185,7 +195,7 @@ def create_history_blueprint(
         db = get_db()
         undone = []
 
-        def _apply():
+        def _apply() -> ErrorResponse | None:
             body = request.get_json(silent=True) or {}
             if not isinstance(body, dict):
                 return json_error("Expected a JSON object")
@@ -222,7 +232,7 @@ def create_history_blueprint(
         return jsonify(_history_response(db, result, "Undo", edit_recipe_updates))
 
     @blueprint.route("/api/undo/status")
-    def api_undo_status():
+    def api_undo_status() -> ResponseReturnValue:
         db = get_db()
         latest = db.edit_history.latest_undoable()
         if not latest:
@@ -236,7 +246,7 @@ def create_history_blueprint(
         })
 
     @blueprint.route("/api/redo", methods=["POST"])
-    def api_redo():
+    def api_redo() -> ResponseReturnValue:
         """Redo the most recently undone edit.
 
         Under the prediction decision lock for the reason ``api_undo`` gives.
@@ -244,7 +254,7 @@ def create_history_blueprint(
         db = get_db()
         redone = []
 
-        def _apply():
+        def _apply() -> ErrorResponse | None:
             entry = db.redo_last_undo()
             if entry is None:
                 return json_error("nothing to redo")
@@ -270,7 +280,7 @@ def create_history_blueprint(
         return jsonify(_history_response(db, result, "Redo", edit_recipe_updates))
 
     @blueprint.route("/api/redo/status")
-    def api_redo_status():
+    def api_redo_status() -> ResponseReturnValue:
         db = get_db()
         latest = db.edit_history.oldest_redoable()
         if not latest:
@@ -281,7 +291,7 @@ def create_history_blueprint(
         })
 
     @blueprint.route("/api/edit-history")
-    def api_edit_history():
+    def api_edit_history() -> ResponseReturnValue:
         db = get_db()
         limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
         offset = max(0, request.args.get("offset", 0, type=int))

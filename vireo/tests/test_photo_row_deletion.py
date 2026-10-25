@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 from repositories.photo_row_deletion import photo_row_deletion
-from services import photo_ingest
+from services import catalog_deletion, moves_merge, photo_ingest
 from services.startup_tasks import StartupTasks
 
 VIREO_ROOT = Path(__file__).resolve().parents[1]
@@ -205,7 +205,7 @@ def test_batch_delete_prunes_collections(db, tmp_path):
     kept = _photo(db, folder, "kept.jpg")
     coll = _static_collection(db, other_ws, "c", [gone, kept])
 
-    db.delete_photos([gone])
+    catalog_deletion.delete_photos(db, [gone])
 
     assert _ids(db, coll) == [kept]
     assert _dangling(db) == set()
@@ -273,7 +273,7 @@ def test_archive_merge_dropping_an_already_archived_photo_remaps_collections(db,
     arch, stage_root, archived, staged = _staged_tree(db, tmp_path, archived_on_disk=True)
     coll = _static_collection(db, other_ws, "c", [staged])
 
-    counts = db.merge_staged_tree_into_archive(stage_root, arch)
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, arch)
 
     assert counts["already_present"] == 1
     assert db.photos.get(staged) is None
@@ -286,7 +286,7 @@ def test_archive_merge_replacing_a_phantom_row_remaps_collections(db, tmp_path):
     arch, stage_root, phantom, staged = _staged_tree(db, tmp_path, archived_on_disk=False)
     coll = _static_collection(db, other_ws, "c", [phantom])
 
-    counts = db.merge_staged_tree_into_archive(stage_root, arch)
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, arch)
 
     assert phantom in counts["dropped_photo_ids"]
     assert db.photos.get(phantom) is None

@@ -1,29 +1,31 @@
 // Filtering and sorting the loaded list: getFiltered, the unlinked-location
 // chip count, isActionableUnlinkedLocation, and sortList.
-// Classic page script; load boot.js after all definitions.
 
-function getFiltered() {
-  let list = showRecords ? allKeywords : identityGroups;
-  if (filterType === 'unlinked-location') {
+import { state } from './state.js';
+import { VireoTextSearch } from './shared.js';
+
+export function getFiltered() {
+  let list = state.showRecords ? state.allKeywords : state.identityGroups;
+  if (state.filterType === 'unlinked-location') {
     list = list.filter(k => isActionableUnlinkedLocation(k));
-  } else if (filterType !== 'all') {
-    list = list.filter(k => (k.type || 'general') === filterType);
+  } else if (state.filterType !== 'all') {
+    list = list.filter(k => (k.type || 'general') === state.filterType);
   }
-  if (searchTerm) {
+  if (state.searchTerm) {
     const options = VireoTextSearch.readOptions('kwSearch');
     list = list.filter(k => VireoTextSearch.matchesFields(
-      [k.name].concat((k.paths || (k.path ? [k.path] : [])).map(path => path.join(' → '))).join('\n'), searchTerm, options));
+      [k.name].concat((k.paths || (k.path ? [k.path] : [])).map(path => path.join(' → '))).join('\n'), state.searchTerm, options));
   }
   return list;
 }
 
-function unlinkedLocationCount() {
-  return allKeywords.reduce(function(n, k) {
+export function unlinkedLocationCount() {
+  return state.allKeywords.reduce(function(n, k) {
     return n + (isActionableUnlinkedLocation(k) ? 1 : 0);
   }, 0);
 }
 
-/** @param {KeywordRecord} k */ function isActionableUnlinkedLocation(k) {
+/** @param {KeywordRecord} k */ export function isActionableUnlinkedLocation(k) {
   return (
     (k.type || 'general') === 'location' &&
     !k.place_id &&
@@ -31,15 +33,15 @@ function unlinkedLocationCount() {
   );
 }
 
-/** @param {KeywordRecord[]} list */ function sortList(list) {
+/** @param {KeywordRecord[]} list */ export function sortList(list) {
   return list.slice().sort((a, b) => {
     let va, vb;
-    switch(sortCol) {
+    switch(state.sortCol) {
       case 'name': va = (a.name||'').toLowerCase(); vb = (b.name||'').toLowerCase(); break;
       case 'type': va = a.type||'general'; vb = b.type||'general'; break;
       case 'parent':
-        va = (a.parent_id ? (parentMap[a.parent_id]||'').toLowerCase() : '');
-        vb = (b.parent_id ? (parentMap[b.parent_id]||'').toLowerCase() : '');
+        va = (a.parent_id ? (state.parentMap[a.parent_id]||'').toLowerCase() : '');
+        vb = (b.parent_id ? (state.parentMap[b.parent_id]||'').toLowerCase() : '');
         break;
       case 'taxon':
         va = (a.taxon_common_name || a.taxon_name || '').toLowerCase();
@@ -51,8 +53,8 @@ function unlinkedLocationCount() {
         break;
       default: va = ''; vb = '';
     }
-    if (va < vb) return -1 * sortDir;
-    if (va > vb) return 1 * sortDir;
+    if (va < vb) return -1 * state.sortDir;
+    if (va > vb) return 1 * state.sortDir;
     return 0;
   });
 }

@@ -17,7 +17,7 @@ from metadata import embedded_keywords
 from xmp import read_keyword_snapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
 
     from db import Database
     from scanner.scan_types import ExifMetadata
@@ -27,6 +27,52 @@ log = logging.getLogger(__name__)
 # ``ScanHooks.sidecar_error``'s reason when ``read_keyword_snapshot`` returned
 # None: the reader logs which (corrupt, or the open failed) but answers only None.
 UNREADABLE_SIDECAR_REASON = "Vireo could not read it, or it is not valid XMP"
+
+
+def sidecar_failure_message(xmp_path: str, photo_filename: str, reason: str) -> str:
+    """The error line naming one photo whose sidecar keywords were not imported.
+
+    Shared by every job that runs a scan (scan, Process, the imports), so the
+    same failure reads the same wherever it happens. "Tries again on the next
+    scan" holds for both cases ``ScanHooks.sidecar_error`` reports: an unread
+    own sidecar stays pending, and a companion's sidecar is imported each time
+    a scan settles the companion.
+    """
+    return (
+        f"{photo_filename}: keywords in {xmp_path} were not imported "
+        f"({reason}). Vireo tries again on the next scan."
+    )
+
+
+def sidecar_failure_note(count: int) -> str:
+    """The step-summary note counting sidecars whose keywords were not imported."""
+    return f"keywords from {count:,} sidecar{'' if count == 1 else 's'} not imported"
+
+
+class SidecarFailures:
+    """Collects one error line per sidecar a job's scans could not import.
+
+    Pass ``record`` as ``ScanHooks.sidecar_error``. A sidecar reported again
+    (a RAW and its companion sharing one, or a second scan in the same job)
+    is kept once. ``on_new`` receives each new line, for jobs that also add
+    it to their error list as it happens.
+    """
+
+    def __init__(self, on_new: Callable[[str], object] | None = None) -> None:
+        self.messages: list[str] = []
+        self._on_new = on_new
+
+    def record(self, xmp_path: str, photo_filename: str, reason: str) -> None:
+        message = sidecar_failure_message(xmp_path, photo_filename, reason)
+        if message in self.messages:
+            return
+        self.messages.append(message)
+        if self._on_new is not None:
+            self._on_new(message)
+
+    def note(self) -> str:
+        """``sidecar_failure_note`` for what was recorded, or '' for nothing."""
+        return sidecar_failure_note(len(self.messages)) if self.messages else ""
 
 
 def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -> bool:

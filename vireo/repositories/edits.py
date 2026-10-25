@@ -169,7 +169,8 @@ class EditsRepository:
 
     def save_preset(
         self,
-        name: str,
+        # Validated here: a request body may send any JSON value.
+        name: object,
         recipe: Mapping[str, Any] | str,
         fields: Collection[str] | None = None,
     ) -> dict[str, Any]:

@@ -81,6 +81,14 @@
     ],
     "sharedWrites": []
   },
+  "keywords": {
+    "route": "/keywords",
+    "template": "keywords.html",
+    "pageHooks": [],
+    "sharedWrites": [
+      "_gmapsCallback"
+    ]
+  },
   "lightroom": {
     "route": "/lightroom",
     "template": "lightroom.html",

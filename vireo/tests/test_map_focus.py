@@ -39,4 +39,4 @@ def test_keywords_page_opens_link_place_from_url(app_and_db):
     page = page_with_scripts(app.test_client(), "/keywords")
 
     assert "function openLinkPlaceFromUrl(" in page
-    assert "loadKeywords().then(() => openLinkPlaceFromUrl(allKeywords, openLinkPlaceModal))" in page
+    assert "loadKeywords().then(() => openLinkPlaceFromUrl(state.allKeywords, openLinkPlaceModal))" in page

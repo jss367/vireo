@@ -15,12 +15,21 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from duplicate_scan import attach_workspace_names, catalog_cleanup_result, revalidate_scan_result
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
-from services import duplicate_resolution
+from services import catalog_deletion, duplicate_resolution
 from sql_chunks import chunked
+
+if TYPE_CHECKING:
+    from db import Database
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+    from web.web_types import AppTrashPaths, CleanupCachedFiles, GetDb, InvalidateMissingOriginals, NetworkRoots
 
 log = logging.getLogger(__name__)
 
@@ -29,15 +38,15 @@ KEEP_CLEANUP_WAIT_SECS = 5.0
 
 
 def create_duplicates_blueprint(
-    get_db,
-    json_error,
+    get_db: GetDb,
+    json_error: JsonError,
     *,
-    trash_paths,
-    network_volume_roots,
-    path_on_network_volume,
-    cleanup_cached_files_for_deleted_photos,
-    invalidate_missing_originals,
-):
+    trash_paths: AppTrashPaths,
+    network_volume_roots: Callable[[], NetworkRoots],
+    path_on_network_volume: Callable[[str, NetworkRoots], bool],
+    cleanup_cached_files_for_deleted_photos: CleanupCachedFiles,
+    invalidate_missing_originals: InvalidateMissingOriginals,
+) -> Blueprint:
     """Build the duplicates blueprint.
 
     ``trash_paths``, ``network_volume_roots`` and ``path_on_network_volume``
@@ -55,7 +64,7 @@ def create_duplicates_blueprint(
     loser_cleanup_lock = threading.Lock()
 
     @blueprint.route("/api/duplicates/apply", methods=["POST"])
-    def api_duplicates_apply():
+    def api_duplicates_apply() -> ResponseReturnValue:
         """Apply resolver decisions for the given list of file hashes.
 
         Body: {"hashes": ["<hash>", ...]}. For each hash we look up every
@@ -110,7 +119,7 @@ def create_duplicates_blueprint(
     }
 
     @blueprint.route("/api/duplicates/keep", methods=["POST"])
-    def api_duplicates_keep():
+    def api_duplicates_keep() -> ResponseReturnValue:
         """Keep this copy of a duplicate group instead of the current one.
 
         Body: ``{"photo_id": int}``. The copy is un-rejected if needed and
@@ -142,7 +151,7 @@ def create_duplicates_blueprint(
         return jsonify(dict(result, ok=True))
 
     @blueprint.route("/api/duplicates/bulk-resolve", methods=["POST"])
-    def api_duplicates_bulk_resolve():
+    def api_duplicates_bulk_resolve() -> ResponseReturnValue:
         """Force-resolve a batch of duplicate groups by keeping the photo
         whose folder matches ``keep_folder``.
 
@@ -179,14 +188,14 @@ def create_duplicates_blueprint(
             "skipped": result["skipped"],
         })
 
-    def _loser_photo_ids_from_request():
-        """The validated ``photo_ids`` list, or ``(None, error_response)``."""
+    def _loser_photo_ids_from_request() -> tuple[list[int], ErrorResponse | None]:
+        """The validated ``photo_ids`` list, or ``([], error_response)``."""
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
-            return None, json_error("photo_ids required")
+            return [], json_error("photo_ids required")
         photo_ids = body.get("photo_ids")
         if not isinstance(photo_ids, list) or not photo_ids:
-            return None, json_error("photo_ids required")
+            return [], json_error("photo_ids required")
         for pid in photo_ids:
             # ``bool`` is a subclass of ``int`` in Python, so a bare
             # ``isinstance(pid, int)`` would accept ``True``/``False`` as
@@ -195,10 +204,12 @@ def create_duplicates_blueprint(
             # trick the endpoint into trashing whichever rejected row
             # happens to have id 1.
             if isinstance(pid, bool) or not isinstance(pid, int):
-                return None, json_error("photo_ids must be a list of integers")
+                return [], json_error("photo_ids must be a list of integers")
         return photo_ids, None
 
-    def _classify_loser_candidates(db, photo_ids):
+    def _classify_loser_candidates(
+        db: Database, photo_ids: list[int],
+    ) -> tuple[list[tuple[int, str]], list[int], list[JsonDict], NetworkRoots]:
         """Split the request into trashable losers and skipped ids.
 
         Returns ``(trash_candidates, trashed_pids, skipped, network_roots)``:
@@ -216,14 +227,14 @@ def create_duplicates_blueprint(
         # across many photo_ids only when the user clicks "trash all losers"
         # for one library — still a small number of distinct hashes.
         hashes = {r["file_hash"] for r in rows_by_id.values() if r["file_hash"]}
-        anchors_by_hash = {}
+        anchors_by_hash: dict[str, list[str]] = {}
         for h in hashes:
             anchors = db.duplicates.live_paths_for_hash(h)
             anchors_by_hash[h] = [os.path.join(a["path"], a["filename"]) for a in anchors]
 
-        trash_candidates = []
-        trashed_pids = []
-        skipped = []
+        trash_candidates: list[tuple[int, str]] = []
+        trashed_pids: list[int] = []
+        skipped: list[JsonDict] = []
         # Classify paths via the bounded kernel mount table BEFORE any
         # per-path stat. Calling ``os.path.isfile`` on an unhealthy SMB path
         # can block indefinitely inside this endpoint, meaning the new
@@ -275,9 +286,9 @@ def create_duplicates_blueprint(
         return trash_candidates, trashed_pids, skipped, network_roots
 
     def _record_trash_outcomes(
-        trash_candidates, successful_paths, already_missing_paths,
-        trash_failures, trashed_pids, skipped, failed,
-    ):
+        trash_candidates: list[tuple[int, str]], successful_paths: set[str], already_missing_paths: set[str],
+        trash_failures: list[JsonDict], trashed_pids: list[int], skipped: list[JsonDict], failed: list[JsonDict],
+    ) -> None:
         """Sort each Trash candidate into ``trashed_pids`` or ``failed``."""
         failure_by_path = {
             failure["path"]: failure for failure in trash_failures
@@ -297,12 +308,12 @@ def create_duplicates_blueprint(
                 "error": failure.get("error", "Trash operation failed"),
             })
 
-    def _drop_trashed_loser_rows(db, trashed_pids):
+    def _drop_trashed_loser_rows(db: Database, trashed_pids: list[int]) -> None:
         """Delete the trashed losers' rows and cached derivatives, chunked."""
         all_files = []
         deleted_rows = 0
         for chunk in chunked(trashed_pids):
-            result = db.delete_photos(chunk)
+            result = catalog_deletion.delete_photos(db, chunk)
             all_files.extend(result.get("files", []))
             deleted_rows += result.get("deleted", 0)
         cleanup_cached_files_for_deleted_photos(all_files)
@@ -310,7 +321,7 @@ def create_duplicates_blueprint(
             invalidate_missing_originals()
 
     @blueprint.route("/api/duplicates/delete-loser-files", methods=["POST"])
-    def api_duplicates_delete_loser_files():
+    def api_duplicates_delete_loser_files() -> ResponseReturnValue:
         """Move duplicate loser files to OS Trash and remove their DB rows.
 
         Body: {"photo_ids": [int, ...]}. For each id we require:
@@ -346,12 +357,12 @@ def create_duplicates_blueprint(
         with loser_cleanup_lock:
             return _trash_loser_files(get_db(), photo_ids)
 
-    def _trash_loser_files(db, photo_ids):
+    def _trash_loser_files(db: Database, photo_ids: list[int]) -> ErrorResponse | Response:
         """Body of ``delete-loser-files``, run under ``loser_cleanup_lock``."""
         trash_candidates, trashed_pids, skipped, network_roots = (
             _classify_loser_candidates(db, photo_ids)
         )
-        failed = []
+        failed: list[JsonDict] = []
 
         # Track paths whose end state already held (local preflight found
         # them absent, or Finder reported them missing on a still-mounted
@@ -360,7 +371,7 @@ def create_duplicates_blueprint(
         # leaving the UI stuck on "Moving to Trash..." — the local branch
         # already surfaces "file already missing" and the network branch
         # must match so cleanup is a terminal state either way.
-        already_missing_paths = set()
+        already_missing_paths: set[str] = set()
         # Pass through our mount-table snapshot — including an explicit
         # ``None`` when our own query failed — so ``_trash_paths`` does
         # not re-query and overwrite our fail-closed classification. If
@@ -412,12 +423,12 @@ def create_duplicates_blueprint(
         })
 
     @blueprint.route("/api/duplicates/cleanup", methods=["GET"])
-    def api_duplicates_cleanup():
+    def api_duplicates_cleanup() -> ResponseReturnValue:
         """Current catalog cleanup candidates, independent of saved scans."""
         return jsonify(catalog_cleanup_result(get_db()))
 
     @blueprint.route("/api/duplicates/last-scan", methods=["GET"])
-    def api_duplicates_last_scan():
+    def api_duplicates_last_scan() -> ResponseReturnValue:
         """Return the most recent completed duplicate-scan's result.
 
         The /duplicates page only holds proposals in JS memory, so
@@ -458,7 +469,7 @@ def create_duplicates_blueprint(
         })
 
     @blueprint.route("/api/duplicates/disk-cleanup-summary", methods=["GET"])
-    def api_duplicates_disk_cleanup_summary():
+    def api_duplicates_disk_cleanup_summary() -> ResponseReturnValue:
         """Return counts of duplicate-loser files that may still be on disk.
 
         Body: ``{count: int, total_size: int, file_hashes: [str, ...]}``.

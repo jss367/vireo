@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import threading
+from typing import TYPE_CHECKING
 
 import card_cleanup
 import path_guard
@@ -16,8 +17,15 @@ from db import Database
 from flask import Blueprint, jsonify, request
 from web.background_jobs import make_background_job
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from jobs import JobRunner
+    from services.service_types import ErrorResponse, JobDict, JsonDict, JsonError
+    from web.background_jobs import JobLaunch
+    from web.web_types import AppConfig, GetDb, GetRunner
 
-def _bound_delete_summary(summary):
+
+def _bound_delete_summary(summary: JsonDict) -> JsonDict:
     """Cap the per-file skipped/failed lists of a delete job's result.
 
     Bound the persisted result: skipped/failed can run to thousands of
@@ -32,7 +40,9 @@ def _bound_delete_summary(summary):
     return summary
 
 
-def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, config):
+def create_card_cleanup_blueprint(
+    get_db: GetDb, json_error: JsonError, get_runner: GetRunner, db_path: str, config: AppConfig,
+) -> Blueprint:
     """Build the card-cleanup blueprint.
 
     ``config`` is the Flask app's config mapping (``CARD_CLEANUP_DIR``).
@@ -41,7 +51,9 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
     background_job = make_background_job(get_runner, get_db, db_path, Database)
     _CARD_CLEANUP_JOB_LOCK = threading.Lock()
 
-    def _resolve_completed_card_cleanup_scan(db, runner, scan_job_id):
+    def _resolve_completed_card_cleanup_scan(
+        db: Database, runner: JobRunner, scan_job_id: str,
+    ) -> tuple[JsonDict, None] | tuple[None, ErrorResponse]:
         """Look up a card-cleanup-scan job, live runner first then
         job_history, and return (scan_job, error_response). Either the
         job is completed and the caller may proceed, or ``error_response``
@@ -66,7 +78,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
                 "scan did not complete — re-scan the card")
         return scan_job, None
 
-    def _card_cleanup_job_conflict_response(runner, scan_job_id):
+    def _card_cleanup_job_conflict_response(runner: JobRunner, scan_job_id: str) -> ErrorResponse | None:
         """Return a 409 :func:`json_error` when a verify or delete for
         this scan is already queued or running, else ``None``. Callers
         MUST hold ``_CARD_CLEANUP_JOB_LOCK`` across both this call and
@@ -86,7 +98,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
 
     @blueprint.route("/api/card-cleanup/scan", methods=["POST"])
     @background_job
-    def api_card_cleanup_scan(ctx):
+    def api_card_cleanup_scan(ctx: JobLaunch) -> ResponseReturnValue:
         """Scan a removable-media source and write a manifest of files
         that are safely deletable (verified elsewhere in the archive).
 
@@ -139,11 +151,11 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
         card_cleanup_dir = config["CARD_CLEANUP_DIR"]
         card_cleanup.prune_manifests(card_cleanup_dir)
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = ctx.thread_db()
             try:
 
-                def progress_cb(current, total, filename):
+                def progress_cb(current: int, total: int, filename: str) -> None:
                     # Throttle SSE events; hashing is per-file fast on
                     # small files and the stream doesn't need every one.
                     if current % 10 != 0 and current not in (1, total):
@@ -154,7 +166,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
                         "phase": "Verifying card files against the archive",
                     })
 
-                manifest = card_cleanup.scan_card(
+                manifest: JsonDict = card_cleanup.scan_card(
                     thread_db, source, recursive, card_cleanup_dir,
                     job["id"],
                     progress_cb=progress_cb,
@@ -184,7 +196,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
             config={"source": source, "recursive": recursive})
 
     @blueprint.route("/api/card-cleanup/<scan_job_id>/manifest")
-    def api_card_cleanup_manifest(scan_job_id):
+    def api_card_cleanup_manifest(scan_job_id: str) -> ResponseReturnValue:
         """Read back the manifest a completed scan job wrote, so the UI
         can preview what a delete would remove."""
         card_cleanup_dir = config["CARD_CLEANUP_DIR"]
@@ -197,7 +209,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
 
     @blueprint.route("/api/card-cleanup/verify", methods=["POST"])
     @background_job
-    def api_card_cleanup_verify(ctx):
+    def api_card_cleanup_verify(ctx: JobLaunch) -> ResponseReturnValue:
         """Verify only archive copies needed by a cleanup preview.
 
         Unlike the workspace-wide integrity audit, this reads at most one
@@ -246,11 +258,11 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
             ):
                 return json_error("nothing needs archive verification")
 
-            def work(job):
+            def work(job: JobDict) -> JsonDict:
                 thread_db = ctx.thread_db()
                 try:
 
-                    def progress_cb(current, total, filename):
+                    def progress_cb(current: int, total: int, filename: str) -> None:
                         ctx.runner.push_event(job["id"], "progress", {
                             "current": current, "total": total,
                             "current_file": filename,
@@ -272,7 +284,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
 
     @blueprint.route("/api/card-cleanup/delete", methods=["POST"])
     @background_job
-    def api_card_cleanup_delete(ctx):
+    def api_card_cleanup_delete(ctx: JobLaunch) -> ResponseReturnValue:
         """Delete the deletable bucket of a scan's manifest.
 
         Background job: re-verifies every file against the card and the
@@ -329,11 +341,11 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
                    for e in manifest["entries"]):
             return json_error("nothing to delete — no verified files")
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = ctx.thread_db()
             try:
 
-                def progress_cb(current, total, filename):
+                def progress_cb(current: int, total: int, filename: str) -> None:
                     # Not throttled — deletions are the events the user
                     # watches, unlike the scan's per-file hashing.
                     ctx.runner.push_event(job["id"], "progress", {
