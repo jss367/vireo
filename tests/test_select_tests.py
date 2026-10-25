@@ -76,7 +76,7 @@ def repo(tmp_path):
     """A committed repo plus an impact map that mirrors APP_SRC line by line."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git(repo, "init", "-q")
+    _git(repo, "init", "-q", "--initial-branch=main")
     _write(repo, "vireo/app.py", APP_SRC)
     _write(repo, "vireo/templates/browse.html", "{% include '_navbar.html' %}\n")
     _write(repo, "vireo/templates/_navbar.html", "<nav><a href='/settings'>settings.html</a></nav>\n")
