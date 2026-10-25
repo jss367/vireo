@@ -1265,6 +1265,46 @@ class PredictionRepository:
             (self.workspace_id, photo_id, min_detector_confidence),
         ).fetchone()
 
+    def get_top_per_detection_for_photo(self, photo_id, min_detector_confidence=None):
+        """Each detection's highest-confidence *current* prediction.
+
+        The per-subject counterpart of :meth:`get_top_for_photo`, with the
+        same workspace scope, latest-labels-fingerprint rule and optional
+        ``min_detector_confidence`` floor: a photo with two animals gets one
+        row per detection (most confident first), so a caller can offer
+        both species instead of collapsing the photo to the single best
+        guess. Rows carry the same columns as :meth:`get_top_for_photo`.
+        """
+        floor_clause = "AND d.detector_confidence >= ?" if min_detector_confidence is not None else ""
+        params = [self.workspace_id, photo_id]
+        if min_detector_confidence is not None:
+            params.append(min_detector_confidence)
+        rows = self.conn.execute(
+            f"""SELECT pr.species, pr.scientific_name, pr.confidence,
+                       pr.detection_id, pr.classifier_model,
+                       pr.labels_fingerprint, pr.source_taxon_id
+                FROM predictions pr
+                JOIN detections d ON d.id = pr.detection_id
+                JOIN photos p ON p.id = d.photo_id
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
+                WHERE d.photo_id = ?
+                  {floor_clause}
+                  AND pr.labels_fingerprint = (
+                     SELECT pr2.labels_fingerprint FROM predictions pr2
+                     WHERE pr2.detection_id = pr.detection_id
+                       AND pr2.classifier_model = pr.classifier_model
+                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                     LIMIT 1
+                  )
+                ORDER BY pr.confidence DESC, pr.detection_id""",
+            params,
+        ).fetchall()
+        top = {}
+        for row in rows:
+            top.setdefault(row["detection_id"], row)
+        return list(top.values())
+
     def get_top_confidences(self, photo_ids):
         """Map photo id → the confidence the Browse sorts rank on.
 

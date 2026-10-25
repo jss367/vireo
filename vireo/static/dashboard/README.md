@@ -9,6 +9,10 @@ navbar:
 <script type="module" src="/static/dashboard/boot.js"></script>
 ```
 
+The shared pending-transfer panel also appears above the scope controls. It
+lists the active workspace's local originals across all Dashboard scopes,
+with catalog size estimates, retention age, destination and transfer status.
+
 | File | Responsibility |
 | --- | --- |
 | `state.js` | The `state` object: the scope and its options, the last stats, the per-folder coverage cache, and which detail panels are open |

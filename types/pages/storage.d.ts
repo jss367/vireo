@@ -27,8 +27,11 @@ interface StorageEmbeddingMatrix {
   matrix?:Array<{labels_name:string;labels_file:string;species_count:number;unusable?:boolean;skipped?:number;models:Record<string,{cached?:boolean}|undefined>}>;
 }
 
-declare var VireoReleaseOriginals:{storageButton():string};
-declare var Vireo:VireoPageHookRegistry;
-declare function safeFetch<T = unknown>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>;
-declare function safeEventSource(url:string,callbacks:{onComplete?():void}):EventSource;
-declare function showToast(message:string,kind:string):void;
+// The shared globals the page's shared.js reads.
+interface Window {
+  VireoReleaseOriginals:{storageButton():string};
+  Vireo:VireoPageHookRegistry;
+  safeFetch<T = unknown>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>;
+  safeEventSource(url:string,callbacks:{onComplete?():void}):EventSource;
+  showToast?(message:string,kind?:string):void;
+}
