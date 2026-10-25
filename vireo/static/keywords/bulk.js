@@ -1,12 +1,16 @@
 // Bulk actions over the selection: apply type and delete.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { loadKeywords } from './loading.js';
+import { keywordErrorMessage } from './merge-helpers.js';
+import { showToast } from './shared.js';
 
 // -- Bulk apply type --
-function bindKeywordBulkApply() {
+export function bindKeywordBulkApply() {
   /** @type {HTMLButtonElement} */ (document.getElementById('kwBulkApply')).addEventListener('click', async function() {
     const newType = /** @type {HTMLSelectElement} */ (document.getElementById('kwBulkType')).value;
     if (!newType) return;
-    const ids = Array.from(selectedIds);
+    const ids = Array.from(state.selectedIds);
     if (!ids.length) return;
 
     let failed = 0;
@@ -25,7 +29,7 @@ function bindKeywordBulkApply() {
           // place, will refetch after the loop rather than 100+ round trips.
           continue;
         }
-        const kw = allKeywords.find(k => k.id === id);
+        const kw = state.allKeywords.find(k => k.id === id);
         if (kw) kw.type = newType;
       } catch(e) {
         console.error('Failed to update', id, e);
@@ -33,7 +37,7 @@ function bindKeywordBulkApply() {
         if (!firstError) firstError = keywordErrorMessage(e) || 'request failed';
       }
     }
-    selectedIds.clear();
+    state.selectedIds.clear();
     /** @type {HTMLSelectElement} */ (document.getElementById('kwBulkType')).value = '';
     await loadKeywords();
     if (failed) {
@@ -44,8 +48,8 @@ function bindKeywordBulkApply() {
 }
 
 // -- Bulk delete --
-async function deleteSelectedKeywords() {
-  const ids = Array.from(selectedIds);
+export async function deleteSelectedKeywords() {
+  const ids = Array.from(state.selectedIds);
   if (!ids.length) return;
   if (!confirm('Delete ' + ids.length + ' keyword(s)? This will also remove them from all photos.')) return;
 
@@ -58,15 +62,15 @@ async function deleteSelectedKeywords() {
         /** @type {KeywordMutation} */ const data = await resp.json().catch(() => ({}));
         throw new Error(data.error || ('HTTP ' + resp.status));
       }
-      allKeywords = allKeywords.filter(k => k.id !== id);
-      delete parentMap[id];
+      state.allKeywords = state.allKeywords.filter(k => k.id !== id);
+      delete state.parentMap[id];
     } catch(e) {
       console.error('Failed to delete', id, e);
       failed++;
       if (!firstError) firstError = keywordErrorMessage(e) || 'request failed';
     }
   }
-  selectedIds.clear();
+  state.selectedIds.clear();
   await loadKeywords();
   if (failed) {
     showToast('Could not delete ' + failed + ' of ' + ids.length +

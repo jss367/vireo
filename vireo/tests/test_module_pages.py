@@ -138,14 +138,22 @@ def test_page_registers_exactly_its_listed_hooks(page, contract):
 @pytest.mark.parametrize("page, contract", PAGES, ids=PAGE_IDS)
 def test_shared_writes_belong_to_shared_scripts(page, contract):
     """``sharedWrites`` are globals a shared script owns and the page resets
-    (e.g. the lightbox's click-to-zoom latch), not new page globals."""
+    (e.g. the lightbox's click-to-zoom latch), not new page globals. The one
+    other kind is a callback a third-party script calls by the name the page
+    passes in its URL (``&callback=_gmapsCallback`` for Google Maps)."""
     shared_sources = "\n".join(
         path.read_text(encoding="utf-8")
         for path in sorted(STATIC.rglob("*.js"))
         if "vendor" not in path.parts and path.parent.name not in module_pages()
     )
+    page_sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted((STATIC / page).glob("*.js"))
+    )
+    url_callbacks = set(re.findall(r"[?&]callback=([A-Za-z_$][\w$]*)", page_sources))
     for name in contract["sharedWrites"]:
-        assert re.search(rf"\bwindow\.{re.escape(name)}\b", shared_sources), name
+        assert name in url_callbacks or re.search(
+            rf"\bwindow\.{re.escape(name)}\b", shared_sources
+        ), name
 
 
 @pytest.mark.parametrize("text", [

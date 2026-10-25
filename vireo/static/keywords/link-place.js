@@ -1,85 +1,83 @@
 // The link-to-Google-place flow: the Maps loader and config fetch, the modal,
 // place normalization, submitLinkPlace, the per-row Link button, and the
 // modal's close controls.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { loadKeywords } from './loading.js';
+import { keywordErrorMessage } from './merge-helpers.js';
+import { googleMaps, setGoogleMapsCallback, showToast } from './shared.js';
 
 // -- Link-to-Google-place flow ---------------------------------------------
 
-window.GOOGLE_MAPS_PREFER_ENGLISH = true;
-
 // Cached promise for the Google Maps JS loader (memoized).
-/** @type {Promise<KeywordGoogle|undefined>|null} */ let _gmapsLoadPromise = null;
-/** @returns {Promise<KeywordGoogle|undefined>} */ function loadGoogleMapsJs() {
-  if (_gmapsLoadPromise) return _gmapsLoadPromise;
-  const apiKey = window.GOOGLE_MAPS_API_KEY || '';
+/** @returns {Promise<KeywordGoogle|undefined>} */ export function loadGoogleMapsJs() {
+  if (state.gmapsLoadPromise) return state.gmapsLoadPromise;
+  const apiKey = state.googleMapsApiKey;
   if (!apiKey) {
-    _gmapsLoadPromise = Promise.reject(new Error('no_api_key'));
-    return _gmapsLoadPromise;
+    state.gmapsLoadPromise = Promise.reject(new Error('no_api_key'));
+    return state.gmapsLoadPromise;
   }
-  _gmapsLoadPromise = new Promise(function(resolve, reject) {
-    window._gmapsCallback = function() { resolve(window.google); };
+  state.gmapsLoadPromise = new Promise(function(resolve, reject) {
+    setGoogleMapsCallback(function() { resolve(googleMaps()); });
     const s = document.createElement('script');
     s.src = 'https://maps.googleapis.com/maps/api/js?key=' +
       encodeURIComponent(apiKey) +
       '&libraries=places' +
-      (window.GOOGLE_MAPS_PREFER_ENGLISH ? '&language=en' : '') +
+      (state.googleMapsPreferEnglish ? '&language=en' : '') +
       '&loading=async&callback=_gmapsCallback';
     s.async = true;
-    s.onerror = function() { reject(new Error('gmaps_load_failed')); };
+    s.addEventListener('error', function() { reject(new Error('gmaps_load_failed')); });
     document.head.appendChild(s);
   });
-  return _gmapsLoadPromise;
+  return state.gmapsLoadPromise;
 }
 
-// Fetch /api/config once on page load to populate window.GOOGLE_MAPS_API_KEY.
+// Fetch /api/config once on page load to populate state.googleMapsApiKey.
 // Mirrors browse.html's _cfgPromise pattern. The modal awaits this promise
 // before deciding whether to bind autocomplete vs. show the empty-key error.
-const _cfgPromise = (async function() {
+export const _cfgPromise = (async function() {
   try {
     const r = await fetch('/api/config');
     /** @type {{google_maps_api_key?:string;google_maps_prefer_english?:boolean}} */ const cfg = await r.json();
-    window.GOOGLE_MAPS_API_KEY = cfg.google_maps_api_key || '';
-    window.GOOGLE_MAPS_PREFER_ENGLISH = cfg.google_maps_prefer_english !== false;
+    state.googleMapsApiKey = cfg.google_maps_api_key || '';
+    state.googleMapsPreferEnglish = cfg.google_maps_prefer_english !== false;
     return cfg;
   } catch(e) {
-    window.GOOGLE_MAPS_API_KEY = '';
-    window.GOOGLE_MAPS_PREFER_ENGLISH = true;
+    state.googleMapsApiKey = '';
+    state.googleMapsPreferEnglish = true;
     return null;
   }
 })();
 
-/** @type {KeywordAutocomplete|null} */ let _activeLinkAutocomplete = null;
-/** @type {number|null} */ let _activeLinkKeywordId = null;
-
-/** @param {string} msg */ function _showLinkError(msg) {
+/** @param {string} msg */ export function _showLinkError(msg) {
   const el = /** @type {HTMLElement} */ (document.getElementById('linkPlaceError'));
   if (!el) return;
   el.textContent = msg;
   el.style.display = 'block';
 }
 
-function _hideLinkError() {
+export function _hideLinkError() {
   const el = /** @type {HTMLElement} */ (document.getElementById('linkPlaceError'));
   if (el) el.style.display = 'none';
 }
 
-/** @param {number} keywordId @param {string} currentName */ async function openLinkPlaceModal(keywordId, currentName) {
+/** @param {number} keywordId @param {string} currentName */ export async function openLinkPlaceModal(keywordId, currentName) {
   const modal = /** @type {HTMLElement} */ (document.getElementById('linkPlaceModal'));
   const input = /** @type {HTMLInputElement} */ (document.getElementById('linkPlaceInput'));
   if (!modal || !input) return;
 
   _hideLinkError();
-  _activeLinkKeywordId = keywordId;
+  state.activeLinkKeywordId = keywordId;
   input.value = currentName || '';
   modal.classList.add('open');
   // Defer focus so the modal is laid out first.
   setTimeout(function() { input.focus(); input.select(); }, 0);
 
-  // Wait for /api/config so window.GOOGLE_MAPS_API_KEY is populated even
+  // Wait for /api/config so state.googleMapsApiKey is populated even
   // on a slow first paint.
   try { await _cfgPromise; } catch(e) {}
 
-  if (!window.GOOGLE_MAPS_API_KEY) {
+  if (!state.googleMapsApiKey) {
     _showLinkError(
       'Google Maps API key not configured. Add one in Settings to enable autocomplete.'
     );
@@ -95,7 +93,7 @@ function _hideLinkError() {
     // Detach any previous listener by replacing the autocomplete instance
     // (Google's API doesn't expose a clean detach for the binding to
     // `input`; binding twice triggers two `place_changed` events).
-    _activeLinkAutocomplete = new google.maps.places.Autocomplete(input, {
+    state.activeLinkAutocomplete = new google.maps.places.Autocomplete(input, {
       types: ['geocode', 'establishment'],
       fields: [
         'place_id',
@@ -106,11 +104,11 @@ function _hideLinkError() {
         'address_components'
       ],
     });
-    _activeLinkAutocomplete.addListener('place_changed', function() {
-      if (!_activeLinkAutocomplete) return; const place = _activeLinkAutocomplete.getPlace();
-      if (place && place.place_id && _activeLinkKeywordId) {
+    state.activeLinkAutocomplete.addListener('place_changed', function() {
+      if (!state.activeLinkAutocomplete) return; const place = state.activeLinkAutocomplete.getPlace();
+      if (place && place.place_id && state.activeLinkKeywordId) {
         submitLinkPlace(
-          _activeLinkKeywordId,
+          state.activeLinkKeywordId,
           place.place_id,
           normalizeGooglePlaceForSubmit(place)
         );
@@ -121,15 +119,15 @@ function _hideLinkError() {
   }
 }
 
-function closeLinkPlaceModal() {
+export function closeLinkPlaceModal() {
   const modal = /** @type {HTMLElement} */ (document.getElementById('linkPlaceModal'));
   if (modal) modal.classList.remove('open');
-  _activeLinkKeywordId = null;
-  _activeLinkAutocomplete = null;
+  state.activeLinkKeywordId = null;
+  state.activeLinkAutocomplete = null;
   _hideLinkError();
 }
 
-/** @param {KeywordGooglePlace|null|undefined} place @returns {KeywordPlaceSubmission|null} */ function normalizeGooglePlaceForSubmit(place) {
+/** @param {KeywordGooglePlace|null|undefined} place @returns {KeywordPlaceSubmission|null} */ export function normalizeGooglePlaceForSubmit(place) {
   if (!place || !place.place_id) return null;
   const loc = place.geometry && place.geometry.location;
   let lat = null;
@@ -155,7 +153,7 @@ function closeLinkPlaceModal() {
   };
 }
 
-/** @param {number} keywordId @param {string} placeId @param {KeywordPlaceSubmission|null} [placeDetails] */ async function submitLinkPlace(keywordId, placeId, placeDetails) {
+/** @param {number} keywordId @param {string} placeId @param {KeywordPlaceSubmission|null} [placeDetails] */ export async function submitLinkPlace(keywordId, placeId, placeDetails) {
   _hideLinkError();
   /** @type {{place_id:string;place?:KeywordPlaceSubmission}} */ const body = {place_id: placeId};
   if (placeDetails) body.place = placeDetails;
@@ -196,14 +194,14 @@ function closeLinkPlaceModal() {
 
 // Per-row "Link..." button click handler. Bound on the body via delegation
 // because rows are re-rendered by render().
-function bindLinkPlaceControls() {
+export function bindLinkPlaceControls() {
   /** @type {HTMLElement} */ (document.getElementById('kwBody')).addEventListener('click', function(e) {
     if (!(e.target instanceof Element)) return; const btn = e.target.closest(/** @type {'button'} */ ('.kw-link-btn'));
     if (!btn) return;
     e.stopPropagation();
     const kwId = parseInt(btn.dataset.linkId || '', 10);
     if (!kwId) return;
-    const kw = allKeywords.find(k => k.id === kwId);
+    const kw = state.allKeywords.find(k => k.id === kwId);
     openLinkPlaceModal(kwId, kw ? kw.name : '');
   });
 
@@ -222,8 +220,3 @@ function bindLinkPlaceControls() {
     }
   });
 }
-
-// Test hook: lets e2e tests trigger the API path without driving the
-// Google Places UI (which Playwright can't reasonably exercise without a
-// live network round-trip).
-window.__linkPlaceForTest = submitLinkPlace;

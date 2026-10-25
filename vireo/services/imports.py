@@ -200,6 +200,25 @@ def _json_dict(value: object) -> JsonDict:
     return value if isinstance(value, dict) else {}
 
 
+def import_photos_ok(result: JsonDict) -> object:
+    """Whether an import brought in every photo; ``ok`` unless sidecars failed it.
+
+    ``ok`` is the job's verdict, and a sidecar whose keywords were not
+    imported fails it, yet the photos are cataloged: the import collection,
+    after-import processing and the chain bookkeeping key on this instead.
+    A failed ``ok`` counts as every photo imported only when the result
+    says so (``photos_ok``), names the sidecars, and failed no file, so a
+    result failed any other way, including after ``photos_ok`` was set,
+    still reads failed. Results without these keys (older rows, runs that
+    stopped before importing) return ``ok`` unchanged. Mirrored by
+    ``importPhotosOk`` in ``static/jobs/import-retry.js``.
+    """
+    ok = result.get("ok")
+    if ok is not False or result.get("photos_ok") is not True:
+        return ok
+    return bool(result.get("sidecar_failures")) and not result.get("failed")
+
+
 def _has_failed_files(result: JsonDict) -> bool:
     failed = result.get("failed")
     return (
@@ -412,7 +431,7 @@ def _mark_takeover_descendant(
     e["chain_process_job_ids"] = _chain_process_job_ids(e["config"], result, rows, e["id"])
     e["chained"] = (
         bool(e["config"].get("chain_already_ran"))
-        or (chain_step and result.get("ok") is not False
+        or (chain_step and import_photos_ok(result) is not False
             and result.get("process_job_id") not in never_started_processes)
     ) and not _chain_invalidated(e["config"], result, rows, e["id"], never_started_processes)
     e["resumable"] = (
@@ -524,7 +543,7 @@ def _takeover_chain(
     parent_chain_ids = _chain_process_job_ids(parent_config, parent_result, rows, parent_id)
     parent_chained = (
         bool(parent_config.get("chain_already_ran"))
-        or (bool(parent_result.get("chained")) and parent_result.get("ok") is not False)
+        or (bool(parent_result.get("chained")) and import_photos_ok(parent_result) is not False)
         or ("chain_already_ran" not in parent_config and _import_failed_before_start(parent_result)
             and bool(parent_chain_ids))
     ) and not _chain_invalidated(parent_config, parent_result, rows, parent_id, never_started_processes)
@@ -1731,7 +1750,7 @@ class ImportService:
                 # skipped processing when ``ok`` was False.
                 "chained": (
                     bool(parent_config.get("chain_already_ran"))
-                    or (bool(parent_result.get("chained")) and parent_result.get("ok") is not False)
+                    or (bool(parent_result.get("chained")) and import_photos_ok(parent_result) is not False)
                 ),
             }
         tags_applied = bool(takeover["tags_applied"])
@@ -2227,7 +2246,7 @@ class ImportService:
             result["carried_photo_ids"] = carried
         collection_ids = photo_ids + carried
         if (
-            not result.get("ok")
+            not import_photos_ok(result)
             or result.get("cancelled")
             or not collection_ids
         ):

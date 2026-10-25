@@ -13,7 +13,7 @@ from import_job.copy_verify import DestReadCancelled, _rehash_dest_or_none
 from import_job.progress import _IMPORT_ETA_PROGRESS_KEYS
 from import_job.state import _reclassify_landed_failed
 from job_contract import progress_event
-from scanner import EMPTY_FILE_SHA256, ScanControl, ScanOptions
+from scanner import EMPTY_FILE_SHA256, ScanControl, ScanHooks, ScanOptions
 
 if TYPE_CHECKING:
     import sqlite3
@@ -105,7 +105,7 @@ def _catalog_scan_and_prescan(
     try:
         _run_preservation_scan(
             scan, destination, db, batch_st, landed_paths, params,
-            runner=runner, job=job,
+            runner=runner, job=job, sidecar_error=state.sidecar_failures.record,
         )
     except Exception as e:  # broad: any scan failure fails the whole batch, each file recorded as failed
         log.warning("Catalog scan failed for import batch %s", rel, exc_info=True)
@@ -133,6 +133,7 @@ def _catalog_scan_and_prescan(
 def _run_preservation_scan(
     scan: ScanFunction, destination: str, db: Database, batch_st: _ImportBatchState,
     landed_paths: set[str], params: ImportParams, *, runner: JobRunner | None, job: JobDict | None,
+    sidecar_error: Callable[[str, str, str], None] | None = None,
 ) -> None:
     """The restricted per-batch ``scan()`` behind
     ``_catalog_scan_and_prescan``: runs to completion even after Stop,
@@ -197,6 +198,7 @@ def _run_preservation_scan(
                 thumb_cache_dir=params.thumb_cache_dir,
                 skip_working_copies=True,
             ),
+            hooks=ScanHooks(sidecar_error=sidecar_error),
             control=ScanControl(
                 cancel_check=scan_park_only_check,
                 pause_check=scan_pause_check,

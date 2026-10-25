@@ -81,6 +81,14 @@
     ],
     "sharedWrites": []
   },
+  "keywords": {
+    "route": "/keywords",
+    "template": "keywords.html",
+    "pageHooks": [],
+    "sharedWrites": [
+      "_gmapsCallback"
+    ]
+  },
   "life-list": {
     "route": "/life-list",
     "template": "life_list.html",

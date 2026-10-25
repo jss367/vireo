@@ -704,6 +704,19 @@ class EmbeddingCache:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
 
+    def read_manifest(self):
+        """The manifest's metadata per cache file, or {} when it is unreadable.
+
+        The manifest is explanatory metadata, never cache validity, so a
+        missing or malformed file reads as empty.
+        """
+        try:
+            with open(self.manifest_path, encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
     def _update_manifest(self, digest, identity, value):
         identity_metadata = {
             key: item for key, item in identity.items() if key != "labels"
@@ -718,14 +731,7 @@ class EmbeddingCache:
             "identity": identity_metadata,
         }
         with _manifest_lock:
-            manifest = {}
-            try:
-                with open(self.manifest_path, encoding="utf-8") as handle:
-                    loaded = json.load(handle)
-                if isinstance(loaded, dict):
-                    manifest = loaded
-            except (OSError, ValueError):
-                pass
+            manifest = self.read_manifest()
             manifest[f"{digest}.npy"] = metadata
             os.makedirs(os.path.dirname(self.manifest_path), exist_ok=True)
             fd, temporary = tempfile.mkstemp(

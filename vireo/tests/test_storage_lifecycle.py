@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
-from services import photo_ingest, result_files, retained_cache
+from services import catalog_deletion, photo_ingest, result_files, retained_cache
 from services.grouping_history import record_grouping_edit
 from wait import wait_for_job_via_client
 
@@ -33,7 +33,7 @@ def test_photo_delete_updates_every_workspace_and_invalidates_culling(db, tmp_pa
         }))
     unrelated = tmp_path / "culling_results_ws999.json"
     unrelated.write_text(json.dumps({"photos": [{"photo_id": keep}]}))
-    db.delete_photos([photo])
+    catalog_deletion.delete_photos(db, [photo])
     for ws in (db.active_workspace_id, other):
         results = json.loads((tmp_path / f"pipeline_results_ws{ws}.json").read_text())
         assert [p["id"] for p in results["photos"]] == [keep]
@@ -48,7 +48,7 @@ def test_rollback_does_not_prune_shared_results(db, tmp_path):
     path = tmp_path / f"pipeline_results_ws{db.active_workspace_id}.json"
     _pipeline(path, [photo])
     original = path.read_bytes()
-    db.delete_photos([photo], commit=False)
+    catalog_deletion.delete_photos(db, [photo], commit=False)
     db.rollback()
     assert db.photos.get(photo)
     assert path.read_bytes() == original

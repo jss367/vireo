@@ -118,16 +118,11 @@ class _ScanJobRun:
         # (``ScanHooks.sidecar_error``). The photos are cataloged, but their
         # keywords are missing, so each is a failed item: the job ends
         # "failed" and these lines name the photos.
-        self.sidecar_errors: list[str] = []
+        from scanner import SidecarFailures
 
-    def sidecar_error_cb(self, xmp_path: str, filename: str, reason: str) -> None:
-        msg = (
-            f"{filename}: keywords in {xmp_path} were not imported "
-            f"({reason}). Vireo tries again on the next scan."
-        )
-        if msg in self.sidecar_errors:
-            return
-        self.sidecar_errors.append(msg)
+        self.sidecar_failures = SidecarFailures(on_new=self._record_job_error)
+
+    def _record_job_error(self, msg: str) -> None:
         if msg not in self.job["errors"]:
             self.job["errors"].append(msg)
 
@@ -245,7 +240,7 @@ class _ScanJobRun:
                 ),
                 hooks=ScanHooks(
                     progress=self.progress_cb, status=self.status_cb,
-                    sidecar_error=self.sidecar_error_cb,
+                    sidecar_error=self.sidecar_failures.record,
                 ),
                 control=ScanControl(
                     cancel_check=self.cancel_check,
@@ -343,7 +338,7 @@ class _ScanJobRun:
         # invalidation.
         failed_root_count = len(self.scan_failed_roots | self.cache_failed_roots)
         metadata_warning = _scan_metadata_warning()
-        failures = self.root_errors + self.sidecar_errors
+        failures = self.root_errors + self.sidecar_failures.messages
         if failures:
             notes = []
             if self.root_errors:
@@ -351,11 +346,8 @@ class _ScanJobRun:
                     f"{failed_root_count} of {len(self.roots_list)} root"
                     f"{'s' if len(self.roots_list) != 1 else ''} failed"
                 )
-            if self.sidecar_errors:
-                n = len(self.sidecar_errors)
-                notes.append(
-                    f"keywords from {n} sidecar{'s' if n != 1 else ''} not imported"
-                )
+            if self.sidecar_failures.messages:
+                notes.append(self.sidecar_failures.note())
             scan_summary = f"{photo_count} photos ({'; '.join(notes)})"
             if metadata_warning:
                 scan_summary += f" — {metadata_warning}"
