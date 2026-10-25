@@ -1,12 +1,17 @@
 // The merge dialog's per-attribute controls: building them for the record to
 // keep, wiring their inputs, the delegated chip and radio handlers, and
 // syncing the coordinate inputs to the preview.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { scheduleMergePreview } from './merge-dialog.js';
+import { formatCoords, mergeChoice, osmLink, speciesSubtitle, speciesTitle } from './merge-helpers.js';
+import { mergeFields } from './merge-state.js';
+import { escapeAttr, escapeHtml } from './shared.js';
 
 /* Build the per-attribute controls for one "record to keep". Rebuilt only
    when that dropdown changes -- re-rendering on every preview would fight
    the user's typing in the name and coordinate inputs. */
-/** @param {KeywordMergePreview} data */ function renderMergeFields(data) {
+/** @param {KeywordMergePreview} data */ export function renderMergeFields(data) {
   const options = data.options;
   const resolved = data.resolved;
   const needed = new Set(data.requires_choice);
@@ -99,7 +104,7 @@
     '</div></div>');
 
   mergeFields.innerHTML = parts.join('');
-  mergeFieldOptions = options;
+  state.mergeFieldOptions = options;
   wireMergeFields();
 }
 
@@ -109,19 +114,19 @@
    registered once below — re-adding them here would stack a duplicate on
    every target change and dialog reopen, so one chip click would fire a
    growing number of preview requests against stale option data. */
-function wireMergeFields() {
+export function wireMergeFields() {
   const nameInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeName'));
   nameInput.addEventListener('input', function() {
-    mergeOverrides.name = nameInput.value;
+    state.mergeOverrides.name = nameInput.value;
     scheduleMergePreview(false);
   });
   const latInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLat'));
   const lngInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLng'));
   function readCoords() {
     if (latInput.value.trim() === '' && lngInput.value.trim() === '') {
-      mergeOverrides.coordinates = null;
+      state.mergeOverrides.coordinates = null;
     } else {
-      mergeOverrides.coordinates = {
+      state.mergeOverrides.coordinates = {
         latitude: latInput.value.trim() === '' ? null : Number(latInput.value),
         longitude: lngInput.value.trim() === '' ? null : Number(lngInput.value)
       };
@@ -134,20 +139,20 @@ function wireMergeFields() {
   const parentSelect = /** @type {HTMLSelectElement} */ (document.getElementById('kwMergeParent'));
   if (parentSelect) {
     parentSelect.addEventListener('change', function() {
-      mergeOverrides.parent_id = parentSelect.value === '' ? null : Number(parentSelect.value);
+      state.mergeOverrides.parent_id = parentSelect.value === '' ? null : Number(parentSelect.value);
       scheduleMergePreview(true);
     });
   }
   const typeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('kwMergeType'));
   if (typeSelect) {
     typeSelect.addEventListener('change', function() {
-      mergeOverrides.type = typeSelect.value;
+      state.mergeOverrides.type = typeSelect.value;
       scheduleMergePreview(true);
     });
   }
 }
 
-function bindMergeFieldDelegates() {
+export function bindMergeFieldDelegates() {
   mergeFields.addEventListener('click', function(event) {
     if (!(event.target instanceof Element)) return; const chip = event.target.closest(/** @type {'button'} */ ('.kw-merge-chip'));
     if (!chip) return;
@@ -156,14 +161,14 @@ function bindMergeFieldDelegates() {
     const lngInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLng'));
     if (chip.dataset.name !== undefined) {
       nameInput.value = chip.dataset.name;
-      mergeOverrides.name = chip.dataset.name;
+      state.mergeOverrides.name = chip.dataset.name;
     } else if (chip.dataset.clearCoords) {
       latInput.value = ''; lngInput.value = '';
-      mergeOverrides.coordinates = null;
+      state.mergeOverrides.coordinates = null;
     } else {
       latInput.value = chip.dataset.lat || '';
       lngInput.value = chip.dataset.lng || '';
-      mergeOverrides.coordinates = {
+      state.mergeOverrides.coordinates = {
         latitude: Number(chip.dataset.lat), longitude: Number(chip.dataset.lng)
       };
     }
@@ -172,9 +177,9 @@ function bindMergeFieldDelegates() {
 
   mergeFields.addEventListener('change', function(event) {
     const input = event.target; if (!(input instanceof HTMLInputElement)) return;
-    if (!mergeFieldOptions) return;
+    if (!state.mergeFieldOptions) return;
     if (input.name === 'kwMergePlace') {
-      mergeOverrides.place_id = input.value === '' ? null : input.value;
+      state.mergeOverrides.place_id = input.value === '' ? null : input.value;
       // The boxes are not updated here. Predicting the point a place change
       // lands on means reimplementing the server's resolution rule in the
       // browser, and the two drifted twice: once showing the previous
@@ -183,8 +188,8 @@ function bindMergeFieldDelegates() {
       // instead, so the fields always show what the merge will actually do.
       scheduleMergePreview(true);
     } else if (input.name === 'kwMergeSpecies') {
-      const species = mergeFieldOptions.species[Number(input.value)]; if (input.value !== '' && !species) return;
-      mergeOverrides.species = input.value === ''
+      const species = state.mergeFieldOptions.species[Number(input.value)]; if (input.value !== '' && !species) return;
+      state.mergeOverrides.species = input.value === ''
         ? null
         : {
             taxon_id: species ? species.taxon_id : null,
@@ -198,8 +203,8 @@ function bindMergeFieldDelegates() {
 /* Show the coordinates the merge will really use. Skipped once the user
    types their own, because from then on the boxes ARE the override and
    overwriting them would fight the typing. */
-/** @param {KeywordMergePreview} data */ function syncCoordinateInputs(data) {
-  if (mergeOverrides.coordinates !== undefined) return;
+/** @param {KeywordMergePreview} data */ export function syncCoordinateInputs(data) {
+  if (state.mergeOverrides.coordinates !== undefined) return;
   const latInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLat'));
   const lngInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLng'));
   if (!latInput || !lngInput) return;

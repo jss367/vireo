@@ -1,8 +1,12 @@
 // The location-match review panel: loading matches and combining a keyword
 // into its linked place.
-// Classic page script; load boot.js after all definitions.
 
-async function loadLocationMatches() {
+import { state } from './state.js';
+import { loadKeywords } from './loading.js';
+import { keywordErrorMessage } from './merge-helpers.js';
+import { escapeHtml, showToast } from './shared.js';
+
+export async function loadLocationMatches() {
   const container = /** @type {HTMLElement} */ (document.getElementById('kwLocationMatches'));
   container.textContent = 'Loading matches…';
   try {
@@ -23,7 +27,7 @@ async function loadLocationMatches() {
   } catch (error) { container.textContent = keywordErrorMessage(error); }
 }
 
-function bindLocationReview() {
+export function bindLocationReview() {
   /** @type {HTMLElement} */ (document.getElementById('kwReviewLocations')).addEventListener('click', function() {
     /** @type {HTMLElement} */ (document.getElementById('kwLocationReview')).hidden = false;
     loadLocationMatches();
@@ -39,7 +43,7 @@ function bindLocationReview() {
       });
       /** @type {KeywordMutation} */ const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not combine locations.');
-      selectedIds.clear();
+      state.selectedIds.clear();
       await loadKeywords();
       await loadLocationMatches();
       showToast('Location keywords combined.');
