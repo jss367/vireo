@@ -799,6 +799,7 @@ def create_jobs_blueprint(
                 "keep_review_message": result.get("keep_review_message"),
                 "species_count": len(result["species_groups"]),
                 "photos_missing_phash": result.get("photos_missing_phash", 0),
+                "unfingerprinted_photos": result.get("unfingerprinted_photos", []),
             }
 
         def work(job):
