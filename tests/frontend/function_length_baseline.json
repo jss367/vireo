@@ -71,7 +71,7 @@
   "vireo/static/pipeline/labels-modal.js:fetchPipelineLabels": 102,
   "vireo/static/pipeline/progress.js:_updatePipelineStageUI": 179,
   "vireo/static/pipeline/run.js:startPipeline": 213,
-  "vireo/static/review/grid.js:renderPredictionCard": 134,
+  "vireo/static/review/grid.js:renderPredictionCard": 127,
   "vireo/static/review/loading.js:loadPredictions": 103,
   "vireo/static/settings/all-settings.js:importSettingsFile": 111,
   "vireo/static/settings/config.js:_postConfigSnapshot": 129,
