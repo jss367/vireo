@@ -143,9 +143,14 @@ def test_jobs_page_details_carry_the_notice_and_the_photos():
 
 
 def test_in_place_import_names_photos_without_a_working_copy(app_and_db, tmp_path, monkeypatch):
+    from services import import_in_place
     from wait import wait_for_job_via_client
 
     _stub_extractor(monkeypatch, lambda src: False)
+    # Keep the step summary deterministic across CI runners that do not
+    # ship exiftool: the ExifTool-missing warning is an orthogonal signal
+    # tested elsewhere, not what this test is asserting about.
+    monkeypatch.setattr(import_in_place, "scan_metadata_warning", lambda: None)
     app, _db = app_and_db
     card = _raw_card(tmp_path, ["DSC_0001.NEF"])
     client = app.test_client()
