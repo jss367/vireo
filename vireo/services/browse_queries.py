@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 import config as cfg
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from db import Database
     from services.service_types import JsonDict
 
@@ -62,7 +64,7 @@ def rules_resolvable(db: Database, rules: Any) -> bool:
 
 def count_browse_stacks(
     db: Database, rules: Any, collection_id: int | None = None, folder_id: int | None = None,
-    include_offline_folders: bool = False, stack_config: JsonDict | None = None,
+    include_offline_folders: bool = False, stack_config: Mapping[str, Any] | None = None,
 ) -> int:
     """Count logical Browse items after stack projection."""
     return db.collections.browse_stack_totals(
@@ -75,7 +77,7 @@ def count_browse_stacks(
 def query_browse_stack_position(
     db: Database, rules: Any, photo_id: int, sort: str = "date",
     collection_id: int | None = None, folder_id: int | None = None,
-    include_offline_folders: bool = False, stack_config: JsonDict | None = None,
+    include_offline_folders: bool = False, stack_config: Mapping[str, Any] | None = None,
 ) -> int | None:
     """Return the zero-based position of the Browse item *containing*
     ``photo_id`` once stacks are projected, or ``None`` when the photo
@@ -124,7 +126,7 @@ def query_photo_position(
 
 def get_collection_photo_ids_stacked(
     db: Database, collection_id: int, sort: str = "date",
-    stack_config: JsonDict | None = None,
+    stack_config: Mapping[str, Any] | None = None,
 ) -> list[int]:
     """Return every photo ID matching a collection, in stack-projected
     order. See ``_stacked_photo_ids``.
@@ -142,7 +144,7 @@ def get_collection_photo_ids_stacked(
 
 def query_photo_ids_stacked(
     db: Database, rules: Any, sort: str = "date", collection_id: int | None = None,
-    folder_id: int | None = None, stack_config: JsonDict | None = None,
+    folder_id: int | None = None, stack_config: Mapping[str, Any] | None = None,
 ) -> list[int]:
     """Return every photo ID matching a universal-filter rule tree, in
     stack-projected order — the rules analog of

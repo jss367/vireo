@@ -10,6 +10,7 @@ when it returns nothing). Lambdas cannot carry annotations and are skipped.
 
 To cover another directory, annotate it and add it to ``COVERED_ROOTS``.
 There is no baseline: a root is either covered completely or not listed.
+``Database`` has a separate guard for its public API and repository factories.
 """
 
 import ast
@@ -88,6 +89,26 @@ def test_covered_root_is_fully_annotated(root):
         f"Functions under vireo/{root} must annotate every parameter and the "
         "return type:\n    " + "\n    ".join(problems)
     )
+
+
+def test_database_public_api_and_factories_are_fully_annotated():
+    """The checked façade must describe inputs as well as repository results."""
+    tree = ast.parse((VIREO / "db.py").read_text(encoding="utf-8"))
+    database = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Database"
+    )
+    lifecycle = {"__init__", "__enter__", "__exit__", "__del__"}
+    database.body = [
+        node for node in database.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+            not node.name.startswith("_")
+            or node.name in lifecycle
+            or node.name.endswith("_repository")
+        )
+    ]
+    problems = missing_annotations(ast.unparse(database))
+    assert not problems, f"Database API annotations are missing: {problems}"
 
 
 def test_missing_annotations_reports_each_gap():

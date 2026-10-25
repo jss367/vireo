@@ -595,6 +595,7 @@ def create_predictions_blueprint(
                 db, pred["photo_id"], [pred_id],
                 lambda: db.update_prediction_status(pred_id, "reviewed", _commit=False),
             )
+            assert item is not None  # The guarded pending -> reviewed transition changed state.
             db.record_edit(
                 "prediction_status",
                 f'Marked prediction "{pred["species"]}" reviewed',

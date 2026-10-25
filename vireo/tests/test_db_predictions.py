@@ -22,6 +22,7 @@ import textwrap
 import pytest
 from db import AUTO_MATCH_REVIEW_MARKER, Database
 from services import photo_ingest, workspace_folders
+from signature_contract import calling_signature
 
 
 def _visible(db, sql, params=()):
@@ -1246,7 +1247,7 @@ def test_prediction_repository_never_hands_itself_out_as_the_database():
 def test_prediction_facade_signatures_unchanged():
     from repositories.predictions import PredictionRepository
 
-    sig = {n: str(inspect.signature(getattr(Database, n)))
+    sig = {n: calling_signature(getattr(Database, n))
            for n in _DELEGATING_PREDICTION_METHODS}
     sig.update({
         f"repo.{n}": str(inspect.signature(getattr(PredictionRepository, n)))

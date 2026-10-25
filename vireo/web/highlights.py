@@ -431,6 +431,7 @@ class _HighlightsRelabel:
         db = self.db
         species = self.species
         ws_id = self.ws_id
+        assert ws_id is not None  # Set by preflight before any relabel writes.
         for old_species_name, pids in self.highlight_renames.items():
             db.rename_species_highlights_species(
                 old_species_name,

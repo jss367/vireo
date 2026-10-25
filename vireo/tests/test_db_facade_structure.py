@@ -126,6 +126,28 @@ def test_connection_lifecycle_allowlist_is_not_stale(name):
 # -- transaction control ------------------------------------------------------------------
 
 
+def test_pathlike_catalog_shares_cache_key_with_string_path(tmp_path):
+    path = tmp_path / "catalog.db"
+    with Database(path) as path_db, Database(str(path)) as string_db:
+        assert path_db._db_path == string_db._db_path == str(path)
+        workspace_id = path_db.require_workspace_id()
+        expected = {"new_count": 7}
+        path_db._new_images_cache.set(path_db._db_path, workspace_id, expected)
+        assert string_db.get_new_images_for_workspace(workspace_id) == expected
+
+
+def test_execute_with_retry_returns_a_cursor_or_raises(db):
+    from db import execute_with_retry
+
+    cursor = execute_with_retry(db.conn, "SELECT :value", {"value": 7}, max_retries=0)
+    assert isinstance(cursor, sqlite3.Cursor)
+    assert cursor.fetchone()[0] == 7
+    with pytest.raises(ValueError, match="max_retries"):
+        execute_with_retry(db.conn, "SELECT 1", max_retries=-1)
+    with pytest.raises(sqlite3.OperationalError):
+        execute_with_retry(db.conn, "SELECT * FROM nonexistent", max_retries=0)
+
+
 def _committed_markers(db):
     """Test rows in ``db_meta`` as a second connection sees them."""
     with contextlib.closing(sqlite3.connect(db._db_path)) as conn:

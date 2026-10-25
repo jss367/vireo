@@ -26,6 +26,7 @@ import pytest
 from db import Database
 from repositories.species_curation import SpeciesCurationRepository
 from services import photo_ingest, workspace_folders
+from signature_contract import calling_signature
 
 
 def _visible(db, sql, params=()):
@@ -1576,7 +1577,7 @@ def test_species_curation_repository_never_touches_keyword_writers():
 def test_species_curation_signatures_unchanged():
     from repositories.species_curation import SpeciesCurationRepository
 
-    sig = {n: str(inspect.signature(getattr(Database, n)))
+    sig = {n: calling_signature(getattr(Database, n))
            for n in _DELEGATING_SPECIES_CURATION_METHODS}
     sig.update({
         f"repo.{n}": str(inspect.signature(getattr(SpeciesCurationRepository, n)))
