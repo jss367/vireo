@@ -72,17 +72,18 @@ def comparison_cases(photos, answers, before, after):
 
 
 def _preview(pid, presentation):
-    # Previews, working copies and thumbnails live under the current Vireo
-    # data root; fresh installs put that outside ``~/.vireo``.
+    # Previews and working copies live under the data root; fresh installs
+    # keep thumbnails on the platform cache root instead.
     root = shared_default_path('data')
+    thumbs = shared_default_path('thumbnails')
     candidates = [root/'previews'/f'{pid}_{s}.jpg' for s in (960,1920,3840)]
     # Full-size JPEG working copy: present for many photos without a preview.
     candidates.append(root/'working'/f'{pid}.jpg')
     thumb = presentation.get('thumbnail')
     if thumb:
         path = Path(thumb)
-        candidates.append(path if path.is_absolute() else root/'thumbnails'/path)
-    candidates.append(root/'thumbnails'/f'{pid}.jpg')
+        candidates.append(path if path.is_absolute() else thumbs/path)
+    candidates.append(thumbs/f'{pid}.jpg')
     return next((p.as_uri() for p in candidates if p.is_file()), None)
 
 

@@ -42,7 +42,7 @@ def photo_payload(conn, pid):
     return photo
 
 
-def image_path(conn, pid, media_root, large):
+def image_path(conn, pid, media_root, thumbnails_root, large):
     row = conn.execute('SELECT data FROM photos WHERE id=?', (pid,)).fetchone()
     if not row:
         return None
@@ -55,14 +55,16 @@ def image_path(conn, pid, media_root, large):
         if now is None or not same_photo(photo, dict(now)):
             return None
     root = Path(media_root).resolve()
+    thumbs = Path(thumbnails_root).resolve()
     paths = [root / 'previews' / f'{pid}_{size}.jpg' for size in ([3840, 1920, 960] if large else [960, 1920])]
     thumb = photo.get('thumbnail')
     if thumb:
         p = Path(thumb)
-        paths.append(p if p.is_absolute() else root / 'thumbnails' / p)
-    paths.append(root / 'thumbnails' / f'{pid}.jpg')
+        paths.append(p if p.is_absolute() else thumbs / p)
+    paths.append(thumbs / f'{pid}.jpg')
     for path in paths:
-        if path.resolve().is_relative_to(root) and path.is_file():
+        resolved = path.resolve()
+        if (resolved.is_relative_to(root) or resolved.is_relative_to(thumbs)) and path.is_file():
             return path
     return None
 
@@ -77,9 +79,13 @@ def make_server(queue, *, port=0, media_root=None, update_vireo_tags=False):
         if meta.get('format_version') != 1:
             raise ValueError('Unsupported review database')
     token = secrets.token_urlsafe(32)
-    # Previews, working copies and thumbnails live under the current Vireo
-    # data root; fresh installs put that outside ``~/.vireo``.
+    # Previews and working copies live under the data root; fresh installs put
+    # thumbnails on the platform cache root. A user-supplied media root keeps
+    # its sibling thumbnails layout so custom installs still resolve both.
+    user_media_root = media_root is not None
     media_root = Path(media_root or shared_default_path('data')).resolve()
+    thumbnails_root = (media_root / 'thumbnails') if user_media_root else Path(shared_default_path('thumbnails'))
+    thumbnails_root = thumbnails_root.resolve()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -150,7 +156,7 @@ def make_server(queue, *, port=0, media_root=None, update_vireo_tags=False):
                         rows = conn.execute("SELECT * FROM species WHERE name LIKE ? ESCAPE '\\' OR scientific LIKE ? ESCAPE '\\' ORDER BY length(name),name LIMIT 30", ('%'+escaped+'%', '%'+escaped+'%')).fetchall()
                     self.send(200, [dict(r) for r in rows])
                 elif parsed.path.startswith('/image/'):
-                    path = image_path(conn, int(parsed.path.rsplit('/', 1)[-1]), media_root, query.get('large') == ['1'])
+                    path = image_path(conn, int(parsed.path.rsplit('/', 1)[-1]), media_root, thumbnails_root, query.get('large') == ['1'])
                     if path:
                         self.send(200, path.read_bytes(), 'image/jpeg')
                     else:
