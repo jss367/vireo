@@ -1660,9 +1660,8 @@ def create_predictions_blueprint(
             "skipped_out_of_workspace": len(out_of_workspace_ids),
         })
 
-    def _review_card_decision(db: Database, pred_id: int, decision: str) -> ResponseReturnValue:
+    def _review_card_decision(db: Database, pred_id: int, decision: str, body: JsonDict) -> ResponseReturnValue:
         """Validate an explicit Review card under the caller's decision lock."""
-        body = request.get_json()
         ids = body.get('review_prediction_ids')
         workspace = body.get('observed_workspace_id')
         if not isinstance(ids, list) or not ids or len(ids) > 10000 or any(
@@ -1702,8 +1701,12 @@ def create_predictions_blueprint(
         if lock_err is not None:
             return lock_err
         try:
-            if request.is_json and 'review_prediction_ids' in request.get_json():
-                return _review_card_decision(db, pred_id, 'accept')
+            body = request.get_json() if request.is_json else {}
+            if not isinstance(body, dict):
+                db.rollback()
+                return json_error('JSON body must be an object', 400)
+            if 'review_prediction_ids' in body:
+                return _review_card_decision(db, pred_id, 'accept', body)
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
@@ -1862,8 +1865,12 @@ def create_predictions_blueprint(
         if lock_err is not None:
             return lock_err
         try:
-            if request.is_json and 'review_prediction_ids' in request.get_json():
-                return _review_card_decision(db, pred_id, 'reject')
+            body = request.get_json() if request.is_json else {}
+            if not isinstance(body, dict):
+                db.rollback()
+                return json_error('JSON body must be an object', 400)
+            if 'review_prediction_ids' in body:
+                return _review_card_decision(db, pred_id, 'reject', body)
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)

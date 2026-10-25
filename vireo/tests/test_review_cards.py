@@ -40,6 +40,21 @@ def _statuses(db, ids):
     return [db.predictions.current_status(pid) for pid in ids]
 
 
+@pytest.mark.parametrize('decision', ['accept', 'reject'])
+@pytest.mark.parametrize('body', [None, 123, True, 'review_prediction_ids', [], ['review_prediction_ids']])
+def test_decision_requires_a_json_object_before_any_writes(app_and_db, decision, body):
+    app, db = app_and_db
+    _, _, ids = _seed(db)
+    response = app.test_client().post(
+        f'/api/predictions/{ids[0]}/{decision}', data=json.dumps(body), content_type='application/json',
+    )
+    assert response.status_code == 400, response.get_data(as_text=True)
+    assert 'object' in response.get_json()['error']
+    assert _statuses(db, ids) == ['pending'] * len(ids)
+    assert db.conn.execute('SELECT count(*) FROM edit_history').fetchone()[0] == 0
+    assert db.conn.execute('SELECT count(*) FROM pending_changes').fetchone()[0] == 0
+
+
 def test_overlapping_groups_and_singletons_share_one_card(app_and_db):
     app, db = app_and_db
     _, _, ids = _seed(db)
