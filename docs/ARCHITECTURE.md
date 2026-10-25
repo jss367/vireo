@@ -131,6 +131,28 @@ that information for interactive use.
   remaining per-page helper copies and inline template scripts are in
   `docs/plans/2026-10-16-frontend-schema-consolidation-plan.md`.
 
+## Media serving
+
+`web.media.create_media_blueprint` composes one blueprint with the existing
+`media.<view>` endpoint names. Its per-app view owners receive only their own
+dependencies; pure helpers are imported by the modules that use them.
+
+| Module | Responsibility |
+| --- | --- |
+| `web.media_thumbnails` | Workspace and duplicate-review thumbnails, freshness checks and self-healing |
+| `web.media_masks` | Mask files, variant listing and immutable mask readers |
+| `web.media_crops` | Detection and focus crops, geometry checks and evidence revalidation |
+| `web.media_previews` | Display previews, `/full`, paired preview cache and preview flights |
+| `web.media_editing` | Editor image/mask previews, cancellation, auto tone and rendering worker entry point |
+| `web.media_originals` | Full-resolution originals, RAW/JPEG choice, prepared renders and extraction |
+| `web.media_common` | Shared source selection, publication guards and response helpers; no route-owner imports |
+
+The prepare-full-resolution job re-enters the registered original/preview views,
+so background preparation and browser requests retain one rendering path.
+`web.media` re-exports `render_edit_preview_job` for the app and benchmark tools.
+Tests patch the collaborator in the module that calls it; a re-export on the
+composition module would not change another module's imported binding.
+
 ## Compatibility rules
 
 - `/api/v1` is the stable automation API and retains token authentication.

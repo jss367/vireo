@@ -341,7 +341,7 @@ def test_automatic_paired_render_retention_verifies_stored_companion_identity(db
 
 def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_path, monkeypatch):
     from testing.waits import synchronization_timeout
-    from web import media
+    from web import media_originals as media
 
     app, db = app_and_db
     config = _cache_config(tmp_path)
@@ -390,7 +390,7 @@ def test_paired_render_publication_waits_until_eviction_finishes(app_and_db, tmp
     import image_loader
     from PIL import Image
     from testing.waits import synchronization_timeout
-    from web import media
+    from web import media_originals as media
 
     app, _db = app_and_db
     config = _cache_config(tmp_path)

@@ -47,8 +47,9 @@ FORMERLY_LAZY_OBJECTS = (
         summary     TEXT DEFAULT '',
         progress    TEXT
     )""",
-    # The durable "do not adopt this preview" marker web.media's _serve_preview
-    # consults: an on-disk preview that outlived its owner would otherwise be
+    # The durable "do not adopt this preview" marker consulted by
+    # web.media_previews._PreviewServer._serve_preview:
+    # an on-disk preview that outlived its owner would otherwise be
     # adopted and re-registered verbatim.
     """CREATE TABLE IF NOT EXISTS preview_cache_invalidations (
         photo_id INTEGER NOT NULL,

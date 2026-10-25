@@ -202,7 +202,7 @@ def test_real_exiftool_date_correction_remains_discoverable(catalog, tmp_path):
 def test_same_shot_api_restore_media_and_cleanup_guards(app_and_db, tmp_path, monkeypatch):
     from unittest.mock import MagicMock
 
-    import web.media as media
+    import web.media_thumbnails as media
     import web.system as system
     from wait import wait_for_job_via_client
 
@@ -241,7 +241,7 @@ def test_same_shot_api_restore_media_and_cleanup_guards(app_and_db, tmp_path, mo
 def test_just_completed_review_works_before_history_is_saved(app_and_db, tmp_path, monkeypatch):
     import threading
 
-    import web.media as media
+    import web.media_thumbnails as media
     from testing.waits import synchronization_timeout
     from wait import wait_for_job_via_client
 

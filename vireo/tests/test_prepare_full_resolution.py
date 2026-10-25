@@ -1061,7 +1061,7 @@ def test_cross_photo_eviction_demotes_earlier_ready_photo(
     decode again at the next lightbox request. Verify readiness is corrected
     to match what the lightbox actually sees.
     """
-    from web import media as media_mod
+    from web import media_previews as media_mod
 
     app, db, pid1 = client_with_photo
     client = app.test_client()
@@ -1281,13 +1281,14 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
 
     from types import SimpleNamespace
 
-    from web import job_launchers, media
+    from web import job_launchers, media_originals
+    from web import media_previews as media
 
     if cache_fault in {"expired", "relocated"}:
         # Advance the renderer's clock at the final cross-selection check,
         # after all three tiers passed their immediate warming checks.
         clock = {"offset": 0}
-        monkeypatch.setattr(media, "time", SimpleNamespace(
+        monkeypatch.setattr(media_originals, "time", SimpleNamespace(
             time=lambda: time.time() + clock["offset"],
         ))
         original_check = job_launchers._paired_jpeg_preview_exists
@@ -1297,7 +1298,7 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
             checks.append(args)
             if len(checks) > 3:
                 if cache_fault == "expired":
-                    clock["offset"] = media._PAIRED_PREVIEW_TTL_SEC + 1
+                    clock["offset"] = media_originals._PAIRED_PREVIEW_TTL_SEC + 1
                 elif len(checks) == 4:
                     # Relocation retains folder_id, but the renderer now
                     # selects a different live companion at its current path.
@@ -1367,7 +1368,7 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
         for artifact in paired_dir.glob("*.jpg"):
             old = time.time() - 3600
             os.utime(artifact, (old, old))
-        monkeypatch.setattr(media, "time", SimpleNamespace(
+        monkeypatch.setattr(media_originals, "time", SimpleNamespace(
             time=lambda: time.time() + 3600,
         ))
         reconcile_preview_cache(db, str(preview_dir.parent))

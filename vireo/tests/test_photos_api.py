@@ -2420,7 +2420,7 @@ def test_original_opens_full_res_working_copy_under_eviction_guard(
 ):
     """Eviction cannot unlink a selected cache hit before send_file opens it."""
     import flask
-    import web.media as media_module
+    import web.media_originals as media_module
     from PIL import Image
 
     app, db = app_and_db
@@ -3426,7 +3426,7 @@ def test_transient_full_original_does_not_restore_concurrently_evicted_copy(
     """Preservation rechecks the capped copy under the eviction guard."""
     import config as cfg
     import image_loader
-    import web.media as media_module
+    import web.media_originals as media_module
     from PIL import Image
 
     app, db = app_and_db
@@ -3518,7 +3518,7 @@ def test_transient_original_reloads_quota_raised_during_extraction(
     """A quota raised mid-extraction must not leave a stale eviction marker."""
     import config as cfg
     import image_loader
-    import web.media as media_module
+    import web.media_originals as media_module
     from PIL import Image
 
     app, db = app_and_db
@@ -3907,7 +3907,7 @@ def test_edit_preview_pins_working_copy_when_original_is_offline(
 ):
     """The only local edit source stays pinned through selection and decode."""
     import image_loader
-    import web.media as media_module
+    import web.media_editing as media_module
     import working_copy_cache
     from PIL import Image
 
@@ -3989,7 +3989,7 @@ def test_original_cache_hit_survives_working_copy_eviction_race(
     edit-preview, thumbnail, preview materializer, export) already recover
     from this race; the /original cache-hit branch remained the only
     unprotected 500."""
-    import web.media as media_module
+    import web.media_originals as media_module
     from PIL import Image
 
     app, db, pid = client_with_photo
@@ -4275,7 +4275,7 @@ def test_edit_preview_crop_scales_from_selected_source_dimensions(
     """A differently shaped working source must retain the requested edge."""
     import io
 
-    import web.media as media_module
+    import web.media_editing as media_module
     from PIL import Image
 
     app, db, photo_id = client_with_photo
@@ -4500,7 +4500,7 @@ def test_auto_tone_keeps_raw_on_recipe_render_path(
     normally short-circuit ``_recipe_render_source`` to the canonical
     working copy and hand the fit clipped pixels.
     """
-    import web.media as media_module
+    import web.media_editing as media_module
 
     app, db, photo_id = client_with_photo
     db.conn.execute(
@@ -4581,7 +4581,7 @@ def test_auto_tone_fits_the_requested_style(client_with_photo, monkeypatch):
 def test_auto_tone_meters_on_active_mask_then_detection(
     client_with_photo, monkeypatch,
 ):
-    import web.media as media_module
+    import web.media_editing as media_module
     from PIL import Image
 
     app, db, photo_id = client_with_photo
@@ -4607,7 +4607,7 @@ def test_auto_tone_meters_on_active_mask_then_detection(
 
 def test_auto_tone_falls_back_to_detection_when_active_mask_is_misaligned(client_with_photo, monkeypatch):
     """An unusable active mask does not discard a valid animal subject box."""
-    import web.media as media_module
+    import web.media_editing as media_module
     from PIL import Image
 
     app, db, photo_id = client_with_photo
@@ -14743,7 +14743,7 @@ def test_edit_preview_touches_working_copy_under_guard(
     import os
     import time
 
-    import web.media as media_module
+    import web.media_editing as media_module
     import working_copy_cache
     from PIL import Image
 
@@ -14833,7 +14833,7 @@ def test_crop_preview_touches_working_copy_under_guard(
     import os
     import time
 
-    import web.media as media_module
+    import web.media_crops as media_module
     import working_copy_cache
     from PIL import Image
 
@@ -15083,7 +15083,7 @@ def test_partial_global_paste_does_not_require_or_rebind_local_mask(client_with_
 def test_active_mask_retries_replaced_generation(client_with_photo, monkeypatch, tmp_path):
     from PIL import Image
     from repositories.masks_features import MasksFeaturesRepository
-    from web.media import _load_active_mask
+    from web.media_masks import _load_active_mask
 
     _, db, photo_id = client_with_photo
     _register_active_mask(db, photo_id, str(tmp_path))

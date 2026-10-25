@@ -19,7 +19,7 @@ def _source_photo(app_and_db, tmp_path):
 
 
 def test_source_frame_cache_reuses_decode_ignores_edits_and_revalidates_source(app_and_db, tmp_path, monkeypatch):
-    import web.media as media
+    import web.media_previews as media
     app, db, pid, path = _source_photo(app_and_db, tmp_path)
     original_loader = media._focus_source_image
     calls = []
@@ -104,7 +104,7 @@ def test_source_frame_raw_uses_jpeg_first_loader_and_caches_result(app_and_db, t
 
 
 def test_source_change_during_decode_never_publishes_stale_frame(app_and_db, tmp_path, monkeypatch):
-    import web.media as media
+    import web.media_previews as media
     app, db, pid, path = _source_photo(app_and_db, tmp_path)
     original_loader = media._focus_source_image
 
@@ -136,7 +136,7 @@ def test_source_frame_cache_write_failure_still_serves_available_pixels(app_and_
 
 
 def test_source_frame_missing_photo_does_not_load_or_adopt_cache(app_and_db, monkeypatch):
-    import web.media as media
+    import web.media_previews as media
     app, _db = app_and_db
     monkeypatch.setattr(media, '_focus_source_image', lambda *a: pytest.fail('unscoped source loaded'))
     assert app.test_client().get('/photos/999999/preview?size=1920&view=source').status_code == 404

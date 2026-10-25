@@ -7,7 +7,7 @@ full-resolution originals cache, and external-edit caches.
 ``RenderCache.invalidate_photo_render_cache`` removes them. A preview file
 that cannot be unlinked (a persistent lock) is recorded twice: in the
 in-process ``invalid_preview_cache_paths`` set and in the durable
-``preview_cache_invalidations`` table, so ``web.media``'s preview route
+``preview_cache_invalidations`` table, so the preview route in ``web.media_previews``
 neither serves nor lazily re-adopts it. That route clears the marker once it
 has rewritten the file, via ``clear_preview_cache_invalid``.
 
@@ -136,7 +136,8 @@ class RenderCache:
 
     # Canonical marker definitions live in preview_cache so the recycled-rowid
     # purge (which runs in the scanner, outside the app factory) writes the
-    # same marker web.media's _serve_preview lazy-adoption branch consults.
+    # same marker consulted by the lazy-adoption branch in
+    # web.media_previews._PreviewServer._serve_preview.
     @staticmethod
     def mark_preview_cache_invalid(db: Database, photo_id: int, size: int | str, *, commit: bool = True) -> None:
         preview_cache.mark_preview_cache_invalid(db, photo_id, size, commit=commit)
