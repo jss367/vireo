@@ -89,7 +89,7 @@ function page(){
     }),pendingArchiveFolderStatuses:()=>({
     }),folderLocalStatusMarkup:()=>'',Element:function(){
     },
-    getBrowseRules:()=>rules.length?rules:null,browseStacksEnabled:()=>false,hasCollectionAvailabilityScope:()=>false,browseLimits:{maxFocusCandidates:200},loadEpoch:0,
+    getBrowseRules:()=>rules.length?rules:null,browseStacksEnabled:()=>false,hasCollectionAvailabilityScope:()=>false,browseLimits:{maxFocusCandidates:200},browseWindowSequence:()=>0,
     searchLaneHeaders:()=>({
     }),bindBrowseMarkup:no,
     // The navbar's Missing Originals snapshot (shared.js): none taken yet.

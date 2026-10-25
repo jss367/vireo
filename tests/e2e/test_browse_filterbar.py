@@ -785,7 +785,7 @@ def test_clear_without_filters_does_not_reload(live_server, page, clear_action):
     selected = page.locator(".grid-card").last
     selected.click()
     selected_id = int(selected.get_attribute("data-id"))
-    epoch_before = page.evaluate("browseState.loadEpoch")
+    epoch_before = page.evaluate("pageModules.windowRequests.browseWindowSequence()")
 
     if clear_action == "popover":
         page.click(".vf-filters-btn")
@@ -804,7 +804,7 @@ def test_clear_without_filters_does_not_reload(live_server, page, clear_action):
     )
     page.wait_for_timeout(300)
 
-    assert page.evaluate("browseState.loadEpoch") == epoch_before
+    assert page.evaluate("pageModules.windowRequests.browseWindowSequence()") == epoch_before
     assert not page.evaluate("VireoFilter.hasFilters()")
     assert page.locator(".vf-search input").input_value() == ""
     assert page.evaluate("browseState.selectedPhotoId") == selected_id

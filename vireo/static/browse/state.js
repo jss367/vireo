@@ -141,10 +141,6 @@ export const state = {
   // stale value for the edited id survive.
   /** @type {Record<string, number>} */
   colorLabelEditGen: Object.create(null),
-  // Generation counter for the grid window (photos/currentPage/earliestPage/
-  // allLoaded). Never compare it directly — go through claimBrowseWindow() /
-  // observeBrowseWindow() so every async path guards the same way.
-  loadEpoch: 0,
   selectAllRequestSeq: 0, // bumped to ignore stale async select-all responses
   // rating/flag/color/date/keyword filter state now lives in VireoFilter
   // (the universal filter bar); Browse keeps only page-scope state.

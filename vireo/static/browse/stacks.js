@@ -17,7 +17,7 @@ import { abandonDetailFocusForBatch, loadDetail } from './detail.js';
 import { fetchColorLabels } from './edit-actions.js';
 import { refreshColorLabelControlsIn, refreshStackMemberCards, renderGrid } from './grid.js';
 import { availableBrowsePhotos, browseAvailableLightboxPhotos } from './lightbox.js';
-import { observeBrowseWindow } from './loading.js';
+import { observeBrowseWindow } from './window-requests.js';
 import { openBrowseCompare } from './selection-panel.js';
 import { refreshCardSelectionVisuals, selectPhoto } from './selection.js';
 import { bindBrowseMarkup } from './markup.js';

@@ -1636,7 +1636,7 @@ def test_unrelated_folder_health_change_preserves_leaf_selection(
         timeout=3000,
     )
     selected_id = page.evaluate("browseState.selectedPhotoId")
-    load_epoch = page.evaluate("browseState.loadEpoch")
+    load_epoch = page.evaluate("pageModules.windowRequests.browseWindowSequence()")
 
     # Only the unrelated yard folder changes health. The park-scoped grid is
     # identical, so the health refresh should update sidebars/counts without
@@ -1648,7 +1648,7 @@ def test_unrelated_folder_health_change_preserves_leaf_selection(
         page.evaluate("openMissingFoldersModal()")
     page.evaluate("() => browseState._activeFolderHealthRefresh")
 
-    assert page.evaluate("browseState.loadEpoch") == load_epoch
+    assert page.evaluate("pageModules.windowRequests.browseWindowSequence()") == load_epoch
     assert page.evaluate("browseState.selectedPhotoId") == selected_id
     assert page.evaluate(
         "document.getElementById('detailContent').classList.contains('visible')"
@@ -1823,7 +1823,7 @@ def test_health_refresh_retry_preserves_unrelated_transition_ids(
         timeout=3000,
     )
     selected_id = page.evaluate("browseState.selectedPhotoId")
-    load_epoch = page.evaluate("browseState.loadEpoch")
+    load_epoch = page.evaluate("pageModules.windowRequests.browseWindowSequence()")
 
     fail_state = {"fired": False}
 
@@ -1855,7 +1855,7 @@ def test_health_refresh_retry_preserves_unrelated_transition_ids(
         timeout=5000,
     )
     assert fail_state["fired"], "the first folder-tree request did not fail"
-    assert page.evaluate("browseState.loadEpoch") == load_epoch
+    assert page.evaluate("pageModules.windowRequests.browseWindowSequence()") == load_epoch
     assert page.evaluate("browseState.selectedPhotoId") == selected_id
     assert page.evaluate(
         "document.getElementById('detailContent').classList.contains('visible')"

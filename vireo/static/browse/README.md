@@ -22,6 +22,7 @@ is involved.
 | `boot.js` | The entry module: composing the filter bar's row, binding the markup and the compare overlay, registering the page hooks, bootstrap, the folder-health subscription, infinite scroll, and the photo deep link |
 | `config.js` | The `/api/config` read (`_cfgPromise`), shortcut defaults, `applyBrowseConfig` |
 | `loading.js` | The loaded window, paging, `loadPhotos`, `resetAndLoad`, filter changes |
+| `window-requests.js` | Private grid-request ownership; claims invalidate previous callbacks, observations follow the current dataset |
 | `grid.js` | Grid rendering, appending and prepending pages, card refreshes |
 | `cards.js` | Card markup: fields, badges, colour labels, detection boxes |
 | `stacks.js` | Burst stacks: membership, badges, trays, cover reconciliation |
@@ -62,6 +63,13 @@ other page module. Values browser tests tune are fields of small exported
 objects (`browseLimits.maxFocusCandidates`, `batchBarTiming.activateQuietMs`,
 `infiniteScroll.observerIsNative`, `locationPick.lastPickedAt`) rather than
 constants.
+
+Grid-request ownership lives in `window-requests.js`, which imports no page
+modules. Dataset replacements call `claimBrowseWindow()`; selection, stack and
+paging requests call `observeBrowseWindow()`. Both return a predicate to check
+after asynchronous work before rendering or releasing a load. The owner is
+private and cannot be reset through `state`. `browseWindowSequence()` exposes
+only the monotonic sequence needed by server-side search cancellation.
 
 ## The shared-code boundary
 

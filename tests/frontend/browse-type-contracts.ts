@@ -7,8 +7,14 @@ import {
   acceptSelectionPrediction, showSelectionPredictionPhotos,
 } from '../../vireo/static/browse/prediction-panels.js';
 import { selectionPanel } from '../../vireo/static/browse/selection-panel-state.js';
+import { claimBrowseWindow, observeBrowseWindow } from '../../vireo/static/browse/window-requests.js';
 
 export function verifyBrowseContracts() {
+  const windowIsCurrent: () => boolean = claimBrowseWindow();
+  windowIsCurrent();
+  observeBrowseWindow()();
+  // @ts-expect-error Window ownership cannot be forged with a caller-supplied sequence.
+  observeBrowseWindow(1);
   const panel = selectionPanel;
   const lane = panelRequests.keywords;
   panel.keywords.replace([{id: 7, name: "Cooper's Hawk", missing_photo_ids: [1, 2]}]);

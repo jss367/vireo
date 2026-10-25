@@ -265,7 +265,7 @@ def flag_route_fixture():
     """Actual selected route and validator with fake persistence only."""
     tree = ast.parse((ROOT / "web/photo_review.py").read_text(encoding="utf-8"))
     nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-             and n.name in {"flag_provenance", "_valid_flag_photo_id", "set_flags"}]
+             and n.name in {"flag_provenance", "_valid_photo_id", "set_flags"}]
     for node in nodes:
         node.decorator_list = []
     body, persisted = {}, []

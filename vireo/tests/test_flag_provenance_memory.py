@@ -48,7 +48,7 @@ def test_no_matching_batch_ids_preserves_redo_and_avoids_writes():
 
 
 def test_batch_boolean_ids_rejected_before_service():
-    ns = load("web/photo_review.py", {"flag_provenance", "create_photo_review_blueprint", "_valid_flag_photo_id"})
+    ns = load("web/photo_review.py", {"flag_provenance", "create_photo_review_blueprint", "_valid_photo_id"})
     routes, calls = {}, []
     class Blueprint:
         def __init__(self, *a):
@@ -69,8 +69,8 @@ def test_batch_boolean_ids_rejected_before_service():
     ns["request"] = types.SimpleNamespace(get_json=lambda **kw: {"flag": "rejected"})
     for pid in (0, -1, True, 2**63, 2**64):
         assert routes["/api/photos/<int:photo_id>/flag"](pid)[1] == 400
-    assert ns["_valid_flag_photo_id"](1)
-    assert ns["_valid_flag_photo_id"](2**63 - 1)
+    assert ns["_valid_photo_id"](1)
+    assert ns["_valid_photo_id"](2**63 - 1)
 
 
 
@@ -286,7 +286,7 @@ def test_global_hook_leaves_malformed_and_object_validation_to_flag_routes():
 def test_v1_flag_routes_require_an_object_and_explicit_flag_before_any_write():
     conn, _, db, service, note = durable_fixture()
     service.set_flag(7, "flagged", source="invented-agent")
-    ns = load("web/photo_review.py", {"flag_provenance", "create_photo_review_blueprint", "_valid_flag_photo_id"})
+    ns = load("web/photo_review.py", {"flag_provenance", "create_photo_review_blueprint", "_valid_photo_id"})
     routes, accesses = {}, []
     class Blueprint:
         def __init__(self, *a):
