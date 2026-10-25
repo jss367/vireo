@@ -834,10 +834,10 @@ def test_query_move_rule_matches_criteria(db, rule_photos):
         [p["hi"], p["lo"]])
     assert sorted(moves_merge.query_move_rule_matches(db, {"folder_ids": []})) == sorted(
         [p["hi"], p["lo"], p["other"]])
-    assert sorted(moves_merge.query_move_rule_matches(db,
-        {"imported_before": "2026-02-01"})) == sorted([p["hi"], p["other"]])
-    assert moves_merge.query_move_rule_matches(db,
-        {"rating_min": 1, "imported_before": "2026-02-01",
+    assert sorted(moves_merge.query_move_rule_matches(
+        db, {"imported_before": "2026-02-01"})) == sorted([p["hi"], p["other"]])
+    assert moves_merge.query_move_rule_matches(
+        db, {"rating_min": 1, "imported_before": "2026-02-01",
          "folder_ids": [p["fid"]]}) == [p["hi"]]
 
 

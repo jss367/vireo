@@ -285,8 +285,8 @@ class _BatchDeleteRun:
                 ids_to_delete = list(ids)
 
             for chunk in self._deletion._chunked(ids_to_delete):
-                chunk_result = catalog_deletion.delete_photos(db,
-                    chunk,
+                chunk_result = catalog_deletion.delete_photos(
+                    db, chunk,
                     include_companions=expand_companions,
                     commit=False,
                 )

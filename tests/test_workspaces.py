@@ -2373,8 +2373,8 @@ def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
     )
     photo_ingest.add_photo(db, staged_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
 
-    result = moves_merge.merge_staged_tree_into_archive(db,
-        staged_year_id,
+    result = moves_merge.merge_staged_tree_into_archive(
+        db, staged_year_id,
         "/archive/USA/2027",
     )
 
@@ -2432,8 +2432,8 @@ def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(d
     )
     photo_ingest.add_photo(db, staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
 
-    result = moves_merge.merge_staged_tree_into_archive(db,
-        staged_trip_id,
+    result = moves_merge.merge_staged_tree_into_archive(
+        db, staged_trip_id,
         "/archive/USA/2027/Trip",
     )
 
@@ -2520,8 +2520,8 @@ def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
     )
     photo_ingest.add_photo(db, staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
 
-    result = moves_merge.merge_staged_tree_into_archive(db,
-        staged_trip_id,
+    result = moves_merge.merge_staged_tree_into_archive(
+        db, staged_trip_id,
         "/archive/USA/2027/Trip",
     )
 
