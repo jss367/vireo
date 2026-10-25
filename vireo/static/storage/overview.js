@@ -1,24 +1,27 @@
 /* Storage category cards share the selected ordering across data refreshes. */
-/** @type {StorageOverviewCategory[] | null} */ var storageOverviewCategories = null;
+
+import { state } from './state.js';
+import { storageEscapeHtml, storageFormatBytes } from './format.js';
+import { VireoReleaseOriginals } from './shared.js';
 
 /** @param {StorageOverviewCategory[]} [categories] */
-function renderStorageCards(categories) {
-  if (categories) storageOverviewCategories = categories;
-  if (!storageOverviewCategories) return;
+export function renderStorageCards(categories) {
+  if (categories) state.storageOverviewCategories = categories;
+  if (!state.storageOverviewCategories) return;
   /** @type {HTMLSelectElement} */ (document.getElementById('storageSort')).disabled = false;
   var order = /** @type {HTMLSelectElement} */ (document.getElementById('storageSort')).value;
-  var sorted = storageOverviewCategories.slice().sort(function(a, b) {
+  var sorted = state.storageOverviewCategories.slice().sort(function(a, b) {
     var byName = a.name.localeCompare(b.name);
     if (order === 'name') return byName;
     var bySize = (a.size || 0) - (b.size || 0);
     return (order === 'size-asc' ? bySize : -bySize) || byName;
   });
-  _storageSummary = {};
+  state.storageSummary = {};
 
   var html = '';
   sorted.forEach(function(c) {
     if (c.size === 0 && !c.type && !(c.release && c.count)) return;
-    if (c.type) _storageSummary[c.type] = {count: c.count || 0, size: c.size || 0};
+    if (c.type) state.storageSummary[c.type] = {count: c.count || 0, size: c.size || 0};
     html += '<div class="stat-card">' +
       '<div class="stat-number">' + storageFormatBytes(c.size) + '</div>' +
       '<div class="stat-label">' + storageEscapeHtml(c.name) +
@@ -42,8 +45,8 @@ function renderStorageCards(categories) {
   /** @type {HTMLElement} */ (document.getElementById('storageGrid')).innerHTML = html || '<span style="color:var(--text-ghost);font-size:13px;">No generated storage yet.</span>';
 }
 
-function showStorageLoadError() {
-  storageOverviewCategories = null;
+export function showStorageLoadError() {
+  state.storageOverviewCategories = null;
   /** @type {HTMLSelectElement} */ (document.getElementById('storageSort')).disabled = true;
   /** @type {HTMLElement} */ (document.getElementById('storageGrid')).innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
 }
