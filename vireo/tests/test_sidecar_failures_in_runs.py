@@ -39,9 +39,11 @@ def no_metadata_warning(monkeypatch):
     """Keep step summaries independent of whether exiftool is installed."""
     import metadata
     from services import import_in_place
+    from web import imports as web_imports
 
     monkeypatch.setattr(metadata, "scan_metadata_warning", lambda: None)
     monkeypatch.setattr(import_in_place, "scan_metadata_warning", lambda: None)
+    monkeypatch.setattr(web_imports, "scan_metadata_warning", lambda: None)
 
 
 def _last_step_update(runner, step_id):
