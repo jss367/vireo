@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from metadata import scan_metadata_warning
@@ -21,13 +22,19 @@ from services.local_folder import (
 )
 from services.maintenance_history import remove_orphans_with_history, resolve_drift_with_history
 
+if TYPE_CHECKING:
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonError
+    from web.web_types import AppConfig, AppTrashPaths, CleanupCachedFiles, GetDb, GetRunner, InvalidateMissingOriginals
+
 log = logging.getLogger(__name__)
 
 # The Drift tab's bulk buttons, by the direction each one posts.
 _RESOLVE_ALL_BUTTONS = {"use_xmp": "Sync All from XMP", "use_db": "Sync All to XMP"}
 
 
-def _resolve_all_skipped_warning(direction, skipped):
+def _resolve_all_skipped_warning(direction: str, skipped: int) -> str:
     """Why ``resolve-all`` left ``skipped`` photos alone (unreadable sidecars)."""
     button = _RESOLVE_ALL_BUTTONS[direction]
     if skipped == 1:
@@ -42,15 +49,15 @@ def _resolve_all_skipped_warning(direction, skipped):
 
 
 def create_audit_blueprint(
-    get_db,
-    json_error,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    config: AppConfig,
     *,
-    cleanup_cached_files_for_deleted_photos,
-    invalidate_missing_originals,
-    get_runner,
-    trash_paths,
-):
+    cleanup_cached_files_for_deleted_photos: CleanupCachedFiles,
+    invalidate_missing_originals: InvalidateMissingOriginals,
+    get_runner: GetRunner,
+    trash_paths: AppTrashPaths,
+) -> Blueprint:
     """Build the audit blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``), read
@@ -66,7 +73,7 @@ def create_audit_blueprint(
     """
     blueprint = Blueprint("audit", __name__)
 
-    def _path_within(path, root):
+    def _path_within(path: str, root: str) -> bool:
         """True if ``path`` is strictly below ``root`` (separator-aware).
 
         Compares by the lexical ``normpath`` spelling AND the parent's
@@ -97,7 +104,7 @@ def create_audit_blueprint(
             return False
 
     @blueprint.route("/api/audit/drift")
-    def api_audit_drift():
+    def api_audit_drift() -> ResponseReturnValue:
         db = get_db()
         from audit import check_drift
 
@@ -106,7 +113,7 @@ def create_audit_blueprint(
         return jsonify(drifts)
 
     @blueprint.route("/api/audit/orphans")
-    def api_audit_orphans():
+    def api_audit_orphans() -> ResponseReturnValue:
         db = get_db()
         from audit import check_orphans
 
@@ -114,7 +121,7 @@ def create_audit_blueprint(
         db.audit.record_run("orphans", len(orphans))
         return jsonify(orphans)
 
-    def _audit_workspace_roots(db):
+    def _audit_workspace_roots(db: Database) -> list[str]:
         """Root folder paths of the active workspace.
 
         Audit scans derive their roots server-side: an audit run is
@@ -134,7 +141,7 @@ def create_audit_blueprint(
         return db.get_audit_root_paths()
 
     @blueprint.route("/api/audit/untracked")
-    def api_audit_untracked():
+    def api_audit_untracked() -> ResponseReturnValue:
         db = get_db()
         from audit import check_untracked
 
@@ -143,7 +150,7 @@ def create_audit_blueprint(
         return jsonify(untracked)
 
     @blueprint.route("/api/audit/sidecars")
-    def api_audit_sidecars():
+    def api_audit_sidecars() -> ResponseReturnValue:
         db = get_db()
         from audit import check_stray_sidecars
 
@@ -152,7 +159,7 @@ def create_audit_blueprint(
         return jsonify(strays)
 
     @blueprint.route("/api/audit/delete-sidecars", methods=["POST"])
-    def api_audit_delete_sidecars():
+    def api_audit_delete_sidecars() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         paths = body.get("paths", [])
@@ -169,7 +176,7 @@ def create_audit_blueprint(
         return jsonify({"ok": True, "deleted": deleted})
 
     @blueprint.route("/api/audit/integrity")
-    def api_audit_integrity():
+    def api_audit_integrity() -> ResponseReturnValue:
         """Current hash-verification state from the last verify run.
 
         Read-only: reports stored verdicts and coverage without
@@ -182,7 +189,7 @@ def create_audit_blueprint(
         return jsonify(check_integrity(db))
 
     @blueprint.route("/api/audit/accept-hash", methods=["POST"])
-    def api_audit_accept_hash():
+    def api_audit_accept_hash() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
@@ -192,14 +199,14 @@ def create_audit_blueprint(
         return jsonify({"ok": True, "accepted": accepted})
 
     @blueprint.route("/api/audit/summary")
-    def api_audit_summary():
+    def api_audit_summary() -> ResponseReturnValue:
         db = get_db()
         from audit import build_summary
 
         return jsonify(build_summary(db))
 
     @blueprint.route("/api/audit/resolve", methods=["POST"])
-    def api_audit_resolve():
+    def api_audit_resolve() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         photo_id = body.get("photo_id")
@@ -233,7 +240,7 @@ def create_audit_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/audit/resolve-all", methods=["POST"])
-    def api_audit_resolve_all():
+    def api_audit_resolve_all() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         direction = body.get("direction")
@@ -257,7 +264,7 @@ def create_audit_blueprint(
         return jsonify(response)
 
     @blueprint.route("/api/audit/remove-orphans", methods=["POST"])
-    def api_audit_remove_orphans():
+    def api_audit_remove_orphans() -> ResponseReturnValue:
         """Drop DB rows for photos whose source file is gone from disk,
         and unlink the cached thumbnails / previews / working copies that
         were derived from them.
@@ -287,7 +294,7 @@ def create_audit_blueprint(
         return jsonify({"ok": True, "removed": result.get("deleted", 0)})
 
     @blueprint.route("/api/audit/import-untracked", methods=["POST"])
-    def api_audit_import_untracked():
+    def api_audit_import_untracked() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):

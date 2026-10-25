@@ -5,19 +5,27 @@ workspace; ``/api/species/search`` suggests names for hand-tagging from the
 active label sets plus existing species keywords.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import sqlite3
+from typing import TYPE_CHECKING, cast
 
 from db import text_search_match
 from flask import Blueprint, jsonify, request
 from web.request_args import request_bool_arg
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict
+    from web.web_types import GetDb
+
 log = logging.getLogger(__name__)
 
 
-def create_species_blueprint(get_db):
+def create_species_blueprint(get_db: GetDb) -> Blueprint:
     """Build the species blueprint.
 
     Only the database accessor is injected; label sets and the text matcher
@@ -26,7 +34,7 @@ def create_species_blueprint(get_db):
     blueprint = Blueprint("species", __name__)
 
     @blueprint.post("/api/photos/<int:photo_id>/species/<int:keyword_id>/provenance")
-    def api_species_provenance(photo_id, keyword_id):
+    def api_species_provenance(photo_id: int, keyword_id: int) -> ResponseReturnValue:
         """Update one existing assignment's evidence as an undoable decision."""
         from services.species_provenance import validate_provenance
         db = get_db()
@@ -52,7 +60,9 @@ def create_species_blueprint(get_db):
                 provenance = validate_provenance(db, [photo_id], body, existing_assignment=assignment)
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
-            before = db.species_provenance.state(photo_id, keyword_id)
+            # Not None: ``assignment`` is this photo_keywords row, read in the
+            # same write transaction.
+            before = cast("JsonDict", db.species_provenance.state(photo_id, keyword_id))
             if before['species_provenance'] and json.loads(before['species_provenance']) == provenance:
                 return jsonify({"ok": True, "species_assignments": assignments})
             db.species_provenance.set(photo_id, keyword_id, provenance)
@@ -71,13 +81,13 @@ def create_species_blueprint(get_db):
                 db.rollback()
 
     @blueprint.route("/api/species")
-    def api_species():
+    def api_species() -> ResponseReturnValue:
         db = get_db()
         species = db.photo_species.get_accepted_species()
         return jsonify({"species": species})
 
     @blueprint.route("/api/species/search")
-    def api_species_search():
+    def api_species_search() -> ResponseReturnValue:
         """Search species names from active label sets for autocomplete."""
         q = request.args.get("q", "").strip()
         match_case = request_bool_arg("match_case")

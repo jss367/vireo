@@ -1,16 +1,25 @@
 """Workspace-scoped photo color-label endpoints."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from config import settings_write_lock
 from flask import Blueprint, jsonify, request
 from repositories.photo_labels import VALID_COLOR_LABELS
 from services.photo_labels import PhotoLabelService
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonError
+    from web.web_types import GetDb
 
-def create_photo_labels_blueprint(get_db, json_error):
+
+def create_photo_labels_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     blueprint = Blueprint("photo_labels", __name__)
 
     @blueprint.get("/api/photos/color_labels")
-    def get_labels():
+    def get_labels() -> ResponseReturnValue:
         ids_str = request.args.get("ids", "")
         if not ids_str:
             return jsonify({})
@@ -23,12 +32,12 @@ def create_photo_labels_blueprint(get_db, json_error):
         return jsonify(labels)
 
     @blueprint.get("/api/color-label-descriptions")
-    def get_descriptions():
+    def get_descriptions() -> ResponseReturnValue:
         descriptions = PhotoLabelService(get_db()).descriptions()
         return jsonify(descriptions)
 
     @blueprint.put("/api/color-label-descriptions/<color>")
-    def set_description(color):
+    def set_description(color: str) -> ResponseReturnValue:
         if color not in VALID_COLOR_LABELS:
             return json_error(f"color must be one of {VALID_COLOR_LABELS}")
         body = request.get_json(silent=True)
@@ -44,7 +53,7 @@ def create_photo_labels_blueprint(get_db, json_error):
         return jsonify({"color": color, "description": description})
 
     @blueprint.post("/api/photos/<int:photo_id>/color_label")
-    def set_label(photo_id):
+    def set_label(photo_id: int) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         color = body.get("color")
         if color is not None and color not in VALID_COLOR_LABELS:
@@ -58,7 +67,7 @@ def create_photo_labels_blueprint(get_db, json_error):
         return jsonify({"ok": True})
 
     @blueprint.post("/api/batch/color_label")
-    def set_labels():
+    def set_labels() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         color = body.get("color")

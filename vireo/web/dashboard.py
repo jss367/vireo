@@ -9,13 +9,20 @@ scope.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from flask import Blueprint, jsonify
 from services import dashboard_stats
 from services.visual_scope import collection_rules_state
 from web.request_args import dashboard_scope_args, reject_visual_collection
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonError
+    from web.web_types import GetDb
 
-def create_dashboard_blueprint(get_db, json_error):
+
+def create_dashboard_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     """Build the dashboard blueprint.
 
     These routes need only the database and the JSON error helper; the
@@ -25,7 +32,7 @@ def create_dashboard_blueprint(get_db, json_error):
     blueprint = Blueprint("dashboard", __name__)
 
     @blueprint.route("/api/dashboard/options")
-    def api_dashboard_options():
+    def api_dashboard_options() -> ResponseReturnValue:
         """Return lightweight scope choices without running collection counts.
 
         Collections whose rules can't be compiled (malformed JSON or
@@ -55,7 +62,7 @@ def create_dashboard_blueprint(get_db, json_error):
         return jsonify({"folders": folders, "collections": collections})
 
     @blueprint.route("/api/stats")
-    def api_stats():
+    def api_stats() -> ResponseReturnValue:
         db = get_db()
         scope = dashboard_scope_args()
         err = reject_visual_collection(
@@ -70,7 +77,7 @@ def create_dashboard_blueprint(get_db, json_error):
         return jsonify(stats)
 
     @blueprint.route("/api/coverage")
-    def api_coverage():
+    def api_coverage() -> ResponseReturnValue:
         """Return per-stage processing coverage for the active workspace.
 
         ``overall`` is the workspace-wide count for each pipeline stage, and
