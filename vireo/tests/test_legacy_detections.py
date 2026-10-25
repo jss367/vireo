@@ -177,3 +177,22 @@ def test_incomplete_raw_run_does_not_hide_legacy_evidence(db, runtime):
         "id": folder, "path": "/photos/legacy", "photo_count": 1,
     }]
     assert db.predictions.legacy_detection_folders() == expected
+
+
+@pytest.mark.parametrize("status", ["pending", "accepted", "rejected"])
+def test_legacy_sentinel_discovery_is_independent_of_workspace_reviews(db, status):
+    folder = workspace_folders.add_folder(db, "/photos/legacy")
+    photo = photo_ingest.add_photo(db, folder, "old.jpg", ".jpg", 10, 1.0)
+    # Only a sentinel prediction provides upgrade evidence here: no legacy
+    # MegaDetector rows/runs can mask an accidental review-filtered read.
+    anchor = db.detections.save(photo, [{
+        "box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1,
+    }], "full-image")[0]
+    db.predictions.add(anchor, "Robin", 0.01, "old-model")
+    prediction = db.predictions.id_for_key(anchor, "old-model", "legacy", "Robin")
+    db.predictions.set_review_status(prediction, db.active_workspace_id, status)
+    other = db.create_workspace("Other reviews")
+    db.predictions.set_review_status(prediction, other, "rejected" if status != "rejected" else "accepted")
+    assert db.predictions.legacy_detection_folders() == [{
+        "id": folder, "path": "/photos/legacy", "photo_count": 1,
+    }]

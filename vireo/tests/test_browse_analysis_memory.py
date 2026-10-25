@@ -6,6 +6,8 @@ import ast
 import sqlite3
 from pathlib import Path
 
+from repositories.top_species import TOP_SPECIES_RANKING_SQL
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -22,9 +24,7 @@ def selected_class(text, name, methods, ns):
 
 
 def catalog(photo_source=None):
-    source = (ROOT / "repositories/top_species.py").read_text(encoding="utf-8")
-    sql = ast.literal_eval(next(n.value for n in ast.parse(source).body if isinstance(n, ast.Assign)))
-    ns = {"TOP_SPECIES_RANKING_SQL": sql}
+    ns = {"TOP_SPECIES_RANKING_SQL": TOP_SPECIES_RANKING_SQL}
     cls = selected_class(
         photo_source or (ROOT / "repositories/photos.py").read_text(encoding="utf-8"),
         "PhotoRepository",

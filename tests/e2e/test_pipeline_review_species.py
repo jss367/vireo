@@ -6,9 +6,14 @@ from urllib.parse import urlsplit
 import pytest
 from playwright.sync_api import expect
 
+pytestmark = pytest.mark.usefixtures("saved_pipeline_suggestions")
+
 
 def _write_predictionless_pipeline_cache(live_server, photo_ids):
     db = live_server["db"]
+    # Undo rebuilds species from the catalog too; keep the fixture truly
+    # predictionless there as well as in the saved snapshot.
+    db.predictions.clear(collection_photo_ids=photo_ids)
     placeholders = ",".join("?" for _ in photo_ids)
     rows = db.conn.execute(
         f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
@@ -312,6 +317,7 @@ def test_predictionless_pipeline_encounter_can_add_species(live_server, page):
     input_box = page.locator(".species-dropdown.open input").first
     input_box.fill("Yellow-breasted Chat")
     input_box.press("Enter")
+    page.locator('#speciesConfirmationPreview .species-preview-apply').click()
 
     expect(species_name).to_have_text("Yellow-breasted Chat")
 
@@ -1802,15 +1808,8 @@ def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_
           window.safeFetch = (url, opts, cfg) => {
             if (String(url).includes('/api/encounters/species') && !JSON.parse(opts.body).preview) {
               window.__speciesPosts.push(JSON.parse(opts.body));
-              return new Promise(resolve => {
-                window.__resolveSpeciesPost = () => resolve({
-                  ok: true,
-                  species: 'American Robin',
-                  keyword_id: 123,
-                  photo_count: 1,
-                  skipped_photo_ids: [],
-                  low_confidence_photo_ids: [],
-                });
+              return new Promise((resolve, reject) => {
+                window.__resolveSpeciesPost = () => originalSafeFetch(url, opts, cfg).then(resolve, reject);
               });
             }
             return originalSafeFetch(url, opts, cfg);
@@ -1905,7 +1904,7 @@ def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_s
     scope.select_option("folder")
     page.locator("[data-testid='pipeline-review-folder']").select_option(str(yard))
     expect(page.locator("#statTotalPhotos")).to_have_text("1")
-    expect(page.locator("#reviewScopeStatus")).to_have_text("1 of 2 reviewed")
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 of 2 in saved results")
     expect(page.locator(".photo-card[data-photo-id]")).to_have_count(1)
     expect(page.locator(".encounter-scope-partial").first).to_have_text(
         "1 of 4 photos in scope"
@@ -2338,6 +2337,7 @@ def _add_species_in_pipeline_review(live_server, page, species):
     input_box = page.locator(".species-dropdown.open input").first
     input_box.fill(species)
     input_box.press("Enter")
+    page.locator('#speciesConfirmationPreview .species-preview-apply').click()
     expect(species_name).to_have_text(species)
 
 
@@ -2435,6 +2435,11 @@ def test_pipeline_review_banner_stays_while_an_earlier_stale_undo_remains(
     input_box = page.locator(".species-dropdown.open input").first
     input_box.fill("American Robin")
     input_box.press("Enter")
+    preview = page.locator('#speciesConfirmationPreview')
+    expect(preview.locator('.species-preview-apply')).to_be_enabled()
+    preview.locator('.species-preview-mode').select_option('replace')
+    preview.locator('.species-preview-previous').select_option('Yellow-breasted Chat')
+    preview.locator('.species-preview-apply').click()
     expect(species_name).to_have_text("American Robin")
 
     banner = page.get_by_test_id("pipeline-review-history-cache-stale")
