@@ -1473,19 +1473,13 @@ def create_pipeline_blueprint(
                 attributed_ids = []
                 for pid in zone_ids:
                     old = old_flags.get(pid, "none")
-                    # Candidates clears only prior flagged/rejected states;
-                    # a "none" photo moved into Candidates stays none, but
-                    # the user's explicit Review choice still confirms
-                    # attribution. The invalidation trigger does not fire
-                    # without a flag UPDATE, so set_current_flag_note below
-                    # inserts attribution for the already-matching flag.
-                    if target == "none" and old not in ("flagged", "rejected"):
-                        attributed_ids.append(pid)
-                        flag_items.append({"photo_id": pid, "old_value": old, "new_value": target})
-                        continue
-                    # For old == target, the UPDATE still fires the trigger;
-                    # set_current_flag_note republishes the explicit note so
-                    # Cull sees the photographer's confirmation.
+                    # Always UPDATE so a raw-NULL flag canonicalizes to
+                    # ``target``: set_current_flag_note's WHERE clause
+                    # filters by ``flag IS 'none'``, which does not match
+                    # NULL. For old == target the UPDATE is a no-op write
+                    # that still fires the invalidation trigger, and
+                    # set_current_flag_note republishes the explicit note
+                    # so Cull sees the photographer's confirmation.
                     db.photo_review.set_flag(pid, target, _commit=False)
                     attributed_ids.append(pid)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": target})

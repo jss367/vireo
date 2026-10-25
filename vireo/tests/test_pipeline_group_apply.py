@@ -92,6 +92,38 @@ def test_apply_clears_flag_when_photo_moved_to_candidates(app_and_db):
     assert db.photos.get(pid)['flag'] == 'none'
 
 
+def test_apply_candidates_null_flag_publishes_confirmation(app_and_db):
+    """A photo with a raw SQL ``NULL`` flag placed in Candidates must still
+    have its explicit Review decision confirmed. The attribution writer
+    filters by ``flag IS 'none'`` which does not match NULL, so Apply must
+    canonicalize the column to ``none`` before publishing the note."""
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    pid = pids[0]
+    # Force the raw column to NULL. Seeded photos may already carry
+    # ``flag = 'none'``; the finding is about the raw NULL case.
+    db.conn.execute("UPDATE photos SET flag = NULL WHERE id = ?", (pid,))
+    db.conn.commit()
+    assert db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?", (pid,),
+    ).fetchone()['flag'] is None
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/group/apply', json={
+        'picks': [],
+        'rejects': [],
+        'candidates': [pid],
+        'species': '',
+    })
+    assert resp.status_code == 200
+
+    # Column canonicalized to 'none' so attribution's WHERE flag IS 'none'
+    # matches, and the Cull overlay sees the decision as confirmed.
+    assert db.photos.get(pid)['flag'] == 'none'
+    states = db.photo_review.culling_flag_states([pid])
+    assert states[pid]['confirmed_flag'] == 'none'
+
+
 def test_apply_records_attribution_history_without_flag_transition(app_and_db):
     """A legacy ``flagged`` photo placed in Picks has its unverified
     attribution turned into a confirmed photographer decision. The

@@ -446,6 +446,30 @@ def test_prediction_group_apply_rejects_overlap(app_and_db):
     assert db.edit_history.list_recent() == []
 
 
+def test_prediction_group_apply_rejects_non_integer_photo_ids(app_and_db):
+    """``picks: [1, "1"]`` would survive dict.fromkeys yet SQLite's INTEGER
+    affinity treats both as the same row, so both reach
+    record_flag_attribution_history and collide on (edit_id, photo_id).
+    Validate shape up front, same bar as /api/culling/apply."""
+    app, db = app_and_db
+    photos = _seed_predictions(db)
+    client = app.test_client()
+    pid = photos[0]['id']
+    before = db.photos.get(pid)['flag']
+
+    resp = client.post('/api/predictions/group/apply', json={
+        'picks': [pid, str(pid)],
+        'rejects': [],
+        'removed': [],
+        'species': '',
+    })
+    assert resp.status_code == 400
+    assert 'picks' in resp.get_json()['error']
+    # Nothing moved — the shape error landed before any write.
+    assert db.photos.get(pid)['flag'] == before
+    assert db.edit_history.list_recent() == []
+
+
 def test_predictions_for_collection(app_and_db):
     """GET /api/predictions?collection_id=N scopes to that collection's photos."""
     app, db = app_and_db

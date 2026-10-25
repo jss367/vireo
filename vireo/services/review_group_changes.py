@@ -167,14 +167,13 @@ def apply_group_changes(db: Database, cached: JsonDict, group: JsonDict) -> Json
             row = db.photos.get(pid)
             old = row["flag"] or "none"
             flag_by_id[pid] = target
-            if target == "none" and old not in ("flagged", "rejected"):
-                # 'none' photo placed in Candidates: no flag write, but the
-                # explicit Review choice still confirms attribution.
-                attributed_ids.append(pid)
-                items.append({"photo_id": pid, "old_value": old, "new_value": target})
-                continue
-            # For old == target, the UPDATE still fires the invalidation
-            # trigger; set_current_flag_note republishes the explicit note.
+            # Always UPDATE so a raw-NULL flag canonicalizes to ``target``.
+            # set_current_flag_note filters by ``flag IS 'none'``, which
+            # does not match NULL; without this, an explicit Candidates
+            # decision on a NULL-flag photo would not publish attribution.
+            # For old == target the UPDATE is a no-op write that still
+            # fires the invalidation trigger, and set_current_flag_note
+            # republishes the explicit note.
             db.photo_review.set_flag(pid, target, _commit=False)
             if old != target:
                 db.queue_flag_change_if_enabled(pid, target, _commit=False)
