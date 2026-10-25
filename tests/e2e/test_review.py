@@ -39,7 +39,8 @@ def test_review_page_shows_seeded_species(live_server, page):
     )
 
 
-def test_review_page_shows_relative_scores(live_server, page):
+@pytest.mark.parametrize("species", ["Red-tailed Hawk", "American Robin"])
+def test_review_page_shows_relative_scores(live_server, page, species):
     """Review labels model scores as relative evidence for the named species."""
     url = live_server["url"]
     page.goto(f"{url}/review", timeout=5000)
@@ -48,8 +49,8 @@ def test_review_page_shows_relative_scores(live_server, page):
 
     confidence_elements = page.locator(".card-confidence")
     assert confidence_elements.count() >= 2
-    expect(confidence_elements.first).to_have_text(
-        "92.00% relative score for Red-tailed Hawk"
+    expect(confidence_elements.filter(has_text=f"relative score for {species}").first).to_have_text(
+        f"92.00% relative score for {species}"
     )
 
 
