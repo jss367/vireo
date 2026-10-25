@@ -7813,7 +7813,10 @@ def test_preview_job_honors_raw_failure_marker_after_source_selection(
             break
         time.sleep(0.05)
 
-    assert data["status"] == "completed"
+    assert data["status"] == "failed"
+    assert data["result"]["failed"] == 1
+    assert data["result"]["ok"] is False
+    assert data["result"]["errors"][0]["filename"] == "source.NEF"
     assert raw_loads == []
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     assert db.caches.preview_get(photo_id, 1920) is None

@@ -6,8 +6,9 @@ ingest/move/offline-cache/full-resolution preparation, folder moves, XMP sync,
 classification, darktable develop, mask extraction, label fetching, embedding
 precompute and the background batch delete. Their request handling leans on
 the app's scan, delete, move-folder and missing-originals services, whose
-bound methods ``create_app`` passes in. Standalone mask processing lives in
-``services.mask_extraction``; this module validates and launches that job.
+bound methods ``create_app`` passes in. Standalone mask and preview processing live in
+``services.mask_extraction`` and ``services.preview_warmup``; this module
+validates and launches those jobs.
 """
 
 from __future__ import annotations
@@ -15,25 +16,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast
 
 from app_paths import media_root
-from artifact_flight import ArtifactProducerFailed
 from config import read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, current_app, jsonify, request
-from preview_cache import (
-    evict_if_over_quota as evict_preview_cache_if_over_quota,
-)
 from preview_cache import lightbox_fit_preview_sizes, paired_preview_ready
-from preview_materializer import (
-    PreviewMaterializationError,
-    materialize_preview,
-)
 from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
@@ -49,6 +41,7 @@ from services.local_workspace import (
     stage_boundary_lock,
 )
 from services.mask_extraction import MaskExtractionOptions, extract_masks
+from services.preview_warmup import warm_previews
 from services.startup_tasks import metadata_repair_count
 from web.background_jobs import make_background_job
 from web.request_args import (
@@ -866,13 +859,11 @@ def create_job_launchers_blueprint(
             return err
 
         def work(job: JobDict) -> JsonDict:
-            return _PreviewWarmup(
-                ctx,
-                job,
-                config,
-                collection_id=collection_id,
-                requested_photo_ids=requested_photo_ids,
-            ).run()
+            return warm_previews(
+                job, media_root(config["THUMB_CACHE_DIR"]),
+                runner=ctx.runner, open_db=ctx.thread_db,
+                collection_id=collection_id, photo_ids=requested_photo_ids,
+            )
 
         return ctx.start(
             "previews",
@@ -2002,205 +1993,6 @@ class _FullResolutionPreparation:
             "bytes": self.copied_bytes,
             "errors": list(self.job["errors"]),
         }
-
-
-class _PreviewWarmup:
-    """The ``/api/jobs/previews`` work function and its run-wide state."""
-
-    def __init__(
-        self, ctx: JobLaunch, job: JobDict, config: AppConfig, *, collection_id: int | None,
-        requested_photo_ids: list[int] | None,
-    ) -> None:
-        self.ctx = ctx
-        self.job = job
-        self.config = config
-        self.collection_id = collection_id
-        self.requested_photo_ids = requested_photo_ids
-
-    def run(self) -> JsonDict:
-        import config as cfg
-
-        job = self.job
-        runner = self.ctx.runner
-        thread_db = self.thread_db = self.ctx.thread_db()
-        vireo_dir = self.vireo_dir = media_root(self.config["THUMB_CACHE_DIR"])
-        # Use workspace-effective config so per-workspace preview_max_size
-        # overrides are honored — otherwise precompute warms the wrong
-        # size and /photos/<id>/full (which uses workspace overrides) still
-        # misses on first view.
-        effective = thread_db.get_effective_config(cfg.load())
-        raw_size = effective.get("preview_max_size")
-        if raw_size == 0:
-            # "Full resolution" — /full redirects to /original so
-            # there's no size-suffixed file to warm. Skip precompute
-            # rather than produce untracked {id}.jpg files.
-            job["_start_time"] = time.time()
-            return {"generated": 0, "skipped": 0, "total": 0,
-                    "note": "skipped (preview_max_size=0)"}
-        self.max_size = int(raw_size or 1920)
-
-        self.preview_quality = effective.get("preview_quality", 90)
-        self.preview_dir = os.path.join(vireo_dir, "previews")
-        os.makedirs(self.preview_dir, exist_ok=True)
-
-        photos = self._photos()
-
-        self.folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
-        total = len(photos)
-        self.generated = 0
-        self.skipped = 0
-        self.failed = 0
-        job["_start_time"] = time.time()
-
-        for i, photo in enumerate(photos):
-            if runner.is_cancelled(job["id"]):
-                break
-            if not self._warm_photo(photo):
-                continue
-
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": i + 1,
-                    "total": total,
-                    "current_file": photo["filename"],
-                    "rate": round(
-                        (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
-                    ),
-                    "phase": "Generating previews",
-                },
-            )
-
-        # Park a pause requested during the final iteration before the
-        # eviction pass, which can unlink many previews and rewrite their
-        # database rows. Without this checkpoint the accepted request
-        # would remain ``pausing`` while eviction ran, and a cancel from
-        # that state could leave the cache mid-eviction.
-        if runner.is_cancelled(job["id"]):
-            return {"generated": self.generated, "skipped": self.skipped,
-                    "failed": self.failed, "total": total}
-
-        # Run a single eviction pass at the end so the batch doesn't
-        # fsync after every photo.
-        evict_preview_cache_if_over_quota(thread_db, vireo_dir)
-
-        return {"generated": self.generated, "skipped": self.skipped,
-                "failed": self.failed, "total": total}
-
-    def _photos(self) -> list[Row]:
-        thread_db = self.thread_db
-        if self.requested_photo_ids is not None:
-            photos: list[Row] = []
-            for photo_id in self.requested_photo_ids:
-                scoped_photo = thread_db.photos.get(
-                    photo_id, verify_workspace=True,
-                )
-                if scoped_photo is not None:
-                    photos.append(scoped_photo)
-            return photos
-        if self.collection_id:
-            return thread_db.collections.get_photos(self.collection_id, per_page=999999)
-        return thread_db.photos.list_page(per_page=999999)
-
-    def _warm_photo(self, photo: Row) -> bool:
-        """Warm one photo's preview.
-
-        Returns False when the photo is finished without a progress event
-        (an existing preview that is kept).
-        """
-        thread_db = self.thread_db
-        detail_photo = thread_db.photos.get(photo["id"]) or photo
-        cache_path = os.path.join(
-            self.preview_dir, f'{photo["id"]}_{self.max_size}.jpg',
-        )
-        recipe = thread_db.get_photo_edit_recipe(photo["id"])
-        if os.path.exists(cache_path) and self._keep_existing_preview(
-            photo, cache_path, recipe,
-        ):
-            return False
-
-        if not os.path.exists(cache_path):
-            self._render_preview(photo, detail_photo, cache_path, recipe)
-        return True
-
-    def _keep_existing_preview(self, photo: Row, cache_path: str, recipe: JsonDict | None) -> bool:
-        """Settle a preview file already on disk.
-
-        Returns True when it is kept (counted skipped); False when an
-        untracked edited preview was removed and must be re-rendered.
-        """
-        import contextlib
-
-        thread_db = self.thread_db
-        max_size = self.max_size
-        cache_row = None
-        try:
-            cache_row = thread_db.caches.preview_get(photo["id"], max_size)
-        except sqlite3.Error:
-            # Treated as untracked: an edited photo's preview is
-            # then re-rendered rather than trusted.
-            log.warning(
-                "Could not read the preview cache row for photo %s",
-                photo["id"], exc_info=True,
-            )
-        if recipe and cache_row is None:
-            with contextlib.suppress(OSError):
-                os.remove(cache_path)
-            if os.path.exists(cache_path):
-                self.skipped += 1
-                log.info(
-                    "Skipping untracked edited preview for photo %s; "
-                    "existing cache file could not be removed",
-                    photo["id"],
-                )
-                return True
-            return False
-        self.skipped += 1
-        # Adopt untracked unedited files so precompute output is
-        # visible to eviction and /api/preview-cache.
-        # Best-effort: photo may be deleted mid-job (FK error).
-        try:
-            if cache_row is None:
-                thread_db.caches.preview_insert(
-                    photo["id"],
-                    max_size,
-                    os.path.getsize(cache_path),
-                )
-        except (sqlite3.Error, OSError):
-            log.debug(
-                "Could not track existing preview for photo %s",
-                photo["id"], exc_info=True,
-            )
-        return True
-
-    def _render_preview(self, photo: Row, detail_photo: Row, cache_path: str, recipe: JsonDict | None) -> None:
-        folder_path = self.folders.get(detail_photo["folder_id"])
-        try:
-            materialized = materialize_preview(
-                self.thread_db,
-                detail_photo,
-                folder_path,
-                size=self.max_size,
-                vireo_dir=self.vireo_dir,
-                preview_quality=self.preview_quality,
-                recipe=recipe,
-                cache_path=cache_path,
-            )
-        except (ArtifactProducerFailed, PreviewMaterializationError) as exc:
-            # A source we could not read is a failure, not a
-            # cache hit; counting it as skipped made an
-            # all-unreadable run look fully cached.
-            self.failed += 1
-            log.info(
-                "Preview warmup failed for photo %s: %s",
-                photo["id"], exc,
-            )
-        else:
-            if materialized.generated:
-                self.generated += 1
-            else:
-                self.skipped += 1
 
 
 def _run_develop(ctx: JobLaunch, job: JobDict, photo_ids: list[int], settings: SimpleNamespace) -> dict[str, int]:

@@ -53,6 +53,13 @@ that information for interactive use.
   The service opens and closes its own worker connection and owns the
   per-photo locks, cached-mask checks, staged-file publication, rollback and
   progress events. It needs no Flask application or request context.
+  Standalone preview generation similarly lives in `services.preview_warmup`;
+  its route validates the selection and passes the workspace-bound database
+  factory and runner. The service owns connection cleanup and the existing
+  materialization/eviction flow. Per-photo render failures return an explicit
+  failure verdict and a bounded error sample with a full `errors_total`, which
+  the runner records in live status and job history. Cancellation takes
+  precedence over the failure verdict and bypasses the final eviction pass.
 - Processing stages live in `vireo/pipeline_stages/`: scanning and collection
   creation, thumbnails and previews, model loading, detection, classification,
   masks and eye keypoints, and grouping and miss detection. `pipeline_job.py`
