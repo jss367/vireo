@@ -11,7 +11,7 @@ from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
 from repositories.masks_features import MaskQuality
-from services import photo_ingest, saved_processes, subject_masks
+from services import catalog_deletion, photo_ingest, saved_processes, subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -741,13 +741,14 @@ def test_jobs_page_returns_200(app_and_db):
     assert 'result.interrupted && Array.isArray(result.photo_ids)' in html
     # A parent with both post-import steps done has nothing to resume;
     # a parent whose chain ran but still owes tag/GPS work stays
-    # resumable as a tag-only replay. ``ok !== false`` discounts a
-    # ``chained`` mark on a failed row — ``_chain_after_import`` returns
-    # early via its "import failed" branch without actually enqueueing
-    # processing. A resume whose predecessor already paid the chain
-    # (``chain_already_ran``) also counts as chained so processing is
-    # not re-enqueued.
-    assert 'chain_already_ran || (result.chained && result.ok !== false)) && result.tags_applied' in html
+    # resumable as a tag-only replay. ``importPhotosOk(result) !== false``
+    # discounts a ``chained`` mark on a failed row — ``_chain_after_import``
+    # returns early via its "import failed" branch without actually
+    # enqueueing processing — while keeping a sidecar-only failure
+    # (``photos_ok``) resumable. A resume whose predecessor already paid
+    # the chain (``chain_already_ran``) also counts as chained so
+    # processing is not re-enqueued.
+    assert 'chain_already_ran || (result.chained && importPhotosOk(result) !== false)) && result.tags_applied' in html
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
     # that false through ``importRetryBody`` and the collision resolver
@@ -5778,7 +5779,7 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     staging = imported["config"]["managed_staging"]["destination"]
     reject = db.conn.execute("SELECT id FROM photos WHERE filename = 'reject.jpg'").fetchone()["id"]
     os.unlink(os.path.join(staging, "reject.jpg"))
-    db.delete_photos([reject])
+    catalog_deletion.delete_photos(db, [reject])
     # Publishing into the shoot folder must preserve that output, too.
     os.makedirs(os.path.join(staging, "published"))
     with open(os.path.join(staging, "published", "gallery.txt"), "w") as f:
@@ -6581,20 +6582,19 @@ def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and
 
 
 def test_pending_archive_waits_for_synchronous_delete(app_and_db, tmp_path, monkeypatch):
-    from db import Database
 
     app, db = app_and_db
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     entered, release = threading.Event(), threading.Event()
     responses = []
-    delete = Database.delete_photos
+    delete = catalog_deletion.delete_photos
 
     def blocking_delete(self, *args, **kwargs):
         entered.set()
         assert release.wait(synchronization_timeout(10))
         return delete(self, *args, **kwargs)
 
-    monkeypatch.setattr(Database, "delete_photos", blocking_delete)
+    monkeypatch.setattr(catalog_deletion, "delete_photos", blocking_delete)
 
     def request_delete():
         with app.test_client() as client:

@@ -49,7 +49,7 @@ function renderResult(res, status) {
     pill.textContent = res.ok === false
       ? 'Import finished with errors'
       : 'Imported in place — original files stayed where they are';
-    const errors = res.errors || [];
+    const errors = errorsWithoutSidecarFailures(res);
     unsafe.style.display = errors.length ? '' : 'none';
     errors.forEach((msg) => {
       const li = document.createElement('li');
@@ -181,6 +181,44 @@ function renderResultNotes(res) {
   renderTaggingInfo(res);
   renderModelWarning(res);
   renderWorkingCopyNotice(res);
+  renderSidecarFailures(res);
+}
+
+/**
+ * The result's errors less the sidecar lines ``renderSidecarFailures`` lists.
+ * @param {ImportResult} res
+ */
+function errorsWithoutSidecarFailures(res) {
+  const sidecarLines = new Set(res.sidecar_failures || []);
+  return (res.errors || []).filter((msg) => !sidecarLines.has(msg));
+}
+
+// Photos imported without the keywords in their XMP sidecar. Each line is a
+// failure the server words (the job fails on it), but the photo itself was
+// imported, so it is listed apart from the errors about the photos.
+var SIDECAR_FAILURES_SHOWN = 20;
+
+/** @param {ImportResult} res */
+function renderSidecarFailures(res) {
+  const box = /** @type {HTMLElement} */ (document.getElementById('sidecarFailureNotice'));
+  const list = /** @type {HTMLElement} */ (document.getElementById('sidecarFailures'));
+  const failures = res.sidecar_failures || [];
+  const n = failures.length;
+  /** @type {HTMLElement} */ (document.getElementById('sidecarFailureNoticeText')).textContent = n === 1
+    ? '1 photo was imported without the keywords in its XMP sidecar:'
+    : n.toLocaleString() + ' photos were imported without the keywords in their XMP sidecars:';
+  list.innerHTML = '';
+  failures.slice(0, SIDECAR_FAILURES_SHOWN).forEach((msg) => {
+    const li = document.createElement('li');
+    li.textContent = msg;
+    list.appendChild(li);
+  });
+  if (n > SIDECAR_FAILURES_SHOWN) {
+    const li = document.createElement('li');
+    li.textContent = 'and ' + (n - SIDECAR_FAILURES_SHOWN).toLocaleString() + ' more';
+    list.appendChild(li);
+  }
+  box.style.display = n ? '' : 'none';
 }
 
 // Working copies the import could not make. The server words the notice;

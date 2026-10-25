@@ -45,7 +45,13 @@ from scanner.cache_invalidation import (
 )
 from scanner.companions import COMPANION_TIMESTAMP_TOLERANCE_SECS
 from scanner.hashing import EMPTY_FILE_SHA256, compute_fd_hash, compute_file_hash
-from scanner.keywords import EMBEDDED_KEYWORDS_BACKFILL_KEY, backfill_embedded_keywords
+from scanner.keywords import (
+    EMBEDDED_KEYWORDS_BACKFILL_KEY,
+    SidecarFailures,
+    backfill_embedded_keywords,
+    sidecar_failure_message,
+    sidecar_failure_note,
+)
 from scanner.options import ScanControl, ScanHooks, ScanOptions
 from scanner.scan_run import scan
 from scanner.working_copies import (
@@ -63,6 +69,7 @@ __all__ = [
     "ScanControl",
     "ScanHooks",
     "ScanOptions",
+    "SidecarFailures",
     "_extract_working_copies",
     "_invalidate_derived_caches",
     "_sweep_untracked_previews_for_photos",
@@ -73,5 +80,7 @@ __all__ = [
     "import_working_copy_notice",
     "is_excluded_scan_path",
     "scan",
+    "sidecar_failure_message",
+    "sidecar_failure_note",
     "working_copy_backfill_candidate_count",
 ]

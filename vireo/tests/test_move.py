@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from db import Database
 from scanner import ScanOptions
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 
 
 def _tmp_folds_case():
@@ -1793,7 +1793,7 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
 
     # Drop the original source folder. SQLite is now free to reuse its
     # rowid on the next folders INSERT.
-    db.delete_folder(original_fid)
+    catalog_deletion.delete_folder(db, original_fid)
 
     # Force a rowid collision by inserting a synthetic folder row at the
     # freed id. This mirrors what SQLite would do on the next real
@@ -1883,7 +1883,7 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
     # Drop the original source folder — the on-disk path is still there
     # (imagine the card being re-inserted with different content later),
     # but the earlier scan is gone from the catalog.
-    db.delete_folder(original_fid)
+    catalog_deletion.delete_folder(db, original_fid)
 
     # Provenance must be cleared so a new folder at the reused path can't
     # inherit the earlier claim.
@@ -2313,7 +2313,7 @@ def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
         ).fetchone()["last_move_source_folder_path"] == str(source_path)
     )
 
-    deleted = db.delete_photos([jpeg_pid])
+    deleted = catalog_deletion.delete_photos(db, [jpeg_pid])
     assert deleted["deleted"] == 1
     assert (
         db.conn.execute(

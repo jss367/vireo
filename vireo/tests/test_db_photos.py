@@ -19,7 +19,7 @@ import textwrap
 import config as cfg
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, Database
-from services import browse_queries, duplicate_resolution, photo_ingest
+from services import browse_queries, catalog_deletion, duplicate_resolution, photo_ingest
 
 
 @pytest.fixture
@@ -869,7 +869,7 @@ def test_resolve_photos_for_delete_companions(db, lib):
 
 def test_delete_photos_removes_rows_and_dependents(db, lib, cache, monkeypatch):
     pruned = []
-    monkeypatch.setattr(db, "prune_pipeline_cache_for_ids", pruned.append)
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
     db.queue_change(lib["a"], "keyword_add", "Heron")
@@ -879,7 +879,7 @@ def test_delete_photos_removes_rows_and_dependents(db, lib, cache, monkeypatch):
     )
     db.conn.commit()
 
-    result = db.delete_photos([lib["a"]])
+    result = catalog_deletion.delete_photos(db, [lib["a"]])
 
     assert result["deleted"] == 1
     assert result["ids"] == [lib["a"]]
@@ -903,9 +903,9 @@ def test_delete_photos_removes_rows_and_dependents(db, lib, cache, monkeypatch):
 
 def test_delete_photos_nothing_to_delete(db, lib, cache, monkeypatch):
     pruned = []
-    monkeypatch.setattr(db, "prune_pipeline_cache_for_ids", pruned.append)
-    assert db.delete_photos([]) == {"deleted": 0, "ids": [], "files": []}
-    assert db.delete_photos([999999]) == {"deleted": 0, "ids": [], "files": []}
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
+    assert catalog_deletion.delete_photos(db, []) == {"deleted": 0, "ids": [], "files": []}
+    assert catalog_deletion.delete_photos(db, [999999]) == {"deleted": 0, "ids": [], "files": []}
     assert pruned == []
     assert cache.invalidated == []
 
@@ -921,7 +921,7 @@ def test_delete_photos_goes_through_facade_resolver(db, lib, monkeypatch):
         return real(repo, photo_ids, include_companions=include_companions)
 
     monkeypatch.setattr(PhotoRepository, "resolve_for_delete", resolver)
-    db.delete_photos([lib["b"]], include_companions=True)
+    catalog_deletion.delete_photos(db, [lib["b"]], include_companions=True)
     assert seen == [([lib["b"]], True)]
 
 
@@ -953,7 +953,7 @@ def test_delete_photos_cleans_collection_photo_id_rules(db, lib):
     db.conn.commit()
 
     statements = _trace(db)
-    db.delete_photos([lib["a"]])
+    catalog_deletion.delete_photos(db, [lib["a"]])
     db.conn.set_trace_callback(None)
 
     rules = dict(db.conn.execute("SELECT name, rules FROM collections").fetchall())
@@ -986,7 +986,7 @@ def test_deleted_photo_id_reused_by_sqlite_does_not_join_foreign_collection(db, 
     ).lastrowid
     db.conn.commit()
 
-    db.delete_photos([doomed])
+    catalog_deletion.delete_photos(db, [doomed])
     reused = _photo(db, lib["root"], "unrelated.jpg")
 
     assert reused == doomed
@@ -1007,7 +1007,7 @@ def test_delete_photos_expires_drained_move_provenance(db, lib, tmp_path):
     _photo(db, lib["root"], "b.cr3")
     db.conn.commit()
 
-    db.delete_photos([lib["a"], lib["b"]])
+    catalog_deletion.delete_photos(db, [lib["a"], lib["b"]])
 
     got = dict(db.conn.execute(
         "SELECT id, last_move_source_folder_path FROM photos WHERE id IN (?, ?)",
@@ -1018,8 +1018,8 @@ def test_delete_photos_expires_drained_move_provenance(db, lib, tmp_path):
 
 def test_delete_photos_commit_false_joins_outer_transaction(db, lib, cache, monkeypatch):
     pruned = []
-    monkeypatch.setattr(db, "prune_pipeline_cache_for_ids", pruned.append)
-    result = db.delete_photos([lib["a"]], commit=False)
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
+    result = catalog_deletion.delete_photos(db, [lib["a"]], commit=False)
     assert result["ids"] == [lib["a"]]
     assert db.conn.in_transaction
     with _reader(db) as r:
@@ -1034,7 +1034,7 @@ def test_delete_photos_commit_false_joins_outer_transaction(db, lib, cache, monk
 
 def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache, monkeypatch):
     pruned = []
-    monkeypatch.setattr(db, "prune_pipeline_cache_for_ids", pruned.append)
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
     db.conn.execute(
@@ -1042,7 +1042,7 @@ def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache,
         "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
     )
     with pytest.raises(sqlite3.IntegrityError, match="blocked"):
-        db.delete_photos([lib["a"]])
+        catalog_deletion.delete_photos(db, [lib["a"]])
     assert not db.conn.in_transaction
     # The earlier keyword delete was rolled back with the rest.
     assert db.conn.execute(
@@ -1060,7 +1060,7 @@ def test_delete_photos_commit_false_error_leaves_rollback_to_caller(db, lib, cac
         "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
     )
     with pytest.raises(sqlite3.IntegrityError, match="blocked"):
-        db.delete_photos([lib["a"]], commit=False)
+        catalog_deletion.delete_photos(db, [lib["a"]], commit=False)
     assert db.conn.in_transaction
     assert db.conn.execute(
         "SELECT COUNT(*) FROM photo_keywords WHERE photo_id = ?", (lib["a"],),
@@ -1077,7 +1077,7 @@ def test_delete_photos_resolves_workspace_mid_transaction(db, lib, cache):
     db.set_active_workspace(None)
     statements = _trace(db)
     with pytest.raises(RuntimeError):
-        db.delete_photos([lib["a"]])
+        catalog_deletion.delete_photos(db, [lib["a"]])
     db.conn.set_trace_callback(None)
     stmts = [s.strip() for s in statements]
     first_delete = next(
@@ -1092,7 +1092,7 @@ def test_delete_photos_resolves_workspace_mid_transaction(db, lib, cache):
 
 
 def test_delete_photos_chunks_every_in_clause(db, lib, monkeypatch):
-    monkeypatch.setattr(db, "prune_pipeline_cache_for_ids", lambda ids: None)
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: None)
     # The dependents chunk at ``db._chunks``' size; the photo rows go
     # through ``photo_row_deletion``, which chunks at ``sql_chunks``'. Just
     # past the larger of the two splits every statement in two.
@@ -1101,7 +1101,7 @@ def test_delete_photos_chunks_every_in_clause(db, lib, monkeypatch):
     ids = [_photo(db, lib["root"], f"z{i}.jpg")
            for i in range(max(_SQLITE_PARAM_CHUNK_SIZE, SQL_PARAM_CHUNK) + 3)]
     statements = _trace(db)
-    result = db.delete_photos(ids)
+    result = catalog_deletion.delete_photos(db, ids)
     db.conn.set_trace_callback(None)
     assert result["deleted"] == len(ids)
     statements = list(dict.fromkeys(s.strip() for s in statements))
@@ -1113,9 +1113,9 @@ def test_delete_photos_chunks_every_in_clause(db, lib, monkeypatch):
 
 
 def test_delete_photos_sql_order(db, lib, monkeypatch, tmp_path):
-    monkeypatch.setattr(db, "prune_pipeline_cache_for_ids", lambda ids: None)
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: None)
     statements = _trace(db)
-    db.delete_photos([lib["a"]])
+    catalog_deletion.delete_photos(db, [lib["a"]])
     db.conn.set_trace_callback(None)
     a = lib["a"]
     root = lib["root"]
@@ -1146,14 +1146,14 @@ def test_prune_pipeline_cache_for_ids(db, monkeypatch):
 
     calls = []
     monkeypatch.setattr(result_files, "prune_photo_results", lambda *a: calls.append(a))
-    db.prune_pipeline_cache_for_ids([])
+    catalog_deletion.prune_pipeline_cache_for_ids(db, [])
     assert calls == []
-    db.prune_pipeline_cache_for_ids([1, 2])
+    catalog_deletion.prune_pipeline_cache_for_ids(db, [1, 2])
     import os
     workspace_ids = [workspace["id"] for workspace in db.workspaces.list_all()]
     assert calls == [(os.path.dirname(db._db_path), [1, 2], workspace_ids)]
     db.set_active_workspace(None)
-    db.prune_pipeline_cache_for_ids([3])
+    catalog_deletion.prune_pipeline_cache_for_ids(db, [3])
     assert calls[-1] == (os.path.dirname(db._db_path), [3], workspace_ids)
 
 
@@ -1164,14 +1164,14 @@ def test_prune_pipeline_cache_for_ids_swallows_errors_but_not_interrupts(db, mon
         raise OSError("disk")
 
     monkeypatch.setattr(result_files, "prune_photo_results", boom)
-    db.prune_pipeline_cache_for_ids([1])
+    catalog_deletion.prune_pipeline_cache_for_ids(db, [1])
 
     def interrupt(*a):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(result_files, "prune_photo_results", interrupt)
     with pytest.raises(KeyboardInterrupt):
-        db.prune_pipeline_cache_for_ids([1])
+        catalog_deletion.prune_pipeline_cache_for_ids(db, [1])
 
 
 # -- quality writers -------------------------------------------------------------
@@ -1372,9 +1372,6 @@ def test_count_catalog_photos_counts_every_folder_status(db, lib):
 
 # -- structure -----------------------------------------------------------------
 
-# Coordinated work that stays on ``Database`` and builds the repository itself.
-COORDINATED = ["delete_photos"]
-
 # The forwarding wrappers this domain used to have on ``Database``; callers
 # reach the same methods through ``db.photos`` now.
 REMOVED_PHOTO_WRAPPERS = [
@@ -1411,15 +1408,12 @@ def _self_attrs(name_or_fn):
     }
 
 
-@pytest.mark.parametrize("name", COORDINATED)
-def test_photo_method_delegates_to_repository(name):
-    attrs = _self_attrs(name)
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to PhotoRepository"
-    )
-    assert {"_photos_repository", "photos"} & attrs, (
-        f"Database.{name} no longer delegates to PhotoRepository"
-    )
+def test_delete_photos_lives_in_the_deletion_service():
+    """``catalog_deletion.delete_photos`` deletes through ``db.photos``, never the connection."""
+    assert not hasattr(Database, "delete_photos")
+    source = textwrap.dedent(inspect.getsource(catalog_deletion.delete_photos))
+    assert ".conn" not in source
+    assert "db.photos.resolve_for_delete" in source and "db.photos.delete" in source
 
 
 def test_photos_has_no_forwarding_wrappers_on_database():
@@ -1455,10 +1449,10 @@ def test_composition_stays_on_the_facade():
     """Cross-domain calls and side effects are made from the façade, and the
     helpers the listing reads consult are bound from it when the repository
     is built, so monkeypatches of these Database methods keep applying."""
-    assert {
-        "photos", "invalidate_new_images_cache_for_folders",
-        "prune_pipeline_cache_for_ids", "_ws_id",
-    } <= _self_attrs("delete_photos")
+    deletion = textwrap.dedent(inspect.getsource(catalog_deletion.delete_photos))
+    for call in ("db.invalidate_new_images_cache_for_folders",
+                 "prune_pipeline_cache_for_ids(db", "db.require_workspace_id"):
+        assert call in deletion
     summary = textwrap.dedent(inspect.getsource(browse_queries.get_browse_summary))
     assert "db.get_effective_config" in summary and "db.photos.get_browse_summary" in summary
     assert not hasattr(Database, "get_browse_summary")

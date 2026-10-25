@@ -4,6 +4,17 @@ import { state } from './state.js';
 import { jobConfig } from './format.js';
 import { formatDateTime, importFailedBeforeStart } from './shared.js';
 
+/**
+ * Whether an import brought in every photo; ``ok`` unless sidecars failed it.
+ * A sidecar whose keywords were not imported fails ``ok`` but not the chain:
+ * the photos are cataloged and processed. Mirrors ``import_photos_ok``.
+ * @param {JobsResult} result
+ */
+function importPhotosOk(result) {
+  if (result.ok !== false || result.photos_ok !== true) return result.ok;
+  return !!(result.sidecar_failures || []).length && !result.failed;
+}
+
 /** @param {JobsRow} job */ export function canRestartInPlace(job) {
   if (!job || job.type !== 'import-in-place' ||
       ['failed', 'cancelled'].indexOf(job.status) < 0) return false;
@@ -71,7 +82,7 @@ import { formatDateTime, importFailedBeforeStart } from './shared.js';
     return pipelineNeverStarted(row);
   }).map(function(row) { return row.id; }));
   var chainInvalidated = importChainInvalidated(jobConfig(job), result, rows, job.id, neverStarted);
-  if (!chainInvalidated && (jobConfig(job).chain_already_ran || (result.chained && result.ok !== false)) && result.tags_applied) return false;
+  if (!chainInvalidated && (jobConfig(job).chain_already_ran || (result.chained && importPhotosOk(result) !== false)) && result.tags_applied) return false;
   // Chain ran but tag/GPS work is still owed (a Stop cut the pass
   // short, or an error left tags unmarked). The resume replays only
   // the tag pass and skips re-chaining server-side.
@@ -247,7 +258,7 @@ import { formatDateTime, importFailedBeforeStart } from './shared.js';
     // After a failed import the chain step marks but skips processing.
     e.chainProcessJobIds = importChainProcessJobIds(e.config, r, rows, e.id);
     e.chained = (!!e.config.chain_already_ran ||
-      (chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id || ''))) &&
+      (chainStep && importPhotosOk(r) !== false && !neverStartedProcesses.has(r.process_job_id || ''))) &&
       !importChainInvalidated(e.config, r, rows, e.id, neverStartedProcesses);
     e.resumable = e.status === 'failed' && !!r.interrupted &&
       Array.isArray(r.photo_ids) && !(tags && e.chained);
@@ -326,7 +337,7 @@ import { formatDateTime, importFailedBeforeStart } from './shared.js';
   // why a failed-files parent still owes processing to its Retry.
   var parentChainIds = importChainProcessJobIds(parentCfg, parentResult, rows, parent.id);
   var chained = (!!parentCfg.chain_already_ran ||
-    (!!parentResult.chained && parentResult.ok !== false) ||
+    (!!parentResult.chained && importPhotosOk(parentResult) !== false) ||
     (!('chain_already_ran' in parentCfg) && importFailedBeforeStart(parentResult) && parentChainIds.length > 0)) &&
     !importChainInvalidated(parentCfg, parentResult, rows, parent.id, neverStartedProcesses) ||
     descendants.some(function(e) { return e.chained; });

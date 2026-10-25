@@ -20,7 +20,7 @@ from burst_evidence import (
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
-from services import missing_originals
+from services import catalog_deletion, missing_originals
 from services.local_folder import (
     local_copy_scan_conflict,
     local_root_for_folder,
@@ -361,7 +361,7 @@ def create_folders_blueprint(
                     "Switch to that workspace and sync or discard the local copy first.",
                     409,
                 )
-            result = db.delete_folder(folder_id)
+            result = catalog_deletion.delete_folder(db, folder_id)
         # Clean up cached files alongside the cascaded photo rows so preview
         # files don't get orphaned on disk (untracked by preview_cache).
         cleanup_cached_files_for_deleted_photos(result.get("files", []))

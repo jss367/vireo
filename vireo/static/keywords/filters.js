@@ -1,46 +1,48 @@
 // The records/groups toggle, search, type filter buttons, and column sorting.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { render } from './render.js';
 
 // -- Search & filter --
-function bindKeywordRecordToggles() {
+export function bindKeywordRecordToggles() {
   /** @type {HTMLInputElement} */ (document.getElementById('kwShowRecords')).addEventListener('change', function() {
-    showRecords = this.checked;
-    selectedIds.clear();
+    state.showRecords = this.checked;
+    state.selectedIds.clear();
     render();
   });
   /** @type {HTMLElement} */ (document.getElementById('kwBody')).addEventListener('click', function(event) {
     if (!(event.target instanceof Element) || !event.target.closest('[data-edit-records]')) return;
     /** @type {HTMLInputElement} */ (document.getElementById('kwShowRecords')).checked = true;
-    showRecords = true;
-    selectedIds.clear();
+    state.showRecords = true;
+    state.selectedIds.clear();
     render();
   });
 }
 
-function bindKeywordSearch() {
+export function bindKeywordSearch() {
   /** @type {HTMLInputElement} */ (document.getElementById('kwSearch')).addEventListener('input', function() {
-    searchTerm = this.value.trim();
+    state.searchTerm = this.value.trim();
     render();
   });
 }
 
-function bindKeywordFilterButtons() {
+export function bindKeywordFilterButtons() {
   document.querySelectorAll(/** @type {'button'} */ ('.kw-filter-btn')).forEach(btn => {
     btn.addEventListener('click', function() {
       document.querySelectorAll(/** @type {'button'} */ ('.kw-filter-btn')).forEach(b => b.classList.remove('active'));
       this.classList.add('active');
-      filterType = this.dataset.type || 'all';
+      state.filterType = this.dataset.type || 'all';
       render();
     });
   });
 }
 
 // -- Sorting --
-function bindKeywordSorting() {
+export function bindKeywordSorting() {
   document.querySelectorAll(/** @type {'th'} */ ('.kw-table th[data-col]')).forEach(th => {
     th.addEventListener('click', function() {
       const col = this.dataset.col || 'name';
-      if (sortCol === col) { sortDir *= -1; } else { sortCol = col; sortDir = 1; }
+      if (state.sortCol === col) { state.sortDir *= -1; } else { state.sortCol = col; state.sortDir = 1; }
       // Update header styles
       document.querySelectorAll('.kw-table th').forEach(h => {
         h.classList.remove('sorted');
@@ -49,7 +51,7 @@ function bindKeywordSorting() {
       });
       this.classList.add('sorted');
       const arrow = this.querySelector('.sort-arrow');
-      if (arrow) arrow.innerHTML = sortDir === 1 ? '&#9650;' : '&#9660;';
+      if (arrow) arrow.innerHTML = state.sortDir === 1 ? '&#9650;' : '&#9660;';
       render();
     });
   });

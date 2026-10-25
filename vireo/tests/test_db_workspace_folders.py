@@ -19,7 +19,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.workspace_folders import WorkspaceFolderRepository
-from services import photo_ingest
+from services import moves_merge, photo_ingest
 
 
 class _RecordingCache:
@@ -916,7 +916,7 @@ def test_prune_nonroot_links_outside_roots(db, cache):
     _link_raw(db, ws, covered, 0)
     cache.invalidated.clear()
 
-    db._prune_ws_nonroot_links_outside_roots(ws, "/archive/USA/")
+    moves_merge.prune_ws_nonroot_links_outside_roots(db, ws, "/archive/USA/")
 
     # Ancestors (/archive), self (/archive/USA) and descendants go; the
     # unrelated /other survives.
@@ -927,7 +927,7 @@ def test_prune_nonroot_links_outside_roots(db, cache):
 
     # Links inside a root are kept even when they sit on the path.
     cache.invalidated.clear()
-    db._prune_ws_nonroot_links_outside_roots(ws, "/kept/USA2026/x")
+    moves_merge.prune_ws_nonroot_links_outside_roots(db, ws, "/kept/USA2026/x")
     assert _links(db, ws) == {other: 0, covered_root: 1, covered: 0}
     assert not db.conn.in_transaction
     assert cache.invalidated == []
@@ -945,7 +945,7 @@ def test_prune_nonroot_links_chunks(db, cache):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db._prune_ws_nonroot_links_outside_roots(ws, "/wide")
+        moves_merge.prune_ws_nonroot_links_outside_roots(db, ws, "/wide")
     finally:
         db.conn.set_trace_callback(None)
     assert len({s for s in statements if s.strip().startswith("DELETE FROM workspace_folders")}) == 2
@@ -1260,7 +1260,6 @@ _MOVED_METHODS = [
     "get_workspace_folder_roots",
     "get_workspace_extensions",
     "move_folders_to_workspace",
-    "_prune_ws_nonroot_links_outside_roots",
     "workspace_unlinked_folder_count",
 ]
 

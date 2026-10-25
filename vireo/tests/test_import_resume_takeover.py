@@ -53,6 +53,10 @@ DONE = {"ok": True, "photo_ids": [], "tags_applied": True, "chained": True}
 INTERRUPTED = {"interrupted": True, "photo_ids": [3]}
 FAILED_FILES = {"ok": False, "failed": 1, "photo_ids": [],
                 "tags_applied": True, "chained": True}
+# Failed on a sidecar whose keywords were not imported: every photo was
+# imported (``photos_ok``), so its chain really ran.
+SIDECAR_ONLY = {"ok": False, "photos_ok": True, "failed": 0, "photo_ids": [], "sidecar_failures": ["x.jpg: keywords ..."],
+                "tags_applied": True, "chained": True}
 
 
 def _inherited_chain_parent(tags_applied):
@@ -177,6 +181,9 @@ def _scenarios():
         "no descendants": (_parent(), []),
         "finished resume": (
             _parent(), [_row("d", "2026-09-01T11:00:00", DONE)],
+        ),
+        "resume that failed only on sidecar keywords": (
+            _parent(), [_row("d", "2026-09-01T11:00:00", SIDECAR_ONLY, status="failed")],
         ),
         "resume interrupted too": (
             _parent(),
@@ -340,6 +347,10 @@ def _scenarios():
             _failed_parent(),
             [_row("r", "2026-09-01T11:00:00", FAILED_FILES, status="failed")],
         ),
+        "retry failed only on sidecar keywords": (
+            _failed_parent(),
+            [_row("r", "2026-09-01T11:00:00", SIDECAR_ONLY, status="failed")],
+        ),
         "retry of the retry finished": (
             _failed_parent(),
             [
@@ -433,6 +444,7 @@ EXPECTED = {
     "tag-only descendant pays expanded scope": ("d2", "done", False, False),
     "no descendants": (None, None, True, False),
     "finished resume": ("d", "done", False, False),
+    "resume that failed only on sidecar keywords": ("d", "done", False, False),
     "resume interrupted too": ("d", "resume", False, False),
     "resume crashed before any work": (None, None, True, False),
     "resume cancelled during copy": (None, None, True, False),
@@ -459,6 +471,7 @@ EXPECTED = {
     "failed import, no retry yet": (None, None, False, True),
     "finished retry": ("r", "done", False, False),
     "retry failed files too": ("r", "retry", False, False),
+    "retry failed only on sidecar keywords": ("r", "done", False, False),
     "retry of the retry finished": ("r2", "done", False, False),
     "retry interrupted": ("r", "resume", False, False),
     "retry crashed before any work": (None, None, False, True),

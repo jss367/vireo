@@ -247,8 +247,9 @@ class _FolderCatalogRewrite:
             # ``merge_reconcile_base`` is the STORED tracked path for an exact
             # overlap (so alias/case-fold destinations still match the existing
             # rows) and ``catalog_path`` for the ancestor case; see where it is set.
-            self.merge_counts = db.merge_staged_tree_into_archive(
-                self.folder_id, self.target.merge_reconcile_base)
+            from services import moves_merge
+            self.merge_counts = moves_merge.merge_staged_tree_into_archive(
+                db, self.folder_id, self.target.merge_reconcile_base)
         else:
             db.moves_merge.move_folder_path(self.folder_id, self.target.catalog_path,
                                 new_name=self.landing_name)
