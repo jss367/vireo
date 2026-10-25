@@ -244,6 +244,95 @@ def test_existing_model_cleanup_removes_cache_when_custom_file_is_independent(hu
     assert independent.read_bytes() == b"independent weights"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+@pytest.mark.parametrize("registration", ["file", "symlink", "directory"])
+def test_existing_model_cleanup_preserves_case_variant_cache_registrations(hub, tmp_path, registration):
+    """Actual case-insensitive lookup must protect registered weights before deletion."""
+    from services import hf_cache
+
+    cache_alias = hub.root.with_name("HUB")
+    if not cache_alias.exists():
+        pytest.skip("requires a case-insensitive filesystem")
+    assert cache_alias.samefile(hub.root)
+    stale_default = tmp_path / "models" / "bioclip-vit-b-16"
+    stale_default.mkdir(parents=True)
+    blob = hub.add("model.onnx", b"active registered weights", repo="models--imageomics--bioclip")
+    alias_blob = cache_alias / blob.relative_to(hub.root)
+    weights = alias_blob
+    if registration == "symlink":
+        weights = tmp_path / "registered-weights.onnx"
+        _symlink(alias_blob, weights)
+    elif registration == "directory":
+        weights = tmp_path / "registered-model"
+        weights.mkdir()
+        _symlink(alias_blob, weights / "model.onnx")
+    (tmp_path / "models.json").write_text(json.dumps({"models": [
+        {"id": "legacy-bioclip-wrapper", "name": "Legacy wrapper",
+         "model_str": "hf-hub:imageomics/bioclip",
+         "weights_path": str(weights), "description": "custom", "managed": False},
+    ]}))
+    snapshot = blob.parent.parent / "snapshots" / "rev1" / "model.onnx"
+
+    with pytest.raises(hf_cache.UnsafeCacheCleanup, match="still reads from this cache"):
+        hf_cache.remove_installed()
+
+    assert blob.read_bytes() == b"active registered weights"
+    assert snapshot.is_symlink() and snapshot.read_bytes() == b"active registered weights"
+    installed_file = weights / "model.onnx" if registration == "directory" else weights
+    assert installed_file.read_bytes() == b"active registered weights"
+    if registration != "file":
+        assert installed_file.is_symlink()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_allows_distinct_case_sensitive_cache_sibling(hub, tmp_path):
+    """Case folding must not conflate independent directories on case-sensitive volumes."""
+    from services import hf_cache
+
+    independent_dir = hub.root.with_name("HUB")
+    if independent_dir.exists():
+        pytest.skip("requires a case-sensitive filesystem")
+    independent_dir.mkdir()
+    independent = independent_dir / "model.onnx"
+    independent.write_bytes(b"independent weights")
+    _install(tmp_path, "bioclip-vit-b-16")
+    blob = hub.add("model.onnx", b"legacy cached revision", repo="models--imageomics--bioclip")
+    (tmp_path / "models.json").write_text(json.dumps({"models": [
+        {"id": "legacy-bioclip-wrapper", "name": "Legacy wrapper",
+         "model_str": "hf-hub:imageomics/bioclip",
+         "weights_path": str(independent), "description": "custom", "managed": False},
+    ]}))
+
+    result = hf_cache.remove_installed()
+
+    assert result["freed"] == len(b"legacy cached revision")
+    assert not result["failed"] and not blob.exists()
+    assert independent.read_bytes() == b"independent weights"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_existing_model_cleanup_preserves_cache_when_install_ancestry_is_unverifiable(hub, tmp_path, monkeypatch):
+    from services import hf_cache
+
+    install = _install(tmp_path, "dinov2-vit-b14")
+    blob = hub.add("dinov2-vit-b14/model.onnx", b"cached revision")
+    real_stat = os.stat
+
+    def stat(path, *args, **kwargs):
+        if path == str(install.parent):
+            raise PermissionError(13, "Cannot verify model ancestor", path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {stat})
+
+    with pytest.raises(hf_cache.UnsafeCacheCleanup, match="Cannot verify model ancestor"):
+        hf_cache.remove_installed()
+
+    assert blob.read_bytes() == b"cached revision"
+    assert (install / "model.onnx").read_bytes() == b"installed"
+
+
 def test_inventory_splits_installed_from_unused(hub, tmp_path):
     from services import hf_cache
 
