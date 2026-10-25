@@ -115,6 +115,7 @@ DOCUMENTED_ROOTS: tuple[str, ...] = (
     "review_server.py",
     "runtime_warnings.py",
     "schema.py",
+    "services/mask_extraction.py",
     "site_export.py",
     "site_publish.py",
     "source_discovery.py",
