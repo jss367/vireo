@@ -55,11 +55,14 @@ interface JobsPollLane {generation:number;pending:boolean;loaded:boolean;error:b
 interface JobsImportEntry {id:string;status:string;startedAt:string;result:JobsResult;root?:string;config:JobsConfig;parent?:string;tagsApplied?:boolean;chainProcessJobIds?:string[];chained?:boolean;resumable?:boolean;hasFailedFiles?:boolean}
 interface JobsTakeover {tagsApplied:boolean;chained:boolean;by:string|null;byStartedAt:string|null;kind:string|null;parentInterrupted:boolean}
 interface JobsSourceCleanup {checking?:boolean;state?:string;file_count?:number;xmp_count?:number;message?:string;error?:string|null;files?:{name:string;size:number}[];review_token?:string;confirmed?:boolean;busy?:boolean;directories?:string[];trashed?:number;failures?:{path:string;error:string}[]}
-declare function escapeHtml(value: unknown): string;
-declare function escapeAttr(value: unknown): string;
-declare function showToast(message: string | undefined, kind?: string): void;
-declare function safeFetch<T>(url: string, options?: RequestInit): Promise<T>;
-declare function importFailedBeforeStart(result: JobsResult | null | undefined): boolean;
-declare function canRetryImportDirectToNas(job: JobsRow, rows: JobsRow[]): boolean;
-declare function directNasImportRetryBody(job: JobsRow | undefined, body: JobsConfig | null, rows:JobsRow[]): JobsConfig | null;
-interface Window { formatJobType(type: string): string; applyFilters():void }
+// The shared globals the page's shared.js reads.
+interface Window {
+  escapeHtml(value: unknown): string;
+  escapeAttr(value: unknown): string;
+  showToast?(message: string | undefined, kind?: string): void;
+  safeFetch<T>(url: string, options?: RequestInit): Promise<T>;
+  importFailedBeforeStart(result: JobsResult | null | undefined): boolean;
+  canRetryImportDirectToNas(job: JobsRow, rows: JobsRow[]): boolean;
+  directNasImportRetryBody(job: JobsRow | undefined, body: JobsConfig | null, rows:JobsRow[]): JobsConfig | null;
+  formatJobType(type: string): string;
+}

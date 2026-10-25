@@ -17,6 +17,7 @@ import queue
 import time
 from types import SimpleNamespace
 
+from app_paths import media_root
 from db import Database
 from flask import Blueprint, Response, jsonify, request
 from job_runner.history import JobHistoryUnavailable
@@ -69,7 +70,7 @@ def create_jobs_blueprint(
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
     def vireo_dir():
-        return os.path.dirname(get_thumb_cache_dir())
+        return media_root(get_thumb_cache_dir())
 
     # -- Job control -------------------------------------------------------
 
@@ -291,7 +292,7 @@ def create_jobs_blueprint(
             thumb_cache_dir = get_thumb_cache_dir()
             return generate_all(
                 thread_db, thumb_cache_dir, progress_callback=progress_cb,
-                vireo_dir=os.path.dirname(thumb_cache_dir),
+                vireo_dir=media_root(thumb_cache_dir),
                 cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
             )
 

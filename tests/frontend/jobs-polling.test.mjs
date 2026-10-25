@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {test} from 'node:test';
 import vm from 'node:vm';
+import {moduleAsScript} from './module-source.mjs';
 
 function harness() {
   const requests = [];
@@ -24,13 +25,16 @@ function harness() {
     renderHistoryOverview: () => renders.push(['history-overview']),
     canRetryImportDirectToNas: () => false,
   });
+  // The page files are ES modules; their imports are the context's names
+  // above, and state.js's `state` is the page state the tests read and set.
   for (const name of ['state', 'polling']) {
-    vm.runInContext(readFileSync(`vireo/static/jobs/${name}.js`, 'utf8'), context);
+    vm.runInContext(moduleAsScript(readFileSync(`vireo/static/jobs/${name}.js`, 'utf8')), context);
   }
+  const state = vm.runInContext('state', context);
   function respond(index, data, ok = true) {
     requests[index].resolve({ok, json: async () => data});
   }
-  return {context, requests, timers, elements, renders, respond};
+  return {context, state, requests, timers, elements, renders, respond};
 }
 
 const row = (id, extra = {}) => ({id, type: 'scan', status: 'running', ...extra});
@@ -50,20 +54,20 @@ for (const lane of ['active', 'history']) {
     await current;
     h.respond(0, pack([row('old')]));
     await old;
-    assert.equal(h.context[key][0].id, 'new');
-    assert.equal(h.context.jobsPollState[lane].error, false);
+    assert.equal(h.state[key][0].id, 'new');
+    assert.equal(h.state.jobsPollState[lane].error, false);
     assert.equal(h.elements.jobsPollWarning.hidden, true);
-    if (lane === 'active') assert.equal(h.context.activeWsId, 0);
+    if (lane === 'active') assert.equal(h.state.activeWsId, 0);
 
     const stale = h.context[method]();
     const pending = h.context[method]();
     h.requests[2].reject(new Error('old offline response'));
     await stale;
-    assert.equal(h.context.jobsPollState[lane].pending, true);
+    assert.equal(h.state.jobsPollState[lane].pending, true);
     assert.equal(h.elements.jobsPollWarning.hidden, true);
     h.respond(3, pack([row('latest')]));
     await pending;
-    assert.equal(h.context[key][0].id, 'latest');
+    assert.equal(h.state[key][0].id, 'latest');
     assert.equal(h.timers.size, 0);
   });
 
@@ -80,7 +84,7 @@ for (const lane of ['active', 'history']) {
       if (failure === 'shape') h.respond(1, {});
       if (failure === 'row') h.respond(1, pack([null]));
       assert.equal(await failed, false);
-      assert.equal(h.context[key][0].id, 'kept');
+      assert.equal(h.state[key][0].id, 'kept');
       assert.equal(h.elements.jobsPollWarning.hidden, false);
       assert.match(h.elements.jobsPollMessage.textContent, /Showing the last successful list/);
       h.context.retryJobsPolling();
@@ -90,7 +94,7 @@ for (const lane of ['active', 'history']) {
       h.respond(2, pack([]));
       // retryJobsPolling is a click handler; drain its fetch/body/finally work.
       await new Promise(resolve => setImmediate(resolve));
-      assert.equal(h.context[key].length, 0);
+      assert.equal(h.state[key].length, 0);
       assert.equal(h.elements.jobsPollWarning.hidden, true);
       assert.equal(h.timers.size, 0);
     });
@@ -105,7 +109,7 @@ for (const lane of ['active', 'history']) {
     h.requests[0].options.signal.addEventListener('abort', () => h.requests[0].reject(new Error('timeout')));
     [...h.timers.values()][0]();
     await pending;
-    assert.equal(h.context.jobsPollState[lane].pending, false);
+    assert.equal(h.state.jobsPollState[lane].pending, false);
     assert.match(h.elements.jobsPollMessage.textContent, /could not be loaded/);
     const retry = h.context[method]();
     h.respond(1, pack([]));
@@ -139,16 +143,16 @@ test('a superseded success cannot erase the latest failure', async () => {
   await latest;
   h.respond(0, payload([row('stale')]));
   await old;
-  assert.equal(h.context.activeJobs.length, 0);
+  assert.equal(h.state.activeJobs.length, 0);
   assert.equal(h.elements.jobsPollWarning.hidden, false);
 });
 
 for (const action of ['retry', 'changed-selection', 'active-again', 'missing']) {
   test(`history handoff survives replacement/failure without stealing selection: ${action}`, async () => {
     const h = harness();
-    h.context.selectedJobId = 'finished';
-    h.context.selectedSource = 'active';
-    h.context.currentView = 'finished';
+    h.state.selectedJobId = 'finished';
+    h.state.selectedSource = 'active';
+    h.state.currentView = 'finished';
     const old = h.context.fetchHistory(true);
     const failed = h.context.fetchHistory();
     h.requests[1].reject(new Error('offline'));
@@ -156,19 +160,19 @@ for (const action of ['retry', 'changed-selection', 'active-again', 'missing']) 
     h.respond(0, []);
     await old;
     const retry = h.context.fetchHistory();
-    if (action === 'changed-selection') h.context.selectedJobId = 'other';
-    if (action === 'active-again') h.context.activeJobs = [row('finished')];
+    if (action === 'changed-selection') h.state.selectedJobId = 'other';
+    if (action === 'active-again') h.state.activeJobs = [row('finished')];
     h.respond(2, action === 'missing' ? [] : [row('finished', {status: 'completed', tree: '[]', result: '{"ok":true}'})]);
     await retry;
     if (action === 'retry') {
-      assert.equal(h.context.selectedSource, 'history');
-      assert.equal(h.context.historyJobs[0].result.ok, true);
+      assert.equal(h.state.selectedSource, 'history');
+      assert.equal(h.state.historyJobs[0].result.ok, true);
       assert.deepEqual(h.renders, [['history', 'finished']]);
     } else if (action === 'missing') {
-      assert.equal(h.context.selectedJobId, null);
+      assert.equal(h.state.selectedJobId, null);
       assert.deepEqual(h.renders, [['active-overview']]);
     } else {
-      assert.equal(h.context.selectedSource, 'active');
+      assert.equal(h.state.selectedSource, 'active');
       assert.equal(h.renders.length, 0);
     }
   });
@@ -176,8 +180,8 @@ for (const action of ['retry', 'changed-selection', 'active-again', 'missing']) 
 
 test('a disappearing active job gets a fresh history snapshot without repeated cancellation', async () => {
   const h = harness();
-  h.context.selectedJobId = 'finished';
-  h.context.selectedSource = 'active';
+  h.state.selectedJobId = 'finished';
+  h.state.selectedSource = 'active';
   const staleHistory = h.context.fetchHistory();
   const active = h.context.fetchJobs();
   h.respond(1, payload([]));
@@ -191,10 +195,10 @@ test('a disappearing active job gets a fresh history snapshot without repeated c
   assert.equal(h.requests[2].options.signal.aborted, false);
   h.respond(0, []);
   await staleHistory;
-  assert.equal(h.context.selectedJobId, 'finished');
+  assert.equal(h.state.selectedJobId, 'finished');
   h.respond(2, [row('finished', {status: 'completed'})]);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(h.context.selectedSource, 'history');
+  assert.equal(h.state.selectedSource, 'history');
   assert.deepEqual(h.renders, [['history', 'finished']]);
 });
 
@@ -207,8 +211,8 @@ test('timeout during body decoding cannot apply a late success', async () => {
   [...h.timers.values()][0]();
   finishBody(payload([row('late')]));
   await pending;
-  assert.equal(h.context.activeJobs.length, 0);
-  assert.equal(h.context.jobsPollState.active.error, true);
+  assert.equal(h.state.activeJobs.length, 0);
+  assert.equal(h.state.jobsPollState.active.error, true);
 });
 
 test('an unreadable history says so in the server\'s words, not "no jobs"', async () => {
@@ -217,13 +221,13 @@ test('an unreadable history says so in the server\'s words, not "no jobs"', asyn
   const failed = h.context.fetchHistory();
   h.respond(0, {error: reason, code: 'job_history_unavailable'}, false);
   assert.equal(await failed, false);
-  assert.equal(h.context.jobsPollState.history.loaded, false);
-  assert.equal(h.context.jobsPollState.history.errorDetail, reason);
+  assert.equal(h.state.jobsPollState.history.loaded, false);
+  assert.equal(h.state.jobsPollState.history.errorDetail, reason);
   assert.equal(h.elements.jobsPollMessage.textContent,
     'Job history could not be loaded. ' + reason + ' Retrying automatically.');
   const recovered = h.context.fetchHistory();
   h.respond(1, []);
   await recovered;
-  assert.equal(h.context.jobsPollState.history.errorDetail, '');
+  assert.equal(h.state.jobsPollState.history.errorDetail, '');
   assert.equal(h.elements.jobsPollWarning.hidden, true);
 });

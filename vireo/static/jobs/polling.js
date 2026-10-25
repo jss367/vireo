@@ -1,12 +1,18 @@
 // Fetching active jobs and history from the server.
-// Classic page script; load boot.js after all definitions.
 
-function renderJobsPollWarning() {
+import { state } from './state.js';
+import { renderActiveOverview, renderDetail, renderHistoryDetail, renderHistoryOverview } from './detail.js';
+import { jobConfig } from './format.js';
+import { importChainProcessJobIds } from './import-retry.js';
+import { populateTypeFilter, updateList, updateRunningBadge } from './list.js';
+import { canRetryImportDirectToNas } from './shared.js';
+
+export function renderJobsPollWarning() {
   var warning = /** @type {HTMLElement} */ (document.getElementById('jobsPollWarning'));
   if (!warning) return;
-  var failed = [/** @type {const} */ ('active'), /** @type {const} */ ('history')].filter(function(name) { return jobsPollState[name].error; });
+  var failed = [/** @type {const} */ ('active'), /** @type {const} */ ('history')].filter(function(name) { return state.jobsPollState[name].error; });
   var messages = failed.map(function(name) {
-    var lane = jobsPollState[name];
+    var lane = state.jobsPollState[name];
     var label = name === 'active' ? 'Active jobs' : 'Job history';
     return label + (lane.loaded
       ? ' could not be refreshed. Showing the last successful list.'
@@ -18,27 +24,27 @@ function renderJobsPollWarning() {
   if (status.textContent !== message) status.textContent = message;
   warning.hidden = failed.length === 0;
   var retry = /** @type {HTMLButtonElement} */ (document.getElementById('retryJobsPolling'));
-  retry.disabled = failed.length > 0 && failed.every(function(name) { return jobsPollState[name].pending; });
+  retry.disabled = failed.length > 0 && failed.every(function(name) { return state.jobsPollState[name].pending; });
   retry.textContent = retry.disabled ? 'Retrying…' : 'Retry now';
 }
 
-function retryJobsPolling() {
-  if (jobsPollState.active.error && !jobsPollState.active.pending) fetchJobs();
-  if (jobsPollState.history.error && !jobsPollState.history.pending) fetchHistory();
+export function retryJobsPolling() {
+  if (state.jobsPollState.active.error && !state.jobsPollState.active.pending) fetchJobs();
+  if (state.jobsPollState.history.error && !state.jobsPollState.history.pending) fetchHistory();
 }
 
-/** @param {unknown} value @returns {value is Record<string,unknown>} */ function isJobsRecord(value) {
+/** @param {unknown} value @returns {value is Record<string,unknown>} */ export function isJobsRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** @param {unknown} rows @returns {asserts rows is JobsRow[]} */ function validateJobRows(rows) {
+/** @param {unknown} rows @returns {asserts rows is JobsRow[]} */ export function validateJobRows(rows) {
   if (!Array.isArray(rows) || !rows.every(function(job) {
     return isJobsRecord(job) && typeof job.id === 'string' && job.id.length > 0 &&
       typeof job.type === 'string' && typeof job.status === 'string';
   })) throw new Error('Invalid jobs list');
 }
 
-/** @param {unknown} data @returns {asserts data is JobsSnapshot} */ function validateActiveJobs(data) {
+/** @param {unknown} data @returns {asserts data is JobsSnapshot} */ export function validateActiveJobs(data) {
   if (!isJobsRecord(data)) throw new Error('Invalid active jobs response');
   validateJobRows(data.active);
   if (data.workspace_names !== undefined && (!isJobsRecord(data.workspace_names) ||
@@ -55,7 +61,7 @@ function retryJobsPolling() {
 
 /** The server's own account of a failed jobs request ('' when it gave none).
  * @param {{json: () => Promise<unknown>}} response @returns {Promise<string>} */
-async function jobsServerError(response) {
+export async function jobsServerError(response) {
   try {
     var body = await response.json();
     return isJobsRecord(body) && typeof body.error === 'string' ? body.error : '';
@@ -64,8 +70,8 @@ async function jobsServerError(response) {
   }
 }
 
-/** @template T @param {'active'|'history'} name @param {string} url @param {(data:unknown)=>asserts data is T} validate @param {(data:T)=>void} apply @param {boolean=} background */ async function fetchJobsSnapshot(name, url, validate, apply, background) {
-  var lane = jobsPollState[name];
+/** @template T @param {'active'|'history'} name @param {string} url @param {(data:unknown)=>asserts data is T} validate @param {(data:T)=>void} apply @param {boolean=} background */ export async function fetchJobsSnapshot(name, url, validate, apply, background) {
+  var lane = state.jobsPollState[name];
   if (background && lane.pending) return false;
   var generation = ++lane.generation;
   if (lane.controller) lane.controller.abort();
@@ -100,8 +106,8 @@ async function jobsServerError(response) {
       // A failed first load is unknown, rather than an empty job list.
       if (!lane.loaded) {
         updateList();
-        if (name === 'active' && currentView === 'active') renderActiveOverview();
-        if (name === 'history' && currentView === 'history') renderHistoryOverview();
+        if (name === 'active' && state.currentView === 'active') renderActiveOverview();
+        if (name === 'history' && state.currentView === 'history') renderHistoryOverview();
       }
     }
     return false;
@@ -115,7 +121,7 @@ async function jobsServerError(response) {
   }
 }
 
-/** @param {string} jobId */ function fetchImportRecoveryOptions(jobId) {
+/** @param {string} jobId */ export function fetchImportRecoveryOptions(jobId) {
   return fetch('/api/import/' + encodeURIComponent(jobId) + '/recovery-options', {cache: 'no-store'})
     .then(function(response) {
       return response.json().then(function(options) {
@@ -134,16 +140,16 @@ async function jobsServerError(response) {
     });
 }
 
-/** @param {JobsRow} job */ function refreshHistoryImportRecovery(job) {
+/** @param {JobsRow} job */ export function refreshHistoryImportRecovery(job) {
   if (job.import_resume_pending || job.import_direct_pending) return;
   if (job.type !== 'import' || job.status !== 'failed' || !job.result) return;
   var interrupted = job.result.interrupted && Array.isArray(job.result.photo_ids);
-  var directCandidate = canRetryImportDirectToNas(job, historyJobs);
+  var directCandidate = canRetryImportDirectToNas(job, state.historyJobs);
   if (!interrupted && !directCandidate) return;
   var cfg = jobConfig(job);
-  var ids = importChainProcessJobIds(cfg, job.result, historyJobs, job.id);
+  var ids = importChainProcessJobIds(cfg, job.result, state.historyJobs, job.id);
   var missing = ids.some(function(id) {
-    return !historyJobs.some(function(row) { return row.id === id; });
+    return !state.historyJobs.some(function(row) { return row.id === id; });
   });
   // No receipt can mean the checkpoint preceded the processing handoff.
   // The server also searches pipelines by chained_from in that crash window.
@@ -152,22 +158,22 @@ async function jobsServerError(response) {
   job.import_direct_pending = directCandidate;
   /** @param {JobsRecoveryOptions} options */ function applyOptions(options) {
     // A subsequent history refresh or selection must not receive stale eligibility.
-    if (historyJobs.indexOf(job) < 0) return;
+    if (state.historyJobs.indexOf(job) < 0) return;
     job.import_resume_allowed = options.resume_allowed;
     job.import_resume_pending = false;
     job.import_direct_pending = false;
     job.import_recovery_options = options;
-    if (selectedSource === 'history' && selectedJobId === job.id) renderHistoryDetail(job);
-    else if (currentView === 'history') renderHistoryOverview();
+    if (state.selectedSource === 'history' && state.selectedJobId === job.id) renderHistoryDetail(job);
+    else if (state.currentView === 'history') renderHistoryOverview();
   }
   fetchImportRecoveryOptions(job.id).then(applyOptions);
 }
 
-/** @param {boolean=} background */ function fetchJobs(background) {
+/** @param {boolean=} background */ export function fetchJobs(background) {
   return fetchJobsSnapshot('active', '/api/jobs', validateActiveJobs, function(data) {
-    activeJobs = data.active || [];
-    activeWsId = data.active_workspace_id ?? null;
-    workspaceNames = data.workspace_names || {};
+    state.activeJobs = data.active || [];
+    state.activeWsId = data.active_workspace_id ?? null;
+    state.workspaceNames = data.workspace_names || {};
     var awakeNote = /** @type {HTMLElement} */ (document.getElementById('keepingAwakeNote'));
     if (awakeNote) {
       awakeNote.style.display = data.keeping_awake ? '' : 'none';
@@ -176,41 +182,41 @@ async function jobsServerError(response) {
     // list (server has finalized them; their next render comes from
     // historyJobs which never shows a cancel button).
     /** @type {Record<string,boolean>} */ var stillActive = {};
-    activeJobs.forEach(function(j) { stillActive[j.id] = true; });
-    Object.keys(cancellingJobIds).forEach(function(id) {
-      if (!stillActive[id]) delete cancellingJobIds[id];
+    state.activeJobs.forEach(function(j) { stillActive[j.id] = true; });
+    Object.keys(state.cancellingJobIds).forEach(function(id) {
+      if (!stillActive[id]) delete state.cancellingJobIds[id];
     });
     updateList();
     updateRunningBadge();
-    if (selectedSource === 'active' && selectedJobId) {
-      var selected = activeJobs.find(function(j) { return j.id === selectedJobId; });
+    if (state.selectedSource === 'active' && state.selectedJobId) {
+      var selected = state.activeJobs.find(function(j) { return j.id === state.selectedJobId; });
       if (selected) {
         renderDetail(selected);
       } else {
-        var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
+        var historical = state.historyJobs.find(function(j) { return j.id === state.selectedJobId; });
         if (historical) {
-          selectedSource = 'history';
+          state.selectedSource = 'history';
           renderHistoryDetail(historical);
         } else {
           fetchHistory(true, true);
         }
       }
-    } else if (currentView === 'active') {
+    } else if (state.currentView === 'active') {
       renderActiveOverview();
     }
   }, background);
 }
 
-/** @param {boolean=} refreshMissingSelection @param {boolean=} background */ function fetchHistory(refreshMissingSelection, background) {
+/** @param {boolean=} refreshMissingSelection @param {boolean=} background */ export function fetchHistory(refreshMissingSelection, background) {
   if (refreshMissingSelection) {
     // The first handoff needs a snapshot requested after the job disappeared.
     // Later active polls must not keep aborting that history request.
-    if (historyRefreshSelectionId !== selectedJobId) background = false;
-    historyRefreshSelectionId = selectedJobId;
+    if (state.historyRefreshSelectionId !== state.selectedJobId) background = false;
+    state.historyRefreshSelectionId = state.selectedJobId;
   }
   return fetchJobsSnapshot('history', '/api/jobs/history?limit=100', validateJobRows, function(data) {
-    historyJobs = data || [];
-    historyJobs.forEach(function(j) {
+    state.historyJobs = data || [];
+    state.historyJobs.forEach(function(j) {
       if (typeof j.tree === 'string') {
         try { j.tree = JSON.parse(j.tree); } catch(e) { j.tree = []; }
       }
@@ -220,24 +226,24 @@ async function jobsServerError(response) {
     });
     updateList();
     populateTypeFilter();
-    historyJobs.forEach(refreshHistoryImportRecovery);
-    var reconcileId = historyRefreshSelectionId;
-    historyRefreshSelectionId = null;
-    if (reconcileId && selectedSource === 'active' && selectedJobId === reconcileId &&
-        !activeJobs.some(function(job) { return job.id === reconcileId; })) {
-      var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
+    state.historyJobs.forEach(refreshHistoryImportRecovery);
+    var reconcileId = state.historyRefreshSelectionId;
+    state.historyRefreshSelectionId = null;
+    if (reconcileId && state.selectedSource === 'active' && state.selectedJobId === reconcileId &&
+        !state.activeJobs.some(function(job) { return job.id === reconcileId; })) {
+      var historical = state.historyJobs.find(function(j) { return j.id === state.selectedJobId; });
       if (historical) {
-        selectedSource = 'history';
+        state.selectedSource = 'history';
         renderHistoryDetail(historical);
       } else {
-        currentView = 'active';
-        selectedJobId = null;
-        selectedSource = null;
+        state.currentView = 'active';
+        state.selectedJobId = null;
+        state.selectedSource = null;
         renderActiveOverview();
         updateList();
       }
       return;
     }
-    if (currentView === 'history') renderHistoryOverview();
+    if (state.currentView === 'history') renderHistoryOverview();
   }, background);
 }

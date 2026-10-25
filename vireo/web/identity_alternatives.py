@@ -1,28 +1,38 @@
 """Unresolved species review groups, separate from mixed-species confirmations."""
 
+from __future__ import annotations
+
 import logging
 import os
 import sqlite3
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from services import identity_alternatives as identities
 from services import prediction_decisions
 from web.request_args import MAX_SELECTION_PHOTOS
 
+if TYPE_CHECKING:
+    from db import Database
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+    from web.web_types import GetDb
+
 log = logging.getLogger(__name__)
 
 
-def create_identity_alternatives_blueprint(get_db, json_error, db_path):
+def create_identity_alternatives_blueprint(get_db: GetDb, json_error: JsonError, db_path: str) -> Blueprint:
     blueprint = Blueprint('identity_alternatives', __name__)
 
     @blueprint.route('/api/identity-alternatives')
-    def api_identity_alternatives():
+    def api_identity_alternatives() -> ResponseReturnValue:
         db = get_db()
         groups = identities.groups_for_review(db)
         return jsonify(groups=groups, photo_count=sum(len(group['photo_ids']) for group in groups),
                        workspace_id=db.require_workspace_id())
 
-    def _write(resolve):
+    def _write(resolve: bool) -> ErrorResponse | Response:
         db = get_db()
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -64,11 +74,11 @@ def create_identity_alternatives_blueprint(get_db, json_error, db_path):
         except ValueError as exc:
             return json_error(str(exc))
         db.prune_edit_history()
-        response = {'ok': True, 'entry_id': entry_id, 'photo_ids': ids, 'flags_changed': False}
+        response: JsonDict = {'ok': True, 'entry_id': entry_id, 'photo_ids': ids, 'flags_changed': False}
         _refresh_species(db, ids, response)
         return jsonify(response)
 
-    def _refresh_species(db, ids, response):
+    def _refresh_species(db: Database, ids: list[int], response: JsonDict) -> None:
         # Persisted Process groups must not retain the candidates as confirmed.
         # As with undo's cache refresh, a saved catalog edit stands on failure.
         try:
@@ -79,16 +89,16 @@ def create_identity_alternatives_blueprint(get_db, json_error, db_path):
         if failed:
             response.update(pipeline_cache_stale=True, warning='Species edit saved, but Process Review could not refresh. Recompute Process results before reviewing species.')
 
-    def _locked_write(resolve):
+    def _locked_write(resolve: bool) -> ErrorResponse | Response:
         db = get_db()
         return prediction_decisions.under_prediction_decision_lock(db, lambda: _write(resolve), json_error=json_error)
 
     @blueprint.route('/api/identity-alternatives', methods=['POST'])
-    def api_save_identity_alternatives():
+    def api_save_identity_alternatives() -> ResponseReturnValue:
         return _locked_write(False)
 
     @blueprint.route('/api/identity-alternatives/resolve', methods=['POST'])
-    def api_resolve_identity_alternatives():
+    def api_resolve_identity_alternatives() -> ResponseReturnValue:
         return _locked_write(True)
 
     return blueprint

@@ -42,12 +42,7 @@ def test_set_and_get_active_labels(tmp_path, monkeypatch):
 
     monkeypatch.setattr("labels.LABELS_DIR", labels_dir)
 
-    def fake_expanduser(p):
-        if "labels_active" in p:
-            return config_path
-        return str(tmp_path / p.lstrip("~/"))
-
-    monkeypatch.setattr("labels.os.path.expanduser", fake_expanduser)
+    monkeypatch.setattr("labels.default_path", lambda _name: config_path)
 
     paths = [
         os.path.join(labels_dir, "ca-birds.txt"),
@@ -79,12 +74,7 @@ def test_get_active_labels_old_format(tmp_path, monkeypatch):
 
     monkeypatch.setattr("labels.LABELS_DIR", labels_dir)
 
-    def fake_expanduser(p):
-        if "labels_active" in p:
-            return config_path
-        return str(tmp_path / p.lstrip("~/"))
-
-    monkeypatch.setattr("labels.os.path.expanduser", fake_expanduser)
+    monkeypatch.setattr("labels.default_path", lambda _name: config_path)
 
     result = get_active_labels()
     assert len(result) == 1
@@ -98,12 +88,7 @@ def test_get_active_labels_skips_missing_files(tmp_path, monkeypatch):
     with open(config_path, "w") as f:
         json.dump({"active_labels": ["/nonexistent/path.txt"]}, f)
 
-    def fake_expanduser(p):
-        if "labels_active" in p:
-            return config_path
-        return str(tmp_path / p.lstrip("~/"))
-
-    monkeypatch.setattr("labels.os.path.expanduser", fake_expanduser)
+    monkeypatch.setattr("labels.default_path", lambda _name: config_path)
 
     result = get_active_labels()
     assert result == []
@@ -512,7 +497,7 @@ def test_set_active_labels_writes_atomically(tmp_path, monkeypatch):
     """A failed write leaves the previous labels_active.json intact instead of
     a truncated file that get_active_labels would read back as []."""
     config_path = str(tmp_path / "labels_active.json")
-    monkeypatch.setattr("labels.os.path.expanduser", lambda p: config_path)
+    monkeypatch.setattr("labels.default_path", lambda _name: config_path)
     set_active_labels(["/a.txt"])
 
     import labels as labels_mod

@@ -41,17 +41,24 @@ const ctx = vm.createContext({
 });
 ctx.window = ctx;
 vm.runInContext(fs.readFileSync('vireo/static/vireo-time.js', 'utf8'), ctx);
+ctx.formatTime = date => ctx.VireoTime.time(date);
+ctx.formatDateTime = date => ctx.VireoTime.dateTime(date);
 vm.runInContext(fs.readFileSync('vireo/static/import-recovery.js', 'utf8'), ctx);
+// The jobs/ files are ES modules: drop their imports (the names they import
+// are this context's) and `export` keywords, and read state.js's `state`.
 for (const file of scripts) {
-  vm.runInContext(fs.readFileSync('vireo/static/jobs/' + file, 'utf8'), ctx);
+  vm.runInContext(fs.readFileSync('vireo/static/jobs/' + file, 'utf8')
+    .replace(/^import\s[^;]*?\sfrom\s+'[^']+';\n/gm, '')
+    .replace(/(^|\*\/ )export (?=(?:async\s+)?function|const |let |var |class )/gm, '$1'), ctx);
 }
+const state = vm.runInContext('state', ctx);
 const parent = {
   id: 'old-job', type: 'import-in-place', status: 'failed',
   config: {sources: ['/photos'], recursive: false, after_import: null},
   result: {interrupted: true}, tree: [], progress: {current: 27365, total: 94747},
 };
 ctx.parent = parent;
-ctx.historyJobs = [parent];
+state.historyJobs = [parent];
 assert(ctx.canRestartInPlace(parent));
 assert(ctx.canRestartInPlace({...parent, status: 'cancelled'}));
 assert(!ctx.canRestartInPlace({...parent, status: 'completed'}));
@@ -87,25 +94,25 @@ async function main() {
   await flush();
   assert(!button.disabled);
   assert.equal(button.textContent, 'Restart import');
-  assert(!ctx.inPlaceRestarts[parent.id]);
+  assert(!state.inPlaceRestarts[parent.id]);
   assert.equal(toasts.at(-1)[0], 'Source is missing');
 
   clickHandler(event);
   // A stale tab gets the existing child from the server and follows it.
   resolveRequest({ok: false, json: () => Promise.resolve({restart_job_id: 'new-job'})});
   await flush();
-  assert.equal(ctx.selectedJobId, 'new-job');
-  assert.equal(ctx.inPlaceRestarts[parent.id].jobId, 'new-job');
+  assert.equal(state.selectedJobId, 'new-job');
+  assert.equal(state.inPlaceRestarts[parent.id].jobId, 'new-job');
   assert.match(ctx.renderJobCard(parent, false), /Show restarted import/);
   assert(!ctx.renderJobCard(parent, false).includes('data-restart-in-place'));
 
-  ctx.inPlaceRestarts = {};
-  ctx.activeJobs = [{id: 'persisted-child', type: 'import-in-place', status: 'running',
+  state.inPlaceRestarts = {};
+  state.activeJobs = [{id: 'persisted-child', type: 'import-in-place', status: 'running',
     config: {restarted_from: parent.id}}];
   assert.equal(ctx.inPlaceRestartJobId(parent), 'persisted-child');
   assert.match(ctx.renderJobCard(parent, false), /Show restarted import/);
-  ctx.activeJobs = [];
-  ctx.historyJobs.push({id: 'finished-child', type: 'import-in-place', status: 'completed',
+  state.activeJobs = [];
+  state.historyJobs.push({id: 'finished-child', type: 'import-in-place', status: 'completed',
     config: {restarted_from: parent.id}});
   assert.equal(ctx.inPlaceRestartJobId(parent), 'finished-child');
 }

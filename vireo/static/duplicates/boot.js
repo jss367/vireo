@@ -28,6 +28,9 @@ onClick('applyBtn', applyRejections);
 onClick('clearResultsBtn', clearResults);
 bindDuplicateEvents();
 bindDuplicateCardContextMenu();
+duplicatesEl('sameShotCompare').addEventListener('close', function(event) {
+  if (!(/** @type {HTMLDialogElement} */ (event.target)).open) state.sameShotComparison = null;
+});
 
 // Module scripts run before DOMContentLoaded, where the classic page started
 // the filter bar and the restore; keep that order.

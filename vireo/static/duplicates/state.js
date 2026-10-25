@@ -18,6 +18,9 @@
  *   successful bulk-resolve so we don't have to round-trip a full re-scan to
  *   refresh the UI.
  * @property {number} sameShotVisibleLimit
+ * @property {boolean} sameShotShowReviewed
+ * @property {Set<string>} sameShotReviewPending
+ * @property {SameShotGroup | null} sameShotComparison
  * @property {Set<number> | null} filterMatchedIds
  *   Photo ids matching the filter bar's expression (null = no filters).
  *   Groups come from the library-wide scan and are never re-derived from the
@@ -73,6 +76,9 @@ export const state = {
   scanInProgress: false,
   lastScanResult: null,
   sameShotVisibleLimit: 50,
+  sameShotShowReviewed: false,
+  sameShotReviewPending: new Set(),
+  sameShotComparison: null,
   filterMatchedIds: null,
   filterEpoch: 0,
   filterReadyResolve: null,

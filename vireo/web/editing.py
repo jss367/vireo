@@ -6,11 +6,20 @@ ratio (``/api/editor/crop-ratio``). Per-photo edit-recipe routes live with
 the other ``/api/photos`` routes.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from config import read_raw_config_file, settings_write_lock
 from flask import Blueprint, jsonify, request
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import GetDb
 
-def create_editing_blueprint(get_db, json_error):
+
+def create_editing_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     """Build the editing blueprint.
 
     The crop-ratio preference is a raw read-modify-write of the user's config
@@ -20,12 +29,12 @@ def create_editing_blueprint(get_db, json_error):
     blueprint = Blueprint("editing", __name__)
 
     @blueprint.route("/api/edit-fields")
-    def api_edit_fields():
+    def api_edit_fields() -> ResponseReturnValue:
         from edit_batch import FIELDS
         return jsonify({"fields": FIELDS})
 
     @blueprint.route("/api/edit-presets", methods=["GET", "POST"])
-    def api_edit_presets():
+    def api_edit_presets() -> ResponseReturnValue:
         """List or save (upsert by name) global edit presets.
 
         Explicit fields support partial looks, geometry, and local adjustments.
@@ -47,21 +56,22 @@ def create_editing_blueprint(get_db, json_error):
         return jsonify({"ok": True, "preset": preset})
 
     @blueprint.route("/api/edit-presets/<int:preset_id>", methods=["DELETE"])
-    def api_delete_edit_preset(preset_id):
+    def api_delete_edit_preset(preset_id: int) -> ResponseReturnValue:
         db = get_db()
         if not db.edits.delete_preset(preset_id):
             return json_error("preset not found", 404)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/editor/crop-ratio", methods=["GET", "PUT"])
-    def api_editor_crop_ratio():
+    def api_editor_crop_ratio() -> ResponseReturnValue:
         import math
 
         import config as cfg
 
         MAX_REVISION = 9007199254740991  # Number.MAX_SAFE_INTEGER
 
-        def valid_aspect(value):
+        # ``value`` is a JSON value from the request or config file.
+        def valid_aspect(value: Any) -> bool:
             if type(value) not in (int, float) or value <= 0:
                 return False
             try:
@@ -69,11 +79,11 @@ def create_editing_blueprint(get_db, json_error):
             except OverflowError:
                 return False
 
-        def valid_revision(value):
+        def valid_revision(value: object) -> bool:
             return type(value) is int and 0 < value <= MAX_REVISION
 
-        def normalized_preference(stored):
-            result = {"enabled": False, "aspect": None}
+        def normalized_preference(stored: object) -> JsonDict:
+            result: JsonDict = {"enabled": False, "aspect": None}
             if isinstance(stored, dict) and valid_revision(stored.get("revision")):
                 result["revision"] = stored["revision"]
             if not isinstance(stored, dict) or stored.get("enabled") is not True:

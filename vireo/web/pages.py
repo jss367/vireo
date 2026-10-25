@@ -6,9 +6,12 @@ Besides the plain template pages this owns the entry points around them:
 ``/favicon.ico``.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
+from typing import TYPE_CHECKING
 
 import config as cfg
 from classification_readiness import classification_readiness
@@ -20,6 +23,10 @@ from flask import (
     request,
     send_from_directory,
 )
+
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from web.web_types import GetDb
 
 _STATIC_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static"
@@ -57,7 +64,7 @@ _TEMPLATES = {
 }
 
 
-def _file_manager_labels():
+def _file_manager_labels() -> dict[str, str]:
     """Friendly OS file-manager wording for UI labels.
 
     Keeps Linux/Windows users from seeing macOS-only "Finder" terminology in
@@ -83,7 +90,7 @@ def _file_manager_labels():
     }
 
 
-def create_pages_blueprint(get_db):
+def create_pages_blueprint(get_db: GetDb) -> Blueprint:
     """Build the pages blueprint.
 
     Only the database accessor is injected: ``/``, ``/welcome`` and
@@ -93,10 +100,10 @@ def create_pages_blueprint(get_db):
     """
     blueprint = Blueprint("pages", __name__)
 
-    def _register_template_route(path, template):
+    def _register_template_route(path: str, template: str) -> None:
         endpoint = path.strip("/").replace("/", "_").replace("-", "_") or "index"
 
-        def render_page():
+        def render_page() -> str:
             return render_template(template)
 
         blueprint.add_url_rule(path, endpoint, render_page)
@@ -105,24 +112,24 @@ def create_pages_blueprint(get_db):
         _register_template_route(path, template)
 
     @blueprint.get("/edit/<int:photo_id>")
-    def photo_editor(photo_id):
+    def photo_editor(photo_id: int) -> ResponseReturnValue:
         del photo_id
         return render_template("photo_editor.html")
 
     @blueprint.get("/map")
-    def map_page():
+    def map_page() -> ResponseReturnValue:
         return render_template("map.html", active_page="map")
 
     @blueprint.get("/stats")
-    def legacy_stats():
+    def legacy_stats() -> ResponseReturnValue:
         return redirect("/dashboard")
 
     @blueprint.get("/compare")
-    def legacy_compare():
+    def legacy_compare() -> ResponseReturnValue:
         return redirect("/id-conflicts")
 
     @blueprint.route("/config-defaults.js")
-    def config_defaults_js():
+    def config_defaults_js() -> ResponseReturnValue:
         """Expose backend defaults to browser code without template literals.
 
         Templates are kept strictly Jinja-free (see
@@ -158,7 +165,7 @@ def create_pages_blueprint(get_db):
         )
 
     @blueprint.route("/")
-    def index():
+    def index() -> ResponseReturnValue:
         # Resume onboarding until the install can actually classify, OR the
         # user explicitly finished/skipped setup. Redirecting on
         # "model downloaded" alone stranded a user who bailed after the model
@@ -169,7 +176,7 @@ def create_pages_blueprint(get_db):
         return redirect("/welcome")
 
     @blueprint.route("/welcome")
-    def welcome():
+    def welcome() -> ResponseReturnValue:
         if request.args.get("force"):
             return render_template("welcome.html")
         if classification_readiness(get_db())["ready"] or cfg.load().get("setup_complete"):
@@ -177,7 +184,7 @@ def create_pages_blueprint(get_db):
         return render_template("welcome.html")
 
     @blueprint.route("/favicon.ico")
-    def favicon():
+    def favicon() -> ResponseReturnValue:
         return send_from_directory(
             _STATIC_DIR,
             "favicon.png",

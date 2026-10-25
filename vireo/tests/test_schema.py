@@ -372,6 +372,20 @@ def test_version_23_import_catalog_gains_identity_state_without_changing_import_
         assert db.identity_alternatives.photo_ids() == set()
 
 
+def test_same_shot_review_migration_is_idempotent_and_preserves_notes(tmp_path):
+    path = str(tmp_path / 'pre-same-shot-review.db')
+    Database(path).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute('DROP TABLE same_shot_reviews')
+        conn.execute('PRAGMA user_version = 26')
+        schema._apply_pending(conn)
+        conn.execute("INSERT INTO same_shot_reviews (group_key,review_key,decision) VALUES ('g','r','keep_all')")
+        conn.commit()
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute('SELECT group_key,review_key,decision FROM same_shot_reviews').fetchone() == ('g', 'r', 'keep_all')
+
+
 def test_version_22_catalog_runs_import_and_identity_registry_migrations(tmp_path):
     path = str(tmp_path / 'pre-import-v22.db')
     with Database(path) as db:

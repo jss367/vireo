@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import preview_cache
+from app_paths import media_root
 
 if TYPE_CHECKING:
     from db import Database
@@ -148,7 +149,7 @@ class RenderCache:
 
     def invalidate_photo_render_cache(self, db: Database, photo_ids: Iterable[int]) -> None:
         """Drop cached rendered derivatives after an edit recipe changes."""
-        vireo_dir = os.path.dirname(self._config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(self._config["THUMB_CACHE_DIR"])
         thumb_dir = self._config["THUMB_CACHE_DIR"]
         preview_dir = os.path.join(vireo_dir, "previews")
         originals_dir = os.path.join(vireo_dir, "originals")

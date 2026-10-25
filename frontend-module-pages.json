@@ -87,6 +87,12 @@
     "pageHooks": [],
     "sharedWrites": []
   },
+  "jobs": {
+    "route": "/jobs",
+    "template": "jobs.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "keywords": {
     "route": "/keywords",
     "template": "keywords.html",

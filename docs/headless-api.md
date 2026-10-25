@@ -48,7 +48,19 @@ a default-instance catalog path. Design: `docs/plans/2026-10-17-mcp-server-desig
 ## Discovering a running instance
 
 When the Vireo sidecar starts (either as part of the Tauri GUI or directly
-from the command line), it writes `~/.vireo/runtime.json`:
+from the command line), it writes `runtime.json` in the active data folder:
+
+- Existing installations: `~/.vireo/runtime.json`.
+- Fresh macOS installations: `~/Library/Application Support/Vireo/runtime.json`.
+- Fresh Windows installations: `%LOCALAPPDATA%\Vireo\runtime.json`.
+- Fresh Linux installations: `$XDG_DATA_HOME/Vireo/runtime.json`, falling back
+  to `~/.local/share/Vireo/runtime.json`.
+
+The [storage guide](uninstalling.md#default-folders-and-upgrades) describes
+layout selection and environment overrides. From a source checkout, resolve
+the exact path with `python -c 'from vireo.app_paths import default_path; print(default_path("runtime"))'`.
+
+Example runtime contents:
 
 ```json
 {
@@ -77,13 +89,13 @@ depends on how Vireo was installed:
 ```bash
 # macOS (.app bundle)
 /Applications/Vireo.app/Contents/MacOS/vireo-server \
-  --headless --port 0 --db ~/.vireo/vireo.db
+  --headless --port 0
 
 # Linux (run the server module directly from a checkout)
-python vireo/app.py --headless --port 0 --db ~/.vireo/vireo.db
+python vireo/app.py --headless --port 0
 ```
 
-`--port 0` picks a free port. Poll `~/.vireo/runtime.json` until it appears
+`--port 0` picks a free port. Poll the selected `runtime.json` path until it appears
 (typically <2 s), then read the port and token from it.
 
 **Only one Vireo instance can run at a time.** If the GUI is already open,
@@ -336,9 +348,11 @@ verify the output GPS tags with ExifTool when coordinates were available.
 ## Worked example
 
 ```bash
-# 1. Locate the instance.
-PORT=$(jq -r .port ~/.vireo/runtime.json)
-TOKEN=$(jq -r .token ~/.vireo/runtime.json)
+# 1. Locate the instance (run from a source checkout). For packaged installs,
+# set VIREO_RUNTIME to the matching path listed above.
+VIREO_RUNTIME=$(python -c 'from vireo.app_paths import default_path; print(default_path("runtime"))')
+PORT=$(jq -r .port "$VIREO_RUNTIME")
+TOKEN=$(jq -r .token "$VIREO_RUNTIME")
 
 # 2. Probe health.
 curl -sf -H "X-Vireo-Token: $TOKEN" "http://127.0.0.1:$PORT/api/v1/health"

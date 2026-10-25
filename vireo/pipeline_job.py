@@ -26,6 +26,7 @@ import time
 import uuid
 from functools import partial
 
+from app_paths import default_path, media_root
 from db import Database
 from file_replace import replace_file
 from job_contract import progress_event
@@ -1658,24 +1659,14 @@ class _RunControl:
 
 def _effective_cache_dirs(db_path, thumb_cache_dir):
     """Return the run's (thumbnail cache dir, vireo dir)."""
-    # Effective thumbnail cache directory for every internal call below.
-    # Falls back to the historical ``<db_dir>/thumbnails`` convention when
-    # the caller didn't supply an explicit value — matches prior behavior
-    # for the default ~/.vireo layout.
-    effective_thumb_cache_dir = thumb_cache_dir or os.path.join(
-        os.path.dirname(db_path), "thumbnails",
+    # Keep catalog-relative defaults for custom databases. The standard catalog
+    # uses the shared default so headless callers also get the native cache root.
+    default_thumbs = (
+        default_path("thumbnails") if os.path.abspath(db_path) == os.path.abspath(default_path("database"))
+        else os.path.join(os.path.dirname(db_path), "thumbnails")
     )
-    # vireo_dir must match the Flask serve convention — app.py computes
-    # ``vireo_dir = os.path.dirname(THUMB_CACHE_DIR)`` for
-    # previews/working. When the caller provided thumb_cache_dir
-    # explicitly we derive from its parent; otherwise fall back to the
-    # db_dir (same as the historical layout where everything sits
-    # alongside vireo.db).
-    effective_vireo_dir = (
-        os.path.dirname(thumb_cache_dir)
-        if thumb_cache_dir
-        else os.path.dirname(db_path)
-    )
+    effective_thumb_cache_dir = thumb_cache_dir or default_thumbs
+    effective_vireo_dir = media_root(effective_thumb_cache_dir)
     return effective_thumb_cache_dir, effective_vireo_dir
 
 
