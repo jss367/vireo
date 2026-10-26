@@ -52,6 +52,7 @@
    "detector",
    "dino_embed",
    "embedding_cache",
+   "encounter_continuity",
    "export",
    "export_metadata",
    "file_identity",
@@ -123,6 +124,7 @@
    "services.moves_merge",
    "services.photo_ingest",
    "services.result_files",
+   "services.retained_cache",
    "services.review_refresh",
    "services.saved_review",
    "services.stage_counts",
@@ -132,6 +134,7 @@
    "subjects",
    "timm_classifier",
    "volume_reachability",
+   "weak_detections",
    "working_copy_cache"
   ],
   [
