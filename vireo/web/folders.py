@@ -473,9 +473,8 @@ def create_folders_blueprint(
         # a caller could probe disk via the OS-window-opens side channel.
         # Don't gate on workspace_folders: duplicate scans are
         # library-wide (file_hash is global), so a bucket can legitimately
-        # surface folders linked only to another workspace, and Vireo is
-        # a single-user app where workspaces are organizational rather
-        # than access-bound.
+        # surface folders linked only to another workspace. This endpoint
+        # validates library membership rather than workspace membership.
         # Normalize both sides so legacy/relocated rows stored with a
         # trailing separator still match bucket-UI paths derived from
         # ``os.path.dirname(...)`` — same trap bulk_resolve_by_folder

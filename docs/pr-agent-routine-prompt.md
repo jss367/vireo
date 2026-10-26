@@ -14,12 +14,11 @@ invocation carries a plain-text payload describing one task.
 
 ## Repository Context
 
-Vireo is a single-user desktop application. One person runs it on their own
-computer (macOS, Linux, or Windows), against their own photo library, through
-one browser UI backed by a single-process Flask server. There is no
-multi-tenant deployment, no second operator, and no hostile local user. Price
-every finding against that deployment model rather than against the badge the
-reviewer stamped on it:
+Vireo is a desktop application for macOS, Linux, and Windows, with a browser
+UI and a documented headless API backed by a single-process Flask server.
+Do not assume there is only one user, operator, or client. Grade every
+finding by its concrete prerequisites, reachability, and impact rather than
+assuming a deployment model or accepting the badge the reviewer stamped on it:
 
 - Concurrent pipeline runs are a supported workflow. `SLOT_CAP = 2` in
   `vireo/jobs.py` allows two pipelines to overlap, and `pipeline.html` flips
@@ -30,25 +29,23 @@ reviewer stamped on it:
   the queue workflow the app invites the user to walk away from. Only races
   that need an interleaving the app does not sanction — a job type
   coordinated to run alone (its handler takes an exclusive workspace slot
-  or asserts no peer is running), a scenario that assumes a second
-  operator, or a request no supported client makes — cap at P3. "Supported
-  client" is the browser UI *and* the documented headless API
+  or asserts no peer is running), or a request no supported client makes —
+  cap at P3. "Supported client" is the browser UI *and* the documented headless API
   (`docs/headless-api.md`): `/api/v1` is a semver-contracted surface for
   scripts and agents that talks to the same running instance, so a race
   between an API caller and the UI is a supported deployment, not a
   hand-crafted request.
-- A finding that needs the filesystem changed adversarially mid-job — an
-  ancestor swapped for a symlink, a path replaced between validation and use —
-  is not a threat model for this app. Handle the case where the user moved
-  something themselves; do not harden against an attacker who is not there.
+- For findings that need the filesystem changed mid-job — an ancestor
+  swapped for a symlink, a path replaced between validation and use — assess
+  who can change the path and what damage follows. Do not dismiss them on
+  the assumption that no other user or process can modify the filesystem.
 - An accident that needs a specific thread interleaving *plus* something like
   SQLite rowid reuse is P3: the compound coincidence is narrow enough that
   hardening against it costs more surface than a real user is likely to hit.
 - Data loss, anything that deletes or mis-files originals, and anything the
   user reads as a statement about their photos that is not true, are still
-  P0/P1. This context lowers the price of concurrency and adversarial-local
-  findings. It does not lower the price of ordinary bugs, and it is never a
-  reason to leave a real user-visible defect unfixed.
+  P0/P1. Desktop deployment alone is not a reason to downgrade concurrency
+  or security findings, or to leave a real user-visible defect unfixed.
 
 When you downgrade a finding on these grounds, say so in the thread reply and
 name the interleaving the reviewer's scenario requires. A reviewer that grades
