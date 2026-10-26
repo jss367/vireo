@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from app_paths import default_path
 from classification_readiness import classification_readiness
-from config import read_raw_config_file, settings_write_lock
+from config import config_value, read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
 from services import workspace_config
@@ -1091,9 +1091,7 @@ def create_models_blueprint(
                 "taxonomy_species_count": count_keywords(),
                 "default_threshold": user_cfg["classification_threshold"],
                 "default_grouping_window": user_cfg["grouping_window_seconds"],
-                "default_similarity_threshold": user_cfg.get(
-                    "similarity_threshold", 0.85
-                ),
+                "default_similarity_threshold": config_value(user_cfg, "similarity_threshold"),
             }
         )
 

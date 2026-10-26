@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
+from config import config_value
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -40,7 +41,7 @@ def set_active_mask_variant(
     themselves once the loop completes.
     """
     effective = db.get_effective_config(cfg.load())
-    min_conf = effective.get("detector_confidence", 0.2)
+    min_conf = config_value(effective, "detector_confidence")
     db.masks_features.set_active_variant(
         photo_id, variant, min_conf, _commit,
         weak_rescue_min_conf=weak_rescue_min_conf,
@@ -81,7 +82,7 @@ def sam_variant_rerun_warning(
         return None
     floor: float = (
         min_conf if min_conf is not None
-        else db.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+        else config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     )
 
     # Resolve the workspace before staging the photo scope, as the
@@ -115,9 +116,7 @@ def get_photos_missing_masks(
     # scoped repository did.
     db.require_workspace_id()
     repo = db.masks_features
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     return repo.photos_missing_masks(folder_ids, min_conf)
 
 
@@ -164,9 +163,7 @@ def list_photos_for_eye_keypoint_stage(
     # repository did.
     db.require_workspace_id()
     repo = db.masks_features
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     if photo_ids is not None:
         photo_ids = list(photo_ids)
         if not photo_ids:

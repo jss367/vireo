@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryFile, mkdtemp
 from weakref import WeakValueDictionary
 
+from config import config_value
 from export import (
     _DevelopedDirIndex,
     _get_photo_exif_data,
@@ -82,7 +83,7 @@ def _export_image(vireo_dir, photo, rel_path, destination, options, folders, ind
     try:
         img = load_export_image(
             photo, vireo_dir, folders, recipe=recipe, exif_data=exif_data,
-            max_size=max_size, wc_max=int(options.get("working_copy_max_size", 4096)),
+            max_size=max_size, wc_max=int(config_value(options, "working_copy_max_size")),
             developed_dir=options.get("developed_dir") or "", developed_index=index,
         )
     except Exception as exc:  # broad: decoders raise a wide set; the photo is reported as not published

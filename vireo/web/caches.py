@@ -19,6 +19,7 @@ import tempfile
 from typing import TYPE_CHECKING
 
 from app_paths import media_root
+from config import config_value
 from flask import Blueprint, jsonify, make_response, request
 from keep_safety import review_culling_suggestions
 from photo_payload import attach_nested_edit_recipes
@@ -214,7 +215,7 @@ def create_caches_blueprint(
         db = get_db()
         count = db.caches.preview_entry_count()
         total = db.caches.preview_total_bytes()
-        quota_mb = cfg.load().get("preview_cache_max_mb", 20480)
+        quota_mb = config_value(cfg.load(), "preview_cache_max_mb")
         return jsonify({
             "count": count,
             "total_size": total,

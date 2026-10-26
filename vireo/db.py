@@ -3836,6 +3836,7 @@ class Database:
         confidence expression) are read here, at call time.
         """
         from repositories.predictions import PredictionRepository
+        from species_identity import SpeciesResolver
 
         return PredictionRepository(
             self.conn,
@@ -3846,6 +3847,7 @@ class Database:
             top_prediction_confidence_expr=_TOP_PREDICTION_CONFIDENCE_EXPR,
             decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
             facade=self,
+            species_resolver=lambda: SpeciesResolver(db=self),
         )
 
     @property

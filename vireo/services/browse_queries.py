@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
+from config import config_value
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -33,9 +34,7 @@ def get_browse_summary(
     shows. Raises ValueError on malformed rules.
     """
     def detector_confidence() -> float:
-        return db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        return config_value(db.get_effective_config(cfg.load()), "detector_confidence")
 
     return db.photos.get_browse_summary(
         folder_id=folder_id,

@@ -20,6 +20,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, cast
 
+from config import config_value
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from pipeline_results import auto_detach_burst_for_species
@@ -357,7 +358,7 @@ def _low_confidence_photo_ids(db: Database, photo_ids: list[int]) -> list[int]:
     """
     import config as cfg
     effective_cfg = db.get_effective_config(cfg.load())
-    det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+    det_conf_threshold = config_value(effective_cfg, "detector_confidence")
     det_rows = db.detections.confidence_summary(photo_ids)
     return [
         r["photo_id"] for r in det_rows

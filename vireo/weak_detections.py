@@ -15,6 +15,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from config import DEFAULTS
+
+# The settings' own defaults, for callers that do not pass the workspace's.
+_DETECTOR_CONFIDENCE = DEFAULTS["detector_confidence"]
+_WEAK_CONFIDENCE = DEFAULTS["pipeline"]["weak_detection_confidence"]
+_BURST_TIME_GAP = DEFAULTS["pipeline"]["burst_time_gap"]
+
 
 def _get(row, key, default=None):
     """Read from plain dicts and sqlite3.Row values."""
@@ -62,9 +69,9 @@ def contextual_weak_runs(
     photos,
     detections_by_photo,
     *,
-    detector_confidence=0.20,
-    weak_confidence=0.12,
-    max_gap=3.0,
+    detector_confidence=_DETECTOR_CONFIDENCE,
+    weak_confidence=_WEAK_CONFIDENCE,
+    max_gap=_BURST_TIME_GAP,
 ):
     """Return weak runs bracketed by strong detections.
 
@@ -152,9 +159,9 @@ def contextual_weak_photo_ids(
     photos,
     detections_by_photo,
     *,
-    detector_confidence=0.20,
-    weak_confidence=0.12,
-    max_gap=3.0,
+    detector_confidence=_DETECTOR_CONFIDENCE,
+    weak_confidence=_WEAK_CONFIDENCE,
+    max_gap=_BURST_TIME_GAP,
 ):
     """Return photo IDs selected for contextual weak-box classification."""
     return {
@@ -230,7 +237,7 @@ def matching_anchor_species(
 
 def matching_full_image_runs(
     photos, detections_by_photo, species_by_photo, fallback_by_photo, *,
-    detector_confidence=0.20, max_gap=3.0, config=None,
+    detector_confidence=_DETECTOR_CONFIDENCE, max_gap=3.0, config=None,
 ):
     """Bridge short detector dropouts corroborated by full-image classifiers.
 

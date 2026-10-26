@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import config as cfg
+from config import config_value
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -40,7 +41,7 @@ def _detector_confidence(db: Database, min_conf: float | None) -> float:
     """``min_conf``, or the workspace-effective ``detector_confidence``."""
     if min_conf is not None:
         return min_conf
-    return db.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+    return config_value(db.get_effective_config(cfg.load()), "detector_confidence")
 
 def count_real_detections_in_scope(
     db: Database, photo_ids: Iterable[int] | None = None, min_conf: float | None = None,

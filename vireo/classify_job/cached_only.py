@@ -19,6 +19,7 @@ from classify_job.common import (
 )
 from classify_job.label_source import _describe_cached_label_source, describe_label_source
 from classify_job.store_predictions import _cached_prediction_taxonomy, _store_grouped_predictions
+from config import config_value
 from services import detection_store
 
 if TYPE_CHECKING:
@@ -247,7 +248,7 @@ def _cached_only_detection_map(thread_db: Database, photo_ids: list[int]) -> Det
     # filters detections with the same threshold before grouping/review.
     import config as cfg
     effective_cfg = thread_db.get_effective_config(cfg.load())
-    det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+    det_conf_threshold = config_value(effective_cfg, "detector_confidence")
     detection_map = detection_store.get_detections_for_photos(
         thread_db, photo_ids, min_conf=det_conf_threshold,
     )

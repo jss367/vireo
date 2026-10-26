@@ -4,6 +4,7 @@ import contextlib
 import os
 
 import numpy as np
+from config import config_value
 from export import _claim_export_path, _get_photo_exif_data, load_export_image
 from PIL import Image
 
@@ -85,7 +86,7 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
                 recipe=recipes.get(pid),
                 exif_data=exif.get(pid),
                 max_size=input_size,
-                wc_max=config.get("working_copy_max_size", 4096),
+                wc_max=config_value(config, "working_copy_max_size"),
                 developed_dir=config.get("darktable_output_dir", "") or "",
             ) as img:
                 # The renderer may return a full-size developed image.

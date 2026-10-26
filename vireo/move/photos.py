@@ -12,6 +12,7 @@ import stat
 from dataclasses import dataclass, field
 
 from services import workspace_folders
+from sidecar_identity import stem_sidecar
 
 from .paths import (
     _is_case_insensitive_path,
@@ -24,24 +25,10 @@ from .transfer import _copy_and_verify
 log = logging.getLogger("move")
 
 
-def _xmp_path(filepath):
-    """Return the XMP sidecar path for a file, or None if it doesn't exist.
-
-    Matches ``.XMP`` too (as ``offline_cache._xmp_source_for`` does): on a
-    case-sensitive volume an uppercase sidecar would otherwise be left
-    behind at the source when its photo moves.
-    """
-    stem = os.path.splitext(filepath)[0]
-    for xmp in (stem + ".xmp", stem + ".XMP"):
-        if os.path.isfile(xmp):
-            return xmp
-    return None
-
-
 def _companion_files(photo, src_dir):
     """Return list of extra files to move alongside a photo (XMP + companion RAW/JPEG)."""
     extras = []
-    xmp = _xmp_path(os.path.join(src_dir, photo["filename"]))
+    xmp = stem_sidecar(os.path.join(src_dir, photo["filename"]))
     if xmp:
         extras.append(os.path.basename(xmp))
     if photo["companion_path"]:
@@ -669,7 +656,7 @@ class _PhotoPreflight:
 
         # Gather companion files
         item.companions = _companion_files(photo, src_dir)
-        _src_xmp = _xmp_path(item.src_file)
+        _src_xmp = stem_sidecar(item.src_file)
         item.xmp_companion = (
             os.path.basename(_src_xmp) if _src_xmp
             else os.path.splitext(photo["filename"])[0] + ".xmp"

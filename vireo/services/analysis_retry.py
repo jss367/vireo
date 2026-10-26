@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Protocol
 
+from config import config_value
 from services.service_types import JobDict, JsonDict
 from subject_readiness import REQUIRED_QUALITY_FIELDS, subject_analysis_readiness
 
@@ -65,10 +66,10 @@ def _context_ids(db: Database, ids: list[int], effective: JsonDict) -> list[int]
     db.pipeline_features.stage_scope_photo_ids(ids)
     rows = db.pipeline_features.selected_folder_context(db.require_workspace_id())
     detections = get_detections_for_photos(db, [row["id"] for row in rows],
-        min_conf=options.get("weak_detection_confidence", .12), detector_model="megadetector-v6")
+        min_conf=config_value(options, "weak_detection_confidence", section="pipeline"), detector_model="megadetector-v6")
     context = set(ids)
-    for run in contextual_weak_runs(rows, detections, detector_confidence=effective.get("detector_confidence", .2),
-            weak_confidence=options.get("weak_detection_confidence", .12), max_gap=options.get("burst_time_gap", 3.0)):
+    for run in contextual_weak_runs(rows, detections, detector_confidence=config_value(effective, "detector_confidence"),
+            weak_confidence=config_value(options, "weak_detection_confidence", section="pipeline"), max_gap=config_value(options, "burst_time_gap", section="pipeline")):
         if context.intersection(run["photo_ids"]):
             context.update([*run["photo_ids"], run["left_photo_id"], run["right_photo_id"]])
     return sorted(context)
@@ -282,8 +283,8 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                 tuple(detection["box_" + key] for key in "xywh"),
                 MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}), _commit=False)
             current = _current_photo(db, pid, effective)
-            weak_floor = effective.get("pipeline", {}).get("weak_detection_confidence", .12) if current.get("subject_uncertain") else None
-            db.masks_features.set_active_variant(pid, variant, effective.get("detector_confidence", .2),
+            weak_floor = config_value(effective.get("pipeline", {}), "weak_detection_confidence", section="pipeline") if current.get("subject_uncertain") else None
+            db.masks_features.set_active_variant(pid, variant, config_value(effective, "detector_confidence"),
                 _commit=False, weak_rescue_min_conf=weak_floor)
             db.masks_features.update_pipeline_features(pid, PipelineFeatures(
                 **{field: features.get(field) for field in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad")},

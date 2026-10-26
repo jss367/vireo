@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vireo"
-version = "0.68.1"
+version = "0.69.0"
 description = "AI-powered wildlife photo organizer"
 license = "MIT AND GPL-3.0-or-later"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "vireo/data/denoise/LICENSE.txt", "vireo/data/denoise/NOTICE.txt", "vireo/data/native-detail/THIRD_PARTY_LICENSES.txt"]
@@ -108,12 +108,14 @@ core = "ctrace"
 [tool.coverage.report]
 # The percentage covers production code only. test-main.yml also measures
 # ``tests/`` and ``scripts/`` so the impact map has a context for every test,
-# and ``vireo/tests`` is measured because it sits under ``--cov=vireo``. All
-# three are omitted here: test bodies execute almost completely whenever the
-# suite runs, so counting them inflated the total from about 76% to 88%.
+# and ``vireo/tests`` and the ``vireo/testing`` harness (waits, the
+# user-first browser scenarios) are measured because they sit under
+# ``--cov=vireo``. All four are omitted here: test bodies execute almost
+# completely whenever the suite runs, so counting them inflated the total from
+# about 76% to 88%, and the harness is not product code either.
 # Patterns are anchored at the path start, so ``tests/*`` does not touch
 # ``vireo/tests``, which needs its own entry.
-omit = ["tests/*", "scripts/*", "vireo/tests/*"]
+omit = ["tests/*", "scripts/*", "vireo/tests/*", "vireo/testing/*"]
 
 [tool.ruff]
 target-version = "py314"

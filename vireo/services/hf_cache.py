@@ -671,17 +671,28 @@ def remove_installed(cache_dir: str | None = None, models_dir: str | None = None
 
 
 def _require_independent_install(install: str, cache_dir: str) -> None:
+    cache_identity = os.stat(cache_dir)
+
     def walk_error(error: OSError) -> None:
         raise error
 
     def check(path: str) -> None:
-        resolved, cache_root = os.path.realpath(path), os.path.realpath(cache_dir)
-        if resolved == cache_root or resolved.startswith(cache_root + os.sep):
-            raise UnsafeCacheCleanup(f"Installed model still reads from this cache: {path}. Keep its cache entry.")
+        # POSIX realpath preserves casing even on case-insensitive macOS.
+        # Compare ancestor identities so aliases match without conflating
+        # distinct directories on case-sensitive volumes. Stat errors abort
+        # the cleanup transaction before any payload is deleted.
+        resolved = os.path.realpath(path)
+        while True:
+            if os.path.samestat(os.stat(resolved), cache_identity):
+                raise UnsafeCacheCleanup(f"Installed model still reads from this cache: {path}. Keep its cache entry.")
+            parent = os.path.dirname(resolved)
+            if parent == resolved:
+                return
+            resolved = parent
 
     check(install)
     # A file-backed install candidate (``weights_path`` pointing to a single
-    # file or a symlink to one) has nothing to walk; the top-level realpath
+    # file or a symlink to one) has nothing to walk; the top-level ancestry
     # check above already catches a cache-backed registration.
     if not os.path.isdir(install):
         return

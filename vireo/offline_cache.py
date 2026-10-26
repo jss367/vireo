@@ -11,6 +11,7 @@ import time
 import weakref
 
 from file_replace import replace_file
+from sidecar_identity import SIDECAR_EXTENSION, stem_sidecar
 
 # Weak values release idle locks without losing a lock held by a waiter.
 _original_locks = weakref.WeakValueDictionary()
@@ -77,15 +78,11 @@ def _offline_rel_path(kind, photo_id, suffix):
 
 
 def _xmp_source_for(folder_path, filename):
-    # Match both cases — other code paths (see app.py sidecar cleanup)
-    # treat `.XMP` as a valid sidecar, so case-sensitive filesystems would
-    # otherwise drop uppercase sidecars from the offline cache.
-    stem = os.path.splitext(filename)[0]
-    lower = os.path.join(folder_path, stem + ".xmp")
-    upper = os.path.join(folder_path, stem + ".XMP")
-    if os.path.isfile(upper) and not os.path.isfile(lower):
-        return upper
-    return lower
+    """The photo's ``<stem>.xmp`` sidecar, or where it would be if absent."""
+    photo_path = os.path.join(folder_path, filename)
+    return stem_sidecar(photo_path) or os.path.join(
+        folder_path, os.path.splitext(filename)[0] + SIDECAR_EXTENSION,
+    )
 
 
 def _same_file_stat(src, dst):

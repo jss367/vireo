@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from app_paths import default_path, media_root
 from camera_denoise import cache_matches, cache_save_options
+from config import config_value
 from file_replace import replace_file
 from image_loader import (
     RAW_DECODE_LINEAR,
@@ -460,7 +461,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
     import config as cfg
     user_cfg = config or cfg.load()
     thumb_size = user_cfg.get("thumbnail_size", THUMB_SIZE)
-    thumb_quality = user_cfg.get("thumbnail_quality", 85)
+    thumb_quality = config_value(user_cfg, "thumbnail_quality")
 
     os.makedirs(cache_dir, exist_ok=True)
 
