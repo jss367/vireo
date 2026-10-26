@@ -144,7 +144,7 @@ class FeatureReader:
             if detector_model is not None:
                 sql += " AND detector_model = ?"
                 params.append(detector_model)
-            from subjects import primary_order_sql
+            from repositories.subject_order import primary_order_sql
             for r in self.conn.execute(sql + " ORDER BY photo_id, " + primary_order_sql(), params):
                 result[r["photo_id"]].append({
                     "id": r["id"], "x": r["box_x"], "y": r["box_y"], "w": r["box_w"], "h": r["box_h"],
