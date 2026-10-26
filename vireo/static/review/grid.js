@@ -37,8 +37,8 @@ function reviewCategoryBadge(pred) {
   return {cls: kind === 'new' ? 'badge-new' : 'badge-disagreement', text: kind};
 }
 
-/** @param {boolean} [includeGroupMembers] */
-function getVisibleItems(includeGroupMembers) {
+/** @param {boolean} [includeGroupMembers] @param {boolean} [includeAllStatuses] */
+function getVisibleItems(includeGroupMembers, includeAllStatuses) {
   var filtered = predictions.slice(); // copy for sorting
 
   if (reviewEvidenceFilter !== 'all') {
@@ -66,7 +66,7 @@ function getVisibleItems(includeGroupMembers) {
   }
 
   // Filter by status tab
-  if (currentTab !== 'all') {
+  if (!includeAllStatuses && currentTab !== 'all') {
     filtered = filtered.filter(function(p) { return p.status === currentTab; });
   }
 
@@ -83,6 +83,7 @@ function getVisibleItems(includeGroupMembers) {
     }
   });
 
+  indexVisibleReviewCards(filtered);
   if (includeGroupMembers) return filtered;
 
   // Deduplicate groups — show only the first photo per group
@@ -94,9 +95,9 @@ function getVisibleItems(includeGroupMembers) {
       seenGroups[subject] = true;
       return true;
     }
-    if (!p.group_id) return true;
-    if (seenGroups[p.group_id]) return false;
-    seenGroups[p.group_id] = true;
+    var key = reviewCardKey(p);
+    if (seenGroups[key]) return false;
+    seenGroups[key] = true;
     return true;
   });
 }
@@ -148,6 +149,7 @@ function bindReviewGridClicks() {
 }
 
 /** @param {ReviewPrediction} pred */ function getConsensusSpecies(pred) {
+  if (pred.consensus_species) return pred.consensus_species;
   // For grouped predictions, derive the consensus winner from the individual votes
   if (pred.individual) {
     try {
@@ -175,7 +177,7 @@ function bindReviewGridClicks() {
   var thumbUrl = window.vireoThumbnailUrl
     ? window.vireoThumbnailUrl(pred)
     : '/thumbnails/' + pred.photo_id + '.jpg';
-  var displaySpecies = pred.group_id ? getConsensusSpecies(pred) : pred.species;
+  var displaySpecies = getConsensusSpecies(pred);
   var confPct = reviewRelativeScore(pred.confidence);
   var confColor = 'var(--info)';
   var cardClass = 'card';
@@ -213,7 +215,7 @@ function bindReviewGridClicks() {
   var actionsHtml = reviewPredictionActions(pred, displaySpecies);
 
   // Model badge — always show
-  var modelHtml = '<span style="font-size:10px;background:var(--bg-tertiary);color:var(--info);padding:1px 6px;border-radius:3px;margin-left:4px;">' + escapeHtml(pred.model || '') + '</span>';
+  var modelHtml = reviewCardModelsHtml(pred);
 
   var otherModelsHtml = reviewModelEvidenceHtml(pred);
 
@@ -267,7 +269,7 @@ function bindReviewGridClicks() {
       '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + ((reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'display:none;') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
-      ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' · ' + confPct + '% relative</span>' +
+      ';color:#0A1F2E;">' + escapeHtml(pred.species) + ' · ' + confPct + '% relative</span>' +
       '</div></div>';
   } else {
     imgHtml = '<div class="card-img-wrap">' + imgTag + representativeBadge + '</div>';
@@ -292,16 +294,21 @@ function bindReviewGridClicks() {
 }
 
 /** @param {ReviewPrediction} pred */ function groupMembersHtml(pred) {
-  if (!pred.group_id) return '';
-
-  var members = predictions.filter(function(p) {
-    return p.group_id === pred.group_id && p.model === pred.model;
+  /** @type {Map<string, ReviewPrediction[]>} */ var groups = new Map();
+  reviewCardMembers(pred).forEach(function(p) {
+    if (!p.group_id) return;
+    var key = JSON.stringify([p.model, p.group_id]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)?.push(p);
   });
-  if (members.length <= 1) return '';
-
-  return '<button data-group-id="' + escapeAttr(pred.group_id) + '" data-model="' + escapeAttr(pred.model || '') + '" ' +
+  return Array.from(groups.values(), function(members) {
+    var group = members[0];
+    var photoCount = new Set(members.map(function(p) { return p.photo_id; })).size;
+    if (!group || photoCount <= 1) return '';
+    return '<button data-group-id="' + escapeAttr(group.group_id) + '" data-model="' + escapeAttr(group.model || '') + '" ' +
     'style="background:var(--accent,#24E5CA);color:var(--accent-text,#0A1F2E);border:none;border-radius:6px;padding:8px 12px;font-size:13px;font-weight:600;cursor:pointer;margin-top:8px;width:100%;display:flex;align-items:center;justify-content:center;gap:6px;">' +
-    '<span style="font-size:16px;">&#9638;</span> Review Burst Group (' + members.length + ' photos)</button>';
+    '<span style="font-size:16px;">&#9638;</span> Review Burst Group (' + photoCount + ' photos) · ' + escapeHtml(group.model) + '</button>';
+  }).join('');
 }
 
 /** @param {ReviewPrediction['individual']} raw @returns {Record<string,number>} */
@@ -330,8 +337,9 @@ function reviewPredictionActions(pred, displaySpecies) {
   } else if (reviewEvidenceBlocksAccept(pred.id)) {
     actionsHtml = '<p>Species confirmation is on hold. Revisit the subject assessments for this region and its burst.</p>';
   } else {
-    var acceptLabel = pred.group_id
-      ? 'Tag ' + pred.total_votes + ' photos as "' + species + '"'
+    var photoCount = reviewCardPhotoCount(pred);
+    var acceptLabel = photoCount > 1
+      ? 'Tag ' + photoCount + ' photos as "' + species + '"'
       : 'Tag as "' + species + '"';
     actionsHtml =
       '<div class="card-actions">' +

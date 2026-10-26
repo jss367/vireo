@@ -31,6 +31,7 @@ function visiblePendingCards() {
       if (p && wanted.has(p.id)) p.status = 'accepted';
     });
   });
+  reviewCardIndexRows = null;
 }
 
 /** @param {number} predId */ async function acceptPrediction(predId) {
@@ -38,8 +39,10 @@ function visiblePendingCards() {
   if (reviewEvidenceBlocksAccept(predId)) return;
   var epoch = _loadPredictionsEpoch;
   var applied;
+  var pred = predictions.find(function(p) { return p.id === predId; });
+  if (!pred) return;
   try {
-    applied = await safeFetch('/api/predictions/' + predId + '/accept', { method: 'POST' });
+    applied = await safeFetch('/api/predictions/' + predId + '/accept', reviewCardRequest(pred));
   } catch(e) { return; }
   // A reload between click and response would have swapped ``predictions``;
   // touching the new array with a stale id would either miss (harmless) or
@@ -55,9 +58,11 @@ function visiblePendingCards() {
 /** @param {number} predId */ async function rejectPrediction(predId) {
   if (_predictionsReloading) return;
   var epoch = _loadPredictionsEpoch;
+  var pred = predictions.find(function(p) { return p.id === predId; });
+  if (!pred) return;
   /** @type {{rejected_prediction_ids?:number[]}} */ var resp;
   try {
-    resp = await safeFetch('/api/predictions/' + predId + '/reject', { method: 'POST' });
+    resp = await safeFetch('/api/predictions/' + predId + '/reject', reviewCardRequest(pred));
   } catch(e) { return; }
   if (_predictionEpochStale(epoch)) return;
   // A burst card's reject covers every undecided member, as its accept does;
@@ -70,6 +75,7 @@ function visiblePendingCards() {
       if (p && rejected.has(p.id)) p.status = 'rejected';
     });
   });
+  reviewCardIndexRows = null;
   renderAll();
 }
 
@@ -96,6 +102,7 @@ async function acceptAllPending() {
   // visible chips already show a narrower filter. See r3618935660.
   var epoch = _loadPredictionsEpoch;
   var pending = visiblePendingCards();
+  var scope = reviewCardScopeKey();
   // ``pending`` is a snapshot, and one accept can settle several of its rows:
   // ``accept_prediction`` expands across the burst group and the response
   // names every row it decided. Without consuming that, the next member of the
@@ -105,11 +112,11 @@ async function acceptAllPending() {
   // Conflicts' batch accept; see vireo-predictions.js.
   var decided = Vireo.predictions.groupedDecisionTracker();
   for (var i = 0; i < pending.length; i++) {
-    if (_predictionEpochStale(epoch)) break;
+    if (_predictionEpochStale(epoch) || scope !== reviewCardScopeKey()) break;
     // Accepted, not skipped: an earlier request in this very run wrote it.
     var item = pending[i]; if (!item) continue; if (decided.alreadyDecided(item.id)) continue;
     try {
-      var applied = await safeFetch('/api/predictions/' + item.id + '/accept', { method: 'POST' });
+      var applied = await safeFetch('/api/predictions/' + item.id + '/accept', reviewCardRequest(item));
       _markPredictionsAccepted(
         [item.id].concat(decided.record(applied)));
     } catch(e) { break; }
