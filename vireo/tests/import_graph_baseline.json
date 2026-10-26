@@ -17,6 +17,8 @@
   "repositories.keywords -> config",
   "repositories.predictions -> config",
   "repositories.species_curation -> config",
+  "repositories.sync -> sidecar_identity",
+  "schema -> file_replace",
   "site_export -> web",
   "site_export -> web.background_jobs",
   "species_identity -> taxonomy"

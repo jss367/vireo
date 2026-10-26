@@ -13,8 +13,8 @@ still a dependency: it only defers the cycle to the first call.
 The layers, lowest first. A module may import its own layer or any layer
 below it; an import that points to a higher layer is an *upward edge*:
 
-0. **foundation**: ``FOUNDATION``, pure helpers with no disk, config, network
-   or model I/O, which import nothing above foundation (``sql_chunks``,
+0. **foundation**: the root initializer (``vireo``) and ``FOUNDATION``, pure
+   helpers with no disk, config, network or model I/O, which import nothing above foundation (``sql_chunks``,
    ``keyword_normalization``, ``duplicates``, ...).
 1. **data**: ``db``, ``repositories/``, ``canonical_schema``, ``schema`` and
    the other ``DATA_MODULES``. They depend only on ``sqlite3``, the schema and
@@ -67,6 +67,7 @@ WRITER = "python vireo/tests/test_import_graph.py --write-baseline"
 
 # Directories under vireo/ that are not production code.
 SKIPPED_DIRS = {"tests", "testing"}
+ROOT_PACKAGE = "vireo"
 
 # Pure helpers: no disk, config, network or model I/O, and no first-party
 # import above foundation. Add a module here only when that holds; the test
@@ -79,10 +80,8 @@ FOUNDATION = frozenset({
     "duplicates",
     "edit_batch",
     "edit_recipe",
-    "file_replace",
     "keyword_normalization",
     "process_strategies",
-    "sidecar_identity",
     "species_identity",
     "species_memberships",
     "sql_chunks",
@@ -116,7 +115,7 @@ def _in_package(module: str, packages: Iterable[str]) -> bool:
 
 
 def tier(module: str) -> int:
-    if module in FOUNDATION:
+    if module == ROOT_PACKAGE or module in FOUNDATION:
         return FOUNDATION_TIER
     if module in DATA_MODULES or _in_package(module, DATA_PACKAGES):
         return DATA_TIER
@@ -135,7 +134,7 @@ def _module_name(rel: Path) -> tuple[str, bool]:
     is_package = parts[-1] == "__init__"
     if is_package:
         parts = parts[:-1]
-    return ".".join(parts), is_package
+    return ".".join(parts) or ROOT_PACKAGE, is_package
 
 
 def production_sources(root: Path = VIREO) -> dict[str, tuple[str, bool, str]]:
@@ -146,8 +145,7 @@ def production_sources(root: Path = VIREO) -> dict[str, tuple[str, bool, str]]:
         if rel.parts[0] in SKIPPED_DIRS:
             continue
         name, is_package = _module_name(rel)
-        if name:
-            modules[name] = (path.read_text(encoding="utf-8"), is_package, rel.as_posix())
+        modules[name] = (path.read_text(encoding="utf-8"), is_package, rel.as_posix())
     return modules
 
 
@@ -177,9 +175,14 @@ def _ancestors(module: str) -> list[str]:
     return [".".join(parts[:i]) for i in range(1, len(parts))]
 
 
+def _normalize(dotted: str) -> str:
+    """Share graph identities between qualified imports and legacy bare ones."""
+    return dotted.removeprefix(ROOT_PACKAGE + ".")
+
+
 def _resolve(dotted: str, modules: Mapping) -> str | None:
     """The longest prefix of ``dotted`` that is a first-party module."""
-    parts = dotted.split(".")
+    parts = _normalize(dotted).split(".")
     for i in range(len(parts), 0, -1):
         candidate = ".".join(parts[:i])
         if candidate in modules:
@@ -191,16 +194,18 @@ def _explicit_targets(node, module: str, is_package: bool, modules: Mapping) -> 
     if isinstance(node, ast.Import):
         return [t for alias in node.names if (t := _resolve(alias.name, modules))]
     if node.level:
-        # Top-level vireo modules use ``from .proc import x`` with a plain
-        # fallback; relative to the vireo package that is ``proc`` either way.
-        package = module.split(".") if is_package else module.split(".")[:-1]
+        # The root initializer has an explicit graph identity, while its
+        # children retain the bare names used throughout the application.
+        package = [] if module == ROOT_PACKAGE else (
+            module.split(".") if is_package else module.split(".")[:-1]
+        )
         package = package[:len(package) - (node.level - 1)] if node.level > 1 else package
-        base = ".".join(package + ([node.module] if node.module else []))
+        base = ".".join(package + ([node.module] if node.module else [])) or ROOT_PACKAGE
     else:
         base = node.module or ""
     targets = []
     for alias in node.names:
-        full = f"{base}.{alias.name}" if base else alias.name
+        full = _normalize(f"{base}.{alias.name}" if base else alias.name)
         target = full if full in modules else _resolve(base, modules) if base else None
         if target:
             targets.append(target)
@@ -292,6 +297,11 @@ def load_baseline(path: Path = BASELINE_PATH) -> dict:
 def _advice(edge: str) -> str:
     src, dst = edge.split(" -> ")
     src_tier, dst_tier = tier(src), tier(dst)
+    if src == ROOT_PACKAGE:
+        return (
+            f"The root package initializer must not load {dst}. Keep __init__.py "
+            "minimal; import domain code at its call site instead."
+        )
     if src_tier == FOUNDATION_TIER:
         return (
             f"{src} is a foundation helper (FOUNDATION in this test) and may import only "
@@ -424,18 +434,109 @@ def test_import_edges(sources, expected):
     assert set(_graph(sources)) == expected
 
 
+def _fixture_modules(root: Path, sources: dict[str, str]):
+    for rel, source in {"__init__.py": "", **sources}.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    return production_sources(root)
+
+
+@pytest.mark.parametrize("statement", [
+    "import vireo.app",
+    "from vireo import app",
+    "from vireo.app import create_app",
+    "def f():\n    import vireo.app",
+    "def f():\n    from vireo import app",
+    "import app",
+    "from . import app",
+    "from .app import create_app",
+])
+def test_package_imports_cannot_bypass_ratchets(tmp_path, monkeypatch, statement):
+    modules = _fixture_modules(tmp_path, {"db.py": statement, "app.py": ""})
+    edges = import_edges(modules)
+    assert ("db", "app") in edges
+    monkeypatch.setattr(sys.modules[__name__], "production_sources", lambda: modules)
+    monkeypatch.setattr(sys.modules[__name__], "current_graph", lambda: (upward_edges(edges), []))
+    monkeypatch.setattr(sys.modules[__name__], "load_baseline", lambda: {"upward_edges": []})
+    with pytest.raises(AssertionError, match="db -> app"):
+        test_no_new_upward_edges()
+    with pytest.raises(AssertionError, match="import app; it is the composition root"):
+        test_nothing_imports_the_composition_root()
+
+
+@pytest.mark.parametrize("statement", [
+    "import vireo.app", "from vireo import app", "from . import app", "from .app import create_app",
+])
+def test_root_initializer_cannot_import_app(tmp_path, monkeypatch, statement):
+    modules = _fixture_modules(tmp_path, {"__init__.py": statement, "app.py": ""})
+    assert modules[ROOT_PACKAGE] == (statement, True, "__init__.py")
+    edges = import_edges(modules)
+    assert set(edges) == {(ROOT_PACKAGE, "app")}
+    assert f"{ROOT_PACKAGE} -> app" in upward_edges(edges)
+    monkeypatch.setattr(sys.modules[__name__], "production_sources", lambda: modules)
+    with pytest.raises(AssertionError, match="import app; it is the composition root"):
+        test_nothing_imports_the_composition_root()
+
+
+@pytest.mark.parametrize("statement", [
+    "import vireo.p.child",
+    "from vireo.p import child",
+    "def f():\n    from vireo.p.child import helper",
+    "from .p import child",
+    "import p.child",
+])
+def test_nested_package_imports_and_initializers(tmp_path, statement):
+    modules = _fixture_modules(tmp_path, {
+        "db.py": statement,
+        "p/__init__.py": "from . import child",
+        "p/child.py": "from .. import db",
+    })
+    edges = import_edges(modules)
+    assert set(edges) == {("db", "p"), ("db", "p.child"), ("p", "p.child"), ("p.child", "db")}
+    assert import_cycles(modules, edges) == [["db", "p", "p.child"]]
+    assert set(upward_edges(edges)) == {"db -> p", "db -> p.child"}
+
+
+@pytest.mark.parametrize(("root_import", "child_import"), [
+    ("from . import child", "import vireo"),
+    ("import vireo.child", "from vireo import helper"),
+    ("from vireo.child import helper", "from . import helper"),
+])
+def test_root_child_cycle_cannot_bypass_ratchet(tmp_path, monkeypatch, root_import, child_import):
+    modules = _fixture_modules(tmp_path, {"__init__.py": root_import, "child.py": child_import})
+    edges = import_edges(modules)
+    cycles = import_cycles(modules, edges)
+    assert set(edges) == {(ROOT_PACKAGE, "child"), ("child", ROOT_PACKAGE)}
+    assert cycles == [["child", ROOT_PACKAGE]]
+    monkeypatch.setattr(sys.modules[__name__], "current_graph", lambda: (upward_edges(edges), cycles))
+    monkeypatch.setattr(sys.modules[__name__], "load_baseline", lambda: {"cycles": []})
+    with pytest.raises(AssertionError, match="Import cycles grew"):
+        test_no_new_or_grown_import_cycles()
+
+
 def test_import_cycles():
     edges = {("a", "b"), ("b", "c"), ("c", "a"), ("c", "d"), ("d", "e"), ("e", "d"), ("f", "a")}
     assert import_cycles("abcdef", edges) == [["a", "b", "c"], ["d", "e"]]
 
 
 def test_tiers():
+    assert tier(ROOT_PACKAGE) == FOUNDATION_TIER
     assert tier("sql_chunks") == FOUNDATION_TIER
     assert tier("repositories.stats") == DATA_TIER
     assert tier("services.result_files") == APPLICATION_TIER
     assert tier("pipeline") == APPLICATION_TIER
     assert tier("web.photos") == WEB_TIER
     assert tier("app") == APP_TIER
+
+
+@pytest.mark.parametrize(("source", "target"), [
+    ("schema", "file_replace"), ("repositories.sync", "sidecar_identity"),
+])
+def test_filesystem_helpers_are_above_data(source, target):
+    assert tier(target) == APPLICATION_TIER
+    edges = _graph({source: f"import {target}", target: ""})
+    assert set(upward_edges(edges)) == {f"{source} -> {target}"}
 
 
 # ---------------------------------------------------------------- the writer
