@@ -49,7 +49,12 @@ function Stop-Vireo($Runtime, $AppProcess) {
 $installerPath = (Resolve-Path $Installer).Path
 if ($RequireSignature) { Assert-Signed $installerPath }
 
-$stateDir = Join-Path $HOME ".vireo"
+# Earlier sidecar checks can already pin the native storage layout. Resolve
+# the same data directory as the packaged app instead of assuming legacy paths.
+$stateDir = (& python -c "from vireo.app_paths import default_path; print(default_path('data'))").Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($stateDir)) {
+  throw "Could not resolve the Vireo data directory"
+}
 $preserveMarker = Join-Path $stateDir "windows-smoke-preserve.txt"
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 Set-Content -Path $preserveMarker -Value "must survive uninstall"
