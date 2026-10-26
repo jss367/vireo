@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import filter_shortcuts
 from app_paths import media_root
-from config import read_raw_config_file, settings_write_lock
+from config import config_value, read_raw_config_file, settings_write_lock
 from flask import Blueprint, g, jsonify, make_response, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
@@ -735,7 +735,7 @@ def create_settings_blueprint(
         """
         try:
             previous_quota_mb = int(
-                previous.get("working_copy_cache_max_mb", 20480)
+                config_value(previous, "working_copy_cache_max_mb")
             )
         except (TypeError, ValueError):
             previous_quota_mb = 20480
@@ -781,13 +781,13 @@ def create_settings_blueprint(
         previous = previous or {}
         try:
             previous_working_copy_quota = int(
-                previous.get("working_copy_cache_max_mb", 20480)
+                config_value(previous, "working_copy_cache_max_mb")
             )
         except (TypeError, ValueError):
             previous_working_copy_quota = 20480
         try:
             current_working_copy_quota = int(
-                current.get("working_copy_cache_max_mb", 20480)
+                config_value(current, "working_copy_cache_max_mb")
             )
         except (TypeError, ValueError):
             current_working_copy_quota = 20480

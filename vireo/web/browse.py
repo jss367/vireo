@@ -20,6 +20,7 @@ import time
 from typing import TYPE_CHECKING
 
 import filter_shortcuts
+from config import config_value
 from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
@@ -428,7 +429,7 @@ def create_browse_blueprint(
         import config as cfg
         db = get_db()
         page = max(1, request.args.get("page", 1, type=int))
-        default_per_page = cfg.load().get("photos_per_page", 50)
+        default_per_page = config_value(cfg.load(), "photos_per_page")
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)

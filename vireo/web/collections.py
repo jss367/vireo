@@ -14,6 +14,7 @@ import json
 from typing import TYPE_CHECKING
 
 import config as cfg
+from config import config_value
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
 from services import browse_queries, workspace_config
@@ -470,7 +471,7 @@ def create_collections_blueprint(
         if err is not None:
             return err
         page = request.args.get("page", 1, type=int)
-        default_per_page = cfg.load().get("photos_per_page", 50)
+        default_per_page = config_value(cfg.load(), "photos_per_page")
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         stacks = request_bool_arg("stacks")

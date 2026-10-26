@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
+from config import config_value
 from db import _inclusive_date_to
 
 if TYPE_CHECKING:
@@ -98,9 +99,7 @@ def get_coverage_stats(
     everything else is a simple NOT NULL check on ``photos``.
     """
     repo = _scoped_stats(db)
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     scope_sql, scope_params = dashboard_scope_clause(
         db, folder_id, collection_id, date_from, date_to,
     )
@@ -123,9 +122,7 @@ def get_folder_coverage_stats(
     show them as 0 / 0 if it chooses.
     """
     repo = _scoped_stats(db)
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     scope_sql, scope_params = dashboard_scope_clause(
         db, folder_id, collection_id, date_from, date_to,
     )
@@ -163,8 +160,8 @@ def get_dashboard_stats(
     # detector_confidence to keep classified_count / prediction_status /
     # detected_count in sync as the threshold moves.
     effective = db.get_effective_config(cfg.load())
-    min_conf = effective.get("detector_confidence", 0.2)
-    preview_size = effective.get("preview_max_size", 1920)
+    min_conf = config_value(effective, "detector_confidence")
+    preview_size = config_value(effective, "preview_max_size")
     scope_sql, scope_params = dashboard_scope_clause(
         db, folder_id, collection_id, date_from, date_to,
     )

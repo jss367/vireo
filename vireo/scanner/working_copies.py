@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from config import config_value
 from image_loader import (
     RAW_EXTENSIONS,
     is_excluded_scan_path,
@@ -104,10 +105,10 @@ def working_copy_backfill_candidate_count(db: Database) -> int:
     import config as cfg
 
     user_cfg = cfg.load()
-    wc_max_size = user_cfg.get("working_copy_max_size", 4096)
+    wc_max_size = config_value(user_cfg, "working_copy_max_size")
     try:
         wc_cache_max_mb = int(
-            user_cfg.get("working_copy_cache_max_mb", 20480)
+            config_value(user_cfg, "working_copy_cache_max_mb")
         )
     except (TypeError, ValueError):
         wc_cache_max_mb = 20480
@@ -182,8 +183,8 @@ def _extract_working_copies(
         return []
 
     user_cfg = cfg.load()
-    wc_max_size = user_cfg.get("working_copy_max_size", 4096)
-    wc_quality = user_cfg.get("working_copy_quality", 92)
+    wc_max_size = config_value(user_cfg, "working_copy_max_size")
+    wc_quality = config_value(user_cfg, "working_copy_quality")
 
     # A zero-byte quota is an explicit "keep no working copies" setting.
     # Skip RAW decoding entirely instead of generating a JPEG only for the

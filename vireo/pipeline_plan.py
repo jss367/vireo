@@ -15,6 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 
+from config import config_value
 from services import detection_store, stage_counts, subject_masks, workspace_config, workspace_folders
 
 log = logging.getLogger(__name__)
@@ -390,9 +391,7 @@ class _ClassifyPlan:
             runtime_fingerprint=detector_runtime,
         )
         self.contextual_weak_ids = set()
-        self.weak_detection_confidence = pipeline_cfg.get(
-            "weak_detection_confidence", 0.12,
-        )
+        self.weak_detection_confidence = config_value(pipeline_cfg, "weak_detection_confidence", section="pipeline")
         if (
             pipeline_cfg.get("weak_detection_rescue_enabled", True)
             and self.weak_detection_confidence < self.detector_confidence
@@ -410,7 +409,7 @@ class _ClassifyPlan:
                 raw_mdv6_detections,
                 detector_confidence=self.detector_confidence,
                 weak_confidence=self.weak_detection_confidence,
-                max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
+                max_gap=config_value(pipeline_cfg, "burst_time_gap", section="pipeline"),
             )
 
     def count_targets(self):
@@ -1034,7 +1033,7 @@ def _plan_preview_size(params, effective_cfg):
     """Preview size the run would use: API override, else workspace config."""
     raw_size = params.preview_max_size
     if raw_size is None:
-        raw_size = effective_cfg.get("preview_max_size", 1920)
+        raw_size = config_value(effective_cfg, "preview_max_size")
     try:
         return int(raw_size or 0)
     except (TypeError, ValueError):
@@ -1649,7 +1648,7 @@ def _stage_plans(db, params, db_path, ws_id, photo_ids, new_count,
     """Per-photo stage plans (Previews through Group) for a resolved scope."""
     classify = _classify_plan(
         db, params, photo_ids, new_count,
-        detector_confidence=effective_cfg.get("detector_confidence", 0.2),
+        detector_confidence=config_value(effective_cfg, "detector_confidence"),
         pipeline_cfg=pipeline_cfg,
     )
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)

@@ -17,7 +17,7 @@ from collections.abc import Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any, cast
 
-from config import read_raw_config_file, settings_write_lock
+from config import config_value, read_raw_config_file, settings_write_lock
 from flask import Blueprint, jsonify, request
 from jobs import SLOT_CAP
 from photo_payload import (
@@ -783,7 +783,7 @@ def create_pipeline_blueprint(
                 "dinov2_variant": dinov2_variant,
                 "proxy_longest_edge": proxy_longest_edge,
                 "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
-                "preview_max_size": effective_cfg.get("preview_max_size", 1920),
+                "preview_max_size": config_value(effective_cfg, "preview_max_size"),
             },
             "mask_variant_coverage": db.masks_features.variant_coverage(),
             "sam_variant_warning": subject_masks.sam_variant_rerun_warning(db, sam2_variant),
@@ -1779,9 +1779,7 @@ def create_pipeline_blueprint(
         # counts so the UI can distinguish "not run" from "hidden by threshold".
         import config as cfg
         effective_cfg = db.get_effective_config(cfg.load())
-        min_conf = effective_cfg.get(
-            "detector_confidence", 0.2
-        )
+        min_conf = config_value(effective_cfg, "detector_confidence")
         try:
             min_conf = float(min_conf)
         except (TypeError, ValueError):
@@ -1841,7 +1839,7 @@ def create_pipeline_blueprint(
             import config as cfg
             box = {"x": primary_det["box_x"], "y": primary_det["box_y"],
                    "w": primary_det["box_w"], "h": primary_det["box_h"]}
-            pad = cfg.load().get("detection_padding", 0.2)
+            pad = config_value(cfg.load(), "detection_padding")
             result["crop_box"] = {
                 "x": max(0, box["x"] - box["w"] * pad),
                 "y": max(0, box["y"] - box["h"] * pad),
@@ -2663,9 +2661,7 @@ class _PipelineLaunch:
 
     def check_folder_template(self) -> ErrorResponse | None:
         """Validate the ingest ``folder_template``."""
-        self.folder_template = folder_template = self.body.get(
-            "folder_template", "%Y/%Y-%m-%d",
-        )
+        self.folder_template = folder_template = config_value(self.body, "folder_template", section="ingest")
         # A remote archive still ingests through local staging, so the
         # template gets applied there too — validate it for both shapes.
         if (self.destination or self.remote_target_id) and folder_template:
@@ -2768,7 +2764,7 @@ class _PipelineLaunch:
             remote_target_id=self.remote_target_id or None,
             remote_subpath=self.remote_subpath or "",
             remote_target_snapshot=remote_target_snapshot,
-            file_types=body.get("file_types", "both"),
+            file_types=config_value(body, "file_types", section="ingest"),
             folder_template=self.folder_template,
             skip_duplicates=body.get("skip_duplicates", True),
             verify_by_hash=bool(body.get("verify_by_hash")),

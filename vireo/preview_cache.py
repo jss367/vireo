@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 
 from app_paths import media_root
+from config import config_value
 
 log = logging.getLogger(__name__)
 
@@ -836,7 +837,7 @@ def evict_if_over_quota(db, vireo_dir):
     """
     import config as cfg
 
-    max_bytes = int(cfg.load().get("preview_cache_max_mb", 20480)) * 1024 * 1024
+    max_bytes = int(config_value(cfg.load(), "preview_cache_max_mb")) * 1024 * 1024
     total = db.caches.preview_total_bytes()
     if total <= max_bytes:
         return

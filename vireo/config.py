@@ -9,6 +9,8 @@ import os
 import shutil
 import tempfile
 import threading
+from collections.abc import Mapping
+from typing import Any
 
 from app_paths import default_path
 from file_replace import replace_file
@@ -285,6 +287,22 @@ DEFAULTS = {
         },
     },
 }
+
+
+def config_value(values: Mapping[str, Any] | None, key: str, section: str | None = None) -> Any:
+    """``values[key]``, falling back to the ``DEFAULTS`` value for ``key``.
+
+    The one way to read a scalar setting with a default, so ``DEFAULTS``
+    stays its only source: ``config_value(effective_cfg,
+    "detector_confidence")``, never ``effective_cfg.get("detector_confidence",
+    0.2)``. ``values`` is any config mapping (``load()``, an effective
+    workspace config, a request body that may carry the setting) or None;
+    ``section`` names the nested ``DEFAULTS`` section the key belongs to
+    (``"pipeline"``, ``"ingest"``) when ``values`` is that section.
+    ``test_config_default_literals.py`` fails on a restated default.
+    """
+    defaults = DEFAULTS if section is None else DEFAULTS[section]
+    return (values or {}).get(key, defaults[key])
 
 
 def _deep_merge(base, override):

@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 import source_discovery
 from app_paths import media_root
+from config import config_value
 from db import Database
 from file_identity import catalog_file_paths, catalog_scan_root
 from flask import Blueprint, Response, abort, jsonify, make_response, request
@@ -710,8 +711,8 @@ class _ImportFullRequest:
         return cls(
             source=body.get("source", ""),
             destination=body.get("destination", ""),
-            file_types=body.get("file_types", "both"),
-            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
+            file_types=config_value(body, "file_types", section="ingest"),
+            folder_template=config_value(body, "folder_template", section="ingest"),
             skip_duplicates=body.get("skip_duplicates", True),
             verify_by_hash=bool(body.get("verify_by_hash")),
             copy=body.get("copy", True),
@@ -1819,7 +1820,7 @@ def create_imports_blueprint(
         from scanner import compute_file_hash
 
         recovery_base = (body.get("destination") or "").strip()
-        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        folder_template = config_value(body, "folder_template", section="ingest")
         if recovery_base and not os.path.isabs(recovery_base):
             return json_error("destination must be an absolute path", 400)
         if recovery_base and folder_template and _is_unsafe_path(
@@ -1953,7 +1954,7 @@ def create_imports_blueprint(
 
         from ingest import _is_unsafe_path, preview_destination
 
-        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        folder_template = config_value(body, "folder_template", section="ingest")
         if folder_template and _is_unsafe_path(folder_template):
             return json_error("folder_template must be a relative path without '..' or backslashes", 400)
 
@@ -1962,7 +1963,7 @@ def create_imports_blueprint(
                 sources=sources,
                 destination=destination,
                 folder_template=folder_template,
-                file_types=body.get("file_types", "both"),
+                file_types=config_value(body, "file_types", section="ingest"),
                 recursive=body.get("recursive", True),
                 exclude_paths=body.get("exclude_paths"),
             )

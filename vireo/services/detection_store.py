@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
+from config import config_value
 
 if TYPE_CHECKING:
     import sqlite3
@@ -81,7 +82,7 @@ def get_detections(
     """
     floor: float = (
         min_conf if min_conf is not None
-        else db.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+        else config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     )
     return db.detections.get(photo_id, floor, detector_model)
 
@@ -109,7 +110,7 @@ def get_detections_for_photos(
         return {}
     floor: float = (
         min_conf if min_conf is not None
-        else db.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+        else config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     )
     return db.detections.get_for_photos(photo_ids, floor, detector_model)
 

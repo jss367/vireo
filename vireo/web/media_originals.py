@@ -22,6 +22,7 @@ from artifact_flight import (
     preview_prefetch_slots,
 )
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
+from config import config_value
 from file_replace import replace_file
 from flask import (
     Response,
@@ -447,7 +448,7 @@ class _OriginalPhotoRequest:
             self.vireo_dir, self.photo, self.recipe, self.file_state,
         )
         os.makedirs(originals_dir, exist_ok=True)
-        quality = cfg.load().get("working_copy_quality", 92)
+        quality = config_value(cfg.load(), "working_copy_quality")
         fd, tmp_path = tempfile.mkstemp(
             prefix=f".{photo_id}.", suffix=".jpg.tmp", dir=originals_dir,
         )
@@ -708,7 +709,7 @@ class _PairedRawOriginal:
         img.save(
             buf,
             format="JPEG",
-            quality=cfg.load().get("working_copy_quality", 92),
+            quality=config_value(cfg.load(), "working_copy_quality"),
         )
         img.close()
         data = buf.getvalue()

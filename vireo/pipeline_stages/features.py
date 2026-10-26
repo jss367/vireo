@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 import numpy as np
+from config import config_value
 from pipeline_locks import (
     acquire_photo_mask,
 )
@@ -358,13 +359,11 @@ class _MaskPass:
         # r3687403366). Compute them on the pre-filter ``photos``
         # list so the eligibility set covers photos we're about to
         # drop, and mirror the loop's anchor-species gate exactly.
-        self.detector_confidence = self.effective_cfg.get("detector_confidence", 0.2)
+        self.detector_confidence = config_value(self.effective_cfg, "detector_confidence")
         self.weak_rescue_enabled = self.pipeline_cfg.get(
             "weak_detection_rescue_enabled", True,
         )
-        self.weak_detection_confidence = self.pipeline_cfg.get(
-            "weak_detection_confidence", 0.12,
-        )
+        self.weak_detection_confidence = config_value(self.pipeline_cfg, "weak_detection_confidence", section="pipeline")
         self.contextual_weak_ids = self._find_contextual_weak_ids()
         self.outcomes.settings = {
             "detector_confidence": self.detector_confidence,
@@ -394,7 +393,7 @@ class _MaskPass:
                 raw_mdv6_dets,
                 detector_confidence=self.detector_confidence,
                 weak_confidence=self.weak_detection_confidence,
-                max_gap=self.pipeline_cfg.get("burst_time_gap", 3.0),
+                max_gap=config_value(self.pipeline_cfg, "burst_time_gap", section="pipeline"),
             )
             weak_scope_ids = {
                 photo_id
@@ -1785,9 +1784,7 @@ class _EyeKeypointPass:
         # which variants get downloaded — otherwise an all-low-
         # confidence collection still pays the bandwidth cost
         # for weights no photo can reach.
-        conf_gate = self.pipeline_cfg.get(
-            "eye_classifier_conf_gate", 0.5,
-        )
+        conf_gate = config_value(self.pipeline_cfg, "eye_classifier_conf_gate", section="pipeline")
         needed_models = []
         for row in self.photos:
             if (row.get("species_conf") or 0.0) < conf_gate:

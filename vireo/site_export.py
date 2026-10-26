@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryFile, mkdtemp
 
+from config import config_value
 from export import _DevelopedDirIndex, _get_photo_exif_data, load_export_image
 from site_publish import _write_json, slugify
 
@@ -210,7 +211,7 @@ def _render_snapshot(snapshot, captured, workspace_id, vireo_dir, destination,
                     img = load_export_image(
                         photo, vireo_dir, folders, recipe=record["edits"],
                         exif_data=entry["exif"], max_size=None,
-                        wc_max=options.get("working_copy_max_size", 4096),
+                        wc_max=config_value(options, "working_copy_max_size"),
                         developed_dir=options.get("developed_dir", ""),
                         developed_index=index,
                     )

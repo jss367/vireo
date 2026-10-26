@@ -4,6 +4,7 @@ import json
 import os
 
 import numpy as np
+from config import config_value
 from PIL import Image
 from subject_ranking import analysis_key, resolve_subject, source_path
 
@@ -21,7 +22,7 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     predictions = [dict(p) for p in db.subjects.visible_predictions(db.require_workspace_id(), photo_id, 0)
                    if p["detection_id"] == detection["id"]]
     prediction = next((p for p in predictions if p["status"] == "accepted"), predictions[0] if predictions else None)
-    if prediction is None or prediction["confidence"] < settings.get("eye_classifier_conf_gate", .5):
+    if prediction is None or prediction["confidence"] < config_value(settings, "eye_classifier_conf_gate", section="pipeline"):
         return result
     model = _resolve_keypoint_model(db, prediction)
     if model is None:
@@ -33,10 +34,10 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     x, y, w, h = (detection["box_" + k] for k in "xywh")
     bbox = tuple(int(round(v)) for v in (x * iw, y * ih, (x + w) * iw, (y + h) * ih))
     points = kp.detect_keypoints(image, bbox, model)
-    eyes = _eye_candidates_in_mask(points, mask, settings.get("eye_detection_conf_gate", .5))
+    eyes = _eye_candidates_in_mask(points, mask, config_value(settings, "eye_detection_conf_gate", section="pipeline"))
     result["eye_status"] = "not_located"
     if eyes:
-        eye, score = _best_eye_by_tenengrad(image, eyes, bbox, settings.get("eye_window_k", .08))
+        eye, score = _best_eye_by_tenengrad(image, eyes, bbox, config_value(settings, "eye_window_k", section="pipeline"))
         result.update(eye_x=eye["x"] / iw, eye_y=eye["y"] / ih, eye_conf=eye["conf"],
                       eye_tenengrad=score, eye_status="measured")
     return result

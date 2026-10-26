@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
+from config import config_value
 from services.photo_review import PhotoReviewService
 
 if TYPE_CHECKING:
@@ -50,9 +51,7 @@ def list_misses(
     if not photos:
         return photos
 
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     return repo.attach_miss_detections(photos, min_conf)
 
 

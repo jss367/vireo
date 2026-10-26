@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
+from config import config_value
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -101,9 +102,7 @@ def get_classifier_run_cache_hits(
     """
     if not photo_ids:
         return set()
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2,
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     return db.model_runs.get_classifier_run_cache_hits(
         photo_ids,
         classifier_model,
@@ -200,9 +199,7 @@ def get_unclassifiable_photos(
     """
     if not photo_ids:
         return set()
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2,
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     return db.model_runs.get_unclassifiable_photos(
         photo_ids,
         min_conf=min_conf,

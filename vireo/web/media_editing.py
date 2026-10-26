@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Protocol, cast
 
 from app_paths import media_root
+from config import config_value
 from flask import (
     Response,
     jsonify,
@@ -781,7 +782,7 @@ class EditingRoutes:
                     'photo_id': photo_id, 'photo': dict(photo), 'folder': dict(folder_row),
                     'vireo_dir': vireo_dir, 'recipe': recipe, 'display_recipe': display_recipe,
                     'size': size, 'apply_crop': apply_crop,
-                    'quality': cfg.load().get('preview_quality', 90),
+                    'quality': config_value(cfg.load(), "preview_quality"),
                     'clear_source_cache': self._config.get('EDIT_PREVIEW_CLEAR_SOURCE_CACHE', False),
                     'threads': self._config.get('EDIT_PREVIEW_THREADS', 2),
                 }
@@ -814,7 +815,7 @@ class EditingRoutes:
             return str(e), 400
 
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=cfg.load().get("preview_quality", 90))
+        img.save(buf, format="JPEG", quality=config_value(cfg.load(), "preview_quality"))
         img.close()
         return Response(buf.getvalue(), mimetype="image/jpeg")
 

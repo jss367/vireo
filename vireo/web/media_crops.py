@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast
 
 from app_paths import media_root
+from config import config_value
 from flask import (
     Response,
     request,
@@ -114,7 +115,7 @@ def _crop_to_detection(img: Image.Image, dets: list[Row], requested_detection: i
         det_box = suggested_crop(det_row)
     if det_box:
         iw, ih = img.size
-        padding = 0 if requested_detection is not None else cfg.load().get("detection_padding", 0.2)
+        padding = 0 if requested_detection is not None else config_value(cfg.load(), "detection_padding")
         pad_w = det_box["w"] * padding
         pad_h = det_box["h"] * padding
         x1 = max(0, int((det_box["x"] - pad_w) * iw))
@@ -231,7 +232,7 @@ class CropRoutes:
         img.thumbnail((800, 800), Image.Resampling.LANCZOS)
         import io
 
-        preview_quality = cfg.load().get("preview_quality", 90)
+        preview_quality = config_value(cfg.load(), "preview_quality")
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=preview_quality)
         buf.seek(0)
@@ -330,7 +331,7 @@ class CropRoutes:
         if mask_bytes is not None:
             crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
         buf = io.BytesIO()
-        crop.save(buf, format="JPEG", quality=effective.get("preview_quality", 90))
+        crop.save(buf, format="JPEG", quality=config_value(effective, "preview_quality"))
         response = Response(buf.getvalue(), mimetype="image/jpeg")
         response.headers.update(focus_headers(
             used, center, window, img.size, source, mask_bytes is not None,

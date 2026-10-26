@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast
 
 from app_paths import media_root
-from config import read_raw_config_file, settings_write_lock
+from config import config_value, read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, current_app, jsonify, request
 from preview_cache import lightbox_fit_preview_sizes, paired_preview_ready
@@ -881,8 +881,8 @@ def create_job_launchers_blueprint(
         body = request.get_json(silent=True) or {}
         source = body.get("source", "")
         destination = body.get("destination", "")
-        file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        file_types = config_value(body, "file_types", section="ingest")
+        folder_template = config_value(body, "folder_template", section="ingest")
         skip_duplicates = body.get("skip_duplicates", True)
         verify_by_hash = bool(body.get("verify_by_hash"))
 
@@ -1463,7 +1463,7 @@ def create_job_launchers_blueprint(
                 "grouping_window", user_cfg["grouping_window_seconds"]
             ),
             similarity_threshold=body.get(
-                "similarity_threshold", user_cfg.get("similarity_threshold", 0.85)
+                "similarity_threshold", config_value(user_cfg, "similarity_threshold")
             ),
             reclassify=body.get("reclassify", False),
         )
@@ -1574,7 +1574,7 @@ def create_job_launchers_blueprint(
         # collection branch (via get_detections) and the workspace SQL
         # below filter on this so we don't run SAM/DINO on noisy
         # below-threshold boxes — matching get_photos_missing_masks.
-        min_detector_conf = effective_cfg.get("detector_confidence", 0.2)
+        min_detector_conf = config_value(effective_cfg, "detector_confidence")
 
         work_units = runtime_warning_work_units(
             "extract-masks collection" if collection_id else "extract-masks workspace",
