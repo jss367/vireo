@@ -77,9 +77,11 @@ jobs:
       # surfaces as an intermittent ``The runner has received a shutdown
       # signal`` cancellation rather than a test failure.
       # Coverage is ratcheted to the measured 2026-10-25 baseline of production
-      # code, rounded down: 91.20% (88,464 statements, 7,789 missed) on main's
-      # Full tests run for c716a8a66, with test files and the ``vireo/testing``
-      # harness omitted in ``[tool.coverage.report]``.
+      # code: 91.20% (88,464 statements, 7,789 missed) on main's Full tests run
+      # for c716a8a66, with test files and the ``vireo/testing`` harness omitted
+      # in ``[tool.coverage.report]``. The gate sits one point below that
+      # (90), so an ordinary merge with some untested code does not turn main
+      # red; 91 would have left only ~180 statements of slack.
       # Raise this number when coverage improves; do not replace it with a low
       # evergreen floor.
       #
@@ -94,7 +96,7 @@ jobs:
         run: |
           set +e
           python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread \
-            --cov=vireo --cov=tests --cov=scripts --cov-context=test --cov-report=term-missing --cov-fail-under=91 \
+            --cov=vireo --cov=tests --cov=scripts --cov-context=test --cov-report=term-missing --cov-fail-under=90 \
             --junitxml=pytest-report.xml
           code=$?
           echo "exit-code=$code" >> "$GITHUB_OUTPUT"
