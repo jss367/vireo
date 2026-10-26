@@ -311,25 +311,52 @@ def test_invalid_card_payload_never_falls_back_to_group_expansion(app_and_db, de
     assert _statuses(db, ids) == ['pending'] * len(ids)
 
 
-def test_mid_card_failure_rolls_back_keywords_statuses_and_history(app_and_db, monkeypatch):
+@pytest.mark.parametrize('decision', ['accept', 'reject'])
+@pytest.mark.parametrize('failure', ['member', 'history'])
+def test_mid_card_failure_rolls_back_keywords_statuses_and_history(app_and_db, monkeypatch, decision, failure):
     from db import Database
 
     app, db = app_and_db
     photos, _, ids = _seed(db)
-    before = {pid: {k['id'] for k in db.photo_keywords.get_for_photo(pid)} for pid in photos}
-    real_accept = Database.accept_prediction
+    # A failed new action must also preserve the redo stack it tried to clear.
+    edit_id = db.record_edit('rating', 'prior edit', '1', [
+        {'photo_id': photos[0], 'old_value': '0', 'new_value': '1'},
+    ])
+    db.conn.execute('UPDATE edit_history SET undone=1 WHERE id=?', (edit_id,))
+    db.commit()
 
-    def accept(database, prediction_id, **kwargs):
-        if prediction_id == ids[2]:
-            raise RuntimeError('second model failed')
-        return real_accept(database, prediction_id, **kwargs)
+    def snapshot():
+        return {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY rowid')]
+                for table in ('keywords', 'photo_keywords', 'prediction_review', 'pending_changes',
+                              'edit_history', 'edit_history_items')}
 
-    monkeypatch.setattr(Database, 'accept_prediction', accept)
-    response = app.test_client().post(f'/api/predictions/{ids[0]}/accept', json=_body(db, ids))
+    before = snapshot()
+    method = 'record_edit' if failure == 'history' else (
+        'accept_prediction' if decision == 'accept' else 'update_prediction_status'
+    )
+    real_write = getattr(Database, method)
+    observations = []
+    calls = 0
+
+    def write(database, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if failure == 'member' and calls == 2:
+            raise RuntimeError('second member failed')
+        result = real_write(database, *args, **kwargs)
+        # The independent fixture connection must still see the before-state;
+        # no inner setter or history write may release the writer transaction.
+        observations.append((database.in_transaction, snapshot() == before))
+        if failure == 'history':
+            raise RuntimeError('history failed after inserting its items')
+        return result
+
+    monkeypatch.setattr(Database, method, write)
+    response = app.test_client().post(f'/api/predictions/{ids[0]}/{decision}', json=_body(db, ids))
     assert response.status_code == 500
+    assert observations and all(locked and unpublished for locked, unpublished in observations)
     assert _statuses(db, ids) == ['pending'] * len(ids)
-    assert {pid: {k['id'] for k in db.photo_keywords.get_for_photo(pid)} for pid in photos} == before
-    assert db.conn.execute('SELECT count(*) FROM edit_history').fetchone()[0] == 0
+    assert snapshot() == before
 
 
 def test_merging_uses_the_species_accept_applies_not_a_minority_frame_label(app_and_db):
