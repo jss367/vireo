@@ -188,7 +188,8 @@ def test_detail_render_scale_accounts_for_crop_and_rotation():
     """Scale = output pixels per native pixel along the long edge, using the
     long edge the recipe would render at native resolution (rotation swaps
     axes, crop shrinks them; straighten keeps dimensions)."""
-    from image_edits import detail_render_scale, normalize_recipe
+    from edit_recipe import normalize_recipe
+    from image_edits import detail_render_scale
 
     # Uncropped: 2000-wide render of an 8000-wide native photo.
     plain = normalize_recipe({"adjustments": {"sharpen": 50}})

@@ -73,10 +73,13 @@ ROOT_PACKAGE = "vireo"
 # import above foundation. Add a module here only when that holds; the test
 # reports any import it makes above foundation as an upward edge.
 FOUNDATION = frozenset({
+    "catalog_stamps",
     "compare",
     "config_schema",
     "detection_id",
     "duplicates",
+    "edit_batch",
+    "edit_recipe",
     "keyword_normalization",
     "process_strategies",
     "species_identity",

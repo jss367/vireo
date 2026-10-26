@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from metadata import EXIF_SUMMARY_COLUMNS
+from canonical_schema import EXIF_SUMMARY_COLUMNS
 from preview_cache import (
     catalog_masks_directory,
     cleanup_cached_files_for_deleted_photos,

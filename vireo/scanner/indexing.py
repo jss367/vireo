@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from canonical_schema import EXIF_SUMMARY_COLUMNS
 from image_loader import RAW_EXTENSIONS
-from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns
+from metadata import exif_summary_columns
 from PIL import Image
 from preview_cache import (
     RecycledIdIndex,

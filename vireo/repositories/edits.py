@@ -47,7 +47,7 @@ class EditsRepository:
         if not row:
             return None
         try:
-            from image_edits import copy_recipe
+            from edit_recipe import copy_recipe
             return copy_recipe(row["recipe_json"])
         except Exception:
             log.warning("Invalid stored edit recipe for photo %s", photo_id, exc_info=True)
@@ -65,7 +65,7 @@ class EditsRepository:
         if not photo_ids:
             return {}
         out = {}
-        from image_edits import copy_recipe
+        from edit_recipe import copy_recipe
         for chunk in self._chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
@@ -90,7 +90,7 @@ class EditsRepository:
         self, photo_id: int, recipe: Mapping[str, Any] | str | None, _commit: bool = True,
     ) -> dict[str, Any] | None:
         """Set or clear a photo's edit recipe; see ``Database.set_photo_edit_recipe``."""
-        from image_edits import copy_recipe, recipe_to_json
+        from edit_recipe import copy_recipe, recipe_to_json
         recipe_json = recipe_to_json(recipe)
         if recipe_json is None:
             self.conn.execute(
@@ -183,11 +183,7 @@ class EditsRepository:
         effective adjustment; explicit fields may store neutral resets.
         Returns the stored preset dict.
         """
-        from image_edits import (
-            RecipeError,
-            normalize_recipe,
-            recipe_to_json,
-        )
+        from edit_recipe import RecipeError, normalize_recipe, recipe_to_json
 
         if not isinstance(name, str) or not name.strip():
             raise ValueError("preset name must not be blank")

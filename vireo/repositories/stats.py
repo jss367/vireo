@@ -23,7 +23,7 @@ per access, see ``Database.stats``); there are no forwarding wrappers on
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
 
-from keyword_identity import identity_sql
+from repositories.keyword_identity_sql import identity_sql
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 
 
@@ -784,7 +784,7 @@ class StatsRepository:
     ):
         """Count done-looking masks whose prompt no longer matches the primary."""
         ws = self.workspace_id_fn()
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
                 FROM photo_masks pm
@@ -825,7 +825,7 @@ class StatsRepository:
 
     def count_eye_keypoint_eligible(self, min_conf, scope_sql, scope_params):
         """Count photos eligible for the eye-keypoint stage."""
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
@@ -861,8 +861,8 @@ class StatsRepository:
 
     def count_eye_keypoint_stale(self, min_conf, scope_sql, scope_params):
         """Count eligible photos stamped under a non-current eye fingerprint."""
-        from pipeline import EYE_KP_FINGERPRINT_VERSION
-        from subjects import primary_order_sql
+        from catalog_stamps import EYE_KP_FINGERPRINT_VERSION
+        from repositories.subject_order import primary_order_sql
         ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
@@ -903,7 +903,7 @@ class StatsRepository:
         self, min_species_conf, min_conf, scope_sql, scope_params,
     ):
         """Count photos whose winning prediction the eye stage would attempt."""
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         ws = self.workspace_id_fn()
         # Window function pins the same per-photo prediction the stage
         # would pick (taxonomy-present first, then detector_conf desc,

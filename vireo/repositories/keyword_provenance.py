@@ -70,13 +70,13 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-from keyword_identity import (
+from keyword_normalization import keyword_match_key, normalize_keyword_display
+from repositories.identity_alternatives import retarget_candidate_names
+from repositories.keyword_identity_sql import (
     embedded_keyword_associations_for_merge,
     free_sibling_name,
     keywords_claim_different_taxa,
 )
-from keyword_normalization import keyword_match_key, normalize_keyword_display
-from repositories.identity_alternatives import retarget_candidate_names
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 
 log = logging.getLogger(__name__)

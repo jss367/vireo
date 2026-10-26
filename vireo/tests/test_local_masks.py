@@ -421,7 +421,7 @@ def test_gc_rechecks_mtime_before_deleting(tmp_path, monkeypatch):
 
 
 def test_brush_correction_is_immutable_and_keeps_source_staleness(tmp_path):
-    from image_edits import normalize_recipe
+    from edit_recipe import normalize_recipe
 
     path = _write_mask(str(tmp_path / 'source.png'))
     row = _mask_row(path)

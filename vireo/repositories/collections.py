@@ -37,8 +37,8 @@ import math
 import re
 import sqlite3
 
-from keyword_identity import identity_sql
 from repositories import UNSET
+from repositories.keyword_identity_sql import identity_sql
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked

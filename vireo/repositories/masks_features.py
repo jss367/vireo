@@ -227,7 +227,7 @@ class MasksFeaturesRepository:
         # sharing this photo runs with a different floor), so checking
         # the mask's prompt against the cached state would reject a
         # mask that extraction just produced from the current primary.
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         detector_filter = ""
         if weak_rescue_min_conf is not None:
             # Only the pipeline's validated contextual rescue may lower the
@@ -345,7 +345,7 @@ class MasksFeaturesRepository:
         secondary or now-hidden detection is stale even if its row remains
         cached for later reuse.
         """
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         if detector_confidence is None:
             conf_pred = ""
             params = ()
@@ -687,11 +687,11 @@ class MasksFeaturesRepository:
         Rows (``id``, ``folder_id``, ``filename``, ``detector_model``, the
         box and ``detector_confidence``) for each non-``full-image``
         detection at or above ``min_conf``, ordered by photo id and then
-        ``subjects.primary_order_sql`` so a photo's first row is its primary.
+        ``repositories.subject_order.primary_order_sql`` so a photo's first row is its primary.
         Unlike ``photos_missing_masks`` it keeps photos that already have a
         mask; the Extract Masks job decides per photo whether one is current.
         """
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         return self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename,
                       d.detector_model,
@@ -713,7 +713,7 @@ class MasksFeaturesRepository:
 
         ``min_conf`` is the workspace detector floor, resolved by the façade.
         """
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         ws_id = self.workspace_id
         if folder_ids:
             # Detections are global post-refactor, so folder filtering alone
@@ -780,7 +780,7 @@ class MasksFeaturesRepository:
         (photo scope) and ``eye_kp_fingerprint_version`` (the pipeline's
         current keypoint fingerprint) are resolved by the façade.
         """
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         ws_id = self.workspace_id
         # Resolve the effective primary the same way mask extraction and
         # ``set_active_mask_variant`` do: the top-ordered non-full-image

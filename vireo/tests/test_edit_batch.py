@@ -2,7 +2,7 @@
 
 import pytest
 from edit_batch import compose_recipe, decode_preset, encode_preset
-from image_edits import RecipeError
+from edit_recipe import RecipeError
 from services import photo_ingest, workspace_folders
 
 

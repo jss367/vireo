@@ -22,6 +22,20 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # so a fresh database has nothing to migrate.
 SCHEMA_VERSION = 29
 
+# Promoted EXIF summary columns in the ``photos`` table — the canonical
+# list the scanner uses to clear absent fields on rescan (a metadata write
+# that omits a column should reset it to NULL, not leave the stale value
+# behind). ``metadata.exif_summary_columns`` produces exactly these keys.
+EXIF_SUMMARY_COLUMNS = (
+    "camera_make",
+    "camera_model",
+    "lens",
+    "focal_length",
+    "aperture",
+    "shutter_speed",
+    "iso",
+)
+
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
 # markers, the species-identity repair audit and the common-name lookup

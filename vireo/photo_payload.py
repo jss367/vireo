@@ -36,7 +36,8 @@ def render_key_for_recipe(recipe):
     URL bare -- correct, because an unedited photo's thumbnail is the same
     image it has always been.
     """
-    from image_edits import EDIT_MATH_VERSION, RecipeError, recipe_to_json
+    from edit_recipe import RecipeError, recipe_to_json
+    from image_edits import EDIT_MATH_VERSION
 
     try:
         canonical = recipe_to_json(recipe)

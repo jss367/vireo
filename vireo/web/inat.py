@@ -754,12 +754,9 @@ def create_inat_blueprint(
         if not recipe:
             return fallback_path, None
 
-        from image_edits import EDIT_MATH_VERSION, recipe_to_json
-        from image_loader import (
-            RAW_DECODE_LINEAR,
-            RAW_EXTENSIONS,
-            load_image,
-        )
+        from edit_recipe import recipe_to_json
+        from image_edits import EDIT_MATH_VERSION
+        from image_loader import RAW_DECODE_LINEAR, RAW_EXTENSIONS, load_image
 
         source_path, using_working_copy = _inat_edit_recipe_source(
             photo, recipe, fallback_path,

@@ -360,7 +360,7 @@ class DetectionsRepository:
             params.append(detector_model)
         # The same ordering drives masks, crop previews, and bulk payloads:
         # manual choice, subject quality, then confidence and stable ID.
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         q += " ORDER BY " + primary_order_sql()
         return self.conn.execute(q, params).fetchall()
 
@@ -385,7 +385,7 @@ class DetectionsRepository:
             if detector_model is not None:
                 q += " AND detector_model = ?"
                 params.append(detector_model)
-            from subjects import primary_order_sql
+            from repositories.subject_order import primary_order_sql
             q += " ORDER BY photo_id, " + primary_order_sql()
             rows = self.conn.execute(q, params).fetchall()
             for r in rows:
@@ -586,7 +586,7 @@ class DetectionsRepository:
         """The animal, non-full-image detections of ``photo_ids`` (one chunk),
         each photo's rows primary first: ``photo_id``, the box and
         ``detector_confidence``. No confidence floor; callers apply one."""
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
 
         placeholders = ",".join("?" * len(photo_ids))
         return self.conn.execute(

@@ -8,7 +8,8 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import image_edits
-from image_edits import RecipeError, apply_recipe, normalize_recipe, recipe_to_json
+from edit_recipe import RecipeError, normalize_recipe, recipe_to_json
+from image_edits import apply_recipe
 
 
 def test_normalize_recipe_drops_noop():

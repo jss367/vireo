@@ -125,7 +125,7 @@ def _compose_bulk_targets(
     ``items`` are the history entries for photos whose recipe changes.
     """
     from edit_batch import compose_recipe
-    from image_edits import RecipeError, normalize_recipe, recipe_to_json
+    from edit_recipe import RecipeError, normalize_recipe, recipe_to_json
 
     items: list[JsonDict] = []
     applied: list[int] = []
@@ -261,7 +261,7 @@ def create_photo_edit_recipes_blueprint(
         photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
-        from image_edits import RecipeError, normalize_recipe, recipe_to_json
+        from edit_recipe import RecipeError, normalize_recipe, recipe_to_json
         try:
             normalized = normalize_recipe(recipe)
         except RecipeError as e:
@@ -308,7 +308,7 @@ def create_photo_edit_recipes_blueprint(
         photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
-        from image_edits import recipe_to_json
+        from edit_recipe import recipe_to_json
         old_recipe = db.get_photo_edit_recipe(photo_id)
         old_value = recipe_to_json(old_recipe) or ""
         try:
@@ -350,7 +350,7 @@ def create_photo_edit_recipes_blueprint(
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe/compose", methods=["POST"])
     def api_compose_photo_edit_recipe(photo_id: int) -> ResponseReturnValue:
         from edit_batch import compose_recipe
-        from image_edits import normalize_recipe
+        from edit_recipe import normalize_recipe
 
         db = get_db()
         photo = db.photos.get(photo_id, verify_workspace=True)
@@ -409,7 +409,7 @@ def create_photo_edit_recipes_blueprint(
         if ids is None:
             return json_error("photo_ids must be integers")
 
-        from image_edits import RecipeError, recipe_to_json
+        from edit_recipe import RecipeError, recipe_to_json
 
         # Validate the incoming recipe once up front so a bad payload fails
         # cleanly before we touch any rows.
@@ -477,7 +477,7 @@ def create_photo_edit_recipes_blueprint(
         limit = min(max(1, request.args.get("limit", 50, type=int)), 200)
         rows = db.edit_history.recipe_history_for_photo(photo_id, limit)
 
-        from image_edits import copy_recipe
+        from edit_recipe import copy_recipe
 
         def decode_recipe(value: str) -> dict[str, int] | None:
             if value is None:

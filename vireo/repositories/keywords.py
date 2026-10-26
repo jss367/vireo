@@ -70,8 +70,8 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-from keyword_identity import identity_sql
 from keyword_normalization import normalize_keyword_display
+from repositories.keyword_identity_sql import identity_sql
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (

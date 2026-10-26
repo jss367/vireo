@@ -690,7 +690,7 @@ class FolderRepository:
                 # clause folds provenance when both rows carried the keyword
                 # so a hand-added manual tag on the survivor cannot be
                 # silently downgraded to an unknown by the import's stamp.
-                from keyword_identity import embedded_keyword_associations_for_merge
+                from repositories.keyword_identity_sql import embedded_keyword_associations_for_merge
 
                 for keyword in embedded_keyword_associations_for_merge(
                         self.conn, photo["id"], existing["id"]):

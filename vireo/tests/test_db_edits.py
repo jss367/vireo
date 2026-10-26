@@ -16,7 +16,7 @@ import textwrap
 
 import pytest
 from db import Database
-from image_edits import RecipeError
+from edit_recipe import RecipeError
 from repositories.edits import EditsRepository
 from services import photo_ingest, workspace_folders
 

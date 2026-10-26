@@ -13,8 +13,8 @@ from collections.abc import Callable, Collection, Iterator
 from functools import partial
 from typing import Any
 
-from keyword_identity import identity_sql
 from keyword_normalization import keyword_match_key
+from repositories.keyword_identity_sql import identity_sql
 from repositories.species_taxon_lookup import lookup_taxon_id as lookup_species_taxon_id
 from repositories.sync import SyncRepository
 from sql_chunks import chunked

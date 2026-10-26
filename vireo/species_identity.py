@@ -104,7 +104,7 @@ class SpeciesResolver:
         self._common_names_verified = False
         self._ambiguous_common = set()
         if db is not None:
-            from taxonomy import COMMON_NAME_IDENTITY_VERSION
+            from catalog_stamps import COMMON_NAME_IDENTITY_VERSION
             self._common_names_verified = db.meta.get("common_name_identity_version") == str(COMMON_NAME_IDENTITY_VERSION)
             self._ambiguous_common = set(json.loads(db.meta.get("ambiguous_common_names") or "[]"))
 
