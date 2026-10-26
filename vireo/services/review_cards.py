@@ -4,6 +4,8 @@ The listing keeps its prediction rows for Browse and per-model filtering. A
 card_id links overlapping burst groups without changing stored group identity.
 The browser submits the visible members; decisions revalidate them under the
 existing writer lock, never expanding beyond the submitted selection.
+The caller holds legacy setters' commits until the complete decision and
+its history have succeeded, then commits the writer transaction once.
 """
 
 from __future__ import annotations
@@ -129,7 +131,7 @@ def accept_review_card(db: Database, rows: list[JsonDict]) -> JsonDict:
     for row in rows:
         if row['id'] in accepted:
             continue
-        result = db.accept_prediction(row['id'], prediction_ids=ids, _commit=False)
+        result = db.accept_prediction(row['id'], prediction_ids=ids)
         if result is None:
             raise ReviewCardConflict('A reviewed prediction disappeared. Reload Review.')
         accepted.update(result['accepted_prediction_ids'])
@@ -144,7 +146,7 @@ def accept_review_card(db: Database, rows: list[JsonDict]) -> JsonDict:
         meta['prior_statuses'] = prior_by_photo.get(photo_id, {})
         items.append({'photo_id': photo_id, 'old_value': json.dumps(meta), 'new_value': str(keyword_id)})
     db.record_edit('prediction_accept', f'Accepted Review card: "{species}"', None,
-                   items, is_batch=len(items) > 1, _commit=False)
+                   items, is_batch=len(items) > 1)
     return {'ok': True, 'prediction_ids': sorted(accepted), 'photo_ids': sorted(set(photo_by_id.values()))}
 
 
@@ -161,12 +163,12 @@ def reject_review_card(db: Database, rows: list[JsonDict]) -> JsonDict:
     for photo_id, targets in by_photo.items():
         def apply(target_ids: set[int] = targets) -> None:
             for prediction_id in target_ids:
-                db.update_prediction_status(prediction_id, 'rejected', _commit=False)
+                db.update_prediction_status(prediction_id, 'rejected')
 
         item = prediction_status_item(db, photo_id, sorted(targets), apply)
         if item is not None:
             items.append(item)
     db.record_edit('prediction_status', f'Rejected Review card: "{rows[0]["consensus_species"]}"',
-                   'rejected', items, is_batch=len(items) > 1, _commit=False)
+                   'rejected', items, is_batch=len(items) > 1)
     return {'ok': True, 'rejected_prediction_ids': sorted({pid for ids in by_photo.values() for pid in ids}),
             'photo_ids': sorted(by_photo)}

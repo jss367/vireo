@@ -1674,8 +1674,11 @@ def create_predictions_blueprint(
         except ReviewCardConflict as exc:
             db.rollback()
             return json_error(str(exc), 409)
-        result = accept_review_card(db, rows) if decision == 'accept' else reject_review_card(db, rows)
-        db.commit()
+        # Legacy setters still commit internally. Hold those commits under
+        # the decision's existing writer lock until every member and its
+        # history have succeeded; a partial failure rolls everything back.
+        with db._commits_held():
+            result = accept_review_card(db, rows) if decision == 'accept' else reject_review_card(db, rows)
         return jsonify(result)
 
     @blueprint.route("/api/predictions/<int:pred_id>/accept", methods=["POST"])
