@@ -46,7 +46,7 @@ from .paths import (
     normalize_destination_name,
     resolve_folder_dest,
 )
-from .photos import _is_same_directory, _xmp_path, move_photos
+from .photos import _is_same_directory, move_photos
 from .remote import (
     _BUNDLED_RSYNC_CANDIDATES,
     _platform_rsync_candidates,
@@ -106,7 +106,6 @@ __all__ = [
     "_ssh_rsh_string",
     "_tracked_destination_ancestor",
     "_tracked_destination_overlap",
-    "_xmp_path",
     "build_remote_move_spec",
     "folder_date_move_photo_ids",
     "is_gnu_rsync",

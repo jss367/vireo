@@ -10,6 +10,12 @@ from image_loader import (
     safe_scan_walk,
 )
 from services import missing_originals
+from sidecar_identity import (
+    is_sidecar_name,
+    owner_keys,
+    sidecar_has_owner,
+    sidecar_owner_key,
+)
 from xmp import read_keyword_snapshot, sidecar_read_problem
 
 log = logging.getLogger(__name__)
@@ -323,60 +329,18 @@ def check_stray_sidecars(root_paths):
                 # Matches the os.path.isfile guard in check_untracked_files.
                 if not os.path.isfile(os.path.join(dirpath, name)):
                     continue
-                stem, ext = os.path.splitext(name)
-                if ext.lower() == ".xmp":
+                if is_sidecar_name(name):
                     xmps.append(name)
                 else:
-                    # Both forms so "bird.xmp" and "bird.jpg.xmp" match
-                    image_names.add(name.lower())
-                    image_names.add(stem.lower())
+                    image_names.update(owner_keys(name))
             for x in xmps:
-                base = os.path.splitext(x)[0].lower()
-                if base not in image_names:
+                if sidecar_owner_key(x) not in image_names:
                     strays.append(
                         {"path": os.path.join(dirpath, x), "folder": dirpath}
                     )
 
     log.info("Stray sidecar check: %d stray sidecars found", len(strays))
     return strays
-
-
-def _sidecar_has_image(xmp_path):
-    """True if any non-sidecar file next to ``xmp_path`` matches its base name.
-
-    Mirrors ``check_stray_sidecars``: any extension counts, so a sidecar
-    beside a format Vireo does not import is never treated as a stray. A
-    directory that cannot be listed counts as matched, so an unreadable
-    folder never makes a sidecar look deletable. Directory entries whose
-    name matches the sidecar's stem do *not* count: ``check_stray_sidecars``
-    excludes them via ``os.path.isfile`` (a sibling directory named
-    ``ghost`` beside ``ghost.xmp`` reports the sidecar as stray), so the
-    delete-time recheck must apply the same rule or that stray becomes
-    permanently undeletable.
-
-    Hidden names (leading ``.``) are *not* skipped here even though
-    ``check_stray_sidecars`` ignores them: the delete route accepts
-    client-supplied paths, so ``.bird.jpg.xmp`` beside its hidden owner
-    ``.bird.jpg`` would otherwise slip past the recheck and land in Trash.
-    The recheck's job is a conservative safety gate, so a hidden owner
-    still counts.
-    """
-    dirpath = os.path.dirname(xmp_path)
-    base = os.path.splitext(os.path.basename(xmp_path))[0].lower()
-    try:
-        names = os.listdir(dirpath)
-    except OSError:
-        return True
-    for name in names:
-        stem, ext = os.path.splitext(name)
-        if ext.lower() == ".xmp":
-            continue
-        if name.lower() != base and stem.lower() != base:
-            continue
-        if not os.path.isfile(os.path.join(dirpath, name)):
-            continue
-        return True
-    return False
 
 
 def _is_under_roots(path, real_roots):
@@ -415,7 +379,7 @@ def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
     real_roots = [os.path.realpath(r) for r in allowed_roots]
     targets = []
     for p in paths:
-        if not isinstance(p, str) or os.path.splitext(p)[1].lower() != ".xmp":
+        if not isinstance(p, str) or not is_sidecar_name(p):
             continue
         if not _is_under_roots(p, real_roots):
             log.warning(
@@ -424,7 +388,10 @@ def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
             continue
         if not os.path.isfile(p):
             continue
-        if _sidecar_has_image(p):
+        # Same ownership rule as check_stray_sidecars, except that hidden
+        # owners count: the paths are client-supplied, so ``.bird.jpg.xmp``
+        # beside a hidden ``.bird.jpg`` must not slip into the Trash.
+        if sidecar_has_owner(p):
             continue
         targets.append(p)
     targets = list(dict.fromkeys(targets))
