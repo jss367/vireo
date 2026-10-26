@@ -188,3 +188,98 @@ def test_missing_unicode_names_use_actual_directory_lookups(db, sidecars, differ
     db._flip_pending_keyword_change(photos[0], 'Robin', 'keyword_add', 'keyword_remove')
     own = [row['change_type'] for row in db.pending_changes.list_all() if row['photo_id'] == photos[0]]
     assert own == (['keyword_remove'] if shared else [])
+
+
+# -- discovery and deletion of a photo's existing sidecars ---------------------
+
+
+def _write(path, text='<x/>'):
+    path.write_text(text)
+    return path
+
+
+def test_photo_sidecars_lists_both_naming_styles_once(tmp_path):
+    from sidecar_identity import photo_sidecars, stem_sidecar
+
+    photo = tmp_path / 'IMG_1.CR3'
+    stem_style = _write(tmp_path / 'IMG_1.XMP')
+    full_style = _write(tmp_path / 'IMG_1.CR3.xmp')
+
+    found = photo_sidecars(str(photo))
+
+    # A case-folding directory answers the ``.xmp`` probe for ``IMG_1.XMP``;
+    # each file is still listed exactly once.
+    assert len(found) == 2
+    assert os.path.samefile(found[0], stem_style)
+    assert os.path.samefile(found[1], full_style)
+    assert os.path.samefile(stem_sidecar(str(photo)), stem_style)
+    assert stem_sidecar(str(tmp_path / 'other.jpg')) is None
+
+
+def test_photo_sidecars_keep_case_variants_apart_in_case_sensitive_directory(tmp_path):
+    from sidecar_identity import photo_sidecars, stem_sidecar
+
+    _write(tmp_path / 'IMG_1.xmp', 'lower')
+    if directory_folds_case(str(tmp_path)):
+        pytest.skip('case-folding directory: IMG_1.XMP is IMG_1.xmp')
+    _write(tmp_path / 'IMG_1.XMP', 'upper')
+
+    found = photo_sidecars(str(tmp_path / 'IMG_1.jpg'))
+
+    assert [os.path.basename(p) for p in found] == ['IMG_1.xmp', 'IMG_1.XMP']
+    assert os.path.basename(stem_sidecar(str(tmp_path / 'IMG_1.jpg'))) == 'IMG_1.xmp'
+
+
+def test_delete_orphaned_sidecars_keeps_sidecar_another_file_owns(tmp_path):
+    from sidecar_identity import delete_orphaned_sidecars
+
+    # The RAW is gone; its JPEG twin survives and shares IMG_1.xmp.
+    (tmp_path / 'IMG_1.JPG').write_bytes(b'jpeg')
+    shared = _write(tmp_path / 'IMG_1.xmp')
+    own = _write(tmp_path / 'IMG_1.CR3.xmp')
+    # A second missing photo whose sidecar nothing else owns.
+    lone = _write(tmp_path / 'IMG_2.XMP')
+
+    cleaned, skipped = delete_orphaned_sidecars([
+        str(tmp_path / 'IMG_1.CR3'),
+        str(tmp_path / 'IMG_2.CR3'),
+        str(tmp_path / 'IMG_3.CR3'),  # no sidecar at all
+    ])
+
+    assert (cleaned, skipped) == (2, 1)
+    assert shared.exists()
+    assert not own.exists()
+    assert not lone.exists()
+
+
+def test_delete_orphaned_sidecars_treats_restored_original_as_owner(tmp_path):
+    from sidecar_identity import delete_orphaned_sidecars
+
+    (tmp_path / 'bird.jpg').write_bytes(b'jpeg')
+    sidecar = _write(tmp_path / 'bird.xmp')
+
+    assert delete_orphaned_sidecars([str(tmp_path / 'bird.jpg')]) == (0, 1)
+    assert sidecar.exists()
+
+
+def test_delete_orphaned_sidecars_deletes_nothing_in_unlistable_directory(tmp_path, monkeypatch):
+    import sidecar_identity
+
+    sidecar = _write(tmp_path / 'ghost.xmp')
+
+    def fail(_path):
+        raise PermissionError('denied')
+
+    monkeypatch.setattr(sidecar_identity.os, 'scandir', fail)
+
+    assert sidecar_identity.delete_orphaned_sidecars([str(tmp_path / 'ghost.NEF')]) == (0, 1)
+    assert sidecar.exists()
+
+
+def test_directory_named_like_the_owner_does_not_own_sidecar(tmp_path):
+    from sidecar_identity import sidecar_has_owner
+
+    (tmp_path / 'ghost').mkdir()
+    sidecar = _write(tmp_path / 'ghost.xmp')
+
+    assert not sidecar_has_owner(str(sidecar))

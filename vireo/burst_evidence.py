@@ -38,6 +38,7 @@ from best_batch import (
     build_best_batch_response,
     limit_batch_rows,
 )
+from config import config_value
 from scoring import DEFAULTS as SCORING_DEFAULTS
 from scoring import _normalize_scoring_config
 
@@ -326,7 +327,7 @@ def _attach_evidence(card, evidence, focus_size):
 def _scoring_settings(effective_cfg, margin):
     settings = {**SCORING_DEFAULTS, **_normalize_scoring_config(effective_cfg)}
     try:
-        min_conf = float(effective_cfg.get("detector_confidence", 0.2))
+        min_conf = float(config_value(effective_cfg, "detector_confidence"))
     except (TypeError, ValueError):
         min_conf = 0.2
     return {

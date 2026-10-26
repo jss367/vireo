@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from config import _deep_merge
+from config import _deep_merge, config_value
 from db import normalize_browse_stack_config
 
 if TYPE_CHECKING:
@@ -53,7 +53,7 @@ def min_detector_confidence_across_workspaces(db: Database, global_config: JsonD
     view: a mask is only considered globally stale when **no**
     workspace would still consider it fresh.
     """
-    default = global_config.get("detector_confidence", 0.2)
+    default = config_value(global_config, "detector_confidence")
     try:
         default = float(default)
     except (TypeError, ValueError):

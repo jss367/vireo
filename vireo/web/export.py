@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import config as cfg
 from app_paths import media_root
-from config import read_raw_config_file, settings_write_lock
+from config import config_value, read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
 from highlights_payload import HighlightsQuery, build_highlights_payload, build_life_list_payload
@@ -288,9 +288,7 @@ def create_export_blueprint(
                     "export_to_subfolder": export_to_subfolder,
                     "subfolder_name": subfolder_name,
                     "max_size": max_size,
-                    "working_copy_max_size": effective_cfg.get(
-                        "working_copy_max_size", 4096,
-                    ),
+                    "working_copy_max_size": config_value(effective_cfg, "working_copy_max_size"),
                     "vireo_dir": vireo_dir,
                     "developed_dir": (
                         effective_cfg.get("darktable_output_dir", "") or ""
@@ -370,7 +368,7 @@ def create_export_blueprint(
             return json_error("no exportable photos in current workspace")
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
-        wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
+        wc_max_size = config_value(effective_cfg, "working_copy_max_size")
         # Pass the configured darktable output dir so export prefers the
         # perfected render over a fresh libraw decode of the RAW.
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
@@ -596,7 +594,7 @@ def create_export_blueprint(
         db = get_db()
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
-        wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
+        wc_max_size = config_value(effective_cfg, "working_copy_max_size")
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
         def work(job: JobDict) -> JsonDict:
@@ -703,7 +701,7 @@ def create_export_blueprint(
                     resolve_visual=resolve_visual,
                     options={
                         "include_locations": include_locations,
-                        "working_copy_max_size": effective.get("working_copy_max_size", 4096),
+                        "working_copy_max_size": config_value(effective, "working_copy_max_size"),
                         "developed_dir": effective.get("darktable_output_dir", "") or "",
                     },
                     progress_cb=progress,

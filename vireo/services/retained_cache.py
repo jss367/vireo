@@ -17,6 +17,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 from app_paths import media_root
+from config import config_value
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -253,8 +254,8 @@ def cleanup(config: _Config, source_folders: Iterable[str], *, family: str | Non
     if family in PRESERVED_FAMILIES:
         raise ValueError("External editor files may contain unique edits. Save a separate copy before removing them manually.")
     now = time.time() if now is None else now
-    max_bytes = int(config.get("retained_cache_max_mb", 10240)) * 1024**2
-    age_days = int(config.get("retained_cache_max_age_days", 30))
+    max_bytes = int(config_value(config, "retained_cache_max_mb")) * 1024**2
+    age_days = int(config_value(config, "retained_cache_max_age_days"))
     selected = roots(config)
     source_folders = [os.path.normcase(os.path.realpath(path)) for path in source_folders if path]
     candidates = []

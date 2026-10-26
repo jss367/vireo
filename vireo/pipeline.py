@@ -19,6 +19,7 @@ from collections import defaultdict
 from contextlib import suppress
 
 import numpy as np
+from config import config_value
 from file_replace import replace_file
 from repositories.masks_features import PipelineFeatures
 from services import dashboard_stats, detection_store, stage_counts, subject_masks
@@ -289,14 +290,12 @@ class _FeatureLoad:
         else:
             effective_cfg = effective_config
         self.effective_cfg = effective_cfg
-        self.min_conf = effective_cfg.get("detector_confidence", 0.2)
+        self.min_conf = config_value(effective_cfg, "detector_confidence")
         self.pipeline_cfg = effective_cfg.get("pipeline", {})
         self.weak_rescue_enabled = self.pipeline_cfg.get(
             "weak_detection_rescue_enabled", True,
         )
-        self.weak_confidence = self.pipeline_cfg.get(
-            "weak_detection_confidence", 0.12,
-        )
+        self.weak_confidence = config_value(self.pipeline_cfg, "weak_detection_confidence", section="pipeline")
         self.photo_ids_for_dets = [row["id"] for row in self.rows]
 
     def find_weak_runs(self):
@@ -322,7 +321,7 @@ class _FeatureLoad:
                 self.raw_mdv6_dets,
                 detector_confidence=self.min_conf,
                 weak_confidence=self.weak_confidence,
-                max_gap=self.pipeline_cfg.get("burst_time_gap", 3.0),
+                max_gap=config_value(self.pipeline_cfg, "burst_time_gap", section="pipeline"),
             )
             self.weak_candidate_ids = {
                 photo_id
@@ -418,7 +417,7 @@ class _FeatureLoad:
         pred_rows = self._query_predictions()
 
         # Group predictions by photo_id, keep top K
-        top_k = (self.config or {}).get("top_k_predictions", 5)
+        top_k = config_value(self.config, "top_k_predictions")
         from species_identity import SpeciesResolver
         species_resolver = SpeciesResolver(db=self.db)
         species_by_photo = self.species_by_photo = defaultdict(list)
@@ -446,7 +445,7 @@ class _FeatureLoad:
         from encounter_continuity import apply_encounter_continuity, evidence_photo_ids
         from species_identity import SpeciesResolver
 
-        config = {**self.effective_cfg, "top_k_predictions": (self.config or {}).get("top_k_predictions", 5)}
+        config = {**self.effective_cfg, "top_k_predictions": config_value(self.config, "top_k_predictions")}
         ids = evidence_photo_ids(photos, config)
         if not ids:
             return photos
@@ -622,7 +621,7 @@ class _FeatureLoad:
 
         resolver = SpeciesResolver(db=self.db)
         fallback = defaultdict(list)
-        top_k = (self.config or {}).get("top_k_predictions", 5)
+        top_k = config_value(self.config, "top_k_predictions")
         for pr in self._query_predictions(full_image_only=True):
             pid = pr['photo_id']
             if pid not in self.detected_photo_ids or pid in self.mdv6_passing_photo_ids:
@@ -653,7 +652,7 @@ class _FeatureLoad:
         for run in matching_full_image_runs(
             self.rows, raw, self.species_by_photo, fallback,
             detector_confidence=self.min_conf,
-            max_gap=self.pipeline_cfg.get('burst_time_gap', 3.0),
+            max_gap=config_value(self.pipeline_cfg, "burst_time_gap", section="pipeline"),
             config=self.pipeline_cfg,
         ):
             for pid in run['photo_ids']:
@@ -676,9 +675,7 @@ class _FeatureLoad:
         if self.weak_runs:
             from weak_detections import matching_anchor_species
 
-            species_floor = self.effective_cfg.get(
-                "classification_threshold", 0.4,
-            )
+            species_floor = config_value(self.effective_cfg, "classification_threshold")
             for run in self.weak_runs:
                 context = matching_anchor_species(
                     run,
@@ -1973,9 +1970,7 @@ def _count_stage_targets(db):
     import config as cfg
 
     ws = db.require_workspace_id()
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     detected = db.pipeline_features.count_detected_photos(ws, min_conf)
 
     return {"detected": detected}
@@ -1991,9 +1986,7 @@ def _count_usable_embeddings(db, expected_variant, detected_only=False):
     detection_min_conf = None
     if detected_only:
         import config as cfg
-        detection_min_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        detection_min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     features = db.pipeline_features
 
     if expected_variant is None:
@@ -2026,9 +2019,7 @@ def _count_eye_keypoint_attempts(db):
     import config as cfg
 
     ws = db.require_workspace_id()
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     return db.pipeline_features.count_eye_keypoint_attempts(
         ws, min_conf, EYE_KP_FINGERPRINT_VERSION,
     )
@@ -2057,7 +2048,7 @@ def _eye_keypoint_readiness_counts(db, total):
     # reads the same key off the pipeline sub-dict before invoking the
     # eye stage.
     pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
-    eye_conf_gate = pipeline_cfg.get("eye_classifier_conf_gate", 0.5)
+    eye_conf_gate = config_value(pipeline_cfg, "eye_classifier_conf_gate", section="pipeline")
     eye_detect_enabled = bool(pipeline_cfg.get("eye_detect_enabled", False))
     eye_target = (
         stage_counts.count_eye_keypoint_attemptable(db, eye_conf_gate) if total else 0
@@ -2373,9 +2364,7 @@ def _current_primary_mask_for_eye(db, row, iw, ih):
     # the expensive keypoint inference on every run until another
     # operation refreshed the state.
     import config as cfg
-    min_conf = db.get_effective_config(cfg.load()).get(
-        "detector_confidence", 0.2
-    )
+    min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     selected = db.pipeline_features.effective_primary_box(row["id"], min_conf)
     # ``selected is None`` when a concurrent reclassify removed every
     # detection, or a workspace raised its confidence floor above all of
@@ -2595,9 +2584,9 @@ def detect_eye_keypoints_stage(
         log.info("Eye-keypoint stage skipped: %s", skip_reason)
         return
 
-    C = config.get("eye_classifier_conf_gate", 0.5)
-    T = config.get("eye_detection_conf_gate", 0.5)
-    k_window = config.get("eye_window_k", 0.08)
+    C = config_value(config, "eye_classifier_conf_gate", section="pipeline")
+    T = config_value(config, "eye_detection_conf_gate", section="pipeline")
+    k_window = config_value(config, "eye_window_k", section="pipeline")
 
     photos = _eye_keypoint_stage_photos(db, collection_id, exclude_photo_ids)
     if not photos:

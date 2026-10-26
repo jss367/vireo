@@ -16,10 +16,8 @@ function reviewEvidenceDeferred(pred) {
 function reviewEvidenceBlocksAccept(id) {
   var pred = predictions.find(function(p) { return p.id === id; });
   if (!pred) return false;
-  var groupId = pred.group_id;
-  return reviewEvidenceDeferred(pred) || reviewEvidenceSaving.has(pred.detection_id || 0) || predictions.some(function(sibling) {
-    return Boolean(groupId) && sibling.group_id === groupId &&
-      (reviewEvidenceDeferred(sibling) || reviewEvidenceSaving.has(sibling.detection_id || 0));
+  return reviewCardMembers(pred).some(function(sibling) {
+    return reviewEvidenceDeferred(sibling) || reviewEvidenceSaving.has(sibling.detection_id || 0);
   });
 }
 

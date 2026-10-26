@@ -4,6 +4,7 @@
     "../types/pages/review.d.ts",
     "../types/page-hooks.d.ts",
     "../vireo/static/review/boot.js",
+    "../vireo/static/review/cards.js",
     "../vireo/static/review/collections.js",
     "../vireo/static/review/context-menu.js",
     "../vireo/static/review/controls.js",

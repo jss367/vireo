@@ -6,6 +6,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from config import config_value
 from pipeline_stages.context import PipelineRun
 from services import detection_store
 
@@ -416,9 +417,7 @@ class _DetectPass:
             _effective_cfg = thread_db.get_effective_config(
                 cfg.load()
             )
-            _det_conf = _effective_cfg.get(
-                "detector_confidence", 0.2,
-            )
+            _det_conf = config_value(_effective_cfg, "detector_confidence")
         except Exception:  # broad: settings fall back to defaults so the anchors still get built
             log.warning(
                 "Could not read workspace detector settings; using defaults",
@@ -431,9 +430,7 @@ class _DetectPass:
         _weak_enabled = _pipeline_cfg.get(
             "weak_detection_rescue_enabled", True,
         )
-        _weak_conf = _pipeline_cfg.get(
-            "weak_detection_confidence", 0.12,
-        )
+        _weak_conf = config_value(_pipeline_cfg, "weak_detection_confidence", section="pipeline")
         _contextual_weak_ids = set()
         if (
             _weak_enabled
@@ -454,9 +451,7 @@ class _DetectPass:
                 _raw_mdv6,
                 detector_confidence=_det_conf,
                 weak_confidence=_weak_conf,
-                max_gap=_pipeline_cfg.get(
-                    "burst_time_gap", 3.0,
-                ),
+                max_gap=config_value(_pipeline_cfg, "burst_time_gap", section="pipeline"),
             )
 
         return [

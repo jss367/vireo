@@ -16,7 +16,7 @@ import sqlite3
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from config import settings_write_lock
+from config import config_value, settings_write_lock
 from db import ALL_NAV_IDS, DEFAULT_TABS
 from flask import Blueprint, abort, jsonify, request
 from services import stage_counts, workspace_folders, workspace_lifecycle
@@ -1557,9 +1557,7 @@ def create_workspace_blueprint(
         if not ws_id:
             return json_error("No active workspace", status=400)
         ws = db.workspaces.get(ws_id)
-        min_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
-        )
+        min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
 
         db_inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=min_conf)
         total_dets = db_inv["total_real_detections"]

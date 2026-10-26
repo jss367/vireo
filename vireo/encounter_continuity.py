@@ -9,6 +9,7 @@ import math
 from collections import defaultdict
 from datetime import UTC, datetime
 
+from config import config_value
 from encounters import _confident_species_prediction, grouping_species_predictions
 from weak_detections import contextual_weak_runs
 
@@ -154,9 +155,9 @@ def _recover_weak(photos, evidence, animals, config):
     pipeline = config.get("pipeline", {})
     if not pipeline.get("weak_detection_rescue_enabled", True):
         return photos
-    floor = config.get("detector_confidence", 0.2)
-    top_k = config.get("top_k_predictions", 5)
-    max_gap = min(pipeline.get("burst_time_gap", 3.0), 3.0)
+    floor = config_value(config, "detector_confidence")
+    top_k = config_value(config, "top_k_predictions")
+    max_gap = min(config_value(pipeline, "burst_time_gap", section="pipeline"), 3.0)
     by_id = {p["id"]: p for p in photos}
     changed = {}
     timed = [{"id": p["id"], "folder_id": p.get("folder_id"), "timestamp": _time(p)} for p in photos]
@@ -244,7 +245,7 @@ def _visual_conflict(middle, anchors):
 
 def _suppress_isolated(photos, evidence, animals, config):
     proposed = {}
-    floor = config.get("detector_confidence", 0.2)
+    floor = config_value(config, "detector_confidence")
     for left, middle, right in zip(photos, photos[1:], photos[2:], strict=False):
         context = _flip_window(left, middle, right)
         if context is None:
@@ -311,10 +312,10 @@ def _recover_extended(photos, evidence, animals, config, *, anchor_context=False
     """The frozen eight-frame, ten-second rule, with optional anchor support."""
     if not config.get("pipeline", {}).get("weak_detection_rescue_enabled", True):
         return photos
-    floor = config.get("detector_confidence", 0.2)
+    floor = config_value(config, "detector_confidence")
     span, frames = 10.0, 8
     overlap, box_floor = (0.2, 0.03) if anchor_context else (0.02, 1e-6)
-    top_k = config.get("top_k_predictions", 5)
+    top_k = config_value(config, "top_k_predictions")
     by_id = {p["id"]: p for p in photos}
     changes = {}
     timed = [{"id": p["id"], "folder_id": p.get("folder_id"), "timestamp": _time(p)} for p in photos]

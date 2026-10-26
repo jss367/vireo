@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from artifact_flight import ArtifactProducerFailed
 from camera_denoise import cache_matches as _camera_cache_matches
+from config import config_value
 from pipeline_stages.context import PipelineRun
 from preview_materializer import (
     PreviewMaterializationError,
@@ -689,7 +690,7 @@ def previews_stage(
         raw_size = (
             run.params.preview_max_size
             if run.params.preview_max_size is not None
-            else effective.get("preview_max_size", 1920)
+            else config_value(effective, "preview_max_size")
         )
         if raw_size == 0:
             # "Full resolution" — /full redirects to /original, so
@@ -702,7 +703,7 @@ def previews_stage(
             run.stages["previews"]["status"] = "completed"
             return
         max_size = int(raw_size or 1920)
-        preview_quality = effective.get("preview_quality", 90)
+        preview_quality = config_value(effective, "preview_quality")
         # Must match the Flask serve convention — app.py reads, reaps,
         # and evicts previews under media_root(THUMB_CACHE_DIR)/previews.
         # Using dirname(db_path) here would, with a custom --thumb-dir,

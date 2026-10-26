@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import config as cfg
 from classification_readiness import classification_readiness
+from config import config_value
 from flask import (
     Blueprint,
     Response,
@@ -148,7 +149,7 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
             + ";\nwindow.VIREO_FULL_PREVIEW_MAX_SIZE = "
             + json.dumps(1920 if preview_max_size is None else preview_max_size)
             + ";\nwindow.VIREO_TIME_FORMAT = "
-            + json.dumps(config.get("time_format", "system"))
+            + json.dumps(config_value(config, "time_format"))
             + ";\nwindow.VIREO_PLATFORM = "
             + json.dumps(sys.platform)
             + ";\nwindow.VIREO_RSYNC_INSTALL = "

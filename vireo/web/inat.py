@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from app_paths import media_root
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
-from config import read_raw_config_file, settings_write_lock
+from config import config_value, read_raw_config_file, settings_write_lock
 from db import Database
 from file_replace import replace_file
 from flask import Blueprint, jsonify, request
@@ -437,7 +437,7 @@ def _write_inat_upload_render(
                 vireo_dir, photo["id"], recipe,
             ),
         )
-        quality = cfg.load().get("working_copy_quality", 92)
+        quality = config_value(cfg.load(), "working_copy_quality")
         fd, tmp_path = tempfile.mkstemp(
             prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
         )
@@ -548,9 +548,7 @@ def create_inat_blueprint(
         # a species from a stale label set. Apply the workspace-effective
         # detector_confidence floor so we never prefill a taxon from a
         # detection the UI threshold hides.
-        min_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        min_conf = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
         pred = db.predictions.get_top_for_photo(
             photo_id, min_detector_confidence=min_conf,
         )
@@ -678,8 +676,8 @@ def create_inat_blueprint(
 
         db = get_db()
         effective_cfg = db.get_effective_config(cfg.load())
-        quality = effective_cfg.get("working_copy_quality", 92)
-        wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
+        quality = config_value(effective_cfg, "working_copy_quality")
+        wc_max_size = config_value(effective_cfg, "working_copy_max_size")
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         reveal = bool(body.get("reveal", False))
@@ -916,9 +914,7 @@ def create_inat_blueprint(
         # workspace-effective detector_confidence floor — submitting a
         # stale or below-threshold taxon to iNaturalist is permanent and
         # not easily reversible.
-        min_conf = db.get_effective_config(user_cfg).get(
-            "detector_confidence", 0.2
-        )
+        min_conf = config_value(db.get_effective_config(user_cfg), "detector_confidence")
         pred = db.predictions.get_top_for_photo(
             photo_id, min_detector_confidence=min_conf,
         )
@@ -1058,9 +1054,7 @@ def create_inat_blueprint(
         # Resolve the workspace-effective detector_confidence floor once for
         # the whole batch — read-time thresholding means below-threshold
         # detections should never seed an iNat submission.
-        min_conf = db.get_effective_config(user_cfg).get(
-            "detector_confidence", 0.2
-        )
+        min_conf = config_value(db.get_effective_config(user_cfg), "detector_confidence")
         results = [
             _submit_batch_item(db, inat, token, min_conf, sub)
             for sub in submissions

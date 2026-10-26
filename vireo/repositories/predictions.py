@@ -116,8 +116,10 @@ class PredictionRepository:
         top_prediction_confidence_expr,
         decided_prediction_statuses,
         facade,
+        species_resolver,
     ):
         self.conn = conn
+        self._species_resolver = species_resolver
         self._resolve_workspace_id = resolve_workspace_id
         # ``db`` module helpers and constants, kept under their module names
         # so the moved bodies read them as ``self.<name>``. ``_chunks`` is
@@ -1660,13 +1662,15 @@ class PredictionRepository:
         if target is None:
             return None
 
+        resolver = self._species_resolver()
+        target_key = resolver.consensus(self.get_rows_by_ids([prediction_id])[0]).key
+
         agreeing = self.conn.execute(
             f"""SELECT pr.id
                FROM predictions pr
                {prediction_review_join('pr')}
                WHERE pr.detection_id = ?
-                 AND lower(trim(pr.species)) = lower(trim(?))
-                 AND {prediction_review_status()} != 'rejected'
+                 AND {prediction_review_status()} = 'pending'
                  AND pr.labels_fingerprint = (
                      SELECT pr2.labels_fingerprint FROM predictions pr2
                      WHERE pr2.detection_id = pr.detection_id
@@ -1675,8 +1679,12 @@ class PredictionRepository:
                      LIMIT 1
                  )
                ORDER BY pr.confidence DESC, pr.id ASC""",
-            (ws, target["detection_id"], target["species"]),
+            (ws, target["detection_id"]),
         ).fetchall()
+
+        identities = {row['id']: resolver.consensus(row).key
+                      for row in self.get_rows_by_ids([p['id'] for p in agreeing])}
+        agreeing = [row for row in agreeing if identities[row['id']] == target_key]
 
         accepted_ids = []
         affected = []
@@ -1686,6 +1694,7 @@ class PredictionRepository:
                 accepted = self.accept_prediction(
                     row["id"],
                     photo_ids=[target["photo_id"]],
+                    prediction_ids=[row["id"]],
                     _commit=False,
                 )
                 # A row whose grouped scope excluded this photo accepts
@@ -1695,7 +1704,10 @@ class PredictionRepository:
                 if accepted and accepted["accepted_prediction_ids"]:
                     result = accepted
                     accepted_ids.append(row["id"])
-                    affected.extend(accepted["affected"])
+                    # Equivalent legacy labels can return different keyword
+                    # IDs. History must retain the ID each accept touched.
+                    affected.extend({**a, "keyword_id": accepted["keyword_id"]}
+                                    for a in accepted["affected"])
             if _commit:
                 self.conn.commit()
         except Exception:

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 from app_paths import media_root
 from camera_denoise import cache_matches as _camera_cache_matches
+from config import config_value
 from flask import (
     Response,
     make_response,
@@ -273,7 +274,7 @@ class _ThumbnailRequest:
         # the selected JPEG incorrectly. JPEG pair views intentionally show
         # the companion as-authored; RAW pair views retain the catalog edit.
         self.render_recipe = None if self.pair_source == "jpeg" else recipe
-        self.thumb_size = self._cfg.load().get("thumbnail_size", 400)
+        self.thumb_size = config_value(self._cfg.load(), "thumbnail_size")
         if self.pair_source_path:
             self.source = self.pair_source_path
             self.using_working_copy = False
@@ -355,7 +356,7 @@ class _ThumbnailRequest:
                 self.source,
                 self.thumb_dir,
                 self.thumb_size,
-                self._cfg.load().get("thumbnail_quality", 85),
+                config_value(self._cfg.load(), "thumbnail_quality"),
                 render_recipe,
                 self.folder_row["path"],
                 self.vireo_dir,
@@ -379,7 +380,7 @@ class _ThumbnailRequest:
                 self.source,
                 self.thumb_dir,
                 self.thumb_size,
-                self._cfg.load().get("thumbnail_quality", 85),
+                config_value(self._cfg.load(), "thumbnail_quality"),
                 render_recipe,
                 self.vireo_dir,
                 cache_name=self.cache_filename,

@@ -1775,3 +1775,44 @@ def test_consolidated_catalog_identity_retains_old_workspace_access(tmp_path, pr
     else:
         with pytest.raises(AssertionError, match="photos lost workspace visibility"):
             machine.no_photo_drops_out_of_a_workspace()
+
+
+@pytest.mark.parametrize("route", ["remove", "delete-sidecars"])
+def test_missing_original_sidecar_cleanup_keeps_sidecars_living_files_own(app_and_db, tmp_path, route):
+    """Missing Originals sidecar cleanup deletes only sidecars nothing else owns.
+
+    RAW+JPEG twins share ``IMG_1.xmp``. When the RAW goes missing and its
+    JPEG stays, that sidecar is still the JPEG's metadata and must survive;
+    the RAW's own darktable sidecar ``IMG_1.CR3.xmp`` is the leftover.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    folder_id = workspace_folders.add_folder(db, str(folder), name="shoot")
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="IMG_1.CR3", extension=".cr3",
+        file_size=1, file_mtime=1.0,
+    )
+    jpeg_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="IMG_1.JPG", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    (folder / "IMG_1.JPG").write_bytes(b"jpeg")
+    (folder / "IMG_1.xmp").write_text("<x:xmpmeta>jpeg rating</x:xmpmeta>")
+    (folder / "IMG_1.CR3.xmp").write_text("<x:xmpmeta>raw edits</x:xmpmeta>")
+
+    if route == "remove":
+        resp = client.post("/api/photos/missing/remove", json={
+            "photo_ids": [raw_id], "delete_sidecars": True, "mode": "vireo",
+        })
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        assert resp.get_json()["sidecars_deleted"] == 1
+    else:
+        resp = client.post("/api/photos/missing/delete-sidecars", json={"photo_ids": [raw_id]})
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        assert resp.get_json() == {"deleted": 1, "skipped": 0}
+
+    assert sorted(os.listdir(folder)) == ["IMG_1.JPG", "IMG_1.xmp"]
+    assert (folder / "IMG_1.xmp").read_text() == "<x:xmpmeta>jpeg rating</x:xmpmeta>"
+    assert db.photos.get(jpeg_id) is not None

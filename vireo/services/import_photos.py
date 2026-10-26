@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 import path_guard
 from app_paths import media_root
+from config import config_value
 from db import Database
 from services import saved_processes
 from services.imports import ImportFailure, import_photos_ok
@@ -435,7 +436,7 @@ class _ImportPhotosRequest:
         return None
 
     def validate_folder_template(self) -> ImportFailure | None:
-        folder_template = self.body.get("folder_template", "%Y/%Y-%m-%d")
+        folder_template = config_value(self.body, "folder_template", section="ingest")
         if folder_template and self.is_unsafe_path(folder_template):
             return ImportFailure(
                 "folder_template must be a relative path without '..' or "
@@ -585,7 +586,7 @@ class _ImportPhotosRequest:
 
     def read_import_options(self) -> ImportFailure | None:
         body = self.body
-        self.file_types = body.get("file_types", "both")
+        self.file_types = config_value(body, "file_types", section="ingest")
         self.skip_duplicates = bool(body.get("skip_duplicates", True))
         self.verify_by_hash = bool(body.get("verify_by_hash", False))
         self.trust_likely_duplicates = bool(
@@ -892,7 +893,7 @@ class _ImportPhotosRequest:
                 or self.checked_count != parent_config.get("checked_count")
                 or set(self.sources) != set(parent_config.get("sources") or [])
                 or self.recursive != parent_config.get("recursive", True)
-                or self.file_types != parent_config.get("file_types", "both")
+                or self.file_types != config_value(parent_config, "file_types", section="ingest")
             ):
                 return ImportFailure("Retry directly to NAS must preserve the original file selection")
             from import_staging import check_staged_mount, plan_staged_import

@@ -18,6 +18,7 @@ from datetime import datetime as dt
 from typing import TYPE_CHECKING, Any, TypedDict
 
 import numpy as np
+from config import config_value
 from pipeline_stages.context import PipelineRun
 from services import classify_preflight, detection_store
 
@@ -383,8 +384,8 @@ class _ClassifyPass:
 
         user_cfg = self.thread_db.get_effective_config(cfg.load())
         self.grouping_window = user_cfg.get("grouping_window_seconds", 5)
-        self.similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
-        self.detector_confidence = user_cfg.get("detector_confidence", 0.2)
+        self.similarity_threshold = config_value(user_cfg, "similarity_threshold")
+        self.detector_confidence = config_value(user_cfg, "detector_confidence")
         self.pipeline_cfg = user_cfg.get("pipeline", {})
         self.raw_session = None
         self.input_recipe = None
@@ -397,9 +398,7 @@ class _ClassifyPass:
                 sam2_variant=self.pipeline_cfg.get("sam2_variant") or "sam2-small",
                 preserve_detail=True,
             )
-        self.weak_detection_confidence = self.pipeline_cfg.get(
-            "weak_detection_confidence", 0.12,
-        )
+        self.weak_detection_confidence = config_value(self.pipeline_cfg, "weak_detection_confidence", section="pipeline")
 
         self.tax = self.loaded_models["tax"]
         # Fingerprint for the FIRST model is preloaded by model_loader_stage.
@@ -480,7 +479,7 @@ class _ClassifyPass:
             raw_mdv6_detections,
             detector_confidence=self.detector_confidence,
             weak_confidence=self.weak_detection_confidence,
-            max_gap=self.pipeline_cfg.get("burst_time_gap", 3.0),
+            max_gap=config_value(self.pipeline_cfg, "burst_time_gap", section="pipeline"),
         )
         if contextual_weak_ids:
             log.info(

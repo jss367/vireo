@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import id_conflicts
 import remote_setup
 from app_paths import default_path, initialize_layout, media_root
+from config import config_value
 from db import (
     Database,
     IncompatibleDatabaseError,
@@ -2531,9 +2532,9 @@ def _log_startup_banner(args, port):
     log.info("  Database: %s", args.db)
     log.info("  Thumbnails: %s", args.thumb_dir)
     log.info("  Threshold: %.0f%%  Grouping: %ds  Similarity: %.0f%%",
-             startup_cfg.get("classification_threshold", 0.4) * 100,
-             startup_cfg.get("grouping_window_seconds", 10),
-             startup_cfg.get("similarity_threshold", 0.85) * 100)
+             config_value(startup_cfg, "classification_threshold") * 100,
+             config_value(startup_cfg, "grouping_window_seconds"),
+             config_value(startup_cfg, "similarity_threshold") * 100)
     if startup_cfg.get("hf_token"):
         log.info("  HuggingFace token: configured")
     log.info("=" * 50)

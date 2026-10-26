@@ -47,12 +47,14 @@ function renderModelFilter() {
 function renderStats() {
   var el = /** @type {HTMLElement} */ (document.getElementById('stats'));
   if (mode === 'review') {
-    var pending = predictions.filter(function(p) { return p.status === 'pending'; }).length;
-    var accepted = predictions.filter(function(p) { return p.status === 'accepted'; }).length;
+    var counts = reviewCardCounts();
+    var title = 'Review Predictions (' + (counts.pending || 0) + ' pending cards)';
+    /** @type {HTMLElement} */ (document.getElementById('title')).textContent = title;
+    document.title = 'Vireo - ' + title;
     el.innerHTML =
-      '<span class="stat new-count">' + pending + ' Pending</span>' +
-      '<span class="stat accepted-count">' + accepted + ' Accepted</span>' +
-      '<span class="stat">' + predictions.length + ' Total</span>';
+      '<span class="stat new-count">' + (counts.pending || 0) + ' Pending cards</span>' +
+      '<span class="stat accepted-count">' + (counts.accepted || 0) + ' Accepted cards</span>' +
+      '<span class="stat">' + (counts.all || 0) + ' Total cards</span>';
   } else {
     // Browse mode means zero predictions loaded — the grid's empty state
     // explains the situation, so there's no count worth showing here.
@@ -66,10 +68,7 @@ function renderTabs() {
     tabsEl.innerHTML = '';
     return;
   }
-  /** @type {Record<string,number>} */ var counts = { all: predictions.length };
-  counts.pending = predictions.filter(function(p) { return p.status === 'pending'; }).length;
-  counts.accepted = predictions.filter(function(p) { return p.status === 'accepted'; }).length;
-  counts.rejected = predictions.filter(function(p) { return p.status === 'rejected'; }).length;
+  var counts = reviewCardCounts();
 
   var tabs = [
     { id: 'all', label: 'All' },

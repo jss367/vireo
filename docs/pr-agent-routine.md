@@ -281,10 +281,10 @@ stop.
 - **Commit attribution.** Commits appear under the claude.ai account's
   connected GitHub identity, the same as when you push from a local
   checkout logged in as yourself.
-- **Scope drift under review bots.** Codex and CodeRabbit grade findings for a
-  server-shaped threat model, so a single-user desktop race reads as P1 to
-  them. The routine used to accept that grading and fix each finding as
-  posted, which on PR #1678 turned a display-only fix into 12 rounds and
+- **Scope drift under review bots.** Review findings need concrete
+  prerequisites, reachability, and impact assessed before choosing a fix.
+  The routine used to accept each finding's grading and fix it as posted,
+  which on PR #1678 turned a display-only fix into 12 rounds and
   ~1.8k lines of concurrency hardening in the module that deletes originals.
   The prompt's **Repository Context** section and the cheapest-fix/size-drift
   steps exist to stop that; if a PR starts ballooning under review again,
