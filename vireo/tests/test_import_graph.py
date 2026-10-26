@@ -77,10 +77,8 @@ FOUNDATION = frozenset({
     "config_schema",
     "detection_id",
     "duplicates",
-    "file_replace",
     "keyword_normalization",
     "process_strategies",
-    "sidecar_identity",
     "species_identity",
     "species_memberships",
     "sql_chunks",
@@ -527,6 +525,15 @@ def test_tiers():
     assert tier("pipeline") == APPLICATION_TIER
     assert tier("web.photos") == WEB_TIER
     assert tier("app") == APP_TIER
+
+
+@pytest.mark.parametrize(("source", "target"), [
+    ("schema", "file_replace"), ("repositories.sync", "sidecar_identity"),
+])
+def test_filesystem_helpers_are_above_data(source, target):
+    assert tier(target) == APPLICATION_TIER
+    edges = _graph({source: f"import {target}", target: ""})
+    assert set(upward_edges(edges)) == {f"{source} -> {target}"}
 
 
 # ---------------------------------------------------------------- the writer

@@ -35,6 +35,8 @@
   "repositories.stats -> keyword_identity",
   "repositories.stats -> pipeline",
   "repositories.stats -> subjects",
+  "repositories.sync -> sidecar_identity",
+  "schema -> file_replace",
   "site_export -> web",
   "site_export -> web.background_jobs",
   "species_identity -> taxonomy"
