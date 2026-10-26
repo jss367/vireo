@@ -118,9 +118,8 @@ def test_folders_reveal_allows_cross_workspace_paths_known_to_library(app_and_db
     only to another workspace. Reveal must still succeed for those —
     otherwise bulk-decide buckets that span workspaces become
     un-revealable. The "must exist in folders table" check is enough
-    to keep arbitrary filesystem-path probes off this endpoint, and
-    Vireo is single-user so workspaces are organizational, not access
-    boundaries."""
+    to keep arbitrary filesystem-path probes off this endpoint. This
+    endpoint validates library membership rather than workspace membership."""
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
