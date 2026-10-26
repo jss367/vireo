@@ -722,8 +722,7 @@ def _write_taxonomy_json_atomically(path, data):
         # mkstemp creates 0600; open(path, "w") kept the target's mode.
         # Carry it over when there is a target to copy from, so writing
         # cannot silently loosen or tighten access. With no existing target
-        # (a first download) the file stays 0600 — ~/.vireo is single-user
-        # data, so private is the right default there.
+        # (a first download) the file stays 0600, private by default.
         with contextlib.suppress(OSError):
             os.chmod(tmp_path, stat_module.S_IMODE(os.stat(target).st_mode))
         replace_file(tmp_path, target)

@@ -1753,8 +1753,8 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
     # this fallback when the ONNX repo has no copy of the file, and a
     # shared staging inode would let one truncate the other's bytes and
     # publish a torn document. mkstemp creates the file 0600 and leaves
-    # it that way; ~/.vireo is single-user data, so private is the right
-    # default. The handle is closed before os.replace — Windows will not
+    # it that way, keeping new files private by default.
+    # The handle is closed before os.replace — Windows will not
     # replace a file that anything still has open.
     try:
         with _staged_sibling(target) as tmp_target:
