@@ -199,6 +199,20 @@ def destination_disk_space(path: str | Path, *, cancel_check: CancelCheck | None
 
 def destination_case_insensitive(path: str | Path, *, cancel_check: CancelCheck | None = None) -> bool:
     """Probe whether the existing volume containing ``path`` folds case."""
+    return _destination_name_alias(path, normalization=False, cancel_check=cancel_check)
+
+
+def destination_unicode_normalization_insensitive(
+    path: str | Path, *, cancel_check: CancelCheck | None = None,
+) -> bool:
+    """Probe Unicode normalization independently of the volume's case policy."""
+    return _destination_name_alias(path, normalization=True, cancel_check=cancel_check)
+
+
+def _destination_name_alias(
+    path: str | Path, *, normalization: bool, cancel_check: CancelCheck | None = None,
+) -> bool:
+    """Create a temporary name and test the alternate spelling on its volume."""
     base = Path(path).expanduser()
     while True:
         if cancel_check and cancel_check():
@@ -212,7 +226,8 @@ def destination_case_insensitive(path: str | Path, *, cancel_check: CancelCheck 
     if cancel_check and cancel_check():
         raise LocalWorkspaceCancelled("Folder scan cancelled")
     try:
-        fd, probe = tempfile.mkstemp(prefix="VireoCaseProbe-", dir=str(base))
+        prefix = "VireoUnicodeProbe-é-" if normalization else "VireoCaseProbe-"
+        fd, probe = tempfile.mkstemp(prefix=prefix, dir=str(base))
     except OSError as exc:
         raise LocalWorkspaceError(
             f"Could not inspect the destination filesystem at {path}: {exc}"
@@ -221,8 +236,10 @@ def destination_case_insensitive(path: str | Path, *, cancel_check: CancelCheck 
     try:
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("Folder scan cancelled")
-        lower = os.path.join(os.path.dirname(probe), os.path.basename(probe).lower())
-        result = lower != probe and os.path.exists(lower)
+        name = os.path.basename(probe)
+        alternate_name = unicodedata.normalize("NFD", name) if normalization else name.lower()
+        alternate = os.path.join(os.path.dirname(probe), alternate_name)
+        result = alternate != probe and os.path.exists(alternate)
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("Folder scan cancelled")
         return result

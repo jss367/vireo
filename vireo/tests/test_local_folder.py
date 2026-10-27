@@ -127,11 +127,12 @@ def test_local_destination_cannot_enter_a_pending_import(tmp_path, operation, re
 
 @pytest.mark.parametrize("operation", [local_copy_preflight, stage_folder])
 @pytest.mark.parametrize("case_insensitive", [False, True])
-@pytest.mark.parametrize("spelling", ["case", "unicode", "sibling"])
+@pytest.mark.parametrize("normalization_insensitive", [False, True])
+@pytest.mark.parametrize("spelling", ["case", "unicode", "combined", "sibling"])
 def test_pending_destination_overlap_respects_volume_names(
-    tmp_path, monkeypatch, operation, case_insensitive, spelling
+    tmp_path, monkeypatch, operation, case_insensitive, normalization_insensitive, spelling
 ):
-    """Case and Unicode aliases overlap only when the volume folds those names."""
+    """Case and Unicode aliases follow independent volume naming policies."""
     from services import local_folder
 
     db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
@@ -145,9 +146,14 @@ def test_pending_destination_overlap_respects_volume_names(
         return case_insensitive
 
     monkeypatch.setattr(local_folder, "destination_case_insensitive", volume_policy)
+    monkeypatch.setattr(
+        local_folder, "destination_unicode_normalization_insensitive",
+        lambda _path, **_kwargs: normalization_insensitive, raising=False,
+    )
     local_base = {
         "case": tmp_path / "PENDING" / "Café" / "working-copies",
         "unicode": tmp_path / "Pending" / "Cafe\u0301" / "working-copies",
+        "combined": tmp_path / "PENDING" / "Cafe\u0301" / "working-copies",
         "sibling": tmp_path / "PENDING" / "Cafe\u0301-other" / "working-copies",
     }[spelling]
     try:
@@ -160,7 +166,9 @@ def test_pending_destination_overlap_respects_volume_names(
                 return operation(db, [folder_id], str(vireo_dir), destination_bases={folder_id: str(local_base)})
             return operation(db, folder_id, str(vireo_dir), local_base=str(local_base))
 
-        if case_insensitive and spelling != "sibling":
+        overlaps = {"case": case_insensitive, "unicode": normalization_insensitive,
+                    "combined": case_insensitive and normalization_insensitive, "sibling": False}[spelling]
+        if overlaps:
             with pytest.raises(LocalWorkspaceError, match="destination.*awaiting NAS transfer"):
                 copy_locally()
             assert not local_base.exists()

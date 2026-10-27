@@ -48,6 +48,7 @@ from services.local_workspace import (
     _write_manifest,
     destination_case_insensitive,
     destination_disk_space,
+    destination_unicode_normalization_insensitive,
     source_tree_size,
     stage_boundary_lock,
 )
@@ -128,13 +129,22 @@ def _pending_archive_paths_overlap(
     shorter, longer = sorted((parts, staging_parts), key=len)
     if shorter == longer[:len(shorter)]:
         return True
-    folded_shorter = tuple(unicodedata.normalize("NFC", part).casefold() for part in shorter)
-    folded_longer = tuple(unicodedata.normalize("NFC", part).casefold() for part in longer)
+    folded_shorter = tuple(unicodedata.normalize("NFC", part.casefold()) for part in shorter)
+    folded_longer = tuple(unicodedata.normalize("NFC", part.casefold()) for part in longer)
     if folded_shorter != folded_longer[:len(folded_shorter)]:
         return False
-    # Avoid probing unrelated or exactly overlapping paths. Only possible
-    # aliases need the volume probe, which cooperates with preflight cancellation.
-    return destination_case_insensitive(staging_path, cancel_check=cancel_check)
+    # Case and Unicode normalization are independent volume properties.
+    # Only possible aliases need these cancellable probes.
+    case_insensitive = destination_case_insensitive(staging_path, cancel_check=cancel_check)
+    normalization_insensitive = destination_unicode_normalization_insensitive(
+        staging_path, cancel_check=cancel_check
+    )
+
+    def volume_key(components: tuple[str, ...]) -> tuple[str, ...]:
+        values = (part.casefold() if case_insensitive else part for part in components)
+        return tuple(unicodedata.normalize("NFC", part) if normalization_insensitive else part for part in values)
+
+    return volume_key(shorter) == volume_key(longer[:len(shorter)])
 
 
 def _refuse_pending_archive_copy(
