@@ -453,6 +453,14 @@ def test_photo_summary_takes_analysis_state_from_readiness_not_the_score():
     assert failed["analysis_status"] == "unknown" and failed["quality_preliminary"] is False
     assert failed["analysis_explanation"] == "Vireo answered 400: nope"
     assert photo_detail({"id": 1}, readiness=complete)["analysis_explanation"] == "done"
+    # Any surfaced quality number (not just quality_score) counts as preliminary
+    # when analysis is incomplete: /api/jobs/sharpness writes sharpness while
+    # leaving quality_score null, and the mcp response still exposes that
+    # number alongside quality_analyzed: false.
+    for field in ("sharpness", "subject_sharpness", "subject_size"):
+        row = photo_summary({"id": 1, field: 0.5}, partial)
+        assert row["quality_preliminary"] is True, field
+        assert row[field] == 0.5
 
 
 def _photo_mid_process(db):

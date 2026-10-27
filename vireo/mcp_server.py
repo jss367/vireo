@@ -83,10 +83,11 @@ with the unchanged selection, provenance and returned token. Preserve existing
 identifications; model confidence is not a probability of correct identification.
 """
 
+_QUALITY_METRIC_KEYS = ("quality_score", "sharpness", "subject_sharpness", "subject_size")
 _PHOTO_SUMMARY_KEYS = (
     "id", "filename", "folder_id", "timestamp", "rating", "flag", "color_label",
     "width", "height", "camera_make", "camera_model", "iso",
-    "quality_score", "sharpness", "subject_sharpness", "subject_size",
+    *_QUALITY_METRIC_KEYS,
     "latitude", "longitude", "location_status", "species",
 )
 _PHOTO_DETAIL_KEYS = _PHOTO_SUMMARY_KEYS + (
@@ -267,7 +268,7 @@ def analysis_fields(photo, readiness):
     inputs and settings; it is never inferred from a stored score, which a
     Process run writes before segmentation and quality measurement finish.
     """
-    has_scores = photo.get("quality_score") is not None
+    has_scores = any(photo.get(key) is not None for key in _QUALITY_METRIC_KEYS)
     if isinstance(readiness, dict) and "status" in readiness:
         out = {
             "quality_analyzed": bool(readiness.get("eligible")),
