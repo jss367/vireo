@@ -117,11 +117,16 @@ def local_path_for_base(local_base: str | Path, root_folder_id: int, source_path
     return Path(local_base) / _safe_folder_name(source_path, root_folder_id)
 
 
-def _refuse_pending_archive_copy(db: Database, source_path: str) -> None:
-    """Keep deferred imports at the paths their NAS transfer still owns."""
+def _refuse_pending_archive_copy(db: Database, path: str, *, destination: bool = False) -> None:
+    """Keep local-copy sources and destinations outside unfinished imports."""
     for staging_path in db.pending_archives.open_staging_paths():
-        if (_physical_is_within(source_path, staging_path)
-                or _physical_is_within(staging_path, source_path)):
+        if (_physical_is_within(path, staging_path)
+                or _physical_is_within(staging_path, path)):
+            if destination:
+                raise LocalWorkspaceError(
+                    "The local destination overlaps photos awaiting NAS transfer. "
+                    "Choose a location outside the pending import's staging folder."
+                )
             raise LocalWorkspaceError(
                 "These photos are already kept locally and are awaiting NAS transfer. "
                 'Use "Send to NAS" in the workspace that imported them.'
@@ -154,6 +159,7 @@ def local_copy_preflight(
         if local_base is None:
             local_base = str(default_local_base(vireo_dir, root_folder_id))
         local_path = local_path_for_base(local_base, root_folder_id, source_path)
+        _refuse_pending_archive_copy(db, str(local_path), destination=True)
         total_files, total_bytes, estimated_bytes = source_tree_size(
             source_path, cancel_check=cancel_check
         )
@@ -754,6 +760,7 @@ def _check_local_destination(
     db: Database, root_folder_id: int, source_path: str, local_root: Path, vireo_dir: str
 ) -> None:
     """Refuse a local destination that overlaps anything Vireo already manages."""
+    _refuse_pending_archive_copy(db, str(local_root), destination=True)
     if _physical_is_within(str(local_root), source_path) or _physical_is_within(
         source_path, str(local_root)
     ):

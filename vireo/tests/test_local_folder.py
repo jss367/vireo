@@ -81,6 +81,50 @@ def test_pending_import_originals_cannot_be_staged_again(tmp_path, operation, re
         db.close()
 
 
+@pytest.mark.parametrize("operation", [local_copy_preflight, stage_folder])
+@pytest.mark.parametrize("relation", ["inside", "symlink", "sibling"])
+def test_local_destination_cannot_enter_a_pending_import(tmp_path, operation, relation):
+    """A pending transfer owns uncataloged sibling paths inside its root too."""
+    db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
+    pending_root = tmp_path / "pending-import"
+    pending_day = pending_root / "2026-10-17"
+    pending_day.mkdir(parents=True)
+    (pending_day / "imported.jpg").write_bytes(b"retained original")
+    try:
+        db.set_active_workspace(first)
+        workspace_folders.add_folder(db, str(pending_day))
+        db.pending_archives.register("retained-import", "/nas/archive", str(pending_root), {})
+        db.set_active_workspace(second)
+        local_base = pending_root / "working-copies"
+        if relation == "symlink":
+            alias = tmp_path / "pending-alias"
+            try:
+                alias.symlink_to(pending_root, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks unavailable")
+            local_base = alias / "working-copies"
+        elif relation == "sibling":
+            local_base = pending_root.with_name("pending-import-other")
+
+        def copy_locally():
+            if operation is local_copy_preflight:
+                return operation(db, [folder_id], str(vireo_dir), destination_bases={folder_id: str(local_base)})
+            return operation(db, folder_id, str(vireo_dir), local_base=str(local_base))
+
+        if relation == "sibling":
+            copy_locally()
+        else:
+            with pytest.raises(LocalWorkspaceError, match="destination.*awaiting NAS transfer"):
+                copy_locally()
+            assert not (pending_root / "working-copies").exists()
+            assert db.folders.get(folder_id)["path"] == str(source)
+            assert folder_status(db, folder_id, str(vireo_dir))["state"] == "remote"
+        assert (source / "bird.jpg").read_bytes() == b"original"
+        assert (pending_day / "imported.jpg").read_bytes() == b"retained original"
+    finally:
+        db.close()
+
+
 def test_completed_import_does_not_block_working_locally(tmp_path):
     db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
     try:
