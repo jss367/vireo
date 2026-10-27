@@ -998,6 +998,10 @@ class JobRunner:
         """Wait out a pause, then report cancellation; see ``JobControl.wait_if_paused``."""
         return self._control.wait_if_paused(job_id, publish_paused=publish_paused)
 
+    def pause_elapsed_seconds(self, job_id):
+        """Cumulative pause duration for *job_id*; see ``JobControl.pause_elapsed_seconds``."""
+        return self._control.pause_elapsed_seconds(job_id)
+
     def resume_job(self, job_id):
         """Resume a pausing or paused job."""
         return self._control.resume_job(job_id)

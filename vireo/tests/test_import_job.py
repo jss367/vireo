@@ -50,6 +50,11 @@ class FakeRunner:
         # callers that want cancel-through-pause behavior still see it.
         return job_id in self.cancelled_ids
 
+    def pause_elapsed_seconds(self, job_id):
+        # FakeRunner never pauses, so no time has been excluded from any
+        # ETA elapsed accounting that queries it.
+        return 0.0
+
     def checkpoint_live_jobs(self):
         # Called synchronously by ``_publish_resume_scope`` so a crash
         # between a batch commit and the next checkpoint tick can't
@@ -232,6 +237,7 @@ def test_import_eta_waits_for_a_completed_transfer_batch():
     now[0] = 2.0
     eta.note_batch_complete(current=200, copied=0)
     assert eta.fields(1000) == {
+        "eta_phase": "copy",
         "eta_state": "estimating",
         "eta_settled": 200,
     }
@@ -241,11 +247,336 @@ def test_import_eta_waits_for_a_completed_transfer_batch():
     now[0] = 22.0
     eta.note_batch_complete(current=400, copied=200)
     assert eta.fields(1000) == {
+        "eta_phase": "copy",
         "eta_state": "ready",
         "eta_settled": 400,
         "eta_seconds": 60.0,
         "eta_rate_per_min": 600.0,
     }
+
+
+def test_working_copy_eta_estimates_until_it_has_a_measured_rate():
+    """The working-copy pass starts with no rate of its own; it must say so
+    rather than inherit the finished copy phase's zero seconds remaining."""
+    from import_job.progress import (
+        _WORKING_COPY_ETA_MIN_ELAPSED,
+        _WorkingCopyEtaEstimator,
+    )
+
+    now = [100.0]
+    eta = _WorkingCopyEtaEstimator(clock=lambda: now[0])
+
+    # The pass announces itself before the first extraction.
+    assert eta.fields(0, 5808) == {
+        "eta_phase": "working_copies",
+        "eta_state": "estimating",
+        "eta_settled": 0,
+    }
+    # Items completed, but less than the minimum elapsed time: still no rate.
+    now[0] = 100.0 + _WORKING_COPY_ETA_MIN_ELAPSED / 2
+    fields = eta.fields(27, 5808)
+    assert fields["eta_state"] == "estimating"
+    assert "eta_seconds" not in fields
+    assert "eta_rate_per_min" not in fields
+    # Enough elapsed time but nothing finished yet: still estimating.
+    now[0] = 100.0 + 10 * _WORKING_COPY_ETA_MIN_ELAPSED
+    assert eta.fields(0, 5808)["eta_state"] == "estimating"
+
+
+def test_working_copy_eta_reports_remaining_from_its_own_rate():
+    """27 working copies in 54 seconds is 2s each: 5,781 remaining is 3.2h."""
+    from import_job.progress import _WorkingCopyEtaEstimator
+
+    now = [100.0]
+    eta = _WorkingCopyEtaEstimator(clock=lambda: now[0])
+    eta.fields(0, 5808)
+    now[0] = 154.0
+    assert eta.fields(27, 5808) == {
+        "eta_phase": "working_copies",
+        "eta_state": "ready",
+        "eta_settled": 27,
+        "eta_seconds": 11562.0,
+        "eta_rate_per_min": 30.0,
+    }
+    # Nothing left to do is the one case where zero remaining is honest.
+    now[0] = 155.0
+    assert eta.fields(5808, 5808) == {
+        "eta_phase": "working_copies",
+        "eta_state": "ready",
+        "eta_settled": 5808,
+        "eta_seconds": 0.0,
+    }
+
+
+def test_working_copy_eta_excludes_paused_elapsed_from_its_rate():
+    """A one-hour pause between two 2-second items must not make the pass
+    look an hour slow. The extractor's cancel_check parks in
+    ``wait_if_paused`` on Pause, which blocks the status callback that
+    advances ``current``; without pause-aware timing the next completed
+    item would record an elapsed of (2 + 3600 + 2) seconds against two
+    items and produce a 30 min/item rate."""
+    from import_job.progress import _WorkingCopyEtaEstimator
+
+    now = [100.0]
+    paused_total = [0.0]
+    eta = _WorkingCopyEtaEstimator(
+        clock=lambda: now[0], paused_elapsed=lambda: paused_total[0],
+    )
+    # First status callback sets the baseline.
+    eta.fields(0, 2)
+    # One item in 2 seconds: honest rate is 30/min, ETA for 1 remaining is 2s.
+    now[0] = 102.0
+    assert eta.fields(1, 2) == {
+        "eta_phase": "working_copies",
+        "eta_state": "ready",
+        "eta_settled": 1,
+        "eta_seconds": 2.0,
+        "eta_rate_per_min": 30.0,
+    }
+    # Pause for an hour: wall clock advances inside wait_if_paused, so the
+    # runner's cumulative pause-elapsed grows by the same amount.
+    now[0] = 3702.0
+    paused_total[0] = 3600.0
+    # Another item in 2 seconds. Without the pause fix this would publish
+    # ~30 min/item and ETA ~0 for the empty tail; with it, the rate stays
+    # 30/min and ETA for the finished pass is still zero.
+    assert eta.fields(2, 2) == {
+        "eta_phase": "working_copies",
+        "eta_state": "ready",
+        "eta_settled": 2,
+        "eta_seconds": 0.0,
+    }
+    # And a longer run that pauses mid-pass keeps the pre-pause rate for
+    # whatever work remains. 2 items in 4 active seconds -> 2s each.
+    now2 = [200.0]
+    paused2 = [0.0]
+    eta2 = _WorkingCopyEtaEstimator(
+        clock=lambda: now2[0], paused_elapsed=lambda: paused2[0],
+    )
+    eta2.fields(0, 10)
+    now2[0] = 202.0
+    eta2.fields(1, 10)
+    now2[0] = 3802.0
+    paused2[0] = 3600.0
+    now2[0] = 3804.0
+    fields = eta2.fields(2, 10)
+    assert fields["eta_state"] == "ready"
+    assert fields["eta_rate_per_min"] == 30.0
+    # 8 remaining * 2s/item == 16s.
+    assert fields["eta_seconds"] == 16.0
+
+
+def test_working_copy_status_subtracts_runner_pause_elapsed():
+    """Wire-up: the status callback built by ``_make_working_copy_status``
+    reads cumulative pause from the runner and publishes an ETA that
+    excludes it in the job progress, step update, and event payload — the
+    three surfaces the Codex review asked us to cover."""
+    from import_job.progress import _make_working_copy_status
+
+    clock = [500.0]
+    paused_total = [0.0]
+
+    class _StubRunner:
+        def __init__(self):
+            self.step_updates = []
+            self.events = []
+
+        def pause_elapsed_seconds(self, _job_id):
+            return paused_total[0]
+
+        def update_step(self, _job_id, _step_id, **kwargs):
+            self.step_updates.append(kwargs)
+
+        def push_event(self, _job_id, _event_type, data):
+            self.events.append(data)
+
+    class _StubState:
+        folder_counts = {}
+
+    runner = _StubRunner()
+    job = {"id": "job-wc", "progress": {"current": 0, "total": 10}}
+
+    # Patch the estimator's clock without having to thread one into every
+    # caller: the only user is this callback, built below.
+    from import_job import progress
+
+    status = _make_working_copy_status(
+        job, runner, _StubState(),
+        eta=progress._WorkingCopyEtaEstimator(
+            clock=lambda: clock[0],
+            paused_elapsed=lambda: runner.pause_elapsed_seconds(job["id"]),
+        ),
+    )
+    status("working copy 1/10", phase_current=0, phase_total=10, phase_label="Generating working copies")
+    clock[0] = 502.0
+    status("working copy 1/10", phase_current=1, phase_total=10)
+    # One item in two seconds while running: 2s/item, 18s remaining.
+    first_event = runner.events[-1]
+    assert first_event["eta_rate_per_min"] == 30.0
+    assert first_event["eta_seconds"] == 18.0
+    assert job["progress"]["eta_rate_per_min"] == 30.0
+
+    # The user hits Pause. The extractor's cancel_check parks in
+    # ``wait_if_paused`` for an hour; cumulative pause-elapsed advances by
+    # the same amount. The runner's clock jumps forward in lockstep.
+    clock[0] = 4102.0
+    paused_total[0] = 3600.0
+    # Resume and finish the next item in 2 active seconds.
+    clock[0] = 4104.0
+    status("working copy 2/10", phase_current=2, phase_total=10)
+    event = runner.events[-1]
+    step = runner.step_updates[-1]
+    # 2 items in 4 active seconds -> still 30/min; 8 remaining -> 16s.
+    assert event["eta_rate_per_min"] == 30.0
+    assert event["eta_seconds"] == 16.0
+    assert step["progress"]["eta_rate_per_min"] == 30.0
+    assert step["progress"]["eta_seconds"] == 16.0
+    assert job["progress"]["eta_rate_per_min"] == 30.0
+    assert job["progress"]["eta_seconds"] == 16.0
+
+
+def _wait_for_job_status(runner, job_id, status, timeout=3.0):
+    import time as _time
+
+    deadline = _time.monotonic() + synchronization_timeout(timeout)
+    while _time.monotonic() < deadline:
+        job = runner.get(job_id)
+        if job and job.get("status") == status:
+            return job
+        _time.sleep(0.01)
+    raise AssertionError(
+        f"job {job_id} never reached {status}; last={runner.get(job_id)!r}"
+    )
+
+
+def test_job_runner_tracks_pause_elapsed_from_wait_if_paused():
+    """A real pausable job records cumulative pause-wait time, so an ETA
+    estimator built around ``runner.pause_elapsed_seconds`` can subtract
+    it. The elapsed reflects the (mocked) clock delta across the park,
+    independent of real wall time."""
+    import threading
+    import time as _time
+
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    class _FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+    clock = _FakeClock()
+    runner._control._clock = clock  # noqa: SLF001 — test seam
+    finish = threading.Event()
+
+    def work(job):
+        while not finish.is_set():
+            if runner.wait_if_paused(job["id"], publish_paused=True):
+                return {"ok": False}
+            _time.sleep(0.01)
+        return {"ok": True}
+
+    try:
+        job_id = runner.start("working-copy-pause-test", work, pausable=True)
+        _time.sleep(0.05)
+        assert runner.pause_job(job_id) is True
+        _wait_for_job_status(runner, job_id, "paused")
+        clock.now = 3600.0
+        assert runner.resume_job(job_id) is True
+        # The parked worker thread wakes after resume_job() has flipped
+        # the status to "running". Poll until the pause duration it
+        # recorded on waking is observable, which proves the bookkeeping
+        # ran at least once.
+        deadline = _time.monotonic() + synchronization_timeout(3)
+        while (
+            _time.monotonic() < deadline
+            and runner.pause_elapsed_seconds(job_id) == 0.0
+        ):
+            _time.sleep(0.01)
+        assert runner.pause_elapsed_seconds(job_id) == pytest.approx(3600.0)
+    finally:
+        finish.set()
+        runner.shutdown(timeout=3)
+
+
+def test_job_control_forget_locked_clears_pause_elapsed():
+    """``forget_locked`` is what ``_prune_finished_jobs`` calls to drop a
+    completed job's control-flag entries; the pause-elapsed bookkeeping
+    joins the other flags there so a long-running runner does not leak."""
+    import threading
+
+    from job_runner.control import JobControl
+
+    jobs = {"j1": {"id": "j1", "pausable": True}}
+    lock = threading.RLock()
+    cond = threading.Condition(lock)
+
+    class _StubStreams:
+        def publish_status_locked(self, _job, _status):
+            pass
+
+    class _FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+    clock = _FakeClock()
+    control = JobControl(lock, cond, jobs, _StubStreams(), clock=clock)
+    # Simulate the state wait_if_paused records.
+    control._pause_elapsed["j1"] = 42.0  # noqa: SLF001 — test seam
+    assert control.pause_elapsed_seconds("j1") == pytest.approx(42.0)
+    with lock:
+        control.forget_locked("j1")
+    assert control.pause_elapsed_seconds("j1") == 0.0
+
+
+def test_job_runner_pause_elapsed_captured_on_cancellation_during_pause():
+    """Cancel during pause: the wait returns True (cancelled) and the
+    pause duration recorded for the pause that led to the cancel is still
+    readable from inside the work function."""
+    import time as _time
+
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    class _FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+    clock = _FakeClock()
+    runner._control._clock = clock  # noqa: SLF001 — test seam
+    seen = {"wait_result": None, "elapsed_during_pause": None}
+
+    def work(job):
+        while True:
+            cancelled = runner.wait_if_paused(job["id"], publish_paused=True)
+            if cancelled:
+                seen["wait_result"] = True
+                # Captured inside the work function so the assertion does
+                # not race the runner's eventual prune of job state.
+                seen["elapsed_during_pause"] = runner.pause_elapsed_seconds(job["id"])
+                return {"ok": True}
+            _time.sleep(0.01)
+
+    try:
+        job_id = runner.start("working-copy-pause-cancel", work, pausable=True)
+        _time.sleep(0.05)
+        assert runner.pause_job(job_id) is True
+        _wait_for_job_status(runner, job_id, "paused")
+        clock.now = 60.0
+        runner.cancel_job(job_id)
+        # Wait for the job to settle so the work function has returned.
+        deadline = _time.monotonic() + synchronization_timeout(3)
+        while _time.monotonic() < deadline and runner.get(job_id).get("status") not in {"cancelled", "completed"}:
+            _time.sleep(0.01)
+        assert seen["wait_result"] is True
+        assert seen["elapsed_during_pause"] == pytest.approx(60.0)
+    finally:
+        runner.shutdown(timeout=3)
 
 
 def test_import_eta_does_not_count_an_active_prepared_batch_as_settled():
@@ -1375,26 +1706,45 @@ def _stub_extractor(monkeypatch, outcome):
     return calls
 
 
-def test_deferred_working_copy_progress_preserves_import_total(
-    tmp_path, monkeypatch,
-):
-    """Archive imports expose WC progress after their file total is complete."""
+# What the copy phase leaves on the job's progress dict once every original
+# has landed: its estimate is finished, with zero seconds remaining.
+_FINISHED_COPY_ETA = {
+    "eta_phase": "copy", "eta_state": "ready", "eta_settled": 5,
+    "eta_seconds": 0.0,
+}
+
+
+def _run_deferred_working_copies(tmp_path, monkeypatch, status_calls, clock):
+    """Run ``_extract_deferred_working_copies`` with a fake extractor that
+    replays ``status_calls`` (``(now, phase_current, phase_total)``) through
+    the status callback, advancing the injected ``clock`` list before each.
+    Returns the job and runner after the pass."""
+    import functools
     from types import SimpleNamespace
 
     import scanner
+    from import_job import progress
     from import_job.cataloging import _extract_deferred_working_copies
     from import_job.state import _ImportRunState
 
+    monkeypatch.setattr(
+        progress, "_WorkingCopyEtaEstimator",
+        functools.partial(
+            progress._WorkingCopyEtaEstimator, clock=lambda: clock[0],
+        ),
+    )
     captured = {}
 
     def fake_extract(_db, _vireo_dir, **kwargs):
         captured.update(kwargs)
-        kwargs["status_callback"](
-            "Generating working copies: 2 of 5",
-            phase_current=2,
-            phase_total=5,
-            phase_label="Generating working copies",
-        )
+        for now, current, total in status_calls:
+            clock[0] = now
+            kwargs["status_callback"](
+                f"Generating working copies: {current} of {total}",
+                phase_current=current,
+                phase_total=total,
+                phase_label="Generating working copies",
+            )
 
     monkeypatch.setattr(scanner, "_extract_working_copies", fake_extract)
     monkeypatch.setattr(scanner.scan_run, "_extract_working_copies", fake_extract)
@@ -1405,7 +1755,7 @@ def test_deferred_working_copy_progress_preserves_import_total(
         wc_dest_folders={str(tmp_path / "archive")},
     )
     job = _make_job()
-    job["progress"].update({"current": 5, "total": 5})
+    job["progress"].update({"current": 5, "total": 5, **_FINISHED_COPY_ETA})
     runner = FakeRunner()
 
     _extract_deferred_working_copies(
@@ -1415,22 +1765,95 @@ def test_deferred_working_copy_progress_preserves_import_total(
         job,
         object(),
     )
-
     assert captured["status_callback"] is not None
-    step = runner.step_updates[-1][2]
-    assert step["progress"] == {
+    return job, runner
+
+
+def test_deferred_working_copy_progress_preserves_import_total(
+    tmp_path, monkeypatch,
+):
+    """Archive imports expose WC progress after their file total is complete,
+    and never present the finished copy phase's ETA as that progress's."""
+    clock = [100.0]
+    job, runner = _run_deferred_working_copies(
+        tmp_path, monkeypatch, [(100.0, 2, 5)], clock,
+    )
+
+    expected = {
         "current": 5,
         "total": 5,
         "phase_current": 2,
         "phase_total": 5,
         "phase_label": "Generating working copies",
+        # The copy phase's eta_seconds: 0.0 is gone; this phase has no
+        # measured rate yet, and says so.
+        "eta_phase": "working_copies",
+        "eta_state": "estimating",
+        "eta_settled": 2,
     }
+    step = runner.step_updates[-1][2]
+    assert step["progress"] == expected
     event = runner.events[-1][2]
     assert event["current"] == 5
     assert event["total"] == 5
-    assert event["phase_current"] == 2
-    assert event["phase_total"] == 5
-    assert event["phase_label"] == "Generating working copies"
+    assert {k: event[k] for k in expected} == expected
+    for published in (job["progress"], step["progress"], event):
+        assert published["eta_phase"] == "working_copies"
+        assert published["eta_state"] == "estimating"
+        assert "eta_seconds" not in published
+        assert "eta_rate_per_min" not in published
+
+
+def test_working_copy_phase_never_reports_a_zero_eta_while_pending(
+    tmp_path, monkeypatch,
+):
+    """Through the whole pass, no publication with work left and no rate of
+    its own may read as ready with zero seconds remaining (the shape the
+    finished copy phase left behind)."""
+    from import_job.progress import _WORKING_COPY_ETA_MIN_ELAPSED
+
+    clock = [100.0]
+    below_minimum = 100.0 + _WORKING_COPY_ETA_MIN_ELAPSED / 2
+    _job, runner = _run_deferred_working_copies(
+        tmp_path, monkeypatch,
+        [(100.0, 0, 5808), (below_minimum, 27, 5808)], clock,
+    )
+
+    events = [data for _jid, etype, data in runner.events if etype == "progress"]
+    steps = [kw["progress"] for _jid, _sid, kw in runner.step_updates]
+    assert len(events) == 2 and len(steps) == 2
+    for published in events + steps:
+        assert published["phase_current"] < published["phase_total"]
+        assert published["eta_phase"] == "working_copies"
+        assert published["eta_state"] == "estimating"
+        assert "eta_seconds" not in published
+        assert "eta_rate_per_min" not in published
+
+
+def test_working_copy_phase_reports_its_own_labelled_estimate(
+    tmp_path, monkeypatch,
+):
+    """Once working copies have completed, the published ETA is positive,
+    labelled with this phase, and derived from this phase's rate alone."""
+    clock = [100.0]
+    job, runner = _run_deferred_working_copies(
+        tmp_path, monkeypatch,
+        [(100.0, 0, 5808), (154.0, 27, 5808)], clock,
+    )
+
+    step = runner.step_updates[-1][2]["progress"]
+    event = runner.events[-1][2]
+    for published in (job["progress"], step, event):
+        assert published["phase_current"] == 27
+        assert published["phase_total"] == 5808
+        assert published["eta_phase"] == "working_copies"
+        assert published["eta_state"] == "ready"
+        assert published["eta_settled"] == 27
+        # 27 in 54 seconds: 2s each, 5,781 to go.
+        assert published["eta_seconds"] == 11562.0
+        assert published["eta_rate_per_min"] == 30.0
+    assert event["phase"] == "Generating working copies"
+    assert event["current"] == 5 and event["total"] == 5
 
 
 def test_working_copy_extracted_from_card_path(tmp_path, monkeypatch):
@@ -7470,6 +7893,7 @@ def test_progress_events_carry_live_per_folder_counts(tmp_path):
         progress_folder_totals
     )
     assert any(e["eta_state"] == "estimating" for e in eta_events)
+    assert all(e["eta_phase"] == "copy" for e in eta_events)
     assert eta_events[-1]["eta_state"] == "ready"
     assert eta_events[-1]["eta_settled"] == 4
     assert eta_events[-1]["eta_seconds"] == 0.0

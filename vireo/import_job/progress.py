@@ -13,11 +13,23 @@ if TYPE_CHECKING:
     from import_job.import_types import Emit
     from import_job.state import _ImportRunState
     from jobs import JobRunner
+    from scanner.scan_types import StatusCallback
     from services.service_types import JobDict
 
+# Every ETA key an import publishes. ``eta_phase`` names the phase the
+# estimate describes (``"copy"`` for the card-to-archive copy,
+# ``"working_copies"`` for the deferred working-copy pass) so a consumer
+# never reads one phase's finished estimate as the other's.
 _IMPORT_ETA_PROGRESS_KEYS = (
-    "eta_state", "eta_settled", "eta_seconds", "eta_rate_per_min",
+    "eta_phase", "eta_state", "eta_settled", "eta_seconds", "eta_rate_per_min",
 )
+
+# The working-copy pass reports ``estimating`` until this much time has
+# passed since its first status callback and at least one working copy has
+# completed. One second is short enough that a card of small JPEG
+# extractions gets an estimate almost at once, and long enough that the
+# first rate is not computed from a few milliseconds of timer resolution.
+_WORKING_COPY_ETA_MIN_ELAPSED = 1.0
 
 
 # Batch-scoped truth counters for the remote path: how many files of the
@@ -120,6 +132,7 @@ class _ImportEtaEstimator:
     def fields(self, total: int) -> dict[str, Any]:
         """Return JSON-safe telemetry for the progress event and step."""
         result = {
+            "eta_phase": "copy",
             "eta_state": (
                 "ready" if self._seconds_per_file is not None
                 else "estimating"
@@ -159,6 +172,127 @@ class _ImportEtaEstimator:
                 60.0 / self._seconds_per_file, 1,
             )
         return result
+
+
+class _WorkingCopyEtaEstimator:
+    """Estimate the deferred working-copy pass from its own progress.
+
+    The pass starts after every original has landed, when the copy phase's
+    estimate already reads zero seconds remaining; carrying that forward
+    would present a finished phase's ETA while thousands of working copies
+    are still pending. Time the pass from its first status callback and
+    divide by the working copies completed so far. Until
+    ``_WORKING_COPY_ETA_MIN_ELAPSED`` has passed and one working copy has
+    completed the honest answer is "estimating".
+
+    The extractor's cancel check parks inside the runner's
+    ``wait_if_paused`` on Pause, so an item that straddles a pause would
+    otherwise look like it took the entire pause to extract and poison the
+    per-item rate for the rest of the pass. ``paused_elapsed``, when
+    supplied, returns the job's cumulative pause duration; the estimator
+    subtracts the delta since timing started from its wall-clock elapsed so
+    rate and ETA reflect active processing time only.
+    """
+
+    def __init__(
+        self,
+        clock: Callable[[], float] | None = None,
+        paused_elapsed: Callable[[], float] | None = None,
+    ) -> None:
+        self._clock = clock or time.monotonic
+        self._paused_elapsed = paused_elapsed
+        self._started_at: float | None = None
+        self._paused_at_start: float = 0.0
+
+    def fields(self, current: int | None, total: int | None) -> dict[str, Any]:
+        """Return JSON-safe telemetry for the progress event and step."""
+        now = self._clock()
+        if self._started_at is None:
+            self._started_at = now
+            if self._paused_elapsed is not None:
+                self._paused_at_start = self._paused_elapsed()
+        completed = max(0, int(current or 0))
+        remaining = max(0, int(total or 0) - completed)
+        result: dict[str, Any] = {
+            "eta_phase": "working_copies",
+            "eta_state": "estimating",
+            "eta_settled": completed,
+        }
+        if remaining == 0:
+            result["eta_state"] = "ready"
+            result["eta_seconds"] = 0.0
+            return result
+        pause_delta = 0.0
+        if self._paused_elapsed is not None:
+            pause_delta = max(0.0, self._paused_elapsed() - self._paused_at_start)
+        elapsed = max(0.0, now - self._started_at - pause_delta)
+        if completed == 0 or elapsed < _WORKING_COPY_ETA_MIN_ELAPSED:
+            return result
+        seconds_per_item = elapsed / completed
+        result["eta_state"] = "ready"
+        result["eta_seconds"] = round(remaining * seconds_per_item, 1)
+        result["eta_rate_per_min"] = round(60.0 / seconds_per_item, 1)
+        return result
+
+
+def _make_working_copy_status(
+    job: JobDict, runner: JobRunner, state: _ImportRunState, eta: _WorkingCopyEtaEstimator | None = None,
+) -> StatusCallback:
+    """Build the status callback for the deferred working-copy pass.
+
+    The callback exposes the pass as sub-phase progress
+    (``phase_current`` / ``phase_total`` / ``phase_label``) without
+    replacing the import's file totals, and replaces the copy phase's ETA
+    keys with the pass's own estimate: the copy phase is over by then, so
+    its ``eta_seconds: 0`` would otherwise be published as this phase's.
+    """
+    if eta is None:
+        eta = _WorkingCopyEtaEstimator(
+            paused_elapsed=lambda: runner.pause_elapsed_seconds(job["id"]),
+        )
+    eta_fields: dict[str, Any] = {}
+
+    def _working_copy_status(
+        message: str, phase_current: int | None = None, phase_total: int | None = None,
+        phase_label: str | None = None,
+    ) -> None:
+        nonlocal eta_fields
+        if phase_total is not None:
+            eta_fields = eta.fields(phase_current, phase_total)
+        extra = {
+            "phase_current": phase_current,
+            "phase_total": phase_total,
+            "phase_label": phase_label or "Generating working copies",
+            **eta_fields,
+        }
+        for key in _IMPORT_ETA_PROGRESS_KEYS:
+            job["progress"].pop(key, None)
+        job["progress"].update(extra)
+        job["progress"]["current_file"] = message
+        runner.update_step(
+            job["id"], "import",
+            current_file=message,
+            progress={
+                "current": job["progress"].get("current", 0),
+                "total": job["progress"].get("total", 0),
+                **extra,
+            },
+        )
+        runner.push_event(
+            job["id"], "progress",
+            progress_event(
+                extra["phase_label"],
+                job["progress"].get("current", 0),
+                job["progress"].get("total", 0),
+                message,
+                folders={
+                    rel: dict(counts)
+                    for rel, counts in state.folder_counts.items()
+                },
+                **extra,
+            ),
+        )
+    return _working_copy_status
 
 
 def _make_emitter(job: JobDict, runner: JobRunner, state: _ImportRunState, eta: _ImportEtaEstimator) -> Emit:

@@ -10,9 +10,8 @@ import os
 from typing import TYPE_CHECKING
 
 from import_job.copy_verify import DestReadCancelled, _rehash_dest_or_none
-from import_job.progress import _IMPORT_ETA_PROGRESS_KEYS
+from import_job.progress import _make_working_copy_status
 from import_job.state import _reclassify_landed_failed
-from job_contract import progress_event
 from scanner import EMPTY_FILE_SHA256, ScanControl, ScanHooks, ScanOptions
 
 if TYPE_CHECKING:
@@ -600,47 +599,6 @@ def _extract_deferred_working_copies(
     if params.vireo_dir and state.wc_dest_folders and not state.cancelled:
         from scanner import _extract_working_copies
 
-        def _working_copy_status(
-            message: str, phase_current: int | None = None, phase_total: int | None = None,
-            phase_label: str | None = None,
-        ) -> None:
-            """Expose deferred extraction without replacing import totals."""
-            extra = {
-                "phase_current": phase_current,
-                "phase_total": phase_total,
-                "phase_label": phase_label or "Generating working copies",
-                **{
-                    key: job["progress"][key]
-                    for key in _IMPORT_ETA_PROGRESS_KEYS
-                    if key in job["progress"]
-                },
-            }
-            job["progress"].update(extra)
-            job["progress"]["current_file"] = message
-            runner.update_step(
-                job["id"], "import",
-                current_file=message,
-                progress={
-                    "current": job["progress"].get("current", 0),
-                    "total": job["progress"].get("total", 0),
-                    **extra,
-                },
-            )
-            runner.push_event(
-                job["id"], "progress",
-                progress_event(
-                    extra["phase_label"],
-                    job["progress"].get("current", 0),
-                    job["progress"].get("total", 0),
-                    message,
-                    folders={
-                        rel: dict(counts)
-                        for rel, counts in state.folder_counts.items()
-                    },
-                    **extra,
-                ),
-            )
-
         # Share this list with the batch so a crash partway through still
         # names every photo it had already marked failed; otherwise the
         # pass-level error would be the only thing the result mentions
@@ -652,7 +610,7 @@ def _extract_deferred_working_copies(
                 db, params.vireo_dir,
                 scope=[(d, "exact") for d in sorted(state.wc_dest_folders)],
                 source_paths=state.wc_source_paths,
-                status_callback=_working_copy_status,
+                status_callback=_make_working_copy_status(job, runner, state),
                 cancel_check=lambda: runner.is_cancelled(job["id"]),
                 failed_paths_sink=state.wc_failed_paths,
             )
