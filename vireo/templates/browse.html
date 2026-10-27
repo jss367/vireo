@@ -139,6 +139,17 @@ body.sidebar-resizing {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 10%, transparent);
 }
+.pending-archive-action {
+  font-family: inherit;
+  cursor: pointer;
+}
+.pending-archive-action:hover {
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+}
+.pending-archive-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .folder-local-status.updating::before {
   content: '';
   display: inline-block;

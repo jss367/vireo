@@ -38,8 +38,9 @@ def _staged_import(db, tmp_path, *, destination):
 
 
 @pytest.mark.parametrize("sync_first", [False, True])
+@pytest.mark.parametrize("entry", ["folder-menu", "badge-click", "badge-keyboard"])
 def test_pending_folder_offers_nas_transfer_instead_of_another_local_copy(
-    live_server, page, tmp_path, sync_first
+    live_server, page, tmp_path, sync_first, entry
 ):
     db = live_server["db"]
     destination = "/Volumes/Photography/USA/2026"
@@ -55,10 +56,37 @@ def test_pending_folder_offers_nas_transfer_instead_of_another_local_copy(
     page.goto(f"{live_server['url']}/browse")
     item = page.locator(f'.tree-item[data-folder-id="{folder_id}"]')
     expect(item).to_contain_text("KEPT LOCALLY")
-    item.click(button="right")
+    original_url = page.url
+    badge = item.get_by_role("button", name="NAS transfer options:")
+    if entry == "folder-menu":
+        item.click(button="right")
+    elif entry == "badge-click":
+        badge.click()
+    else:
+        badge.focus()
+        badge.press("Enter")
     menu = page.locator(".vireo-ctx-menu")
     expect(menu.get_by_text("Work Locally…", exact=True)).to_have_count(0)
-    menu.get_by_text("Send to NAS…", exact=True).click()
+    if entry != "folder-menu":
+        expect(badge).to_have_attribute("aria-expanded", "true")
+        expect(menu.get_by_role("menuitem", name="Send to NAS…")).to_be_focused()
+        assert page.url == original_url
+        if directory := os.environ.get("VIREO_TRANSFER_SCREENSHOTS"):
+            target = Path(directory)
+            target.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(target / "kept-locally-menu.png"), clip={
+                "x": 0, "y": 80, "width": 330, "height": 230,
+            })
+    if entry == "badge-keyboard":
+        menu.press("Escape")
+        expect(menu).to_have_count(0)
+        expect(badge).to_be_focused()
+        expect(badge).to_have_attribute("aria-expanded", "false")
+        badge.press("Space")
+        menu.get_by_role("menuitem", name="Send to NAS…").press("Enter")
+    else:
+        menu.get_by_text("Send to NAS…", exact=True).click()
+    expect(badge).to_have_attribute("aria-expanded", "false")
 
     banner = page.locator("#pendingArchives")
     expect(banner.locator("details")).to_have_attribute("open", "")

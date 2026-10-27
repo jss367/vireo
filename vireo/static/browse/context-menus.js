@@ -4,7 +4,7 @@ import { selection } from './selection-state.js';
 import { _noteColorLabelEdits, state } from './state.js';
 import {
   VireoColorLabels, VireoFilter, VireoReleaseOriginals, buildOpenInEditorMenuItems,
-  buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems, coerceSelectionOnContext,
+  buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems, closeContextMenu, coerceSelectionOnContext,
   editNav, findSimilar, localFolders, openContextMenu, openPanoramaModal, pendingArchives, revealLabel,
   safeFetch, showPendingArchiveForFolder, showRevealFeedback, showToast,
 } from './shared.js';
@@ -569,6 +569,46 @@ function workLocallyFolder(/** @type {number} */ fid) {
     return;
   }
   window.location.href = '/workspace#work-locally';
+}
+
+/** @param {Event} event @param {HTMLElement} button */
+export function openPendingArchiveMenu(event, button) {
+  event.stopPropagation();
+  var fid = Number(button.dataset.folderId);
+  var archive = (pendingArchives() || []).find(function(item) {
+    return (item.folder_ids || []).some(function(id) { return Number(id) === fid; });
+  });
+  if (!archive) return;
+  var rect = button.getBoundingClientRect();
+  openContextMenu({clientX: rect.left, clientY: rect.bottom + 4}, [{
+    label: archive.state === 'ready' ? 'Send to NAS…' : 'View NAS transfer…',
+    onClick: function() { showPendingArchiveForFolder(fid); },
+  }], {onDismiss: function() {
+    button.setAttribute('aria-expanded', 'false');
+    if (button.isConnected) button.focus();
+  }});
+  button.setAttribute('aria-expanded', 'true');
+  button.setAttribute('aria-controls', 'pendingArchiveFolderMenu');
+  var menu = document.querySelector('.vireo-ctx-menu');
+  if (!(menu instanceof HTMLElement)) return;
+  menu.id = 'pendingArchiveFolderMenu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'NAS transfer options');
+  const item = menu.querySelector('.vireo-ctx-item');
+  if (!(item instanceof HTMLElement)) return;
+  item.setAttribute('role', 'menuitem');
+  item.tabIndex = 0;
+  item.addEventListener('keydown', function(keyEvent) {
+    if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+      keyEvent.preventDefault();
+      item.click();
+    } else if (keyEvent.key === 'Tab') {
+      closeContextMenu();
+    } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(keyEvent.key)) {
+      keyEvent.preventDefault();
+    }
+  });
+  item.focus();
 }
 
 async function rescanFolder(/** @type {number} */ fid) {
