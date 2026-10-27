@@ -247,6 +247,37 @@ def test_weak_context_anchors_are_read_without_becoming_retry_targets(retry_libr
     assert result["requested_photo_ids"] == [ids[1]]
 
 
+def test_readiness_is_the_same_alone_and_within_its_encounter(retry_library, tmp_path):
+    """A full-image-rescued dropout frame must not read as "no subject" when asked about alone.
+
+    Its anchors carry normal boxes and a species; it carries only a merely
+    positive box plus a full-image classification. The pipeline rescues it from
+    the anchors, so readiness has to load them whatever the request contains.
+    """
+    from services import detection_store
+    from services.analysis_retry import _context_ids
+    _, db, ids, calls = retry_library
+    box = {"x": .1, "y": .1, "w": .7, "h": .7}
+    for index, pid in enumerate(ids):
+        db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?", (f"2026-10-21T10:00:0{index}", pid))
+        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
+            {"box": box, "confidence": .05 if index == 1 else .9, "category": "animal"}])[0]
+        if index == 1:
+            did = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.0,
+                                            "category": "animal"}], "full-image")[0]
+        db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match")
+    db.commit()
+    effective = db.get_effective_config({})
+    assert _context_ids(db, [ids[1]], effective) == sorted(ids)
+    alone = explain_selected(db, [ids[1]], effective)["photos"][0]
+    together = next(photo for photo in explain_selected(db, ids, effective)["photos"] if photo["photo_id"] == ids[1])
+    assert (alone["status"], alone["reasons"]) == (together["status"], together["reasons"])
+    assert alone["reasons"] == ["segmentation_incomplete"] and alone["required_stages"] == ["segmentation", "quality"]
+    result, _ = execute(db, [ids[1]], tmp_path)
+    assert result["ok"] and result["photos"][0]["status"] == "complete"
+    assert calls["detection"] == [] and len(calls["segmentation"]) == 1
+
+
 def test_visibility_removed_during_inference_never_publishes(retry_library, tmp_path, monkeypatch):
     _, db, ids, _ = retry_library
     original = __import__("masking").generate_mask

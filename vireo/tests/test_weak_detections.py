@@ -154,3 +154,27 @@ def test_full_image_bridge_does_not_chain_over_long_runs():
     entry = [('Common Yellowthroat', 0.99, 'model', 'taxon:9721')]
     assert matching_full_image_runs(photos, detections, {1:entry, 6:entry},
                                     {pid:entry for pid in (2,3,4,5)}) == []
+
+
+def test_rescue_candidate_runs_cover_both_contextual_rescues():
+    """Readiness and mask extraction load the anchors of both rescue kinds."""
+    from weak_detections import (
+        FULL_IMAGE_RESCUE_WEAK_FLOOR,
+        rescue_candidate_runs,
+        rescue_floor,
+        rescue_scope_photo_ids,
+    )
+    photos = [{"id": i, "folder_id": 1, "timestamp": f"2026-10-21T10:00:0{i}"} for i in range(5)]
+    detections = {
+        0: [{"confidence": .9, "category": "animal"}],
+        1: [{"confidence": .15, "category": "animal"}],   # ordinary weak run
+        2: [{"confidence": .9, "category": "animal"}],
+        3: [{"confidence": .05, "category": "animal"}],   # full-image dropout candidate
+        4: [{"confidence": .9, "category": "animal"}],
+    }
+    runs = rescue_candidate_runs(photos, detections, detector_confidence=.2, weak_confidence=.12, max_gap=3.0)
+    assert sorted(run["photo_ids"] for run in runs) == [[1], [3]]
+    assert rescue_scope_photo_ids(runs) == {0, 1, 2, 3, 4}
+    assert rescue_floor({"weak_detection_context": {"species": "x"}}, .12) == .12
+    assert rescue_floor({"weak_detection_context": {"evidence": "full_image_sequence"}}, .12) == FULL_IMAGE_RESCUE_WEAK_FLOOR
+    assert rescue_floor({}, .12) == .12

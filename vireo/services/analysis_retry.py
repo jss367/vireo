@@ -57,19 +57,29 @@ def _current_photo(db: Database, pid: int, effective: JsonDict) -> JsonDict:
 
 
 def _context_ids(db: Database, ids: list[int], effective: JsonDict) -> list[int]:
-    """Read neighboring weak-run anchors without inferring on unselected photos."""
+    """Read neighboring rescue anchors without inferring on unselected photos.
+
+    The feature loader rescues a selected frame from its neighbors in two ways:
+    ordinary weak-box runs at the workspace's weak floor, and full-image
+    dropout runs around merely positive boxes (``matching_full_image_runs``).
+    Both kinds of anchor must be loaded, or the same frame reads as "no
+    qualifying subject" in a small request and "segmentation incomplete" in
+    the request that happens to include its encounter.
+    """
     from services.detection_store import get_detections_for_photos
-    from weak_detections import contextual_weak_runs
+    from weak_detections import FULL_IMAGE_RESCUE_WEAK_FLOOR, rescue_candidate_runs
     options = effective.get("pipeline", {})
     if not options.get("weak_detection_rescue_enabled", True):
         return ids
     db.pipeline_features.stage_scope_photo_ids(ids)
     rows = db.pipeline_features.selected_folder_context(db.require_workspace_id())
+    weak_confidence = config_value(options, "weak_detection_confidence", section="pipeline")
     detections = get_detections_for_photos(db, [row["id"] for row in rows],
-        min_conf=config_value(options, "weak_detection_confidence", section="pipeline"), detector_model="megadetector-v6")
+        min_conf=min(weak_confidence, FULL_IMAGE_RESCUE_WEAK_FLOOR), detector_model="megadetector-v6")
+    runs = rescue_candidate_runs(rows, detections, detector_confidence=config_value(effective, "detector_confidence"),
+        weak_confidence=weak_confidence, max_gap=config_value(options, "burst_time_gap", section="pipeline"))
     context = set(ids)
-    for run in contextual_weak_runs(rows, detections, detector_confidence=config_value(effective, "detector_confidence"),
-            weak_confidence=config_value(options, "weak_detection_confidence", section="pipeline"), max_gap=config_value(options, "burst_time_gap", section="pipeline")):
+    for run in runs:
         if context.intersection(run["photo_ids"]):
             context.update([*run["photo_ids"], run["left_photo_id"], run["right_photo_id"]])
     return sorted(context)
@@ -249,6 +259,7 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
     from pipeline_job import _StagedMaskFile
     from repositories.masks_features import MaskQuality, PipelineFeatures
     from subject_analysis import publish_analysis
+    from weak_detections import rescue_floor
 
     features = analysis["features"]
     if any(not isinstance(features.get(field), (int, float)) or isinstance(features.get(field), bool)
@@ -283,7 +294,8 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                 tuple(detection["box_" + key] for key in "xywh"),
                 MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}), _commit=False)
             current = _current_photo(db, pid, effective)
-            weak_floor = config_value(effective.get("pipeline", {}), "weak_detection_confidence", section="pipeline") if current.get("subject_uncertain") else None
+            weak_floor = (rescue_floor(current, config_value(effective.get("pipeline", {}), "weak_detection_confidence", section="pipeline"))
+                          if current.get("subject_uncertain") else None)
             db.masks_features.set_active_variant(pid, variant, config_value(effective, "detector_confidence"),
                 _commit=False, weak_rescue_min_conf=weak_floor)
             db.masks_features.update_pipeline_features(pid, PipelineFeatures(

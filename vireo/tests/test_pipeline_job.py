@@ -8845,6 +8845,64 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
         assert primary["detection_id"] == detection_ids[1]
 
 
+def test_extract_masks_stage_masks_full_image_rescued_dropout(tmp_path, monkeypatch):
+    """A full-image-rescued dropout frame enters the mask worklist at its own floor.
+
+    Its only MegaDetector box sits below ``weak_detection_confidence``, so the
+    ordinary weak floor never sees it; grouping still rescues the frame from
+    its anchors through the full-image classification. Mask extraction must
+    open the same frame, or a clean Full run leaves it "segmentation
+    incomplete" and the selected-photo retry cannot activate its mask.
+    """
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = workspace_folders.add_folder(db, folder_path)
+
+    photo_ids = []
+    detection_ids = []
+    for index, confidence in enumerate((0.9, 0.05, 0.9)):
+        filename = f"bird{index}.jpg"
+        photo_id = photo_ingest.add_photo(
+            db, folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        _drop_jpeg(folder_path, filename)
+        detection_id = detection_store.write_detection_batch(
+            db, photo_id, "megadetector-v6",
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": confidence, "category": "animal"}],
+        )[0]
+        photo_ids.append(photo_id)
+        detection_ids.append(detection_id)
+        if index == 1:
+            detection_id = detection_store.write_detection_batch(
+                db, photo_id, "full-image",
+                [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0, "category": "animal"}],
+            )[0]
+        db.predictions.add(detection_id, "Great-tailed Grackle", 0.9, "inat21")
+
+    collection_id = db.collections.add(
+        "Full-image mask bridge",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+    state = _stub_extract_masks_heavy_ops(monkeypatch)
+    params = PipelineParams(
+        collection_id=collection_id, skip_classify=True,
+        skip_extract_masks=False, skip_regroup=True,
+    )
+    result = run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert state["proxy_calls"] == 3
+    primary = db.conn.execute(
+        "SELECT detection_id FROM photo_subject_state WHERE photo_id=?", (photo_ids[1],),
+    ).fetchone()
+    assert primary["detection_id"] == detection_ids[1]
+    assert db.conn.execute(
+        "SELECT mask_path FROM photos WHERE id=?", (photo_ids[1],),
+    ).fetchone()[0] is not None
+
+
 def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
     tmp_path, monkeypatch,
 ):
