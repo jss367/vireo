@@ -61,6 +61,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         "previous_species": edit.previous_species, "split": bool(body.get("split")),
         "provenance": edit.provenance,
         "preserve_existing_provenance": edit.preserve_existing_provenance,
+        "preserve_keyword_metadata": edit.preserve_keyword_metadata,
         "target": target_state,
         # Burst edits refresh the entire encounter, including sibling bursts.
         # Bind their live species inputs without expanding the visible matrix
@@ -82,7 +83,8 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
             "species": proposed_species, "previous_species": edit.previous_species,
             "split": bool(body.get("split")), "previous_species_choices": edit.current_species_list,
             "provenance": edit.provenance,
-            "preserve_existing_provenance": edit.preserve_existing_provenance}
+            "preserve_existing_provenance": edit.preserve_existing_provenance,
+            "preserve_keyword_metadata": edit.preserve_keyword_metadata}
 
 
 def _refresh_group(

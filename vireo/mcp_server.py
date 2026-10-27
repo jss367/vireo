@@ -553,7 +553,8 @@ def _species_assignment_payload(photo_ids, species, provenance):
         raise VireoError("provenance.reason or evidence_source must describe the identification evidence")
     return {"photo_ids": photo_ids, "source_photo_ids": photo_ids,
             "species": species, "provenance": provenance, "add": True,
-            "preserve_existing_provenance": True, "response_mode": "compact"}
+            "preserve_existing_provenance": True, "preserve_keyword_metadata": True,
+            "response_mode": "compact"}
 
 
 def _register_species_tools(server, client):

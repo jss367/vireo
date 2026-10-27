@@ -329,6 +329,79 @@ def test_species_tools_require_attributed_identification_evidence(mcp, provenanc
     assert transport.calls == []
 
 
+@pytest.mark.parametrize("kind", ["general", "untyped_taxonomy", "genus"])
+def test_species_tools_reject_shared_keyword_promotion_or_rebinding(mcp, app_and_db, kind):
+    from pipeline import load_results_raw
+    from test_app import _seed_encounter_cache
+
+    server, db, _ = mcp
+    app, _ = app_and_db
+    _seed_encounter_cache(app, db, [1, 2, 3])
+    db.conn.executemany("INSERT INTO taxa (id, name, common_name, rank) VALUES (?, ?, ?, ?)", [
+        (900001, "Reviewus", "Review bird", "genus"),
+        (900002, "Reviewus birdus", "Review bird", "species"),
+    ])
+    keyword = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) VALUES ('Review bird', ?, ?, ?)",
+        ("general" if kind == "general" else "taxonomy", int(kind == "genus"),
+         900001 if kind == "genus" else None),
+    ).lastrowid
+    db.commit()
+    db.tag_photo(3, keyword)
+    original = db.keywords.species_assignment_identity(keyword)
+    original_species = db.photo_species.get_species_for_photos([1, 2, 3])
+    original_history = db.edit_history.list_recent()
+    original_cache = load_results_raw(os.path.dirname(db._db_path), db.active_workspace_id)
+    provenance = {"method": "direct_visual", "reviewer": "Agent", "reason": "Visible plumage"}
+    for tool, extra in [("preview_species_assignment", {}), ("apply_species_assignment", {"preview_token": "unused"})]:
+        error = call_error(server, tool, photo_ids=[1], species="Review bird", provenance=provenance, **extra)
+        assert "409" in error and "keyword management" in error
+    assert db.keywords.species_assignment_identity(keyword) == original
+    assert db.photo_species.get_species_for_photos([1, 2, 3]) == original_species
+    assert db.edit_history.list_recent() == original_history
+    assert load_results_raw(os.path.dirname(db._db_path), db.active_workspace_id) == original_cache
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_species_tools_reuse_shared_species_metadata_through_undo_and_redo(mcp, app_and_db, linked):
+    from test_app import _seed_encounter_cache
+
+    server, db, _ = mcp
+    app, _ = app_and_db
+    _seed_encounter_cache(app, db, [1, 2, 3])
+    db.conn.execute("INSERT INTO taxa (id, name, common_name, rank) VALUES (900002, 'Reviewus birdus', 'Review bird', 'species')")
+    keyword = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) VALUES ('Review bird', 'taxonomy', ?, ?)",
+        (0 if linked else 1, 900002 if linked else None),
+    ).lastrowid
+    db.commit()
+    db.tag_photo(3, keyword)
+    original = db.keywords.species_assignment_identity(keyword)
+    outside = db.species_provenance.assignments(3)
+    provenance = {"method": "direct_visual", "reviewer": "Agent", "reason": "Visible plumage"}
+    preview = call(server, "preview_species_assignment", photo_ids=[1], species="Review bird", provenance=provenance)
+    assert preview["preserve_keyword_metadata"] is True
+    client = app.test_client()
+    body = {"photo_ids": [1], "source_photo_ids": [1], "species": "Review bird", "provenance": provenance,
+            "add": True, "preserve_existing_provenance": True, "preserve_keyword_metadata": False,
+            "preview_token": preview["preview_token"]}
+    assert client.post("/api/encounters/species", json=body).status_code == 409
+    result = call(server, "apply_species_assignment", photo_ids=[1], species="Review bird", provenance=provenance,
+                  preview_token=preview["preview_token"])
+    assert db.keywords.species_assignment_identity(keyword) == original
+    assert db.species_provenance.assignments(1)[0]["keyword_id"] == keyword
+    assert db.species_provenance.assignments(2) == []
+    assert db.species_provenance.assignments(3) == outside
+    assert client.post("/api/undo", json={"edit_id": result["undo"]["edit_id"]}).status_code == 200
+    assert db.species_provenance.assignments(1) == []
+    assert db.keywords.species_assignment_identity(keyword) == original
+    assert db.species_provenance.assignments(3) == outside
+    assert client.post("/api/redo").status_code == 200
+    assert db.species_provenance.assignments(1)[0]["keyword_id"] == keyword
+    assert db.keywords.species_assignment_identity(keyword) == original
+    assert db.species_provenance.assignments(3) == outside
+
+
 @pytest.mark.parametrize("method", [[], {}, None, 1, True])
 def test_species_tools_reject_non_string_methods_before_http(mcp, method):
     server, _, transport = mcp

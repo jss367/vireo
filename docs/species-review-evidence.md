@@ -88,6 +88,11 @@ is a separate action, and reclassification does not repair confirmed keywords.
    species and flags, and returns a compact response with an Undo reference.
    The connector sets `preserve_existing_provenance: true`: a photo already
    carrying the species keeps its saved evidence and reviewer attribution.
+   It also sets `preserve_keyword_metadata: true`, reusing existing species rows
+   without promoting or rebinding shared keywords. An incompatible general or
+   higher-rank keyword returns 409 before writes and needs explicit review in
+   keyword management. A compatible unlinked species row retains its null taxon
+   link; adding a reviewed label does not silently repair shared catalog metadata.
 5. Read `get_photo(...).species_assignments` to verify the saved identification,
    reviewer, method and supporting frames. Preserve user-reviewed assignments.
 

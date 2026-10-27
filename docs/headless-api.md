@@ -240,6 +240,10 @@ writer lock. Stale previews return HTTP 409 without species changes.
 equivalent species assignments intact; the new MCP confirmation tools set this
 option. Its value is bound to the preview token. Existing API callers retain
 their default behavior of updating attribution when provenance is supplied.
+The MCP tools also set `preserve_keyword_metadata: true`, bound to the token.
+Existing species keywords are reused without changing their type or taxon link.
+An incompatible keyword returns 409 before writes and requires explicit review
+in keyword management. Legacy API callers retain their keyword-resolution behavior.
 The token also binds live species identities and provenance for every encounter
 member whose summaries will refresh, including sibling bursts outside the
 displayed source-photo matrix. Unrelated encounters remain outside that scope.
