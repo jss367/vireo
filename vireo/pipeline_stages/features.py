@@ -68,8 +68,7 @@ class _PreflightMaskOutcomes(Protocol):
     def __call__(
         self, thread_db: Database, dropped_photos: list[sqlite3.Row],
         sam2_variant: str | None, dinov2_variant: str | None,
-        detector_confidence: float, contextual_weak_ids: set[int] | None = ...,
-        weak_detection_confidence: float | None = ...,
+        detector_confidence: float, rescue_floors: dict[int, float] | None = ...,
         raw_subject_analysis: bool = ...,
     ) -> tuple[set[int], set[int]]: ...
 
@@ -348,23 +347,24 @@ class _MaskPass:
             self.thread_db.collections.get_photos(self.run.collection_id, per_page=999999),
         )
 
-        # The mask loop applies two detection-confidence floors: a
-        # strict one for ordinary photos, and a lower
-        # ``weak_detection_confidence`` floor with an MDv6/animal
-        # filter for photos rescued by ``contextual_weak_runs``. The
-        # pre-flight offline probe below has to know both, and know
-        # the *precise* rescue set — a plain "look this low"
-        # candidacy floor over-counts unrelated sub-threshold photos
-        # as at-risk, inflating the outage report (Codex #1392 P2
-        # r3687403366). Compute them on the pre-filter ``photos``
-        # list so the eligibility set covers photos we're about to
-        # drop, and mirror the loop's anchor-species gate exactly.
+        # The mask loop applies a strict detection-confidence floor to
+        # ordinary photos and a per-photo rescue floor with an MDv6/animal
+        # filter to contextually rescued frames (``weak_detection_
+        # confidence`` for ordinary weak runs, the near-zero candidate
+        # floor for full-image dropout rescues). The pre-flight offline
+        # probe below has to know the *precise* rescue set and each
+        # frame's floor — a plain "look this low" candidacy floor
+        # over-counts unrelated sub-threshold photos as at-risk,
+        # inflating the outage report (Codex #1392 P2 r3687403366).
+        # Compute them on the pre-filter ``photos`` list so the
+        # eligibility set covers photos we're about to drop, and mirror
+        # the loop's anchor-species gate exactly.
         self.detector_confidence = config_value(self.effective_cfg, "detector_confidence")
         self.weak_rescue_enabled = self.pipeline_cfg.get(
             "weak_detection_rescue_enabled", True,
         )
         self.weak_detection_confidence = config_value(self.pipeline_cfg, "weak_detection_confidence", section="pipeline")
-        self.contextual_weak_ids = self._find_contextual_weak_ids()
+        self.rescue_floor_by_photo = self._find_rescue_floors()
         self.outcomes.settings = {
             "detector_confidence": self.detector_confidence,
             "weak_detection_confidence": self.weak_detection_confidence,
@@ -375,52 +375,48 @@ class _MaskPass:
             "raw_subject_analysis": self.run.params.raw_subject_analysis,
         }
 
-    def _find_contextual_weak_ids(self) -> set[int]:
-        contextual_weak_ids: set = set()
-        if (
-            self.weak_rescue_enabled
-            and self.weak_detection_confidence < self.detector_confidence
-            and self.photos
-        ):
-            from weak_detections import contextual_weak_runs
-            raw_mdv6_dets = detection_store.get_detections_for_photos(
-                self.thread_db, [p["id"] for p in self.photos],
-                min_conf=self.weak_detection_confidence,
-                detector_model="megadetector-v6",
-            )
-            weak_runs = contextual_weak_runs(
-                self.photos,
-                raw_mdv6_dets,
-                detector_confidence=self.detector_confidence,
-                weak_confidence=self.weak_detection_confidence,
-                max_gap=config_value(self.pipeline_cfg, "burst_time_gap", section="pipeline"),
-            )
-            weak_scope_ids = {
-                photo_id
-                for run in weak_runs
-                for photo_id in (
-                    run["left_photo_id"],
-                    *run["photo_ids"],
-                    run["right_photo_id"],
-                )
-            }
-            if weak_scope_ids:
-                # Mask only frames that pass the same matching-species
-                # anchor gate as encounter grouping. Candidate weak
-                # runs with conflicting or unclassified anchors remain
-                # ordinary sub-threshold detections throughout.
-                from pipeline import load_photo_features
-                weak_features = load_photo_features(
-                    self.thread_db,
-                    config=self.effective_cfg,
-                    photo_ids=weak_scope_ids,
-                )
-                contextual_weak_ids = {
-                    feature["id"]
-                    for feature in weak_features
-                    if feature.get("subject_uncertain")
-                }
-        return contextual_weak_ids
+    def _find_rescue_floors(self) -> dict[int, float]:
+        """Map each rescued frame to the MegaDetector floor its subject box clears.
+
+        Ordinary weak-box runs keep ``weak_detection_confidence``. Full-image
+        dropout rescues (a merely positive box on a bracketed frame,
+        corroborated by whole-image classification) use the near-zero
+        candidate floor; at the weak floor the mask loop never opens them and
+        the frame stays "segmentation incomplete" after a clean Full run.
+        Only frames that pass grouping's matching-species anchor gate are
+        included; candidate runs with conflicting or unclassified anchors
+        remain ordinary sub-threshold detections throughout.
+        """
+        if not (self.weak_rescue_enabled and self.photos):
+            return {}
+        from weak_detections import (
+            FULL_IMAGE_RESCUE_WEAK_FLOOR,
+            rescue_candidate_runs,
+            rescue_floor,
+            rescue_scope_photo_ids,
+        )
+        raw_mdv6_dets = detection_store.get_detections_for_photos(
+            self.thread_db, [p["id"] for p in self.photos],
+            min_conf=min(self.weak_detection_confidence, FULL_IMAGE_RESCUE_WEAK_FLOOR),
+            detector_model="megadetector-v6",
+        )
+        weak_scope_ids = rescue_scope_photo_ids(rescue_candidate_runs(
+            self.photos, raw_mdv6_dets,
+            detector_confidence=self.detector_confidence,
+            weak_confidence=self.weak_detection_confidence,
+            max_gap=config_value(self.pipeline_cfg, "burst_time_gap", section="pipeline"),
+        ))
+        if not weak_scope_ids:
+            return {}
+        from pipeline import load_photo_features
+        weak_features = load_photo_features(
+            self.thread_db, config=self.effective_cfg, photo_ids=weak_scope_ids,
+        )
+        return {
+            feature["id"]: rescue_floor(feature, self.weak_detection_confidence)
+            for feature in weak_features
+            if feature.get("subject_uncertain")
+        }
 
     def drop_offline_folders(self) -> None:
         """Drop photos whose folder is offline.
@@ -534,14 +530,7 @@ class _MaskPass:
             self.thread_db, dropped, self.sam2_variant, self.dinov2_variant,
             self.detector_confidence,
             raw_subject_analysis=self.run.params.raw_subject_analysis,
-            contextual_weak_ids=self.contextual_weak_ids,
-            weak_detection_confidence=(
-                self.weak_detection_confidence
-                if self.weak_rescue_enabled
-                and self.weak_detection_confidence
-                < self.detector_confidence
-                else None
-            ),
+            rescue_floors=self.rescue_floor_by_photo,
         )
 
     def map_primary_detections(self) -> None:
@@ -570,7 +559,7 @@ class _MaskPass:
         (download weights vs lower the threshold).
 
         ``detector_confidence`` / ``weak_rescue_enabled`` /
-        ``weak_detection_confidence`` / ``contextual_weak_ids`` are
+        ``rescue_floor_by_photo`` are
         captured above (before the pre-flight offline probe) so
         ``_preflight_mask_outcomes`` can apply the same weak-rescue
         eligibility the loop uses.  Reusing them here keeps that
@@ -629,16 +618,16 @@ class _MaskPass:
         # only photos would otherwise enter SAM extraction on
         # variant cache misses.
         #
-        # Contextual weak-rescue photos get the lower floor plus
-        # the same MDv6/animal constraints that classify_stage and
-        # load_photo_features apply, so mask extraction picks up
-        # the same bracketed frame those two stages already opted
-        # in to.
-        if p["id"] in self.contextual_weak_ids:
+        # Contextually rescued photos get their rescue floor plus the
+        # same MDv6/animal constraints that classify_stage and
+        # load_photo_features apply, so mask extraction picks up the
+        # same bracketed frame those two stages already opted in to.
+        rescue_floor = self.rescue_floor_by_photo.get(p["id"])
+        if rescue_floor is not None:
             return [
                 d for d in detection_store.get_detections(
                     thread_db, p["id"],
-                    min_conf=self.weak_detection_confidence,
+                    min_conf=rescue_floor,
                     detector_model="megadetector-v6",
                 )
                 if d["category"] == "animal"
@@ -1077,10 +1066,9 @@ class _MaskPass:
         old eye/DINO results when the effective primary changed.
         """
         from subjects import retained, sync_primary
-        subject_floor = (self.weak_detection_confidence
-            if photo_id in self.contextual_weak_ids else self.detector_confidence)
-        subject_detector = ("megadetector-v6"
-            if photo_id in self.contextual_weak_ids else None)
+        rescue_floor = self.rescue_floor_by_photo.get(photo_id)
+        subject_floor = self.detector_confidence if rescue_floor is None else rescue_floor
+        subject_detector = None if rescue_floor is None else "megadetector-v6"
         sync_primary(
             self.thread_db, photo_id, min_conf=subject_floor,
             detector_model=subject_detector,
@@ -1263,8 +1251,7 @@ class _MaskPass:
         )
         subject_masks.set_active_mask_variant(
             thread_db, photo_id, self.sam2_variant, _commit=False,
-            weak_rescue_min_conf=(self.weak_detection_confidence
-                if photo_id in self.contextual_weak_ids else None),
+            weak_rescue_min_conf=self.rescue_floor_by_photo.get(photo_id),
         )
         # Remaining (non-mask) per-photo features still land
         # on the photos row.  mask_path / crop_complete /

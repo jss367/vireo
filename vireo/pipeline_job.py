@@ -483,24 +483,21 @@ def _source_offline_reason(
 
 
 def _preflight_mask_detections(
-    thread_db, photo_id, contextual_weak_ids, weak_detection_confidence,
-    detector_confidence,
+    thread_db, photo_id, rescue_floors, detector_confidence,
 ):
     """Return the detections the mask loop would consider for ``photo_id``."""
     # Mirror ``extract_masks_stage``'s per-photo detection lookup: a
-    # weak-rescued photo takes the lower floor with the MDv6/animal
-    # filter, everyone else takes the strict floor with the full-image
-    # filter. Applying only the lower floor to every photo would count
-    # unrelated sub-threshold detections as at-risk, inflating outages
-    # for photos the loop would never open.
-    if (
-        photo_id in contextual_weak_ids
-        and weak_detection_confidence is not None
-    ):
+    # rescued photo takes its rescue floor with the MDv6/animal filter,
+    # everyone else takes the strict floor with the full-image filter.
+    # Applying only the lower floor to every photo would count unrelated
+    # sub-threshold detections as at-risk, inflating outages for photos
+    # the loop would never open.
+    rescue_floor = rescue_floors.get(photo_id)
+    if rescue_floor is not None:
         dets = [
             d for d in detection_store.get_detections(
                 thread_db, photo_id,
-                min_conf=weak_detection_confidence,
+                min_conf=rescue_floor,
                 detector_model="megadetector-v6",
             )
             if d["category"] == "animal"
@@ -517,8 +514,7 @@ def _preflight_mask_detections(
 
 def _preflight_mask_outcomes(
     thread_db, dropped_photos, sam2_variant, dinov2_variant,
-    detector_confidence, contextual_weak_ids=None,
-    weak_detection_confidence=None, raw_subject_analysis=False,
+    detector_confidence, rescue_floors=None, raw_subject_analysis=False,
 ):
     """Split pre-flight-dropped photos into ``(already_masked, at_risk)``.
 
@@ -530,10 +526,10 @@ def _preflight_mask_outcomes(
       never have been read for masking, so an outage doesn't change its
       fate. It lands in neither set: counting it would turn an unrelated
       outage into a Fatal Extract failure and tell the user to reconnect for
-      photos that would still have no mask candidate. Weak-rescued frames
-      (photos in ``contextual_weak_ids``) apply the loop's lower
-      ``weak_detection_confidence`` floor with the MDv6/animal filter —
-      matching the exact second branch of the mask loop's detection lookup.
+      photos that would still have no mask candidate. Rescued frames
+      (keys of ``rescue_floors``) apply the loop's per-photo rescue floor
+      with the MDv6/animal filter — matching the exact second branch of
+      the mask loop's detection lookup.
       Ordinary photos take the strict ``detector_confidence`` floor with
       the full-image synthetic filter. A weak-confidence detection alone is
       NOT enough to count as at-risk: the loop requires ``contextual_weak_
@@ -553,14 +549,13 @@ def _preflight_mask_outcomes(
     Only the at-risk set is unmasked-and-unreachable, so only it should
     drive the unreadable count, the reconnect message, and the failure latch.
     """
-    contextual_weak_ids = contextual_weak_ids or set()
+    rescue_floors = rescue_floors or {}
     already_masked: set = set()
     at_risk: set = set()
     for photo in dropped_photos:
         photo_id = photo["id"]
         dets = _preflight_mask_detections(
-            thread_db, photo_id, contextual_weak_ids,
-            weak_detection_confidence, detector_confidence,
+            thread_db, photo_id, rescue_floors, detector_confidence,
         )
         if not dets:
             continue

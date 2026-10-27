@@ -22,6 +22,12 @@ _DETECTOR_CONFIDENCE = DEFAULTS["detector_confidence"]
 _WEAK_CONFIDENCE = DEFAULTS["pipeline"]["weak_detection_confidence"]
 _BURST_TIME_GAP = DEFAULTS["pipeline"]["burst_time_gap"]
 
+# Full-image dropout rescue (``matching_full_image_runs``) brackets frames whose
+# best animal box is merely positive, within a short span. A tiny positive floor
+# excludes zero-box detector runs; it is NOT a general detection threshold.
+FULL_IMAGE_RESCUE_WEAK_FLOOR = 1e-6
+FULL_IMAGE_RESCUE_MAX_GAP = 3.0
+
 
 def _get(row, key, default=None):
     """Read from plain dicts and sqlite3.Row values."""
@@ -235,9 +241,81 @@ def matching_anchor_species(
     }
 
 
+def full_image_rescue_candidate_runs(
+    photos, detections_by_photo, *,
+    detector_confidence=_DETECTOR_CONFIDENCE, max_gap=_BURST_TIME_GAP,
+):
+    """The bracketed runs full-image rescue may consider, before its gates.
+
+    Readers that need every photo a rescue decision depends on (the feature
+    loader's selection context) use this same selector, so an anchor is never
+    loaded for the pipeline but left out of a smaller readiness request.
+    """
+    return contextual_weak_runs(
+        photos, detections_by_photo,
+        detector_confidence=detector_confidence,
+        weak_confidence=FULL_IMAGE_RESCUE_WEAK_FLOOR,
+        max_gap=min(max_gap, FULL_IMAGE_RESCUE_MAX_GAP),
+    )
+
+
+def rescue_candidate_runs(
+    photos, detections_by_photo, *,
+    detector_confidence=_DETECTOR_CONFIDENCE, weak_confidence=_WEAK_CONFIDENCE,
+    max_gap=_BURST_TIME_GAP,
+):
+    """Every bracketed run either contextual rescue may consider.
+
+    Ordinary weak-box runs at ``weak_confidence`` plus the full-image dropout
+    candidates, each run once (the near-zero candidate floor also finds the
+    ordinary runs). ``detections_by_photo`` must be loaded at or below
+    ``FULL_IMAGE_RESCUE_WEAK_FLOOR`` so the second kind can see its boxes.
+    """
+    runs = []
+    seen = set()
+    for run in (
+        *contextual_weak_runs(
+            photos, detections_by_photo, detector_confidence=detector_confidence,
+            weak_confidence=weak_confidence, max_gap=max_gap,
+        ),
+        *full_image_rescue_candidate_runs(
+            photos, detections_by_photo, detector_confidence=detector_confidence,
+            max_gap=max_gap,
+        ),
+    ):
+        key = (run["left_photo_id"], tuple(run["photo_ids"]), run["right_photo_id"])
+        if key not in seen:
+            seen.add(key)
+            runs.append(run)
+    return runs
+
+
+def rescue_scope_photo_ids(runs):
+    """Every photo a rescue decision over ``runs`` reads: middles and anchors."""
+    return {
+        photo_id
+        for run in runs
+        for photo_id in (run["left_photo_id"], *run["photo_ids"], run["right_photo_id"])
+    }
+
+
+def rescue_floor(feature, weak_confidence=_WEAK_CONFIDENCE):
+    """The MegaDetector floor a rescued feature's subject box clears.
+
+    Ordinary weak rescue keeps the workspace's weak floor. A full-image
+    dropout rescue bracketed a merely positive box, so its subject lookups
+    and mask activation use ``FULL_IMAGE_RESCUE_WEAK_FLOOR``; at the weak
+    floor that box is invisible and the frame can never be segmented.
+    """
+    context = feature.get("weak_detection_context") or {}
+    if context.get("evidence") == "full_image_sequence":
+        return FULL_IMAGE_RESCUE_WEAK_FLOOR
+    return weak_confidence
+
+
 def matching_full_image_runs(
     photos, detections_by_photo, species_by_photo, fallback_by_photo, *,
-    detector_confidence=_DETECTOR_CONFIDENCE, max_gap=3.0, config=None,
+    detector_confidence=_DETECTOR_CONFIDENCE, max_gap=FULL_IMAGE_RESCUE_MAX_GAP, config=None,
 ):
     """Bridge short detector dropouts corroborated by full-image classifiers.
 
@@ -271,19 +349,19 @@ def matching_full_image_runs(
 
     by_id = {_get(p, 'id'): p for p in photos}
     matched = []
-    # A tiny positive floor excludes zero-box detector runs. This is NOT a
-    # new general detection threshold: the independent classifier, geometry,
-    # short-span, and two-sided identity gates below must all pass.
-    for run in contextual_weak_runs(photos, detections_by_photo,
-                                   detector_confidence=detector_confidence,
-                                   weak_confidence=1e-6, max_gap=min(max_gap, 3.0)):
+    # The candidate floor is not a detection threshold: the independent
+    # classifier, geometry, short-span, and two-sided identity gates below
+    # must all pass.
+    for run in full_image_rescue_candidate_runs(photos, detections_by_photo,
+                                                detector_confidence=detector_confidence,
+                                                max_gap=max_gap):
         ids = run['photo_ids']
         if len(ids) > 3 or any(pid not in fallback_by_photo for pid in ids):
             continue
         left, right = run['left_photo_id'], run['right_photo_id']
         duration = (_parse_timestamp(_get(by_id[right], 'timestamp')) -
                     _parse_timestamp(_get(by_id[left], 'timestamp'))).total_seconds()
-        if duration > min(max_gap, 3.0):
+        if duration > min(max_gap, FULL_IMAGE_RESCUE_MAX_GAP):
             continue
         winners = [_confident_species_prediction({'species_top5': entries}, config=config)
                    for entries in [species_by_photo.get(left), species_by_photo.get(right),
