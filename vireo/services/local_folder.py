@@ -120,13 +120,52 @@ def local_path_for_base(local_base: str | Path, root_folder_id: int, source_path
     return Path(local_base) / _safe_folder_name(source_path, root_folder_id)
 
 
-def _pending_archive_paths_overlap(
-    path: str, staging_path: str, *, cancel_check: CancelCheck | None = None,
+def _path_identity(path: Path) -> tuple[int, int] | None:
+    """Return an existing filesystem entry's identity without guessing its spelling."""
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise LocalWorkspaceError(f"Could not inspect folder {path}: {exc}") from exc
+    return st.st_dev, st.st_ino
+
+
+def _existing_path_anchor(
+    path: str, cancel_check: CancelCheck | None,
+) -> tuple[Path, tuple[int, int], tuple[str, ...]] | None:
+    """Find the nearest existing ancestor and the remaining, uncreated names."""
+    current = Path(os.path.realpath(path))
+    missing: list[str] = []
+    while True:
+        if cancel_check and cancel_check():
+            raise LocalWorkspaceCancelled("Folder scan cancelled")
+        identity = _path_identity(current)
+        if identity is not None:
+            return current, identity, tuple(reversed(missing))
+        if current.parent == current:
+            return None
+        missing.append(current.name)
+        current = current.parent
+
+
+def _has_ancestor_identity(
+    path: Path, identity: tuple[int, int], cancel_check: CancelCheck | None,
 ) -> bool:
-    """Compare resolved components using the pending root's volume policy."""
-    parts = Path(os.path.realpath(path)).parts
-    staging_parts = Path(os.path.realpath(staging_path)).parts
-    shorter, longer = sorted((parts, staging_parts), key=len)
+    """Test containment across mount points and their native naming policies."""
+    for ancestor in (path, *path.parents):
+        if cancel_check and cancel_check():
+            raise LocalWorkspaceCancelled("Folder scan cancelled")
+        if _path_identity(ancestor) == identity:
+            return True
+    return False
+
+
+def _uncreated_paths_overlap(
+    anchor: Path, parts: tuple[str, ...], other_parts: tuple[str, ...], cancel_check: CancelCheck | None,
+) -> bool:
+    """Compare future names using the filesystem that will actually own them."""
+    shorter, longer = sorted((parts, other_parts), key=len)
     if shorter == longer[:len(shorter)]:
         return True
     folded_shorter = tuple(unicodedata.normalize("NFC", part.casefold()) for part in shorter)
@@ -135,9 +174,9 @@ def _pending_archive_paths_overlap(
         return False
     # Case and Unicode normalization are independent volume properties.
     # Only possible aliases need these cancellable probes.
-    case_insensitive = destination_case_insensitive(staging_path, cancel_check=cancel_check)
+    case_insensitive = destination_case_insensitive(anchor, cancel_check=cancel_check)
     normalization_insensitive = destination_unicode_normalization_insensitive(
-        staging_path, cancel_check=cancel_check
+        anchor, cancel_check=cancel_check
     )
 
     def volume_key(components: tuple[str, ...]) -> tuple[str, ...]:
@@ -145,6 +184,25 @@ def _pending_archive_paths_overlap(
         return tuple(unicodedata.normalize("NFC", part) if normalization_insensitive else part for part in values)
 
     return volume_key(shorter) == volume_key(longer[:len(shorter)])
+
+
+def _pending_archive_paths_overlap(
+    path: str, staging_path: str, *, cancel_check: CancelCheck | None = None,
+) -> bool:
+    """Compare existing identities, then names below a shared existing ancestor."""
+    anchor = _existing_path_anchor(path, cancel_check)
+    staging_anchor = _existing_path_anchor(staging_path, cancel_check)
+    if anchor is None or staging_anchor is None:
+        return False
+    path_parent, path_identity, missing = anchor
+    staging_parent, staging_identity, staging_missing = staging_anchor
+    if not missing and _has_ancestor_identity(staging_parent, path_identity, cancel_check):
+        return True
+    if not staging_missing and _has_ancestor_identity(path_parent, staging_identity, cancel_check):
+        return True
+    if path_identity != staging_identity:
+        return False
+    return _uncreated_paths_overlap(path_parent, missing, staging_missing, cancel_check)
 
 
 def _refuse_pending_archive_copy(
