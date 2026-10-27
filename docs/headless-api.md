@@ -40,6 +40,19 @@ thumbnail or the detected subject as an image), `burst`, `set_flag`,
 `apply_species_assignment`; see [species review evidence](species-review-evidence.md).
 `view_photo(view="subject", detection_id=...)` addresses the exact animal region,
 and `get_photo` includes saved `species_assignments` and their provenance.
+Every photo row (`get_photo`, `search_photos`, `find_photos_by_text`) carries
+the app's own analysis readiness, read from
+`POST /api/photos/analysis-readiness` (one call per returned page):
+`quality_analyzed` is true only when subject analysis is complete for the
+photo's current inputs and settings (readiness `eligible`), `analysis_status`
+is `not_run`, `incomplete`, `failed`, `complete` or `unknown` (the readiness
+call failed, with the error in `analysis_explanation`), and `analysis_reasons`
+holds the readiness codes. Quality fields such as `quality_score` can be
+present before analysis is complete (a Process run writes them before
+segmentation finishes); `quality_preliminary` is then true and the numbers
+are not comparison evidence. `get_photo` adds the readiness `explanation` as
+`analysis_explanation`; `burst` frames carry `selection_eligible`,
+`analysis_status` and `analysis_reasons` from the ranking itself.
 `set_flag` accepts optional
 `source` (who decided, up to 60 characters) and `reason` (why, up to 300);
 `get_photo` returns the current `flag_note` with only flag, source, reason,

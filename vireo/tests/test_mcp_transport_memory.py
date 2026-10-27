@@ -324,8 +324,15 @@ def test_photo_detail_exposes_only_current_allowlisted_flag_note_fields():
         def get_json(self, path, params=None):
             assert path == "/api/photos/7"
             return {"id": 7, "flag": "rejected", "flag_note": note, "metadata": {}}
+        def post_json(self, path, body=None):
+            assert (path, body) == ("/api/photos/analysis-readiness", {"photo_ids": [7]})
+            return {"photos": [{"photo_id": 7, "status": "not_run", "eligible": False,
+                                "reasons": ["detection_not_run"], "explanation": "invented",
+                                "provenance": {"token": "must-not-surface"}}]}
     result = ns["build_server"](Client()).tools["get_photo"](7)
     assert result["flag_note"] == {key: note[key] for key in ("flag", "source", "reason", "description", "at")}
+    assert result["analysis_status"] == "not_run" and result["quality_analyzed"] is False
+    assert "provenance" not in result and "must-not-surface" not in json.dumps(result)
     assert "flag_note" not in ns["photo_summary"]({"flag_note": note})
     assert ns["photo_detail"]({"flag_note": None})["flag_note"] is None
     assert ns["photo_detail"]({"flag_note": "malformed"})["flag_note"] is None
@@ -369,7 +376,16 @@ def test_payload_trimming_and_stdio_are_explicit_without_starting_anything():
     photo = {"id": 7, "quality_score": 0, "token": "must-not-surface", "path": "/invented/a.raw",
              "metadata": {"EXIF": {"LensModel": "invented", "CameraSerialNumber": "private"}}}
     summary = ns["photo_summary"](photo)
-    assert summary["quality_analyzed"] is True and "token" not in summary and "path" not in summary
+    # A stored score alone proves nothing: without the app's readiness the
+    # state is unknown and the score is marked preliminary.
+    assert summary["quality_analyzed"] is False and summary["analysis_status"] == "unknown"
+    assert summary["quality_preliminary"] is True
+    assert summary["analysis_explanation"] == ns["READINESS_UNCHECKED"]
+    assert "token" not in summary and "path" not in summary
+    complete = {"status": "complete", "eligible": True, "reasons": [], "explanation": "done"}
+    analyzed = ns["photo_summary"](photo, complete)
+    assert analyzed["quality_analyzed"] is True and analyzed["quality_preliminary"] is False
+    assert "analysis_explanation" not in analyzed
     detail = ns["photo_detail"](photo)
     assert detail["path"] == "/invented/a.raw" and "exif" not in detail
     assert detail["exposure"] == {"LensModel": "invented"}
