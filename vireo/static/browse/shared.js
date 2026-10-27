@@ -204,6 +204,11 @@ export function pendingArchives() {
   return window.vireoPendingArchives;
 }
 
+/** Open the existing transfer controls, including its destination and metadata choices. @param {number} folderId */
+export function showPendingArchiveForFolder(folderId) {
+  window.dispatchEvent(new CustomEvent('vireo:show-pending-archive', {detail: {folderId: folderId}}));
+}
+
 // ---- Google Maps ----
 /** The Maps API, once its script has loaded. */
 export function googleMaps() {

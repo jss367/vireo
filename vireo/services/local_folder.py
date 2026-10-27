@@ -117,6 +117,17 @@ def local_path_for_base(local_base: str | Path, root_folder_id: int, source_path
     return Path(local_base) / _safe_folder_name(source_path, root_folder_id)
 
 
+def _refuse_pending_archive_copy(db: Database, source_path: str) -> None:
+    """Keep deferred imports at the paths their NAS transfer still owns."""
+    for staging_path in db.pending_archives.open_staging_paths():
+        if (_physical_is_within(source_path, staging_path)
+                or _physical_is_within(staging_path, source_path)):
+            raise LocalWorkspaceError(
+                "These photos are already kept locally and are awaiting NAS transfer. "
+                'Use "Send to NAS" in the workspace that imported them.'
+            )
+
+
 def local_copy_preflight(
     db: Database,
     root_folder_ids: Iterable[int],
@@ -138,6 +149,7 @@ def local_copy_preflight(
         if row is None:
             raise LocalWorkspaceError(f"Folder {root_folder_id} was not found")
         source_path = row["path"]
+        _refuse_pending_archive_copy(db, source_path)
         local_base = destination_bases.get(root_folder_id)
         if local_base is None:
             local_base = str(default_local_base(vireo_dir, root_folder_id))
@@ -909,6 +921,9 @@ def _claim_staging(
     before any copying starts. Returns ``(roots, folders)``.
     """
     with stage_boundary_lock():
+        row = db.folders.get(root_folder_id)
+        if row is not None:
+            _refuse_pending_archive_copy(db, row["path"])
         covering = local_root_for_folder(db, root_folder_id)
         if covering is not None:
             if covering == root_folder_id:

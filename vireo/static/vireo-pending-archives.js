@@ -250,6 +250,22 @@
       loading = false;
     }
   };
+  // Folder actions point here instead of making another local copy of an import.
+  window.addEventListener('vireo:show-pending-archive', function(event) {
+    if (!(event instanceof CustomEvent)) return;
+    const item = (window.vireoPendingArchives || []).find(archive =>
+      (archive.folder_ids || []).some(id => Number(id) === Number(event.detail.folderId)));
+    if (!item) return;
+    const details = Array.from(list.querySelectorAll('details')).find(element =>
+      element.dataset.archiveId === String(item.id));
+    if (!details) return;
+    details.open = true;
+    const row = details.closest('.pending-archive-row');
+    if (!row) return;
+    row.scrollIntoView({block: 'center'});
+    const button = row.querySelector('button:not(:disabled)');
+    if (button instanceof HTMLButtonElement) button.focus({preventScroll: true});
+  });
   refresh();
   setInterval(refresh, 5000);
   window.addEventListener('focus', refresh);

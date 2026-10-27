@@ -5,8 +5,8 @@ import { _noteColorLabelEdits, state } from './state.js';
 import {
   VireoColorLabels, VireoFilter, VireoReleaseOriginals, buildOpenInEditorMenuItems,
   buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems, coerceSelectionOnContext,
-  editNav, findSimilar, localFolders, openContextMenu, openPanoramaModal, revealLabel,
-  safeFetch, showRevealFeedback, showToast,
+  editNav, findSimilar, localFolders, openContextMenu, openPanoramaModal, pendingArchives, revealLabel,
+  safeFetch, showPendingArchiveForFolder, showRevealFeedback, showToast,
 } from './shared.js';
 import {
   _clearRepresentativeStateIfIneligible, addToCollection, batchAddKeyword, batchDelete,
@@ -752,6 +752,9 @@ document.addEventListener('contextmenu', function(e) {
   e.preventDefault();
   var fid = parseInt(ti.dataset.folderId || '', 10);
   if (isNaN(fid)) return;
+  var pendingArchive = (pendingArchives() || []).some(function(item) {
+    return (item.folder_ids || []).some(function(id) { return Number(id) === fid; });
+  });
   var items = [
     { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
     { separator: true },
@@ -759,7 +762,10 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { label: 'Show Associated Workspaces…', onClick: function() { showFolderWorkspaces(fid); } },
     { separator: true },
-    { label: 'Work Locally\u2026', onClick: function() { workLocallyFolder(fid); } },
+    { label: pendingArchive ? 'Send to NAS\u2026' : 'Work Locally\u2026', onClick: function() {
+      if (pendingArchive) showPendingArchiveForFolder(fid);
+      else workLocallyFolder(fid);
+    } },
     { label: 'Release Local Originals…', disabled: VireoReleaseOriginals.isRunning(),
       onClick: function() {
         VireoReleaseOriginals.release({folder_id: fid}, 'this folder and its subfolders');

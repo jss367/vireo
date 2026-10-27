@@ -37,6 +37,63 @@ def _shared_environment(tmp_path):
     return db, vireo_dir, source, first, second, folder_id
 
 
+@pytest.mark.parametrize("operation", [local_copy_preflight, stage_folder])
+@pytest.mark.parametrize("relation", ["same", "child", "parent", "symlink", "sibling"])
+def test_pending_import_originals_cannot_be_staged_again(tmp_path, operation, relation):
+    db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
+    try:
+        db.set_active_workspace(first)
+        db.pending_archives.register("retained-import", "/nas/archive", str(source), {})
+        # The catalog and files are shared even when the transfer belongs to
+        # another workspace. Staging here would break that transfer's paths.
+        db.set_active_workspace(second)
+        selected = source
+        if relation == "child":
+            selected = source / "day"
+            selected.mkdir()
+        elif relation == "parent":
+            selected = source.parent
+        elif relation == "symlink":
+            selected = tmp_path / "alias"
+            try:
+                selected.symlink_to(source, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks unavailable")
+        elif relation == "sibling":
+            selected = source.with_name("photos-other")
+            selected.mkdir()
+            (selected / "other.jpg").write_bytes(b"other original")
+        selected_id = workspace_folders.add_folder(db, str(selected))
+        args = [selected_id] if operation is local_copy_preflight else selected_id
+        if relation == "sibling":
+            operation(db, args, str(vireo_dir))
+        else:
+            with pytest.raises(LocalWorkspaceError, match='already kept locally.*Send to NAS'):
+                operation(db, args, str(vireo_dir))
+            assert db.folders.get(selected_id)["path"] == str(selected)
+            assert not (vireo_dir / "local-folders").exists()
+        assert db.folders.get(folder_id)["path"] == str(source)
+        assert (source / "bird.jpg").read_bytes() == b"original"
+        assert db.pending_archives.get("retained-import") is None
+        db.set_active_workspace(first)
+        assert db.pending_archives.get("retained-import")["staging_destination"] == str(source)
+    finally:
+        db.close()
+
+
+def test_completed_import_does_not_block_working_locally(tmp_path):
+    db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
+    try:
+        db.set_active_workspace(first)
+        db.pending_archives.register("completed-import", "/nas/archive", str(source), {})
+        db.pending_archives.set_state("completed-import", "complete")
+        assert local_copy_preflight(db, [folder_id], str(vireo_dir))["can_copy"]
+        stage_folder(db, folder_id, str(vireo_dir))
+        assert folder_status(db, folder_id, str(vireo_dir))["state"] == "active"
+    finally:
+        db.close()
+
+
 def test_shared_folder_uses_one_local_copy_in_every_workspace(tmp_path):
     db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
     try:

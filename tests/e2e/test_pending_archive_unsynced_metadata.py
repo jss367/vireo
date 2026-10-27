@@ -6,6 +6,10 @@ NAS connection afterwards, and only while that mount is up. The banner has
 to say so before the click, and offer the cheap ordering.
 """
 
+import os
+from pathlib import Path
+
+import pytest
 from playwright.sync_api import expect
 from services import photo_ingest, workspace_folders
 
@@ -31,6 +35,53 @@ def _staged_import(db, tmp_path, *, destination):
     )
     db.conn.commit()
     return workspace_id, photo_ids
+
+
+@pytest.mark.parametrize("sync_first", [False, True])
+def test_pending_folder_offers_nas_transfer_instead_of_another_local_copy(
+    live_server, page, tmp_path, sync_first
+):
+    db = live_server["db"]
+    destination = "/Volumes/Photography/USA/2026"
+    workspace_id, photo_ids = _staged_import(db, tmp_path, destination=destination)
+    folder_id = db.photos.get(photo_ids[0])["folder_id"]
+    if sync_first:
+        db.queue_change(photo_ids[0], "rating", "3", workspace_id=workspace_id)
+    assert page.request.post(
+        f"{live_server['url']}/api/workspaces/{workspace_id}/activate"
+    ).ok
+    requests = []
+    page.on("request", lambda request: requests.append(request.url))
+    page.goto(f"{live_server['url']}/browse")
+    item = page.locator(f'.tree-item[data-folder-id="{folder_id}"]')
+    expect(item).to_contain_text("KEPT LOCALLY")
+    item.click(button="right")
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu.get_by_text("Work Locally…", exact=True)).to_have_count(0)
+    menu.get_by_text("Send to NAS…", exact=True).click()
+
+    banner = page.locator("#pendingArchives")
+    expect(banner.locator("details")).to_have_attribute("open", "")
+    expect(banner.locator(".pending-archive-destination")).to_have_text(
+        "Destination: " + destination
+    )
+    expect(page.locator("#stageLocalFoldersModal")).not_to_have_class("modal-overlay open")
+    label = "Sync metadata and send to NAS" if sync_first else "Send to NAS"
+    send = banner.get_by_role("button", name=label, exact=True)
+    expect(send).to_be_focused()
+    assert not any("/local-folders/preflight" in url for url in requests)
+
+    if directory := os.environ.get("VIREO_TRANSFER_SCREENSHOTS"):
+        target = Path(directory)
+        target.mkdir(parents=True, exist_ok=True)
+        banner.screenshot(path=str(target / f"pending-folder-send-{sync_first}.png"))
+
+    page.route("**/api/import/pending-archives/*/send", lambda route: route.fulfill(
+        status=202, json={"job_id": "send-test"}
+    ))
+    with page.expect_request("**/api/import/pending-archives/*/send") as sent:
+        send.click()
+    assert sent.value.post_data_json == {"sync_first": sync_first}
 
 
 def test_banner_offers_to_sync_metadata_before_sending(live_server, page, tmp_path):

@@ -52,6 +52,12 @@ class PendingArchiveRepository:
             (archive_id, self.workspace_id_fn()),
         ).fetchone()
 
+    def open_staging_paths(self) -> list[str]:
+        """Retained originals in every workspace, for filesystem overlap guards."""
+        return [row["staging_destination"] for row in self.conn.execute(
+            "SELECT staging_destination FROM pending_archives WHERE state != 'complete'"
+        )]
+
     def open_with_review_collection(self) -> list[sqlite3.Row]:
         """The workspace's transfers not yet ``complete``, oldest first.
 
