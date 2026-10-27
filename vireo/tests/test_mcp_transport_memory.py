@@ -24,7 +24,7 @@ def forbidden(*a, **kw):
 class Registry:
     def __init__(self, *a, **kw):
         self.tools = {}
-    def tool(self):
+    def tool(self, **kwargs):
         def register(fn):
             self.tools[fn.__name__] = fn
             return fn
@@ -59,6 +59,7 @@ def namespace():
           "sys": types.SimpleNamespace(executable="/invented/python", platform="linux"),
           "subprocess": types.SimpleNamespace(list2cmdline=shlex.join, Popen=forbidden, run=forbidden),
           "read_runtime_json": forbidden, "ToolError": RuntimeError, "MCPServer": Registry, "Image": FakeImage,
+          "mcp_types": types.SimpleNamespace(ToolAnnotations=types.SimpleNamespace),
           "urllib": types.SimpleNamespace(parse=urllib.parse, error=urllib.error,
               request=types.SimpleNamespace(HTTPRedirectHandler=object, Request=Request,
                   ProxyHandler=Proxy, build_opener=forbidden))}

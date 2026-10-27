@@ -393,6 +393,7 @@ POST         /api/photos/missing/remove
 POST         /api/photos/open-external
 POST         /api/photos/query
 POST         /api/photos/sharpness/regions
+POST         /api/photos/species-evidence
 POST         /api/pipeline/active-mask-variant
 POST         /api/pipeline/detach-burst
 POST         /api/pipeline/detach-photo
@@ -452,6 +453,7 @@ POST         /api/v1/photos/<int:photo_id>/flag
 POST         /api/v1/photos/analysis-readiness
 POST         /api/v1/photos/analysis-retry
 POST         /api/v1/photos/burst-evidence
+POST         /api/v1/photos/species-evidence
 POST         /api/v1/shutdown
 POST         /api/v1/workspaces/<int:ws_id>/activate
 POST         /api/workspace/tabs/pin

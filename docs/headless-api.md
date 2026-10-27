@@ -35,7 +35,12 @@ Tools: `vireo_status`, `list_workspaces`, `activate_workspace`,
 `list_folders`, `list_collections`, `search_keywords`, `search_photos`,
 `find_photos_by_text`, `get_photo`, `view_photo` (the preview, the
 thumbnail or the detected subject as an image), `burst`, `set_flag`,
-`set_rating`, `add_keyword` and `remove_keyword`. `set_flag` accepts optional
+`set_rating`, `add_keyword` and `remove_keyword`. Identification tools are
+`get_species_evidence`, `preview_species_assignment` and
+`apply_species_assignment`; see [species review evidence](species-review-evidence.md).
+`view_photo(view="subject", detection_id=...)` addresses the exact animal region,
+and `get_photo` includes saved `species_assignments` and their provenance.
+`set_flag` accepts optional
 `source` (who decided, up to 60 characters) and `reason` (why, up to 300);
 `get_photo` returns the current `flag_note` with only flag, source, reason,
 description and timestamp fields. The server reads `runtime.json` on every call;
@@ -143,6 +148,7 @@ Current stable set:
 | POST | `/api/v1/batch/flag` | The same for `{"photo_ids": [...], "flag": ..., "source"?, "reason"?}`; one undoable edit. IDs must be positive integers below `2**63`. |
 | GET  | `/api/v1/photos/<id>/burst-evidence` | The burst around a photo as an evidence pack: ranked frames, feature coverage, ambiguity reasons, 1:1 crop URLs. `margin`, `focus_size`, `gap_seconds`, `max_photos`. |
 | POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |
+| POST | `/api/v1/photos/species-evidence` | Read-only identification evidence for 1–100 exact unique `photo_ids`: subjects, model candidates, score meanings, uncertainty, list provenance and bound crop URLs. No automatic continuity or assignment claim. |
 | GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
 | GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
 
@@ -227,8 +233,17 @@ itself a confirmation.
 Apply by sending the same request without `preview`, with the returned
 `preview_token`. Narrowing photos or changing add/replace/split choices requires
 a fresh preview. The server rechecks the encounter, all source photos' keywords
-and provenance, subject boxes, classifier output and decisions while holding the
+and assignment provenance, requested reviewer/evidence provenance, subject boxes,
+classifier output and decisions while holding the
 writer lock. Stale previews return HTTP 409 without species changes.
+`preserve_existing_provenance: true` leaves attribution on already-present
+equivalent species assignments intact; the new MCP confirmation tools set this
+option. Its value is bound to the preview token. Existing API callers retain
+their default behavior of updating attribution when provenance is supplied.
+The MCP tools also set `preserve_keyword_metadata: true`, bound to the token.
+Existing species keywords are reused without changing their type or taxon link.
+An incompatible keyword returns 409 before writes and requires explicit review
+in keyword management. Legacy API callers retain their keyword-resolution behavior.
 The token also binds live species identities and provenance for every encounter
 member whose summaries will refresh, including sibling bursts outside the
 displayed source-photo matrix. Unrelated encounters remain outside that scope.

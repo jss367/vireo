@@ -487,6 +487,9 @@ class _SpeciesConfirmation:
         self.had_old: set[int] = set()
         self.photo_edit_id: int | None = None
         self.provenance: JsonDict | None = None
+        self.preserve_existing_provenance = False
+        self.preserve_keyword_metadata = False
+        self.preserved_keyword_id: int | None = None
         self.attribution_only: list[int] = []
         self.undo_edit_id: int | None = None
 
@@ -504,6 +507,13 @@ class _SpeciesConfirmation:
         return cast(str, self.previous_species)
 
     def read_provenance(self, body: JsonDict) -> ErrorResponse | None:
+        error = self.read_keyword_scope(body)
+        if error is not None:
+            return error
+        preserve = body.get('preserve_existing_provenance', False)
+        if type(preserve) is not bool:
+            return self.json_error('preserve_existing_provenance must be a boolean')
+        self.preserve_existing_provenance = preserve
         if 'provenance' not in body:
             return None
         from services.species_provenance import validate_provenance
@@ -511,6 +521,32 @@ class _SpeciesConfirmation:
             self.provenance = validate_provenance(self.db, self.photo_ids, body['provenance'])
         except ValueError as exc:
             return self.json_error(str(exc))
+        return None
+
+    def read_keyword_scope(self, body: JsonDict) -> ErrorResponse | None:
+        """Reuse a species keyword without promoting or rebinding shared rows.
+
+        The route holds BEGIN IMMEDIATE from validation through application, so
+        the resolved row cannot change between this read and the association edit.
+        """
+        preserve = body.get('preserve_keyword_metadata', False)
+        if type(preserve) is not bool:
+            return self.json_error('preserve_keyword_metadata must be a boolean')
+        self.preserve_keyword_metadata = preserve
+        if not preserve or self.remove_mode:
+            return None
+        target = self.db.keywords.species_confirmation_target(self.species)
+        keyword = target['keyword']
+        if keyword is None:
+            return None
+        rank = next((t['rank'] for t in target['taxa'] if t['id'] == keyword['taxon_id']), None)
+        if (keyword['type'] != 'taxonomy' or rank not in (None, 'species')
+                or not (keyword['is_species'] or rank == 'species')):
+            return self.json_error(
+                'The existing keyword needs explicit review of its type or taxon in keyword management '
+                'before a scoped species assignment; no photos were changed', 409,
+            )
+        self.preserved_keyword_id = keyword['id']
         return None
 
     # -- request against the cache ----------------------------------
@@ -776,7 +812,8 @@ class _SpeciesConfirmation:
             self.already_has_new = set()
             self.newly_tagged = []
             return
-        self.kid = db.add_keyword(self.species, is_species=True, _commit=False)
+        self.kid = (self.preserved_keyword_id if self.preserved_keyword_id is not None
+                    else db.add_keyword(self.species, is_species=True, _commit=False))
         # Queue/record the stored spelling (see api_add_keyword).
         stored = db.keywords.name_of(self.kid)
         if stored:
@@ -893,7 +930,7 @@ class _SpeciesConfirmation:
                 self.db, pid, self.species, workspace_id=ws_id, _commit=False,
             )
 
-        if self.provenance is not None and not self.remove_mode:
+        if self.provenance is not None and not self.remove_mode and not self.preserve_existing_provenance:
             from services.species_provenance import remember_before
             # Equivalent hierarchy aliases must retain their actual keyword ID.
             # Not remove mode, so resolve_target_keyword stored the new keyword id.

@@ -1517,6 +1517,20 @@ def create_photos_blueprint(
                          config={"photo_ids": ids, "workspace_id": db.require_workspace_id()},
                          extra={"photo_ids": ids, "workspace_id": db.require_workspace_id()})
 
+    @blueprint.route("/api/photos/species-evidence", methods=["POST"])
+    def api_species_review_evidence() -> ResponseReturnValue:
+        """Read exact-selection identification evidence without running analysis."""
+        from services.species_review_evidence import build_species_evidence, selection_ids
+
+        try:
+            ids = selection_ids(request.get_json(silent=True))
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        db = get_db()
+        if any(db.photos.get(pid, verify_workspace=True) is None for pid in ids):
+            return json_error("A selected photo is not visible in the active workspace", 404)
+        return jsonify(build_species_evidence(db, ids))
+
     @blueprint.route("/api/photos/<int:photo_id>/subjects")
     def api_photo_subjects(photo_id: int) -> ResponseReturnValue:
         from subjects import payload
