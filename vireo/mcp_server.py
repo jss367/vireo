@@ -26,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from mcp import types as mcp_types
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from runtime import read_runtime_json
@@ -558,7 +559,7 @@ def _species_assignment_payload(photo_ids, species, provenance):
 def _register_species_tools(server, client):
     """Identification evidence and deliberate, token-guarded additive edits."""
 
-    @server.tool()
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
     def get_species_evidence(photo_ids: list[int]) -> dict:
         """Read identification evidence for 1–100 exact, unique photo IDs.
 
@@ -570,7 +571,7 @@ def _register_species_tools(server, client):
         """
         return client.post_json("/api/photos/species-evidence", {"photo_ids": photo_ids})
 
-    @server.tool()
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
     def preview_species_assignment(photo_ids: list[int], species: str, provenance: dict) -> dict:
         """Preview adding one reviewed species to exact photo IDs, without writing.
 
@@ -584,7 +585,7 @@ def _register_species_tools(server, client):
         body = _species_assignment_payload(photo_ids, species, provenance)
         return client.post_json("/api/encounters/species", {**body, "preview": True})
 
-    @server.tool()
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False))
     def apply_species_assignment(
         photo_ids: list[int], species: str, provenance: dict, preview_token: str,
     ) -> dict:

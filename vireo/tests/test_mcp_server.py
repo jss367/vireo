@@ -100,6 +100,17 @@ def test_tools_are_the_documented_set(mcp):
         assert "ctx" not in tool.input_schema["properties"], tool.name
 
 
+def test_species_tools_advertise_side_effects_to_clients(mcp):
+    server, _, _ = mcp
+    tools = {tool.name: tool for tool in anyio.run(server.list_tools)}
+    for name in ("get_species_evidence", "preview_species_assignment"):
+        hints = tools[name].model_dump(by_alias=True)["annotations"]
+        assert hints["readOnlyHint"] is True
+    hints = tools["apply_species_assignment"].model_dump(by_alias=True)["annotations"]
+    assert hints["readOnlyHint"] is False
+    assert hints["destructiveHint"] is False
+
+
 def test_status_reports_version_workspace_and_count(mcp, monkeypatch):
     server, db, _ = mcp
     # Status never names the catalog path, override or not.
