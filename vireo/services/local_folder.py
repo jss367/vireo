@@ -18,6 +18,7 @@ import shutil
 import stat
 import threading
 import time
+import unicodedata
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -45,6 +46,7 @@ from services.local_workspace import (
     _source_state,
     _walk_entries,
     _write_manifest,
+    destination_case_insensitive,
     destination_disk_space,
     source_tree_size,
     stage_boundary_lock,
@@ -117,11 +119,30 @@ def local_path_for_base(local_base: str | Path, root_folder_id: int, source_path
     return Path(local_base) / _safe_folder_name(source_path, root_folder_id)
 
 
-def _refuse_pending_archive_copy(db: Database, path: str, *, destination: bool = False) -> None:
+def _pending_archive_paths_overlap(
+    path: str, staging_path: str, *, cancel_check: CancelCheck | None = None,
+) -> bool:
+    """Compare resolved components using the pending root's volume policy."""
+    parts = Path(os.path.realpath(path)).parts
+    staging_parts = Path(os.path.realpath(staging_path)).parts
+    shorter, longer = sorted((parts, staging_parts), key=len)
+    if shorter == longer[:len(shorter)]:
+        return True
+    folded_shorter = tuple(unicodedata.normalize("NFC", part).casefold() for part in shorter)
+    folded_longer = tuple(unicodedata.normalize("NFC", part).casefold() for part in longer)
+    if folded_shorter != folded_longer[:len(folded_shorter)]:
+        return False
+    # Avoid probing unrelated or exactly overlapping paths. Only possible
+    # aliases need the volume probe, which cooperates with preflight cancellation.
+    return destination_case_insensitive(staging_path, cancel_check=cancel_check)
+
+
+def _refuse_pending_archive_copy(
+    db: Database, path: str, *, destination: bool = False, cancel_check: CancelCheck | None = None,
+) -> None:
     """Keep local-copy sources and destinations outside unfinished imports."""
     for staging_path in db.pending_archives.open_staging_paths():
-        if (_physical_is_within(path, staging_path)
-                or _physical_is_within(staging_path, path)):
+        if _pending_archive_paths_overlap(path, staging_path, cancel_check=cancel_check):
             if destination:
                 raise LocalWorkspaceError(
                     "The local destination overlaps photos awaiting NAS transfer. "
@@ -154,12 +175,12 @@ def local_copy_preflight(
         if row is None:
             raise LocalWorkspaceError(f"Folder {root_folder_id} was not found")
         source_path = row["path"]
-        _refuse_pending_archive_copy(db, source_path)
+        _refuse_pending_archive_copy(db, source_path, cancel_check=cancel_check)
         local_base = destination_bases.get(root_folder_id)
         if local_base is None:
             local_base = str(default_local_base(vireo_dir, root_folder_id))
         local_path = local_path_for_base(local_base, root_folder_id, source_path)
-        _refuse_pending_archive_copy(db, str(local_path), destination=True)
+        _refuse_pending_archive_copy(db, str(local_path), destination=True, cancel_check=cancel_check)
         total_files, total_bytes, estimated_bytes = source_tree_size(
             source_path, cancel_check=cancel_check
         )

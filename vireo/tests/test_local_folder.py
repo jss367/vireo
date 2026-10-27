@@ -125,6 +125,56 @@ def test_local_destination_cannot_enter_a_pending_import(tmp_path, operation, re
         db.close()
 
 
+@pytest.mark.parametrize("operation", [local_copy_preflight, stage_folder])
+@pytest.mark.parametrize("case_insensitive", [False, True])
+@pytest.mark.parametrize("spelling", ["case", "unicode", "sibling"])
+def test_pending_destination_overlap_respects_volume_names(
+    tmp_path, monkeypatch, operation, case_insensitive, spelling
+):
+    """Case and Unicode aliases overlap only when the volume folds those names."""
+    from services import local_folder
+
+    db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
+    pending_root = tmp_path / "Pending" / "Café"
+    # Keep this root disconnected so the host filesystem cannot canonicalize
+    # its spelling before the mocked volume-sensitivity policy is applied.
+    probes = []
+
+    def volume_policy(path, **_kwargs):
+        probes.append(str(path))
+        return case_insensitive
+
+    monkeypatch.setattr(local_folder, "destination_case_insensitive", volume_policy)
+    local_base = {
+        "case": tmp_path / "PENDING" / "Café" / "working-copies",
+        "unicode": tmp_path / "Pending" / "Cafe\u0301" / "working-copies",
+        "sibling": tmp_path / "PENDING" / "Cafe\u0301-other" / "working-copies",
+    }[spelling]
+    try:
+        db.set_active_workspace(first)
+        db.pending_archives.register("retained-import", "/nas/archive", str(pending_root), {})
+        db.set_active_workspace(second)
+
+        def copy_locally():
+            if operation is local_copy_preflight:
+                return operation(db, [folder_id], str(vireo_dir), destination_bases={folder_id: str(local_base)})
+            return operation(db, folder_id, str(vireo_dir), local_base=str(local_base))
+
+        if case_insensitive and spelling != "sibling":
+            with pytest.raises(LocalWorkspaceError, match="destination.*awaiting NAS transfer"):
+                copy_locally()
+            assert not local_base.exists()
+            assert db.local_folders.get_state(folder_id) is None
+            assert db.folders.get(folder_id)["path"] == str(source)
+        else:
+            copy_locally()
+        if spelling != "sibling":
+            assert str(pending_root) in probes
+        assert (source / "bird.jpg").read_bytes() == b"original"
+    finally:
+        db.close()
+
+
 def test_completed_import_does_not_block_working_locally(tmp_path):
     db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
     try:
