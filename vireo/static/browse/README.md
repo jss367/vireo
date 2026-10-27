@@ -50,7 +50,7 @@ is involved.
 | `collection-editor.js` | The collection rule editor and its live match count |
 | `folder-health.js` | Refreshing Browse when folder health changes |
 | `calendar.js`, `view-controls.js`, `layout.js` | The calendar heatmap, the view controls, the resizable panes |
-| `context-menus.js` | Right-click menus for cards, folders and collections |
+| `context-menus.js` | Right-click menus for cards, folders and collections, plus the clickable Kept Locally badge menu; retained import folders open the existing NAS transfer controls through `vireo:show-pending-archive` |
 | `export.js` | The export modal, offline copies, full-resolution preparation |
 | `keyword-autocomplete.js` | Keyword autocomplete for the keyword inputs |
 

@@ -2,6 +2,7 @@ import errno
 import os
 import shutil
 import threading
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -355,6 +356,7 @@ def test_walk_entries_rejects_directory_after_transient_open_failure(
     [
         local_workspace.destination_disk_space,
         local_workspace.destination_case_insensitive,
+        local_workspace.destination_unicode_normalization_insensitive,
     ],
 )
 def test_destination_probe_cancels_between_missing_ancestors(tmp_path, probe):
@@ -370,6 +372,44 @@ def test_destination_probe_cancels_between_missing_ancestors(tmp_path, probe):
         probe(destination, cancel_check=cancel_check)
 
     assert checks == 2
+
+
+@pytest.mark.parametrize("insensitive", [False, True])
+def test_unicode_volume_probe_checks_normalized_name_and_cleans_up(tmp_path, monkeypatch, insensitive):
+    """The Unicode probe asks about NFD spelling without changing case."""
+    real_exists = os.path.exists
+    checked = []
+
+    def alias_exists(path):
+        name = os.path.basename(path)
+        if name.startswith("VireoUnicodeProbe-"):
+            checked.append(name)
+            assert unicodedata.normalize("NFD", name) == name
+            assert unicodedata.normalize("NFC", name) != name
+            assert name.startswith("VireoUnicodeProbe-e\u0301-")
+            return insensitive
+        return real_exists(path)
+
+    monkeypatch.setattr(local_workspace.os.path, "exists", alias_exists)
+    assert local_workspace.destination_unicode_normalization_insensitive(tmp_path) is insensitive
+    assert len(checked) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("probe", [local_workspace.destination_case_insensitive,
+                                   local_workspace.destination_unicode_normalization_insensitive])
+def test_name_probe_cancellation_removes_temporary_file(tmp_path, probe):
+    """Cancellation after file creation must still remove the probe file."""
+    checks = 0
+
+    def cancel_check():
+        nonlocal checks
+        checks += 1
+        return checks == 3
+
+    with pytest.raises(LocalWorkspaceCancelled, match="Folder scan cancelled"):
+        probe(tmp_path, cancel_check=cancel_check)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_stage_modify_and_sync_back(local_workspace_env):

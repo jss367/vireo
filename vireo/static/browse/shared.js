@@ -75,6 +75,7 @@ export const safeEventSource = forward('safeEventSource');
 export const preferredScrollBehavior = forward('preferredScrollBehavior');
 export const matchesShortcut = forward('matchesShortcut');
 export const openContextMenu = forward('openContextMenu');
+export const closeContextMenu = forward('closeContextMenu');
 export const coerceSelectionOnContext = forward('coerceSelectionOnContext');
 export const buildOpenInEditorMenuItems = forward('buildOpenInEditorMenuItems');
 export const buildSpeciesHighlightMenuItems = forward('buildSpeciesHighlightMenuItems');
@@ -202,6 +203,11 @@ export function localFolders() {
 /** The pending archive transfers, once loaded. */
 export function pendingArchives() {
   return window.vireoPendingArchives;
+}
+
+/** Open the existing transfer controls, including its destination and metadata choices. @param {number} folderId */
+export function showPendingArchiveForFolder(folderId) {
+  window.dispatchEvent(new CustomEvent('vireo:show-pending-archive', {detail: {folderId: folderId}}));
 }
 
 // ---- Google Maps ----

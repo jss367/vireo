@@ -4,9 +4,9 @@ import { selection } from './selection-state.js';
 import { _noteColorLabelEdits, state } from './state.js';
 import {
   VireoColorLabels, VireoFilter, VireoReleaseOriginals, buildOpenInEditorMenuItems,
-  buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems, coerceSelectionOnContext,
-  editNav, findSimilar, localFolders, openContextMenu, openPanoramaModal, revealLabel,
-  safeFetch, showRevealFeedback, showToast,
+  buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems, closeContextMenu, coerceSelectionOnContext,
+  editNav, findSimilar, localFolders, openContextMenu, openPanoramaModal, pendingArchives, revealLabel,
+  safeFetch, showPendingArchiveForFolder, showRevealFeedback, showToast,
 } from './shared.js';
 import {
   _clearRepresentativeStateIfIneligible, addToCollection, batchAddKeyword, batchDelete,
@@ -571,6 +571,46 @@ function workLocallyFolder(/** @type {number} */ fid) {
   window.location.href = '/workspace#work-locally';
 }
 
+/** @param {Event} event @param {HTMLElement} button */
+export function openPendingArchiveMenu(event, button) {
+  event.stopPropagation();
+  var fid = Number(button.dataset.folderId);
+  var archive = (pendingArchives() || []).find(function(item) {
+    return (item.folder_ids || []).some(function(id) { return Number(id) === fid; });
+  });
+  if (!archive) return;
+  var rect = button.getBoundingClientRect();
+  openContextMenu({clientX: rect.left, clientY: rect.bottom + 4}, [{
+    label: archive.state === 'ready' ? 'Send to NAS…' : 'View NAS transfer…',
+    onClick: function() { showPendingArchiveForFolder(fid); },
+  }], {onDismiss: function() {
+    button.setAttribute('aria-expanded', 'false');
+    if (button.isConnected) button.focus();
+  }});
+  button.setAttribute('aria-expanded', 'true');
+  button.setAttribute('aria-controls', 'pendingArchiveFolderMenu');
+  var menu = document.querySelector('.vireo-ctx-menu');
+  if (!(menu instanceof HTMLElement)) return;
+  menu.id = 'pendingArchiveFolderMenu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'NAS transfer options');
+  const item = menu.querySelector('.vireo-ctx-item');
+  if (!(item instanceof HTMLElement)) return;
+  item.setAttribute('role', 'menuitem');
+  item.tabIndex = 0;
+  item.addEventListener('keydown', function(keyEvent) {
+    if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+      keyEvent.preventDefault();
+      item.click();
+    } else if (keyEvent.key === 'Tab') {
+      closeContextMenu();
+    } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(keyEvent.key)) {
+      keyEvent.preventDefault();
+    }
+  });
+  item.focus();
+}
+
 async function rescanFolder(/** @type {number} */ fid) {
   showToast('Starting folder rescan...', 'info');
   try {
@@ -752,6 +792,9 @@ document.addEventListener('contextmenu', function(e) {
   e.preventDefault();
   var fid = parseInt(ti.dataset.folderId || '', 10);
   if (isNaN(fid)) return;
+  var pendingArchive = (pendingArchives() || []).some(function(item) {
+    return (item.folder_ids || []).some(function(id) { return Number(id) === fid; });
+  });
   var items = [
     { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
     { separator: true },
@@ -759,7 +802,10 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { label: 'Show Associated Workspaces…', onClick: function() { showFolderWorkspaces(fid); } },
     { separator: true },
-    { label: 'Work Locally\u2026', onClick: function() { workLocallyFolder(fid); } },
+    { label: pendingArchive ? 'Send to NAS\u2026' : 'Work Locally\u2026', onClick: function() {
+      if (pendingArchive) showPendingArchiveForFolder(fid);
+      else workLocallyFolder(fid);
+    } },
     { label: 'Release Local Originals…', disabled: VireoReleaseOriginals.isRunning(),
       onClick: function() {
         VireoReleaseOriginals.release({folder_id: fid}, 'this folder and its subfolders');

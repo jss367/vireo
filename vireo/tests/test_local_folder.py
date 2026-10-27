@@ -37,6 +37,215 @@ def _shared_environment(tmp_path):
     return db, vireo_dir, source, first, second, folder_id
 
 
+@pytest.mark.parametrize("operation", [local_copy_preflight, stage_folder])
+@pytest.mark.parametrize("relation", ["same", "child", "parent", "symlink", "sibling"])
+def test_pending_import_originals_cannot_be_staged_again(tmp_path, operation, relation):
+    db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
+    try:
+        db.set_active_workspace(first)
+        db.pending_archives.register("retained-import", "/nas/archive", str(source), {})
+        # The catalog and files are shared even when the transfer belongs to
+        # another workspace. Staging here would break that transfer's paths.
+        db.set_active_workspace(second)
+        selected = source
+        if relation == "child":
+            selected = source / "day"
+            selected.mkdir()
+        elif relation == "parent":
+            selected = source.parent
+        elif relation == "symlink":
+            selected = tmp_path / "alias"
+            try:
+                selected.symlink_to(source, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks unavailable")
+        elif relation == "sibling":
+            selected = source.with_name("photos-other")
+            selected.mkdir()
+            (selected / "other.jpg").write_bytes(b"other original")
+        selected_id = workspace_folders.add_folder(db, str(selected))
+        args = [selected_id] if operation is local_copy_preflight else selected_id
+        if relation == "sibling":
+            operation(db, args, str(vireo_dir))
+        else:
+            with pytest.raises(LocalWorkspaceError, match='already kept locally.*Send to NAS'):
+                operation(db, args, str(vireo_dir))
+            assert db.folders.get(selected_id)["path"] == str(selected)
+            assert not (vireo_dir / "local-folders").exists()
+        assert db.folders.get(folder_id)["path"] == str(source)
+        assert (source / "bird.jpg").read_bytes() == b"original"
+        assert db.pending_archives.get("retained-import") is None
+        db.set_active_workspace(first)
+        assert db.pending_archives.get("retained-import")["staging_destination"] == str(source)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("operation", [local_copy_preflight, stage_folder])
+@pytest.mark.parametrize("relation", ["inside", "symlink", "sibling"])
+def test_local_destination_cannot_enter_a_pending_import(tmp_path, operation, relation):
+    """A pending transfer owns uncataloged sibling paths inside its root too."""
+    db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
+    pending_root = tmp_path / "pending-import"
+    pending_day = pending_root / "2026-10-17"
+    pending_day.mkdir(parents=True)
+    (pending_day / "imported.jpg").write_bytes(b"retained original")
+    try:
+        db.set_active_workspace(first)
+        workspace_folders.add_folder(db, str(pending_day))
+        db.pending_archives.register("retained-import", "/nas/archive", str(pending_root), {})
+        db.set_active_workspace(second)
+        local_base = pending_root / "working-copies"
+        if relation == "symlink":
+            alias = tmp_path / "pending-alias"
+            try:
+                alias.symlink_to(pending_root, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks unavailable")
+            local_base = alias / "working-copies"
+        elif relation == "sibling":
+            local_base = pending_root.with_name("pending-import-other")
+
+        def copy_locally():
+            if operation is local_copy_preflight:
+                return operation(db, [folder_id], str(vireo_dir), destination_bases={folder_id: str(local_base)})
+            return operation(db, folder_id, str(vireo_dir), local_base=str(local_base))
+
+        if relation == "sibling":
+            copy_locally()
+        else:
+            with pytest.raises(LocalWorkspaceError, match="destination.*awaiting NAS transfer"):
+                copy_locally()
+            assert not (pending_root / "working-copies").exists()
+            assert db.folders.get(folder_id)["path"] == str(source)
+            assert folder_status(db, folder_id, str(vireo_dir))["state"] == "remote"
+        assert (source / "bird.jpg").read_bytes() == b"original"
+        assert (pending_day / "imported.jpg").read_bytes() == b"retained original"
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("operation", [local_copy_preflight, stage_folder])
+@pytest.mark.parametrize("case_insensitive", [False, True])
+@pytest.mark.parametrize("normalization_insensitive", [False, True])
+@pytest.mark.parametrize("spelling", ["case", "unicode", "combined", "sibling"])
+def test_pending_destination_overlap_respects_volume_names(
+    tmp_path, monkeypatch, operation, case_insensitive, normalization_insensitive, spelling
+):
+    """Case and Unicode aliases follow independent volume naming policies."""
+    from services import local_folder
+
+    db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
+    pending_root = tmp_path / "Pending" / "Café"
+    # Keep this root disconnected so the host filesystem cannot canonicalize
+    # its spelling before the mocked volume-sensitivity policy is applied.
+    probes = []
+
+    def volume_policy(path, **_kwargs):
+        probes.append(str(path))
+        return case_insensitive
+
+    monkeypatch.setattr(local_folder, "destination_case_insensitive", volume_policy)
+    monkeypatch.setattr(
+        local_folder, "destination_unicode_normalization_insensitive",
+        lambda _path, **_kwargs: normalization_insensitive, raising=False,
+    )
+    local_base = {
+        "case": tmp_path / "PENDING" / "Café" / "working-copies",
+        "unicode": tmp_path / "Pending" / "Cafe\u0301" / "working-copies",
+        "combined": tmp_path / "PENDING" / "Cafe\u0301" / "working-copies",
+        "sibling": tmp_path / "PENDING" / "Cafe\u0301-other" / "working-copies",
+    }[spelling]
+    try:
+        db.set_active_workspace(first)
+        db.pending_archives.register("retained-import", "/nas/archive", str(pending_root), {})
+        db.set_active_workspace(second)
+
+        def copy_locally():
+            if operation is local_copy_preflight:
+                return operation(db, [folder_id], str(vireo_dir), destination_bases={folder_id: str(local_base)})
+            return operation(db, folder_id, str(vireo_dir), local_base=str(local_base))
+
+        overlaps = {"case": case_insensitive, "unicode": normalization_insensitive,
+                    "combined": case_insensitive and normalization_insensitive, "sibling": False}[spelling]
+        if overlaps:
+            with pytest.raises(LocalWorkspaceError, match="destination.*awaiting NAS transfer"):
+                copy_locally()
+            assert not local_base.exists()
+            assert db.local_folders.get_state(folder_id) is None
+            assert db.folders.get(folder_id)["path"] == str(source)
+        else:
+            copy_locally()
+        if spelling != "sibling":
+            assert str(tmp_path) in probes
+        assert (source / "bird.jpg").read_bytes() == b"original"
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("operation", [local_copy_preflight, stage_folder])
+@pytest.mark.parametrize("spelling", ["case", "unicode"])
+def test_pending_destination_uses_mount_point_identity(tmp_path, monkeypatch, operation, spelling):
+    """An insensitive parent may name a sensitive mounted volume through aliases."""
+    from services import local_folder
+
+    db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
+    mount = tmp_path / "Volumes" / "Café"
+    alias = tmp_path / "Volumes" / ("CAFÉ" if spelling == "case" else "Cafe\u0301")
+    pending_root = mount / "staging"
+    day = pending_root / "2026-10-17"
+    day.mkdir(parents=True)
+    (day / "imported.jpg").write_bytes(b"retained original")
+    real_stat = Path.stat
+
+    def identity(path):
+        parts = path.parts
+        if parts[:len(alias.parts)] == alias.parts:
+            path = mount.joinpath(*parts[len(alias.parts):])
+        try:
+            st = real_stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        return st.st_dev, st.st_ino
+
+    monkeypatch.setattr(local_folder, "_path_identity", identity, raising=False)
+    # The mounted volume itself is sensitive to both properties; only its
+    # parent's mount-point lookup supplies the alias, modeled by identity().
+    monkeypatch.setattr(local_folder, "destination_case_insensitive", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_folder, "destination_unicode_normalization_insensitive", lambda *_args, **_kwargs: False)
+    try:
+        db.set_active_workspace(first)
+        workspace_folders.add_folder(db, str(day))
+        db.pending_archives.register("retained-import", "/nas/archive", str(pending_root), {})
+        db.set_active_workspace(second)
+        local_base = alias / "staging" / "working-copies"
+        with pytest.raises(LocalWorkspaceError, match="destination.*awaiting NAS transfer"):
+            if operation is local_copy_preflight:
+                operation(db, [folder_id], str(vireo_dir), destination_bases={folder_id: str(local_base)})
+            else:
+                operation(db, folder_id, str(vireo_dir), local_base=str(local_base))
+        assert not (pending_root / "working-copies").exists()
+        assert db.folders.get(folder_id)["path"] == str(source)
+        assert db.local_folders.get_state(folder_id) is None
+        assert (source / "bird.jpg").read_bytes() == b"original"
+        assert (day / "imported.jpg").read_bytes() == b"retained original"
+    finally:
+        db.close()
+
+
+def test_completed_import_does_not_block_working_locally(tmp_path):
+    db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
+    try:
+        db.set_active_workspace(first)
+        db.pending_archives.register("completed-import", "/nas/archive", str(source), {})
+        db.pending_archives.set_state("completed-import", "complete")
+        assert local_copy_preflight(db, [folder_id], str(vireo_dir))["can_copy"]
+        stage_folder(db, folder_id, str(vireo_dir))
+        assert folder_status(db, folder_id, str(vireo_dir))["state"] == "active"
+    finally:
+        db.close()
+
+
 def test_shared_folder_uses_one_local_copy_in_every_workspace(tmp_path):
     db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
     try:

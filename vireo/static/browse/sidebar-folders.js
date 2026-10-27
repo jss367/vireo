@@ -139,7 +139,7 @@ export function renderFolderTree(/** @type {BrowseFolder[]} */ folders) {
         '<span class="folder-name"' + (f.path ? ' title="' + escapeAttr(f.path) + '"' : '') + '>' +
           escapeHtml(f.name || '') + '</span>' +
         '<span class="folder-local-status-slot">' + folderLocalStatusMarkup(localStatuses[f.id]) + '</span>' +
-        '<span class="folder-archive-status-slot">' + folderLocalStatusMarkup(archiveStatuses[f.id]) + '</span>' +
+        '<span class="folder-archive-status-slot">' + folderLocalStatusMarkup(archiveStatuses[f.id], f.id) + '</span>' +
         partialBadge +
         '<span class="count">' + rolledUp[f.id] + '</span>' +
       '</div>';
@@ -367,7 +367,7 @@ function pendingArchiveFolderStatuses() {
     var description = sending
       ? 'Kept locally — being copied' + destination + ' now'
       : 'Kept locally — still in Vireo’s staging folder, not copied' +
-        destination + ' yet. Use "Photos kept locally" at the top of this page to send them.';
+        destination + ' yet. Open this badge for NAS transfer options.';
     item.folder_ids.forEach(function(rawId) {
       statuses[Number(rawId)] = {
         kind: sending ? 'pending-archive updating' : 'pending-archive',
@@ -383,7 +383,10 @@ function refreshPendingArchiveStatusIndicators() {
   var statuses = pendingArchiveFolderStatuses();
   /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item[data-folder-id]')).forEach(function(row) {
     var slot = /** @type {HTMLElement | null} */ (row.querySelector('.folder-archive-status-slot'));
-    if (slot) slot.innerHTML = folderLocalStatusMarkup(statuses[Number(row.dataset.folderId)]);
+    if (slot) {
+      slot.innerHTML = folderLocalStatusMarkup(statuses[Number(row.dataset.folderId)], Number(row.dataset.folderId));
+      bindBrowseMarkup(slot);
+    }
   });
 }
 
@@ -391,8 +394,16 @@ window.addEventListener('vireo:pending-archives-changed', function() {
   refreshPendingArchiveStatusIndicators();
 });
 
-function folderLocalStatusMarkup(/** @type {BrowseFolderStatus | undefined} */ status) {
+/** @param {BrowseFolderStatus | undefined} status @param {number} [archiveFolderId] */
+function folderLocalStatusMarkup(status, archiveFolderId) {
   if (!status) return '';
+  if (archiveFolderId != null) {
+    return '<button type="button" class="folder-local-status pending-archive-action ' + status.kind + '"' +
+      ' data-browse-on="click:openPendingArchiveMenu" data-folder-id="' + archiveFolderId + '"' +
+      ' aria-haspopup="menu" aria-expanded="false" aria-label="NAS transfer options: ' + escapeAttr(status.description) + '"' +
+      ' title="' + escapeAttr(status.description) + '">' + escapeHtml(status.label) +
+      ' <span aria-hidden="true">▾</span></button>';
+  }
   return '<span class="folder-local-status ' + status.kind + '" role="img"' +
     ' aria-label="' + escapeAttr(status.description) + '"' +
     ' title="' + escapeAttr(status.description) + '">' +

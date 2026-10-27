@@ -25,7 +25,7 @@ import {
   addRuleGroup, addRuleRow, commitRuleOnEnter, hideCollectionModal, removeRule, saveCollection,
   showCollectionModal, updateRule,
 } from './collection-editor.js';
-import { filterToBrowseGroup, hideFolderWorkspaces, openBatchMoreMenu } from './context-menus.js';
+import { filterToBrowseGroup, hideFolderWorkspaces, openBatchMoreMenu, openPendingArchiveMenu } from './context-menus.js';
 import { closeDetail, filterMetadata } from './detail.js';
 import {
   batchRate, removeKeyword, setColorLabel, setFlag, setKeywordType, setRating,
@@ -83,6 +83,7 @@ const HANDLERS = {
   // Sidebar (the trees and the collection list are rendered markup)
   toggleTree: function(event, element) { toggleTree(event, element); },
   filterByFolder: function(event, element) { filterByFolder(Number(element.dataset.folderId)); },
+  openPendingArchiveMenu: function(event, element) { openPendingArchiveMenu(event, element); },
   filterByKeyword: function(event, element) { filterByKeyword(element.dataset.keyword || ''); },
   filterByCollection: function(event, element) { filterByCollection(Number(element.dataset.collectionId)); },
   reviewCollectionLocations: function(event, element) {

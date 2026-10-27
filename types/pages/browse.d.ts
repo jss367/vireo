@@ -197,7 +197,8 @@ declare var VireoExportPresets: {modalOpened(): void; markCustom(): void; subfol
 declare var VireoExportJob: {watch(id: string): void};
 declare var VireoFolderBrowser: new(options: {overlayId: string; defaultMode: string; modes: Record<string, {title: string; multiple: boolean; showCounts: boolean; startPath(): string; onSelect(path: string): void}>}) => {sequence: number; open(mode: string, options?: {skipInitialBrowse: boolean}): void};
 interface BrowseMenuItem {label?: string; title?: string; disabled?: boolean; disabledHint?: string; separator?: boolean; chips?: BrowseMenuItem[]; onClick?: () => void; color?: string | null; colorBaseTitle?: string}
-declare function openContextMenu(event: {clientX: number; clientY: number}, items: BrowseMenuItem[]): void;
+declare function openContextMenu(event: {clientX: number; clientY: number}, items: BrowseMenuItem[], options?: {onDismiss?: () => void}): void;
+declare function closeContextMenu(): void;
 declare function buildOpenInEditorMenuItems(ids: number[]): BrowseMenuItem[];
 declare function coerceSelectionOnContext(selected: Set<number>, id: number): number[];
 declare var VireoReleaseOriginals: {isRunning(): boolean; release(scope: {photo_ids?: number[]; folder_id?: number; collection_id?: number}, description: string): void};
