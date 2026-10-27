@@ -387,36 +387,9 @@ class _MaskPass:
         included; candidate runs with conflicting or unclassified anchors
         remain ordinary sub-threshold detections throughout.
         """
-        if not (self.weak_rescue_enabled and self.photos):
-            return {}
-        from weak_detections import (
-            FULL_IMAGE_RESCUE_WEAK_FLOOR,
-            rescue_candidate_runs,
-            rescue_floor,
-            rescue_scope_photo_ids,
-        )
-        raw_mdv6_dets = detection_store.get_detections_for_photos(
-            self.thread_db, [p["id"] for p in self.photos],
-            min_conf=min(self.weak_detection_confidence, FULL_IMAGE_RESCUE_WEAK_FLOOR),
-            detector_model="megadetector-v6",
-        )
-        weak_scope_ids = rescue_scope_photo_ids(rescue_candidate_runs(
-            self.photos, raw_mdv6_dets,
-            detector_confidence=self.detector_confidence,
-            weak_confidence=self.weak_detection_confidence,
-            max_gap=config_value(self.pipeline_cfg, "burst_time_gap", section="pipeline"),
-        ))
-        if not weak_scope_ids:
-            return {}
-        from pipeline import load_photo_features
-        weak_features = load_photo_features(
-            self.thread_db, config=self.effective_cfg, photo_ids=weak_scope_ids,
-        )
-        return {
-            feature["id"]: rescue_floor(feature, self.weak_detection_confidence)
-            for feature in weak_features
-            if feature.get("subject_uncertain")
-        }
+        from pipeline import find_mask_rescue_floors
+
+        return find_mask_rescue_floors(self.thread_db, self.photos, self.effective_cfg)
 
     def drop_offline_folders(self) -> None:
         """Drop photos whose folder is offline.

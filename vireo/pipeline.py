@@ -159,6 +159,45 @@ def collection_covers_workspace(db, workspace_id, collection_id,
     return ws_photo_ids.issubset(covered_ids)
 
 
+def find_mask_rescue_floors(db, photos, effective_cfg):
+    """Validated mask-rescue floors for exactly the run's photos and settings.
+
+    Load features only for candidate runs and their anchors. Both the Process
+    plan and mask extraction use this matching-species rescue decision.
+    """
+    pipeline_cfg = effective_cfg.get("pipeline", {})
+    weak_confidence = config_value(pipeline_cfg, "weak_detection_confidence", section="pipeline")
+    if not (pipeline_cfg.get("weak_detection_rescue_enabled", True) and photos):
+        return {}
+    from weak_detections import (
+        FULL_IMAGE_RESCUE_WEAK_FLOOR,
+        rescue_candidate_runs,
+        rescue_floor,
+        rescue_scope_photo_ids,
+    )
+    raw_mdv6_dets = detection_store.get_detections_for_photos(
+        db, [p["id"] for p in photos],
+        min_conf=min(weak_confidence, FULL_IMAGE_RESCUE_WEAK_FLOOR),
+        detector_model="megadetector-v6",
+    )
+    weak_scope_ids = rescue_scope_photo_ids(rescue_candidate_runs(
+        photos, raw_mdv6_dets,
+        detector_confidence=config_value(effective_cfg, "detector_confidence"),
+        weak_confidence=weak_confidence,
+        max_gap=config_value(pipeline_cfg, "burst_time_gap", section="pipeline"),
+    ))
+    if not weak_scope_ids:
+        return {}
+    weak_features = load_photo_features(
+        db, config=effective_cfg, photo_ids=weak_scope_ids, effective_config=effective_cfg,
+    )
+    return {
+        feature["id"]: rescue_floor(feature, weak_confidence)
+        for feature in weak_features
+        if feature.get("subject_uncertain")
+    }
+
+
 def load_photo_features(db, collection_id=None, config=None,
                         labels_fingerprint=None, photo_ids=None, *,
                         effective_config=None):

@@ -4194,3 +4194,135 @@ def test_regroup_plan_skips_empty_resolved_scope(tmp_path, scope):
     assert group["state"] == "will-skip"
     assert "no photos" in group["summary"]
     db.close()
+
+
+def _mask_rescue_sequence(tmp_path, monkeypatch, confidence):
+    import copy
+
+    import config as cfg
+    from services import detection_store
+
+    effective = copy.deepcopy(cfg.DEFAULTS)
+    effective['detector_confidence'] = 0.2
+    effective['pipeline'].update(weak_detection_confidence=0.12,
+                                 weak_detection_rescue_enabled=True,
+                                 sam2_variant='sam2-small')
+    monkeypatch.setattr(cfg, 'load', lambda: effective)
+    db, folder_id = _make_db(tmp_path)
+    ids = []
+    for index, conf in enumerate((0.9, confidence, 0.9)):
+        pid, did = _add_photo_with_detection(db, folder_id, f'bird{index}.jpg', conf=conf)
+        did = detection_store.write_detection_batch(
+            db, pid, 'megadetector-v6',
+            [{'box': {'x': 0.1, 'y': 0.1, 'w': 0.5, 'h': 0.5},
+              'confidence': conf, 'category': 'animal'}],
+        )[0]
+        db.conn.execute('UPDATE photos SET timestamp=? WHERE id=?',
+                        (f'2026-07-18T08:36:3{index}', pid))
+        if index == 1 and confidence < 0.12:
+            did = detection_store.write_detection_batch(
+                db, pid, 'full-image',
+                [{'box': {'x': 0, 'y': 0, 'w': 1, 'h': 1},
+                  'confidence': 0, 'category': 'animal'}],
+            )[0]
+        db.predictions.add(did, 'Great-tailed Grackle', 0.9, 'inat21')
+        ids.append(pid)
+        if index != 1:
+            _mark_sam_done(db, pid, f'/m/{pid}.png')
+    db.conn.commit()
+    return db, ids, effective
+
+
+@pytest.mark.parametrize('confidence', [0.15, 0.05])
+def test_extract_plan_counts_rescued_masks_and_stale_prompts(tmp_path, monkeypatch, confidence):
+    from pipeline_plan import compute_plan
+
+    db, ids, _ = _mask_rescue_sequence(tmp_path, monkeypatch, confidence)
+
+    def extract(**kwargs):
+        return compute_plan(db, _params(skip_classify=True, **kwargs),
+                            str(tmp_path / 'test.db'))['stages']['Extract']
+
+    missing = extract()
+    assert missing['state'] == 'will-run'
+    assert missing['detail']['eligible'] == 3
+    assert missing['detail']['pending'] == 1
+    assert missing['detail']['stale'] == 0
+
+    pid = ids[1]
+    db.masks_features.upsert_mask(pid, 'sam2-small', '/m/rescued.png',
+                                 detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5))
+    subject_masks.set_active_mask_variant(db, pid, 'sam2-small', weak_rescue_min_conf=0.001)
+    done = extract()
+    assert done['state'] == 'done-prior'
+    assert done['detail']['eligible'] == 3
+
+    db.conn.execute('UPDATE photo_masks SET prompt_x=0.7 WHERE photo_id=?', (pid,))
+    db.conn.commit()
+    stale = extract()
+    assert stale['state'] == 'will-run'
+    assert stale['detail']['pending'] == 1
+    assert stale['detail']['stale'] == 1
+
+    # The job cannot rescue the middle when its selected scope omits an anchor.
+    scoped = extract(photo_ids=ids[:2])
+    assert scoped['state'] == 'done-prior'
+    assert scoped['detail']['eligible'] == 1
+    excluded = extract(exclude_photo_ids=[ids[-1]])
+    assert excluded['detail']['eligible'] == 1
+
+
+@pytest.mark.parametrize('confidence', [0.15, 0.05])
+def test_extract_plan_rescue_requires_enabled_matching_anchors(tmp_path, monkeypatch, confidence):
+    from pipeline_plan import compute_plan
+
+    db, ids, effective = _mask_rescue_sequence(tmp_path, monkeypatch, confidence)
+    effective['pipeline']['weak_detection_rescue_enabled'] = False
+    disabled = compute_plan(db, _params(skip_classify=True), str(tmp_path / 'test.db'))
+    assert disabled['stages']['Extract']['detail']['eligible'] == 2
+    assert disabled['stages']['Extract']['state'] == 'done-prior'
+
+    effective['pipeline']['weak_detection_rescue_enabled'] = True
+    db.conn.execute("UPDATE predictions SET species='Northern Cardinal' WHERE detection_id IN "
+                    '(SELECT id FROM detections WHERE photo_id=?)', (ids[-1],))
+    db.conn.commit()
+    conflict = compute_plan(db, _params(skip_classify=True), str(tmp_path / 'test.db'))
+    assert conflict['stages']['Extract']['detail']['eligible'] == 2
+    assert conflict['stages']['Extract']['state'] == 'done-prior'
+
+
+def test_rescued_mask_counts_keep_variant_detector_and_large_scope_gates(tmp_path, monkeypatch):
+    db, ids, _ = _mask_rescue_sequence(tmp_path, monkeypatch, 0.05)
+    pid = ids[1]
+    # A higher-confidence box from another detector must not become the
+    # rescued mask's primary. Extraction uses only MegaDetector animal boxes.
+    db.detections.save(pid, [{'box': {'x': 0.7, 'y': 0.7, 'w': 0.2, 'h': 0.2},
+                             'confidence': 0.99, 'category': 'animal'}],
+                       detector_model='other-detector')
+    db.masks_features.upsert_mask(pid, 'sam2-small', '/m/rescued.png',
+                                 detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5))
+    subject_masks.set_active_mask_variant(db, pid, 'sam2-small', weak_rescue_min_conf=0.001)
+    # Force both the scope and the rescue set past SQLite's legacy parameter
+    # budget, including non-existent IDs that must never inflate counts.
+    scope = [pid, *range(10000, 12000)]
+    floors = dict.fromkeys(scope, 0.001)
+    assert stage_counts.count_photos_pending_masks(
+        db, scope, sam2_variant='sam2-small', rescue_floors=floors,
+    ) == {'eligible': 1, 'pending': 0}
+    assert stage_counts.count_extract_stale(
+        db, 'sam2-small', scope, rescue_floors=floors,
+    ) == 0
+    assert stage_counts.count_photos_pending_masks(
+        db, scope, sam2_variant='sam2-large', rescue_floors=floors,
+    ) == {'eligible': 1, 'pending': 1}
+    db.conn.execute("UPDATE photo_masks SET path='' WHERE photo_id=?", (pid,))
+    db.conn.commit()
+    assert stage_counts.count_photos_pending_masks(
+        db, scope, sam2_variant='sam2-small', rescue_floors=floors,
+    ) == {'eligible': 1, 'pending': 1}
+    assert stage_counts.count_extract_stale(
+        db, 'sam2-small', scope, rescue_floors=floors,
+    ) == 0
+    assert stage_counts.count_photos_pending_masks(
+        db, [], sam2_variant='sam2-small', rescue_floors=floors,
+    ) == {'eligible': 0, 'pending': 0}

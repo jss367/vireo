@@ -660,11 +660,44 @@ class StatsRepository:
             out[key] = (float(med), n)
         return out
 
+    def mask_rescue_photos(self, scope_sql, scope_params):
+        """Only sequence metadata needed to find rescue candidates in scope."""
+        return self.conn.execute(
+            f"""SELECT p.id, p.folder_id, p.timestamp FROM photos p
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
+                WHERE 1=1{scope_sql}""",
+            (self.workspace_id_fn(), *scope_params),
+        ).fetchall()
+
+    def _mask_detection_predicate(self, alias, rescue_floors):
+        """Use the extraction stage's floor and detector gate per photo.
+
+        A separate temp table keeps large rescue sets off SQLite's parameter
+        limit and does not overwrite the caller's staged photo scope.
+        """
+        ordinary = f"{alias}.detector_model != 'full-image' AND {alias}.detector_confidence >= ?"
+        if not rescue_floors:
+            return ordinary
+        self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS mask_rescue_floors "
+                          "(photo_id INTEGER PRIMARY KEY, min_conf REAL NOT NULL)")
+        self.conn.execute("DELETE FROM mask_rescue_floors")
+        self.conn.executemany("INSERT INTO mask_rescue_floors VALUES (?, ?)", rescue_floors.items())
+        return f"""(
+            (NOT EXISTS (SELECT 1 FROM mask_rescue_floors r WHERE r.photo_id = {alias}.photo_id)
+             AND {ordinary})
+            OR ({alias}.detector_model = 'megadetector-v6' AND {alias}.category = 'animal'
+                AND EXISTS (SELECT 1 FROM mask_rescue_floors r
+                            WHERE r.photo_id = {alias}.photo_id
+                              AND {alias}.detector_confidence >= r.min_conf))
+        )"""
+
     def count_photos_pending_masks(
-        self, min_conf, sam2_variant, scope_sql, scope_params,
+        self, min_conf, sam2_variant, scope_sql, scope_params, *, rescue_floors=None,
     ):
         """Return (pending, eligible) for the extract-masks stage."""
         ws = self.workspace_id_fn()
+        detection_predicate = self._mask_detection_predicate("d", rescue_floors)
         if sam2_variant:
             row = self.conn.execute(
                 f"""SELECT
@@ -680,8 +713,7 @@ class StatsRepository:
                       ON wf.photo_id = p.id AND wf.workspace_id = ?
                     JOIN detections d
                       ON d.photo_id = p.id
-                     AND d.detector_model != 'full-image'
-                     AND d.detector_confidence >= ?
+                     AND {detection_predicate}
                     LEFT JOIN photo_masks pm
                       ON pm.photo_id = p.id AND pm.variant = ?
                     WHERE 1=1{scope_sql}""",
@@ -698,8 +730,7 @@ class StatsRepository:
                       ON wf.photo_id = p.id AND wf.workspace_id = ?
                     JOIN detections d
                       ON d.photo_id = p.id
-                     AND d.detector_model != 'full-image'
-                     AND d.detector_confidence >= ?
+                     AND {detection_predicate}
                     WHERE 1=1{scope_sql}""",
                 (ws, min_conf, *scope_params),
             ).fetchone()
@@ -780,10 +811,12 @@ class StatsRepository:
         }
 
     def count_extract_stale(
-        self, sam2_variant, detector_confidence, scope_sql, scope_params,
+        self, sam2_variant, detector_confidence, scope_sql, scope_params, *, rescue_floors=None,
     ):
         """Count done-looking masks whose prompt no longer matches the primary."""
         ws = self.workspace_id_fn()
+        detection_predicate = self._mask_detection_predicate("d0", rescue_floors)
+        primary_predicate = detection_predicate.replace("d0.", "d2.")
         from repositories.subject_order import primary_order_sql
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
@@ -798,8 +831,7 @@ class StatsRepository:
                  AND EXISTS (
                     SELECT 1 FROM detections d0
                      WHERE d0.photo_id = pm.photo_id
-                       AND d0.detector_model != 'full-image'
-                       AND d0.detector_confidence >= ?
+                       AND {detection_predicate}
                  )
                  AND NOT EXISTS (
                     SELECT 1 FROM detections d
@@ -807,8 +839,7 @@ class StatsRepository:
                            SELECT d2.id
                              FROM detections d2
                             WHERE d2.photo_id = pm.photo_id
-                              AND d2.detector_model != 'full-image'
-                              AND d2.detector_confidence >= ?
+                              AND {primary_predicate}
                             ORDER BY {primary_order_sql("d2")}
                             LIMIT 1
                        )
