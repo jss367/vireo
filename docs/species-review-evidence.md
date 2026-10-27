@@ -86,6 +86,8 @@ is a separate action, and reclassification does not repair confirmed keywords.
    saved assignment provenance as well as the existing photo/species evidence.
    Changes require a fresh preview. Application is additive, preserves unrelated
    species and flags, and returns a compact response with an Undo reference.
+   The connector sets `preserve_existing_provenance: true`: a photo already
+   carrying the species keeps its saved evidence and reviewer attribution.
 5. Read `get_photo(...).species_assignments` to verify the saved identification,
    reviewer, method and supporting frames. Preserve user-reviewed assignments.
 

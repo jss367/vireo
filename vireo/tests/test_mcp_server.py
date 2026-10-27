@@ -274,6 +274,37 @@ def test_species_preview_binds_existing_assignment_evidence(mcp, app_and_db):
     assert assignments[0]["reviewer"] == "User"
 
 
+def test_species_tools_preserve_existing_user_evidence_in_mixed_selection(mcp, app_and_db):
+    from test_app import _seed_encounter_cache
+
+    server, db, _ = mcp
+    app, _ = app_and_db
+    _seed_encounter_cache(app, db, [1, 2, 3])
+    keyword = db.add_keyword("Robin", is_species=True)
+    db.tag_photo(1, keyword)
+    assert app.test_client().post(f"/api/photos/1/species/{keyword}/provenance", json={
+        "method": "direct_visual", "reviewer": "User", "reason": "User-reviewed identification",
+    }).status_code == 200
+    original = db.species_provenance.assignments(1)
+    provenance = {"method": "adjacent_frames", "reviewer": "Agent", "reason": "Reviewed sequence",
+                  "supporting_photo_ids": [1]}
+    preview = call(server, "preview_species_assignment", photo_ids=[1, 2], species="Robin", provenance=provenance)
+    assert preview["preserve_existing_provenance"] is True
+    assert preview["photos"][0]["additions"] == []
+    assert preview["photos"][1]["additions"] == ["Robin"]
+    body = {"photo_ids": [1, 2], "source_photo_ids": [1, 2], "species": "Robin", "provenance": provenance,
+            "add": True, "preserve_existing_provenance": False, "preview_token": preview["preview_token"]}
+    assert app.test_client().post("/api/encounters/species", json=body).status_code == 409
+    result = call(server, "apply_species_assignment", photo_ids=[1, 2], species="Robin", provenance=provenance,
+                  preview_token=preview["preview_token"])
+    assert db.species_provenance.assignments(1) == original
+    assert db.species_provenance.assignments(2)[0]["reviewer"] == "Agent"
+    assert db.species_provenance.assignments(3) == []
+    assert app.test_client().post("/api/undo", json={"edit_id": result["undo"]["edit_id"]}).status_code == 200
+    assert db.species_provenance.assignments(1) == original
+    assert db.species_provenance.assignments(2) == []
+
+
 @pytest.mark.parametrize("provenance", [
     {"method": "direct_visual", "reason": "Visible plumage"},
     {"method": "direct_visual", "reviewer": "Agent"},

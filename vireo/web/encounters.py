@@ -487,6 +487,7 @@ class _SpeciesConfirmation:
         self.had_old: set[int] = set()
         self.photo_edit_id: int | None = None
         self.provenance: JsonDict | None = None
+        self.preserve_existing_provenance = False
         self.attribution_only: list[int] = []
         self.undo_edit_id: int | None = None
 
@@ -504,6 +505,10 @@ class _SpeciesConfirmation:
         return cast(str, self.previous_species)
 
     def read_provenance(self, body: JsonDict) -> ErrorResponse | None:
+        preserve = body.get('preserve_existing_provenance', False)
+        if type(preserve) is not bool:
+            return self.json_error('preserve_existing_provenance must be a boolean')
+        self.preserve_existing_provenance = preserve
         if 'provenance' not in body:
             return None
         from services.species_provenance import validate_provenance
@@ -893,7 +898,7 @@ class _SpeciesConfirmation:
                 self.db, pid, self.species, workspace_id=ws_id, _commit=False,
             )
 
-        if self.provenance is not None and not self.remove_mode:
+        if self.provenance is not None and not self.remove_mode and not self.preserve_existing_provenance:
             from services.species_provenance import remember_before
             # Equivalent hierarchy aliases must retain their actual keyword ID.
             # Not remove mode, so resolve_target_keyword stored the new keyword id.

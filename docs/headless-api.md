@@ -236,6 +236,10 @@ a fresh preview. The server rechecks the encounter, all source photos' keywords
 and assignment provenance, requested reviewer/evidence provenance, subject boxes,
 classifier output and decisions while holding the
 writer lock. Stale previews return HTTP 409 without species changes.
+`preserve_existing_provenance: true` leaves attribution on already-present
+equivalent species assignments intact; the new MCP confirmation tools set this
+option. Its value is bound to the preview token. Existing API callers retain
+their default behavior of updating attribution when provenance is supplied.
 The token also binds live species identities and provenance for every encounter
 member whose summaries will refresh, including sibling bursts outside the
 displayed source-photo matrix. Unrelated encounters remain outside that scope.
