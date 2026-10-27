@@ -1,5 +1,7 @@
 """Cooperative cancel and pause: the flags workers poll and the waits they park in."""
 
+import time
+
 from job_runner.outcome import apply_result_verdict
 
 
@@ -12,11 +14,12 @@ class JobControl:
     publishes status changes through ``EventStreams``.
     """
 
-    def __init__(self, lock, pause_condition, jobs, streams):
+    def __init__(self, lock, pause_condition, jobs, streams, clock=None):
         self._lock = lock
         self._pause_condition = pause_condition
         self._jobs = jobs
         self._streams = streams
+        self._clock = clock or time.monotonic
         self.cancelled = set()  # job ids that have been cancelled
         # Cooperative pause requests. Pausable work reaches these through
         # is_cancelled(), which doubles as its existing safe-point callback.
@@ -31,6 +34,14 @@ class JobControl:
         # the result. Cleared by _prune_finished_jobs alongside
         # cancelled.
         self.uncancellable = set()
+        # Cumulative seconds each live job has spent parked inside
+        # ``wait_if_paused``. ETA estimators subtract this from their
+        # elapsed-time measurements so a pause does not inflate the next
+        # computed rate: without it, an item that straddles a one-hour pause
+        # would present as taking an hour, poisoning the per-item rate for
+        # the rest of the pass. Cleared alongside the other flags in
+        # ``forget_locked``.
+        self._pause_elapsed = {}
 
     # ------------------------------------------------------------------
     # Lifecycle bookkeeping (runner lock held)
@@ -41,6 +52,7 @@ class JobControl:
         self.cancelled.discard(job_id)
         self.pause_requested.discard(job_id)
         self.uncancellable.discard(job_id)
+        self._pause_elapsed.pop(job_id, None)
 
     def cancel_live_locked(self):
         """Flag every live, cancellable job for cancellation (shutdown).
@@ -220,7 +232,23 @@ class JobControl:
                     return False
                 if publish_paused and job.get("status") != "paused":
                     self._streams.publish_status_locked(job, "paused")
+                wait_start = self._clock()
                 self._pause_condition.wait()
+                self._pause_elapsed[job_id] = (
+                    self._pause_elapsed.get(job_id, 0.0)
+                    + max(0.0, self._clock() - wait_start)
+                )
+
+    def pause_elapsed_seconds(self, job_id):
+        """Return cumulative seconds *job_id* has spent parked in a pause.
+
+        Reset to zero when the job is forgotten. Returns 0.0 for a job that
+        has never paused or is unknown. ETA estimators subtract this from
+        their wall-clock elapsed so a pause does not inflate the per-item
+        rate they publish on the next status callback.
+        """
+        with self._lock:
+            return self._pause_elapsed.get(job_id, 0.0)
 
     def resume_job(self, job_id):
         """Resume a pausing or paused job."""

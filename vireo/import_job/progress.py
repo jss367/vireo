@@ -184,17 +184,33 @@ class _WorkingCopyEtaEstimator:
     divide by the working copies completed so far. Until
     ``_WORKING_COPY_ETA_MIN_ELAPSED`` has passed and one working copy has
     completed the honest answer is "estimating".
+
+    The extractor's cancel check parks inside the runner's
+    ``wait_if_paused`` on Pause, so an item that straddles a pause would
+    otherwise look like it took the entire pause to extract and poison the
+    per-item rate for the rest of the pass. ``paused_elapsed``, when
+    supplied, returns the job's cumulative pause duration; the estimator
+    subtracts the delta since timing started from its wall-clock elapsed so
+    rate and ETA reflect active processing time only.
     """
 
-    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], float] | None = None,
+        paused_elapsed: Callable[[], float] | None = None,
+    ) -> None:
         self._clock = clock or time.monotonic
+        self._paused_elapsed = paused_elapsed
         self._started_at: float | None = None
+        self._paused_at_start: float = 0.0
 
     def fields(self, current: int | None, total: int | None) -> dict[str, Any]:
         """Return JSON-safe telemetry for the progress event and step."""
         now = self._clock()
         if self._started_at is None:
             self._started_at = now
+            if self._paused_elapsed is not None:
+                self._paused_at_start = self._paused_elapsed()
         completed = max(0, int(current or 0))
         remaining = max(0, int(total or 0) - completed)
         result: dict[str, Any] = {
@@ -206,7 +222,10 @@ class _WorkingCopyEtaEstimator:
             result["eta_state"] = "ready"
             result["eta_seconds"] = 0.0
             return result
-        elapsed = now - self._started_at
+        pause_delta = 0.0
+        if self._paused_elapsed is not None:
+            pause_delta = max(0.0, self._paused_elapsed() - self._paused_at_start)
+        elapsed = max(0.0, now - self._started_at - pause_delta)
         if completed == 0 or elapsed < _WORKING_COPY_ETA_MIN_ELAPSED:
             return result
         seconds_per_item = elapsed / completed
@@ -228,7 +247,9 @@ def _make_working_copy_status(
     its ``eta_seconds: 0`` would otherwise be published as this phase's.
     """
     if eta is None:
-        eta = _WorkingCopyEtaEstimator()
+        eta = _WorkingCopyEtaEstimator(
+            paused_elapsed=lambda: runner.pause_elapsed_seconds(job["id"]),
+        )
     eta_fields: dict[str, Any] = {}
 
     def _working_copy_status(
