@@ -318,6 +318,16 @@ def test_species_tools_require_attributed_identification_evidence(mcp, provenanc
     assert transport.calls == []
 
 
+@pytest.mark.parametrize("method", [[], {}, None, 1, True])
+def test_species_tools_reject_non_string_methods_before_http(mcp, method):
+    server, _, transport = mcp
+    provenance = {"method": method, "reviewer": "Agent", "reason": "Visible plumage"}
+    assert "provenance.method must be" in call_error(
+        server, "preview_species_assignment", photo_ids=[1], species="Robin", provenance=provenance,
+    )
+    assert transport.calls == []
+
+
 def test_photo_summary_reports_quality_analysis_state():
     assert photo_summary({"id": 1, "quality_score": None})["quality_analyzed"] is False
     assert photo_summary({"id": 1, "quality_score": 0.4})["quality_analyzed"] is True

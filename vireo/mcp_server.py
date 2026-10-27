@@ -544,7 +544,8 @@ def _species_assignment_payload(photo_ids, species, provenance):
     reviewer = provenance.get("reviewer")
     if not isinstance(reviewer, str) or not reviewer.strip():
         raise VireoError("provenance.reviewer must identify the actual reviewer")
-    if provenance.get("method") not in {"direct_visual", "adjacent_frames"}:
+    method = provenance.get("method")
+    if not isinstance(method, str) or method not in {"direct_visual", "adjacent_frames"}:
         raise VireoError("provenance.method must be direct_visual or adjacent_frames after reviewing evidence")
     if not any(isinstance(provenance.get(key), str) and provenance[key].strip()
                for key in ("reason", "evidence_source")):
