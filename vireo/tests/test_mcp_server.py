@@ -620,6 +620,57 @@ def test_burst_exposes_provisional_candidate_without_claiming_a_keeper(mcp, monk
         assert frame["keep_reasons"] == response["cards"][0]["keep_reasons"]
 
 
+def test_burst_nulls_quality_fields_on_ineligible_frames(mcp, monkeypatch):
+    """The best-batch cleanup leaves ``subject_tenengrad`` (exposed as
+    ``sharpness``) in place even when a frame is ineligible, so the burst
+    tool nulls every surfaced quality metric itself to match its guidance.
+    """
+    from keep_safety import review_ranked_suggestions
+
+    server, _, transport = mcp
+    response = {
+        "seed_photo_id": 42,
+        "best_photo_id": 42,
+        "cards": [{
+            "id": 42, "filename": "frame.jpg", "rank": 1, "label": "KEEP",
+            "selection_eligible": False, "analysis_status": "incomplete",
+            "analysis_reasons": ["segmentation_incomplete"],
+            # None of these should survive on an ineligible frame.
+            "quality": 0.72, "quality_pct": 72, "focus": 0.9,
+            "focus_basis": "subject", "sharpness": 0.5, "exposure": 0.4,
+        }],
+    }
+    review_ranked_suggestions(response)
+    monkeypatch.setattr(transport, "get_json", lambda path: response)
+    frame = call(server, "burst", photo_id=42)["frames"][0]
+    assert frame["selection_eligible"] is False
+    for key in ("quality", "quality_pct", "focus", "focus_basis",
+                "sharpness", "exposure"):
+        assert frame[key] is None, f"{key} must be null on an ineligible frame"
+
+
+def test_burst_keeps_quality_fields_on_eligible_frames(mcp, monkeypatch):
+    from keep_safety import review_ranked_suggestions
+
+    server, _, transport = mcp
+    response = {
+        "seed_photo_id": 42,
+        "best_photo_id": 42,
+        "cards": [{
+            "id": 42, "filename": "frame.jpg", "rank": 1, "label": "KEEP",
+            "selection_eligible": True, "analysis_status": "complete",
+            "analysis_reasons": [],
+            "quality": 0.72, "quality_pct": 72, "focus": 0.9,
+            "focus_basis": "subject", "sharpness": 0.5, "exposure": 0.4,
+        }],
+    }
+    review_ranked_suggestions(response)
+    monkeypatch.setattr(transport, "get_json", lambda path: response)
+    frame = call(server, "burst", photo_id=42)["frames"][0]
+    assert frame["sharpness"] == 0.5
+    assert frame["quality"] == 0.72
+
+
 def test_set_flag_writes_only_what_the_route_persists(mcp):
     # Omitted provenance preserves the ordinary manual-write payload.
     server, db, transport = mcp

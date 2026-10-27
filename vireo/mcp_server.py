@@ -99,9 +99,12 @@ _PHOTO_DETAIL_KEYS = _PHOTO_SUMMARY_KEYS + (
 # wins.
 _EXPOSURE_TAGS = ("ExposureTime", "ShutterSpeed", "FNumber", "Aperture",
                   "FocalLength", "LensModel", "LensID", "ExposureCompensation")
+_BURST_QUALITY_KEYS = (
+    "quality_pct", "quality", "focus", "focus_basis", "sharpness", "exposure",
+)
 _BURST_CARD_KEYS = (
-    "id", "filename", "rank", "role", "label", "quality_pct", "quality",
-    "focus", "focus_basis", "sharpness", "exposure", "flag", "rating", "reasons",
+    "id", "filename", "rank", "role", "label", *_BURST_QUALITY_KEYS,
+    "flag", "rating", "reasons",
     "selection_eligible", "analysis_status", "analysis_reasons",
     "automatic_keep_eligible", "keep_status", "keep_reasons",
 )
@@ -256,6 +259,22 @@ class VireoClient:
 
 def _pick(row, keys):
     return {key: row[key] for key in keys if key in row}
+
+
+def _burst_frame(card):
+    """A ``burst`` frame with its quality fields nulled when ineligible.
+
+    The best-batch cleanup nulls ``SCORE_FIELDS`` but leaves raw measurements
+    like ``subject_tenengrad`` (surfaced here as ``sharpness``) in place. The
+    tool guidance says ineligible frames carry no comparison numbers, so null
+    every surfaced quality metric together.
+    """
+    frame = _pick(card, _BURST_CARD_KEYS)
+    if frame.get("selection_eligible") is False:
+        for key in _BURST_QUALITY_KEYS:
+            if key in frame:
+                frame[key] = None
+    return frame
 
 
 def analysis_fields(photo, readiness):
@@ -625,7 +644,7 @@ def _register_photo_tools(server, client):
                            "best_reasons", "count", "scope_method",
                            "suggested_reject_ids", "alternate_ids",
                            "ranked_candidate_id", "ranking_status", "keep_review_message")),
-            "frames": [_pick(card, _BURST_CARD_KEYS) for card in data.get("cards", [])],
+            "frames": [_burst_frame(card) for card in data.get("cards", [])],
         }
 
 
