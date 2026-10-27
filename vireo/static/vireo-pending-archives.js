@@ -263,8 +263,9 @@
     const row = details.closest('.pending-archive-row');
     if (!row) return;
     row.scrollIntoView({block: 'center'});
-    const button = row.querySelector('button:not(:disabled)');
-    if (button instanceof HTMLButtonElement) button.focus({preventScroll: true});
+    const button = row.querySelector('.pending-archive-actions button:not(:disabled)');
+    const target = button || details.querySelector('summary');
+    if (target instanceof HTMLElement) target.focus({preventScroll: true});
   });
   refresh();
   setInterval(refresh, 5000);

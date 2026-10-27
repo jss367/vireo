@@ -112,6 +112,40 @@ def test_pending_folder_offers_nas_transfer_instead_of_another_local_copy(
     assert sent.value.post_data_json == {"sync_first": sync_first}
 
 
+@pytest.mark.parametrize("entry", ["folder-menu", "badge-keyboard"])
+def test_missing_archive_source_focuses_details_instead_of_removal(
+    live_server, page, tmp_path, entry
+):
+    """Opening a transfer must not direct keyboard activation toward removal."""
+    db = live_server["db"]
+    workspace_id, photo_ids = _staged_import(
+        db, tmp_path, destination="/Volumes/Photography/USA/2026"
+    )
+    folder_id = db.photos.get(photo_ids[0])["folder_id"]
+    staging = tmp_path / "staging" / "import-kept-locally"
+    staging.rename(staging.with_name("disconnected-originals"))
+    assert page.request.post(
+        f"{live_server['url']}/api/workspaces/{workspace_id}/activate"
+    ).ok
+    page.goto(f"{live_server['url']}/browse")
+    item = page.locator(f'.tree-item[data-folder-id="{folder_id}"]')
+    expect(item).to_contain_text("KEPT LOCALLY")
+    if entry == "folder-menu":
+        item.click(button="right")
+        page.locator(".vireo-ctx-menu").get_by_text("Send to NAS…", exact=True).click()
+    else:
+        item.get_by_role("button", name="NAS transfer options:").press("Enter")
+        page.get_by_role("menuitem", name="Send to NAS…").press("Enter")
+
+    banner = page.locator("#pendingArchives")
+    expect(banner.get_by_role("button", name="Send to NAS", exact=True)).to_be_disabled()
+    remove = banner.get_by_role("button", name="Remove missing transfer", exact=True)
+    expect(remove).to_be_enabled()
+    expect(remove).not_to_be_focused()
+    expect(banner.locator("summary")).to_be_focused()
+    expect(banner).to_contain_text("Local originals are unavailable")
+
+
 def test_banner_offers_to_sync_metadata_before_sending(live_server, page, tmp_path):
     db = live_server["db"]
     workspace_id, photo_ids = _staged_import(
