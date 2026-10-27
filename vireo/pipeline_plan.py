@@ -834,7 +834,8 @@ def _extract_no_eligible_plan(params, photo_ids, new_count):
     }
 
 
-def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
+def _extract_plan(db, params, photo_ids, effective_cfg, new_count=0):
+    pipeline_cfg = effective_cfg.get("pipeline", {})
     if params.skip_extract_masks:
         return {
             "state": "will-skip",
@@ -852,12 +853,22 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
             "state": "will-run",
             "summary": "Recompute quality without RAW exposure correction",
         }
+    from pipeline import find_mask_rescue_floors
+
+    rescue_floors = {}
+    if pipeline_cfg.get("weak_detection_rescue_enabled", True):
+        photos = db.stats.mask_rescue_photos(scope_sql, scope_params)
+        rescue_floors = find_mask_rescue_floors(db, photos, effective_cfg)
+    min_conf = config_value(effective_cfg, "detector_confidence")
     counts = stage_counts.count_photos_pending_masks(
-        db, photo_ids, sam2_variant=sam2_variant,
+        db, photo_ids, min_conf=min_conf, sam2_variant=sam2_variant,
+        rescue_floors=rescue_floors,
     )
     eligible = counts["eligible"]
     pending = counts["pending"]
-    stale = stage_counts.count_extract_stale(db, sam2_variant, photo_ids)
+    stale = stage_counts.count_extract_stale(
+        db, sam2_variant, photo_ids, detector_confidence=min_conf, rescue_floors=rescue_floors,
+    )
     sam_warning = subject_masks.sam_variant_rerun_warning(db, sam2_variant, photo_ids)
     if eligible == 0:
         return _extract_no_eligible_plan(params, photo_ids, new_count)
@@ -1651,7 +1662,7 @@ def _stage_plans(db, params, db_path, ws_id, photo_ids, new_count,
         detector_confidence=config_value(effective_cfg, "detector_confidence"),
         pipeline_cfg=pipeline_cfg,
     )
-    extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)
+    extract = _extract_plan(db, params, photo_ids, effective_cfg, new_count)
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count)
     previews = _previews_plan(db, params, photo_ids, new_count, effective_cfg)
     # An all-duplicates import leaves every upstream stage "will-run" over

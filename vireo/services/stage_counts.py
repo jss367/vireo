@@ -213,12 +213,13 @@ def count_full_image_classify_stale(
 
 def count_photos_pending_masks(
     db: Database, photo_ids: Iterable[int] | None = None, min_conf: float | None = None,
-    sam2_variant: str | None = None,
+    sam2_variant: str | None = None, *, rescue_floors: dict[int, float] | None = None,
 ) -> dict[str, int]:
     """Return (pending, eligible) for the extract-masks stage.
 
     eligible = photos in scope with at least one real detection above the
-        workspace's effective detector_confidence
+        workspace's effective detector_confidence, or a validated MegaDetector
+        animal rescue in ``rescue_floors`` at its per-photo floor
     pending  = eligible photos whose mask_path IS NULL, or when
         ``sam2_variant`` is supplied, whose ``photo_masks`` row for that
         variant is missing/incomplete
@@ -231,7 +232,7 @@ def count_photos_pending_masks(
     min_conf = _detector_confidence(db, min_conf)
     scope_sql, scope_params = repo.scope_clause(photo_ids)
     return repo.count_photos_pending_masks(
-        min_conf, sam2_variant, scope_sql, scope_params,
+        min_conf, sam2_variant, scope_sql, scope_params, rescue_floors=rescue_floors,
     )
 
 
@@ -296,7 +297,7 @@ def count_photos_missing_thumb_or_preview(
 
 def count_extract_stale(
     db: Database, sam2_variant: str | None, photo_ids: Iterable[int] | None = None,
-    detector_confidence: float | None = None,
+    detector_confidence: float | None = None, *, rescue_floors: dict[int, float] | None = None,
 ) -> int:
     """Count photos in scope that "look done" (``photos.mask_path``
     is set) but whose ``photo_masks`` row for ``sam2_variant`` has a
@@ -307,7 +308,8 @@ def count_extract_stale(
     mask is fresh only when its stored ``(detector_model,
     prompt_xywh)`` equals the selected non-full-image
     detection on the same photo (with optional ``detector_confidence``
-    floor). Filtered by ``sam2_variant`` so a stale mask under a
+    floor, or the validated MegaDetector animal rescue floor). Filtered by
+    ``sam2_variant`` so a stale mask under a
     different variant doesn't pollute the count for the currently
     configured variant.
 
@@ -331,7 +333,7 @@ def count_extract_stale(
     detector_confidence = _detector_confidence(db, detector_confidence)
     scope_sql, scope_params = repo.scope_clause(photo_ids)
     return repo.count_extract_stale(
-        sam2_variant, detector_confidence, scope_sql, scope_params,
+        sam2_variant, detector_confidence, scope_sql, scope_params, rescue_floors=rescue_floors,
     )
 
 
