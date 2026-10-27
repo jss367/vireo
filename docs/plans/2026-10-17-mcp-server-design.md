@@ -45,8 +45,13 @@ database access of its own and cannot race the app for the catalog.
 
 Read tools return trimmed JSON: a photo is `id`, `filename`, `folder_id`,
 `timestamp`, `rating`, `flag`, size, camera, quality fields, `species`, plus
-`quality_analyzed` (true when the quality analysis has run on the photo,
-which is what the burst and quality fields depend on). The full row with its
+the app's analysis readiness from `POST /api/photos/analysis-readiness` (one
+batched call per page): `quality_analyzed` (true only when subject analysis
+is complete for the current inputs and settings, which is what the burst
+ranking depends on), `analysis_status`, `analysis_reasons` and
+`quality_preliminary` (quality numbers present before analysis is complete,
+as a Process run leaves them between detection and segmentation). A stored
+`quality_score` is never taken as proof of analysis. The full row with its
 EXIF dump, cached paths and render keys stays behind `get_photo(include_exif=true)`.
 
 | Tool | Backed by | Notes |

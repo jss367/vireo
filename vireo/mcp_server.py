@@ -60,9 +60,15 @@ collection and keyword ids come from the list_* and search_* tools.
 
 Judging photos: never judge focus or sharpness from a thumbnail. Use
 view_photo(view="preview") for the frame and view_photo(view="subject") for
-the detected animal; quality fields (quality_score, sharpness,
-subject_sharpness) are only present when quality_analyzed is true, which
-means Vireo's Process step has run on the photo.
+the detected animal. quality_analyzed is true only when Vireo's subject
+analysis is complete for the photo's current inputs and settings (the same
+readiness check Vireo's own burst ranking uses); analysis_status is not_run,
+incomplete, failed, complete or unknown (readiness could not be checked), with
+analysis_reasons saying why. Quality fields (quality_score, sharpness,
+subject_sharpness) can appear before analysis is complete, for example while
+a Process run is between detection and segmentation; then quality_preliminary
+is true and the numbers are not comparison evidence. get_photo adds
+analysis_explanation.
 
 Writing: set_flag, set_rating, add_keyword and remove_keyword change the
 catalog through the same routes the UI uses, so each call is one Undo step
@@ -77,10 +83,11 @@ with the unchanged selection, provenance and returned token. Preserve existing
 identifications; model confidence is not a probability of correct identification.
 """
 
+_QUALITY_METRIC_KEYS = ("quality_score", "sharpness", "subject_sharpness", "subject_size")
 _PHOTO_SUMMARY_KEYS = (
     "id", "filename", "folder_id", "timestamp", "rating", "flag", "color_label",
     "width", "height", "camera_make", "camera_model", "iso",
-    "quality_score", "sharpness", "subject_sharpness", "subject_size",
+    *_QUALITY_METRIC_KEYS,
     "latitude", "longitude", "location_status", "species",
 )
 _PHOTO_DETAIL_KEYS = _PHOTO_SUMMARY_KEYS + (
@@ -92,9 +99,13 @@ _PHOTO_DETAIL_KEYS = _PHOTO_SUMMARY_KEYS + (
 # wins.
 _EXPOSURE_TAGS = ("ExposureTime", "ShutterSpeed", "FNumber", "Aperture",
                   "FocalLength", "LensModel", "LensID", "ExposureCompensation")
+_BURST_QUALITY_KEYS = (
+    "quality_pct", "quality", "focus", "focus_basis", "sharpness", "exposure",
+)
 _BURST_CARD_KEYS = (
-    "id", "filename", "rank", "role", "label", "quality_pct", "quality",
-    "focus", "focus_basis", "sharpness", "exposure", "flag", "rating", "reasons",
+    "id", "filename", "rank", "role", "label", *_BURST_QUALITY_KEYS,
+    "flag", "rating", "reasons",
+    "selection_eligible", "analysis_status", "analysis_reasons",
     "automatic_keep_eligible", "keep_status", "keep_reasons",
 )
 _COLLECTION_KEYS = ("id", "name", "photo_count", "available_photo_count",
@@ -105,6 +116,11 @@ _FOLDER_KEYS = ("id", "name", "parent_id", "path", "photo_count", "status",
 PREVIEW_SIZE = 1920
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 200
+# One ``/api/photos/analysis-readiness`` call takes at most this many ids
+# (``services.analysis_retry.MAX_SELECTED_PHOTOS``; a test keeps them equal).
+MAX_READINESS_IDS = 200
+READINESS_PATH = "/api/photos/analysis-readiness"
+READINESS_UNCHECKED = "Analysis readiness was not checked."
 
 
 class VireoError(ToolError):
@@ -245,10 +261,88 @@ def _pick(row, keys):
     return {key: row[key] for key in keys if key in row}
 
 
-def photo_summary(photo):
-    """The fields a reader needs to recognise and judge a photo."""
+def _burst_frame(card):
+    """A ``burst`` frame with its quality fields nulled when ineligible.
+
+    The best-batch cleanup nulls ``SCORE_FIELDS`` but leaves raw measurements
+    like ``subject_tenengrad`` (surfaced here as ``sharpness``) in place. The
+    tool guidance says ineligible frames carry no comparison numbers, so null
+    every surfaced quality metric together.
+    """
+    frame = _pick(card, _BURST_CARD_KEYS)
+    if frame.get("selection_eligible") is False:
+        for key in _BURST_QUALITY_KEYS:
+            if key in frame:
+                frame[key] = None
+    return frame
+
+
+def analysis_fields(photo, readiness):
+    """What the quality numbers on ``photo`` are worth, from the app's readiness.
+
+    ``readiness`` is one row of ``/api/photos/analysis-readiness`` (``status``,
+    ``eligible``, ``reasons``, ``explanation``), ``{"error": text}`` when the
+    call failed, or ``None`` when it was never made. ``quality_analyzed`` is
+    the app's own verdict that subject analysis is complete for the current
+    inputs and settings; it is never inferred from a stored score, which a
+    Process run writes before segmentation and quality measurement finish.
+    """
+    has_scores = any(photo.get(key) is not None for key in _QUALITY_METRIC_KEYS)
+    if isinstance(readiness, dict) and "status" in readiness:
+        out = {
+            "quality_analyzed": bool(readiness.get("eligible")),
+            "analysis_status": readiness.get("status"),
+            "analysis_reasons": list(readiness.get("reasons") or []),
+            "analysis_explanation": readiness.get("explanation"),
+        }
+    else:
+        error = readiness.get("error") if isinstance(readiness, dict) else None
+        out = {
+            "quality_analyzed": False,
+            "analysis_status": "unknown",
+            "analysis_reasons": ["readiness_unavailable"],
+            "analysis_explanation": error or READINESS_UNCHECKED,
+        }
+    out["quality_preliminary"] = has_scores and not out["quality_analyzed"]
+    return out
+
+
+def fetch_readiness(client, photo_ids):
+    """Readiness rows by photo id, batched; a failed batch records its error.
+
+    A photo the app did not report (no longer visible, say) gets an error row
+    too, so no caller can mistake silence for completed analysis.
+    """
+    ids = list(dict.fromkeys(pid for pid in photo_ids if isinstance(pid, int)))
+    rows = {}
+    for start in range(0, len(ids), MAX_READINESS_IDS):
+        chunk = ids[start:start + MAX_READINESS_IDS]
+        try:
+            data = client.post_json(READINESS_PATH, {"photo_ids": chunk})
+        except VireoError as err:
+            rows.update({pid: {"error": str(err)} for pid in chunk})
+            continue
+        for row in data.get("photos") or []:
+            if isinstance(row, dict) and row.get("photo_id") in chunk:
+                rows[row["photo_id"]] = row
+        for pid in chunk:
+            rows.setdefault(pid, {"error": "Vireo reported no analysis readiness for this photo."})
+    return rows
+
+
+def photo_summary(photo, readiness=None):
+    """The fields a reader needs to recognise and judge a photo.
+
+    ``readiness`` is this photo's row from ``fetch_readiness``; without one
+    the summary says the analysis state is unknown rather than guessing.
+    """
     out = _pick(photo, _PHOTO_SUMMARY_KEYS)
-    out["quality_analyzed"] = photo.get("quality_score") is not None
+    analysis = analysis_fields(photo, readiness)
+    if analysis["analysis_status"] != "unknown":
+        # The sentence is get_photo's; a list row keeps the codes, except
+        # when the state is unknown and the reader needs to know why.
+        del analysis["analysis_explanation"]
+    out.update(analysis)
     detections = photo.get("detections")
     if isinstance(detections, list):
         out["subjects_detected"] = len(detections)
@@ -270,8 +364,16 @@ def _exposure_from_metadata(metadata):
     return found
 
 
-def photo_detail(photo, include_exif=False):
-    out = photo_summary(photo)
+def summarize_photos(client, photos):
+    """Summaries for one page of rows, with one readiness call for the page."""
+    photos = [p for p in photos if isinstance(p, dict)]
+    readiness = fetch_readiness(client, [p.get("id") for p in photos])
+    return [photo_summary(p, readiness.get(p.get("id"))) for p in photos]
+
+
+def photo_detail(photo, include_exif=False, readiness=None):
+    out = photo_summary(photo, readiness)
+    out["analysis_explanation"] = analysis_fields(photo, readiness)["analysis_explanation"]
     out.update(_pick(photo, _PHOTO_DETAIL_KEYS))
     if "flag_note" in photo:
         note = photo["flag_note"]
@@ -449,7 +551,7 @@ def _register_search_tools(server, client):
             "per_page": per_page,
         })
         return {
-            "photos": [photo_summary(p) for p in data.get("photos", [])],
+            "photos": summarize_photos(client, data.get("photos", [])),
             "total": data.get("total"),
             "page": data.get("page"),
             "per_page": data.get("per_page"),
@@ -472,10 +574,10 @@ def _register_search_tools(server, client):
             "folder_id": folder_id,
             "collection_id": collection_id,
         })
+        items = [item for item in data.get("results", []) if isinstance(item, dict)]
+        summaries = summarize_photos(client, [item.get("photo") or {} for item in items])
         results = []
-        for item in data.get("results", []):
-            photo = item.get("photo") or {}
-            entry = photo_summary(photo)
+        for item, entry in zip(items, summaries, strict=True):
             entry.update({k: v for k, v in item.items() if k != "photo"})
             results.append(entry)
         out = {
@@ -494,9 +596,13 @@ def _register_photo_tools(server, client):
     @server.tool()
     def get_photo(photo_id: int, include_exif: bool = False) -> dict:
         """One photo in full: file paths, keywords, species, location,
-        detections, exposure settings and quality fields.
+        detections, exposure settings, quality fields and the analysis
+        readiness behind them (quality_analyzed, analysis_status,
+        analysis_reasons, analysis_explanation, quality_preliminary).
         ``include_exif`` adds the complete EXIF dump."""
-        return photo_detail(client.get_json(f"/api/photos/{photo_id}"), include_exif)
+        photo = client.get_json(f"/api/photos/{photo_id}")
+        pid = photo.get("id", photo_id)
+        return photo_detail(photo, include_exif, fetch_readiness(client, [pid]).get(pid))
 
     @server.tool()
     def view_photo(photo_id: int, view: str = "preview", detection_id: int | None = None) -> Image:
@@ -528,15 +634,17 @@ def _register_photo_tools(server, client):
     def burst(photo_id: int) -> dict:
         """The burst of frames shot around a photo, ranked by Vireo's
         quality analysis. A provisional ranked candidate still needs manual
-        review; ranking alone does not establish an automatic keeper. Needs
-        the Process step to have run on the frames."""
+        review; ranking alone does not establish an automatic keeper. A frame
+        ranks only when its subject analysis is complete: each frame carries
+        selection_eligible, analysis_status and analysis_reasons, and an
+        ineligible frame's quality fields are null."""
         data = client.get_json(f"/api/photos/{photo_id}/best-batch")
         return {
             **_pick(data, ("seed_photo_id", "best_photo_id", "best_filename",
                            "best_reasons", "count", "scope_method",
                            "suggested_reject_ids", "alternate_ids",
                            "ranked_candidate_id", "ranking_status", "keep_review_message")),
-            "frames": [_pick(card, _BURST_CARD_KEYS) for card in data.get("cards", [])],
+            "frames": [_burst_frame(card) for card in data.get("cards", [])],
         }
 
 

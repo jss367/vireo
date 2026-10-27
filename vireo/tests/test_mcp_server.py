@@ -148,20 +148,35 @@ def test_search_photos_returns_trimmed_summaries(mcp):
     assert data["total"] == 3
     assert len(data["photos"]) == 2
     photo = data["photos"][0]
-    assert {"id", "filename", "folder_id", "rating", "flag", "quality_analyzed"} <= set(photo)
+    assert {"id", "filename", "folder_id", "rating", "flag", "quality_analyzed",
+            "analysis_status", "analysis_reasons", "quality_preliminary"} <= set(photo)
+    # Nothing has been processed: not analyzed, and the app says why.
     assert photo["quality_analyzed"] is False
+    assert photo["analysis_status"] == "not_run"
+    assert photo["analysis_reasons"] == ["detection_not_run"]
+    assert photo["quality_preliminary"] is False
+    assert "analysis_explanation" not in photo
     for noisy in ("exif_data", "thumb_path", "render_key", "life_list", "xmp_mtime"):
         assert noisy not in photo
-    _, path, params, _ = transport.calls[-1]
+    _, path, params, _ = _photos_call(transport)
     assert path == "/api/photos"
     assert params["per_page"] == 2
+    # One readiness call for the page, with exactly the page's ids.
+    readiness_calls = [c for c in transport.calls if c[1] == mcp_server.READINESS_PATH]
+    assert len(readiness_calls) == 1
+    assert readiness_calls[0][3] == {"photo_ids": [p["id"] for p in data["photos"]]}
+
+
+def _photos_call(transport, path="/api/photos"):
+    """The latest recorded request to ``path`` (the readiness POST follows it)."""
+    return next(c for c in reversed(transport.calls) if c[1] == path)
 
 
 def test_search_photos_passes_filters_through(mcp):
     server, _, transport = mcp
     data = call(server, "search_photos", rating_min=4, flag="none")
     assert [p["filename"] for p in data["photos"]] == ["bird3.jpg"]
-    _, _, params, _ = transport.calls[-1]
+    _, _, params, _ = _photos_call(transport)
     assert params["rating_min"] == 4 and params["flag"] == "none"
     assert "Vireo answered 400" in call_error(server, "search_photos", flag="maybe")
 
@@ -169,7 +184,7 @@ def test_search_photos_passes_filters_through(mcp):
 def test_search_photos_caps_the_page_size(mcp):
     server, _, transport = mcp
     call(server, "search_photos", per_page=10_000)
-    assert transport.calls[-1][2]["per_page"] == mcp_server.MAX_PAGE_SIZE
+    assert _photos_call(transport)[2]["per_page"] == mcp_server.MAX_PAGE_SIZE
 
 
 def test_get_photo_trims_and_optionally_includes_exif(mcp):
@@ -412,9 +427,121 @@ def test_species_tools_reject_non_string_methods_before_http(mcp, method):
     assert transport.calls == []
 
 
-def test_photo_summary_reports_quality_analysis_state():
-    assert photo_summary({"id": 1, "quality_score": None})["quality_analyzed"] is False
-    assert photo_summary({"id": 1, "quality_score": 0.4})["quality_analyzed"] is True
+def test_photo_summary_takes_analysis_state_from_readiness_not_the_score():
+    complete = {"status": "complete", "eligible": True, "reasons": [], "explanation": "done"}
+    partial = {"status": "incomplete", "eligible": False,
+               "reasons": ["segmentation_incomplete"], "explanation": "missing"}
+    assert photo_summary({"id": 1, "quality_score": 0.4}, complete) == {
+        "id": 1, "quality_score": 0.4, "quality_analyzed": True,
+        "analysis_status": "complete", "analysis_reasons": [], "quality_preliminary": False,
+    }
+    # A score written mid-run is preliminary, never "analyzed".
+    preliminary = photo_summary({"id": 1, "quality_score": 0.4}, partial)
+    assert preliminary["quality_analyzed"] is False
+    assert preliminary["analysis_status"] == "incomplete"
+    assert preliminary["quality_preliminary"] is True
+    # A completed detector run without a qualifying subject is complete but ineligible.
+    no_subject = {"status": "complete", "eligible": False,
+                  "reasons": ["no_qualifying_subject"], "explanation": "review"}
+    assert photo_summary({"id": 1}, no_subject)["quality_analyzed"] is False
+    # No readiness at all: unknown, with the reason spelled out, and never True.
+    unknown = photo_summary({"id": 1, "quality_score": 0.4})
+    assert unknown["quality_analyzed"] is False and unknown["analysis_status"] == "unknown"
+    assert unknown["quality_preliminary"] is True
+    assert unknown["analysis_explanation"] == mcp_server.READINESS_UNCHECKED
+    failed = photo_summary({"id": 1}, {"error": "Vireo answered 400: nope"})
+    assert failed["analysis_status"] == "unknown" and failed["quality_preliminary"] is False
+    assert failed["analysis_explanation"] == "Vireo answered 400: nope"
+    assert photo_detail({"id": 1}, readiness=complete)["analysis_explanation"] == "done"
+    # Any surfaced quality number (not just quality_score) counts as preliminary
+    # when analysis is incomplete: /api/jobs/sharpness writes sharpness while
+    # leaving quality_score null, and the mcp response still exposes that
+    # number alongside quality_analyzed: false.
+    for field in ("sharpness", "subject_sharpness", "subject_size"):
+        row = photo_summary({"id": 1, field: 0.5}, partial)
+        assert row["quality_preliminary"] is True, field
+        assert row[field] == 0.5
+
+
+def _photo_mid_process(db):
+    """A photo as a Process run leaves it between detection and segmentation:
+    a detector run, a subject, a stored quality score, but no mask yet."""
+    pid = db.photos.list_page()[0]["id"]
+    db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .6, "h": .6},
+                              "confidence": .9, "category": "animal"}], "megadetector-v6")
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 1)
+    db.conn.execute("UPDATE photos SET quality_score = 0.4 WHERE id = ?", (pid,))
+    db.commit()
+    return pid
+
+
+def test_preliminary_quality_scores_are_not_reported_as_analyzed(mcp, app_and_db):
+    """The observed bug: get_photo said quality_analyzed while the app's own
+    readiness said segmentation was incomplete. Detail and list must both
+    follow the readiness verdict and mark the numbers preliminary."""
+    app, _ = app_and_db
+    server, db, _ = mcp
+    pid = _photo_mid_process(db)
+    readiness = app.test_client().post("/api/photos/analysis-readiness", json={"photo_ids": [pid]}).json
+    assert (readiness["photos"][0]["status"], readiness["photos"][0]["eligible"]) == ("incomplete", False)
+
+    detail = call(server, "get_photo", photo_id=pid)
+    assert detail["quality_score"] == 0.4
+    assert detail["quality_analyzed"] is False
+    assert detail["analysis_status"] == "incomplete"
+    assert detail["analysis_reasons"] == ["segmentation_incomplete"]
+    assert detail["quality_preliminary"] is True
+    assert detail["analysis_explanation"] == readiness["photos"][0]["explanation"]
+
+    listed = next(p for p in call(server, "search_photos")["photos"] if p["id"] == pid)
+    assert listed["quality_score"] == 0.4
+    assert {k: listed[k] for k in ("quality_analyzed", "analysis_status", "quality_preliminary")} == {
+        k: detail[k] for k in ("quality_analyzed", "analysis_status", "quality_preliminary")
+    }
+    assert listed["analysis_reasons"] == ["segmentation_incomplete"]
+
+
+def test_readiness_failure_never_claims_analyzed(mcp, monkeypatch):
+    server, db, transport = mcp
+    pid = _photo_mid_process(db)
+    original = transport.request
+
+    def failing_readiness(method, path, params=None, json_body=None):
+        if path == mcp_server.READINESS_PATH:
+            return 400, "application/json", json.dumps({"error": "Every selected photo must be visible"}).encode()
+        return original(method, path, params, json_body)
+
+    monkeypatch.setattr(transport, "request", failing_readiness)
+    detail = call(server, "get_photo", photo_id=pid)
+    assert detail["quality_analyzed"] is False
+    assert detail["analysis_status"] == "unknown"
+    assert detail["quality_preliminary"] is True
+    assert detail["analysis_explanation"] == "Vireo answered 400: Every selected photo must be visible"
+    listed = call(server, "search_photos")["photos"]
+    assert all(p["analysis_status"] == "unknown" and p["quality_analyzed"] is False for p in listed)
+    assert all("Vireo answered 400" in p["analysis_explanation"] for p in listed)
+
+
+def test_readiness_is_batched_at_the_endpoints_limit():
+    from services.analysis_retry import MAX_SELECTED_PHOTOS
+    assert mcp_server.MAX_READINESS_IDS == MAX_SELECTED_PHOTOS
+    assert mcp_server.MAX_PAGE_SIZE <= mcp_server.MAX_READINESS_IDS
+
+    class Client:
+        calls = []
+
+        def post_json(self, path, body=None):
+            self.calls.append(body["photo_ids"])
+            return {"photos": [{"photo_id": pid, "status": "complete", "eligible": True,
+                                "reasons": [], "explanation": "done"}
+                               for pid in body["photo_ids"] if pid != 3]}
+
+    ids = list(range(1, 2 * MAX_SELECTED_PHOTOS + 2))
+    rows = mcp_server.fetch_readiness(Client(), ids + ids[:5] + ["7", None])
+    assert [len(chunk) for chunk in Client.calls] == [MAX_SELECTED_PHOTOS, MAX_SELECTED_PHOTOS, 1]
+    assert rows[1]["eligible"] is True and len(rows) == len(ids)
+    # A photo the app left out of its answer is not silently analyzed.
+    assert "error" in rows[3] and mcp_server.analysis_fields({}, rows[3])["analysis_status"] == "unknown"
 
 
 def test_view_photo_thumbnail_returns_the_jpeg(mcp):
@@ -456,7 +583,9 @@ def test_burst_exposes_provisional_candidate_without_claiming_a_keeper(mcp, monk
     server, _, transport = mcp
     response = {
         "seed_photo_id": 42,
-        "cards": [{"id": 42, "filename": "frame.jpg", "rank": 1, "label": "KEEP"}]
+        "cards": [{"id": 42, "filename": "frame.jpg", "rank": 1, "label": "KEEP",
+                   "selection_eligible": False, "analysis_status": "incomplete",
+                   "analysis_reasons": ["segmentation_incomplete"], "quality": None}]
         if has_candidate else [],
         "best_photo_id": 42,
     }
@@ -472,6 +601,12 @@ def test_burst_exposes_provisional_candidate_without_claiming_a_keeper(mcp, monk
     assert paths == ["/api/photos/42/best-batch"]
     assert result["ranked_candidate_id"] == (42 if has_candidate else None)
     assert result["ranking_status"] == "provisional"
+    if has_candidate:
+        # The frame's readiness travels with it, so a null quality is explained.
+        frame = result["frames"][0]
+        assert frame["selection_eligible"] is False
+        assert frame["analysis_status"] == "incomplete"
+        assert frame["analysis_reasons"] == ["segmentation_incomplete"]
     assert result["keep_review_message"] == response["keep_review_message"]
     assert result["best_photo_id"] is None
     assert result["best_filename"] is None
@@ -483,6 +618,57 @@ def test_burst_exposes_provisional_candidate_without_claiming_a_keeper(mcp, monk
         assert frame["automatic_keep_eligible"] is False
         assert frame["keep_status"] == response["cards"][0]["keep_status"]
         assert frame["keep_reasons"] == response["cards"][0]["keep_reasons"]
+
+
+def test_burst_nulls_quality_fields_on_ineligible_frames(mcp, monkeypatch):
+    """The best-batch cleanup leaves ``subject_tenengrad`` (exposed as
+    ``sharpness``) in place even when a frame is ineligible, so the burst
+    tool nulls every surfaced quality metric itself to match its guidance.
+    """
+    from keep_safety import review_ranked_suggestions
+
+    server, _, transport = mcp
+    response = {
+        "seed_photo_id": 42,
+        "best_photo_id": 42,
+        "cards": [{
+            "id": 42, "filename": "frame.jpg", "rank": 1, "label": "KEEP",
+            "selection_eligible": False, "analysis_status": "incomplete",
+            "analysis_reasons": ["segmentation_incomplete"],
+            # None of these should survive on an ineligible frame.
+            "quality": 0.72, "quality_pct": 72, "focus": 0.9,
+            "focus_basis": "subject", "sharpness": 0.5, "exposure": 0.4,
+        }],
+    }
+    review_ranked_suggestions(response)
+    monkeypatch.setattr(transport, "get_json", lambda path: response)
+    frame = call(server, "burst", photo_id=42)["frames"][0]
+    assert frame["selection_eligible"] is False
+    for key in ("quality", "quality_pct", "focus", "focus_basis",
+                "sharpness", "exposure"):
+        assert frame[key] is None, f"{key} must be null on an ineligible frame"
+
+
+def test_burst_keeps_quality_fields_on_eligible_frames(mcp, monkeypatch):
+    from keep_safety import review_ranked_suggestions
+
+    server, _, transport = mcp
+    response = {
+        "seed_photo_id": 42,
+        "best_photo_id": 42,
+        "cards": [{
+            "id": 42, "filename": "frame.jpg", "rank": 1, "label": "KEEP",
+            "selection_eligible": True, "analysis_status": "complete",
+            "analysis_reasons": [],
+            "quality": 0.72, "quality_pct": 72, "focus": 0.9,
+            "focus_basis": "subject", "sharpness": 0.5, "exposure": 0.4,
+        }],
+    }
+    review_ranked_suggestions(response)
+    monkeypatch.setattr(transport, "get_json", lambda path: response)
+    frame = call(server, "burst", photo_id=42)["frames"][0]
+    assert frame["sharpness"] == 0.5
+    assert frame["quality"] == 0.72
 
 
 def test_set_flag_writes_only_what_the_route_persists(mcp):
