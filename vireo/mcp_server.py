@@ -66,6 +66,14 @@ means Vireo's Process step has run on the photo.
 Writing: set_flag, set_rating, add_keyword and remove_keyword change the
 catalog through the same routes the UI uses, so each call is one Undo step
 in Vireo. Do not flag photos the user already flagged unless asked.
+
+Species: get_species_evidence returns per-subject predictions, score meanings,
+uncertainty, species-list provenance and inspection candidates for exact IDs.
+It does not verify same-animal continuity or approve label propagation. Inspect
+the frame and the specified detection using view_photo(view="subject",
+detection_id=...). Use preview_species_assignment, then apply_species_assignment
+with the unchanged selection, provenance and returned token. Preserve existing
+identifications; model confidence is not a probability of correct identification.
 """
 
 _PHOTO_SUMMARY_KEYS = (
@@ -270,6 +278,8 @@ def photo_detail(photo, include_exif=False):
             _pick(note, ("flag", "source", "reason", "description", "at"))
             if isinstance(note, dict) else None
         )
+    if "species_assignments" in photo:
+        out["species_assignments"] = photo["species_assignments"]
     out["keywords"] = [
         _pick(k, ("id", "name", "type")) for k in photo.get("keywords") or []
     ]
@@ -312,6 +322,7 @@ def build_server(client: VireoClient):
     _register_catalog_tools(server, client)
     _register_search_tools(server, client)
     _register_photo_tools(server, client)
+    _register_species_tools(server, client)
     _register_write_tools(server, client)
     return server
 
@@ -487,11 +498,16 @@ def _register_photo_tools(server, client):
         return photo_detail(client.get_json(f"/api/photos/{photo_id}"), include_exif)
 
     @server.tool()
-    def view_photo(photo_id: int, view: str = "preview") -> Image:
+    def view_photo(photo_id: int, view: str = "preview", detection_id: int | None = None) -> Image:
         """Look at a photo. ``view`` is ``preview`` (the frame at 1920 px,
         use this to judge a photo), ``thumbnail`` (small and fast, for
         composition only) or ``subject`` (the detected animal cropped
-        from the frame, for identification)."""
+        from the frame, for identification). Supply ``detection_id`` for
+        the exact subject from get_species_evidence; it is valid only with
+        view="subject". Subject crops are identification views, not native
+        focus evidence."""
+        if detection_id is not None and view != "subject":
+            raise VireoError("detection_id requires view='subject'")
         if view == "preview":
             content_type, body = client.get_bytes(
                 f"/photos/{photo_id}/preview", {"size": PREVIEW_SIZE}
@@ -499,7 +515,9 @@ def _register_photo_tools(server, client):
         elif view == "thumbnail":
             content_type, body = client.get_bytes(f"/thumbnails/{photo_id}.jpg")
         elif view == "subject":
-            content_type, body = client.get_bytes(f"/photos/{photo_id}/crop")
+            content_type, body = client.get_bytes(
+                f"/photos/{photo_id}/crop", {"detection_id": detection_id}
+            )
         else:
             raise VireoError("view must be 'preview', 'thumbnail' or 'subject'")
         fmt = "png" if "png" in (content_type or "") else "jpeg"
@@ -519,6 +537,66 @@ def _register_photo_tools(server, client):
                            "ranked_candidate_id", "ranking_status", "keep_review_message")),
             "frames": [_pick(card, _BURST_CARD_KEYS) for card in data.get("cards", [])],
         }
+
+
+def _species_assignment_payload(photo_ids, species, provenance):
+    """Require attributed evidence on the agent's reviewed-assignment path."""
+    reviewer = provenance.get("reviewer")
+    if not isinstance(reviewer, str) or not reviewer.strip():
+        raise VireoError("provenance.reviewer must identify the actual reviewer")
+    if provenance.get("method") not in {"direct_visual", "adjacent_frames"}:
+        raise VireoError("provenance.method must be direct_visual or adjacent_frames after reviewing evidence")
+    if not any(isinstance(provenance.get(key), str) and provenance[key].strip()
+               for key in ("reason", "evidence_source")):
+        raise VireoError("provenance.reason or evidence_source must describe the identification evidence")
+    return {"photo_ids": photo_ids, "source_photo_ids": photo_ids,
+            "species": species, "provenance": provenance, "add": True, "response_mode": "compact"}
+
+
+def _register_species_tools(server, client):
+    """Identification evidence and deliberate, token-guarded additive edits."""
+
+    @server.tool()
+    def get_species_evidence(photo_ids: list[int]) -> dict:
+        """Read identification evidence for 1–100 exact, unique photo IDs.
+
+        Includes every subject's model candidates and uncertainty, bound crop
+        URLs, saved assignment provenance, current species-list defaults and
+        stored run sources. Candidate selections are unverified predictions;
+        they do not establish continuity or authorize group-wide propagation.
+        No analysis, classification, keyword or flag writes are performed.
+        """
+        return client.post_json("/api/photos/species-evidence", {"photo_ids": photo_ids})
+
+    @server.tool()
+    def preview_species_assignment(photo_ids: list[int], species: str, provenance: dict) -> dict:
+        """Preview adding one reviewed species to exact photo IDs, without writing.
+
+        provenance requires method (direct_visual or adjacent_frames for a
+        visual review), reviewer and evidence: reason, evidence_source and
+        supporting_photo_ids. Model predictions remain suggestions until reviewed.
+        Inspect every proposed addition/removal before applying. This existing
+        confirmation workflow requires IDs within one cached encounter; split
+        requests explicitly, never expand the selection to satisfy that rule.
+        """
+        body = _species_assignment_payload(photo_ids, species, provenance)
+        return client.post_json("/api/encounters/species", {**body, "preview": True})
+
+    @server.tool()
+    def apply_species_assignment(
+        photo_ids: list[int], species: str, provenance: dict, preview_token: str,
+    ) -> dict:
+        """Apply the exact previously inspected species preview, with Undo.
+
+        Reuse unchanged photo IDs, species and provenance from the preview.
+        A stale token returns a conflict; obtain and inspect a fresh preview.
+        Adds the species without removing existing labels, changing flags or
+        extending to encounter siblings. Read back species_assignments afterward.
+        """
+        if not preview_token:
+            raise VireoError("preview_token from preview_species_assignment is required")
+        body = _species_assignment_payload(photo_ids, species, provenance)
+        return client.post_json("/api/encounters/species", {**body, "preview_token": preview_token})
 
 
 def _register_write_tools(server, client):

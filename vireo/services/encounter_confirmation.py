@@ -22,6 +22,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
     source_ids = body.get("source_photo_ids", edit.photo_ids)
     evidence = db.photo_species.confirmation_evidence(source_ids)
     species = db.photo_species.get_species_for_photos(source_ids)
+    assignments = {pid: db.species_provenance.assignments(pid) for pid in source_ids}
     target_state = db.keywords.species_confirmation_target(edit.species)
     target = target_state["keyword"]
     proposed_species = target["name"] if target else db.resolve_species_display_name(edit.species)
@@ -44,6 +45,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
             for prediction in subject["predictions"]:
                 prediction["historical"] = prediction["prediction_id"] in historical
         row["existing_species"] = species.get(pid, [])
+        row["species_assignments"] = assignments[row["id"]]
         row["selected"] = pid in selected
         row["additions"] = (
             [proposed_species] if pid in selected and not edit.remove_mode and pid not in already else []
@@ -57,6 +59,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         "burst_index": edit.burst_index, "rows": rows, "species": edit.species,
         "add": edit.add_mode, "remove": edit.remove_mode,
         "previous_species": edit.previous_species, "split": bool(body.get("split")),
+        "provenance": edit.provenance,
         "target": target_state,
         # Burst edits refresh the entire encounter, including sibling bursts.
         # Bind their live species inputs without expanding the visible matrix
@@ -76,7 +79,8 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
     return {"ok": True, "preview_token": token, "photos": rows,
             "photo_ids": list(edit.photo_ids), "photo_count": len(selected),
             "species": proposed_species, "previous_species": edit.previous_species,
-            "split": bool(body.get("split")), "previous_species_choices": edit.current_species_list}
+            "split": bool(body.get("split")), "previous_species_choices": edit.current_species_list,
+            "provenance": edit.provenance}
 
 
 def _refresh_group(

@@ -92,6 +92,7 @@ def test_tools_are_the_documented_set(mcp):
         "list_collections", "search_keywords", "search_photos",
         "find_photos_by_text", "get_photo", "view_photo", "burst",
         "set_flag", "set_rating", "add_keyword", "remove_keyword",
+        "get_species_evidence", "preview_species_assignment", "apply_species_assignment",
     }
     for tool in anyio.run(server.list_tools):
         assert tool.description, f"{tool.name} has no description"
@@ -195,6 +196,95 @@ def test_photo_detail_pulls_exposure_out_of_exif_groups():
     ]
     assert detail["has_edits"] is True and detail["subjects_detected"] == 1
     assert "exif" not in detail
+
+
+def test_photo_detail_preserves_species_assignment_provenance():
+    assignment = {"photo_id": 1, "species": "Robin", "method": "adjacent_frames",
+                  "reviewer": "Reviewer", "supporting_photo_ids": [2], "confidence": None}
+    assert photo_detail({"id": 1, "species_assignments": [assignment]})["species_assignments"] == [assignment]
+
+
+def test_species_evidence_tool_uses_exact_scope(mcp):
+    server, _, transport = mcp
+    result = call(server, "get_species_evidence", photo_ids=[3, 1])
+    assert result["photo_ids"] == [3, 1]
+    assert [p["id"] for p in result["photos"]] == [3, 1]
+    assert result["automatic_assignment_eligible"] is False
+    assert transport.calls[-1][1:] == ("/api/photos/species-evidence", None, {"photo_ids": [3, 1]})
+    assert "unique" in call_error(server, "get_species_evidence", photo_ids=[1, 1])
+
+
+def test_species_tools_preview_apply_and_stale_provenance(mcp, app_and_db):
+    from test_app import _seed_encounter_cache
+
+    server, db, transport = mcp
+    app, _ = app_and_db
+    _seed_encounter_cache(app, db, [1, 2, 3])
+    db.photo_review.set_flag(1, "flagged")
+    provenance = {"method": "direct_visual", "reviewer": "Test agent", "reason": "Visible plumage"}
+    preview = call(server, "preview_species_assignment", photo_ids=[1], species="Robin", provenance=provenance)
+    assert db.species_provenance.assignments(1) == []
+    assert preview["provenance"]["reviewer"] == "Test agent"
+    assert "409" in call_error(server, "apply_species_assignment", photo_ids=[1], species="Robin",
+                               provenance=provenance | {"reviewer": "Different reviewer"},
+                               preview_token=preview["preview_token"])
+    assert db.species_provenance.assignments(1) == []
+    result = call(server, "apply_species_assignment", photo_ids=[1], species="Robin", provenance=provenance,
+                  preview_token=preview["preview_token"])
+    assert result["photo_ids"] == [1]
+    assert result["response_mode"] == "compact"
+    assert result["undo"]["edit_id"]
+    assert db.species_provenance.assignments(1)[0]["reviewer"] == "Test agent"
+    assert db.species_provenance.assignments(2) == []
+    assert db.photos.get(1)["flag"] == "flagged"
+    assert transport.calls[-1][3]["add"] is True
+    assert "required" in call_error(server, "apply_species_assignment", photo_ids=[1], species="Robin",
+                                    provenance=provenance, preview_token="")
+    assert app.test_client().post("/api/undo", json={"edit_id": result["undo"]["edit_id"]}).status_code == 200
+    assert db.species_provenance.assignments(1) == []
+    assert db.photos.get(1)["flag"] == "flagged"
+
+
+def test_explicit_subject_view_never_falls_back_to_default_subject(mcp):
+    server, _, transport = mcp
+    assert "404" in call_error(server, "view_photo", photo_id=1, view="subject", detection_id=99999)
+    assert transport.calls[-1][1:3] == ("/photos/1/crop", {"detection_id": 99999})
+    assert "requires" in call_error(server, "view_photo", photo_id=1, view="preview", detection_id=99999)
+
+
+def test_species_preview_binds_existing_assignment_evidence(mcp, app_and_db):
+    from test_app import _seed_encounter_cache
+
+    server, db, _ = mcp
+    app, _ = app_and_db
+    _seed_encounter_cache(app, db, [1, 2])
+    keyword = db.add_keyword("Mallard", is_species=True)
+    db.tag_photo(1, keyword)
+    provenance = {"method": "direct_visual", "reviewer": "Agent", "reason": "Visible plumage"}
+    preview = call(server, "preview_species_assignment", photo_ids=[1], species="Robin", provenance=provenance)
+    response = app.test_client().post(f"/api/photos/1/species/{keyword}/provenance", json={
+        "method": "direct_visual", "reviewer": "User", "reason": "Updated identification evidence",
+    })
+    assert response.status_code == 200
+    assert "409" in call_error(server, "apply_species_assignment", photo_ids=[1], species="Robin",
+                               provenance=provenance, preview_token=preview["preview_token"])
+    assignments = db.species_provenance.assignments(1)
+    assert len(assignments) == 1
+    assert assignments[0]["species"] == "Mallard"
+    assert assignments[0]["reviewer"] == "User"
+
+
+@pytest.mark.parametrize("provenance", [
+    {"method": "direct_visual", "reason": "Visible plumage"},
+    {"method": "direct_visual", "reviewer": "Agent"},
+    {"method": "manual_unspecified", "reviewer": "Agent", "reason": "No inspected evidence"},
+    {"method": "model_proposed", "reviewer": "Agent", "reason": "Unreviewed prediction"},
+])
+def test_species_tools_require_attributed_identification_evidence(mcp, provenance):
+    server, _, transport = mcp
+    assert "provenance" in call_error(server, "preview_species_assignment", photo_ids=[1],
+                                      species="Robin", provenance=provenance)
+    assert transport.calls == []
 
 
 def test_photo_summary_reports_quality_analysis_state():

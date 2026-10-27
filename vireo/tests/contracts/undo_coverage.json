@@ -179,6 +179,7 @@
       "POST /api/photos/missing/check",
       "POST /api/photos/query",
       "POST /api/photos/sharpness/regions",
+      "POST /api/photos/species-evidence",
       "POST /api/pipeline/group/state",
       "POST /api/pipeline/plan",
       "POST /api/pipeline/selection-results",
@@ -193,6 +194,7 @@
       "POST /api/system/mcp-check",
       "POST /api/v1/photos/analysis-readiness",
       "POST /api/v1/photos/burst-evidence",
+      "POST /api/v1/photos/species-evidence",
       "POST /api/workspaces/active/local-folders/preflight",
       "POST /api/workspaces/active/new-images/recheck"
     ]
