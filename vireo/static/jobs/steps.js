@@ -13,6 +13,41 @@ export function bindStepRetryButtons() {
   }, true);
 }
 
+// Import's visible counter advances while a batch is prepared, before its
+// transfer and restricted catalog scan finish, so current / elapsed is badly
+// skewed by fast duplicate checks and queued files. Use the backend's own
+// estimate, and name the phase it describes: once every original has
+// landed, the job generates working copies and publishes that pass's
+// estimate as eta_phase "working_copies". The copy phase's finished
+// "0s remaining" must never read as the import finishing while thousands
+// of working copies are still pending.
+/** @param {JobsProgress} progress @returns {string} */
+function importEtaStatusLine(progress) {
+  var workingCopies = progress.eta_phase === 'working_copies';
+  var etaSeconds = Number(progress.eta_seconds);
+  var etaRate = Number(progress.eta_rate_per_min);
+  if (progress.eta_state !== 'ready' || !isFinite(etaSeconds)) {
+    return workingCopies
+      ? 'Estimating after the first working copies…'
+      : 'Estimating after the first transfer batch…';
+  }
+  if (etaSeconds <= 0) {
+    return workingCopies
+      ? 'Working copies complete &middot; finishing import…'
+      : 'Copy batches complete &middot; finishing import…';
+  }
+  var line;
+  if (isFinite(etaRate) && etaRate > 0) {
+    line = '~' + Math.round(etaRate) + '/min ' +
+      (workingCopies ? 'working copies' : 'from completed batches');
+  } else {
+    line = workingCopies
+      ? 'Based on completed working copies'
+      : 'Based on completed batches';
+  }
+  return line + ' &middot; ETA ' + formatElapsed(etaSeconds);
+}
+
 // "key: value" lines for a finished job's result, in place of a raw
 // JSON dump. Keys the interruption bookkeeping adds (and the error,
 // which renders on its own line) are skipped; nested objects stay as
@@ -107,30 +142,8 @@ export function bindStepRetryButtons() {
     if (isRunning && step.progress && (step.progress.current || 0) > 0 &&
         step.started_at && !importInPlacePhaseActive && step.progress.unit !== 'labels') {
       if (job.type === 'import') {
-        // Import's visible counter advances while a batch is prepared,
-        // before its transfer and restricted catalog scan finish. Use the
-        // backend's completed-batch estimate instead of current / elapsed,
-        // which is badly skewed by fast duplicate checks and queued files.
-        var etaState = step.progress.eta_state;
-        var etaSeconds = Number(step.progress.eta_seconds);
-        var etaRate = Number(step.progress.eta_rate_per_min);
-        var importStatusLine;
-        if (etaState === 'ready' && isFinite(etaSeconds)) {
-          if (etaSeconds > 0) {
-            if (isFinite(etaRate) && etaRate > 0) {
-              importStatusLine = '~' + Math.round(etaRate) +
-                '/min from completed batches';
-            } else {
-              importStatusLine = 'Based on completed batches';
-            }
-            importStatusLine += ' &middot; ETA ' + formatElapsed(etaSeconds);
-          } else {
-            importStatusLine = 'Copy batches complete &middot; finishing import…';
-          }
-        } else {
-          importStatusLine = 'Estimating after the first transfer batch…';
-        }
-        html += '<div class="tree-step-throughput">' + importStatusLine + '</div>';
+        html += '<div class="tree-step-throughput">' +
+          importEtaStatusLine(step.progress) + '</div>';
       } else if (step.progress.eta_kind === 'classification') {
         // Classification can walk cached photos far faster than it can
         // decode and infer uncached ones. Use the backend's model-work ETA;

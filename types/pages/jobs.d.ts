@@ -3,7 +3,7 @@
 interface JobsProgress {
   current?: number; total?: number; phase_current?: number; phase_total?: number;
   phase_label?: string; phase?: string; current_file?: string; pause_reason?: string;
-  unit?: string; eta_state?: string; eta_seconds?: number; eta_rate_per_min?: number;
+  unit?: string; eta_phase?: string; eta_state?: string; eta_seconds?: number; eta_rate_per_min?: number;
   eta_kind?: string; cache_hits?: number; classified?: number;
 }
 interface JobsStep {
