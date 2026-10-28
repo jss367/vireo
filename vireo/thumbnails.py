@@ -269,7 +269,7 @@ def generate_thumbnail(
     """
     thumb_path = os.path.join(cache_dir, cache_name or f"{photo_id}.jpg")
 
-    if os.path.exists(thumb_path) and cache_matches(thumb_path, camera_metadata, recipe):
+    if os.path.exists(thumb_path) and cache_matches(thumb_path, camera_metadata, recipe, source_path):
         return thumb_path
 
     load_max_size = None if recipe and recipe.get("crop") else size
@@ -314,7 +314,7 @@ def generate_thumbnail(
     )
     os.close(fd)
     try:
-        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe))
+        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe, source_path))
         replace_file(tmp_path, thumb_path)
     except Exception:  # broad: remove the temp file on any failure, then re-raise
         with contextlib.suppress(OSError):
@@ -332,7 +332,7 @@ def get_thumb_path(photo_id, cache_dir):
 
 
 def _photos_needing_thumbnails(db, photos, cache_dir, cancel_check):
-    """Photos with no thumbnail or a stale camera-denoise one; ``None`` if cancelled."""
+    """Photos with no thumbnail or a stale camera-aware one; ``None`` if cancelled."""
     needed = []
     for photo in photos:
         if cancel_check and cancel_check():
@@ -342,7 +342,8 @@ def _photos_needing_thumbnails(db, photos, cache_dir, cancel_check):
             needed.append(photo)
         else:
             recipe = db.get_photo_edit_recipe(photo["id"])
-            if ((recipe or {}).get("adjustments") or {}).get("denoise_mode") == "camera":
+            adjustments = (recipe or {}).get("adjustments") or {}
+            if adjustments.get("denoise_mode") == "camera" or adjustments.get("lens_profile"):
                 detail_photo = db.photos.get(photo["id"]) or photo
                 if not cache_matches(thumb_path, detail_photo, recipe):
                     needed.append(photo)

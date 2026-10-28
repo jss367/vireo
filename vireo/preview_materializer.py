@@ -259,7 +259,7 @@ def _load_raw_failure_fallback(
 
 def _encode_preview(
     img, photo, *, size, vireo_dir, recipe, preview_quality,
-    apply_recipe_to_loaded_image,
+    apply_recipe_to_loaded_image, source_path=None,
 ):
     """Apply the recipe (if any) and JPEG-encode; always closes ``img``."""
     photo_id = photo["id"]
@@ -282,7 +282,7 @@ def _encode_preview(
             img = rendered
 
         encoded = io.BytesIO()
-        img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe))
+        img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe, source_path))
         return encoded.getvalue()
     finally:
         # broad: cleanup must not replace the render's own exception (or its bytes)
@@ -372,6 +372,7 @@ def render_preview_bytes(
         img, photo, size=size, vireo_dir=vireo_dir, recipe=recipe,
         preview_quality=preview_quality,
         apply_recipe_to_loaded_image=apply_recipe_to_loaded_image,
+        source_path=canonical,
     )
 
 
