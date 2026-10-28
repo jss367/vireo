@@ -2464,7 +2464,7 @@ class _OpenExternal:
                 "source_path": src.source_path,
                 "source_mtime": src.source_mtime,
                 "edit_math_version": EDIT_MATH_VERSION,
-                **_camera_render_cache_fields(photo, recipe),
+                **_camera_render_cache_fields(photo, recipe, src.source_path),
             }
             if self._cached_handoff_is_fresh(src):
                 return src.out_path, None
@@ -2550,7 +2550,7 @@ class _OpenExternal:
             fd = None
             rendered.save(tmp_path, format="JPEG", quality=quality)
             replace_file(tmp_path, src.out_path)
-            src.expected_meta.update(_camera_render_cache_fields(photo, recipe, rendered))
+            src.expected_meta.update(_camera_render_cache_fields(photo, recipe, image=rendered))
             with open(src.meta_path, "w", encoding="utf-8") as f:
                 json.dump(src.expected_meta, f, sort_keys=True)
         except Exception:  # broad: close and remove the unpublished temporary upload, then re-raise

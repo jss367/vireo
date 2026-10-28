@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 
 from PIL import Image
 
@@ -12,15 +13,20 @@ except ImportError:
     import lens_profiles
 
 
-def render_cache_fields(photo, recipe, image=None):
+def _source_kind(photo, source_path, image):
+    """Prefer actual decode provenance; use selected source intent for cache reads."""
+    if image is not None:
+        return image.info.get("vireo_lens_source", "rendered")
+    extension = os.path.splitext(source_path)[1].lower() if source_path is not None else lens_profiles.lens_metadata(photo)["extension"]
+    return "linear" if extension in lens_profiles._RAW_EXTENSIONS else "rendered"
+
+
+def render_cache_fields(photo, recipe, source_path=None, *, image=None):
     fields = camera_denoise.render_cache_fields(photo, recipe)
     lens_key = lens_profiles.render_cache_key(photo, recipe)
     if lens_key:
         fields["lens_profile"] = lens_key
-        fields["lens_source"] = (
-            image.info.get("vireo_lens_source", "rendered") if image is not None else
-            "linear" if lens_profiles.lens_metadata(photo)["extension"] in lens_profiles._RAW_EXTENSIONS else "rendered"
-        )
+        fields["lens_source"] = _source_kind(photo, source_path, image)
     return fields
 
 
@@ -43,19 +49,19 @@ def _optical_marker(fields):
     return f"vireo-render-inputs:{digest}".encode("ascii")
 
 
-def cache_save_options(photo, recipe, image=None):
+def cache_save_options(photo, recipe, source_path=None, *, image=None):
     if not ((recipe or {}).get("adjustments") or {}).get("lens_profile"):
         return camera_denoise.cache_save_options(photo, recipe)
-    return {"comment": _optical_marker(render_cache_fields(photo, recipe, image))}
+    return {"comment": _optical_marker(render_cache_fields(photo, recipe, source_path, image=image))}
 
 
-def cache_matches(path, photo, recipe, *, allow_fallback=False):
+def cache_matches(path, photo, recipe, source_path=None, *, allow_fallback=False):
     if not ((recipe or {}).get("adjustments") or {}).get("lens_profile"):
         return camera_denoise.cache_matches(path, photo, recipe)
     try:
         with Image.open(path) as image:
             marker = image.info.get("comment")
-        fields = render_cache_fields(photo, recipe)
+        fields = render_cache_fields(photo, recipe, source_path)
         if marker == _optical_marker(fields):
             return True
         # Equal-key flight waiters may consume the producer's fresh fallback

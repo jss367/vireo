@@ -269,7 +269,7 @@ def generate_thumbnail(
     """
     thumb_path = os.path.join(cache_dir, cache_name or f"{photo_id}.jpg")
 
-    if os.path.exists(thumb_path) and cache_matches(thumb_path, camera_metadata, recipe):
+    if os.path.exists(thumb_path) and cache_matches(thumb_path, camera_metadata, recipe, source_path):
         return thumb_path
 
     load_max_size = None if recipe and recipe.get("crop") else size
@@ -314,7 +314,7 @@ def generate_thumbnail(
     )
     os.close(fd)
     try:
-        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe, img))
+        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe, source_path, image=img))
         replace_file(tmp_path, thumb_path)
     except Exception:  # broad: remove the temp file on any failure, then re-raise
         with contextlib.suppress(OSError):

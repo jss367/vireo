@@ -459,7 +459,7 @@ class _OriginalPhotoRequest:
         )
         os.close(fd)
         try:
-            img.save(tmp_path, format="JPEG", quality=quality, **_optical_cache_save_options(self.photo, self.recipe, img))
+            img.save(tmp_path, format="JPEG", quality=quality, **_optical_cache_save_options(self.photo, self.recipe, image=img))
             with self._preparation_publication(), reader_guard("full-resolution"):
                 replace_file(tmp_path, cache_path)
                 _peg_render_mtime_to_source(cache_path, self.photo)

@@ -247,6 +247,8 @@ def test_fallback_cache_cannot_masquerade_as_profile_corrected_raw(database, tmp
     fallback = path.read_bytes()
     assert not cache_matches(path, photo, recipe)
     assert cache_matches(path, photo, recipe, allow_fallback=True)
+    assert cache_matches(path, photo, recipe, source_path=tmp_path / "companion.jpg")
+    assert not cache_matches(path, photo, recipe, source_path=source)
     linear = True
     render()
     assert decoded == [False, True]
