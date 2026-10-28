@@ -98,6 +98,19 @@ class PhotoVersionsRepository:
     def serialize(self, photo_id: int) -> str:
         return json.dumps({"schema": 1, "versions": self.list(photo_id)}, sort_keys=True)
 
+    def queue_sync(self, photo_id: int, workspace_id: int) -> None:
+        """Queue the version set in the caller's transaction, without committing."""
+        self.conn.execute(
+            "DELETE FROM pending_changes WHERE photo_id = ? AND workspace_id = ? AND change_type = 'photo_versions'",
+            (photo_id, workspace_id),
+        )
+        self.conn.execute(
+            "INSERT INTO pending_changes (photo_id, workspace_id, change_type, value, change_token) "
+            "VALUES (?, ?, 'photo_versions', ?, ?)",
+            (photo_id, workspace_id, self.serialize(photo_id), uuid.uuid4().hex),
+        )
+        self.refresh_pending(photo_id)
+
     def refresh_pending(self, photo_id: int) -> None:
         """Every workspace must sync the same current, globally shared versions."""
         self.conn.execute(

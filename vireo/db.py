@@ -4803,13 +4803,12 @@ class Database:
         )
 
     def _edit_set_photo_version(self, pid, value):
-        from services.photo_versions import queue_versions_sync
         state = json.loads(value)
         if state["value"] is None:
             self.photo_versions.delete(pid, state["id"])
         else:
             self.photo_versions.put(pid, state["value"])
-        queue_versions_sync(self, pid)
+        self.photo_versions.queue_sync(pid, self.require_workspace_id())
 
     def _edit_set_photo_location(self, pid, value):
         from services.pending_changes import queue_location_sync_if_enabled

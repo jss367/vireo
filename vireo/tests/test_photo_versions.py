@@ -206,8 +206,6 @@ def test_sidecar_recovery_validates_before_writing_and_keeps_pending_deletions(a
 
 
 def test_all_workspaces_queue_current_versions_with_fresh_sync_tokens(app_and_db):
-    from services.photo_versions import queue_versions_sync
-
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     version = create(app.test_client(), pid)
@@ -216,7 +214,7 @@ def test_all_workspaces_queue_current_versions_with_fresh_sync_tokens(app_and_db
     db.set_active_workspace(workspace)
     changed = dict(version, name="Renamed in the second workspace")
     db.photo_versions.put(pid, changed)
-    queue_versions_sync(db, pid)
+    db.photo_versions.queue_sync(pid, db.require_workspace_id())
     db.commit()
     rows = db.conn.execute("SELECT value, change_token FROM pending_changes WHERE change_type='photo_versions'").fetchall()
     assert len(rows) == 2
@@ -251,3 +249,24 @@ def test_export_api_passes_selected_version_to_preflight_and_worker(app_and_db, 
     assert response.status_code == 200, response.get_json()
     wait_for_job_via_client(client, response.get_json()["job_id"])
     assert captured["preview"][pid] == captured["worker"][pid] == version["recipe"]
+
+
+def test_queue_failure_rolls_back_version_and_history_together(app_and_db, monkeypatch):
+    import sqlite3
+
+    from repositories.photo_versions import PhotoVersionsRepository
+
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]["id"]
+
+    def fail(self, photo_id, workspace_id):
+        with sqlite3.connect(db._db_path) as reader:
+            assert reader.execute("SELECT COUNT(*) FROM photo_versions").fetchone()[0] == 0
+            assert reader.execute("SELECT COUNT(*) FROM edit_history WHERE action_type='photo_version'").fetchone()[0] == 0
+        raise ValueError("Simulated queue failure")
+
+    monkeypatch.setattr(PhotoVersionsRepository, "queue_sync", fail)
+    response = app.test_client().post(f"/api/photos/{pid}/versions", json={})
+    assert response.status_code == 400
+    assert db.photo_versions.list(pid) == []
+    assert not db.conn.execute("SELECT 1 FROM edit_history WHERE action_type='photo_version'").fetchone()

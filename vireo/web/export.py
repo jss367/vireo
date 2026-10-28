@@ -24,10 +24,8 @@ if TYPE_CHECKING:
 
 
 def _photo_export_work(
-    ctx: JobLaunch, photo_ids: list[int], destination: str, *, vireo_dir: str, naming_template: str, max_size: int | None,
-    quality: int, output_format: str, wc_max_size: int, developed_dir: str, metadata_fields: list[str] | None,
-    export_to_subfolder: bool, subfolder_name: str | None, reveal_after_export: bool,
-    version_options: JsonDict,
+    ctx: JobLaunch, photo_ids: list[int], destination: str, *, vireo_dir: str,
+    options: JsonDict, reveal_after_export: bool,
 ) -> Callable[..., JsonDict]:
     """The ``export`` job's work function for an already-validated request."""
 
@@ -58,19 +56,7 @@ def _photo_export_work(
             vireo_dir=vireo_dir,
             photo_ids=photo_ids,
             destination=destination,
-            options={
-                "naming_template": naming_template,
-                "max_size": max_size,
-                "quality": quality,
-                "format": output_format,
-                "working_copy_max_size": wc_max_size,
-                "developed_dir": developed_dir,
-                "metadata_fields": metadata_fields,
-                "export_to_subfolder": export_to_subfolder,
-                "subfolder_name": subfolder_name,
-                "collect_files": reveal_after_export,
-                **version_options,
-            },
+            options=options,
             progress_cb=progress_cb,
             cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
             cancel_only_check=lambda: ctx.runner.cancellation_requested(job["id"]),
@@ -386,19 +372,21 @@ def create_export_blueprint(
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
         work = _photo_export_work(
-            ctx, photo_ids, destination,
-            vireo_dir=vireo_dir,
-            naming_template=naming_template,
-            max_size=max_size,
-            quality=quality,
-            output_format=output_format,
-            wc_max_size=wc_max_size,
-            developed_dir=developed_dir,
-            metadata_fields=metadata_fields,
-            export_to_subfolder=export_to_subfolder,
-            subfolder_name=subfolder_name,
+            ctx, photo_ids, destination, vireo_dir=vireo_dir,
             reveal_after_export=reveal_after_export,
-            version_options=version_options,
+            options={
+                "naming_template": naming_template,
+                "max_size": max_size,
+                "quality": quality,
+                "format": output_format,
+                "working_copy_max_size": wc_max_size,
+                "developed_dir": developed_dir,
+                "metadata_fields": metadata_fields,
+                "export_to_subfolder": export_to_subfolder,
+                "subfolder_name": subfolder_name,
+                "collect_files": reveal_after_export,
+                **version_options,
+            },
         )
 
         return ctx.start(

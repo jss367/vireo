@@ -14,15 +14,6 @@ if TYPE_CHECKING:
     from db import Database
 
 
-def queue_versions_sync(db: Database, photo_id: int) -> None:
-    """Queue the entire version set so deletions also survive sidecar sync."""
-    workspace = db.require_workspace_id()
-    db.remove_pending_changes(photo_id, "photo_versions", workspace_id=workspace, _commit=False)
-    db.queue_change(photo_id, "photo_versions", db.photo_versions.serialize(photo_id),
-                    workspace_id=workspace, _commit=False)
-    db.photo_versions.refresh_pending(photo_id)
-
-
 def validate_recipe(recipe: Any, photo_id: int, media_dir: str) -> dict[str, Any] | None:
     import local_masks
     result = normalize_recipe(recipe)
@@ -37,8 +28,8 @@ def change_version(
     *, delete: bool = False,
 ) -> dict[str, Any] | None:
     """Serialize writers, reject stale tabs, and commit data, history and sync together."""
-    db.conn.execute("BEGIN IMMEDIATE")
-    try:
+    db.begin_immediate()
+    with db.transaction(), db._commits_held():
         if not db.photos.get(photo_id, verify_workspace=True):
             raise LookupError("Photo not found")
         repo = db.photo_versions
@@ -52,13 +43,9 @@ def change_version(
         before = json.dumps({"id": key, "value": old})
         after = json.dumps({"id": key, "value": new})
         db.record_edit("photo_version", description, after,
-                       [{"photo_id": photo_id, "old_value": before, "new_value": after}], _commit=False)
-        queue_versions_sync(db, photo_id)
-        db.commit()
+                       [{"photo_id": photo_id, "old_value": before, "new_value": after}])
+        db.photo_versions.queue_sync(photo_id, db.require_workspace_id())
         return new
-    except BaseException:
-        db.conn.rollback()
-        raise
 
 
 def _change_value(
