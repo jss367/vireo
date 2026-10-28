@@ -156,3 +156,42 @@ def test_missing_profile_is_visible_when_recipe_requests_matching(page, live_ser
     page.locator('#lensProfileEnabled').check()
     expect(page.locator('#lensProfileStatus')).to_contain_text('No profile correction will be applied')
     assert page.evaluate('recipeForSave(editorState.recipe).adjustments.lens_profile') is True
+
+
+def test_reused_preview_resolves_source_status_after_delay(page, live_server, profiled_raw):
+    # When the editor reuses the already-displayed image for a scheduled refresh,
+    # the request's seq must track the post-bump editorState.previewSeq. If it
+    # didn't, a delayed source-status receipt would be rejected and the matched
+    # profile would stay source-pending, blocking mask painting until a fresh
+    # render ran.
+    page.goto(f"{live_server['url']}/edit/{profiled_raw}")
+    page.wait_for_function('!editorState.loading && document.getElementById("editorImg").naturalWidth > 0')
+    page.locator('#lensProfileEnabled').check()
+    page.wait_for_function('document.getElementById("editorImg").dataset.previewSourceKind === "linear"')
+    # Hold the next source-status response so a potential older seq is visible
+    # before the receipt lands; the reuse branch runs while the fetch is paused.
+    held = []
+    pattern = f"**/photos/{profiled_raw}/edit-preview?*source_status=1*"
+
+    def _hold(route, request):
+        if "source_status=1" in request.url:
+            held.append(route)
+        else:
+            route.continue_()
+
+    page.route(pattern, _hold)
+    page.evaluate('delete document.getElementById("editorImg").dataset.previewSourceKind')
+    before_seq = page.evaluate('editorState.previewSeq')
+    page.evaluate('updatePreview({scheduled: true})')
+    # The reuse branch bumps previewSeq synchronously, before the receipt fetch.
+    page.wait_for_function(f'editorState.previewSeq > {before_seq}')
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held, "source_status receipt was never requested"
+    for route in held:
+        route.continue_()
+    page.unroute(pattern, _hold)
+    page.wait_for_function('document.getElementById("editorImg").dataset.previewSourceKind === "linear"')
+    assert page.evaluate('lensProfileSourcePending(editorState.recipe)') is False

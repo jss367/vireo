@@ -310,7 +310,11 @@ function pumpEditorPreview() {
   if ((img.dataset.previewUrl || img.getAttribute('src')) === url && img.complete && img.naturalWidth) {
     // Reusing the displayed result also supersedes any slower in-flight tier.
     // Keep the timers: reusing a quick preview must still allow refinement.
+    // The reused request carries the post-bump seq so a delayed source-status
+    // receipt (optics.js:42) still matches editorState.previewSeq when it
+    // lands; a newer edit after this point bumps the seq again and rejects it.
     editorState.previewSeq++;
+    request.seq = editorState.previewSeq;
     editorPreviewQueue.pending = null;
     detachEditorPreview(true);
     presentEditorPreview(request, img);
