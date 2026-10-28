@@ -32,6 +32,10 @@ _ADJUSTMENT_RANGES = {
     # sharpen_radius is validated separately because its no-op is absence, not 0.
     "sharpen": (0.0, 100.0),
     "noise_reduction": (0.0, 100.0),
+    "distortion": (-100.0, 100.0),
+    "vignetting": (-100.0, 100.0),
+    "defringe_purple": (0.0, 100.0),
+    "defringe_green": (0.0, 100.0),
 }
 
 SHARPEN_RADIUS_RANGE = (0.5, 3.0)
@@ -43,6 +47,7 @@ SHARPEN_RADIUS_DEFAULT = 1.0
 _DETAIL_KEYS = frozenset({"sharpen", "sharpen_radius", "noise_reduction", "denoise_mode"})
 # Global spatial controls run in presence.py before local detail branches.
 _PRESENCE_KEYS = frozenset({"texture", "clarity", "dehaze"})
+_OPTICS_KEYS = frozenset({"distortion", "vignetting", "defringe_purple", "defringe_green", "lens_profile"})
 
 # Local (mask-weighted) adjustments — see
 # docs/plans/2026-07-03-local-adjustments-design.md. Region values are deltas
@@ -392,6 +397,11 @@ def _normalize_adjustments(adjustments):
         raise RecipeError("denoise_mode must be standard or camera")
     if denoise_mode == "camera":
         normalized_adjustments["denoise_mode"] = denoise_mode
+    lens_profile = adjustments.get("lens_profile", False)
+    if not isinstance(lens_profile, bool):
+        raise RecipeError("lens_profile must be a boolean")
+    if lens_profile:
+        normalized_adjustments["lens_profile"] = True
 
     # The USM radius only means something while sharpening is on, and its
     # default (1.0) is canonicalized to absence so an untouched radius slider

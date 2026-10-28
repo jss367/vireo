@@ -241,6 +241,7 @@ def create_photo_edit_recipes_blueprint(
                 photo_id=photo_id, mask=body.get("mask"), mode=body.get("mode"),
                 radius=body.get("radius"), points=body.get("points"),
                 softness=body.get("softness", 0), strength=body.get("strength", 1),
+                optics=body.get("optics"),
             )
         except ValueError as exc:
             return json_error(str(exc))

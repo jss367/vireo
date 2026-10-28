@@ -1,13 +1,14 @@
-// Basic, tone curve, color mixer, color grading, and detail (denoise) controls.
+// Tone, color, manual lens corrections, defringing, and detail controls.
 // Classic page script; load boot.js after all definitions.
 
 /** @param {EditorNumericKey} key @param {string|number} value */ function setAdjustment(key, value) {
+  if (editorState.loading || editorState.showBefore) return;
   var vals = adjustmentValues(editorState.recipe);
   vals[key] = Number(value) || 0;
   if (key === 'exposure' || key === 'sharpen_radius') /** @type {HTMLElement} */ (document.getElementById(key + 'Value')).textContent = vals[key].toFixed(1);
   else /** @type {HTMLElement} */ (document.getElementById(key + 'Value')).textContent = String(Math.round(vals[key]));
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
-  /** @type {EditorNumericKey[]} */ (['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction']).forEach(function(name) {
+  /** @type {EditorNumericKey[]} */ (['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction', 'distortion', 'vignetting', 'defringe_purple', 'defringe_green']).forEach(function(name) {
     if (Math.abs(vals[name]) > 0.000001) adj[name] = vals[name];
     else delete adj[name];
   });
@@ -24,13 +25,14 @@
 }
 
 function resetAdjustments() {
-  // Detail, tone curve, color mixer, and color grading each live in their
+  // Detail, lens corrections, tone curve, color mixer, and color grading live in their
   // own panel band with a dedicated reset button; only clear the basic
   // tone, presence, and white-balance keys owned by this panel.
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   /** @type {EditorAdjustments} */ var kept = {};
   [
     'sharpen', 'sharpen_radius', 'noise_reduction', 'denoise_mode',
+    'distortion', 'vignetting', 'defringe_purple', 'defringe_green', 'lens_profile',
     'tone_curve', 'point_curves', 'point_color', 'hsl', 'color_grading',
   ].forEach(function(key) {
     copyEditorAdjustment(kept, adj, /** @type {keyof EditorAdjustments} */ (key));
@@ -231,4 +233,18 @@ function resetDetail() {
 function copyEditorAdjustment(target, source, key) {
   var value = source[key];
   if (value) target[key] = value;
+}
+
+function resetOptics() {
+  if (editorState.loading || editorState.showBefore) return;
+  var adj = cloneRecipe(editorState.recipe.adjustments || {});
+  delete adj.lens_profile;
+  delete adj.distortion;
+  delete adj.vignetting;
+  delete adj.defringe_purple;
+  delete adj.defringe_green;
+  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
+  else delete editorState.recipe.adjustments;
+  syncControls();
+  markChanged(true);
 }

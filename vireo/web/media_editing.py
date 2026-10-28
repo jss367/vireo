@@ -7,6 +7,8 @@ import json
 import logging
 import math
 import os
+import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -49,7 +51,6 @@ from working_copy_cache import (
 )
 
 if TYPE_CHECKING:
-    import threading
     from sqlite3 import Row
 
     import numpy as np
@@ -633,6 +634,29 @@ class EditingRoutes:
         self._json_error = json_error
         self._render_edit_preview = render_edit_preview
         self._cancel_edit_preview = cancel_edit_preview
+        self._preview_sources: OrderedDict[tuple[str, str, int], str] = OrderedDict()
+        self._preview_sources_lock = threading.Lock()
+
+    def _preview_response(self, photo_id: int, body: bytes | str, status: int, source_kind: str) -> Response:
+        response = Response(body, status=status, mimetype='image/jpeg' if status == 200 else 'text/plain')
+        response.headers['Cache-Control'] = 'no-store'
+        if status == 200 and source_kind:
+            response.headers['X-Vireo-Preview-Source'] = source_kind
+            session, sequence = request.args.get('preview_session'), request.args.get('preview_seq')
+            if session and sequence:
+                with self._preview_sources_lock:
+                    self._preview_sources[session, sequence, photo_id] = source_kind
+                    while len(self._preview_sources) > 128:
+                        self._preview_sources.popitem(last=False)
+        return response
+
+    def _preview_source_status(self, photo_id: int) -> Response:
+        key = (request.args.get('preview_session', ''), request.args.get('preview_seq', ''), photo_id)
+        with self._preview_sources_lock:
+            source = self._preview_sources.get(key)
+        response = jsonify(source=source)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
 
     def serve_edit_mask_preview(self, photo_id: int) -> ResponseReturnValue:
         """Serve a recipe's transformed, feathered local-weight map as a
@@ -719,6 +743,7 @@ class EditingRoutes:
             native_size=native_dims,
             detail_scale=preview_detail_scale,
             feather=preview_feather,
+            camera_metadata=photo if request.args.get('profile_source') == 'linear' else None,
         )
         if weight is None:
             return "Mask does not fit this photo", 404
@@ -753,6 +778,8 @@ class EditingRoutes:
         photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
+        if request.args.get('source_status') == '1':
+            return self._preview_source_status(photo_id)
         try:
             size = int(request.args.get("size", "1920"))
         except ValueError:
@@ -804,26 +831,15 @@ class EditingRoutes:
                     payload, session, sequence,
                     guard=lambda cancelled: _edit_preview_source_guard(photo, folder_row, cancelled),
                 )
-                response = Response(body, status=status, mimetype='image/jpeg' if status == 200 else 'text/plain')
-                response.headers['Cache-Control'] = 'no-store'
-                if source_kind:
-                    response.headers['X-Vireo-Preview-Source'] = source_kind
-                return response
+                return self._preview_response(photo_id, body, status, source_kind)
             # Explicit in-process test seam for source/fallback monkeypatches.
-            edit = _EditPreviewRequest(
-                db,
-                photo_id,
-                photo,
-                folder_row,
-                vireo_dir,
-                recipe,
-                display_recipe,
-                size,
-                apply_crop,
-            )
+            edit = _EditPreviewRequest(db, photo_id, photo, folder_row, vireo_dir,
+                                       recipe, display_recipe, size, apply_crop)
             img = edit.load()
             if img is None:
                 return "Could not load image", 500
+            from float_image import FloatImage
+            source_kind = 'linear' if isinstance(img, FloatImage) and img.encoding == 'linear' else 'srgb'
             img = edit.render(img)
         except RecipeError as e:
             return str(e), 400
@@ -831,7 +847,7 @@ class EditingRoutes:
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=config_value(cfg.load(), "preview_quality"))
         img.close()
-        return Response(buf.getvalue(), mimetype="image/jpeg")
+        return self._preview_response(photo_id, buf.getvalue(), 200, source_kind)
 
     def api_auto_tone(self, photo_id: int) -> ResponseReturnValue:
         """Fit Auto Tone to the photo as framed by ``recipe``, in ``style``.
@@ -902,7 +918,7 @@ class EditingRoutes:
         try:
             result = auto_tone.fit_loaded_image(
                 img, recipe, native_size=edit.native_dims, mask=mask, box=box,
-                style=style,
+                style=style, camera_metadata=photo,
             )
         finally:
             img.close()

@@ -506,3 +506,43 @@ def test_soft_brush_at_photo_edge_does_not_fade_along_clipped_edge(tmp_path):
     pixels = np.asarray(local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(corrected)))
     assert pixels[100, 0] == 128
     assert 0 < pixels[100, 15] < pixels[100, 5] < 128
+
+
+@pytest.mark.parametrize('geometry', [
+    {'distortion': 100, 'warp': None}, {'distortion': -100, 'warp': None},
+    {'distortion': 0, 'warp': [1.02, -0.04, 0.08, -0.02, 0]},
+    {'distortion': -50, 'warp': [1.02, 0, -0.065, 0, 0]},
+])
+@pytest.mark.parametrize('softness,strength', [(0, 1), (1, 0.5)])
+def test_optical_brush_preserves_corrected_cursor_footprint(tmp_path, geometry, softness, strength):
+    from optics import distort_image
+
+    path = str(tmp_path / 'source.png')
+    Image.new('L', (601, 401)).save(path)
+    original = local_masks.create_snapshot(photo_id=1, mask_row=_mask_row(path), vireo_dir=str(tmp_path))
+    point, radius = [[0.83, 0.75]], 0.05
+    corrected = local_masks.correct_snapshot(vireo_dir=str(tmp_path), photo_id=1, mask=original,
+                                            mode='add', radius=radius, points=point, optics=geometry,
+                                            softness=softness, strength=strength)
+    snapshot = local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(corrected))
+    rendered = np.asarray(distort_image(snapshot, geometry['distortion'], {'warp': geometry['warp']}))
+    expected = local_masks.correct_snapshot(vireo_dir=str(tmp_path), photo_id=1, mask=original,
+                                           mode='add', radius=radius, points=point,
+                                           softness=softness, strength=strength)
+    target = np.asarray(local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(expected)))
+    # The forward render of the stored source mask recovers the circular
+    # display-space dab, including its softness and single-pass opacity.
+    assert np.abs(rendered.astype(float) - target).mean() < 0.15
+    assert rendered[300, 498] == pytest.approx(strength * 255, abs=1)
+    assert corrected['source_digest'] == original['source_digest']
+    assert (np.asarray(local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(original))) == 0).all()
+
+
+@pytest.mark.parametrize('geometry', [True, [], {'distortion': True}, {'distortion': float('nan')},
+                                    {'distortion': 101}, {'warp': [1, 0]}, {'warp': [1, 0, 0, 0, float('inf')]}])
+def test_invalid_brush_optics_do_not_publish(tmp_path, geometry):
+    path = _write_mask(str(tmp_path / 'source.png'))
+    original = local_masks.create_snapshot(photo_id=1, mask_row=_mask_row(path), vireo_dir=str(tmp_path))
+    with pytest.raises(ValueError):
+        local_masks.correct_snapshot(vireo_dir=str(tmp_path), photo_id=1, mask=original,
+                                     mode='add', radius=0.05, points=[[0.8, 0.7]], optics=geometry)

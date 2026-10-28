@@ -100,8 +100,9 @@ function syncMaskBrushButtons() {
 }
 
 // Invert crop, straighten, flip, then clockwise quarter-turn rotation. These
-// coordinates refer to the EXIF-oriented source, exactly as the mask does.
-/** @param {number} x @param {number} y @param {EditorRecipe} recipe @param {boolean} applyCrop @param {{width:number;height:number}} native @returns {[number,number]} */ function maskBrushSourcePoint(x, y, recipe, applyCrop, native) {
+// By default return EXIF-oriented source coordinates. Optical brush strokes
+// stop before the lens map: the server transforms their entire coverage.
+/** @param {number} x @param {number} y @param {EditorRecipe} recipe @param {boolean} applyCrop @param {{width:number;height:number}} native @param {boolean=} applyLens @returns {[number,number]} */ function maskBrushSourcePoint(x, y, recipe, applyCrop, native, applyLens) {
   var rotation = Number(recipe.rotation || 0);
   var w = native.width, h = native.height;
   if (rotation === 90 || rotation === 270) { w = native.height; h = native.width; }
@@ -115,10 +116,29 @@ function syncMaskBrushButtons() {
   y = (-Math.sin(angle) * px + Math.cos(angle) * py) / h + 0.5;
   if ((recipe.flip || {}).horizontal) x = 1 - x;
   if ((recipe.flip || {}).vertical) y = 1 - y;
-  if (rotation === 90) return [y, 1 - x];
-  if (rotation === 180) return [1 - x, 1 - y];
-  if (rotation === 270) return [1 - y, x];
-  return [x, y];
+  if (rotation === 90) { var oldX = x; x = y; y = 1 - oldX; }
+  else if (rotation === 180) { x = 1 - x; y = 1 - y; }
+  else if (rotation === 270) { var oldY = y; y = x; x = 1 - oldY; }
+  return applyLens === false ? [x, y] : maskBrushLensSourcePoint(x, y, recipe, native);
+}
+
+// Same inverse radial map/inset as optics.distort_image, after undoing the
+// user's geometry. Brush snapshots remain in the uncorrected source frame.
+/** @param {number} x @param {number} y @param {EditorRecipe} recipe @param {{width:number;height:number}} native @returns {[number,number]} */ function maskBrushLensSourcePoint(x, y, recipe, native) {
+  var amount = (recipe.adjustments || {}).distortion || 0;
+  var warp = lensProfileWarp(recipe);
+  if (!amount && !warp) return [x, y];
+  var k = -0.2 * amount / 100, inset = 1;
+  if (k > 0) {
+    for (var i = 0; i < 8; i++) inset -= (inset + k * inset ** 3 - 1) / (1 + 3 * k * inset ** 2);
+  }
+  if (warp) inset = lensProfileInset(amount, warp);
+  var cx = (native.width - 1) / 2, cy = (native.height - 1) / 2;
+  var px = x * native.width - 0.5 - cx, py = y * native.height - 0.5 - cy;
+  var r2 = (px * px + py * py) / Math.max(cx * cx + cy * cy, 1);
+  var factor = inset * (1 + k * inset * inset * r2);
+  if (warp) factor = inset * lensRadialFactor(Math.sqrt(r2) * inset, amount, warp);
+  return [(cx + px * factor + 0.5) / native.width, (cy + py * factor + 0.5) / native.height];
 }
 
 /** @param {PointerEvent} event */ function addMaskBrushPoint(event) {
@@ -128,7 +148,7 @@ function syncMaskBrushButtons() {
   var x = (event.clientX - rect.left) / rect.width;
   var y = (event.clientY - rect.top) / rect.height;
   if (x < 0 || x > 1 || y < 0 || y > 1) return;
-  var point = maskBrushSourcePoint(x, y, stroke.recipe, stroke.applyCrop, stroke.native);
+  var point = maskBrushSourcePoint(x, y, stroke.recipe, stroke.applyCrop, stroke.native, !stroke.optics);
   if (point.some(function(v) { return v < 0 || v > 1; })) return;
   var last = stroke.points[stroke.points.length - 1];
   if (last && Math.hypot((point[0] - last[0]) * stroke.native.width,
@@ -181,7 +201,7 @@ function syncMaskBrushButtons() {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({mask: mask, mode: stroke.mode,
         radius: stroke.radius, points: stroke.points,
-        softness: stroke.softness, strength: stroke.strength}),
+        softness: stroke.softness, strength: stroke.strength, optics: stroke.optics}),
     }, {toast: false});
     if (sequence !== maskBrush.sequence || loadSeq !== editorState.loadSeq) return;
     if (recipeAtStart !== recipeKey(editorState.recipe)) {
@@ -212,7 +232,7 @@ function syncMaskBrushButtons() {
     event.preventDefault(); event.stopImmediatePropagation();
     if (maskBrush.busy || editorState.loading || editorState.showBefore) return;
     var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
-    if (!img.complete || !img.naturalWidth || !editorImageMatchesZoomRecipe(img)) {
+    if (!img.complete || !img.naturalWidth || !editorImageMatchesZoomRecipe(img) || lensProfileSourcePending(editorState.recipe)) {
       maskBrushStatus('Wait for the current photo preview, then paint.'); return;
     }
     var rect = img.getBoundingClientRect();
@@ -235,7 +255,7 @@ function syncMaskBrushButtons() {
     maskBrush.pointer = {x: event.clientX, y: event.clientY};
     maskBrush.stroke = {pointerId: event.pointerId, mode: event.altKey ? 'subtract' : maskBrush.mode,
       rect: rect, recipe: recipe, applyCrop: applyCrop, native: native,
-      radius: radius, screenSize: screenSize, points: [], softness: softness, strength: strength};
+      radius: radius, screenSize: screenSize, points: [], softness: softness, strength: strength, optics: maskBrushOptics(recipe)};
     wrap.setPointerCapture(event.pointerId);
     addMaskBrushPoint(event);
     syncMaskBrushButtons();

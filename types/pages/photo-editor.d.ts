@@ -1,5 +1,5 @@
 // Photo Editor domain models and contracts of separately checked shared scripts.
-type EditorNumericKey = 'exposure'|'highlights'|'shadows'|'whites'|'blacks'|'contrast'|'texture'|'clarity'|'dehaze'|'temperature'|'tint'|'vibrance'|'saturation'|'sharpen'|'sharpen_radius'|'noise_reduction';
+type EditorNumericKey = 'exposure'|'highlights'|'shadows'|'whites'|'blacks'|'contrast'|'texture'|'clarity'|'dehaze'|'temperature'|'tint'|'vibrance'|'saturation'|'sharpen'|'sharpen_radius'|'noise_reduction'|'distortion'|'vignetting'|'defringe_purple'|'defringe_green';
 type EditorGradeZone = 'shadows'|'midtones'|'highlights';
 interface EditorCrop {x:number;y:number;w:number;h:number}
 interface EditorPoint {x:number;y:number}
@@ -7,9 +7,10 @@ interface EditorFlip {horizontal?:boolean;vertical?:boolean}
 interface EditorMask {ref:string;source_digest:string;corrected?:boolean;feather?:number}
 interface EditorLocalRegion {region:'subject'|'background';adjustments:Record<string,number>}
 type EditorColorGrading = Partial<Record<EditorGradeZone,Record<string,number>>> & {balance?:number};
-type EditorAdjustments = Partial<Record<EditorNumericKey,number>> & {white_balance?:Record<string,number>;tone_curve?:Record<string,number>;hsl?:Record<string,Record<string,number>>;color_grading?:EditorColorGrading;denoise_mode?:string;point_curves?:Record<string,[number,number][]>;point_color?:EditorPointColor[]};
+type EditorAdjustments = Partial<Record<EditorNumericKey,number>> & {white_balance?:Record<string,number>;tone_curve?:Record<string,number>;hsl?:Record<string,Record<string,number>>;color_grading?:EditorColorGrading;denoise_mode?:string;lens_profile?:boolean;point_curves?:Record<string,[number,number][]>;point_color?:EditorPointColor[]};
 interface EditorRecipe {version?:number;rotation?:number;straighten?:number;flip?:EditorFlip;crop?:EditorCrop;adjustments?:EditorAdjustments;local?:{mask:EditorMask;regions:EditorLocalRegion[]}}
-interface EditorPhoto {id:number;filename:string;width?:number;height?:number;timestamp?:string;species?:string[];rating?:number;folder_name?:string;metadata?:unknown;edit_recipe?:EditorRecipe;denoise_profile?:{camera_model?:string;camera_make?:string;iso?:number;source?:string;match?:string;profile_iso?:number[]}}
+interface EditorLensProfile {matched:boolean;lens:string;message:string;warp:number[]|null;vignette:number[]|null}
+interface EditorPhoto {lens_profile?:EditorLensProfile;id:number;filename:string;width?:number;height?:number;timestamp?:string;species?:string[];rating?:number;folder_name?:string;metadata?:unknown;edit_recipe?:EditorRecipe;denoise_profile?:{camera_model?:string;camera_make?:string;iso?:number;source?:string;match?:string;profile_iso?:number[]}}
 interface EditorPreset {id:number;name:string;recipe?:EditorRecipe;fields?:string[]}
 interface EditorLocalDraft {subject:Record<string,number>;background:Record<string,number>;feather:number}
 interface EditorVersion {id:string;name:string;kind:"copy"|"snapshot";recipe:EditorRecipe|null;revision:string;created_at:string;updated_at:string}
@@ -17,7 +18,8 @@ interface EditorState {versionId:string|null;version:EditorVersion|null;photoId:
 interface EditorPreviewRequest {url:string;size:number;seq:number;interactive:boolean;started:number;image?:HTMLImageElement;timeout?:ReturnType<typeof setTimeout>;serverSequence?:number}
 interface EditorCropRatio {enabled:boolean;aspect:number|null;revision?:number}
 interface EditorPendingCropRatio extends EditorCropRatio {revision:number}
-interface EditorMaskStroke {pointerId:number;mode:string;rect:DOMRect;recipe:EditorRecipe;applyCrop:boolean;native:{width:number;height:number};radius:number;screenSize:number;points:[number,number][];softness:number;strength:number;lastScreen?:[number,number]}
+interface EditorBrushOptics {distortion:number;warp:number[]|null}
+interface EditorMaskStroke {pointerId:number;mode:string;rect:DOMRect;recipe:EditorRecipe;applyCrop:boolean;native:{width:number;height:number};radius:number;screenSize:number;points:[number,number][];softness:number;strength:number;optics:EditorBrushOptics|null;lastScreen?:[number,number]}
 interface EditorAutoTone {style?:string;notes?:string[];metering?:string;subject_source?:string;adjustments?:Partial<Record<EditorNumericKey,number>>}
 interface EditorExportRequest {version_id?:string;version_revision?:string;photo_ids:number[];destination:string;export_to_subfolder:boolean;subfolder_name:string;naming_template:string;max_size:number|null;format:string;quality?:number;metadata_fields?:string[];reveal_after_export?:boolean}
 interface EditorExportPreflight {error?:string}

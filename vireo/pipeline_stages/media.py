@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from artifact_flight import ArtifactProducerFailed
-from camera_denoise import cache_matches as _camera_cache_matches
 from config import config_value
 from pipeline_stages.context import PipelineRun
 from preview_materializer import (
@@ -20,6 +19,7 @@ from preview_materializer import (
     PreviewSourceUnavailable,
     materialize_preview,
 )
+from render_fingerprint import cache_matches as _camera_cache_matches
 from render_source import (
     has_current_working_copy_failure as _has_current_working_copy_failure,
 )
@@ -810,8 +810,10 @@ def _preview_photo(
     detail_photo = thread_db.photos.get(photo["id"]) or photo
     cache_path = os.path.join(target.preview_dir, f'{photo["id"]}_{target.max_size}.jpg')
     recipe = thread_db.get_photo_edit_recipe(photo["id"])
+    folder_path = folders.get(photo["folder_id"])
+    source_path = os.path.join(folder_path, photo["filename"]) if folder_path else None
     if os.path.exists(cache_path) and _keep_existing_preview(
-        thread_db, photo, detail_photo, cache_path, recipe, target.max_size,
+        thread_db, photo, detail_photo, cache_path, recipe, target.max_size, source_path,
     ):
         return "cached"
     if not os.path.exists(cache_path):
@@ -823,7 +825,7 @@ def _preview_photo(
 
 def _keep_existing_preview(
     thread_db: Database, photo: sqlite3.Row, detail_photo: PhotoRecord, cache_path: str,
-    recipe: EditRecipe | None, max_size: int,
+    recipe: EditRecipe | None, max_size: int, source_path: str | None = None,
 ) -> bool:
     """Track a reusable preview file, or remove a stale edited one.
 
@@ -840,7 +842,7 @@ def _keep_existing_preview(
             "Could not read the preview cache row for photo %s",
             photo["id"], exc_info=True,
         )
-    if recipe and (cache_row is None or not _camera_cache_matches(cache_path, detail_photo, recipe)):
+    if recipe and (cache_row is None or not _camera_cache_matches(cache_path, detail_photo, recipe, source_path)):
         with contextlib.suppress(OSError):
             os.remove(cache_path)
         if os.path.exists(cache_path):
