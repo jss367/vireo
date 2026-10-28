@@ -259,3 +259,12 @@ def test_profile_metadata_flows_to_preview_export_thumbnails_and_source_receipt(
     thumbs = tmp_path / "thumbs"
     generate_all(db, str(thumbs), config={"thumbnail_size": 512, "thumbnail_quality": 90}, vireo_dir=str(tmp_path))
     assert (thumbs / f"{pid}.jpg").read_bytes() == cached.getvalue()
+    # Lens-only recipes must reach the metadata-aware cache check during
+    # batch selection, even when the thumbnail already exists.
+    db.conn.execute('UPDATE photos SET focal_length=24 WHERE id=?', (pid,))
+    db.conn.commit()
+    changed_photo = db.photos.get(pid)
+    assert not cache_matches(thumbs / f"{pid}.jpg", changed_photo, recipe)
+    generate_all(db, str(thumbs), config={"thumbnail_size": 512, "thumbnail_quality": 90}, vireo_dir=str(tmp_path))
+    assert (thumbs / f"{pid}.jpg").read_bytes() != cached.getvalue()
+    assert cache_matches(thumbs / f"{pid}.jpg", changed_photo, recipe)
