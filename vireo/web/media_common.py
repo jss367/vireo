@@ -14,12 +14,12 @@ from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, BinaryIO
 
 from app_paths import media_root
-from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from flask import (
     Response,
     make_response,
     request,
 )
+from render_fingerprint import render_cache_fields as _camera_render_cache_fields
 
 if TYPE_CHECKING:
     from sqlite3 import Row

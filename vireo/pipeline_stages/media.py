@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from artifact_flight import ArtifactProducerFailed
-from camera_denoise import cache_matches as _camera_cache_matches
 from config import config_value
 from pipeline_stages.context import PipelineRun
 from preview_materializer import (
@@ -20,6 +19,7 @@ from preview_materializer import (
     PreviewSourceUnavailable,
     materialize_preview,
 )
+from render_fingerprint import cache_matches as _camera_cache_matches
 from render_source import (
     has_current_working_copy_failure as _has_current_working_copy_failure,
 )

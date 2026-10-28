@@ -7,6 +7,7 @@ import math
 from edit_recipe import (
     _ADJUSTMENT_RANGES,
     _DETAIL_KEYS,
+    _OPTICS_KEYS,
     _PRESENCE_KEYS,
     SHARPEN_RADIUS_DEFAULT,
     normalize_recipe,
@@ -15,8 +16,10 @@ from PIL import Image
 
 try:
     from .float_image import FloatImage
+    from .optics import apply_optics, distort_image
 except ImportError:
     from float_image import FloatImage
+    from optics import apply_optics, distort_image
 
 # Bump whenever the rendering math in this module or `tone.py` changes
 # in a way that produces different output bytes for the same recipe. Cached
@@ -34,7 +37,9 @@ except ImportError:
 #   5 — monotonic, linear-luminance range curves with chroma preservation.
 #   6 — scene-linear RAW decode and floating-point render/export buffers.
 #   7 — edge-aware Shadows/Highlights with local contrast preservation.
-EDIT_MATH_VERSION = 8
+#   8 — camera-aware denoising.
+#   9 — manual lens corrections and edge-aware defringing.
+EDIT_MATH_VERSION = 9
 
 # Tile budget for the tone pass, in pixels. Bounds peak memory on
 # full-resolution originals/exports; overridable in tests to force many tiles.
@@ -164,13 +169,13 @@ def _apply_adjustments(
     return _adjusted_image(output, img, floating)
 
 
-def _apply_geometry(image, normalized):
+def _apply_geometry(image, normalized, lens_profile=None):
     """Apply the recipe's geometry ops (rotate/flip/straighten/crop).
 
     Used for both the photo and the local-adjustment mask so their pixels
     stay aligned through every transform.
     """
-    result = image
+    result = distort_image(image, (normalized.get("adjustments") or {}).get("distortion", 0), lens_profile)
 
     rotation = normalized.get("rotation", 0)
     if rotation:
@@ -263,7 +268,7 @@ def _feathered_weight(mask_img, sigma):
 
 
 def _apply_recipe_impl(
-    img, normalized, local_mask, native_size, detail_scale=None,
+    img, normalized, local_mask, native_size, detail_scale=None, lens_profile=None,
 ):
     """Geometry + weighted tone. Returns (image, geometry-transformed mask).
 
@@ -294,13 +299,14 @@ def _apply_recipe_impl(
 
     # Float geometry returns new buffers/views and the tone pass allocates its
     # output; avoid copying a 500+ MB source only to immediately replace it.
-    result = _apply_geometry(img if isinstance(img, FloatImage) else img.copy(), normalized)
-    mask_geo = _apply_geometry(fitted, normalized) if fitted is not None else None
-
     adjustments = normalized.get("adjustments") or {}
+    corrected = apply_optics(img, adjustments, lens_profile)
+    result = _apply_geometry(corrected if isinstance(corrected, FloatImage) else corrected.copy(), normalized, lens_profile)
+    mask_geo = _apply_geometry(fitted, normalized, lens_profile) if fitted is not None else None
+
     tone_adjustments = {
         k: v for k, v in adjustments.items()
-        if k not in _DETAIL_KEYS | _PRESENCE_KEYS
+        if k not in _DETAIL_KEYS | _PRESENCE_KEYS | _OPTICS_KEYS
     }
     subject_tone, background_tone = (
         _local_region_deltas(local, _LOCAL_TONE_KEYS)
@@ -494,6 +500,7 @@ def apply_recipe_to_loaded_image(
         result, mask_geo = _apply_recipe_impl(
             img, normalized, local_mask, native_size,
             detail_scale=detail_scale,
+            lens_profile=_lens_profile_for_image(img, normalized, camera_metadata),
         )
     if max_size and max_size > 0 and max(result.size) > max_size:
         result.thumbnail((max_size, max_size), resample=Image.Resampling.LANCZOS)
@@ -550,7 +557,7 @@ def apply_recipe_to_loaded_image(
 
 def local_weight_map(
     local_mask, source_size, recipe, native_size=None, detail_scale=None,
-    feather=None,
+    feather=None, camera_metadata=None,
 ):
     """The local-adjustment weight map exactly as the renderer computes it.
 
@@ -580,7 +587,8 @@ def local_weight_map(
     fitted = _fit_mask_to_source(local_mask, source_size)
     if fitted is None:
         return None
-    mask_geo = _apply_geometry(fitted, normalized)
+    lens_profile = _resolve_lens_profile(normalized, camera_metadata)
+    mask_geo = _apply_geometry(fitted, normalized, lens_profile)
     scale = (
         detail_scale
         if detail_scale is not None
@@ -589,3 +597,22 @@ def local_weight_map(
     if feather is None:
         feather = local["mask"].get("feather") or 0.0
     return _feathered_weight(mask_geo, feather * scale)
+
+
+def _resolve_lens_profile(recipe, metadata):
+    if not ((recipe or {}).get("adjustments") or {}).get("lens_profile"):
+        return None
+    try:
+        from .lens_profiles import resolve_profile
+    except ImportError:
+        from lens_profiles import resolve_profile
+    profile = resolve_profile(metadata)
+    return profile if profile["matched"] else None
+
+
+def _lens_profile_for_image(image, recipe, metadata):
+    # A RAW catalog row can render from an embedded/companion JPEG or working
+    # copy. Those may already be corrected: never apply the calibration twice.
+    if not isinstance(image, FloatImage) or image.encoding != "linear":
+        return None
+    return _resolve_lens_profile(recipe, metadata)

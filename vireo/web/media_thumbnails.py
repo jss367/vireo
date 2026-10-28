@@ -10,13 +10,13 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 from app_paths import media_root
-from camera_denoise import cache_matches as _camera_cache_matches
 from config import config_value
 from flask import (
     Response,
     make_response,
     send_from_directory,
 )
+from render_fingerprint import cache_matches as _camera_cache_matches
 from render_source import (
     has_current_working_copy_failure as _has_current_working_copy_failure,
 )

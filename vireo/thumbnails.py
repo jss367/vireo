@@ -8,7 +8,6 @@ import tempfile
 from datetime import UTC, datetime
 
 from app_paths import default_path, media_root
-from camera_denoise import cache_matches, cache_save_options
 from config import config_value
 from file_replace import replace_file
 from image_loader import (
@@ -16,6 +15,7 @@ from image_loader import (
     RAW_EXTENSIONS,
     load_image,
 )
+from render_fingerprint import cache_matches, cache_save_options
 from render_source import (
     photo_value as _photo_value,
 )

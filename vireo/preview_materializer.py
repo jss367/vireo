@@ -17,7 +17,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from artifact_flight import atomic_write_bytes, preview_artifact_flights
-from camera_denoise import cache_matches, cache_save_options
+from render_fingerprint import cache_matches, cache_save_options
 from render_source import (
     companion_image_can_replace_raw_result,
     has_current_working_copy_failure,

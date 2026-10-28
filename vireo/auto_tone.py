@@ -717,13 +717,13 @@ def _refine_box_subject(display, ellipse):
 
 
 def fit_loaded_image(
-    img, recipe, *, native_size=None, mask=None, box=None, style="balanced",
+    img, recipe, *, native_size=None, mask=None, box=None, style="balanced", camera_metadata=None,
 ):
     """Fit Auto Tone to a decoded source and the recipe being edited.
 
     ``img`` is the decoded edit source (PIL image, or a FloatImage — RAW is
     scene-linear). The recipe's geometry and crop select the analysed frame;
-    its white balance and presence controls are rendered during the fit;
+    its lens, white balance and presence controls are rendered during the fit;
     every other adjustment (including local edits) is ignored, so the result
     does not depend on the slider values Auto Tone replaces. ``mask`` (the
     active SAM mask, 'L') or ``box`` (primary detection, normalized) marks
@@ -737,13 +737,15 @@ def fit_loaded_image(
         from .image_edits import (
             _PRESENCE_KEYS,
             _apply_geometry,
+            _lens_profile_for_image,
+            apply_optics,
             detail_render_scale,
             normalize_recipe,
         )
         from .tone import RANGE_RADIUS
     except ImportError:
         from edit_recipe import _PRESENCE_KEYS, normalize_recipe
-        from image_edits import _apply_geometry, detail_render_scale
+        from image_edits import _apply_geometry, _lens_profile_for_image, apply_optics, detail_render_scale
         from tone import RANGE_RADIUS
 
     normalized = normalize_recipe(recipe) or {}
@@ -751,7 +753,9 @@ def fit_loaded_image(
 
     subject_img, subject_source = _subject_image(img.size, mask=mask, box=box)
     floating = isinstance(img, FloatImage)
-    frame = _apply_geometry(img if floating else img.convert("RGB"), normalized)
+    profile = _lens_profile_for_image(img, normalized, camera_metadata)
+    corrected = apply_optics(img if floating else img.convert("RGB"), adjustments, profile)
+    frame = _apply_geometry(corrected, normalized, profile)
     frame.thumbnail(
         (ANALYSIS_LONG_EDGE, ANALYSIS_LONG_EDGE),
         resample=Image.Resampling.LANCZOS,
@@ -762,7 +766,7 @@ def fit_loaded_image(
 
     subject = None
     if subject_img is not None:
-        subject_frame = _apply_geometry(subject_img, normalized).resize(
+        subject_frame = _apply_geometry(subject_img, normalized, profile).resize(
             frame.size, Image.Resampling.BILINEAR,
         )
         subject = np.asarray(subject_frame, dtype=np.float32) / 255.0

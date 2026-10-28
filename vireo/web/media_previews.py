@@ -15,7 +15,6 @@ from artifact_flight import (
     preview_artifact_flights,
     preview_prefetch_slots,
 )
-from camera_denoise import cache_matches as _camera_cache_matches
 from config import config_value
 from flask import (
     Response,
@@ -30,6 +29,7 @@ from preview_materializer import (
     PreviewMaterializationError,
     materialize_preview,
 )
+from render_fingerprint import cache_matches as _camera_cache_matches
 from web.media_common import (
     _PAIRED_PREVIEW_DIRNAME,
     _ArtifactResponseError,

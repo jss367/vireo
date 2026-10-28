@@ -115,10 +115,29 @@ function syncMaskBrushButtons() {
   y = (-Math.sin(angle) * px + Math.cos(angle) * py) / h + 0.5;
   if ((recipe.flip || {}).horizontal) x = 1 - x;
   if ((recipe.flip || {}).vertical) y = 1 - y;
-  if (rotation === 90) return [y, 1 - x];
-  if (rotation === 180) return [1 - x, 1 - y];
-  if (rotation === 270) return [1 - y, x];
-  return [x, y];
+  if (rotation === 90) { var oldX = x; x = y; y = 1 - oldX; }
+  else if (rotation === 180) { x = 1 - x; y = 1 - y; }
+  else if (rotation === 270) { var oldY = y; y = x; x = 1 - oldY; }
+  return maskBrushLensSourcePoint(x, y, recipe, native);
+}
+
+// Same inverse radial map/inset as optics.distort_image, after undoing the
+// user's geometry. Brush snapshots remain in the uncorrected source frame.
+/** @param {number} x @param {number} y @param {EditorRecipe} recipe @param {{width:number;height:number}} native @returns {[number,number]} */ function maskBrushLensSourcePoint(x, y, recipe, native) {
+  var amount = (recipe.adjustments || {}).distortion || 0;
+  var warp = lensProfileWarp(recipe);
+  if (!amount && !warp) return [x, y];
+  var k = -0.2 * amount / 100, inset = 1;
+  if (k > 0) {
+    for (var i = 0; i < 8; i++) inset -= (inset + k * inset ** 3 - 1) / (1 + 3 * k * inset ** 2);
+  }
+  if (warp) inset = lensProfileInset(amount, warp);
+  var cx = (native.width - 1) / 2, cy = (native.height - 1) / 2;
+  var px = x * native.width - 0.5 - cx, py = y * native.height - 0.5 - cy;
+  var r2 = (px * px + py * py) / Math.max(cx * cx + cy * cy, 1);
+  var factor = inset * (1 + k * inset * inset * r2);
+  if (warp) factor = inset * lensRadialFactor(Math.sqrt(r2) * inset, amount, warp);
+  return [(cx + px * factor + 0.5) / native.width, (cy + py * factor + 0.5) / native.height];
 }
 
 /** @param {PointerEvent} event */ function addMaskBrushPoint(event) {
@@ -212,7 +231,7 @@ function syncMaskBrushButtons() {
     event.preventDefault(); event.stopImmediatePropagation();
     if (maskBrush.busy || editorState.loading || editorState.showBefore) return;
     var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
-    if (!img.complete || !img.naturalWidth || !editorImageMatchesZoomRecipe(img)) {
+    if (!img.complete || !img.naturalWidth || !editorImageMatchesZoomRecipe(img) || lensProfileSourcePending(editorState.recipe)) {
       maskBrushStatus('Wait for the current photo preview, then paint.'); return;
     }
     var rect = img.getBoundingClientRect();

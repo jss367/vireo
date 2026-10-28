@@ -19,12 +19,12 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from app_paths import media_root
-from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from config import config_value, read_raw_config_file, settings_write_lock
 from db import Database
 from file_replace import replace_file
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key
+from render_fingerprint import render_cache_fields as _camera_render_cache_fields
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
 )

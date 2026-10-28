@@ -1,0 +1,8 @@
+Lensfun lens and camera calibration database
+Copyright the Lensfun project and contributing photographers, as credited in the XML files.
+License: Creative Commons Attribution-ShareAlike 3.0 Unported (CC-BY-SA-3.0).
+Source: https://github.com/lensfun/lensfun/tree/052c3ec6380aaa172caa6d7ea3a5eaafe0b052da/data/db
+Revision: 052c3ec6380aaa172caa6d7ea3a5eaafe0b052da
+The XML files are redistributed unmodified.
+The complete license is in LICENSE.txt.
+No Lensfun library code is bundled.

@@ -38,7 +38,6 @@ from burst_evidence import (
     build_evidence_pack,
     numeric_query_arg,
 )
-from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from config import config_value
 from db import Database
 from file_replace import replace_file
@@ -56,6 +55,7 @@ from photo_payload import (
     render_key_for_recipe,
 )
 from proc import no_window_kwargs
+from render_fingerprint import render_cache_fields as _camera_render_cache_fields
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
 )
@@ -1047,6 +1047,8 @@ def create_photos_blueprint(
         result["flag_note"] = flag_note(db, photo_id, result.get("flag"))
         from camera_denoise import resolve_profile
         result["denoise_profile"] = resolve_profile(photo)
+        from lens_profiles import resolve_profile as resolve_lens_profile
+        result["lens_profile"] = resolve_lens_profile(photo)
         # The shared lightbox normally warms /original after /full settles.
         # In full-resolution preview mode /full already redirects to /original,
         # so tell the client not to repeat that potentially expensive RAW work.

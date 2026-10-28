@@ -5,7 +5,7 @@ import json
 import math
 from typing import Any
 
-from edit_recipe import _ADJUSTMENT_RANGES, RecipeError, _number, normalize_recipe
+from edit_recipe import _ADJUSTMENT_RANGES, _OPTICS_KEYS, RecipeError, _number, normalize_recipe
 
 # Explicit paths make a missing source value mean "reset this setting", while
 # settings outside the selection always retain the destination's value.
@@ -14,10 +14,12 @@ for name, bounds in _ADJUSTMENT_RANGES.items():
     FIELDS.append({
         "path": f"adjustments.{name}",
         "label": name.replace("_", " ").capitalize(),
-        "group": "Adjustments", "min": bounds[0], "max": bounds[1],
+        "group": "Lens corrections" if name in _OPTICS_KEYS else "Adjustments",
+        "min": bounds[0], "max": bounds[1],
         "step": 0.1 if name == "exposure" else 1, "default": 0,
     })
 FIELDS += [
+    {"path": "adjustments.lens_profile", "label": "Automatic lens profile", "group": "Lens corrections"},
     {"path": "adjustments.denoise_mode", "label": "Denoise method", "group": "Adjustments"},
     {"path": "adjustments.sharpen_radius", "label": "Sharpening radius", "group": "Adjustments",
      "min": 0.5, "max": 3, "step": 0.1, "default": 1},

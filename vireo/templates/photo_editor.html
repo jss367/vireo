@@ -1010,6 +1010,37 @@ body {
       </div>
     </div>
 
+    <div class="panel-band" id="opticsBand">
+      <div class="panel-title">Lens Corrections</div>
+      <label><input id="lensProfileEnabled" type="checkbox" onchange="setLensProfile(this.checked)"> Use matched lens profile</label>
+      <p id="lensProfileStatus" class="local-unavailable-note" aria-live="polite"></p>
+      <p class="local-unavailable-note">Manual fine-tuning. Positive Distortion corrects barrel distortion; negative corrects pincushion. Edges are inset as needed to avoid empty borders. Positive Vignetting brightens dark corners.</p>
+      <div class="control-row">
+        <label for="distortionRange">Distortion</label>
+        <input id="distortionRange" data-adjustment="distortion" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('distortion', this.value)">
+        <span class="control-value" id="distortionValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="vignettingRange">Vignetting</label>
+        <input id="vignettingRange" data-adjustment="vignetting" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('vignetting', this.value)">
+        <span class="control-value" id="vignettingValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="defringe_purpleRange">Purple fringe</label>
+        <input id="defringe_purpleRange" data-adjustment="defringe_purple" type="range" min="0" max="100" step="1" value="0" oninput="setAdjustment('defringe_purple', this.value)">
+        <span class="control-value" id="defringe_purpleValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="defringe_greenRange">Green fringe</label>
+        <input id="defringe_greenRange" data-adjustment="defringe_green" type="range" min="0" max="100" step="1" value="0" oninput="setAdjustment('defringe_green', this.value)">
+        <span class="control-value" id="defringe_greenValue">0</span>
+      </div>
+      <p class="local-unavailable-note">Defringing reduces purple or green color near strong edges. Inspect at 100% and use the lowest effective amount to protect feather and foliage colors. Matched profiles apply to decoded RAW originals; JPEG fallbacks skip them.</p>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="resetOptics()">Reset Lens Corrections</button>
+      </div>
+    </div>
+
     <div class="panel-band">
       <div class="panel-title">Detail</div>
       <label for="denoiseModeSelect">Denoise method</label>
@@ -1230,6 +1261,7 @@ body {
 <script defer src="/static/photo-editor/crop-ratio.js"></script>
 <script defer src="/static/photo-editor/crop-drag.js"></script>
 <script defer src="/static/photo-editor/adjustments.js"></script>
+<script defer src="/static/photo-editor/optics.js"></script>
 <script defer src="/static/photo-editor/presets.js"></script>
 <script defer src="/static/photo-editor/local-adjustments.js"></script>
 <script defer src="/static/photo-editor/mask-brush.js"></script>

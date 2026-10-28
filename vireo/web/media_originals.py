@@ -21,7 +21,6 @@ from artifact_flight import (
     original_artifact_flights,
     preview_prefetch_slots,
 )
-from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from config import config_value
 from file_replace import replace_file
 from flask import (
@@ -29,6 +28,7 @@ from flask import (
     make_response,
     request,
 )
+from render_fingerprint import render_cache_fields as _camera_render_cache_fields
 from render_source import (
     has_current_working_copy_failure as _has_current_working_copy_failure,
 )
