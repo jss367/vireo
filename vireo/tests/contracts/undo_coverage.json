@@ -5,6 +5,7 @@
       "DELETE /api/photos/<int:photo_id>/edit-recipe",
       "DELETE /api/photos/<int:photo_id>/keywords/<int:keyword_id>",
       "DELETE /api/photos/<int:photo_id>/location",
+      "DELETE /api/photos/<int:photo_id>/versions/<version_id>",
       "POST /api/batch/best-batch-flags",
       "POST /api/batch/color_label",
       "POST /api/batch/flag",
@@ -32,6 +33,7 @@
       "POST /api/photos/<int:photo_id>/location/text",
       "POST /api/photos/<int:photo_id>/rating",
       "POST /api/photos/<int:photo_id>/species/<int:keyword_id>/provenance",
+      "POST /api/photos/<int:photo_id>/versions",
       "POST /api/photos/<int:photo_id>/wildlife_excluded",
       "POST /api/photos/edit-recipe/apply",
       "POST /api/pipeline/detach-burst",
@@ -50,7 +52,8 @@
       "POST /api/v1/encounters/species",
       "POST /api/v1/encounters/species/bulk",
       "POST /api/v1/photos/<int:photo_id>/flag",
-      "PUT /api/photos/<int:photo_id>/edit-recipe"
+      "PUT /api/photos/<int:photo_id>/edit-recipe",
+      "PUT /api/photos/<int:photo_id>/versions/<version_id>"
     ]
   },
   "partial": {

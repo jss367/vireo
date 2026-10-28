@@ -95,6 +95,7 @@ _SYNC_PREVIEW_FIELD_LABELS = {
     "flag": "Flag",
     "location": "Location",
     "edit_recipe": "Photo edits",
+    "photo_versions": "Virtual copies and snapshots",
 }
 
 
@@ -623,6 +624,10 @@ def _sync_preview_presentation(
 
     if change_type == "edit_recipe":
         return _sync_preview_edit_recipe_presentation(value, metadata)
+    if change_type == "photo_versions":
+        return {"field": "Virtual copies and snapshots", "action": "updated",
+                "before": "Saved versions" if metadata.get("photo_versions") else "No saved versions",
+                "after": "Current virtual copies and named snapshots"}
 
     field = change_type.replace("_", " ").strip().title() or "Metadata"
     return {
@@ -796,7 +801,7 @@ def _sync_preview_change_creates_sidecar(
             assigned_location.get("latitude") is not None
             and assigned_location.get("longitude") is not None
         )
-    if change_type == "edit_recipe":
+    if change_type in ("edit_recipe", "photo_versions"):
         return bool(change["value"])
     return False
 

@@ -27,14 +27,28 @@ function bindEditHistoryBusyEvents() {
 }
 
 async function afterHistoryChange() {
-  if (editorState.photoId) await loadPhoto(editorState.photoId, {skipUrl: true});
+  if (!editorState.photoId) return;
+  var photoId = editorState.photoId, versionId = editorState.versionId, seq = editorState.loadSeq;
+  if (versionId) {
+    // A probe rejection must still fall through to loadPhoto, which owns the
+    // editor-specific load and error state; without the guard the shared
+    // dispatcher's generic toast would stand in for an actual reload.
+    try {
+      var response = await fetch(editorRecipeUrl(photoId, versionId));
+      if (seq !== editorState.loadSeq) return;
+      if (response.status === 404) versionId = null;
+    } catch (_) {
+      if (seq !== editorState.loadSeq) return;
+    }
+  }
+  await loadPhoto(photoId, {versionId: versionId});
 }
 
 /** @param {EditorRecipe|null} recipe */ async function restoreRecipe(recipe) {
   // The history panel is also pointer-events: none while loading, but guard
   // here too so a programmatic restore (or any escape from the CSS gate) can't
   // copy a previous photo's checkpoint onto the photoId currently loading.
-  if (editorState.loading) return;
+  if (editorState.loading || Object.keys(editorState.savingPhotoIds).length) return;
   cancelPointColorPicker();
   editorState.recipe = cloneRecipe(recipe || {});
   ensureCrop(editorState.recipe);
@@ -92,11 +106,12 @@ async function afterHistoryChange() {
   // out if the editor has moved on so an earlier response can't paint Restore
   // rows pointing at another photo's recipes.
   if (photoId == null) photoId = editorState.photoId;
+  var versionId = editorState.versionId, seq = editorState.loadSeq;
   var list = /** @type {HTMLElement} */ (document.getElementById('historyList'));
   list.innerHTML = '<div class="history-empty">Loading history...</div>';
   try {
-    /** @type {{history?:{new_recipe?:EditorRecipe;created_at?:string;description?:string;undone?:boolean}[]}} */ var data = await safeFetch('/api/photos/' + photoId + '/edit-history?limit=100', {}, {toast: false});
-    if (editorState.photoId !== photoId) return;
+    /** @type {{history?:{new_recipe?:EditorRecipe;created_at?:string;description?:string;undone?:boolean}[]}} */ var data = await safeFetch('/api/photos/' + photoId + (versionId ? '/versions/' + versionId + '/history' : '/edit-history?limit=100'), {}, {toast: false});
+    if (seq !== editorState.loadSeq) return;
     list.innerHTML = '';
     var currentKey = recipeKey(editorState.savedRecipe);
     var visibleHistoryRows = 0;
@@ -118,7 +133,7 @@ async function afterHistoryChange() {
       list.appendChild(empty);
     }
   } catch (e) {
-    if (editorState.photoId !== photoId) return;
+    if (seq !== editorState.loadSeq) return;
     list.innerHTML = '<div class="history-empty">Could not load history.</div>';
   }
 }

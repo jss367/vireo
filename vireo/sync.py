@@ -212,6 +212,7 @@ class _PhotoSyncPlan:
     rating: int | None = None
     flag: str | None = None
     edit_recipe_json: str | None = None
+    photo_versions_json: str | None = None
     sync_location: bool = False
     cleanup_location: bool = False
     # The keyword half of a ``location`` change, gated by its own setting:
@@ -288,6 +289,8 @@ def _plan_photo_sync(photo_changes, sync_flags, sync_locations,
                 plan.sync_location_keywords = True
             else:
                 plan.cleanup_location_keywords = True
+        elif kind == "photo_versions":
+            plan.photo_versions_json = c["value"] or ""
         elif kind == "edit_recipe":
             plan.edit_recipe_json = c["value"] or ""
         else:
@@ -430,6 +433,8 @@ def _write_photo_sync(xmp_path, plan, assigned_location=None, location_path=None
     elif plan.cleanup_location:
         editor.remove_vireo_gps_location()
 
+    if plan.photo_versions_json is not None:
+        editor.set_photo_versions(plan.photo_versions_json)
     if plan.edit_recipe_json is not None:
         editor.set_edit_recipe(plan.edit_recipe_json)
 

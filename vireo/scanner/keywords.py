@@ -89,7 +89,21 @@ def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -
         location_metadata=snapshot[2:],
     )
     _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords)
+    _import_photo_versions(db, photo_id, xmp_path_str)
     return True
+
+
+def _import_photo_versions(db: Database, photo_id: int, path: str) -> None:
+    """Rebuild independent edits from their Vireo sidecar marker."""
+    from xmp.readers import read_sync_preview_metadata
+    if db.photo_versions.list(photo_id):
+        return
+    value = read_sync_preview_metadata(path).get("photo_versions")
+    if value:
+        try:
+            db.photo_versions.import_document(photo_id, value)
+        except (ValueError, TypeError):
+            log.warning("Could not import photo versions from %s", path, exc_info=True)
 
 
 def _import_embedded_keywords_for_photo(db: Database, photo_id: int, file_meta: ExifMetadata | None, *,

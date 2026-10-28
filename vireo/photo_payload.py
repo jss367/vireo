@@ -259,4 +259,7 @@ def prepare_browse_photo_dicts(db, photos, stack_items=None):
         if (photo.get("browse_stack") or {}).get("count", 0) >= 2:
             photo["prediction_confidence_is_stack_lead"] = True
     attach_edit_recipes(db, photo_dicts)
+    version_counts = db.photo_versions.counts([photo["id"] for photo in photo_dicts])
+    for photo in photo_dicts:
+        photo["virtual_copy_count"] = version_counts.get(photo["id"], 0)
     return photo_dicts

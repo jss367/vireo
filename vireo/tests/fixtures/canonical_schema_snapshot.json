@@ -1094,6 +1094,18 @@
   ],
   [
    "table",
+   "photo_versions",
+   "photo_versions",
+   "CREATE TABLE photo_versions (\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        id TEXT NOT NULL,\n        value_json TEXT NOT NULL,\n        PRIMARY KEY (photo_id, id)\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_photo_versions_1",
+   "photo_versions",
+   null
+  ],
+  [
+   "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
    "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"

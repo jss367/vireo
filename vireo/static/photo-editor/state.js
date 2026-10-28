@@ -3,6 +3,8 @@
 
 /** @type {EditorState} */ var editorState = {
   photoId: null,
+  versionId: null,
+  version: null,
   photo: null,
   savedRecipe: {},
   savedRecipeSeq: 0,

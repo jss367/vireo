@@ -19,6 +19,8 @@ function resetAllEdits() {
   // write the previous photo's returned recipe back into the editor state for
   // a different photo (or refresh the cache under the wrong photoId).
   var savedPhotoId = editorState.photoId;
+  var savedVersionId = editorState.versionId;
+  var savedLoadSeq = editorState.loadSeq;
   editorState.savingPhotoIds[String(savedPhotoId)] = true;
   finishEditorHistoryGesture();
   if (window.renderHistoryControls) window.renderHistoryControls();
@@ -31,17 +33,18 @@ function resetAllEdits() {
   // made while the request is in flight must survive its response.
   var sentKey = recipeKey(editorState.recipe);
   try {
-    /** @type {{recipe?:EditorRecipe;local_mask_stale?:boolean}} */ var data = await safeFetch('/api/photos/' + savedPhotoId + '/edit-recipe', {
+    /** @type {{recipe?:EditorRecipe;local_mask_stale?:boolean;version?:EditorVersion}} */ var data = await safeFetch(editorRecipeUrl(savedPhotoId, savedVersionId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         recipe: recipeForSave(editorState.recipe),
+        revision: editorState.version ? editorState.version.revision : undefined,
         description: description || 'Updated photo edit recipe',
       }),
     }, {toast: false});
     // Sync the shared edit-recipe cache against the photo we actually saved,
     // regardless of where the editor is now.
-    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
+    if (!savedVersionId && typeof window.vireoRefreshEditRecipeCache === 'function') {
       /** @type {Record<string,EditorRecipe|null>} */ var updates = {};
       updates[String(savedPhotoId)] = data.recipe || null;
       window.vireoRefreshEditRecipeCache(updates);
@@ -50,7 +53,9 @@ function resetAllEdits() {
     // If the user navigated to a different photo while the PUT was in flight,
     // the editor now owns that other photo's recipe / savedRecipe / Save
     // button — don't overwrite it with the previous photo's saved data.
-    if (editorState.photoId !== savedPhotoId) return false;
+    if (editorState.loadSeq !== savedLoadSeq) return false;
+    if (data.version) editorState.version = data.version;
+    loadEditorVersions();
     editorState.savedRecipe = cloneRecipe(data.recipe || {});
     editorState.savedRecipeSeq++;
     if (recipeKey(editorState.recipe) !== sentKey) {
@@ -81,7 +86,7 @@ function resetAllEdits() {
     // Only re-enable the Save button / surface the error if the editor is
     // still on the photo we were saving; otherwise the new photo's controls
     // own these surfaces.
-    if (editorState.photoId === savedPhotoId) {
+    if (editorState.loadSeq === savedLoadSeq) {
       btn.disabled = false;
       setStatus(editorErrorMessage(e) || 'Save failed', true);
     }

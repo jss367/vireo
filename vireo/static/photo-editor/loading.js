@@ -25,19 +25,22 @@ function editorEmptyState() {
   return true;
 }
 
-/** @param {number} photoId @param {{skipUrl?:boolean}=} opts */ async function loadPhoto(photoId, opts) {
+/** @param {number} photoId @param {{skipUrl?:boolean;versionId?:string|null}=} opts */ function beginEditorPhotoLoad(photoId, opts) {
   cancelPointColorPicker();
   cancelMaskBrush();
   cancelEditorPreview({abortActive: true});
   editorState.previewInputAt = performance.now();
   opts = opts || {};
   photoId = Number(photoId);
-  if (!Number.isFinite(photoId) || photoId <= 0) return;
+
   // Rapid Next/Prev can leave multiple /api/photos/:id requests in flight; the
   // seq lets a stale resolution bail out instead of overwriting newer state.
   var seq = ++editorState.loadSeq;
   editorState.localMaskUpdateSeq++;
   editorState.photoId = photoId;
+  editorState.versionId = opts.versionId || null;
+  editorState.version = null;
+  var versionId = editorState.versionId;
   editorState.photo = null;
   // Reset recipe state so a Save click during the load window can't write the
   // previous (possibly dirty) photo's recipe onto the new photoId. syncControls
@@ -65,7 +68,7 @@ function editorEmptyState() {
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   // Keep the URL in sync so refresh / bookmark / Back behave sensibly.
   if (!opts.skipUrl) {
-    try { window.history.replaceState({photoId: photoId}, '', '/edit/' + photoId); } catch (_) {}
+    try { window.history.replaceState({photoId: photoId}, '', '/edit/' + photoId + (versionId ? '?version=' + versionId : '')); } catch (_) {}
   }
   if (typeof window.vireoRefreshNavigationHrefs === 'function') {
     window.vireoRefreshNavigationHrefs();
@@ -74,9 +77,25 @@ function editorEmptyState() {
   /** @type {HTMLElement} */ (document.getElementById('editorFilename')).textContent = 'Loading photo...';
   updateNavControls();
   setEditorLoading(true);
+  return {seq: seq, versionId: versionId};
+}
+
+/** @param {number} photoId @param {{skipUrl?:boolean;versionId?:string|null}=} opts */
+async function loadPhoto(photoId, opts) {
+  photoId = Number(photoId);
+  if (!Number.isInteger(photoId) || photoId <= 0) return;
+  var started = beginEditorPhotoLoad(photoId, opts);
+  var seq = started.seq, versionId = started.versionId;
   try {
     /** @type {EditorPhoto} */ var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
     if (seq !== editorState.loadSeq) return;
+    if (versionId) {
+      /** @type {{version:EditorVersion;recipe:EditorRecipe|null}} */ var versionData = await safeFetch(editorRecipeUrl(photoId, versionId), {}, {toast: false});
+      if (seq !== editorState.loadSeq) return;
+      if (versionData.version.kind !== 'copy') throw new Error('Open an editable copy to restore this snapshot.');
+      editorState.version = versionData.version;
+      photo.edit_recipe = versionData.recipe || undefined;
+    }
     editorState.photo = photo;
     editorState.savedRecipe = cloneRecipe(photo.edit_recipe || {});
     editorState.savedRecipeSeq++;
@@ -107,7 +126,7 @@ function editorEmptyState() {
       }).catch(function() {});
     if (photo.edit_recipe && photo.edit_recipe.local) {
       var localStaleSavedRecipeSeq = editorState.savedRecipeSeq;
-      safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false})
+      safeFetch(editorRecipeUrl(photoId, versionId), {}, {toast: false})
         .then(/** @param {{active?:unknown;local_mask_stale?:boolean}} d */ function(d) {
           applyLoadedLocalStaleness(
             photoId, seq, localStaleSavedRecipeSeq, d
@@ -116,12 +135,13 @@ function editorEmptyState() {
     }
     /** @type {HTMLElement} */ (document.getElementById('editorFilename')).textContent = photo.filename || ('Photo ' + photoId);
     var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + photoId;
-    /** @type {HTMLElement} */ (document.getElementById('editorSubhead')).textContent = dim;
+    /** @type {HTMLElement} */ (document.getElementById('editorSubhead')).textContent = dim + (editorState.version ? ' · ' + editorState.version.name : ' · Original');
     updateFeedbackControls();
     setEditorLoading(false);
     syncControls();
     updatePreview();
     loadHistory(photoId);
+    loadEditorVersions();
   } catch (e) {
     if (seq !== editorState.loadSeq) return;
     // Keep the editing surface frozen (editor-loading) on failure: the stage
@@ -189,5 +209,5 @@ async function initEditor() {
     editorEmptyState();
     return;
   }
-  await loadPhoto(photoId, {skipUrl: !!match});
+  await loadPhoto(photoId, {skipUrl: !!match, versionId: new URLSearchParams(window.location.search).get('version')});
 }

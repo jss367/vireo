@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -211,6 +211,16 @@ def create_same_shot_reviews(conn):
     )""")
 
 
+def create_photo_versions(conn):
+    """Version identities belong to a source photo, never to a second file."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS photo_versions (
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        id TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        PRIMARY KEY (photo_id, id)
+    )""")
+
+
 def create_auxiliary_schema_objects(conn):
     """Shared auxiliary objects for fresh catalogs; migrations use the same DDL."""
     create_formerly_lazy_objects(conn)
@@ -219,6 +229,7 @@ def create_auxiliary_schema_objects(conn):
     create_identity_alternatives(conn)
     create_detection_evidence_reviews(conn)
     create_same_shot_reviews(conn)
+    create_photo_versions(conn)
 
 
 class CanonicalSchema:

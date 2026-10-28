@@ -22,6 +22,7 @@
     "../vireo/static/photo-editor/preview.js",
     "../vireo/static/photo-editor/recipe.js",
     "../vireo/static/photo-editor/save.js",
+    "../vireo/static/photo-editor/versions.js",
     "../vireo/static/photo-editor/search.js",
     "../vireo/static/photo-editor/state.js",
     "../vireo/static/photo-editor/zoom.js",

@@ -223,6 +223,39 @@ function openPhotoEditor(/** @type {number} */ photoId) {
   window.location.href = '/edit/' + photoId;
 }
 
+/** @param {number[]} photoIds @param {boolean} one @param {string|undefined} hint */
+function photoVersionMenuItems(photoIds, one, hint) {
+  return /** @type {BrowseMenuItem[]} */ ([
+    { label: 'Edit Photo', disabled: !one, disabledHint: hint,
+      onClick: function() { if (photoIds[0] != null) openPhotoEditor(photoIds[0]); } },
+    { label: 'Create Virtual Copy', disabled: !one, disabledHint: hint,
+      onClick: async function() {
+        var photoId = photoIds[0]; if (photoId == null) return;
+        try {
+          var response = await fetch('/api/photos/' + photoId + '/versions', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind: 'copy'}),
+          });
+          // A proxy or error page may return HTML; response.json() would otherwise
+          // raise SyntaxError and the catch below would show its parser message.
+          var result = await response.json().catch(function() { return null; });
+          if (!response.ok || !result || !result.version) {
+            throw new Error((result && result.error) || 'Could not create virtual copy');
+          }
+          // Seed the editor's Prev/Next list from the current browse context before
+          // navigating; without this the editor reads a stale list from an earlier session.
+          var nav = editNav();
+          if (nav) {
+            nav.setList(browsePhotoNavigationList(photoId), photoId);
+            nav.setLastPhoto(photoId);
+          }
+          window.location.href = '/edit/' + photoId + '?version=' + encodeURIComponent(result.version.id);
+        } catch (error) { showToast(error instanceof Error ? error.message : 'Could not create virtual copy', 'error'); }
+      } },
+    { label: 'View Versions', disabled: !one, disabledHint: hint,
+      onClick: function() { if (photoIds[0] != null) openPhotoEditor(photoIds[0]); } },
+  ]);
+}
+
 export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {number | null} */ contextPhotoId, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
   // Capture the opener now: closeContextMenu removes the clicked menu item
   // before invoking its onClick, so document.activeElement would be body
@@ -322,8 +355,7 @@ export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @typ
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
     { separator: true },
-    { label: 'Edit Photo', disabled: !one, disabledHint: hint,
-      onClick: function() { if (photoIds[0] != null) openPhotoEditor(photoIds[0]); } },
+    ...photoVersionMenuItems(photoIds, one, hint),
     { label: 'Copy Development Settings',
       disabled: developmentSourceId == null,
       disabledHint: 'Right-click a photo to choose the settings to copy',

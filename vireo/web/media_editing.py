@@ -65,6 +65,23 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _requested_edit_recipe(db: Database, photo_id: int) -> JsonDict:
+    """Explicit previews and saved versions never fall back to a different edit."""
+    raw = request.args.get("recipe")
+    if raw:
+        recipe = json.loads(raw)
+    elif request.args.get("version_id"):
+        version = db.photo_versions.get(photo_id, request.args["version_id"])
+        if version is None:
+            raise LookupError("Version not found")
+        recipe = version["recipe"] or {}
+    else:
+        recipe = db.get_photo_edit_recipe(photo_id) or {}
+    if not isinstance(recipe, dict):
+        raise ValueError("Invalid recipe")
+    return recipe
+
+
 class _RenderEditPreview(Protocol):
     """``PreviewWorkers.render``: ``(status, body, source_kind)``."""
 
@@ -651,6 +668,11 @@ class EditingRoutes:
                 recipe = json.loads(raw_recipe)
             except (TypeError, ValueError):
                 return "Invalid recipe", 400
+        elif request.args.get("version_id"):
+            version = db.photo_versions.get(photo_id, request.args["version_id"])
+            if version is None:
+                return "Version not found", 404
+            recipe = version["recipe"] or {}
         else:
             recipe = db.get_photo_edit_recipe(photo_id) or {}
 
@@ -739,15 +761,11 @@ class EditingRoutes:
         # native-resolution render and be a true 1:1 view.
         size = max(256, min(16384, size))
 
-        raw_recipe = request.args.get("recipe")
-        if raw_recipe:
-            try:
-                recipe = json.loads(raw_recipe)
-            except (TypeError, ValueError):
-                return "Invalid recipe", 400
-        else:
-            recipe = db.get_photo_edit_recipe(photo_id) or {}
-        if not isinstance(recipe, dict):
+        try:
+            recipe = _requested_edit_recipe(db, photo_id)
+        except LookupError:
+            return "Version not found", 404
+        except ValueError:
             return "Invalid recipe", 400
 
         try:

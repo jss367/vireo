@@ -49,6 +49,7 @@ function exportCurrentEditedPhoto() {
 function sendCurrentEditedPhotoToInat() {
   if (!editorState.photoId || editorState.loading ||
       editorState.savingPhotoIds[String(editorState.photoId)] || isEditorDirty()) return;
+  if (editorState.versionId) { showToast('Export this virtual copy to upload it to iNaturalist.', 'info'); return; }
   if (typeof window.submitToInat === 'function') {
     window.submitToInat(editorState.photoId);
   }
@@ -200,11 +201,11 @@ function buildPhotoEditorContextMenu() {
     },
     {
       label: 'Send to iNaturalist',
-      disabled: unavailable || dirty || savePending,
+      disabled: unavailable || dirty || savePending || !!editorState.versionId,
       disabledHint: unavailable
         ? 'No photo is ready to send'
         : (savePending ? 'Saving changes' :
-          (dirty ? 'Save changes before sending to iNaturalist' : undefined)),
+          (dirty ? 'Save changes before sending to iNaturalist' : (editorState.versionId ? 'Export this virtual copy to upload it to iNaturalist' : undefined))),
       onClick: sendCurrentEditedPhotoToInat,
     },
   ];
