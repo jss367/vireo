@@ -24,6 +24,8 @@ from db import Database
 from file_replace import replace_file
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key
+from render_fingerprint import cache_save_options as _render_cache_save_options
+from render_fingerprint import metadata_cache_matches as _render_metadata_cache_matches
 from render_fingerprint import render_cache_fields as _camera_render_cache_fields
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
@@ -415,7 +417,7 @@ def _inat_companion_fallback(
 
 def _write_inat_upload_render(
     img: Image.Image | FloatImage, recipe: JsonDict, photo: Row, vireo_dir: str, out_dir: str, out_path: str,
-    meta_path: str, expected_meta: JsonDict,
+    meta_path: str, expected_meta: JsonDict, primary_path: str,
 ) -> None:
     """Render ``recipe`` onto ``img`` and publish the JPEG and its cache key.
 
@@ -443,7 +445,8 @@ def _write_inat_upload_render(
         )
         os.close(fd)
         fd = None
-        rendered.save(tmp_path, format="JPEG", quality=quality)
+        rendered.save(tmp_path, format="JPEG", quality=quality,
+                      **_render_cache_save_options(photo, recipe, primary_path, image=rendered))
         replace_file(tmp_path, out_path)
         expected_meta.update(_camera_render_cache_fields(photo, recipe, image=rendered))
         with open(meta_path, "w", encoding="utf-8") as f:
@@ -816,7 +819,9 @@ def create_inat_blueprint(
                 if os.path.isfile(out_path) and os.path.isfile(meta_path):
                     with open(meta_path, encoding="utf-8") as f:
                         cached_meta = json.load(f)
-                    if cached_meta == expected_meta:
+                    if _render_metadata_cache_matches(
+                        out_path, cached_meta, expected_meta, photo, recipe, fallback_path,
+                    ):
                         return out_path, None
             except (OSError, ValueError, TypeError):
                 pass
@@ -843,7 +848,7 @@ def create_inat_blueprint(
             return None, f"{photo['filename']}: failed to load image"
         _write_inat_upload_render(
             img, recipe, photo, vireo_dir, out_dir, out_path, meta_path,
-            expected_meta,
+            expected_meta, fallback_path,
         )
         return out_path, None
 

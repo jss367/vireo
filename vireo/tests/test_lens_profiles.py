@@ -331,3 +331,78 @@ def test_profile_metadata_flows_to_preview_export_thumbnails_and_source_receipt(
     generate_all(db, str(thumbs), config={"thumbnail_size": 512, "thumbnail_quality": 90}, vireo_dir=str(tmp_path))
     assert (thumbs / f"{pid}.jpg").read_bytes() != cached.getvalue()
     assert cache_matches(thumbs / f"{pid}.jpg", changed_photo, recipe)
+
+
+@pytest.mark.parametrize("artifact", ["external", "inat"])
+@pytest.mark.parametrize("recovery", ["restored", "transient"])
+def test_handoff_fallback_cache_reuses_and_recovers(database, app_and_db, tmp_path, monkeypatch, artifact, recovery):
+    import os
+    from types import SimpleNamespace
+
+    import config as cfg
+    import image_loader
+    import inat
+    import render_fingerprint
+    from services import photo_ingest, workspace_folders
+    from web.photos import _OpenExternal
+
+    app, db = app_and_db
+    folder = tmp_path / "raws"
+    folder.mkdir()
+    source = folder / "photo.dng"
+    if recovery == "transient":
+        source.write_bytes(b"unsupported RAW")
+    Image.new("RGB", (121, 81), (70, 70, 70)).save(folder / "companion.jpg")
+    fid = workspace_folders.add_folder(db, str(folder))
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename=source.name, extension=".dng",
+                                width=121, height=81, file_size=123, file_mtime=1)
+    metadata = _photo()
+    db.conn.execute('UPDATE photos SET camera_make=?,camera_model=?,lens=?,focal_length=?,aperture=?,companion_path=? WHERE id=?',
+                    (*[metadata[k] for k in ("camera_make", "camera_model", "lens", "focal_length", "aperture")], "companion.jpg", pid))
+    db.conn.commit()
+    db.set_photo_edit_recipe(pid, {"adjustments": {"lens_profile": True}})
+    photo = db.photos.get_with_folder_path(pid)
+    now = [100000.0]
+    monkeypatch.setattr(render_fingerprint, "time", SimpleNamespace(time=lambda: now[0]))
+    decoded = []
+    linear = False
+
+    def load(*args, **kwargs):
+        decoded.append(linear)
+        if linear:
+            return FloatImage(np.full((81, 121, 3), 0.1, dtype=np.float32))
+        return Image.new("RGB", (121, 81), (70, 70, 70))
+
+    monkeypatch.setattr(image_loader, "load_image", load)
+    monkeypatch.setattr(inat, "submit_observation", lambda **kwargs: (123, "https://example.com/123"))
+    cfg.save({"inat_token": "fake-token"})
+    media = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    run = _OpenExternal(db, {fid: str(folder)}, media, lambda *args: None)
+    client = app.test_client()
+
+    def render():
+        if artifact == "external":
+            path, error = run.handoff_path(photo, str(source))
+            assert error is None
+            return path
+        response = client.post("/api/inat/submit", json={"photo_id": pid})
+        assert response.status_code == 200, response.get_json()
+        return os.path.join(media, "inat-uploads", f"{pid}.jpg")
+
+    path = render()
+    with open(path, "rb") as stream:
+        fallback = stream.read()
+    render()
+    assert decoded == [False]
+    now[0] += render_fingerprint._FALLBACK_RETRY_SECONDS + 1
+    if recovery == "restored":
+        render()
+        assert decoded == [False]  # Offline fallback remains stable beyond retry age.
+        source.write_bytes(b"RAW restored")
+    linear = True
+    render()
+    assert decoded == [False, True]
+    with open(path, "rb") as stream:
+        assert stream.read() != fallback
+    render()
+    assert decoded == [False, True]

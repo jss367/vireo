@@ -55,6 +55,8 @@ from photo_payload import (
     render_key_for_recipe,
 )
 from proc import no_window_kwargs
+from render_fingerprint import cache_save_options as _render_cache_save_options
+from render_fingerprint import metadata_cache_matches as _render_metadata_cache_matches
 from render_fingerprint import render_cache_fields as _camera_render_cache_fields
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
@@ -2466,7 +2468,7 @@ class _OpenExternal:
                 "edit_math_version": EDIT_MATH_VERSION,
                 **_camera_render_cache_fields(photo, recipe, src.source_path),
             }
-            if self._cached_handoff_is_fresh(src):
+            if self._cached_handoff_is_fresh(src, photo, recipe):
                 return src.out_path, None
 
             # Derive the decode mode from the primary photo's extension
@@ -2548,7 +2550,8 @@ class _OpenExternal:
             )
             os.close(fd)
             fd = None
-            rendered.save(tmp_path, format="JPEG", quality=quality)
+            rendered.save(tmp_path, format="JPEG", quality=quality,
+                          **_render_cache_save_options(photo, recipe, src.fallback_path, image=rendered))
             replace_file(tmp_path, src.out_path)
             src.expected_meta.update(_camera_render_cache_fields(photo, recipe, image=rendered))
             with open(src.meta_path, "w", encoding="utf-8") as f:
@@ -2597,12 +2600,14 @@ class _OpenExternal:
         return None
 
     @staticmethod
-    def _cached_handoff_is_fresh(src: _HandoffSource) -> bool:
+    def _cached_handoff_is_fresh(src: _HandoffSource, photo: Row, recipe: JsonDict) -> bool:
         try:
             if os.path.isfile(src.out_path) and os.path.isfile(src.meta_path):
                 with open(src.meta_path, encoding="utf-8") as f:
                     cached_meta = json.load(f)
-                if cached_meta == src.expected_meta:
+                if _render_metadata_cache_matches(
+                    src.out_path, cached_meta, src.expected_meta, photo, recipe, src.fallback_path,
+                ):
                     return True
         except (OSError, ValueError, TypeError):
             pass

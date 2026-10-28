@@ -108,3 +108,13 @@ def _fallback_matches(marker, fields, source_path, allow_fallback):
     # Stable unsupported RAWs reuse their fallback briefly; transient decode
     # failures are retried without decoding on every hover or bulk pass.
     return age <= _FALLBACK_RETRY_SECONDS
+
+
+def metadata_cache_matches(path, cached, expected, photo, recipe, source_path):
+    """Validate sidecar keys plus the shared optical decode/retry receipt."""
+    optical = bool(((recipe or {}).get("adjustments") or {}).get("lens_profile"))
+    if optical and isinstance(cached, dict):
+        expected = {**expected, "lens_source": cached.get("lens_source")}
+    if cached != expected:
+        return False
+    return not optical or cache_matches(path, photo, recipe, source_path)
