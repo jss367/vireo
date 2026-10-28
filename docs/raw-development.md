@@ -115,6 +115,12 @@ already rendered source twice. The editor verifies which source its actual
 preview used and reports when a profile was skipped. Its mask overlay and brush
 map use that same source decision.
 
+Profile-enabled caches record whether their pixels came from a scene-linear
+RAW or a rendered fallback. A fallback cannot satisfy a later RAW cache hit;
+later requests retry the RAW so recovered sources regain their requested
+profile corrections. Equal-key requests already sharing a render may consume
+that render's fresh fallback once.
+
 ### Manual fine-tuning
 
 Manual controls work on both RAW and rendered images and can supplement an

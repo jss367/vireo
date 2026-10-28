@@ -17,9 +17,11 @@ from PIL import Image
 try:
     from .float_image import FloatImage
     from .optics import apply_optics, distort_image
+    from .render_fingerprint import record_render_source
 except ImportError:
     from float_image import FloatImage
     from optics import apply_optics, distort_image
+    from render_fingerprint import record_render_source
 
 # Bump whenever the rendering math in this module or `tone.py` changes
 # in a way that produces different output bytes for the same recipe. Cached
@@ -529,10 +531,11 @@ def apply_recipe_to_loaded_image(
         if (local and mask_geo is not None) else ({}, {})
     )
     if subject_detail or background_detail:
-        return _apply_local_detail(
+        result = _apply_local_detail(
             result, adjustments, local, mask_geo, subject_detail,
             background_detail, scale, denoise_kwargs,
         )
+        return record_render_source(result, img, normalized)
 
     sharpen = adjustments.get("sharpen", 0.0)
     noise_reduction = adjustments.get("noise_reduction", 0.0)
@@ -552,7 +555,7 @@ def apply_recipe_to_loaded_image(
             scale=scale,
             **denoise_kwargs,
         )
-    return result
+    return record_render_source(result, img, normalized)
 
 
 def local_weight_map(

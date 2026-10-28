@@ -210,6 +210,52 @@ def test_render_cache_tracks_lens_metadata_calibration_and_other_camera_edits(da
     assert render_cache_fields(photo, {}) == {}
 
 
+@pytest.mark.parametrize("artifact", ["thumbnail", "preview"])
+def test_fallback_cache_cannot_masquerade_as_profile_corrected_raw(database, tmp_path, monkeypatch, artifact):
+    import image_loader
+    import thumbnails
+    from preview_materializer import materialize_preview
+
+    source = tmp_path / "photo.dng"
+    source.write_bytes(b"decoder replaced by controlled sources")
+    photo = _photo(id=7, folder_id=1, filename=source.name, width=121, height=81,
+                   companion_path=None, working_copy_path=None)
+    recipe = {"adjustments": {"lens_profile": True}}
+    decoded = []
+    linear = False
+
+    def load(*args, **kwargs):
+        decoded.append(linear)
+        if linear:
+            return FloatImage(np.full((81, 121, 3), 0.1, dtype=np.float32))
+        return Image.new("RGB", (121, 81), (70, 70, 70))
+
+    monkeypatch.setattr(image_loader, "load_image", load)
+    monkeypatch.setattr(thumbnails, "load_image", load)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    path = cache / "7.jpg"
+
+    def render():
+        if artifact == "thumbnail":
+            thumbnails.generate_thumbnail(7, str(source), str(cache), recipe=recipe, camera_metadata=photo)
+        else:
+            materialize_preview(None, photo, str(tmp_path), size=256, vireo_dir=str(tmp_path),
+                                preview_quality=90, recipe=recipe, cache_path=str(path))
+
+    render()
+    fallback = path.read_bytes()
+    assert not cache_matches(path, photo, recipe)
+    assert cache_matches(path, photo, recipe, allow_fallback=True)
+    linear = True
+    render()
+    assert decoded == [False, True]
+    assert path.read_bytes() != fallback
+    assert cache_matches(path, photo, recipe)
+    render()
+    assert decoded == [False, True]
+
+
 def test_profile_metadata_flows_to_preview_export_thumbnails_and_source_receipt(database, app_and_db, tmp_path):
     from export import load_export_image
     from image_loader import RAW_DECODE_LINEAR, load_image

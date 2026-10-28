@@ -28,6 +28,8 @@ from flask import (
     make_response,
     request,
 )
+from render_fingerprint import cache_matches as _optical_cache_matches
+from render_fingerprint import cache_save_options as _optical_cache_save_options
 from render_fingerprint import render_cache_fields as _camera_render_cache_fields
 from render_source import (
     has_current_working_copy_failure as _has_current_working_copy_failure,
@@ -229,6 +231,8 @@ def _prepared_full_resolution_render(
     )
     try:
         if not os.path.isfile(cache_path) or os.path.getsize(cache_path) <= 0:
+            return None
+        if ((recipe or {}).get("adjustments") or {}).get("lens_profile") and not _optical_cache_matches(cache_path, photo, recipe):
             return None
         # Same freshness gate ``serve_thumbnail`` uses. The signature
         # hash already covers the normal invalidation case (a scan that
@@ -455,7 +459,7 @@ class _OriginalPhotoRequest:
         )
         os.close(fd)
         try:
-            img.save(tmp_path, format="JPEG", quality=quality)
+            img.save(tmp_path, format="JPEG", quality=quality, **_optical_cache_save_options(self.photo, self.recipe, img))
             with self._preparation_publication(), reader_guard("full-resolution"):
                 replace_file(tmp_path, cache_path)
                 _peg_render_mtime_to_source(cache_path, self.photo)

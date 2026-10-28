@@ -104,7 +104,7 @@ def _paired_cache_path_for_request(
 def _serve_cached_preview(
     db: Database, photo_id: int, size: int, cache_path: str, paired_cache_path: str | None, vireo_dir: str, *,
     bypass_cache: bool, stale_after_failed_invalidation: bool,
-    skip_untracked_preview_adoption: bool,
+    skip_untracked_preview_adoption: bool, photo: Row | None = None, recipe: JsonDict | None = None,
 ) -> Response | None:
     """Serve a tracked, adoptable or paired cache hit; ``None`` on a miss."""
     from flask import send_file
@@ -153,6 +153,7 @@ def _serve_cached_preview(
     if (
         paired_cache_path
         and paired_preview_ready(db, paired_cache_path)
+        and _camera_cache_matches(paired_cache_path, photo, recipe)
     ):
         with contextlib.suppress(sqlite3.Error):
             db.caches.paired_preview_touch(os.path.basename(paired_cache_path))
@@ -464,7 +465,7 @@ class _PreviewServer:
             )
         )
         cached = _serve_cached_preview(
-            db, photo_id, size, cache_path, paired_cache_path, vireo_dir,
+            db, photo_id, size, cache_path, paired_cache_path, vireo_dir, photo=photo, recipe=render_recipe,
             bypass_cache=bypass_cache,
             stale_after_failed_invalidation=stale_after_failed_invalidation,
             skip_untracked_preview_adoption=skip_untracked_preview_adoption,

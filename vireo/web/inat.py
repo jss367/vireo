@@ -445,6 +445,7 @@ def _write_inat_upload_render(
         fd = None
         rendered.save(tmp_path, format="JPEG", quality=quality)
         replace_file(tmp_path, out_path)
+        expected_meta.update(_camera_render_cache_fields(photo, recipe, rendered))
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(expected_meta, f, sort_keys=True)
     except Exception:  # broad: close and remove the unpublished temporary upload, then re-raise

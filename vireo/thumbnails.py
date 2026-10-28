@@ -314,7 +314,7 @@ def generate_thumbnail(
     )
     os.close(fd)
     try:
-        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe))
+        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe, img))
         replace_file(tmp_path, thumb_path)
     except Exception:  # broad: remove the temp file on any failure, then re-raise
         with contextlib.suppress(OSError):

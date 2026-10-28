@@ -2550,6 +2550,7 @@ class _OpenExternal:
             fd = None
             rendered.save(tmp_path, format="JPEG", quality=quality)
             replace_file(tmp_path, src.out_path)
+            src.expected_meta.update(_camera_render_cache_fields(photo, recipe, rendered))
             with open(src.meta_path, "w", encoding="utf-8") as f:
                 json.dump(src.expected_meta, f, sort_keys=True)
         except Exception:  # broad: close and remove the unpublished temporary upload, then re-raise

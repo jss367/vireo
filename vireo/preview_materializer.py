@@ -282,7 +282,7 @@ def _encode_preview(
             img = rendered
 
         encoded = io.BytesIO()
-        img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe))
+        img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe, img))
         return encoded.getvalue()
     finally:
         # broad: cleanup must not replace the render's own exception (or its bytes)
@@ -446,7 +446,7 @@ def materialize_preview(
 
     def consume_published():
         if (cache_path and os.path.exists(cache_path) and os.path.getsize(cache_path)
-                and cache_matches(cache_path, photo, recipe)):
+                and cache_matches(cache_path, photo, recipe, allow_fallback=True)):
             return PreviewMaterialization(
                 data=None, generated=False, published=True,
             )

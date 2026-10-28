@@ -246,7 +246,7 @@ def test_heal_worker_success_does_not_log_failure():
 def test_preview_cleanup_preserves_encoded_bytes_and_render_failure():
     encode = _function(
         "preview_materializer.py", "_encode_preview", io=io,
-        cache_save_options=lambda photo, recipe: {},
+        cache_save_options=lambda photo, recipe, image=None: {},
     )
     for original in (None, ValueError("encode failed")):
         def save(output, original=original, **kwargs):
