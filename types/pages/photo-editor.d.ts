@@ -17,7 +17,8 @@ interface EditorState {photoId:number|null;photo:EditorPhoto|null;savedRecipe:Ed
 interface EditorPreviewRequest {url:string;size:number;seq:number;interactive:boolean;started:number;image?:HTMLImageElement;timeout?:ReturnType<typeof setTimeout>;serverSequence?:number}
 interface EditorCropRatio {enabled:boolean;aspect:number|null;revision?:number}
 interface EditorPendingCropRatio extends EditorCropRatio {revision:number}
-interface EditorMaskStroke {pointerId:number;mode:string;rect:DOMRect;recipe:EditorRecipe;applyCrop:boolean;native:{width:number;height:number};radius:number;screenSize:number;points:[number,number][];softness:number;strength:number;lastScreen?:[number,number]}
+interface EditorBrushOptics {distortion:number;warp:number[]|null}
+interface EditorMaskStroke {pointerId:number;mode:string;rect:DOMRect;recipe:EditorRecipe;applyCrop:boolean;native:{width:number;height:number};radius:number;screenSize:number;points:[number,number][];softness:number;strength:number;optics:EditorBrushOptics|null;lastScreen?:[number,number]}
 interface EditorAutoTone {style?:string;notes?:string[];metering?:string;subject_source?:string;adjustments?:Partial<Record<EditorNumericKey,number>>}
 interface EditorExportRequest {photo_ids:number[];destination:string;export_to_subfolder:boolean;subfolder_name:string;naming_template:string;max_size:number|null;format:string;quality?:number;metadata_fields?:string[];reveal_after_export?:boolean}
 interface EditorExportPreflight {error?:string}

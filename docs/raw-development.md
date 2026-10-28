@@ -130,7 +130,8 @@ enabled profile:
   corrects pincushion distortion. A radial inverse map preserves the source
   dimensions and automatically insets the sampled frame as needed to avoid
   empty borders. This can trim the field of view. Subject masks and their
-  overlays receive the same map; brush coordinates map back to the source.
+  overlays receive the same map; the entire brush footprint maps back to the
+  source so its displayed circle stays the size and shape shown by the cursor.
 - **Vignetting** (−100 to 100): positive brightens dark corners, negative
   darkens them, with up to 1.5 stops of gain or attenuation at the corners.
   Gain is applied in linear light around the uncropped image center.

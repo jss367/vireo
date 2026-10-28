@@ -208,9 +208,11 @@ def _publish_snapshot(vireo_dir, photo_id, data):
     return ref
 
 
-def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points, softness=0, strength=1):
+def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points, softness=0, strength=1, optics=None):
     """Paint one bounded stroke in normalized, untransformed photo coordinates.
 
+    With ``optics``, points/radius describe the lens-corrected frame before
+    user rotation/crop, and the entire stroke coverage is mapped to the source.
     Preserve the AI source digest: a manual correction is not a new extraction.
     Existing snapshots remain untouched so recipe undo can restore them exactly.
     """
@@ -236,6 +238,7 @@ def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points, softnes
         raise ValueError("brush radius must be between 0.001 and 0.25")
     if not isinstance(points, list) or not 1 <= len(points) <= 2048:
         raise ValueError("a stroke needs between 1 and 2048 points")
+    optics = _brush_optics(optics)
     for point in points:
         if not isinstance(point, list) or len(point) != 2 or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1
@@ -254,7 +257,9 @@ def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points, softnes
     pixels = [(x * (width - 1), y * (height - 1)) for x, y in points]
     r = max(0.5, radius * min(width, height))
     value = 255 if mode == "add" else 0
-    if softness == 0 and strength == 1:
+    if optics:
+        _draw_optical_brush(image, pixels, r, value, softness, strength, optics)
+    elif softness == 0 and strength == 1:
         _draw_brush_stroke(image, pixels, r, value)
     else:
         _blend_brush_stroke(image, pixels, r, value, softness, strength)
@@ -266,6 +271,45 @@ def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points, softnes
         "source_digest": digest,
         "corrected": True,
     }
+
+
+def _brush_optics(value):
+    """Validate bounded radial geometry captured with the visible preview."""
+    import math
+
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"distortion", "warp"}:
+        raise ValueError("invalid brush lens geometry")
+    amount, warp = value.get("distortion", 0), value.get("warp")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not -100 <= amount <= 100:
+        raise ValueError("brush distortion must be between -100 and 100")
+    if warp is not None and (not isinstance(warp, list) or len(warp) != 5 or any(
+        isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or abs(v) > 1e6 for v in warp
+    )):
+        raise ValueError("brush profile must contain five finite radial coefficients")
+    return {"distortion": amount, "warp": warp} if amount or warp else None
+
+
+def _draw_optical_brush(image, pixels, radius, value, softness, strength, optics):
+    """Rasterize once in corrected space, preserving cursor shape and opacity."""
+    import numpy as np
+    from optics import corrected_mask_to_source
+
+    with Image.new("L", image.size) as coverage:
+        _blend_brush_stroke(coverage, pixels, radius, 255, softness, 1)
+        mapped = corrected_mask_to_source(coverage, optics["distortion"], optics["warp"])
+    before, weights = np.asarray(image), np.asarray(mapped)
+    output = np.empty_like(before)
+    rows = max(1, 1_000_000 // image.width)
+    for top in range(0, image.height, rows):
+        stop = min(image.height, top + rows)
+        tile = before[top:stop].astype(np.float32)
+        weight = weights[top:stop].astype(np.float32) * (strength / 255)
+        output[top:stop] = np.clip(np.rint(tile + (value - tile) * weight), 0, 255).astype(np.uint8)
+    with Image.fromarray(output) as result:
+        image.paste(result)
+    mapped.close()
 
 
 def _draw_brush_stroke(image, pixels, radius, value):

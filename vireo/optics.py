@@ -138,6 +138,42 @@ def apply_optics(image, adjustments, profile=None):
     return _wrap(output, image)
 
 
+def corrected_mask_to_source(image, amount, warp=None):
+    """Map corrected-space brush coverage back through the whole radial warp.
+
+    Invert the monotonic radial map once as a dense lookup table, then sample
+    coverage in bounded row strips. Pixels outside the visible corrected
+    frame receive zero coverage, preserving the source mask there.
+    """
+    radii = np.linspace(0, 1, 16385)
+    if warp:
+        inset = profile_inset(amount, warp)
+        source_radii = radii * inset * radial_factor(radii * inset, amount, warp)
+    else:
+        k, inset = distortion_scale(amount)
+        source_radii = radii * inset * (1 + k * inset * inset * radii * radii)
+    if not np.isfinite(source_radii).all() or np.min(np.diff(source_radii)) <= 0:
+        raise ValueError("lens geometry must be finite and non-folding for mask painting")
+    source = np.asarray(image)
+    output = np.empty_like(source)
+    width, height = image.size
+    cx, cy = (width - 1) / 2, (height - 1) / 2
+    x = (np.arange(width, dtype=np.float32) - cx)[None, :]
+    rows = max(1, _TILE_PIXELS // width)
+    for top in range(0, height, rows):
+        bottom = min(height, top + rows)
+        r = np.sqrt(_radius_squared(width, height, top, bottom))
+        corrected = np.interp(r, source_radii, radii)
+        factor = np.divide(corrected, r, out=np.ones_like(corrected), where=r > 0)
+        y = (np.arange(top, bottom, dtype=np.float32) - cy)[:, None]
+        map_x = (cx + x * factor).astype(np.float32)
+        map_y = (cy + y * factor).astype(np.float32)
+        map_x[r > source_radii[-1]] = -1
+        output[top:bottom] = cv2.remap(source, map_x, map_y, cv2.INTER_LINEAR,
+                                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return _wrap(output, image)
+
+
 def distortion_scale(amount):
     """Inverse-map coefficient and inset keeping every sample inside the image."""
     k = -0.2 * amount / 100

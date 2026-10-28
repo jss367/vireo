@@ -73,6 +73,12 @@ function syncLensProfileControls() {
   return manual * value;
 }
 
+/** @param {EditorRecipe} recipe @returns {EditorBrushOptics|null} */ function maskBrushOptics(recipe) {
+  var amount = (recipe.adjustments || {}).distortion || 0;
+  var warp = lensProfileWarp(recipe);
+  return amount || warp ? {distortion: amount, warp: warp ? warp.slice() : null} : null;
+}
+
 /** @param {number} amount @param {number[]} warp */ function lensProfileInset(amount, warp) {
   var lower = 0, upper = 1;
   for (var i = 0; i < 32; i++) {
