@@ -30,9 +30,16 @@ async function afterHistoryChange() {
   if (!editorState.photoId) return;
   var photoId = editorState.photoId, versionId = editorState.versionId, seq = editorState.loadSeq;
   if (versionId) {
-    var response = await fetch(editorRecipeUrl(photoId, versionId));
-    if (seq !== editorState.loadSeq) return;
-    if (response.status === 404) versionId = null;
+    // A probe rejection must still fall through to loadPhoto, which owns the
+    // editor-specific load and error state; without the guard the shared
+    // dispatcher's generic toast would stand in for an actual reload.
+    try {
+      var response = await fetch(editorRecipeUrl(photoId, versionId));
+      if (seq !== editorState.loadSeq) return;
+      if (response.status === 404) versionId = null;
+    } catch (_) {
+      if (seq !== editorState.loadSeq) return;
+    }
   }
   await loadPhoto(photoId, {versionId: versionId});
 }

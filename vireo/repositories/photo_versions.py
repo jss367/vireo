@@ -177,8 +177,21 @@ def remap_photo_versions(conn: sqlite3.Connection, mapping: dict[int, int | None
             (target, source),
         )
         # A caller may already have moved pending changes before deleting the source.
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE pending_changes SET photo_id = ?, value = ?, change_token = lower(hex(randomblob(16))) "
             "WHERE photo_id IN (?, ?) AND change_type = 'photo_versions'",
             (target, repo.serialize(target), source, target),
         )
+        # When both photos' sidecars had already synced before the merge, neither
+        # has a pending row to carry the inherited versions onto the survivor.
+        # Seed a row for every workspace that holds the target photo so the next
+        # sync writes the merged version set out to the surviving sidecar.
+        if cursor.rowcount == 0 and values:
+            conn.execute(
+                "INSERT INTO pending_changes "
+                "(photo_id, workspace_id, change_type, value, change_token) "
+                "SELECT DISTINCT ?, wf.workspace_id, 'photo_versions', ?, lower(hex(randomblob(16))) "
+                "FROM workspace_folders wf JOIN photos p ON p.folder_id = wf.folder_id "
+                "WHERE p.id = ?",
+                (target, repo.serialize(target), target),
+            )

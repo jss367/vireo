@@ -235,9 +235,20 @@ function photoVersionMenuItems(photoIds, one, hint) {
           var response = await fetch('/api/photos/' + photoId + '/versions', {
             method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind: 'copy'}),
           });
-          var result = await response.json();
-          if (!response.ok) throw new Error(result.error || 'Could not create virtual copy');
-          window.location.href = '/edit/' + photoId + '?version=' + result.version.id;
+          // A proxy or error page may return HTML; response.json() would otherwise
+          // raise SyntaxError and the catch below would show its parser message.
+          var result = await response.json().catch(function() { return null; });
+          if (!response.ok || !result || !result.version) {
+            throw new Error((result && result.error) || 'Could not create virtual copy');
+          }
+          // Seed the editor's Prev/Next list from the current browse context before
+          // navigating; without this the editor reads a stale list from an earlier session.
+          var nav = editNav();
+          if (nav) {
+            nav.setList(browsePhotoNavigationList(photoId), photoId);
+            nav.setLastPhoto(photoId);
+          }
+          window.location.href = '/edit/' + photoId + '?version=' + encodeURIComponent(result.version.id);
         } catch (error) { showToast(error instanceof Error ? error.message : 'Could not create virtual copy', 'error'); }
       } },
     { label: 'View Versions', disabled: !one, disabledHint: hint,
