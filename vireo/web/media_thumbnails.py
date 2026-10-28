@@ -134,7 +134,7 @@ class _ThumbnailRequest:
         return (
             self.selected_source_mtime is None
             or cached_mtime >= self.selected_source_mtime
-        ) and _camera_cache_matches(self.thumb_path, self.photo, self.cache_recipe)
+        ) and _camera_cache_matches(self.thumb_path, self.photo, self.cache_recipe, os.path.join(self.folder_row["path"], self.photo["filename"]))
 
     def serve_fresh_cache(self) -> Response | tuple[str, int] | None:
         """Serve the cached thumbnail when it is current, or clear it.
@@ -342,7 +342,7 @@ class _ThumbnailRequest:
             self.thumb_dir,
             size=self.thumb_size,
             recipe=render_recipe,
-            camera_metadata=photo,
+            camera_metadata=photo, original_path=os.path.join(self.folder_row["path"], photo["filename"]),
             raw_decode=raw_decode,
             min_source_size=min_source_size,
             native_size=(
@@ -416,7 +416,7 @@ class _ThumbnailRequest:
             self.thumb_dir,
             size=self.thumb_size,
             recipe=self.render_recipe,
-            camera_metadata=self.photo,
+            camera_metadata=self.photo, original_path=os.path.join(self.folder_row["path"], self.photo["filename"]),
             native_size=(
                 _recipe_source_dimensions(self.photo)
                 if self.render_recipe else None

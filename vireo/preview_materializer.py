@@ -372,7 +372,7 @@ def render_preview_bytes(
         img, photo, size=size, vireo_dir=vireo_dir, recipe=recipe,
         preview_quality=preview_quality,
         apply_recipe_to_loaded_image=apply_recipe_to_loaded_image,
-        source_path=canonical,
+        source_path=original_abs,
     )
 
 
@@ -447,7 +447,7 @@ def materialize_preview(
 
     def consume_published():
         if (cache_path and os.path.exists(cache_path) and os.path.getsize(cache_path)
-                and cache_matches(cache_path, photo, recipe, allow_fallback=True)):
+                and cache_matches(cache_path, photo, recipe, os.path.join(folder_path, photo["filename"]) if folder_path else None, allow_fallback=True)):
             return PreviewMaterialization(
                 data=None, generated=False, published=True,
             )
@@ -461,7 +461,7 @@ def materialize_preview(
             and cache_path
             and os.path.exists(cache_path)
             and os.path.getsize(cache_path)
-            and cache_matches(cache_path, photo, recipe)
+            and cache_matches(cache_path, photo, recipe, os.path.join(folder_path, photo["filename"]) if folder_path else None)
         ):
             return PreviewMaterialization(
                 data=None, generated=False, published=True,

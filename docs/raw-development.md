@@ -116,10 +116,12 @@ preview used and reports when a profile was skipped. Its mask overlay and brush
 map use that same source decision.
 
 Profile-enabled caches record whether their pixels came from a scene-linear
-RAW or a rendered fallback. A fallback cannot satisfy a later RAW cache hit;
-later requests retry the RAW so recovered sources regain their requested
-profile corrections. Equal-key requests already sharing a render may consume
-that render's fresh fallback once.
+RAW or a rendered fallback and an opaque primary-source identity. Offline
+fallbacks remain reusable while the source is unchanged and missing; restoring
+or changing the RAW invalidates them immediately. When the RAW is present but
+its decoder falls back, reuse lasts at most 60 seconds before retrying, avoiding
+a decode on every hover while allowing transient failures to recover.
+Equal-key requests already sharing a render may consume its fresh fallback.
 
 ### Manual fine-tuning
 

@@ -224,7 +224,7 @@ def _serve_trusted_working_copy(path: str) -> Response:
 
 
 def _prepared_full_resolution_render(
-    vireo_dir: str, photo: Row, recipe: JsonDict | None, file_state: JsonDict | None = None,
+    vireo_dir: str, photo: Row, recipe: JsonDict | None, file_state: JsonDict | None = None, source_path: str | None = None,
 ) -> str | None:
     cache_path = _full_resolution_render_path(
         vireo_dir, photo, recipe, file_state,
@@ -232,7 +232,7 @@ def _prepared_full_resolution_render(
     try:
         if not os.path.isfile(cache_path) or os.path.getsize(cache_path) <= 0:
             return None
-        if ((recipe or {}).get("adjustments") or {}).get("lens_profile") and not _optical_cache_matches(cache_path, photo, recipe):
+        if ((recipe or {}).get("adjustments") or {}).get("lens_profile") and not _optical_cache_matches(cache_path, photo, recipe, source_path):
             return None
         # Same freshness gate ``serve_thumbnail`` uses. The signature
         # hash already covers the normal invalidation case (a scan that
@@ -459,7 +459,7 @@ class _OriginalPhotoRequest:
         )
         os.close(fd)
         try:
-            img.save(tmp_path, format="JPEG", quality=quality, **_optical_cache_save_options(self.photo, self.recipe, image=img))
+            img.save(tmp_path, format="JPEG", quality=quality, **_optical_cache_save_options(self.photo, self.recipe, os.path.join(self.folder_path, self.photo["filename"]), image=img))
             with self._preparation_publication(), reader_guard("full-resolution"):
                 replace_file(tmp_path, cache_path)
                 _peg_render_mtime_to_source(cache_path, self.photo)
@@ -1081,7 +1081,7 @@ class OriginalRoutes:
         original.collect_file_state()
         with reader_guard("full-resolution"):
             prepared_render = _prepared_full_resolution_render(
-                vireo_dir, photo, recipe, original.file_state,
+                vireo_dir, photo, recipe, original.file_state, os.path.join(original.folder_path, photo["filename"]),
             )
             if prepared_render:
                 return send_file(prepared_render, mimetype="image/jpeg")

@@ -211,15 +211,23 @@ def test_render_cache_tracks_lens_metadata_calibration_and_other_camera_edits(da
 
 
 @pytest.mark.parametrize("artifact", ["thumbnail", "preview"])
-def test_fallback_cache_cannot_masquerade_as_profile_corrected_raw(database, tmp_path, monkeypatch, artifact):
+@pytest.mark.parametrize("recovery", ["restored", "transient"])
+def test_fallback_cache_cannot_masquerade_as_profile_corrected_raw(database, tmp_path, monkeypatch, artifact, recovery):
+    from types import SimpleNamespace
+
     import image_loader
+    import render_fingerprint
     import thumbnails
     from preview_materializer import materialize_preview
 
     source = tmp_path / "photo.dng"
-    source.write_bytes(b"decoder replaced by controlled sources")
+    if recovery == "transient":
+        source.write_bytes(b"decoder replaced by controlled sources")
+    now = [100000.0]
+    monkeypatch.setattr(render_fingerprint, "time", SimpleNamespace(time=lambda: now[0]))
     photo = _photo(id=7, folder_id=1, filename=source.name, width=121, height=81,
-                   companion_path=None, working_copy_path=None)
+                   companion_path="companion.jpg", working_copy_path=None)
+    Image.new("RGB", (121, 81), (70, 70, 70)).save(tmp_path / "companion.jpg")
     recipe = {"adjustments": {"lens_profile": True}}
     decoded = []
     linear = False
@@ -247,8 +255,15 @@ def test_fallback_cache_cannot_masquerade_as_profile_corrected_raw(database, tmp
     fallback = path.read_bytes()
     assert not cache_matches(path, photo, recipe)
     assert cache_matches(path, photo, recipe, allow_fallback=True)
-    assert cache_matches(path, photo, recipe, source_path=tmp_path / "companion.jpg")
-    assert not cache_matches(path, photo, recipe, source_path=source)
+    assert not cache_matches(path, photo, recipe, source_path=tmp_path / "companion.jpg")
+    assert cache_matches(path, photo, recipe, source_path=source)
+    render()
+    assert decoded == [False]  # Reuse a healthy fallback, not another decode.
+    now[0] += render_fingerprint._FALLBACK_RETRY_SECONDS + 1
+    if recovery == "restored":
+        render()
+        assert decoded == [False]  # A still-offline source remains reusable.
+        source.write_bytes(b"the RAW original is available again")
     linear = True
     render()
     assert decoded == [False, True]

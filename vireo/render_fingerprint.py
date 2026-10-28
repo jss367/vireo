@@ -3,8 +3,11 @@
 import hashlib
 import json
 import os
+import time
 
 from PIL import Image
+
+_FALLBACK_RETRY_SECONDS = 60
 
 try:
     from . import camera_denoise, lens_profiles
@@ -49,10 +52,27 @@ def _optical_marker(fields):
     return f"vireo-render-inputs:{digest}".encode("ascii")
 
 
+def _source_stamp(path):
+    """Opaque source health identity; cached JPEGs never disclose local paths."""
+    if path is None:
+        return ""
+    try:
+        stat = os.stat(path)
+        state = [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode]
+    except OSError:
+        state = None
+    value = json.dumps([os.path.abspath(path), state], separators=(",", ":"))
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 def cache_save_options(photo, recipe, source_path=None, *, image=None):
     if not ((recipe or {}).get("adjustments") or {}).get("lens_profile"):
         return camera_denoise.cache_save_options(photo, recipe)
-    return {"comment": _optical_marker(render_cache_fields(photo, recipe, source_path, image=image))}
+    fields = render_cache_fields(photo, recipe, source_path, image=image)
+    marker = _optical_marker(fields)
+    if image is not None and fields["lens_source"] == "rendered" and lens_profiles.lens_metadata(photo)["extension"] in lens_profiles._RAW_EXTENSIONS:
+        marker += f"|{_source_stamp(source_path)}|{time.time():.6f}".encode("ascii")
+    return {"comment": marker}
 
 
 def cache_matches(path, photo, recipe, source_path=None, *, allow_fallback=False):
@@ -62,10 +82,29 @@ def cache_matches(path, photo, recipe, source_path=None, *, allow_fallback=False
         with Image.open(path) as image:
             marker = image.info.get("comment")
         fields = render_cache_fields(photo, recipe, source_path)
-        if marker == _optical_marker(fields):
+        raw = lens_profiles.lens_metadata(photo)["extension"] in lens_profiles._RAW_EXTENSIONS
+        if marker == _optical_marker({**fields, "lens_source": "linear"} if raw else fields):
             return True
-        # Equal-key flight waiters may consume the producer's fresh fallback
-        # once. Later cache requests must retry the RAW before reusing it.
-        return allow_fallback and marker == _optical_marker({**fields, "lens_source": "rendered"})
+        return _fallback_matches(marker, fields, source_path, allow_fallback)
     except (OSError, ValueError):
         return False
+
+
+def _fallback_matches(marker, fields, source_path, allow_fallback):
+    if not isinstance(marker, bytes):
+        return False
+    parts = marker.split(b"|")
+    if len(parts) != 3 or parts[0] != _optical_marker({**fields, "lens_source": "rendered"}):
+        return False
+    age = time.time() - float(parts[2])
+    if not 0 <= age < float("inf"):
+        return False
+    if allow_fallback:
+        return age <= _FALLBACK_RETRY_SECONDS
+    if source_path is None or not parts[1] or parts[1].decode("ascii") != _source_stamp(source_path):
+        return False
+    if os.path.splitext(source_path)[1].lower() not in lens_profiles._RAW_EXTENSIONS or not os.path.isfile(source_path):
+        return True  # Still the same explicitly rendered/offline source.
+    # Stable unsupported RAWs reuse their fallback briefly; transient decode
+    # failures are retried without decoding on every hover or bulk pass.
+    return age <= _FALLBACK_RETRY_SECONDS
