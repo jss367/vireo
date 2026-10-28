@@ -22,6 +22,7 @@ import logging
 
 from repositories.collections import remap_collection_photo_ids
 from repositories.identity_alternatives import identity_merge_transaction, remap_photo_identities
+from repositories.photo_versions import remap_photo_versions
 from sql_chunks import chunked
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class PhotoRowDeletion:
         cost N passes over every collection.
         """
         remap_photo_identities(self.conn, mapping)
+        remap_photo_versions(self.conn, mapping)
         ids = list(dict.fromkeys(mapping))
         for chunk in chunked(ids):
             marks = ",".join("?" for _ in chunk)

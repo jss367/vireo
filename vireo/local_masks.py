@@ -310,6 +310,29 @@ def _blend_brush_stroke(image, pixels, radius, value, softness, strength):
         image.paste(result, box)
 
 
+def ensure_snapshot_for_photo(vireo_dir, photo_id, ref):
+    """Recover a content-addressed mask after a catalog merge or XMP rebuild.
+
+    Versions retain the immutable content reference even when their source
+    photo's catalog ID changes. Keep the old file until garbage collection;
+    verify its hash before publishing a copy under the current photo ID.
+    """
+    path = snapshot_path(vireo_dir, photo_id, ref)
+    if os.path.isfile(path) or not _REF_RE.match(ref):
+        return path
+    from pathlib import Path
+    for candidate in Path(path).parent.glob(f"*.{ref}.png"):
+        old_id = candidate.name.split(".", 1)[0]
+        if not old_id.isdigit():
+            continue
+        try:
+            _copy_snapshot_for_transfer(vireo_dir, int(old_id), photo_id, ref)
+            break
+        except OSError:
+            log.warning("Could not recover edit-mask snapshot %s", candidate, exc_info=True)
+    return path
+
+
 def load_snapshot(vireo_dir, photo_id, recipe):
     """Return the recipe's snapshot as a PIL 'L' image, or None.
 
@@ -323,7 +346,7 @@ def load_snapshot(vireo_dir, photo_id, recipe):
     ref = ((local.get("mask") or {}).get("ref")) or ""
     if not _REF_RE.match(ref):
         return None
-    path = snapshot_path(vireo_dir, photo_id, ref)
+    path = ensure_snapshot_for_photo(vireo_dir, photo_id, ref)
     try:
         with Image.open(path) as img:
             return img.convert("L").copy()
@@ -436,6 +459,7 @@ def _referenced_refs(db):
     pattern = re.compile(r'"ref":\s*"([0-9a-f]{12})"')
     values = [
         *db.edits.recipes_with_local_adjustments(),
+        *db.photo_versions.local_recipe_values(),
         *db.edit_history.item_values_with_local_adjustments(),
     ]
     for value in values:

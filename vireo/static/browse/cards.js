@@ -196,6 +196,10 @@ export function renderCardInfo(/** @type {BrowsePhoto} */ p) {
   state.cardFields.forEach(function(field) {
     infoHtml += renderCardField(field, p);
   });
+  if (p.virtual_copy_count) {
+    infoHtml += '<div class="grid-card-meta" title="Right-click and choose View Versions">' +
+      p.virtual_copy_count + (p.virtual_copy_count === 1 ? ' virtual copy' : ' virtual copies') + '</div>';
+  }
   return infoHtml;
 }
 

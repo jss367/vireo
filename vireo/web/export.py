@@ -13,6 +13,7 @@ from config import config_value, read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
 from highlights_payload import HighlightsQuery, build_highlights_payload, build_life_list_payload
+from services.photo_versions import export_version_options
 from web.background_jobs import make_background_job
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ def _photo_export_work(
     ctx: JobLaunch, photo_ids: list[int], destination: str, *, vireo_dir: str, naming_template: str, max_size: int | None,
     quality: int, output_format: str, wc_max_size: int, developed_dir: str, metadata_fields: list[str] | None,
     export_to_subfolder: bool, subfolder_name: str | None, reveal_after_export: bool,
+    version_options: JsonDict,
 ) -> Callable[..., JsonDict]:
     """The ``export`` job's work function for an already-validated request."""
 
@@ -67,6 +69,7 @@ def _photo_export_work(
                 "export_to_subfolder": export_to_subfolder,
                 "subfolder_name": subfolder_name,
                 "collect_files": reveal_after_export,
+                **version_options,
             },
             progress_cb=progress_cb,
             cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
@@ -274,6 +277,10 @@ def create_export_blueprint(
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
 
+        try:
+            version_options = export_version_options(db, photo_ids, body, media_root(config["THUMB_CACHE_DIR"]))
+        except ValueError as exc:
+            return json_error(str(exc), 409)
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
 
@@ -283,6 +290,7 @@ def create_export_blueprint(
                 photo_ids=photo_ids,
                 destination=destination,
                 options={
+                    **version_options,
                     "naming_template": naming_template,
                     "format": output_format,
                     "export_to_subfolder": export_to_subfolder,
@@ -366,6 +374,10 @@ def create_export_blueprint(
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
+        try:
+            version_options = export_version_options(db, photo_ids, body, media_root(config["THUMB_CACHE_DIR"]))
+        except ValueError as exc:
+            return json_error(str(exc), 409)
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
         wc_max_size = config_value(effective_cfg, "working_copy_max_size")
@@ -386,6 +398,7 @@ def create_export_blueprint(
             export_to_subfolder=export_to_subfolder,
             subfolder_name=subfolder_name,
             reveal_after_export=reveal_after_export,
+            version_options=version_options,
         )
 
         return ctx.start(

@@ -27,6 +27,7 @@ from canonical_schema import (
     create_detection_evidence_reviews,
     create_formerly_lazy_objects,
     create_identity_alternatives,
+    create_photo_versions,
     create_same_shot_reviews,
     create_subject_ranking_analysis,
     job_history_columns,
@@ -269,6 +270,7 @@ MIGRATIONS = (
     Migration(27, "same_shot_reviews", create_same_shot_reviews),
     Migration(28, "flag_attribution_history", create_current_flag_attribution),
     Migration(29, "global_flag_attribution_lifetime", _retain_global_flag_attribution),
+    Migration(30, "photo_versions", create_photo_versions),
 )
 
 

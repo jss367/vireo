@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from repositories.photo_metadata import PhotoMetadataRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_species import PhotoSpeciesRepository
+    from repositories.photo_versions import PhotoVersionsRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
     from repositories.pipeline_features import PipelineFeaturesRepository
@@ -2277,6 +2278,12 @@ class Database:
         Do not hold the returned repository across ``set_active_workspace``.
         """
         return self._photo_label_repository()
+
+    @property
+    def photo_versions(self) -> PhotoVersionsRepository:
+        """Independent versions sharing the source photo and its metadata."""
+        from repositories.photo_versions import PhotoVersionsRepository
+        return PhotoVersionsRepository(self.conn)
 
     def _edits_repository(self) -> EditsRepository:
         """Build the edits repository on this connection.
@@ -4795,6 +4802,15 @@ class Database:
             pid, value if value else None, verify_workspace=False,
         )
 
+    def _edit_set_photo_version(self, pid, value):
+        from services.photo_versions import queue_versions_sync
+        state = json.loads(value)
+        if state["value"] is None:
+            self.photo_versions.delete(pid, state["id"])
+        else:
+            self.photo_versions.put(pid, state["value"])
+        queue_versions_sync(self, pid)
+
     def _edit_set_photo_location(self, pid, value):
         from services.pending_changes import queue_location_sync_if_enabled
         state = json.loads(value)
@@ -5118,6 +5134,7 @@ class Database:
         'wildlife_excluded': _edit_set_wildlife_excluded,
         'color_label': _edit_set_color_label,
         'edit_recipe': _edit_set_edit_recipe,
+        'photo_version': _edit_set_photo_version,
         'photo_location': _edit_set_photo_location,
         'prediction_status': _edit_set_prediction_status,
     }

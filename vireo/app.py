@@ -96,6 +96,7 @@ from web.photo_edit_recipes import create_photo_edit_recipes_blueprint
 from web.photo_labels import create_photo_labels_blueprint
 from web.photo_location_keywords import create_photo_location_keywords_blueprint
 from web.photo_review import create_photo_review_blueprint
+from web.photo_versions import create_photo_versions_blueprint
 from web.photos import create_photos_blueprint
 from web.pipeline import create_pipeline_blueprint
 from web.predictions import create_predictions_blueprint
@@ -2058,6 +2059,7 @@ def _register_browse_blueprints(app, w):
         create_remote_setup_blueprint(_get_db, json_error, app.config)
     )
     app.register_blueprint(create_editing_blueprint(_get_db, json_error))
+    app.register_blueprint(create_photo_versions_blueprint(_get_db, json_error, app.config))
     app.register_blueprint(create_species_blueprint(_get_db))
     app.register_blueprint(
         create_system_blueprint(

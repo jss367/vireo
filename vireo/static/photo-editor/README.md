@@ -20,6 +20,7 @@ for the page's inline event handlers, and the editor's shared state lives on
 | `local-adjustments.js` | Subject/background adjustments, the mask snapshot, and the mask overlay |
 | `mask-brush.js` | Add/subtract mask painting, inverse geometry, and immutable correction requests |
 | `auto-tone.js` | Auto Tone requests (Balanced, Subject and Gentle styles) and their result messages |
+| `versions.js` | Virtual copies, named snapshots, version switching, and preview cards |
 | `save.js` | Resetting all edits and saving the recipe |
 | `checkpoints.js` | Edit History checkpoints and the saved-edit undo/redo hooks |
 | `export.js` | The Export dialog: presets, filename preview, preflight, and starting the job |
