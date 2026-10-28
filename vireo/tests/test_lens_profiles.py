@@ -406,3 +406,43 @@ def test_handoff_fallback_cache_reuses_and_recovers(database, app_and_db, tmp_pa
         assert stream.read() != fallback
     render()
     assert decoded == [False, True]
+
+
+@pytest.mark.parametrize("artifact", ["thumbnail", "preview"])
+def test_background_optical_cache_handles_disappearing_folder(database, app_and_db, tmp_path, monkeypatch, artifact):
+    from pipeline_stages.media import _preview_photo, _PreviewTarget
+    from services import photo_ingest, workspace_folders
+    from thumbnails import generate_all
+
+    app, db = app_and_db
+    folder = tmp_path / "raws"
+    folder.mkdir()
+    working = tmp_path / "working.jpg"
+    Image.new("RGB", (121, 81), (70, 70, 70)).save(working)
+    fid = workspace_folders.add_folder(db, str(folder))
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="photo.dng", extension=".dng",
+                                width=121, height=81, file_size=123, file_mtime=1)
+    metadata = _photo()
+    db.conn.execute('UPDATE photos SET camera_make=?,camera_model=?,lens=?,focal_length=?,aperture=?,working_copy_path=? WHERE id=?',
+                    (*[metadata[k] for k in ("camera_make", "camera_model", "lens", "focal_length", "aperture")], str(working), pid))
+    db.conn.commit()
+    recipe = {"adjustments": {"lens_profile": True}}
+    db.set_photo_edit_recipe(pid, recipe)
+    photo = db.photos.get(pid)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    # Photo selection happens before the folder map is read. A concurrent
+    # health check can remove its folder from tree() in between the two.
+    monkeypatch.setattr(type(db.folders), "tree", lambda self: [])
+    monkeypatch.setattr(type(db.photos), "list_page", lambda self, **kwargs: [photo])
+    if artifact == "thumbnail":
+        result = generate_all(db, str(cache), vireo_dir=str(tmp_path))
+        assert result["generated"] == 1 and result["failed"] == 0
+        assert (cache / f"{pid}.jpg").is_file()
+    else:
+        path = cache / f"{pid}_256.jpg"
+        Image.new("RGB", (121, 81)).save(path, **cache_save_options(photo, recipe))
+        db.caches.preview_insert(pid, 256, path.stat().st_size)
+        target = _PreviewTarget(str(cache), 256, str(tmp_path), 90)
+        assert _preview_photo(db, photo, {}, target) == "cached"
+        assert path.is_file()

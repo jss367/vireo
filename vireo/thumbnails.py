@@ -370,7 +370,9 @@ def _render_thumbnail_with_fallbacks(
     # add_photo INSERT) past the 30s busy_timeout.
     recipe_kwargs = {"recipe": recipe} if recipe else {}
     if recipe:
-        recipe_kwargs["original_path"] = os.path.join(folders[source_photo["folder_id"]], source_photo["filename"])
+        folder_path = folders.get(source_photo["folder_id"])
+        if folder_path:
+            recipe_kwargs["original_path"] = os.path.join(folder_path, source_photo["filename"])
         recipe_kwargs["camera_metadata"] = source_photo
         recipe_kwargs["native_size"] = _recipe_source_dimensions(
             source_photo

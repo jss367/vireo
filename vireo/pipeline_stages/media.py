@@ -810,8 +810,10 @@ def _preview_photo(
     detail_photo = thread_db.photos.get(photo["id"]) or photo
     cache_path = os.path.join(target.preview_dir, f'{photo["id"]}_{target.max_size}.jpg')
     recipe = thread_db.get_photo_edit_recipe(photo["id"])
+    folder_path = folders.get(photo["folder_id"])
+    source_path = os.path.join(folder_path, photo["filename"]) if folder_path else None
     if os.path.exists(cache_path) and _keep_existing_preview(
-        thread_db, photo, detail_photo, cache_path, recipe, target.max_size, os.path.join(folders[photo["folder_id"]], photo["filename"]),
+        thread_db, photo, detail_photo, cache_path, recipe, target.max_size, source_path,
     ):
         return "cached"
     if not os.path.exists(cache_path):
