@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from db import Database
+from job_runner.lineage import JobLineage
 from services import workspace_config
 
 if TYPE_CHECKING:
@@ -84,6 +85,10 @@ class StartupTasks:
                 self._app._job_runner.start_singleton(
                     "retained-cache-maintenance", self._maintain_retained_caches,
                     workspace_id=None, singleton_key="retained-cache-maintenance",
+                    lineage=JobLineage.system(
+                        "Hourly cleanup of generated files (previews, working "
+                        "copies, analysis caches) Vireo can rebuild"
+                    ),
                 )
             except Exception:
                 log.exception("Could not start retained generated-file maintenance")
@@ -119,12 +124,14 @@ class StartupTasks:
                              source_is_readable=source_verifier(db, settings, checkpoint),
                              checkpoint=checkpoint, progress=progress)
             workspaces = db.workspaces.list_all()
+            retired_total: dict[str, int] = {}
             for workspace in workspaces:
                 checkpoint()
                 db.set_active_workspace(workspace["id"])
                 retired = db._prune_edit_history()
                 for key, count in retired.items():
                     result[key] = result.get(key, 0) + count
+                    retired_total[key] = retired_total.get(key, 0) + count
             result_workspace_ids = {ws_id for _path, _kind, ws_id in result_files(os.path.dirname(self._db_path))}
             for ws_id in result_workspace_ids:
                 checkpoint()
@@ -136,6 +143,10 @@ class StartupTasks:
                     result["errors"].extend(errors)
                     result["errors_total"] += len(errors)
                     result["ok"] = result["ok"] and not errors
+            result["noop"] = not (
+                result.get("deleted") or result.get("errors_total")
+                or any(retired_total.values())
+            )
             return result
 
     def run_catalog_repairs(self) -> None:
@@ -288,16 +299,18 @@ class StartupTasks:
         return jobs_stopped
 
     def kickoff_thumb_path_backfill(self) -> None:
-        """Start the ephemeral thumb_path backfill job when it has work.
+        """Start the thumb_path backfill as a system job when it has work.
 
         The dashboard's coverage card counts thumbnails by ``thumb_path IS
         NOT NULL``, but for a long stretch the column was never populated by
         production code, so libraries with 40k JPEGs cached on disk reported
         "0 thumbnails" forever. This pass aligns the column with disk reality
         for legacy rows, and clears it for photos whose cached file has since
-        been deleted (drift correction). It runs as an ephemeral JobRunner job
-        (so it shows in the bottom panel), is never written to job_history,
-        and is skipped entirely when a fast count check finds nothing to do.
+        been deleted (drift correction). It runs as a system JobRunner job
+        (``JobLineage.system``), so it shows in the bottom panel and Jobs page
+        with the reason it started and its history row survives a crash; a
+        run that changed nothing is dropped from history. It is skipped
+        entirely when a fast count check finds nothing to do.
         """
         from thumbnails import (
             backfill_thumb_paths,
@@ -356,20 +369,25 @@ class StartupTasks:
                 def cancel_check() -> bool:
                     return runner.is_cancelled(job["id"])
 
-                return backfill_thumb_paths(
+                result = backfill_thumb_paths(
                     thread_db, cache_dir,
                     progress_callback=progress_cb,
                     status_callback=status_cb,
                     cancel_check=cancel_check,
                 )
+                result["noop"] = not (result.get("set") or result.get("cleared"))
+                return result
             finally:
                 thread_db.close()
 
         try:
             runner.start(
                 "thumb_path_backfill", work,
-                ephemeral=True,
                 config={"trigger": "startup"},
+                lineage=JobLineage.system(
+                    f"At startup, {candidate_count:,} photo records did not match "
+                    "the thumbnails cached on disk"
+                ),
             )
         except Exception:
             log.exception("Failed to start thumb_path backfill job")
@@ -380,8 +398,8 @@ class StartupTasks:
         Lists saved before they recorded identities leave BioCLIP predictions
         identified by name only, so a species whose name the taxonomy calls
         ambiguous shows up twice in review. See ``label_source_identities``.
-        The pass re-queries iNaturalist, so it runs as an ephemeral JobRunner
-        job (visible in the bottom panel) and only when a label set needs it;
+        The pass re-queries iNaturalist, so it runs as a system JobRunner job
+        (visible in the bottom panel and Jobs page) and only when a label set needs it;
         a list it could not reach stays pending for the next startup.
         """
         from label_source_identities import backfill, legacy_pass_needed, pending_label_sets
@@ -414,18 +432,28 @@ class StartupTasks:
                         "current": current, "total": total, "phase": phase,
                     })
 
-                return backfill(
+                result = backfill(
                     thread_db, progress=progress,
                     cancel_check=lambda: runner.is_cancelled(job["id"]),
                 )
+                result["noop"] = not (
+                    result.get("labels_identified")
+                    or result.get("predictions_updated")
+                    or result.get("legacy_predictions_updated")
+                    or result.get("errors")
+                )
+                return result
             finally:
                 thread_db.close()
 
         try:
             runner.start(
                 "label-list-species-ids", work,
-                ephemeral=True,
                 config={"trigger": "startup"},
+                lineage=JobLineage.system(
+                    "At startup, predictions from a label list were missing "
+                    "their iNaturalist species IDs"
+                ),
             )
         except Exception:
             log.exception("Failed to start label list species ID job")
@@ -438,8 +466,8 @@ class StartupTasks:
         (``photo_exif_search_text``) contain the term; a photo without a row
         falls back to the slower raw-text check. Triggers cover every later
         EXIF write, so this pass only runs after an upgrade, or after a
-        definition change empties the table. Ephemeral JobRunner job, so it
-        shows in the bottom panel; skipped when nothing is unindexed.
+        definition change empties the table. A system JobRunner job, so it
+        shows in the bottom panel and Jobs page; skipped when nothing is unindexed.
         """
         db_path = self._db_path
         check_db = None
@@ -480,15 +508,18 @@ class StartupTasks:
                                  f"{job['progress']['current']:,} / {total:,} photos",
                     })
                 log.info("EXIF search backfill: indexed %d photos", indexed)
-                return {"indexed": indexed}
+                return {"indexed": indexed, "noop": not indexed}
             finally:
                 thread_db.close()
 
         try:
             runner.start(
                 "exif_search_backfill", work,
-                ephemeral=True,
                 config={"trigger": "startup"},
+                lineage=JobLineage.system(
+                    f"At startup, {total:,} photos had camera metadata not yet "
+                    "indexed for search"
+                ),
             )
         except Exception:
             log.exception("Failed to start EXIF search backfill job")

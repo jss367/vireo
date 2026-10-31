@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from services import photo_ingest, workspace_folders
+from wait import wait_for_job_via_runner
 
 
 def _make_jpeg(path, w=200, h=150):
@@ -104,7 +105,7 @@ def test_startup_thumb_path_backfill_sets_unsynced_rows(tmp_path, monkeypatch):
     job = _wait_for_job(app._job_runner, "thumb_path_backfill")
     assert job is not None, "backfill job should have been started"
     assert job["status"] == "completed", f"job: {job}"
-    assert job.get("ephemeral") is True
+    assert job["origin"] == "system" and job["reason"], job
 
     db2 = Database(db_path)
     row = db2.conn.execute(
@@ -113,9 +114,13 @@ def test_startup_thumb_path_backfill_sets_unsynced_rows(tmp_path, monkeypatch):
     assert row["thumb_path"] == f"{pid}.jpg"
 
 
-def test_startup_thumb_path_backfill_does_not_persist_to_history(tmp_path, monkeypatch):
-    """Ephemeral job must NOT land in job_history — every restart would
-    otherwise add a noise row."""
+def test_startup_thumb_path_backfill_records_a_system_history_row(tmp_path, monkeypatch):
+    """A run that repaired rows is history worth keeping, marked as Vireo's.
+
+    It used to be ephemeral and never written, so a crash mid-backfill left
+    no trace. Now its row is written at start like any job; only a run that
+    changed nothing is dropped (see JobHistory.system_disposition).
+    """
     import config as cfg
     import models
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -149,10 +154,14 @@ def test_startup_thumb_path_backfill_does_not_persist_to_history(tmp_path, monke
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t")
     app._kickoff_thumb_path_backfill()
 
-    _wait_for_job(app._job_runner, "thumb_path_backfill")
-
+    job = _wait_for_job(app._job_runner, "thumb_path_backfill")
+    job = wait_for_job_via_runner(app._job_runner, job["id"], wait_for_history=True)
+    assert job["status"] == "completed", job
     db2 = Database(db_path)
     rows = db2.conn.execute(
-        "SELECT id FROM job_history WHERE type='thumb_path_backfill'"
+        "SELECT origin, reason, status FROM job_history WHERE type='thumb_path_backfill'"
     ).fetchall()
-    assert rows == [], "ephemeral job must not persist to history"
+    assert len(rows) == 1, rows
+    assert rows[0]["origin"] == "system"
+    assert "did not match" in rows[0]["reason"]
+    assert rows[0]["status"] == "completed"

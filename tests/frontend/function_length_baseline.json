@@ -31,7 +31,7 @@
   "vireo/static/jobs/actions.js:bindDetailPaneActions": 258,
   "vireo/static/jobs/actions.js:bindDetailPaneActions.@call:[[\"member\",[\"expression\",\"{\\\"type\\\":\\\"CallExpression\\\",\\\"callee\\\":{\\\"type\\\":\\\"MemberExpression\\\",\\\"object\\\":{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"document\\\"},\\\"property\\\":{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"getElementById\\\"},\\\"computed\\\":false,\\\"optional\\\":false},\\\"arguments\\\":[{\\\"type\\\":\\\"Literal\\\",\\\"value\\\":\\\"jobDetailPane\\\"}],\\\"optional\\\":false}\"],[\"property\",\"Identifier\",\"addEventListener\"],false],\"click\"]": 256,
   "vireo/static/jobs/import-retry.js:importResumeTakeover": 180,
-  "vireo/static/jobs/job-card.js:renderJobCard": 218,
+  "vireo/static/jobs/job-card.js:renderJobCard": 206,
   "vireo/static/jobs/steps.js:renderRichStep": 215,
   "vireo/static/lightbox/controls.js:buildLightboxContextMenu": 132,
   "vireo/static/lightbox/inat.js:exportInatQuickPhotos": 108,

@@ -27,6 +27,7 @@ _SKIPPED_KEYS = {
     "ok", "summary", "photo_ids", "failed_photo_ids", "stages", "duration",
     "collection_id", "workspace_id", "mode", "cancelled", "root_folder_id",
     "interrupted", "last_progress_at", "checkpoint_at", "partial_failure",
+    "noop",
 }
 
 

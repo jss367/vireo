@@ -35,6 +35,7 @@ import dir_listing_cache
 from app_paths import media_root
 from db import _SQLITE_PARAM_CHUNK_SIZE as SQLITE_PARAM_CHUNK_SIZE
 from db import Database, MissingPhotosCancelled
+from job_runner.lineage import JobLineage
 from photo_payload import attach_nested_edit_recipes
 from sidecar_identity import photo_sidecars
 
@@ -718,6 +719,13 @@ class MissingOriginals:
                 config={"scope": scan.scope_label, "folder_id": folder_id},
                 ephemeral=False,
                 counts_for_badge=True,
+                # The navbar's periodic check is Vireo's; "Check now" is yours.
+                lineage=(
+                    JobLineage.system(
+                        "Regular check that your photos' original files are "
+                        "still where Vireo expects them"
+                    ) if automatic else None
+                ),
             )
         except Exception:
             with self.lock:
@@ -846,6 +854,8 @@ class MissingOriginals:
                     self.errors.pop(key, None)
             return {
                 "missing_count": len(photos),
+                # Nothing missing and nothing stale: a routine all-clear.
+                "noop": not photos and not stale,
                 "checked_at": checked_at,
                 "scope": scan.scope_label,
                 "stale": stale,

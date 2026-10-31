@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 from config import config_value, settings_write_lock
 from db import ALL_NAV_IDS, DEFAULT_TABS
 from flask import Blueprint, abort, jsonify, request
+from job_runner.lineage import JobLineage
 from services import stage_counts, workspace_folders, workspace_lifecycle
 from services.local_folder import (
     affected_workspace_ids as local_folder_workspace_ids,
@@ -338,9 +339,12 @@ def _new_images_walk_compute(db_path: str, ws_id: int, walk_result: JsonDict, wa
 
 def _new_images_walk_job_payload(progress_state: JsonDict, result: JsonDict) -> JsonDict:
     """The recorded new-images job's result: final totals and caveats."""
+    unreachable = result.get("unreachable_roots") or []
     payload = {
         "files_checked": progress_state["checked"],
         "new_count": progress_state["found"],
+        # Nothing new and every folder reachable: a routine all-clear.
+        "noop": not progress_state["found"] and not unreachable,
         # Which folders this walk read from disk and which it
         # reused unchanged since the last look.
         "folders_read": result.get("folders_read", 0),
@@ -349,7 +353,6 @@ def _new_images_walk_job_payload(progress_state: JsonDict, result: JsonDict) -> 
     # An offline volume is a completed walk with a caveat, not
     # a failure: name the roots that were skipped so the Jobs
     # panel tells the same story as the banner.
-    unreachable = result.get("unreachable_roots") or []
     if unreachable:
         payload["unreachable_roots"] = list(unreachable)
         payload["phase"] = (
@@ -1204,9 +1207,13 @@ def create_workspace_blueprint(
             db.workspaces.update(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
-    def _new_images_walk_fns(db: Database, ws_id: int) -> tuple[Callable[..., JsonDict], Callable[..., Callable[..., None]], Callable[[], bool]]:
+    def _new_images_walk_fns(db: Database, ws_id: int, *, requested: bool) -> tuple[Callable[..., JsonDict], Callable[..., Callable[..., None]], Callable[[], bool]]:
         """Return ``(compute, on_spawn, spawned)`` for a transparent background
         new-images walk, shared by the navbar probe and the snapshot POST.
+
+        ``requested`` is True when the user asked for this walk (the banner's
+        snapshot click, "Check again"); otherwise it is the navbar's own
+        periodic probe, recorded as a system job.
 
         ``spawned()`` reports whether the most recent ``kickoff_compute`` that
         received this ``on_spawn`` actually started a worker. Only that
@@ -1277,6 +1284,10 @@ def create_workspace_blueprint(
                 counts_for_badge=True,
                 workspace_id=ws_id,
                 config={"workspace_name": ws_name},
+                lineage=None if requested else JobLineage.system(
+                    "Regular check of your workspace folders for photos not "
+                    "yet in Vireo"
+                ),
             )
 
             return _new_images_walk_progress_callback(runner, job_id, progress_state)
@@ -1380,7 +1391,9 @@ def create_workspace_blueprint(
         # libraries (and the test suite's tmp_path filesystems) still
         # observe a real count synchronously; longer walks return
         # ``pending: true`` and the front-end re-polls.
-        compute, on_spawn, spawned = _new_images_walk_fns(db, ws_id)
+        compute, on_spawn, spawned = _new_images_walk_fns(
+            db, ws_id, requested=manual_recheck,
+        )
         event = cache.kickoff_compute(
             db_path, ws_id, compute, on_spawn=on_spawn,
             can_start=lambda: _new_images_deferred_reason(manual=manual_recheck) is None,
@@ -1493,7 +1506,7 @@ def create_workspace_blueprint(
         # poll loops can never stack walks or restart one mid-flight.
         # ``on_spawn`` registers the same recorded bottom-panel job the
         # navbar probe gets, so a click-triggered walk is just as visible.
-        compute, on_spawn, spawned = _new_images_walk_fns(db, ws_id)
+        compute, on_spawn, spawned = _new_images_walk_fns(db, ws_id, requested=True)
         event = cache.kickoff_compute(
             db_path, ws_id, compute, on_spawn=on_spawn,
             can_start=lambda: _new_images_deferred_reason(manual=True) is None,

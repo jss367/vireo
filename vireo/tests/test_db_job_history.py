@@ -173,7 +173,8 @@ def test_terminal_is_newest_first_and_scoped_only_when_asked(history_db):
         db.conn.execute("UPDATE job_history SET started_at = ? WHERE id = ?", (started, job_id))
     db.commit()
     terminal = ("completed", "failed", "cancelled")
-    assert [r["id"] for r in db.job_history.terminal(ws, terminal, 10)] == ["b", "a"]
+    # A workspace's history includes the global rows (maintenance, downloads).
+    assert [r["id"] for r in db.job_history.terminal(ws, terminal, 10)] == ["b", "d", "a"]
     assert [r["id"] for r in db.job_history.terminal(None, terminal, 10)] == ["b", "d", "a"]
     assert [r["id"] for r in db.job_history.terminal(None, terminal, 1)] == ["b"]
 

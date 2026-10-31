@@ -18,6 +18,7 @@ jobsElement('retryJobsPolling', HTMLButtonElement).addEventListener('click', ret
 // The type and status filters used to carry onchange="applyFilters()".
 jobsElement('filterType', HTMLSelectElement).addEventListener('change', applyFilters);
 jobsElement('filterStatus', HTMLSelectElement).addEventListener('change', applyFilters);
+jobsElement('filterOrigin', HTMLSelectElement).addEventListener('change', applyFilters);
 
 // Initial load
 fetchJobs();

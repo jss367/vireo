@@ -69,12 +69,19 @@ class JobHistoryRepository:
     def terminal(
         self, workspace_id: int | None, statuses: Sequence[str], limit: int,
     ) -> list[sqlite3.Row]:
-        """Newest-first rows in ``statuses``, of one workspace or (``None``) every one."""
+        """Newest-first rows in ``statuses``, of one workspace or (``None``) every one.
+
+        A workspace's rows include the global ones (``workspace_id`` NULL:
+        storage maintenance, model downloads), which belong to every
+        workspace; leaving them out hid Vireo's own maintenance from the
+        Jobs page entirely.
+        """
         placeholders = ",".join(["?"] * len(statuses))
         if workspace_id is not None:
             return self.conn.execute(
                 f"SELECT * FROM job_history "
-                f"WHERE workspace_id = ? AND status IN ({placeholders}) "
+                f"WHERE (workspace_id = ? OR workspace_id IS NULL) "
+                f"AND status IN ({placeholders}) "
                 f"ORDER BY started_at DESC LIMIT ?",
                 (workspace_id, *statuses, limit),
             ).fetchall()
@@ -145,7 +152,7 @@ class JobHistoryRepository:
     def chained_job_row(self, parent_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT 1 FROM job_history "
-            "WHERE json_extract(config, '$.chained_from') = ? "
+            "WHERE parent_job_id = ? "
             "  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
             "  AND NOT (type='pipeline' AND status='cancelled' AND duration IS NULL "
             "           AND (result IS NULL OR result='null')) "

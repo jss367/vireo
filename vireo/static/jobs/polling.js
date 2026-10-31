@@ -152,7 +152,7 @@ export async function jobsServerError(response) {
     return !state.historyJobs.some(function(row) { return row.id === id; });
   });
   // No receipt can mean the checkpoint preceded the processing handoff.
-  // The server also searches pipelines by chained_from in that crash window.
+  // The server also searches pipelines by parent_job_id in that crash window.
   if (!directCandidate && !missing && ids.length) return;
   job.import_resume_pending = !!interrupted;
   job.import_direct_pending = directCandidate;

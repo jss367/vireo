@@ -397,7 +397,7 @@ def test_startup_job_recovers_identities_in_the_background(db, tmp_path, monkeyp
 
     job = _wait_for_job(app._job_runner, "label-list-species-ids")
     assert job is not None and job["status"] == "completed", job
-    assert job.get("ephemeral") is True
+    assert job["origin"] == "system" and job["reason"], job
     row = _row(db, _prediction_id(db, det, "BioCLIP-2.5", legacy_list["fingerprint"]))
     assert row["source_taxon_id"] == REDHEAD["taxon_id"]
 

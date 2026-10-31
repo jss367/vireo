@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from db import Database
+from job_runner.lineage import JobLineage
 from job_runner.work_control import JobCancelled, JobNotStarted, SerializedWork, WorkControl
 from services.local_folder import (
     LOCAL_FOLDER_JOB_TYPES,
@@ -323,7 +324,7 @@ class FolderMoves:
                 return {"ok": False, "moved": 0, "errors": [],
                         "summary": "Cancelled before transfer started"}
 
-        job_config = _move_job_config(request, chain.chained_from)
+        job_config = _move_job_config(request)
         managed_staging_root = staging.managed_staging_root
 
         def staged_work(job: JobDict) -> JsonDict:
@@ -348,16 +349,21 @@ class FolderMoves:
             request.destination_name or os.path.basename(os.path.normpath(request.source_path)),
         )
         move_paths = [os.path.realpath(request.source_path), os.path.realpath(landing)]
+        # Provenance for the Jobs page: a chained move follows the
+        # processing run whose completion hook started it.
+        lineage = JobLineage.following(chain.chained_from)
         if managed_staging_root:
             return runner.start(
                 "move-folder", staged_work, config=job_config,
                 workspace_id=workspace_id,
                 workspace_transfer_batch=managed_staging_root,
                 workspace_paths=move_paths,
+                lineage=lineage,
             )
         return runner.start(
             "move-folder", work, config=job_config, workspace_id=workspace_id,
             workspace_paths=move_paths,
+            lineage=lineage,
         )
 
     def _run_move_job(
@@ -659,7 +665,7 @@ def _remove_empty_staging_parents(source_path: str, managed_staging_root: str) -
         parent = os.path.dirname(parent)
 
 
-def _move_job_config(request: FolderMoveRequest, chained_from: str | None) -> JsonDict:
+def _move_job_config(request: FolderMoveRequest) -> JsonDict:
     """Build the move-folder job's config snapshot for the jobs panel."""
     folder_template = request.folder_template
     date_destinations = request.date_destinations
@@ -705,10 +711,6 @@ def _move_job_config(request: FolderMoveRequest, chained_from: str | None) -> Js
             "mount_dest_base": remote["mount_dest_base"],
             "bwlimit_kbps": remote["bwlimit_kbps"],
         }
-    if chained_from:
-        # Provenance for the jobs panel: this move was started by a
-        # chained process run's completion hook, not by hand.
-        job_config["chained_from"] = chained_from
     return job_config
 
 

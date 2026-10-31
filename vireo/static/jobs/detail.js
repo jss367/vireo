@@ -3,7 +3,24 @@
 import { jobsElement, state } from './state.js';
 import { isLiveStatus } from './format.js';
 import { renderJobCard } from './job-card.js';
+import { groupOperations } from './lineage.js';
+import { filteredHistory } from './list.js';
 import { escapeHtml } from './shared.js';
+
+/**
+ * Cards for ``rows``, each operation's follow-ups indented under its root.
+ * @param {JobsRow[]} rows @param {(job: JobsRow) => {workspaceName?: string}} optionsFor
+ */
+function renderOperationCards(rows, optionsFor) {
+  var html = '';
+  groupOperations(rows).forEach(function(group) {
+    html += renderJobCard(group.root, optionsFor(group.root));
+    group.followUps.forEach(function(j) {
+      html += renderJobCard(j, Object.assign({ followUp: true }, optionsFor(j)));
+    });
+  });
+  return html;
+}
 
 /** @param {JobsRow} job */ export function renderDetail(job) {
   var pane = jobsElement('jobDetailPane', HTMLElement);
@@ -68,15 +85,14 @@ export function renderActiveOverview() {
 
   var html = '<div style="padding:16px 24px 0;">';
 
-  thisWs.forEach(function(j) {
-    html += renderJobCard(j, j.workspace_id == null ? { workspaceName: 'All workspaces' } : {});
+  html += renderOperationCards(thisWs, function(j) {
+    return j.workspace_id == null ? { workspaceName: 'All workspaces' } : {};
   });
 
   if (otherWs.length > 0) {
     html += '<div class="jobs-overview-divider">Other Workspaces</div>';
-    otherWs.forEach(function(j) {
-      var wsName = state.workspaceNames[j.workspace_id ?? -1] || ('Workspace ' + j.workspace_id);
-      html += renderJobCard(j, { workspaceName: wsName });
+    html += renderOperationCards(otherWs, function(j) {
+      return { workspaceName: state.workspaceNames[j.workspace_id ?? -1] || ('Workspace ' + j.workspace_id) };
     });
   }
 
@@ -95,16 +111,11 @@ export function renderHistoryOverview() {
         : 'Loading job history…') + '</div>';
     return;
   }
-  var typeFilter = jobsElement('filterType', HTMLSelectElement).value;
-  var statusFilter = jobsElement('filterStatus', HTMLSelectElement).value;
-
-  var filtered = state.historyJobs;
-  if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
-  if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });
+  var filtered = filteredHistory();
 
   if (filtered.length === 0) {
     pane.innerHTML = '<div class="jobs-overview-empty">No job history' +
-      (typeFilter || statusFilter ? ' matching filters' : '') + '.</div>';
+      (filtered.length < state.historyJobs.length ? ' matching filters' : '') + '.</div>';
     return;
   }
 
@@ -115,9 +126,7 @@ export function renderHistoryOverview() {
   html += '<div style="font-size:12px;color:var(--text-ghost);margin-bottom:12px;">Showing ' +
     filtered.length + ' jobs back to ' + oldestDate + '</div>';
 
-  filtered.forEach(function(j) {
-    html += renderJobCard(j);
-  });
+  html += renderOperationCards(filtered, function() { return {}; });
 
   html += '</div>';
   pane.innerHTML = html;

@@ -4,6 +4,7 @@ import { jobsElement, state } from './state.js';
 import { renderHistoryOverview, renderMainPane } from './detail.js';
 import { activeProgress, formatElapsed, isLiveStatus, progressPct, timeAgo } from './format.js';
 import { jobCollectionText } from './job-card.js';
+import { findJob, followUpText, groupOperations, isSystemJob, matchesOriginFilter, repeatText } from './lineage.js';
 import { selectJob } from './selection.js';
 import { escapeHtml, formatJobType } from './shared.js';
 
@@ -25,10 +26,31 @@ export function applyFilters() {
   if (state.currentView === 'history') renderHistoryOverview();
 }
 
-export function updateList() {
-  var container = jobsElement('jobListContent', HTMLElement);
+// The history rows the type, status and origin filters let through.
+export function filteredHistory() {
   var typeFilter = jobsElement('filterType', HTMLSelectElement).value;
   var statusFilter = jobsElement('filterStatus', HTMLSelectElement).value;
+  var originFilter = jobsElement('filterOrigin', HTMLSelectElement).value;
+  var filtered = state.historyJobs;
+  if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
+  if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });
+  if (originFilter) filtered = filtered.filter(function(j) { return matchesOriginFilter(j, originFilter); });
+  return filtered;
+}
+
+/** @param {JobsRow[]} rows @param {string} source */ function renderOperations(rows, source) {
+  var html = '';
+  groupOperations(rows).forEach(function(group) {
+    html += renderListItem(group.root, source);
+    group.followUps.forEach(function(j) {
+      html += renderListItem(j, source, { followUp: true });
+    });
+  });
+  return html;
+}
+
+export function updateList() {
+  var container = jobsElement('jobListContent', HTMLElement);
   var html = '';
 
   // Active = running OR queued. Queued pipelines waiting behind a busy
@@ -39,11 +61,9 @@ export function updateList() {
   });
   html += '<div class="jobs-list-divider clickable' + (state.currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
     (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
-  running.forEach(function(j) { html += renderListItem(j, 'active'); });
+  html += renderOperations(running, 'active');
 
-  var filtered = state.historyJobs;
-  if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
-  if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });
+  var filtered = filteredHistory();
 
   html += '<div class="jobs-list-divider clickable' + (state.currentView === 'history' ? ' selected' : '') + '" data-view="history">History</div>';
   if (state.jobsPollState.history.error && !state.jobsPollState.history.loaded) {
@@ -57,11 +77,13 @@ export function updateList() {
     }
     html += '<div style="padding:24px;text-align:center;color:var(--text-ghost);font-size:13px;">' + emptyMessage + '</div>';
   }
-  filtered.forEach(function(j) { html += renderListItem(j, 'history'); });
+  html += renderOperations(filtered, 'history');
   container.innerHTML = html;
 }
 
-/** @param {JobsRow} j @param {string} source */ export function renderListItem(j, source) {
+/** @param {JobsRow} j @param {string} source @param {{followUp?: boolean}=} options */
+export function renderListItem(j, source, options) {
+  options = options || {};
   var selected = j.id === state.selectedJobId ? ' selected' : '';
   var dot = j.status || 'completed';
   var time = '';
@@ -88,16 +110,29 @@ export function updateList() {
   if (collectionText) {
     detail = detail ? detail + ' &middot; ' + escapeHtml(collectionText) : escapeHtml(collectionText);
   }
+  var repeats = repeatText(j);
+  if (repeats) {
+    detail = detail ? escapeHtml(repeats) + ' &middot; ' + detail : escapeHtml(repeats);
+  }
+  // A follow-up shown without its parent (filtered out, or pruned) still
+  // says what started it.
+  var orphanNote = !options.followUp && j.parent_job_id
+    ? followUpText(j, findJob(j.parent_job_id, [state.activeJobs, state.historyJobs])) : '';
   var pct = 0;
   if (visibleProgress) {
     pct = progressPct(visibleProgress);
   }
-  var html = '<div class="job-list-item' + selected + '" data-job-id="' + escapeHtml(j.id) + '" data-job-source="' + source + '">';
+  var html = '<div class="job-list-item' + selected + (options.followUp ? ' follow-up' : '') +
+    '" data-job-id="' + escapeHtml(j.id) + '" data-job-source="' + source + '">';
   html += '<div class="job-list-item-header">';
   html += '<span class="job-list-item-dot ' + dot + '"></span>';
   html += '<span class="job-list-item-type">' + escapeHtml(formatJobType(j.type)) + '</span>';
+  if (isSystemJob(j) && !options.followUp) {
+    html += '<span class="job-origin-chip" title="' + escapeHtml(j.reason || 'Vireo started this on its own') + '">Vireo</span>';
+  }
   html += '<span class="job-list-item-time">' + time + '</span>';
   html += '</div>';
+  if (orphanNote) html += '<div class="job-list-item-detail">' + escapeHtml(orphanNote) + '</div>';
   if (detail) html += '<div class="job-list-item-detail">' + detail + '</div>';
   if (isLiveStatus(j.status) && pct > 0) {
     html += '<div class="job-list-item-progress"><div class="job-list-item-progress-fill" style="width:' + pct + '%"></div></div>';

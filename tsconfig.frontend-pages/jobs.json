@@ -8,6 +8,7 @@
     "../vireo/static/jobs/format.js",
     "../vireo/static/jobs/import-retry.js",
     "../vireo/static/jobs/job-card.js",
+    "../vireo/static/jobs/lineage.js",
     "../vireo/static/jobs/list.js",
     "../vireo/static/jobs/move-route.js",
     "../vireo/static/jobs/polling.js",
