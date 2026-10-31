@@ -9,6 +9,7 @@ runs the move's phases in order through three collaborators:
 import logging
 import os
 import shutil
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from .folder_catalog import _FolderCatalogRewrite
@@ -241,15 +242,17 @@ class _FolderMove:
             if error is not None:
                 return error
 
-        error = self.verify_and_begin_commit()
-        if error is not None:
-            return error
-        catalog.update_catalog()
-        catalog.apply_mtime_corrections(transfer.mtime_updates)
-        catalog.relocate_developed_dirs()
-        self.remove_originals()
-        self.progress(transfer.total_files, transfer.total_files, folder_name,
-                      "Done")
+        guard = self.control.commit_context if self.control else nullcontext
+        with guard():
+            error = self.verify_and_begin_commit()
+            if error is not None:
+                return error
+            catalog.update_catalog()
+            catalog.apply_mtime_corrections(transfer.mtime_updates)
+            catalog.relocate_developed_dirs()
+            self.remove_originals()
+            self.progress(transfer.total_files, transfer.total_files, folder_name,
+                          "Done")
         return self.result()
 
     def verify_and_begin_commit(self):

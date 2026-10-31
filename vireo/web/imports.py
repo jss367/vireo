@@ -25,7 +25,7 @@ from config import config_value
 from db import Database
 from file_identity import catalog_file_paths, catalog_scan_root
 from flask import Blueprint, Response, abort, jsonify, make_response, request
-from job_runner.work_control import WorkControl
+from job_runner.work_control import SerializedWork, WorkControl
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
 from new_images import exclude_snapshot_folders, invalidate_new_images_after_scan
@@ -1483,7 +1483,10 @@ def create_imports_blueprint(
             _staged_photo_ids(thread_db, folder_ids)
             if sync_first else []
         )
-        control = WorkControl(runner, job["id"])
+        # Keep the copy unlocked, but exclude sibling sidecar writers during
+        # final verification and source removal. Pause releases that guard;
+        # Resume reacquires it before the mandatory fresh verification.
+        control = SerializedWork(runner, job["id"], sync_job_lock if sync_first else None).control
         synced, undeliverable = _sync_before_archive_transfer(
             thread_db, control, progress, folder_ids) if sync_first else (0, set())
         control.checkpoint()

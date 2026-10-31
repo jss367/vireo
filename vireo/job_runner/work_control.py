@@ -18,10 +18,11 @@ class WorkControl:
     ``generation`` lets a verifier discard evidence gathered before a pause.
     """
 
-    def __init__(self, runner, job_id, pause_context=nullcontext):
+    def __init__(self, runner, job_id, pause_context=nullcontext, commit_context=nullcontext):
         self.runner = runner
         self.job_id = job_id
         self.pause_context = pause_context
+        self.commit_context = commit_context
         self.generation = 0
 
     def stop_requested(self):
@@ -57,7 +58,7 @@ class SerializedWork:
         self.job_id = job_id
         self.lock = lock
         self.held = False
-        self.control = WorkControl(runner, job_id, self._pause)
+        self.control = WorkControl(runner, job_id, self._pause, self._commit_scope)
 
     def _acquire(self, *, checkpoint):
         if self.lock is None:
@@ -75,6 +76,19 @@ class SerializedWork:
         if self.held:
             self.lock.release()
             self.held = False
+
+    @contextmanager
+    def _commit_scope(self):
+        """Guard verification and commit, unless an outer scope already does."""
+        if self.held:
+            yield
+            return
+        try:
+            self._acquire(checkpoint=True)
+            self.control.checkpoint()
+            yield
+        finally:
+            self._release()
 
     @contextmanager
     def _pause(self):

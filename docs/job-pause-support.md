@@ -72,8 +72,10 @@ Date-organized folder moves commit one photo at a time, so photos already moved
 remain moved after Cancel.
 
 Send to NAS releases the global metadata synchronization lock after its optional
-sidecar-writing phase. A pause during that phase waits for it to finish. The
-long copy and verification do not keep the sidecar lock held.
+sidecar-writing phase and reacquires it for final verification through source
+cleanup. A pause during sidecar writing waits for that phase to finish. Pausing
+verification releases the lock; Resume reacquires it before fresh verification.
+The long copy does not keep the sidecar lock held.
 
 ## Adding a new job
 
