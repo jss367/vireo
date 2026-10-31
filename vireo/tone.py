@@ -715,7 +715,25 @@ class ToneAdjustments:
     """The global tone and color controls of an edit recipe.
 
     Each field is a recipe ``adjustments`` key; the defaults leave the
-    image unchanged. See :func:`apply_adjustments` for what each does.
+    image unchanged.
+
+    Fields:
+        exposure: stops of exposure (linear gain ``2 ** exposure``).
+        white_balance: dict with ``temperature``/``tint`` in [-100, 100], or None.
+        highlights: [-100, 100]; local exposure of bright neighborhoods,
+            up to ``RANGE_STOPS`` stops.
+        shadows: [-100, 100]; local exposure of dark neighborhoods, up to
+            ``RANGE_STOPS`` stops.
+        whites: [-100, 100]; perceptual-luminance white point adjustment.
+        blacks: [-100, 100]; perceptual-luminance black point adjustment.
+        contrast: [-100, 100]; a linear contrast around mid-grey (0.5).
+        vibrance: [-100, 100]; luma-preserving selective saturation.
+        saturation: [-100, 100]; luma-preserving saturation in display space.
+        tone_curve: five composite RGB output points at fixed input levels.
+        hsl: per-colour hue, saturation, and luminance adjustments.
+        point_curves: composite and RGB channel [input, output] control points.
+        point_color: sampled HSL colors with selection ranges and adjustments.
+        color_grading: shadow/midtone/highlight hue and saturation tints.
     """
 
     exposure: float = 0.0
@@ -773,7 +791,7 @@ def apply_adjustments(
     Args:
         rgb: float array shaped ``(..., 3)``. Normally sRGB-encoded [0,1];
             ``input_linear=True`` accepts scene-linear RAW data above white.
-        adjustments: the global controls (``ToneAdjustments``, fields below);
+        adjustments: the global controls (see ``ToneAdjustments``);
             None leaves every control at its default.
         local: mask-weighted deltas (``LocalAdjustments``), or None for the
             global-only path; see below.
@@ -784,24 +802,6 @@ def apply_adjustments(
         range_base: a base already built over the whole frame, for a tile
             of it at ``origin`` (top, left); takes precedence over
             ``range_sigma``.
-
-    ``ToneAdjustments`` fields:
-        exposure: stops of exposure (linear gain ``2 ** exposure``).
-        white_balance: dict with ``temperature``/``tint`` in [-100, 100], or None.
-        highlights: [-100, 100]; local exposure of bright neighborhoods,
-            up to ``RANGE_STOPS`` stops.
-        shadows: [-100, 100]; local exposure of dark neighborhoods, up to
-            ``RANGE_STOPS`` stops.
-        whites: [-100, 100]; perceptual-luminance white point adjustment.
-        blacks: [-100, 100]; perceptual-luminance black point adjustment.
-        contrast: [-100, 100]; a linear contrast around mid-grey (0.5).
-        vibrance: [-100, 100]; luma-preserving selective saturation.
-        saturation: [-100, 100]; luma-preserving saturation in display space.
-        tone_curve: five composite RGB output points at fixed input levels.
-        hsl: per-colour hue, saturation, and luminance adjustments.
-        point_curves: composite and RGB channel [input, output] control points.
-        point_color: sampled HSL colors with selection ranges and adjustments.
-        color_grading: shadow/midtone/highlight hue and saturation tints.
 
     Returns:
         float32 array, same shape, sRGB-encoded and clipped to [0,1].
