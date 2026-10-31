@@ -162,7 +162,8 @@ def test_startup_backfill_job_indexes_unindexed_photos(tmp_path, monkeypatch):
             break
         time.sleep(0.05)
     assert job is not None and job["status"] == "completed", job
-    assert job["result"] == {"indexed": 1}
+    assert job["result"] == {"indexed": 1, "noop": False}
+    assert job["origin"] == "system"
 
     check = Database(db_path)
     try:
