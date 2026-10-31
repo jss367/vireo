@@ -134,7 +134,7 @@
     if (!job) return '';
     var label = typeof window.formatJobType === 'function'
       ? window.formatJobType(job.type)
-      : String(job.type || 'Processing').replace(/[-_]+/g, ' ');
+      : String(job.type || 'Processing').replace(/[-_]+/g, ' ').replace(/\bnas\b/gi, 'NAS');
     var status = ['queued', 'running', 'pausing', 'paused'].indexOf(job.status) >= 0
       ? job.status
       : 'running';

@@ -64,11 +64,13 @@ def _human_bytes(size: Any) -> str:
     return ""
 
 
-def _humanize_key(key: str) -> str:
+def _humanize_key(key: str, *, sentence_case: bool = True) -> str:
     words = str(key).replace("_", " ").replace("-", " ").split()
     if not words:
         return str(key)
-    return " ".join(words).capitalize()
+    text = " ".join(words)
+    text = text.capitalize() if sentence_case else text.lower()
+    return re.sub(r"\bnas\b", "NAS", text, flags=re.IGNORECASE)
 
 
 def _format_scalar(value: Any) -> str:
@@ -939,7 +941,7 @@ def _generic(result: dict, config: dict) -> tuple[str, list[str]]:
             count = int(total) if isinstance(total, (int, float)) and not isinstance(total, bool) else len(value)
             if not value and not count:
                 continue
-            noun = _humanize_key(key).lower()
+            noun = _humanize_key(key, sentence_case=False)
             if count == 1 and noun.endswith("s"):
                 noun = noun[:-1]
             parts.append(f"{count:,} {noun}")

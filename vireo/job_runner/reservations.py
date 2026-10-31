@@ -43,6 +43,7 @@ def format_duration(seconds):
 def describe_job(job):
     """Name a job for a busy message, e.g. "the export job (running for 4 min)"."""
     kind = str(job.get("type") or "unknown").replace("-", " ").replace("_", " ")
+    kind = " ".join("NAS" if word.lower() == "nas" else word for word in kind.split())
     status = job.get("status") or "running"
     started = job.get("_start_time")
     if status == "running" and isinstance(started, (int, float)):
