@@ -169,6 +169,12 @@ seams, corners, image boundaries, alpha preservation, local weights, and source
 immutability. A work-count regression guards overlap cost without relying on
 wall-clock timing in CI.
 
+Edit math version 10 later replaced the overlapping filter with a base built
+once per frame on a coarse grid (`tone.RangeBase`), so tiles no longer overlap.
+On a synthetic 46 MP scene-linear frame with four numeric threads, the warm
+tone pass for an exposure plus Shadows/Highlights recipe fell from 11.8 to
+4.2 seconds and its peak memory from 2.29 to 1.58 GiB.
+
 ## Preview worker measurements
 
 The [schema 2 worker report](performance/raw-preview-workers.json) records the

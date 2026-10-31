@@ -108,10 +108,9 @@ python -m pytest -o addopts='' -o junit_family=xunit1 -q \
 
 Cold RAW decoding still uses the full-precision decoder. The quick tier reduces
 render/output work; it does not replace that decode with an embedded JPEG.
-Native Shadows/Highlights rendering uses rectangular tiles with the full filter
-neighborhood on each edge. This avoids repeating the same filtering over wide,
-short strips while keeping the working tile budget bounded. Pointwise edits
-retain contiguous row tiles, and images within the budget run in one pass.
+Native Shadows/Highlights rendering builds its neighborhood base once per
+frame on a coarse grid, so the tone pass runs in contiguous row tiles with no
+overlap, and images within the budget run in one pass.
 See [RAW preview benchmarks](../../../docs/raw-preview-benchmarks.md) for the
 real-camera corpus runner, memory measurements, regression comparisons, and
 server cancellation and its limits.

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from tone import (
     HIGHLIGHT_KNEE,
+    RANGE_STOPS,
     LocalAdjustments,
     ToneAdjustments,
     apply_adjustments,
@@ -172,12 +173,20 @@ def test_extreme_range_control_combinations_remain_monotonic():
         _assert_monotonic_grey(apply_adjustments(ramp, ToneAdjustments(**adjustments)))
 
 
-def test_shadows_and_highlights_preserve_black_and_white_endpoints():
+def test_shadows_and_highlights_keep_black_and_only_highlight_recovery_moves_white():
     endpoints = np.array([[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]], dtype=np.float32)
     for name in ("shadows", "highlights"):
         for amount in (-100, -50, 50, 100):
             out = apply_adjustments(endpoints, ToneAdjustments(**{name: amount}))
-            assert np.allclose(out, endpoints, atol=1e-6)
+            # An exposure gain has nothing to scale at black.
+            np.testing.assert_allclose(out[0, 0], 0.0, atol=1e-6)
+            if name == "shadows" or amount > 0:
+                np.testing.assert_allclose(out[0, 1], 1.0, atol=1e-6)
+    # Recovering highlights is a local exposure cut, so it may darken white,
+    # by at most RANGE_STOPS.
+    white = srgb_to_linear(apply_adjustments(endpoints, ToneAdjustments(highlights=-100))[0, 1])
+    assert np.all(white < 1.0)
+    assert np.all(white >= 2.0 ** -RANGE_STOPS - 1e-6)
 
 
 def test_blacks_and_whites_deliberately_move_only_their_endpoint_direction():

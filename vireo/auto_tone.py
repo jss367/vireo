@@ -54,6 +54,7 @@ try:
         LUMA_B,
         LUMA_G,
         LUMA_R,
+        RangeBase,
         ToneAdjustments,
         apply_adjustments,
         linear_to_srgb,
@@ -67,6 +68,7 @@ except ImportError:
         LUMA_B,
         LUMA_G,
         LUMA_R,
+        RangeBase,
         ToneAdjustments,
         apply_adjustments,
         linear_to_srgb,
@@ -119,8 +121,8 @@ HIGHLIGHTS_LIMIT = -70.0
 # 10% of the subject) sits above this level.
 HIGHLIGHT_CEILING = 0.90
 
-SHADOWS_LIMIT = 50.0
-SHADOWS_LIMIT_SUBJECT = 70.0
+SHADOWS_LIMIT = 100.0
+SHADOWS_LIMIT_SUBJECT = 100.0
 # Lift until the 10th percentile of the frame reaches FRAME_SHADOW_FLOOR, or
 # with a subject, its 25th percentile reaches SUBJECT_SHADOW_FLOOR (the frame
 # floor relaxes so a dark background behind a lit subject stays dark).
@@ -256,28 +258,45 @@ def _largest(limit, ok, step=1.0):
 
 class _Fitter:
     def __init__(
-        self, rgb, *, input_linear, range_radius, subject, white_balance,
+        self, rgb, *, input_linear, range_sigma, subject, white_balance,
         presence, presence_scale,
     ):
         self.rgb = rgb
         self.input_linear = input_linear
-        self.range_radius = range_radius
+        self.range_sigma = range_sigma
         self.subject = subject
         self.white_balance = white_balance or None
         self.presence = {k: v for k, v in (presence or {}).items() if v}
         self.presence_scale = presence_scale
         self._cache = {}
+        self._bases = {}
+
+    def _range_base(self, exposure):
+        """The Shadows/Highlights base, which only exposure changes here."""
+        if not self.range_sigma or self.rgb.ndim != 3:
+            return None
+        base = self._bases.get(exposure)
+        if base is None:
+            base = self._bases[exposure] = RangeBase.build(
+                self.rgb, self.range_sigma, exposure=exposure,
+                white_balance=self.white_balance, input_linear=self.input_linear,
+            )
+        return base
 
     def render(self, adjustments):
         key = tuple(sorted((k, round(float(v), 4)) for k, v in adjustments.items() if v))
         cached = self._cache.get(key)
         if cached is not None:
             return cached
+        values = dict(key)
         rgb = apply_adjustments(
             self.rgb,
-            ToneAdjustments(white_balance=self.white_balance, **dict(key)),
+            ToneAdjustments(white_balance=self.white_balance, **values),
             input_linear=self.input_linear,
-            range_radius=self.range_radius,
+            range_base=(
+                self._range_base(values.get("exposure", 0.0))
+                if values.get("shadows") or values.get("highlights") else None
+            ),
         )
         if self.presence:
             try:
@@ -561,7 +580,7 @@ def _fit_colour(fitter, adj):
 
 
 def fit(
-    rgb, *, input_linear=False, range_radius=0, subject=None,
+    rgb, *, input_linear=False, range_sigma=0.0, subject=None,
     white_balance=None, presence=None, presence_scale=1.0, style="balanced",
 ):
     """Fit Auto Tone to a pre-tone RGB buffer.
@@ -569,8 +588,8 @@ def fit(
     Args:
         rgb: float array ``(H, W, 3)`` after geometry and crop; sRGB-encoded
             [0, 1], or scene-linear when ``input_linear`` (RAW).
-        range_radius: guided-filter radius for Shadows/Highlights at this
-            buffer's scale, as the real render would use.
+        range_sigma: blur of the Shadows/Highlights base in this buffer's
+            pixels, as the real render would use (``tone.range_sigma``).
         subject: optional ``(H, W)`` weight map in [0, 1] marking the subject.
         white_balance, presence: the photo's current white balance and
             texture/clarity/dehaze, rendered during the fit but not changed.
@@ -590,7 +609,7 @@ def fit(
     fitter = _Fitter(
         rgb,
         input_linear=input_linear,
-        range_radius=range_radius,
+        range_sigma=range_sigma,
         subject=weights,
         white_balance=white_balance,
         presence=presence,
@@ -742,11 +761,11 @@ def fit_loaded_image(
             detail_render_scale,
             normalize_recipe,
         )
-        from .tone import RANGE_RADIUS
+        from .tone import range_sigma
     except ImportError:
         from edit_recipe import _PRESENCE_KEYS, normalize_recipe
         from image_edits import _apply_geometry, _lens_profile_for_image, apply_optics, detail_render_scale
-        from tone import RANGE_RADIUS
+        from tone import range_sigma
 
     normalized = normalize_recipe(recipe) or {}
     adjustments = normalized.get("adjustments") or {}
@@ -756,6 +775,9 @@ def fit_loaded_image(
     profile = _lens_profile_for_image(img, normalized, camera_metadata)
     corrected = apply_optics(img if floating else img.convert("RGB"), adjustments, profile)
     frame = _apply_geometry(corrected, normalized, profile)
+    # The render sizes the Shadows/Highlights base from the full loaded frame;
+    # the fit sees it shrunk by the crop's thumbnail.
+    unshrunk_long_edge = max(frame.size)
     frame.thumbnail(
         (ANALYSIS_LONG_EDGE, ANALYSIS_LONG_EDGE),
         resample=Image.Resampling.LANCZOS,
@@ -780,7 +802,7 @@ def fit_loaded_image(
     result = fit(
         pixels,
         input_linear=floating and frame.encoding == "linear",
-        range_radius=max(1, int(round(RANGE_RADIUS * scale))),
+        range_sigma=range_sigma(max(img.size)) * max(frame.size) / unshrunk_long_edge,
         subject=subject,
         white_balance=adjustments.get("white_balance"),
         presence={k: adjustments.get(k) for k in _PRESENCE_KEYS},

@@ -346,7 +346,7 @@ def test_apply_recipe_tiling_matches_single_pass(mode, monkeypatch):
     compares against a single-pass reference computed directly through the tone
     pipeline. Proves tiling does not change results.
     """
-    from tone import RANGE_RADIUS, ToneAdjustments, apply_adjustments
+    from tone import ToneAdjustments, apply_adjustments, range_sigma
 
     width, height = 13, 97
     rng = np.random.default_rng(1234)
@@ -387,7 +387,7 @@ def test_apply_recipe_tiling_matches_single_pass(mode, monkeypatch):
             vibrance=35,
             saturation=25,
         ),
-        range_radius=RANGE_RADIUS,
+        range_sigma=range_sigma(max(width, height)),
     )
     ref8 = np.clip(ref_rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
     if channels == 4:

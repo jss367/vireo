@@ -8,7 +8,7 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import auto_tone
-from tone import ToneAdjustments, apply_adjustments, linear_to_srgb
+from tone import ToneAdjustments, apply_adjustments, linear_to_srgb, srgb_to_linear
 
 H, W = 120, 180
 
@@ -97,10 +97,12 @@ def test_dark_subject_on_bright_ground_pulls_exposure_a_bounded_amount():
     subject_ev = metered['adjustments']['exposure']
     assert subject_ev > frame_ev
     assert subject_ev - frame_ev <= auto_tone.SUBJECT_PULL_LIMIT + 0.1
-    # Shadows open the bird up instead of exposure blowing the sand.
+    # Shadows open the bird up instead of exposure blowing the sand: more
+    # than a stop brighter, though Shadows alone lifts at most RANGE_STOPS.
     assert metered['adjustments']['shadows'] > 0
     rendered = _luma(_render(rgb, metered['adjustments']))
-    assert np.median(rendered[50:70, 80:110]) > 0.08 + 0.1
+    lifted = srgb_to_linear(np.median(rendered[50:70, 80:110]))
+    assert lifted > 2 * srgb_to_linear(0.08)
 
 
 def test_saturated_subject_is_metered_on_its_brightest_channel():
