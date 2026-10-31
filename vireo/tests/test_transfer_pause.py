@@ -353,6 +353,7 @@ def test_resume_verifies_skipped_symlinks(transfer_env, monkeypatch, entry, link
         link.symlink_to(expected, target_is_directory=link_kind == "directory")
     except OSError:
         pytest.skip("Directory symlinks are unavailable")
+    original_target = os.readlink(link)
     entered, release = threading.Event(), threading.Event()
     original = transfer._copy_tree_with_progress
 
@@ -391,10 +392,10 @@ def test_resume_verifies_skipped_symlinks(transfer_env, monkeypatch, entry, link
         assert job["status"] == ("completed" if entry == "matching" else "failed"), job
         if entry == "matching":
             assert not source.exists()
-            assert os.readlink(landing / link.name) == str(expected)
+            assert os.readlink(landing / link.name) == original_target
         else:
             assert source.exists()
-            assert os.readlink(link) == str(expected)
+            assert os.readlink(link) == original_target
             with Database(db_path) as db:
                 assert db.folders.get(folder_id)["path"] == str(source)
             if entry == "file":
