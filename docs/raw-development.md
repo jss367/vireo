@@ -20,10 +20,14 @@ high-precision pipeline. Darktable remains a separate optional integration.
    and white-balance adjustments operate on this source. A luminance shoulder
    maps highlights to display range, with
    gamut compression to avoid independently clipping color channels.
-4. Shadows and Highlights use an edge-aware log-luminance base to move broad
-   tones while retaining fine texture contrast. Restoration fades near strong
-   edges, deep black, and display white to limit halos and noise amplification.
-   Whites and Blacks remain point curves. Tonal range, curves, color, presence,
+4. Shadows and Highlights are a local exposure change on scene radiance,
+   applied before the shoulder: each pixel gains or loses up to 1.7 stops
+   according to the brightness of its neighborhood, an edge-aware base of log
+   luminance whose blur is 1.5% of the frame's long edge. A dark region lifts
+   as a whole, so its texture keeps its contrast, and Highlights can bring
+   retained radiance above display white back into range before the shoulder
+   compresses it. Near strong edges the base falls back to each pixel's own
+   level, so flat regions gain no rim. Whites and Blacks remain point curves. Tonal range, curves, color, presence,
    and detail controls keep floating-point buffers. Existing detail algorithms
    still run after tone and output resizing.
 5. JPEG and PNG output is quantized to 8 bits at encoding. TIFF output from this
@@ -36,9 +40,10 @@ adjustments use server previews because the JPEG-based browser shader cannot
 reproduce adjustments to retained RAW highlight data. Display previews are
 still JPEGs, but they are encoded after applying the requested recipe.
 Shadows/Highlights also use server previews for JPEG sources, since their
-neighborhood filter cannot be reproduced by the single-pass browser shader.
-The filter radius scales with loaded resolution, and overlapping row tiles
-provide the same neighborhood support in full-resolution exports.
+neighborhood base cannot be reproduced by the single-pass browser shader.
+The base is built once per frame on a coarse grid and sampled by each pixel's
+position, so row tiles of a full-resolution export need no overlap and match a
+whole-frame render exactly.
 
 Sized decoded RAW buffers share a 128 MiB memory cache keyed by source path,
 modification time, file size, and requested size. Full-resolution originals and
@@ -50,8 +55,10 @@ retain their existing fast JPEG paths and disk working copies.
 
 - Originals and saved edit recipes are not rewritten. Existing RAW edits can
   look different because their rendering now starts with high-precision data.
-  Render version 9 invalidates edited caches and browser image URLs. Existing
-  Shadows/Highlights recipes gain the new detail-preserving behavior.
+  Render version 9 invalidates edited caches and browser image URLs. Render
+  version 10 re-renders Shadows/Highlights edits as local exposure: deep
+  shadows lift at most 1.7 stops, mid-shadows move less than under the old
+  curve, and Highlights can now darken display white on JPEG sources.
 - An unsupported RAW can still fall back to its embedded JPEG. Offline files
   can use a companion JPEG or working copy. Those sources retain their original
   precision limits; their TIFF exports remain 8-bit. A pre-existing darktable
@@ -172,8 +179,7 @@ future denoising, highlight-reconstruction, and sharpening algorithms.
 brightness, hard-edge halo limits, noise protection near black, ordered tone
 ramps, local-mask isolation, float precision, tile seams, and preview scaling.
 These synthetic checks do not replace visual tuning on real wildlife photos.
-The RAW highlight shoulder still runs before the range controls; moving range
-compression ahead of that shoulder is a separate future change.
+Shadows/Highlights run on scene radiance before the RAW highlight shoulder.
 
 `vireo/tests/test_optics.py` checks known radial-grid recovery, border coverage,
 linear-light falloff recovery, fringe hue/edge isolation, mask alignment,

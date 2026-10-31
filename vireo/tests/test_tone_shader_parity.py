@@ -8,8 +8,9 @@ browser tests cover the actual GPU pixels through repeated slider changes.
 
 It can't execute the actual shader headlessly, but it locks the *formula*:
 sRGB<->linear transfer, the highlight-knee rolloff, the white-balance gains and
-push-gate, the perceptual-luminance range curves, and display-space color
-controls — in the same order.
+push-gate, the Whites/Blacks curves, and display-space color controls — in the
+same order. Shadows/Highlights have no shader path: they read a neighborhood
+base, so the lightbox always previews them on the server.
 """
 
 import os
@@ -45,9 +46,6 @@ def test_shader_range_curve_constants_match_tone():
     with open(NAVBAR, encoding='utf-8') as f:
         src = f.read()
     expected_fragments = (
-        f"x / {tone.SHADOW_PIVOT:.2f}",
-        f"{tone.SHADOW_LIFT:.1f} * positive - "
-        f"{tone.SHADOW_DEEPEN:.2f} * negative",
         f"x / {tone.BLACK_PIVOT:.2f}",
         f"{tone.BLACK_PIVOT:.2f} * {tone.BLACK_LIFT:.2f} * positive",
         f"{tone.BLACK_PIVOT:.2f} * {tone.BLACK_DEEPEN:.2f} * negative",
@@ -57,12 +55,17 @@ def test_shader_range_curve_constants_match_tone():
         assert fragment in src, f"shader is missing tone.py constant: {fragment}"
 
 
+def test_shadows_and_highlights_always_preview_on_the_server():
+    with open(NAVBAR, encoding='utf-8') as f:
+        src = f.read()
+    assert 'uShadows' not in src and 'uHighlights' not in src
+    assert 'if (adjustments.shadows || adjustments.highlights) return true;' in src
+
+
 def _shader_mirror(
     c,
     exposure,
     wb_gain,
-    highlights,
-    shadows,
     whites,
     blacks,
     contrast,
@@ -85,15 +88,6 @@ def _shader_mirror(
         r = KNEE + h * (o / (o + h))
         return np.where(x > KNEE, r, x)
 
-    def shadow_level_curve(x, amount):
-        a = amount / 100.0
-        positive = max(a, 0.0)
-        negative = max(-a, 0.0)
-        t = np.clip(x / 0.65, 0.0, 1.0)
-        basis = t * (1.0 - t) ** 3
-        delta = 0.65 * basis * (3.0 * positive - 0.85 * negative)
-        return np.where(x < 0.65, x + delta, x)
-
     def black_level_curve(x, amount):
         a = amount / 100.0
         positive = max(a, 0.0)
@@ -108,8 +102,6 @@ def _shader_mirror(
         luminance = range_lin @ np.array([0.2126, 0.7152, 0.0722])
         level = linear_to_srgb(luminance)
         source_level = level
-        level = shadow_level_curve(level, shadows)
-        level = 1.0 - shadow_level_curve(1.0 - level, -highlights)
         level = black_level_curve(level, blacks)
         level = 1.0 - black_level_curve(1.0 - level, -whites)
         target = srgb_to_linear(np.clip(level, 0.0, 1.0))
@@ -153,7 +145,7 @@ def _shader_mirror(
         # which keeps the shoulder from darkening pixels below their natural
         # (unrolled) value — see the monotonicity note in apply_adjustments.
         lin = np.maximum(roll(lin), np.minimum(lin_pre, lin))
-    if shadows or highlights or blacks or whites:
+    if blacks or whites:
         lin = apply_range_curves(lin)
     disp = linear_to_srgb(lin)
     disp = (disp - 0.5) * contrast + 0.5
@@ -167,22 +159,20 @@ def test_shader_matches_tone_for_full_recipe():
     rng = np.random.default_rng(1)
     px = rng.random((256, 3)).astype(np.float32)
     cases = [
-        (0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-        (1.5, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-        (2.0, 60, -30, -25, 35, 10, -15, 10, 20, 20),
-        (-1.0, 0, 0, 20, -30, -25, 18, 40, 0, -50),
-        (0.0, 0, 0, 0, 0, 0, 0, 0, 30, -100),
-        (3.0, -40, 25, -40, 45, 20, -25, -20, 35, 35),
+        (0.0, 0, 0, 0, 0, 0, 0, 0),
+        (1.5, 0, 0, 0, 0, 0, 0, 0),
+        (2.0, 60, -30, 10, -15, 10, 20, 20),
+        (-1.0, 0, 0, -25, 18, 40, 0, -50),
+        (0.0, 0, 0, 0, 0, 0, 30, -100),
+        (3.0, -40, 25, 20, -25, -20, 35, 35),
     ]
-    for ev, temp, tint, hi, sh, wh, bl, con, vib, sat in cases:
+    for ev, temp, tint, wh, bl, con, vib, sat in cases:
         wb = {"temperature": temp, "tint": tint} if (temp or tint) else None
         expected = tone.apply_adjustments(
             px[None, :, :],
             tone.ToneAdjustments(
                 exposure=ev,
                 white_balance=wb,
-                highlights=hi,
-                shadows=sh,
                 whites=wh,
                 blacks=bl,
                 contrast=con,
@@ -198,8 +188,6 @@ def test_shader_matches_tone_for_full_recipe():
             px,
             exposure=ev,
             wb_gain=(gr, gg, gb),
-            highlights=hi,
-            shadows=sh,
             whites=wh,
             blacks=bl,
             contrast=max(0.0, 1.0 + con / 100.0),
@@ -208,4 +196,4 @@ def test_shader_matches_tone_for_full_recipe():
             rolloff=pushed,
         )
         max_err = float(np.max(np.abs(got - expected)))
-        assert max_err < 2e-4, (ev, temp, tint, hi, sh, wh, bl, con, vib, sat, max_err)
+        assert max_err < 2e-4, (ev, temp, tint, wh, bl, con, vib, sat, max_err)

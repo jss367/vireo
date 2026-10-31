@@ -498,7 +498,7 @@ function _vireoHashString(/** @type {string} */ s) {
 // seeing the old bytes from their own browser cache until they expire.
 // test_edit_math_version_template_constant_matches_python locks the two
 // constants together.
-var _VIREO_EDIT_MATH_VERSION = 9;
+var _VIREO_EDIT_MATH_VERSION = 10;
 
 // Stable stringify: sort object keys at every depth so a fingerprint tracks
 // the recipe's *content*. Two payloads can serialize the same recipe with
@@ -943,13 +943,15 @@ function _lbWhiteBalanceGains(/** @type {number} */ temperature, /** @type {numb
 
 // GPU transcription of vireo/tone.py, applied to a neutral source with the
 // complete adjustment values. Keep shader math in sync with the server.
+// Shadows/Highlights read a neighborhood base, so they always use the server
+// preview (_lbPreviewNeedsServer) and have no counterpart here.
 export var VireoToneGL = (function() {
   var KNEE = 0.85; // == tone.HIGHLIGHT_KNEE
   /** @type {HTMLCanvasElement | null} */ var canvas = null;
   /** @type {WebGLRenderingContext | null} */ var gl = null;
   /** @type {WebGLProgram | null} */ var prog = null;
   /** @type {WebGLTexture | null} */ var tex = null;
-  /** @type {Record<'tex' | 'exposure' | 'wbGain' | 'highlights' | 'shadows' | 'whites' | 'blacks' | 'contrast' | 'vibrance' | 'saturation' | 'rolloff' | 'knee', WebGLUniformLocation | null> | null} */ var locs = null;
+  /** @type {Record<'tex' | 'exposure' | 'wbGain' | 'whites' | 'blacks' | 'contrast' | 'vibrance' | 'saturation' | 'rolloff' | 'knee', WebGLUniformLocation | null> | null} */ var locs = null;
   /** @type {string | null} */ var texKey = null; var failed = false, maxTextureSize = 0;
 
   var VERT = [
@@ -964,8 +966,6 @@ export var VireoToneGL = (function() {
     'uniform sampler2D uTex;',
     'uniform float uExposure;',   // stops (linear gain = exp2(uExposure))
     'uniform vec3 uWbGain;',      // per-channel linear gains
-    'uniform float uHighlights;',
-    'uniform float uShadows;',
     'uniform float uWhites;',
     'uniform float uBlacks;',
     'uniform float uContrast;',   // display-space contrast factor about 0.5
@@ -986,15 +986,6 @@ export var VireoToneGL = (function() {
     '  float r = uKnee + h * (o / (o + h));',
     '  return x > uKnee ? r : x;',
     '}',
-    'float shadowLevelCurve(float x, float amount){',
-    '  float a = amount / 100.0;',
-    '  float positive = max(a, 0.0);',
-    '  float negative = max(-a, 0.0);',
-    '  float t = clamp(x / 0.65, 0.0, 1.0);',
-    '  float basis = t * pow(1.0 - t, 3.0);',
-    '  float delta = 0.65 * basis * (3.0 * positive - 0.85 * negative);',
-    '  return x < 0.65 ? x + delta : x;',
-    '}',
     'float blackLevelCurve(float x, float amount){',
     '  float a = amount / 100.0;',
     '  float positive = max(a, 0.0);',
@@ -1009,8 +1000,6 @@ export var VireoToneGL = (function() {
     '  float luminance = dot(rangeLin, vec3(0.2126, 0.7152, 0.0722));',
     '  float level = linearToSrgb(vec3(luminance)).r;',
     '  float sourceLevel = level;',
-    '  level = shadowLevelCurve(level, uShadows);',
-    '  level = 1.0 - shadowLevelCurve(1.0 - level, -uHighlights);',
     '  level = blackLevelCurve(level, uBlacks);',
     '  level = 1.0 - blackLevelCurve(1.0 - level, -uWhites);',
     '  float targetLuminance = srgbToLinear(vec3(clamp(level, 0.0, 1.0))).r;',
@@ -1053,7 +1042,7 @@ export var VireoToneGL = (function() {
     '    vec3 rolled = vec3(roll(lin.r), roll(lin.g), roll(lin.b));',
     '    lin = max(rolled, min(linPre, lin));',
     '  }',
-    '  if (abs(uShadows) + abs(uHighlights) + abs(uBlacks) + abs(uWhites) > 0.000001) {',
+    '  if (abs(uBlacks) + abs(uWhites) > 0.000001) {',
     '    lin = applyRangeCurves(lin);',
     '  }',
     '  vec3 disp = linearToSrgb(lin);',
@@ -1120,8 +1109,6 @@ export var VireoToneGL = (function() {
       tex: gl.getUniformLocation(prog, 'uTex'),
       exposure: gl.getUniformLocation(prog, 'uExposure'),
       wbGain: gl.getUniformLocation(prog, 'uWbGain'),
-      highlights: gl.getUniformLocation(prog, 'uHighlights'),
-      shadows: gl.getUniformLocation(prog, 'uShadows'),
       whites: gl.getUniformLocation(prog, 'uWhites'),
       blacks: gl.getUniformLocation(prog, 'uBlacks'),
       contrast: gl.getUniformLocation(prog, 'uContrast'),
@@ -1174,13 +1161,11 @@ export var VireoToneGL = (function() {
     supported: function() { return init(); },
     // Force a texture re-upload (call when the underlying image pixels change).
     invalidate: function() { texKey = null; },
-    render: function(/** @type {HTMLImageElement} */ img, /** @type {Omit<LightboxAdjustmentValues, "temperature" | "tint"> & {wbGain: [number, number, number], rolloff: boolean}} */ u) {
+    render: function(/** @type {HTMLImageElement} */ img, /** @type {Omit<LightboxAdjustmentValues, "temperature" | "tint" | "highlights" | "shadows"> & {wbGain: [number, number, number], rolloff: boolean}} */ u) {
       if (!init() || !uploadSource(img) || !gl || !canvas || !locs) return false;
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.uniform1f(locs.exposure, u.exposure);
       gl.uniform3f(locs.wbGain, u.wbGain[0], u.wbGain[1], u.wbGain[2]);
-      gl.uniform1f(locs.highlights, u.highlights);
-      gl.uniform1f(locs.shadows, u.shadows);
       gl.uniform1f(locs.whites, u.whites);
       gl.uniform1f(locs.blacks, u.blacks);
       gl.uniform1f(locs.contrast, u.contrast);
@@ -1230,7 +1215,7 @@ function _lbPreviewNeedsServer(/** @type {LightboxRecipe | null | undefined} */ 
   var photo = lbState.photoList.find(function(p) { return p.id === vireoLightboxSession.requestedPhotoId(); });
   var filename = (photo && photo.filename) || document.getElementById('lightboxFilename')?.textContent;
   if (/\.(nef|cr2|cr3|arw|raf|dng|rw2|orf)$/i.test(filename || '')) return true;
-  // Range adjustments preserve texture using neighboring luminance samples.
+  // Shadows/Highlights are a local exposure driven by neighboring luminance.
   // The single-pass shader cannot reproduce this shared preview/export math.
   var adjustments = (recipe && recipe.adjustments) || {};
   if (adjustments.shadows || adjustments.highlights) return true;
@@ -1275,8 +1260,6 @@ function _lbApplyAdjustmentPreview(/** @type {LightboxAdjustmentValues} */ value
     var ok = loaded && VireoToneGL.render(source.image, {
       exposure: exposure,
       wbGain: [gains.r, gains.g, gains.b],
-      highlights: Number(values.highlights || 0),
-      shadows: Number(values.shadows || 0),
       whites: Number(values.whites || 0),
       blacks: Number(values.blacks || 0),
       contrast: Math.max(0, 1 + Number(values.contrast || 0) / 100),
