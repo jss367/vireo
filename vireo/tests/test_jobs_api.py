@@ -5812,6 +5812,84 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     assert client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["already_sent"]
 
 
+def test_import_runs_while_another_import_is_sent_to_nas(app_and_db, tmp_path, monkeypatch):
+    """A second card imports and processes in the same workspace mid-send.
+
+    The send moves only the first import's staged originals and their NAS
+    folder; an import that writes into that NAS folder still has to wait.
+    """
+    import move
+
+    app, db = app_and_db
+    first = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = first["config"]["pending_archive_id"]
+    sending, release = threading.Event(), threading.Event()
+    real_move_folder = move.move_folder
+
+    def held_move_folder(*args, **kwargs):
+        sending.set()
+        assert release.wait(synchronization_timeout(30))
+        return real_move_folder(*args, **kwargs)
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "move_folder", held_move_folder)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send")
+    assert response.status_code == 200, response.get_json()
+    send_job = response.get_json()["job_id"]
+    try:
+        assert sending.wait(synchronization_timeout(30))
+        second_card = tmp_path / "second-card"
+        second_card.mkdir()
+        Image.new("RGB", (16, 16), "green").save(str(second_card / "second.jpg"))
+        response = client.post("/api/jobs/import-photos", json={
+            "sources": [str(second_card)], "destination": str(tmp_path / "NAS" / "day-two"),
+            "folder_template": "", "local_processing": True, "defer_nas_transfer": True,
+            "after_import": _process_id(db, "Cull-ready"),
+        })
+        assert response.status_code == 200, response.get_json()
+        second = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert second["status"] == "completed", second
+        processed = wait_for_job_via_client(client, second["result"]["process_job_id"])
+        assert processed["status"] == "completed", processed
+        in_place = tmp_path / "in-place"
+        in_place.mkdir()
+        Image.new("RGB", (16, 16), "black").save(str(in_place / "in_place.jpg"))
+        response = client.post("/api/jobs/import-in-place", json={
+            "sources": [str(in_place)], "after_import": None,
+        })
+        assert response.status_code == 200, response.get_json()
+        cataloged = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert cataloged["status"] == "completed", cataloged
+        assert client.get(f"/api/jobs/{send_job}").get_json()["status"] == "running"
+
+        # Copying straight into the NAS folder the send is filling must wait.
+        third_card = tmp_path / "third-card"
+        third_card.mkdir()
+        Image.new("RGB", (16, 16), "white").save(str(third_card / "third.jpg"))
+        response = client.post("/api/jobs/import-photos", json={
+            "sources": [str(third_card)], "destination": str(tmp_path / "NAS" / "trip"),
+            "folder_template": "",
+        })
+        assert response.status_code == 409, response.get_json()
+        assert "which this job also uses" in response.get_json()["error"]
+        assert not (tmp_path / "NAS" / "trip" / "third.jpg").exists()
+        # Anything else in the workspace still waits for the send.
+        assert client.post("/api/batch/flag", json={"photo_ids": [], "flag": "flagged"}).status_code == 409
+    finally:
+        release.set()
+    sent = wait_for_job_via_client(client, send_job)
+    assert sent["status"] == "completed", sent
+    assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
+    staged = second["config"]["managed_staging"]["destination"]
+    assert os.path.exists(os.path.join(staged, "second.jpg"))
+    items = client.get("/api/import/pending-archives").get_json()["items"]
+    assert [item["id"] for item in items] == [second["config"]["pending_archive_id"]]
+
+
 def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_and_db, tmp_path, monkeypatch):
     import shutil
 

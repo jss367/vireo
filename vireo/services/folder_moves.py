@@ -330,14 +330,27 @@ class FolderMoves:
                 return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
             return work(job)
 
+        # The two trees a move touches. A staged transfer reserves them once
+        # it holds the workspace, so an import that touches neither may run
+        # beside it; any other move may start beside a transfer that misses
+        # both. The destination is resolved by the caller (a chained move's
+        # is the snapshot taken when the import was planned); resolving it
+        # again could stall on the NAS.
+        landing = os.path.join(
+            request.destination,
+            request.destination_name or os.path.basename(os.path.normpath(request.source_path)),
+        )
+        move_paths = [os.path.realpath(request.source_path), os.path.normpath(landing)]
         if managed_staging_root:
             return runner.start(
                 "move-folder", staged_work, config=job_config,
                 workspace_id=workspace_id,
                 workspace_transfer_batch=managed_staging_root,
+                workspace_paths=move_paths,
             )
         return runner.start(
             "move-folder", work, config=job_config, workspace_id=workspace_id,
+            workspace_paths=move_paths,
         )
 
     def _run_move_job(

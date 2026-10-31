@@ -1621,6 +1621,12 @@ def create_imports_blueprint(
                 "send-to-nas", work, singleton_key=archive_id,
                 workspace_id=workspace_id,
                 exclusive_workspace=True,
+                # The local originals and the NAS folder they merge into:
+                # an import that touches neither may run while this sends.
+                # The destination was resolved when the import was planned;
+                # resolving it again would stat the NAS on a request thread.
+                workspace_paths=[os.path.realpath(archive["staging_destination"]),
+                                 os.path.normpath(archive["destination"])],
                 config={"pending_archive_id": archive_id, "destination": archive["destination"],
                         "sync_first": sync_first},
             )

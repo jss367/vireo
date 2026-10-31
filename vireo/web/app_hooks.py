@@ -77,6 +77,17 @@ RESERVATION_EXEMPT_ENDPOINTS = frozenset({
     "system.api_system_mcp_check",
 })
 
+# Import launches still reserve their workspace, so a new NAS transfer or a
+# workspace deletion waits for them, but a running transfer does not refuse
+# them: the job each one starts declares the folders it touches, and the
+# runner admits it only when they miss every folder the transfer is moving
+# (``job_runner.reservations``).
+TRANSFER_SCOPED_ENDPOINTS = frozenset({
+    "imports.api_job_import_photos",
+    "imports.api_job_import_in_place",
+    "imports.api_job_import_in_place_restart",
+})
+
 
 def get_request_db(db_path: str) -> Database:
     """Get a Database instance. One connection per request via Flask g."""
@@ -455,6 +466,7 @@ def register_app_hooks(
                         and workspace_id == target_ws
                     ),
                     label=f"the request {request.method} {request.path}",
+                    defer_transfer_check=request.endpoint in TRANSFER_SCOPED_ENDPOINTS,
                 ))
             g.nas_workspace_mutation = reservation.pop_all()
         return None

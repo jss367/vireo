@@ -10,7 +10,7 @@ from resource_ledger import get_resource_ledger
 def new_job_dict(job_id, job_type, *, config, workspace_id,
                  ephemeral, counts_for_badge, pausable,
                  blocks_local_transitions, runtime_warning,
-                 singleton_key=None, now=None):
+                 singleton_key=None, workspace_paths=None, now=None):
     return {
         "id": job_id,
         "type": job_type,
@@ -29,6 +29,10 @@ def new_job_dict(job_id, job_type, *, config, workspace_id,
         "blocks_local_transitions": bool(blocks_local_transitions),
         "exclusive_workspace": False,
         "workspace_transfer_batch": None,
+        # The folder trees the job reads or writes, realpath'd, when it
+        # declared them; None means "anywhere in the workspace". A transfer's
+        # are the trees it moves; see job_runner.reservations.
+        "workspace_paths": list(workspace_paths) if workspace_paths else None,
         "runtime_warning": runtime_warning,
         "singleton_key": singleton_key,
         "resource_wait_seconds": 0.0,
