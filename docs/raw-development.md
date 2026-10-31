@@ -179,8 +179,7 @@ future denoising, highlight-reconstruction, and sharpening algorithms.
 brightness, hard-edge halo limits, noise protection near black, ordered tone
 ramps, local-mask isolation, float precision, tile seams, and preview scaling.
 These synthetic checks do not replace visual tuning on real wildlife photos.
-The RAW highlight shoulder still runs before the range controls; moving range
-compression ahead of that shoulder is a separate future change.
+Shadows/Highlights run on scene radiance before the RAW highlight shoulder.
 
 `vireo/tests/test_optics.py` checks known radial-grid recovery, border coverage,
 linear-light falloff recovery, fringe hue/edge isolation, mask alignment,

@@ -8,7 +8,13 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import auto_tone
-from tone import ToneAdjustments, apply_adjustments, linear_to_srgb, srgb_to_linear
+from tone import (
+    ToneAdjustments,
+    apply_adjustments,
+    linear_to_srgb,
+    range_sigma,
+    srgb_to_linear,
+)
 
 H, W = 120, 180
 
@@ -159,6 +165,22 @@ def test_bright_areas_get_highlight_recovery():
     assert np.mean(_luma(after) >= auto_tone.HIGHLIGHT_CEILING) < np.mean(
         _luma(before) >= auto_tone.HIGHLIGHT_CEILING
     )
+
+
+def test_highlight_recovery_never_turns_a_jpegs_clipped_white_grey():
+    # A JPEG with a blown sky beside bright, still-unclipped cloud detail.
+    # Highlights is a local exposure: pulled far enough to tame the cloud, it
+    # would darken the blown sky too, and a JPEG has no detail there to show.
+    levels = np.linspace(0.2, 0.5, H * W, dtype=np.float32).reshape(H, W)
+    levels[:50, :90] = 1.0
+    levels[:50, 90:] = np.random.default_rng(0).uniform(0.94, 0.99, (50, 90))
+    rgb = _grey(levels)
+    sigma = range_sigma(W)
+    adj = auto_tone.fit(rgb, range_sigma=sigma)['adjustments']
+    rendered = _luma(apply_adjustments(
+        rgb, ToneAdjustments(**{k: v for k, v in adj.items() if v}), range_sigma=sigma,
+    ))
+    assert np.min(rendered[:50, :90]) >= auto_tone.HIGHLIGHT_GUARD
 
 
 def test_overexposed_raw_is_darkened_in_linear_light():

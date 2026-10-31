@@ -437,8 +437,33 @@ def _fit_exposure(fitter, rgb, weights, *, input_linear, white_balance, expose_f
     return ev, low_key
 
 
+def _white_kept_limit(fitter, adj, clipped):
+    """Strongest Highlights that leaves a display-referred source's white white.
+
+    Highlights is a local exposure, so it darkens a clipped area along with
+    the bright detail around it. On RAW that brings scene tones back from
+    beyond white; a JPEG holds nothing past white, so the same pull only
+    turns blown areas grey. On such a source Highlights stops before more
+    than ``NEW_CLIP_ALLOWANCE`` of the frame falls from clipped to below
+    ``HIGHLIGHT_GUARD``, the level brightening is also held under.
+    """
+    if fitter.input_linear or not np.any(clipped):
+        return HIGHLIGHTS_LIMIT
+
+    def white_kept(amount):
+        r = fitter.render({**adj, "highlights": amount})
+        greyed = np.count_nonzero(clipped & (r.luma < HIGHLIGHT_GUARD))
+        return greyed / len(r.luma) <= NEW_CLIP_ALLOWANCE
+
+    return _largest(HIGHLIGHTS_LIMIT, white_kept)
+
+
 def _fit_highlights(fitter, adj, recoverable, *, has_subject, subject_mask, expose_for_subject):
     """Give bright areas their gradation back."""
+    limit = _white_kept_limit(fitter, adj, ~recoverable)
+    if limit == 0:
+        return 0.0
+
     def highlights_ok(amount):
         r = fitter.render({**adj, "highlights": amount})
         # The subject style lets the background go bright on purpose.
@@ -454,7 +479,7 @@ def _fit_highlights(fitter, adj, recoverable, *, has_subject, subject_mask, expo
                 return False
         return True
 
-    return _bisect(HIGHLIGHTS_LIMIT, highlights_ok)
+    return _bisect(limit, highlights_ok)
 
 
 def _shadow_frame_floor(has_subject, low_key, expose_for_subject):
@@ -628,8 +653,10 @@ def fit(
     adj["exposure"] = round(ev, 1) + 0.0
 
     exposed = fitter.render(adj)
-    # Pixels already at white cannot be pulled back by Highlights (the curve
-    # anchors white), so they never decide how far it goes.
+    # Pixels already at display white never decide how far Highlights goes:
+    # on a JPEG they hold no detail to bring back. Highlights still darkens
+    # them (it is a local exposure, nothing anchors white), so on such a
+    # source they cap it instead (``_white_kept_limit``).
     recoverable = exposed.luma < CLIPPED
     has_range = exposed.frame(0.995) - exposed.frame(0.005) > MIN_TONAL_RANGE
 
