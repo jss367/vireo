@@ -94,6 +94,8 @@ def _admit_import_job(service: ImportService, db: Database, request: _ImportPhot
     failure = _competing_retry_failure(runner, job_config)
     if failure is not None:
         return failure
+    # Resolved here, not under the runner lock below, which must not do I/O.
+    workspace_paths = request.workspace_paths()
 
     # Re-check ``local_copy_scan_conflict`` and register the runner job
     # atomically under ``stage_boundary_lock``. A folder-stage request
@@ -127,6 +129,7 @@ def _admit_import_job(service: ImportService, db: Database, request: _ImportPhot
         return runner.start(
             "import", import_job.work, config=job_config,
             workspace_id=request.active_ws, pausable=True,
+            workspace_paths=workspace_paths,
         )
 
 
@@ -1002,6 +1005,21 @@ class _ImportPhotosRequest:
             self.service._prepare_import_workspace(self.db, self.body)
         )
         return workspace_err
+
+    def workspace_paths(self) -> list[str]:
+        """The trees this import reads and writes, for NAS-transfer admission.
+
+        The sources it copies from and the folder it copies into: local
+        staging when processing runs before the NAS transfer, or the archive
+        destination itself. Every file it writes is under these. Photos a
+        recovery retry carries from an earlier attempt only get catalog
+        writes (collection membership, tags still owed, whose sidecars wait
+        for a sync job); the chained Process run declares their folders
+        itself.
+        """
+        written = (self.managed_staging["destination"] if self.managed_staging
+                   else self.destination)
+        return [os.path.realpath(path) for path in [*self.sources, written]]
 
     def remote_transport(self) -> JsonDict | None:
         """Snapshot the resolved remote transport at enqueue time so a

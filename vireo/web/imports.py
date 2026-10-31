@@ -1580,6 +1580,12 @@ def create_imports_blueprint(
                 return json_error(
                     f"Wait for {describe_jobs(active)} to finish before sending these photos to NAS", 409)
 
+            # Canonical like the trees jobs declare (an SSH target's mount
+            # mirror may be reached through a symlink), resolved before the
+            # runner lock, which must not do I/O.
+            transfer_paths = [os.path.realpath(archive["staging_destination"]),
+                              os.path.realpath(archive["destination"])]
+
             def work(job: JobDict) -> JsonDict:
                 with Database(db_path) as thread_db:
                     thread_db.set_active_workspace(workspace_id)
@@ -1614,6 +1620,9 @@ def create_imports_blueprint(
                 "send-to-nas", work, singleton_key=archive_id,
                 workspace_id=workspace_id,
                 exclusive_workspace=True,
+                # The local originals and the NAS folder they merge into:
+                # an import that touches neither may run while this sends.
+                workspace_paths=transfer_paths,
                 config={"pending_archive_id": archive_id, "destination": archive["destination"],
                         "sync_first": sync_first},
             )

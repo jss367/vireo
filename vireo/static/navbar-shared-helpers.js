@@ -1915,7 +1915,7 @@ export function formatJobType(type) {
   return String(type)
     .split(/[-_]+/)
     .filter(function(w) { return w.length > 0; })
-    .map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); })
+    .map(function(w) { return w.toLowerCase() === 'nas' ? 'NAS' : w.charAt(0).toUpperCase() + w.slice(1); })
     .join(' ');
 }
 

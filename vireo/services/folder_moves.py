@@ -336,14 +336,28 @@ class FolderMoves:
                 return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
             return work(job)
 
+        # The two trees a move touches. A staged transfer reserves them once
+        # it holds the workspace, so an import that touches neither may run
+        # beside it; any other move may start beside a transfer that misses
+        # both. Canonical like the trees other jobs declare, and resolved
+        # here because the runner lock must not do I/O.
+        # A date-organized move renders its folders under the destination
+        # itself, so the whole destination bounds its writes.
+        landing = request.destination if request.folder_template else os.path.join(
+            request.destination,
+            request.destination_name or os.path.basename(os.path.normpath(request.source_path)),
+        )
+        move_paths = [os.path.realpath(request.source_path), os.path.realpath(landing)]
         if managed_staging_root:
             return runner.start(
                 "move-folder", staged_work, config=job_config,
                 workspace_id=workspace_id,
                 workspace_transfer_batch=managed_staging_root,
+                workspace_paths=move_paths,
             )
         return runner.start(
             "move-folder", work, config=job_config, workspace_id=workspace_id,
+            workspace_paths=move_paths,
         )
 
     def _run_move_job(

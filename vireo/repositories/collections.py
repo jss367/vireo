@@ -486,6 +486,24 @@ class CollectionRepository:
         params = [*params, *order_params]
         return [row["id"] for row in self.conn.execute(query, params).fetchall()]
 
+    def folder_paths(self, collection_id):
+        """The distinct folder paths of a collection's photos, offline ones included.
+
+        The trees a run over the collection can touch; see
+        ``JobRunner.enqueue_pipeline``'s ``workspace_paths``.
+        """
+        parts = self._build_collection_query(collection_id, include_offline_folders=True)
+        if parts is None:
+            return []
+        folder_join, join_clause, where, params = parts
+        query = f"""
+            SELECT DISTINCT f.path FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        return [row["path"] for row in self.conn.execute(query, params).fetchall()]
+
     def count_photos(
         self, collection_id, include_offline_folders=False,
     ):

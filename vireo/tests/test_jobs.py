@@ -71,6 +71,189 @@ def test_workspace_transfer_reservation_blocks_job_admission(admission):
     runner.shutdown()
 
 
+_TRANSFER_TREES = [os.path.join(os.sep, "staging", "import-a", "trip"), os.path.join(os.sep, "NAS", "trip")]
+
+
+def _start_transfer(runner, release, paths=_TRANSFER_TREES):
+    return runner.start_singleton(
+        "send-to-nas", lambda job: release.wait(synchronization_timeout(10)), singleton_key="archive",
+        workspace_id=1, exclusive_workspace=True, workspace_paths=paths,
+    )[0]
+
+
+@pytest.mark.parametrize("admission", ["start", "singleton", "pipeline"])
+def test_job_declaring_other_folders_runs_beside_a_transfer(admission):
+    """An import into other folders need not wait for a NAS send to finish."""
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release = threading.Event()
+    transfer = _start_transfer(runner, release)
+
+    def admit(paths, key):
+        if admission == "start":
+            return runner.start("import", lambda job: None, workspace_id=1, workspace_paths=paths)
+        if admission == "singleton":
+            return runner.start_singleton("import", lambda job: None, workspace_id=1,
+                                          singleton_key=key, workspace_paths=paths)[0]
+        return runner.enqueue_pipeline(lambda job: None, workspace_id=1, workspace_paths=paths)
+
+    try:
+        elsewhere = [os.path.join(os.sep, "card"), os.path.join(os.sep, "staging", "import-b", "trip")]
+        job_id = admit(elsewhere, "elsewhere")
+        assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+        # A sibling whose name merely starts with the transfer's is another folder.
+        job_id = admit([os.path.join(os.sep, "NAS", "trip-2")], "sibling")
+        assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+        # The NAS folder the send merges into, a parent of it, the staged
+        # originals in a different case, and a job that declares nothing all
+        # still wait.
+        nas_parent = os.path.join(os.sep, "NAS")
+        with pytest.raises(WorkspaceBusyError, match=r"it is moving .*trip, which this job also uses"):
+            admit([nas_parent], "parent")
+        with pytest.raises(WorkspaceBusyError, match="which this job also uses"):
+            admit([os.path.join(os.sep, "Staging", "Import-A", "trip", "DCIM")], "inside")
+        with pytest.raises(WorkspaceBusyError, match="before starting another job"):
+            admit(None, "undeclared")
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+        runner.shutdown()
+
+
+def test_transfer_without_declared_folders_refuses_every_job():
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release = threading.Event()
+    transfer = _start_transfer(runner, release, paths=None)
+    try:
+        with pytest.raises(WorkspaceBusyError, match="NAS transfer"):
+            runner.start("import", lambda job: None, workspace_id=1,
+                         workspace_paths=[os.path.join(os.sep, "elsewhere")])
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+        runner.shutdown()
+
+
+def test_job_admitted_beside_a_transfer_still_keeps_the_next_transfer_out():
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release_transfer, release_import = threading.Event(), threading.Event()
+    transfer = _start_transfer(runner, release_transfer)
+    imported = runner.start("import", lambda job: release_import.wait(synchronization_timeout(10)),
+                            workspace_id=1, workspace_paths=[os.path.join(os.sep, "card")])
+    try:
+        release_transfer.set()
+        wait_for_job_via_runner(runner, transfer)
+        with pytest.raises(WorkspaceBusyError, match=r"busy with the import job"):
+            runner.start_singleton("send-to-nas", lambda job: None, singleton_key="next",
+                                   workspace_id=1, exclusive_workspace=True,
+                                   workspace_paths=[os.path.join(os.sep, "other")])
+    finally:
+        release_transfer.set()
+        release_import.set()
+        wait_for_job_via_runner(runner, imported)
+        runner.shutdown()
+
+
+def test_deferred_mutation_runs_beside_a_transfer_but_not_a_deletion():
+    """An import request is checked by its job, not refused by the hook.
+
+    Its reservation still keeps a new transfer out while it runs, and a
+    workspace deletion still refuses it.
+    """
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release = threading.Event()
+    transfer = _start_transfer(runner, release)
+    try:
+        with runner.workspace_mutation(1, label="the request POST /api/jobs/import-photos",
+                                       defer_transfer_check=True):
+            pass
+        with pytest.raises(WorkspaceBusyError):
+            with runner.workspace_mutation(1):
+                pytest.fail("Undeferred mutation entered during transfer")
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+    with runner.workspace_mutation(1, label="the request POST /api/jobs/import-photos",
+                                   defer_transfer_check=True):
+        with pytest.raises(WorkspaceBusyError, match="POST /api/jobs/import-photos"):
+            runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
+                                   workspace_id=1, exclusive_workspace=True)
+    with runner.workspace_mutation(1, exclusive=True):
+        with pytest.raises(WorkspaceBusyError):
+            with runner.workspace_mutation(1, defer_transfer_check=True):
+                pytest.fail("Mutation entered a workspace being deleted")
+    runner.shutdown()
+
+
+def test_automatic_transfer_registers_beside_a_running_transfer_and_waits():
+    """A chained NAS move of an import admitted mid-send queues behind it."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+    moved = threading.Event()
+    transfer = _start_transfer(runner, release)
+
+    def move(job):
+        if runner.wait_for_workspace_transfer(job["id"]):
+            moved.set()
+
+    job_id = runner.start("move-folder", move, workspace_id=1, workspace_transfer_batch="b",
+                          workspace_paths=list(_TRANSFER_TREES))
+    try:
+        assert not moved.wait(0.3)
+        release.set()
+        assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+        assert moved.is_set()
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+        runner.shutdown()
+
+
+@pytest.mark.parametrize("folder_template,expected_leaf", [("", "day"), ("%Y-%m-%d", None)])
+def test_move_declares_the_tree_it_writes(tmp_path, folder_template, expected_leaf):
+    """A date-organized move writes under the destination itself, not one leaf of it."""
+    from services.folder_moves import FolderMoveRequest, FolderMoves
+
+    started = {}
+
+    class Runner:
+        def start(self, *args, **kwargs):
+            started.update(kwargs)
+            return "job"
+
+    source, destination = tmp_path / "staging" / "day", tmp_path / "NAS"
+    request = FolderMoveRequest(
+        folder_id=1, source_path=str(source), destination=str(destination),
+        display_dest=str(destination), resolved_destination=str(destination / "day"),
+        merge=False, developed_dir="", keep_visible=False, folder_template=folder_template,
+    )
+    moves = FolderMoves(get_runner=lambda: None, get_db=lambda: None, db_path="",
+                        config={}, invalidate_missing_originals=lambda *a, **k: None)
+    moves.start_job(Runner(), 1, request)
+    landing = destination / expected_leaf if expected_leaf else destination
+    assert started["workspace_paths"] == [os.path.realpath(source), os.path.realpath(landing)]
+
+
+def test_paths_overlap_compares_whole_folder_names():
+    from job_runner.reservations import paths_overlap
+
+    root = os.sep
+    assert paths_overlap(os.path.join(root, "a", "b"), os.path.join(root, "a", "b", "c"))
+    assert paths_overlap(os.path.join(root, "a", "b", "c"), os.path.join(root, "a", "b"))
+    assert paths_overlap(os.path.join(root, "a", "b") + os.sep, os.path.join(root, "A", "B"))
+    assert not paths_overlap(os.path.join(root, "a", "b"), os.path.join(root, "a", "bc"))
+    assert paths_overlap(root, os.path.join(root, "a"))
+
+
 def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch):
     from jobs import JobRunner, WorkspaceBusyError
 

@@ -1,13 +1,20 @@
 """Workspace reservations: transfers versus every other job and change.
 
-A NAS transfer moves a workspace's originals, so nothing else may run against
-that workspace while it does: no job that carries photo/folder paths, no
-queued pipeline, and no synchronous request that writes the catalog. This
-module decides admission on both sides and names whatever holds a workspace
-when it refuses.
+A NAS transfer moves the originals under two folder trees (where they are and
+where they land), so nothing that might touch those trees may run while it
+does: no job that carries photo/folder paths, no queued pipeline, and no
+synchronous request that writes the catalog. A job that declares the trees it
+reads and writes (``workspace_paths``: an import's sources and the folder it
+copies into, a chained Process run's photo folders) is admitted beside a
+transfer when none of them overlaps the transfer's trees; anything that does
+not declare them is refused, because it could reach any folder. A new
+transfer still waits for every other job in the workspace. This module
+decides admission on both sides and names whatever holds a workspace when it
+refuses.
 """
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -43,6 +50,7 @@ def format_duration(seconds):
 def describe_job(job):
     """Name a job for a busy message, e.g. "the export job (running for 4 min)"."""
     kind = str(job.get("type") or "unknown").replace("-", " ").replace("_", " ")
+    kind = " ".join("NAS" if word.lower() == "nas" else word for word in kind.split())
     status = job.get("status") or "running"
     started = job.get("_start_time")
     if status == "running" and isinstance(started, (int, float)):
@@ -59,6 +67,36 @@ def _join_blockers(items):
 def describe_jobs(jobs):
     """``describe_job`` for each job, joined into one phrase."""
     return _join_blockers([describe_job(job) for job in jobs])
+
+
+def _tree_key(path):
+    # Case-folded on every platform: treating two trees as overlapping when
+    # a case-sensitive filesystem would keep them apart only refuses a job,
+    # and the check runs under the runner lock, so it must not probe disk.
+    return os.path.normpath(path).casefold().rstrip(os.sep) + os.sep
+
+
+def paths_overlap(a, b):
+    """True if realpath'd ``a`` and ``b`` are the same tree or one holds the other."""
+    a_key, b_key = _tree_key(a), _tree_key(b)
+    return a_key.startswith(b_key) or b_key.startswith(a_key)
+
+
+def transfer_conflict(transfers, paths):
+    """The first (transfer, transfer path) whose tree overlaps one of ``paths``.
+
+    A transfer that declared no trees conflicts with everything, and so does
+    a job that declared none (``paths`` empty or None): either could reach
+    any folder. Returns None when the job can run beside every transfer.
+    """
+    for transfer in transfers:
+        reserved = transfer.get("workspace_paths")
+        if not reserved or not paths:
+            return transfer, None
+        for tree in reserved:
+            if any(paths_overlap(tree, path) for path in paths):
+                return transfer, tree
+    return None
 
 
 class WorkspaceReservations:
@@ -85,10 +123,15 @@ class WorkspaceReservations:
         self.exclusive = {}  # workspace -> holder
 
     @contextmanager
-    def workspace_mutation(self, workspace_id, *, exclusive=False, label=None):
+    def workspace_mutation(self, workspace_id, *, exclusive=False, label=None,
+                           defer_transfer_check=False):
         """Reserve synchronous mutations against transfers for their full duration.
 
         ``label`` names the holder in the message a blocked job gets back.
+        ``defer_transfer_check`` admits the request beside a running transfer
+        because the job it starts declares its folder trees and is checked
+        against the transfer's when it registers. The reservation still keeps
+        a new transfer and a workspace deletion out while the request runs.
         """
         holder = {
             "label": label or "a change in this workspace",
@@ -96,7 +139,8 @@ class WorkspaceReservations:
             "thread": threading.get_ident(),
         }
         with self._lock:
-            self.check_admission_locked(workspace_id, exclusive=exclusive)
+            self.check_admission_locked(workspace_id, exclusive=exclusive,
+                                        defer_transfer_check=defer_transfer_check)
             self.mutations.setdefault(workspace_id, []).append(holder)
             if exclusive:
                 self.exclusive[workspace_id] = holder
@@ -159,8 +203,16 @@ class WorkspaceReservations:
                     return True
                 self._pause_condition.wait(timeout=0.1)
 
-    def check_admission_locked(self, workspace_id, blocking=True, exclusive=False):
+    def check_admission_locked(self, workspace_id, blocking=True, exclusive=False,
+                               paths=None, defer_transfer_check=False):
         """Check both sides of a transfer reservation under the registration lock.
+
+        ``paths`` are the realpath'd folder trees a job declared; it runs
+        beside a transfer only when none overlaps the transfer's trees.
+        ``defer_transfer_check`` skips the transfer check for an admission
+        that cannot touch originals yet: an automatic transfer, which waits in
+        ``wait_for_workspace_transfer`` before moving anything, and a request
+        whose job is checked when it registers.
 
         A rejection names what holds the workspace: the user cannot see a
         synchronous reservation anywhere else, so "wait for running jobs"
@@ -180,12 +232,19 @@ class WorkspaceReservations:
                   and j.get("status") in ("running", "queued", "pausing", "paused")
                   and j.get("blocks_local_transitions", True)]
         transfers = [j for j in active if j.get("exclusive_workspace")]
-        if transfers:
-            self._raise_workspace_busy_locked(
-                workspace_id,
-                "Wait for the NAS transfer ({blockers}) to finish before starting another job in this workspace.",
-                transfers, [],
-            )
+        conflict = None if defer_transfer_check else transfer_conflict(transfers, paths)
+        if conflict is not None:
+            transfer, tree = conflict
+            if tree is None:
+                template = ("Wait for the NAS transfer ({blockers}) to finish before starting "
+                            "another job in this workspace.")
+            else:
+                # The folder is the user's to compare with what they chose;
+                # braces in it must survive the template formatting.
+                folder = tree.replace("{", "{{").replace("}", "}}")
+                template = ("Wait for the NAS transfer ({blockers}) to finish: it is moving "
+                            f"{folder}, which this job also uses.")
+            self._raise_workspace_busy_locked(workspace_id, template, [transfer], [])
         if not exclusive:
             return
         queued = sum(1 for c in self._queue.queued.values() if c.get("workspace_id") == workspace_id)
