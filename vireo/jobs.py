@@ -373,6 +373,9 @@ class JobRunner:
             "ephemeral": False,
             "counts_for_badge": True,
             "pausable": True,
+            "pause_unavailable_reason": None,
+            "cancellable": True,
+            "control_unavailable_reason": None,
             "runtime_warning": ctx["runtime_warning"],
             # Pre-seeded for iteration safety — see start().
             "_start_time": time.time(),
@@ -455,7 +458,7 @@ class JobRunner:
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
               ephemeral=False, runtime_warning=None, counts_for_badge=True,
-              pausable=False, blocks_local_transitions=None,
+              pausable=None, blocks_local_transitions=None,
               workspace_transfer_batch=None):
         """Start a background job.
 
@@ -475,7 +478,9 @@ class JobRunner:
                        while the job is running.
             counts_for_badge: if False, the job remains visible in job lists
                        but does not contribute to app/Dock attention badges.
-            pausable: if True, pause_job() may suspend the worker the next
+            pausable: defaults to the job type's audited pause policy.
+                      Unknown types must explicitly declare this option.
+                      If True, pause_job() may suspend the worker the next
                       time it calls is_cancelled(). Only set this for work
                       that checks cancellation at safe boundaries.
             blocks_local_transitions: if False, Work Locally stage/sync/discard
@@ -586,7 +591,7 @@ class JobRunner:
     def start_singleton(self, job_type, work_fn, *, singleton_key,
                         config=None, workspace_id=None, ephemeral=False,
                         runtime_warning=None, counts_for_badge=True,
-                        pausable=False, blocks_local_transitions=None,
+                        pausable=None, blocks_local_transitions=None,
                         exclusive_workspace=False):
         """Start a job unless one with the same (type, singleton_key) is active.
 
@@ -1020,12 +1025,12 @@ class JobRunner:
         """Report cancellation without waiting; see ``JobControl.cancellation_requested``."""
         return self._control.cancellation_requested(job_id)
 
-    def begin_uncancellable(self, job_id):
+    def begin_uncancellable(self, job_id, *, wait_for_pause=True):
         """Honor a pending pause, then enter an uninterruptible phase.
 
         See ``JobControl.begin_uncancellable``.
         """
-        return self._control.begin_uncancellable(job_id)
+        return self._control.begin_uncancellable(job_id, wait_for_pause=wait_for_pause)
 
     def clear_cancellation(self, job_id):
         """Consume a pending cancel and mark the job uncancellable.

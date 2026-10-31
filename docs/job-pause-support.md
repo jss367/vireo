@@ -13,6 +13,7 @@ not a checkpoint that survives restarting the application.
 | Prepare full resolution, generate previews, cache originals for offline use, release local originals | Between photos |
 | Generate thumbnails, develop photos, extract subject masks | Between photos |
 | Export photos, export for iNaturalist, move selected photos | Between photos and after export metadata finishes; active subprocesses finish and moved-folder counts are reconciled before a pause is confirmed |
+| Send to NAS and move entire folders | Between preflight checks and local files; active rsync copies and remote verification processes are stopped and reaped before pausing. Resume retains completed files and restarts interrupted subprocess work. Transfer serialization locks are released while paused. |
 | Verify photo hashes | Between files, after committing the completed batch prefix |
 | Adjust capture time | Between photos, after the metadata write and catalog update |
 | Scan for duplicates | Between duplicate groups |
@@ -45,9 +46,10 @@ These jobs deliberately remain without Pause in the current implementation:
 | Download models, taxonomy, or Darktable | Downloads and setup delegate to external downloaders, active network streams, or installation steps. Their progress notifications do not establish a point where all work has stopped. Taxonomy installation also performs large database transactions. Supporting pause requires separate download and installation coordination. |
 | Synchronize metadata to XMP sidecars | A job holds the shared synchronization lock while collecting and writing changes. Parking inside that operation would block other synchronization jobs. The lock and change snapshots need a resumable batch protocol. |
 | In-place imports from a saved new-photo list | These imports hold a shared lock for the entire operation so concurrent imports cannot reuse the same saved list. Pausing would block those imports and delay their cancellation. Ordinary in-place imports support pause. |
-| Move entire folders | Moves may hold a batch serialization lock and use external transfer tools, followed by catalog rebasing and source cleanup. Pausing requires coordinated transfer and catalog boundaries. Moving selected photos supports pause separately. |
 | Work Locally: stage, synchronize, or discard, for either folders or workspaces | These transitions reserve shared folder or workspace state while switching between remote and local files. An indefinite pause can block other operations or leave a transition pending. |
 | Batch deletion from the library or disk | Disk deletion and catalog reconciliation span multiple phases. Pausing between them could leave the catalog pointing to files already removed for an indefinite period. Verified memory-card deletion has a separate per-file protocol and supports pause. |
+| Create panoramas, analyze subjects, retry analysis | These paths delegate to external tools or analysis requests without coordinated pause checkpoints. |
+| Retained cache maintenance and cleanup | File deletion and catalog reconciliation run together without resumable batch checkpoints. |
 | Automatic startup backfills, missing-original scans, and new-image discovery | These are internal, ephemeral maintenance or discovery tasks rather than user-managed jobs. |
 
 Website publishing's final replacement step is also uninterrupted, even when
@@ -57,12 +59,43 @@ The final import handoff follows the same rule: pending requests are honored
 before creating the import collection and starting follow-up processing;
 after the handoff begins, control the follow-up job through its own controls.
 
+Folder transfers also have an uninterrupted final commit: updating catalog
+paths and removing the source originals. Pause and Cancel are unavailable
+during that step, and the Jobs page explains why. Any pause during verification
+invalidates the earlier checks; the transfer repeats verification after Resume
+before entering its commit. Cancel before commit retains the source originals.
+Date-organized folder moves commit one photo at a time, so photos already moved
+remain moved after Cancel.
+
+Send to NAS releases the global metadata synchronization lock after its optional
+sidecar-writing phase. A pause during that phase waits for it to finish. The
+long copy and verification do not keep the sidecar lock held.
+
 ## Adding a new job
 
-Keep pause opt-in with `pausable=True` on its launcher. Use
+Declare each job type in `vireo/job_runner/pause_policy.py`. Supported jobs
+default to pausable; exceptions must have an explanation that appears on the
+Jobs page. Unknown types without an explicit `pausable` declaration are rejected
+by both runner launch APIs. The production-launcher audit test also requires
+literal job types to have a central policy. Dynamic families (such as model
+downloads) must explicitly declare their policy at the launcher.
+
+Use
 `runner.is_cancelled(job_id)` at a safe checkpoint when the worker handles
 cancellation itself, or `JobLaunch.checkpoint(job)` when cancellation should
 unwind the worker. Both retain the worker's local state during a pause.
+
+`job_runner.work_control.WorkControl` provides shared checkpoints, a nonblocking
+subprocess-stop probe, and an atomic commit boundary. `SerializedWork` releases
+and reacquires transfer locks around a pause. Read-only external commands can
+use `run_controlled_process`, which stops and reaps the subprocess before
+parking and restarts the command on Resume. A caller that verifies files before
+deleting originals must check the control's pause generation and reverify after
+any pause, including a request racing the commit boundary.
+
+Test Pause → Resume and Pause → Cancel using observable checkpoints. Verify
+that subprocesses have exited, locks are available, completed writes persist,
+and an indefinite pause cannot make stale verification authorize deletion.
 
 Do not park while holding a database write transaction, a shared lock, an
 inference permit, or while another worker or subprocess is still active.

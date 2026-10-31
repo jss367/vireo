@@ -14,6 +14,8 @@ import tempfile
 import threading
 import time
 
+from job_runner.subprocess_control import process_group_kwargs, stop_process_tree
+
 try:
     from ..proc import no_window_kwargs
 except ImportError:
@@ -207,11 +209,11 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
         poll = 1.0 if cancel_check is not None else min(stall_timeout, 30)
         while not done.wait(poll):
             if cancel_check is not None and cancel_check():
-                proc.kill()
+                stop_process_tree(proc)
                 return
             if time.monotonic() - last_activity["t"] > stall_timeout:
                 state["timed_out"] = True
-                proc.kill()
+                stop_process_tree(proc)
                 return
 
     watchdog = threading.Thread(target=_watchdog, daemon=True)
@@ -219,17 +221,22 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
 
     stderr_thread, stderr_chunks = _start_stderr_drain(proc, last_activity)
 
+    completed = False
     try:
         _stream_rsync_progress(
             stdout_stream, total_files, progress_cb, last_activity)
         proc.wait()
+        completed = True
     finally:
         done.set()
+        if not completed:
+            stop_process_tree(proc)
+            proc.wait()
         if stdout_stream is not None and stdout_stream is not proc.stdout:
             with contextlib.suppress(OSError):
                 stdout_stream.close()
-    stderr_thread.join()
-    watchdog.join()
+        stderr_thread.join()
+        watchdog.join()
     return proc.returncode, "".join(stderr_chunks), state["timed_out"]
 
 
@@ -263,7 +270,7 @@ def _spawn_rsync_on_pty(cmd):
     try:
         proc = subprocess.Popen(
             cmd, stdout=stdout_arg, stderr=subprocess.PIPE, text=True,
-            **no_window_kwargs(),
+            **no_window_kwargs(), **process_group_kwargs(),
         )
     except BaseException:
         # Popen can raise after os.openpty() succeeded (bad rsync_bin,

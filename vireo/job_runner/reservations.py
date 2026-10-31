@@ -129,6 +129,10 @@ class WorkspaceReservations:
                 job = self._jobs[job_id]
                 if job_id in self._control.cancelled or self._workers.shutting_down:
                     return False
+                # No filesystem work or reservation is held yet. Publish a
+                # genuine pause even while waiting for the producing jobs.
+                if self._control.wait_if_paused(job_id, publish_paused=True):
+                    return False
                 workspace_id = job["workspace_id"]
                 batch = job.get("workspace_transfer_batch")
                 if not batch:

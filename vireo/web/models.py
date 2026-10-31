@@ -830,7 +830,7 @@ def create_models_blueprint(
         # Locally hostage.
         return ctx.start(
             f"download-{model_id}", work, config={"model_id": model_id},
-            blocks_local_transitions=False,
+            blocks_local_transitions=False, pausable=False,
         )
 
     @blueprint.route("/api/models/pipeline/delete", methods=["POST"])

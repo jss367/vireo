@@ -33,7 +33,7 @@ def active_archive_jobs(runner, workspace_id):
             and j.get("blocks_local_transitions", True)]
 
 
-def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
+def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb, control=None):
     """Move the remaining directory through the verified move implementation.
 
     The saved target is authoritative; never resolve the destination from
@@ -79,6 +79,7 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb):
         merge=True, remote=remote, allow_tracked_merge=True,
         verify_contents=remote is None,
         thumb_cache_dir=os.path.join(vireo_dir, "thumbnails"),
+        **({"control": control} if control else {}),
         **({"pre_commit_check": check_mount} if check_mount else {}),
     )
     if result.get("errors") or result.get("needs_merge"):

@@ -6643,6 +6643,7 @@ def test_rsync_stall_watchdog_kills_silent_process(monkeypatch):
     treated as wedged and killed, with timed_out=True — even though no
     total-runtime cap was hit."""
     import move as move_mod
+    monkeypatch.setattr(move_mod.transfer, "stop_process_tree", lambda proc: proc.kill())
 
     proc_holder = {}
 
@@ -6700,6 +6701,7 @@ def test_rsync_streamed_cancel_check_kills_transfer(monkeypatch):
     (timed_out stays False): the caller distinguishes cancellation by its
     own cancel flag."""
     import move as move_mod
+    monkeypatch.setattr(move_mod.transfer, "stop_process_tree", lambda proc: proc.kill())
 
     proc_holder = {}
 

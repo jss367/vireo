@@ -14,6 +14,8 @@ import filecmp
 import os
 import subprocess
 
+from job_runner.subprocess_control import run_controlled_process
+
 from .remote import _ssh_rsh_string
 from .transfer import FINDER_METADATA_FILES, _rsync_finder_metadata_exclude_file
 
@@ -31,7 +33,7 @@ REMOTE_VERIFY_TIMEOUT = 7200  # 2 hours
 
 
 def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
-                            *, is_merge=False):
+                            *, is_merge=False, control=None):
     """Independent verification that the remote copy is complete and correct.
 
     The local move's safety check walks the destination filesystem before
@@ -63,9 +65,12 @@ def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
                *metadata_excludes,
                src_path + "/", rsync_target + "/"]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=REMOTE_VERIFY_TIMEOUT,
-                                  **no_window_kwargs())
+            if control:
+                proc = run_controlled_process(cmd, control, timeout=REMOTE_VERIFY_TIMEOUT)
+            else:
+                proc = subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=REMOTE_VERIFY_TIMEOUT,
+                                      **no_window_kwargs())
         except subprocess.TimeoutExpired:
             return ("__ERROR__", f"verification timed out after "
                     f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
@@ -149,7 +154,7 @@ def remote_verify_files(rsync_bin, src_specs, rsync_target, remote,
     return None
 
 
-def _find_content_conflict(src_path, dest_path):
+def _find_content_conflict(src_path, dest_path, *, checkpoint=None):
     """Return the relative path of the first source file that ALSO exists at
     dest_path but with different content, or None. Run before a merge copies
     anything: a same-name destination file is only safe to treat as "already
@@ -176,6 +181,8 @@ def _find_content_conflict(src_path, dest_path):
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
+            if checkpoint:
+                checkpoint()
             src_file = os.path.join(root, fn)
             if fn in FINDER_METADATA_FILES and \
                     not os.path.islink(src_file) and \
@@ -189,7 +196,7 @@ def _find_content_conflict(src_path, dest_path):
     return None
 
 
-def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
+def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote, *, control=None):
     """Remote counterpart to ``_find_content_conflict`` — find the first
     source file whose same-name twin at the remote destination differs in
     content. The destination is on the NAS so we can't filecmp it directly;
@@ -220,9 +227,12 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
                *metadata_excludes,
                src_path + "/", rsync_target + "/"]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=REMOTE_VERIFY_TIMEOUT,
-                                  **no_window_kwargs())
+            if control:
+                proc = run_controlled_process(cmd, control, timeout=REMOTE_VERIFY_TIMEOUT)
+            else:
+                proc = subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=REMOTE_VERIFY_TIMEOUT,
+                                      **no_window_kwargs())
         except subprocess.TimeoutExpired:
             return ("__ERROR__", f"conflict check timed out after "
                     f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")

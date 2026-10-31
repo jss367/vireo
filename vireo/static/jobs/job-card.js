@@ -23,6 +23,46 @@ import {
   return '';
 }
 
+/** @param {JobsRow} job */ function renderJobControls(job) {
+  var html = '';
+  if (job.pausable && job.cancellable !== false && job.status === 'running') {
+    html += '<button class="btn-pause" data-pause-job="' + escapeAttr(job.id) + '">Pause</button>';
+  } else if (job.pausable && job.status === 'pausing') {
+    // The pause has been requested but not yet honored: the worker
+    // stops at its next safe checkpoint, which can be minutes away
+    // (e.g. label embeddings inside the model lock). The status pill
+    // still reads "pausing" so the user can see it is underway; this
+    // button withdraws the request via the resume endpoint, which
+    // accepts pausing as well as paused.
+    //
+    // BUT: when the pipeline itself parked the job on a dead source
+    // (``_handle_source_offline`` in pipeline_job.py publishes
+    // ``pause_reason`` before flipping to ``pausing``), cancelling
+    // the pause would immediately retry the unreachable volume and
+    // burn one of the bounded ``_MAX_SOURCE_OFFLINE_PAUSES`` attempts
+    // — repeated clicks can convert a recoverable outage into a
+    // failed run. Only offer cancel for user-requested pauses; for
+    // safety pauses, leave the disabled ``Pausing…`` button so the
+    // banner tells the user to reconnect the source instead.
+    var automaticPauseReason = job.progress && job.progress.pause_reason;
+    if (automaticPauseReason) {
+      html += '<button class="btn-pause" disabled title="This pause was triggered automatically (see the pause banner). Fix the underlying issue, then Resume.">Pausing…</button>';
+    } else {
+      html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '" data-cancel-pause="1" title="Pause is still pending; the job stops at its next safe checkpoint. Click to keep it running instead.">Cancel pause</button>';
+    }
+  } else if (job.pausable && job.status === 'paused') {
+    html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '">Resume</button>';
+  }
+  if (job.cancellable === false) {
+    html += '<button class="btn-cancel" disabled title="' + escapeAttr(job.control_unavailable_reason || 'Finishing safely') + '">Finishing…</button>';
+  } else if (state.cancellingJobIds[job.id]) {
+    html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';
+  } else {
+    html += '<button class="btn-cancel" data-cancel-job="' + escapeHtml(job.id) + '">Cancel</button>';
+  }
+  return html;
+}
+
 /** @param {JobsRow} job @param {{workspaceName?:string}=} options */ export function renderJobCard(job, options) {
   options = options || {};
   // Queued pipelines are "live" for UI purposes: they have a real
@@ -51,42 +91,12 @@ import {
     html += '<span class="job-card-workspace">' + escapeHtml(options.workspaceName) + '</span>';
   }
   html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
-  if (isLive) {
-    if (job.pausable && job.status === 'running') {
-      html += '<button class="btn-pause" data-pause-job="' + escapeAttr(job.id) + '">Pause</button>';
-    } else if (job.pausable && job.status === 'pausing') {
-      // The pause has been requested but not yet honored: the worker
-      // stops at its next safe checkpoint, which can be minutes away
-      // (e.g. label embeddings inside the model lock). The status pill
-      // still reads "pausing" so the user can see it is underway; this
-      // button withdraws the request via the resume endpoint, which
-      // accepts pausing as well as paused.
-      //
-      // BUT: when the pipeline itself parked the job on a dead source
-      // (``_handle_source_offline`` in pipeline_job.py publishes
-      // ``pause_reason`` before flipping to ``pausing``), cancelling
-      // the pause would immediately retry the unreachable volume and
-      // burn one of the bounded ``_MAX_SOURCE_OFFLINE_PAUSES`` attempts
-      // — repeated clicks can convert a recoverable outage into a
-      // failed run. Only offer cancel for user-requested pauses; for
-      // safety pauses, leave the disabled ``Pausing…`` button so the
-      // banner tells the user to reconnect the source instead.
-      var automaticPauseReason = job.progress && job.progress.pause_reason;
-      if (automaticPauseReason) {
-        html += '<button class="btn-pause" disabled title="This pause was triggered automatically (see the pause banner). Fix the underlying issue, then Resume.">Pausing…</button>';
-      } else {
-        html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '" data-cancel-pause="1" title="Pause is still pending; the job stops at its next safe checkpoint. Click to keep it running instead.">Cancel pause</button>';
-      }
-    } else if (job.pausable && job.status === 'paused') {
-      html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '">Resume</button>';
-    }
-    if (state.cancellingJobIds[job.id]) {
-      html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';
-    } else {
-      html += '<button class="btn-cancel" data-cancel-job="' + escapeHtml(job.id) + '">Cancel</button>';
-    }
-  }
+  if (isLive) html += renderJobControls(job);
   html += '</div>';
+
+  if (isLive && (job.control_unavailable_reason || (!job.pausable && job.pause_unavailable_reason))) {
+    html += '<div class="job-pause-banner">' + escapeHtml(job.control_unavailable_reason || job.pause_unavailable_reason) + '</div>';
+  }
 
   // Meta: started, elapsed, overall %
   html += '<div class="job-detail-meta">';

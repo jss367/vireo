@@ -276,7 +276,7 @@ class JobControl:
         with self._lock:
             return job_id in self.cancelled
 
-    def begin_uncancellable(self, job_id):
+    def begin_uncancellable(self, job_id, *, wait_for_pause=True):
         """Honor a pending pause, then atomically enter an uninterruptible phase.
 
         Returns False when a cancellation is already pending, leaving that flag
@@ -284,8 +284,14 @@ class JobControl:
         returns True, later pause and cancellation requests are ignored until
         the job reaches a terminal state. Pausable callers must invoke this at
         a safe checkpoint before acquiring resources for the commit.
+
+        With ``wait_for_pause=False``, a pending pause returns False without
+        parking. Verifiers use this to repeat their checks after Resume
+        instead of committing with evidence from before an indefinite pause.
         """
         with self._pause_condition:
+            if not wait_for_pause and job_id in self.pause_requested:
+                return False
             while job_id in self.pause_requested and job_id not in self.cancelled:
                 job = self._jobs.get(job_id)
                 if job is None:
@@ -296,7 +302,18 @@ class JobControl:
             if job_id in self.cancelled:
                 return False
             self.uncancellable.add(job_id)
+            self._publish_commit_locked(job_id)
             return True
+
+    def _publish_commit_locked(self, job_id):
+        """Expose the same control restrictions the backend enforces."""
+        job = self._jobs.get(job_id)
+        if job is not None:
+            job["cancellable"] = False
+            job["control_unavailable_reason"] = (
+                "Finishing safely. Pause and cancel are unavailable during this step."
+            )
+            self._streams.publish_status_locked(job, job["status"])
 
     def clear_cancellation(self, job_id):
         """Consume any pending cancellation flag for ``job_id`` and
@@ -317,3 +334,4 @@ class JobControl:
         with self._lock:
             self.cancelled.discard(job_id)
             self.uncancellable.add(job_id)
+            self._publish_commit_locked(job_id)
