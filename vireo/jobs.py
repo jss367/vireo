@@ -513,11 +513,12 @@ class JobRunner:
             config: optional dict of job configuration (persisted to history)
             workspace_id: optional workspace id to associate with this job
             ephemeral: if True, the job runs and streams events normally but
-                       is never written to ``job_history``. Use for transient
-                       background work surfaced to the user for transparency
-                       (e.g. the new-images filesystem walk) — it is fine to
-                       lose the record on process restart and we don't want
-                       it to clutter the history list.
+                       is never written to ``job_history`` and holds no
+                       sleep assertion. Not for Vireo's own background work:
+                       start that with ``lineage=JobLineage.system(...)``,
+                       whose row survives a crash and whose no-op runs are
+                       dropped from history instead (see
+                       ``JobHistory.system_disposition``).
             runtime_warning: optional user-facing warning metadata to expose
                        while the job is running.
             counts_for_badge: if False, the job remains visible in job lists
