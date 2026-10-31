@@ -64,6 +64,10 @@ paths and removing the source originals. Pause and Cancel are unavailable
 during that step, and the Jobs page explains why. Any pause during verification
 invalidates the earlier checks; the transfer repeats verification after Resume
 before entering its commit. Cancel before commit retains the source originals.
+Once paused, a transfer also treats its destination as shared: Resume does not
+overwrite files that arrived while it was paused, and failure or cancellation
+does not delete that destination tree. Conflicting files stop the transfer and
+leave the originals intact.
 Date-organized folder moves commit one photo at a time, so photos already moved
 remain moved after Cancel.
 

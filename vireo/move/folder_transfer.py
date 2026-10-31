@@ -7,6 +7,8 @@ import posixpath
 import shutil
 import sys
 
+from job_runner.work_control import JobCancelled
+
 from .folder_catalog import _plan_moved_file_mtimes
 from .remote import _remote_mkdir_p, _ssh_rsh_string, resolve_rsync_bin
 from .transfer import (
@@ -203,13 +205,19 @@ class _FolderTransfer:
                     _copy_tree_with_progress(
                         src_path, self.target.catalog_path, dest_exists, total_files,
                         self._copy_progress if self.control else progress_cb,
+                        **({"control": self.control} if self.control else {}),
                     )
                     returncode, stderr, timed_out = 0, "", False
+                except JobCancelled:
+                    # A paused job released its serialization slot. Another
+                    # transfer may now own files in this destination; cancel
+                    # must never run destructive fresh-copy cleanup here.
+                    raise
                 except Exception as exc:
                     log.warning("Copy fallback failed for %s", src_path, exc_info=True)
                     # Only remove a destination we created — never one that
                     # pre-existed (a merge target may hold the user's own files).
-                    if not dest_exists:
+                    if self._owns_destination():
                         shutil.rmtree(self.target.catalog_path, ignore_errors=True)
                     return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
             except OSError as exc:
@@ -234,6 +242,10 @@ class _FolderTransfer:
         self.progress(total_files, total_files, "", "Copying files")
         return None
 
+    def _owns_destination(self):
+        """A released transfer slot invalidates ownership of a fresh copy."""
+        return not self.target.dest_exists and not (self.control and self.control.generation)
+
     def _copy_progress(self, current, total, filename, phase):
         """The shutil fallback has finished the file before this checkpoint."""
         self.control.checkpoint()
@@ -250,6 +262,12 @@ class _FolderTransfer:
         flags = [*flags, "--partial-dir=.rsync-partial"]
         while True:
             self.control.checkpoint()
+            if self.control.generation:
+                # Files may have arrived while the transfer slot was released.
+                # Resume must preserve them, even if this began as a fresh copy.
+                flags = [flag for flag in flags if flag != "--checksum"]
+                if "--ignore-existing" not in flags:
+                    flags.append("--ignore-existing")
             stopped = False
 
             def stop_requested():
@@ -304,7 +322,7 @@ class _FolderTransfer:
                 # retry into one that demands a merge. A destination that was
                 # already there is never removed -- it may hold the user's own
                 # files.
-                if not self.target.dest_exists:
+                if self._owns_destination():
                     shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
                 return {"moved": 0, "errors": [
                     f"Verification failed: {problem}. Originals preserved."
@@ -368,7 +386,8 @@ class _FolderTransfer:
             verify_error = _fresh_copy_mismatch(src_path, transfer_dest,
                                                 progress=report)
             if verify_error is not None:
-                shutil.rmtree(transfer_dest, ignore_errors=True)
+                if self._owns_destination():
+                    shutil.rmtree(transfer_dest, ignore_errors=True)
                 return {"moved": 0, "errors": [
                     f"Verification failed: {verify_error}. Originals preserved."
                 ]}

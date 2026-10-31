@@ -260,6 +260,15 @@ class _FolderMove:
                 error = self.validate_source()
                 if error:
                     return error
+                if self.control.generation:
+                    # A paused transfer no longer exclusively owns a fresh
+                    # destination. Preserve every existing file and recheck
+                    # catalog ownership before publishing or cleaning up.
+                    self.target.dest_exists = True
+                    self.transfer.verify_contents = True
+                    error = self.target.resolve_tracked_destination()
+                    if error:
+                        return error
             generation = self.control.generation if self.control else 0
             for phase in (self.transfer.plan_mtime_corrections,
                           self.transfer.verify_copy):

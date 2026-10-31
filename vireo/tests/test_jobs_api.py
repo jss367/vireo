@@ -5828,14 +5828,14 @@ def test_pending_archive_pause_releases_sync_lock_and_retains_originals(app_and_
     def no_rsync(*args, **kwargs):
         raise FileNotFoundError()
 
-    def copy_with_boundary(src, dst, skip, total, progress):
+    def copy_with_boundary(src, dst, skip, total, progress, **kwargs):
         def report(current, count, name, phase):
             if not entered.is_set():
                 entered.set()
                 assert release.wait(synchronization_timeout(5))
             progress(current, count, name, phase)
 
-        return original_copy(src, dst, skip, total, report)
+        return original_copy(src, dst, skip, total, report, **kwargs)
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     monkeypatch.setattr(move.folder_transfer, "_copy_tree_with_progress", copy_with_boundary)

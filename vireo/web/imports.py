@@ -1606,7 +1606,7 @@ def create_imports_blueprint(
                         return result
                     except Exception as e:  # broad: mark the archive retryable before propagating any worker failure
                         if steps is not None:
-                            steps.fail(str(e), status="cancelled" if runner.is_cancelled(job["id"]) else "failed")
+                            steps.fail(str(e), status="cancelled" if runner.cancellation_requested(job["id"]) else "failed")
                         thread_db.pending_archives.set_state(archive_id, "pending", str(e))
                         raise
 

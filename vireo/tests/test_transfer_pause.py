@@ -47,7 +47,7 @@ def transfer_env(tmp_path, monkeypatch):
     runner.shutdown(timeout=synchronization_timeout(5))
 
 
-def start_move(env, *, lock=None):
+def start_move(env, *, lock=None, verify_contents=True):
     from move import move_folder
 
     runner, db_path, workspace_id, folder_id, source, destination = env
@@ -58,7 +58,7 @@ def start_move(env, *, lock=None):
             with SerializedWork(runner, job["id"], lock) as control:
                 result = move_folder(
                     db, folder_id, str(destination), control=control,
-                    verify_contents=True,
+                    verify_contents=verify_contents,
                 )
                 return {**result, "ok": not result.get("errors")}
 
@@ -69,7 +69,7 @@ def wait_status(runner, job_id, status):
     return wait_for_job(lambda: runner.get(job_id), terminal=(status,), timeout=5)
 
 
-@pytest.mark.parametrize("action", ["resume", "cancel"])
+@pytest.mark.parametrize("action", ["resume", "cancel", "collision"])
 def test_folder_copy_pause_releases_lock_and_preserves_originals(transfer_env, monkeypatch, action):
     import move.folder_transfer as transfer
 
@@ -78,7 +78,7 @@ def test_folder_copy_pause_releases_lock_and_preserves_originals(transfer_env, m
     original = transfer._copy_tree_with_progress
     copied = []
 
-    def copy_with_boundary(src, dst, skip, total, progress):
+    def copy_with_boundary(src, dst, skip, total, progress, **kwargs):
         def report(current, count, name, phase):
             copied.append(name)
             if len(copied) == 1:
@@ -86,7 +86,7 @@ def test_folder_copy_pause_releases_lock_and_preserves_originals(transfer_env, m
                 assert release.wait(synchronization_timeout(5))
             progress(current, count, name, phase)
 
-        return original(src, dst, skip, total, report)
+        return original(src, dst, skip, total, report, **kwargs)
 
     monkeypatch.setattr(transfer, "_copy_tree_with_progress", copy_with_boundary)
     lock = threading.Lock()
@@ -99,10 +99,21 @@ def test_folder_copy_pause_releases_lock_and_preserves_originals(transfer_env, m
         assert lock.acquire(blocking=False), "paused transfer retained the batch lock"
         lock.release()
         assert len(copied) == 1
+        other_file = destination / source.name / "another-transfer.jpg"
+        other_file.write_bytes(b"another transfer's only copy")
         assert (source / "a.jpg").exists() and (source / "b.jpg").exists()
         with Database(db_path) as db:
             assert db.folders.get(folder_id)["path"] == str(source)
-        if action == "resume":
+        if action == "collision":
+            outstanding = ({"a.jpg", "b.jpg"} - set(copied)).pop()
+            conflicting = destination / source.name / outstanding
+            conflicting.write_bytes(b"another transfer's photo")
+            assert runner.resume_job(job_id)
+            job = wait_for_job_via_runner(runner, job_id)
+            assert job["status"] == "failed", job
+            assert conflicting.read_bytes() == b"another transfer's photo"
+            assert source.exists()
+        elif action == "resume":
             assert runner.resume_job(job_id)
             job = wait_for_job_via_runner(runner, job_id)
             assert job["status"] == "completed", job
@@ -115,6 +126,42 @@ def test_folder_copy_pause_releases_lock_and_preserves_originals(transfer_env, m
             assert job["status"] == "cancelled", job
             assert len(copied) == 1
             assert source.exists()
+        assert other_file.read_bytes() == b"another transfer's only copy"
+    finally:
+        release.set()
+        runner.cancel_job(job_id)
+
+
+def test_failed_fresh_verification_after_pause_preserves_other_files(transfer_env, monkeypatch):
+    import move.folder_transfer as transfer
+
+    runner, _, _, _, source, destination = transfer_env
+    entered, release = threading.Event(), threading.Event()
+    original = transfer._fresh_copy_mismatch
+
+    def verify(src, dst, progress):
+        def report(current, name):
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(synchronization_timeout(5))
+            progress(current, name)
+
+        return original(src, dst, progress=report)
+
+    monkeypatch.setattr(transfer, "_fresh_copy_mismatch", verify)
+    job_id = start_move(transfer_env, verify_contents=False)
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        assert runner.pause_job(job_id)
+        release.set()
+        wait_status(runner, job_id, "paused")
+        other = destination / source.name / "another-transfer.jpg"
+        other.write_bytes(b"another transfer's only copy")
+        assert runner.resume_job(job_id)
+        job = wait_for_job_via_runner(runner, job_id)
+        assert job["status"] == "failed", job
+        assert other.read_bytes() == b"another transfer's only copy"
+        assert source.exists()
     finally:
         release.set()
         runner.cancel_job(job_id)

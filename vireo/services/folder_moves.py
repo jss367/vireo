@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from db import Database
-from job_runner.work_control import JobNotStarted, SerializedWork, WorkControl
+from job_runner.work_control import JobCancelled, JobNotStarted, SerializedWork, WorkControl
 from services.local_folder import (
     LOCAL_FOLDER_JOB_TYPES,
     local_root_for_folder,
@@ -568,6 +568,9 @@ def _run_stepped_move(
     steps.start()
     try:
         result = move_folder(**move_kwargs)
+    except JobCancelled as e:
+        steps.fail(str(e), status="cancelled")
+        raise
     except Exception as e:
         steps.fail(str(e))
         raise

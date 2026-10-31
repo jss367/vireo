@@ -61,7 +61,7 @@ def _copy_and_verify(src, dst):
 
 
 def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
-                             progress_cb):
+                             progress_cb, control=None):
     """Recursively copy src_path into dest_path, reporting each file copied.
 
     ``skip_existing`` mirrors rsync ``--ignore-existing`` (merge/resume): a
@@ -94,14 +94,18 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
         # primary rsync -a path (which preserves symlinks rather than
         # following them) and keeping the verification counts consistent.
         for d in dirs:
+            if control:
+                control.checkpoint()
             src_sub = os.path.join(root, d)
             if not os.path.islink(src_sub):
                 continue
             dst_sub = os.path.join(target_dir, d)
-            if skip_existing and os.path.lexists(dst_sub):
+            if (skip_existing or (control and control.generation)) and os.path.lexists(dst_sub):
                 continue
             os.symlink(os.readlink(src_sub), dst_sub)
         for fn in files:
+            if control:
+                control.checkpoint()
             # Merges skip Finder metadata (``.DS_Store``) — the destination
             # keeps its own copy, and the source's is discarded when the
             # source tree is removed after a successful merge. Fresh moves
@@ -114,7 +118,7 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
             # still counts as present for a merge, so we never dereference it
             # and write through to its target. exists() returns False for a
             # broken symlink and would fall through to copy2 below.
-            if skip_existing and os.path.lexists(dst_file):
+            if (skip_existing or (control and control.generation)) and os.path.lexists(dst_file):
                 continue
             if os.path.islink(src_file):
                 # Preserve the symlink rather than copy2's dereferenced target,
@@ -134,7 +138,7 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
     # metadata. Run after all contents exist so child writes don't re-bump a
     # parent's mtime. Skipped on a merge: a pre-existing destination dir keeps
     # the user's own metadata rather than being overwritten with the source's.
-    if not skip_existing:
+    if not skip_existing and not (control and control.generation):
         for src_dir, target_dir in created_dirs:
             shutil.copystat(src_dir, target_dir)
 
