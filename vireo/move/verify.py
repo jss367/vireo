@@ -249,6 +249,34 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote, *, 
         return None
 
 
+def _directory_symlink_mismatch(root, directories, src_path, dest_path):
+    """Verify opaque directory links without traversing their targets.
+
+    ``os.walk(..., followlinks=False)`` puts directory symlinks in ``dirs``
+    but never visits their contents. A file-only verifier would silently
+    accept a missing link, a different link, or an ordinary directory.
+    lstat also rejects a destination parent alias back into the source.
+    """
+    for name in directories:
+        source = os.path.join(root, name)
+        if not os.path.islink(source):
+            continue
+        relative = os.path.relpath(source, src_path)
+        destination = os.path.join(dest_path, relative)
+        try:
+            if not os.path.islink(destination):
+                return relative
+            source_stat, destination_stat = os.lstat(source), os.lstat(destination)
+            if ((source_stat.st_dev, source_stat.st_ino)
+                    == (destination_stat.st_dev, destination_stat.st_ino)):
+                return relative
+            if os.readlink(source) != os.readlink(destination):
+                return relative
+        except OSError:
+            return relative
+    return None
+
+
 def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
                                is_merge=False, progress=None):
     """Return the relative path of the first source file absent (or
@@ -295,7 +323,10 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     file has passed, where ``checked`` counts the source files done so far.
     """
     checked = 0
-    for root, _, files in os.walk(src_path):
+    for root, directories, files in os.walk(src_path):
+        mismatch = _directory_symlink_mismatch(root, directories, src_path, dest_path)
+        if mismatch is not None:
+            return mismatch
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)
@@ -488,7 +519,10 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
     ``progress`` is called as in ``_first_missing_source_file``.
     """
     src_count = 0
-    for root, _dirs, files in os.walk(src_path):
+    for root, directories, files in os.walk(src_path):
+        mismatch = _directory_symlink_mismatch(root, directories, src_path, transfer_dest)
+        if mismatch is not None:
+            return f"'{mismatch}' directory symlink missing or different at destination"
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)

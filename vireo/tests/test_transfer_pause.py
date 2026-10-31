@@ -334,3 +334,102 @@ def test_final_commit_exposes_and_enforces_unavailable_controls(transfer_env, mo
         assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
     finally:
         release.set()
+
+
+@pytest.mark.parametrize("entry", ["matching", "wrong_target", "file", "directory", "source_alias"])
+def test_resume_verifies_skipped_directory_symlinks(transfer_env, monkeypatch, entry):
+    import move.folder_transfer as transfer
+
+    runner, db_path, _, folder_id, source, destination = transfer_env
+    nested = source / "nested"
+    nested.mkdir()
+    external = source.parent / "external"
+    external.mkdir()
+    (external / "keep.txt").write_text("external files must remain untouched")
+    link = nested / "directory-link"
+    try:
+        link.symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
+    entered, release = threading.Event(), threading.Event()
+    original = transfer._copy_tree_with_progress
+
+    def copy_with_boundary(src, dst, skip, total, progress, **kwargs):
+        def report(current, count, name, phase):
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(synchronization_timeout(5))
+            progress(current, count, name, phase)
+
+        return original(src, dst, skip, total, report, **kwargs)
+
+    monkeypatch.setattr(transfer, "_copy_tree_with_progress", copy_with_boundary)
+    job_id = start_move(transfer_env)
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        assert runner.pause_job(job_id)
+        release.set()
+        wait_status(runner, job_id, "paused")
+        landing = destination / source.name / "nested"
+        if entry == "source_alias":
+            landing.symlink_to(nested, target_is_directory=True)
+        else:
+            landing.mkdir()
+            target = landing / link.name
+            if entry == "matching":
+                target.symlink_to(external, target_is_directory=True)
+            elif entry == "wrong_target":
+                target.symlink_to(source.parent, target_is_directory=True)
+            elif entry == "file":
+                target.write_text("another writer's file")
+            else:
+                target.mkdir()
+        assert runner.resume_job(job_id)
+        job = wait_for_job_via_runner(runner, job_id)
+        assert job["status"] == ("completed" if entry == "matching" else "failed"), job
+        if entry == "matching":
+            assert not source.exists()
+            assert os.readlink(landing / link.name) == str(external)
+        else:
+            assert source.exists()
+            assert os.readlink(link) == str(external)
+            with Database(db_path) as db:
+                assert db.folders.get(folder_id)["path"] == str(source)
+            if entry == "file":
+                assert (landing / link.name).read_text() == "another writer's file"
+        assert (external / "keep.txt").read_text() == "external files must remain untouched"
+    finally:
+        release.set()
+        runner.cancel_job(job_id)
+
+
+@pytest.mark.parametrize("entry", ["matching", "missing", "wrong_target", "file", "directory", "source_alias"])
+def test_both_folder_verifiers_check_directory_symlinks(tmp_path, entry):
+    from move.verify import _first_missing_source_file, _fresh_copy_mismatch
+
+    source, destination, external = (tmp_path / name for name in ("source", "destination", "external"))
+    for path in (source, destination, external):
+        path.mkdir()
+    (source / "nested").mkdir()
+    link = source / "nested" / "directory-link"
+    try:
+        link.symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
+    landing = destination / "nested"
+    if entry == "source_alias":
+        landing.symlink_to(source / "nested", target_is_directory=True)
+    else:
+        landing.mkdir()
+        target = landing / link.name
+        if entry == "matching":
+            target.symlink_to(external, target_is_directory=True)
+        elif entry == "wrong_target":
+            target.symlink_to(tmp_path, target_is_directory=True)
+        elif entry == "file":
+            target.touch()
+        elif entry == "directory":
+            target.mkdir()
+    for verify in (_first_missing_source_file, _fresh_copy_mismatch):
+        result = verify(str(source), str(destination))
+        assert (result is None) == (entry == "matching"), (verify.__name__, result)
