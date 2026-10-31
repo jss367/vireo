@@ -333,14 +333,13 @@ class FolderMoves:
         # The two trees a move touches. A staged transfer reserves them once
         # it holds the workspace, so an import that touches neither may run
         # beside it; any other move may start beside a transfer that misses
-        # both. The destination is resolved by the caller (a chained move's
-        # is the snapshot taken when the import was planned); resolving it
-        # again could stall on the NAS.
+        # both. Canonical like the trees other jobs declare, and resolved
+        # here because the runner lock must not do I/O.
         landing = os.path.join(
             request.destination,
             request.destination_name or os.path.basename(os.path.normpath(request.source_path)),
         )
-        move_paths = [os.path.realpath(request.source_path), os.path.normpath(landing)]
+        move_paths = [os.path.realpath(request.source_path), os.path.realpath(landing)]
         if managed_staging_root:
             return runner.start(
                 "move-folder", staged_work, config=job_config,

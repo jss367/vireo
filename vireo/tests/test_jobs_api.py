@@ -5877,6 +5877,20 @@ def test_import_runs_while_another_import_is_sent_to_nas(app_and_db, tmp_path, m
         assert response.status_code == 409, response.get_json()
         assert "which this job also uses" in response.get_json()["error"]
         assert not (tmp_path / "NAS" / "trip" / "third.jpg").exists()
+        # ...including through a symlink alias of that folder (where the
+        # platform lets the test create one; Windows needs a privilege).
+        try:
+            (tmp_path / "NAS-link").symlink_to(tmp_path / "NAS", target_is_directory=True)
+        except OSError:
+            pass
+        else:
+            response = client.post("/api/jobs/import-photos", json={
+                "sources": [str(third_card)], "destination": str(tmp_path / "NAS-link" / "trip"),
+                "folder_template": "",
+            })
+            assert response.status_code == 409, response.get_json()
+            assert "which this job also uses" in response.get_json()["error"]
+            assert not (tmp_path / "NAS" / "trip" / "third.jpg").exists()
         # Anything else in the workspace still waits for the send.
         assert client.post("/api/batch/flag", json={"photo_ids": [], "flag": "flagged"}).status_code == 409
     finally:
