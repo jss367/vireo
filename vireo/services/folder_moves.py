@@ -335,7 +335,9 @@ class FolderMoves:
         # beside it; any other move may start beside a transfer that misses
         # both. Canonical like the trees other jobs declare, and resolved
         # here because the runner lock must not do I/O.
-        landing = os.path.join(
+        # A date-organized move renders its folders under the destination
+        # itself, so the whole destination bounds its writes.
+        landing = request.destination if request.folder_template else os.path.join(
             request.destination,
             request.destination_name or os.path.basename(os.path.normpath(request.source_path)),
         )

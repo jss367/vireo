@@ -218,6 +218,31 @@ def test_automatic_transfer_registers_beside_a_running_transfer_and_waits():
         runner.shutdown()
 
 
+@pytest.mark.parametrize("folder_template,expected_leaf", [("", "day"), ("%Y-%m-%d", None)])
+def test_move_declares_the_tree_it_writes(tmp_path, folder_template, expected_leaf):
+    """A date-organized move writes under the destination itself, not one leaf of it."""
+    from services.folder_moves import FolderMoveRequest, FolderMoves
+
+    started = {}
+
+    class Runner:
+        def start(self, *args, **kwargs):
+            started.update(kwargs)
+            return "job"
+
+    source, destination = tmp_path / "staging" / "day", tmp_path / "NAS"
+    request = FolderMoveRequest(
+        folder_id=1, source_path=str(source), destination=str(destination),
+        display_dest=str(destination), resolved_destination=str(destination / "day"),
+        merge=False, developed_dir="", keep_visible=False, folder_template=folder_template,
+    )
+    moves = FolderMoves(get_runner=lambda: None, get_db=lambda: None, db_path="",
+                        config={}, invalidate_missing_originals=lambda *a, **k: None)
+    moves.start_job(Runner(), 1, request)
+    landing = destination / expected_leaf if expected_leaf else destination
+    assert started["workspace_paths"] == [os.path.realpath(source), os.path.realpath(landing)]
+
+
 def test_paths_overlap_compares_whole_folder_names():
     from job_runner.reservations import paths_overlap
 
