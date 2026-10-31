@@ -403,6 +403,10 @@ def _admit_in_place_job(
     job_config = import_job.job_config(body, created_workspace)
     if restart_config:
         job_config.update(restart_config)
+    # The folders it catalogs bound every file it reads and the photos it
+    # writes, so it may run beside a NAS transfer of other folders. Resolved
+    # here, not under the runner lock, which must not do I/O.
+    workspace_paths = [os.path.realpath(path) for path in in_place_sources.sources]
     # Snapshot-backed imports serialize on ``snapshot_import_lock`` for
     # the entire worker call. Pausing inside that critical section would
     # sleep while holding the shared lock, so a queued second import for
@@ -425,6 +429,7 @@ def _admit_in_place_job(
             "import-in-place", import_job.work, config=job_config,
             workspace_id=active_ws,
             pausable=snapshot_import_lock is None,
+            workspace_paths=workspace_paths,
         )
 
 

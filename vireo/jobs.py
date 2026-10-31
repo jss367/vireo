@@ -227,12 +227,16 @@ class JobRunner:
         )
 
     def enqueue_pipeline(self, work_fn, config=None, workspace_id=None,
-                         runtime_warning=None):
-        """Admit and persist a pipeline, then attempt promotion into a free slot."""
+                         runtime_warning=None, workspace_paths=None):
+        """Admit and persist a pipeline, then attempt promotion into a free slot.
+
+        ``workspace_paths`` are the realpath'd folders of every photo the
+        pipeline processes; see ``start``.
+        """
         # Cover the persistence window before the queued context is published.
         # A transfer must not slip between checking admission and publishing it.
         with self._lock:
-            self._reservations.check_admission_locked(workspace_id)
+            self._reservations.check_admission_locked(workspace_id, paths=workspace_paths)
             self._queue.admit_locked(workspace_id)
         try:
             return self._enqueue_pipeline_admitted(work_fn, config, workspace_id, runtime_warning)
@@ -456,7 +460,7 @@ class JobRunner:
     def start(self, job_type, work_fn, config=None, workspace_id=None,
               ephemeral=False, runtime_warning=None, counts_for_badge=True,
               pausable=False, blocks_local_transitions=None,
-              workspace_transfer_batch=None):
+              workspace_transfer_batch=None, workspace_paths=None):
         """Start a background job.
 
         Args:
@@ -487,6 +491,12 @@ class JobRunner:
                       than being re-decided at every launcher.
             workspace_transfer_batch: identifies automatic moves whose workers
                       call wait_for_workspace_transfer before touching originals.
+            workspace_paths: the realpath'd folder trees the job reads and
+                      writes. A job that declares them may run beside a NAS
+                      transfer whose trees they do not overlap; one that does
+                      not is refused while any transfer runs in its workspace.
+                      Only declare trees that bound everything the job
+                      touches, its catalog writes included.
 
         Returns:
             job_id string
@@ -498,6 +508,7 @@ class JobRunner:
             counts_for_badge=counts_for_badge, pausable=pausable,
             blocks_local_transitions=blocks_local_transitions,
             workspace_transfer_batch=workspace_transfer_batch,
+            workspace_paths=workspace_paths,
         )
         log.info("Job %s started type=%s", job["id"], job_type)
         if not self._workers.start(job, work_fn):
@@ -508,7 +519,8 @@ class JobRunner:
     def _register_and_prepare(self, job_type, work_fn, *, config, workspace_id,
                               ephemeral, runtime_warning, counts_for_badge,
                               pausable, blocks_local_transitions,
-                              singleton_key=None, workspace_transfer_batch=None):
+                              singleton_key=None, workspace_transfer_batch=None,
+                              workspace_paths=None):
         """Allocate an id and register the job dict under the runner lock.
 
         Returns the (job, work_fn) pair the caller should hand to a thread.
@@ -525,7 +537,12 @@ class JobRunner:
         with self._lock:
             if self._workers.shutting_down:
                 raise RuntimeError("JobRunner is shut down")
-            self._reservations.check_admission_locked(workspace_id, blocks_local_transitions)
+            # An automatic transfer waits for the running one before it
+            # touches anything, so it registers now and queues behind it.
+            self._reservations.check_admission_locked(
+                workspace_id, blocks_local_transitions, paths=workspace_paths,
+                defer_transfer_check=workspace_transfer_batch is not None,
+            )
             self._enqueue_counter += 1
             seq = self._enqueue_counter
             job_id = f"{job_type}-{int(time.time() * 1000)}-{seq}"
@@ -537,6 +554,7 @@ class JobRunner:
                 blocks_local_transitions=blocks_local_transitions,
                 runtime_warning=runtime_warning,
                 singleton_key=singleton_key,
+                workspace_paths=workspace_paths,
             )
             self._prune_finished_jobs()
             job["workspace_transfer_batch"] = workspace_transfer_batch
@@ -544,13 +562,15 @@ class JobRunner:
             self._streams.open_locked(job_id)
         return job, work_fn
 
-    def workspace_mutation(self, workspace_id, *, exclusive=False, label=None):
+    def workspace_mutation(self, workspace_id, *, exclusive=False, label=None,
+                           defer_transfer_check=False):
         """Reserve synchronous mutations against transfers for their full duration.
 
         A context manager; see ``WorkspaceReservations.workspace_mutation``.
         """
         return self._reservations.workspace_mutation(
             workspace_id, exclusive=exclusive, label=label,
+            defer_transfer_check=defer_transfer_check,
         )
 
     def wait_for_workspace_transfer(self, job_id):
@@ -587,7 +607,7 @@ class JobRunner:
                         config=None, workspace_id=None, ephemeral=False,
                         runtime_warning=None, counts_for_badge=True,
                         pausable=False, blocks_local_transitions=None,
-                        exclusive_workspace=False):
+                        exclusive_workspace=False, workspace_paths=None):
         """Start a job unless one with the same (type, singleton_key) is active.
 
         The existence check AND the new-job registration happen under a
@@ -603,6 +623,10 @@ class JobRunner:
           stored config to decide whether joining is actually appropriate).
         - ``joined_existing`` False means a fresh job was registered and
           its worker thread was started; ``existing_snapshot`` is None.
+
+        An ``exclusive_workspace`` job is a NAS transfer; its
+        ``workspace_paths`` are the trees it moves, and only jobs whose own
+        declared trees miss them may start while it runs (see ``start``).
         """
         # Compute the joined snapshot / register a new job under one lock
         # acquisition so the check-and-start is genuinely atomic.
@@ -617,7 +641,10 @@ class JobRunner:
             blocks_local_transitions = _resolve_blocking(
                 job_type, blocks_local_transitions,
             )
-            self._reservations.check_admission_locked(workspace_id, blocks_local_transitions, exclusive_workspace)
+            self._reservations.check_admission_locked(
+                workspace_id, blocks_local_transitions, exclusive_workspace,
+                paths=None if exclusive_workspace else workspace_paths,
+            )
             # No active singleton — register inline while still holding the
             # lock so a second caller arriving between our check and our
             # registration cannot slip in and register its own.
@@ -632,6 +659,7 @@ class JobRunner:
                 blocks_local_transitions=blocks_local_transitions,
                 runtime_warning=runtime_warning,
                 singleton_key=singleton_key,
+                workspace_paths=workspace_paths,
             )
             job["exclusive_workspace"] = bool(exclusive_workspace)
             self._prune_finished_jobs()

@@ -11,6 +11,7 @@ request database — every dependency is passed in explicitly.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import TYPE_CHECKING, Protocol
 
@@ -489,10 +490,18 @@ class PipelineChain:
         job_config = _process_job_config(
             thread_db, collection_id, process_id, params, chained_from,
         )
+        # The folders of every photo the run processes: an import admitted
+        # beside a NAS transfer can process its own photos while the
+        # transfer moves other folders.
+        workspace_paths = [
+            os.path.realpath(path)
+            for path in thread_db.collections.folder_paths(collection_id)
+        ]
         job_id = runner.enqueue_pipeline(
             work,
             config=job_config,
             workspace_id=workspace_id,
             runtime_warning=runtime_warning,
+            workspace_paths=workspace_paths,
         )
         return job_id, model_warning, None
