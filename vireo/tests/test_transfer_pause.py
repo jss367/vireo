@@ -337,7 +337,8 @@ def test_final_commit_exposes_and_enforces_unavailable_controls(transfer_env, mo
 
 
 @pytest.mark.parametrize("entry", ["matching", "wrong_target", "file", "directory", "source_alias"])
-def test_resume_verifies_skipped_directory_symlinks(transfer_env, monkeypatch, entry):
+@pytest.mark.parametrize("link_kind", ["directory", "file", "broken"])
+def test_resume_verifies_skipped_symlinks(transfer_env, monkeypatch, entry, link_kind):
     import move.folder_transfer as transfer
 
     runner, db_path, _, folder_id, source, destination = transfer_env
@@ -346,9 +347,10 @@ def test_resume_verifies_skipped_directory_symlinks(transfer_env, monkeypatch, e
     external = source.parent / "external"
     external.mkdir()
     (external / "keep.txt").write_text("external files must remain untouched")
-    link = nested / "directory-link"
+    expected = external if link_kind == "directory" else external / ("keep.txt" if link_kind == "file" else "missing.txt")
+    link = nested / "link"
     try:
-        link.symlink_to(external, target_is_directory=True)
+        link.symlink_to(expected, target_is_directory=link_kind == "directory")
     except OSError:
         pytest.skip("Directory symlinks are unavailable")
     entered, release = threading.Event(), threading.Event()
@@ -377,7 +379,7 @@ def test_resume_verifies_skipped_directory_symlinks(transfer_env, monkeypatch, e
             landing.mkdir()
             target = landing / link.name
             if entry == "matching":
-                target.symlink_to(external, target_is_directory=True)
+                target.symlink_to(expected, target_is_directory=link_kind == "directory")
             elif entry == "wrong_target":
                 target.symlink_to(source.parent, target_is_directory=True)
             elif entry == "file":
@@ -389,10 +391,10 @@ def test_resume_verifies_skipped_directory_symlinks(transfer_env, monkeypatch, e
         assert job["status"] == ("completed" if entry == "matching" else "failed"), job
         if entry == "matching":
             assert not source.exists()
-            assert os.readlink(landing / link.name) == str(external)
+            assert os.readlink(landing / link.name) == str(expected)
         else:
             assert source.exists()
-            assert os.readlink(link) == str(external)
+            assert os.readlink(link) == str(expected)
             with Database(db_path) as db:
                 assert db.folders.get(folder_id)["path"] == str(source)
             if entry == "file":
@@ -404,16 +406,19 @@ def test_resume_verifies_skipped_directory_symlinks(transfer_env, monkeypatch, e
 
 
 @pytest.mark.parametrize("entry", ["matching", "missing", "wrong_target", "file", "directory", "source_alias"])
-def test_both_folder_verifiers_check_directory_symlinks(tmp_path, entry):
+@pytest.mark.parametrize("link_kind", ["directory", "file", "broken"])
+def test_both_folder_verifiers_check_symlinks(tmp_path, entry, link_kind):
     from move.verify import _first_missing_source_file, _fresh_copy_mismatch
 
     source, destination, external = (tmp_path / name for name in ("source", "destination", "external"))
     for path in (source, destination, external):
         path.mkdir()
+    (external / "target.txt").write_text("external file")
+    expected = external if link_kind == "directory" else external / ("target.txt" if link_kind == "file" else "missing.txt")
     (source / "nested").mkdir()
-    link = source / "nested" / "directory-link"
+    link = source / "nested" / "link"
     try:
-        link.symlink_to(external, target_is_directory=True)
+        link.symlink_to(expected, target_is_directory=link_kind == "directory")
     except OSError:
         pytest.skip("Directory symlinks are unavailable")
     landing = destination / "nested"
@@ -423,7 +428,7 @@ def test_both_folder_verifiers_check_directory_symlinks(tmp_path, entry):
         landing.mkdir()
         target = landing / link.name
         if entry == "matching":
-            target.symlink_to(external, target_is_directory=True)
+            target.symlink_to(expected, target_is_directory=link_kind == "directory")
         elif entry == "wrong_target":
             target.symlink_to(tmp_path, target_is_directory=True)
         elif entry == "file":

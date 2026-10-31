@@ -249,6 +249,20 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote, *, 
         return None
 
 
+def _matching_independent_symlink(source, destination):
+    """Preserve a link's target while rejecting aliases back to its own entry."""
+    try:
+        if not os.path.islink(destination):
+            return False
+        source_stat, destination_stat = os.lstat(source), os.lstat(destination)
+        return (
+            (source_stat.st_dev, source_stat.st_ino) != (destination_stat.st_dev, destination_stat.st_ino)
+            and os.readlink(source) == os.readlink(destination)
+        )
+    except OSError:
+        return False
+
+
 def _directory_symlink_mismatch(root, directories, src_path, dest_path):
     """Verify opaque directory links without traversing their targets.
 
@@ -263,16 +277,7 @@ def _directory_symlink_mismatch(root, directories, src_path, dest_path):
             continue
         relative = os.path.relpath(source, src_path)
         destination = os.path.join(dest_path, relative)
-        try:
-            if not os.path.islink(destination):
-                return relative
-            source_stat, destination_stat = os.lstat(source), os.lstat(destination)
-            if ((source_stat.st_dev, source_stat.st_ino)
-                    == (destination_stat.st_dev, destination_stat.st_ino)):
-                return relative
-            if os.readlink(source) != os.readlink(destination):
-                return relative
-        except OSError:
+        if not _matching_independent_symlink(source, destination):
             return relative
     return None
 
@@ -287,7 +292,9 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     With ``verify_contents``, compare fresh bytes as well before allowing
     managed temporary originals to be removed.
 
-    A symlinked destination entry is treated as missing: `os.path.isfile` /
+    Expected source symlinks must remain independent links with identical
+    target strings. For regular source files, a symlinked destination is
+    treated as missing: `os.path.isfile` /
     `os.path.getsize` follow the link, so a symlink pointing back into the
     source tree (directly, or via a symlinked parent directory) would pass
     a size compare even though no independent copy exists at the
@@ -339,6 +346,10 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
                     os.path.isfile(src_file):
                 continue
             dst_file = os.path.join(dest_path, rel_name)
+            if os.path.islink(src_file):
+                if not _matching_independent_symlink(src_file, dst_file):
+                    return rel_name
+                continue
             if not os.path.lexists(dst_file) or os.path.islink(dst_file):
                 return rel_name
             try:
@@ -540,9 +551,9 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
                     f"'{rel_name}' type mismatch (symlink vs regular file) "
                     f"at destination")
             if src_is_link:
-                if os.readlink(src_file) != os.readlink(dst_file):
+                if not _matching_independent_symlink(src_file, dst_file):
                     return (
-                        f"'{rel_name}' symlink target mismatch at destination")
+                        f"'{rel_name}' symlink target mismatch or source alias at destination")
                 continue
             try:
                 src_size = os.stat(src_file, follow_symlinks=False).st_size
