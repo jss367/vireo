@@ -206,3 +206,16 @@ test('missing or invalid chosen subjects require manual centering without using 
   ctx.rqItem(1).center = [.7,.3];
   assert.deepEqual([...ctx.rqSubjectCenter()], [.7,.3]);
 });
+
+test('review outlines only the selected animal and hides invalid or missing boxes', () => {
+  const {ctx, element} = harness();
+  ctx.rqOutlineSubject({id:22,box_x:.65,box_y:.1,box_w:.2,box_h:.3});
+  const box = element('rqSubjectBox');
+  assert.equal(box.hidden, false);
+  assert.equal(box.style.left, '65%');
+  assert.equal(box.style.height, '30%');
+  ctx.rqOutlineSubject({id:22,box_x:.95,box_y:.1,box_w:.2,box_h:.3});
+  assert.equal(box.hidden, true);
+  ctx.rqOutlineSubject(undefined);
+  assert.equal(box.hidden, true);
+});

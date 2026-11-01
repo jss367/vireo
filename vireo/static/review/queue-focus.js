@@ -39,6 +39,7 @@ async function rqLoadCrop() {
   }
   var sequence = reviewQueue.cropSequence;
   var photoId = reviewQueue.current.id;
+  var manual = !!rqItem(photoId).center;
   var url = '/photos/' + photoId + '/focus-crop?size=512&source=' + reviewQueue.source + '&center=' + center.join(',');
   rqElement('rqCropStatus').textContent = 'Loading native focus pixels…';
   rqMarkCenter(center);
@@ -60,7 +61,8 @@ async function rqLoadCrop() {
     image.hidden = false;
     var h = response.headers;
     var scale = h.get('X-Vireo-Focus-Original-Scale') || 'unknown';
-    rqElement('rqCropStatus').textContent = 'Source: ' + (h.get('X-Vireo-Focus-Source') || 'unknown') +
+    rqElement('rqCropStatus').textContent = (manual ? 'Manual center; verify eye visibility. ' :
+      'Subject-box center; the head or eye may be outside this crop. ') + 'Source: ' + (h.get('X-Vireo-Focus-Source') || 'unknown') +
       ' · decoded raster: ' + (h.get('X-Vireo-Focus-Raster-Size') || 'unknown') + ' px · original pixel scale: ' + scale +
       '. One crop pixel per decoded raster pixel; displayed at native size (scroll for more).' +
       (scale !== 'unknown' && Number(scale) < 0.98 ? ' This raster is smaller than the original; it is not a full-resolution RAW inspection.' : '') +
@@ -79,15 +81,35 @@ function rqRenderSubjects() {
   select.replaceChildren(new Option('Choose subject / manual center', ''));
   reviewQueue.subjects.forEach(function(subject, index) {
     select.add(new Option('Subject ' + (index + 1) + ' · left ' + Math.round(subject.box_x * 100) + '% · top ' +
-      Math.round(subject.box_y * 100) + '%' + (subject.is_primary ? ' · saved primary' : ''), String(subject.id)));
+      Math.round(subject.box_y * 100) + '%' +
+      (Number.isFinite(subject.detector_confidence) ? ' · detector ' + Math.round(/** @type {number} */ (subject.detector_confidence) * 100) + '%' : '') +
+      (subject.is_primary ? ' · saved primary' : ''), String(subject.id)));
   });
   select.value = String(item.subject || '');
   var chosen = reviewQueue.subjects.find(function(s) { return s.id === item.subject; });
+  var hasBox = rqOutlineSubject(chosen);
   rqElement('rqAnalysis').textContent = (chosen?.analysis ? 'Cached box analysis is recorded for this subject; freshness is not checked here.' :
     'No cached box analysis is recorded for this subject.') +
     ' Subject choice and manual centering only change this inspection. They do not change the saved primary, rankings, or analysis.' +
-    (item.center ? ' Using the saved manual center.' : ' Focus window centered on the selected subject.');
+    (item.center ? ' Using the saved manual center; verify that the head or eye is visible.' :
+      hasBox ? ' Focus window uses the subject box center; the head or eye may be outside the crop.' :
+        ' No usable subject box; place a manual head or eye center.') +
+    ' No current subject-bound eye evidence is verified in this view. Use Inspect head / eye to place a center on the intended animal.';
   /** @type {HTMLSelectElement} */ (rqElement('rqSource')).value = reviewQueue.source;
+}
+
+/** @param {ReviewQueueSubject | undefined} subject */
+function rqOutlineSubject(subject) {
+  var outline = rqElement('rqSubjectBox');
+  var valid = subject && [subject.box_x, subject.box_y, subject.box_w, subject.box_h].every(Number.isFinite) &&
+    subject.box_x >= 0 && subject.box_y >= 0 && subject.box_w > 0 && subject.box_h > 0 &&
+    subject.box_x + subject.box_w <= 1.000001 && subject.box_y + subject.box_h <= 1.000001;
+  outline.hidden = !valid;
+  if (valid && subject) {
+    outline.style.left = subject.box_x * 100 + '%'; outline.style.top = subject.box_y * 100 + '%';
+    outline.style.width = subject.box_w * 100 + '%'; outline.style.height = subject.box_h * 100 + '%';
+  }
+  return !!valid;
 }
 
 /** @param {MouseEvent} event */

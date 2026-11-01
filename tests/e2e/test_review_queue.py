@@ -73,6 +73,10 @@ def test_review_queue_resumes_scope_position_subject_manual_center_and_unresolve
     expect(page.locator('#rqFlag')).to_contain_text('Current catalog flag: rejected')
     page.locator('#rqSubject').select_option(str(subjects[1][1]))
     expect(page.locator('#rqAnalysis')).to_contain_text('No cached box analysis')
+    expect(page.locator('#rqAnalysis')).to_contain_text('head or eye may be outside the crop')
+    expect(page.locator('#rqAnalysis')).to_contain_text('No current subject-bound eye evidence')
+    expect(page.locator('#rqSubjectBox')).to_be_visible()
+    assert page.locator('#rqSubjectBox').evaluate('el => el.style.left') == '65%'
     page.locator('#rqUnresolved').check()
     page.locator('#rqManual').click()
     page.wait_for_function('document.getElementById("rqFull").naturalWidth > 0')
@@ -99,7 +103,7 @@ def test_review_queue_resumes_scope_position_subject_manual_center_and_unresolve
     assert all(live_server['db'].subjects.choice(pid) is None for pid in pids)
     screenshot = Path(__file__).resolve().parents[2] / '.context' / 'review-queue.png'
     screenshot.parent.mkdir(exist_ok=True)
-    page.screenshot(path=str(screenshot), full_page=True)
+    page.locator('#reviewQueue').screenshot(path=str(screenshot))
 
 
 def test_review_queue_missing_pixels_and_concurrent_flags_are_preserved(page, live_server, tmp_path):

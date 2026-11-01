@@ -13,6 +13,20 @@ frame. The red marker and coordinates identify the inspection point. **Inspect
 selected subject** restores the automatic inspection. Manual placement changes
 neither rankings nor saved subjects, flags, ratings, or edits.
 
+Choose **Inspect head / eye** for a native window at the eye location tied to
+the selected subject's analysis. If that evidence is unavailable, the action
+asks you to click the intended head or eye in the unedited full frame. Vireo
+does not guess a head location from the body box. The inspection reports the
+actual crop basis, selected detection, detector confidence, and missing eye
+evidence. A subject-box-centered window can omit the head entirely.
+
+The side-by-side review queue outlines the selected subject and labels its
+box-centered window. It does not verify cached eye-analysis freshness, so its
+**Inspect head / eye (click full frame)** action uses manual placement. Both
+views remind reviewers to inspect the full frame and intended head before
+rejecting a whole photo: the default window can contain bark, a branch, a body,
+or another flock member. Crop inspection does not write photo decisions.
+
 The full frame is displayed before saved crop and rotation, in the same upright
 coordinate space as detections and native focus crops. The focus label reports
 the actual source, raster dimensions, and scale relative to catalog dimensions.

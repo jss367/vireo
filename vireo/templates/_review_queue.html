@@ -24,13 +24,14 @@
     <div class="rq-toolbar">
       <label>Subject <select id="rqSubject" aria-label="Subject for inspection"></select></label>
       <label>Crop pixels from <select id="rqSource"><option value="working">Working image</option><option value="auto">Best available source</option><option value="original">Original</option></select></label>
-      <button type="button" id="rqManual" aria-pressed="false">Place center in full frame</button>
+      <button type="button" id="rqManual" aria-pressed="false">Inspect head / eye (click full frame)</button>
       <button type="button" id="rqResetCenter">Use subject center</button>
     </div>
     <p id="rqAnalysis"></p>
+    <p>Default crops can omit the head or show another animal or background. Inspect the intended animal in the full frame and head-centered view before rejecting the whole photo.</p>
     <div class="rq-images">
       <figure><figcaption>Full frame · upright source before saved crop or rotation</figcaption>
-        <div class="rq-full-wrap"><img id="rqFull" alt="Full frame for inspection"><span id="rqCenter" hidden aria-hidden="true"></span></div>
+        <div class="rq-full-wrap"><img id="rqFull" alt="Full frame for inspection"><span id="rqSubjectBox" hidden aria-label="Selected model subject"></span><span id="rqCenter" hidden aria-hidden="true"></span></div>
         <p id="rqFullStatus"></p>
       </figure>
       <figure><figcaption>Native focus crop · chosen subject or manual center</figcaption>

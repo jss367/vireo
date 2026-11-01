@@ -166,3 +166,24 @@ def focus_headers(basis, center, window, image_size, source, mask_applied, scale
         "X-Vireo-Focus-Mask": "1" if mask_applied else "0",
         "X-Vireo-Focus-Window": ",".join(str(v) for v in window),
     }
+
+
+def focus_evidence_headers(photo, boxes, *, bound=False):
+    """Describe the actual crop subject, independently of photo-level scoring."""
+    headers = {"X-Vireo-Focus-Eye-Status": "unbound"}
+    if boxes:
+        box = boxes[0]
+        headers["X-Vireo-Focus-Detection-Id"] = str(box["id"])
+        headers["X-Vireo-Focus-Subject-Box"] = ",".join(str(box["box_" + k]) for k in "xywh")
+        headers["X-Vireo-Focus-Detection-Confidence"] = str(box["detector_confidence"])
+    if bound:
+        try:
+            focus_point(photo, boxes, "eye", eye_enabled=True)
+        except (ValueError, TypeError):
+            status = photo.get("eye_status")
+            headers["X-Vireo-Focus-Eye-Status"] = status if status in {
+                "disabled", "model_unavailable", "identity_unavailable", "not_located",
+            } else "not_located"
+        else:
+            headers["X-Vireo-Focus-Eye-Status"] = "located"
+    return headers

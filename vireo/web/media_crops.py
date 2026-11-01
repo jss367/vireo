@@ -258,6 +258,7 @@ class CropRoutes:
             numeric_query_arg,
         )
         from focus_crop import (
+            focus_evidence_headers,
             focus_headers,
             focus_point,
             focus_subject_detections,
@@ -337,6 +338,7 @@ class CropRoutes:
             used, center, window, img.size, source, mask_bytes is not None,
             scale=original_scale(img.size, photo),
         ))
+        response.headers.update(focus_evidence_headers(photo, boxes, bound=selected_analysis is not None))
         if selected_analysis:
             response.headers["X-Vireo-Detection-Id"] = str(detection["id"])
             response.headers["X-Vireo-Analysis-Key"] = request.args["analysis_key"]

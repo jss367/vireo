@@ -11,7 +11,8 @@
 .rq-full-wrap {position:relative;width:100%;line-height:0}
 .rq-full-wrap img {width:100%;height:auto;cursor:crosshair}
 #rqCenter {position:absolute;width:16px;height:16px;border:2px solid var(--accent);border-radius:50%;transform:translate(-50%,-50%);pointer-events:none}
+#rqSubjectBox {position:absolute;border:2px solid #ffd34e;pointer-events:none}
 .rq-crop-wrap {overflow:auto;max-height:600px;background:var(--bg-primary);min-height:128px}
 .rq-crop-wrap img {width:auto;height:auto;max-width:none;display:block}
-#rqCrop[hidden],#rqCenter[hidden] {display:none}
+#rqCrop[hidden],#rqCenter[hidden],#rqSubjectBox[hidden] {display:none}
 @media(max-width:650px) {.review-queue {margin:12px 8px;padding:10px}.rq-images {gap:8px}.rq-crop-wrap {max-height:350px}}

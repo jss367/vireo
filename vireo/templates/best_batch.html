@@ -356,9 +356,11 @@ body {
 
       <div>
         <section aria-label="Focus inspection">
+          <button class="best-btn" id="headFocusBtn" type="button">Inspect head / eye</button>
           <button class="best-btn" id="manualFocusBtn" type="button" aria-pressed="false">Place manual focus center</button>
           <button class="best-btn" id="resetFocusBtn" type="button">Inspect selected subject</button>
           <p id="focusSelectionStatus" class="section-note"></p>
+          <p id="focusEvidenceStatus" class="section-note" role="status"></p>
           <img id="inspectedFocusImg" alt="Focus inspection crop" hidden style="max-width:100%;height:auto;">
           <p id="focusRasterStatus" class="section-note" role="status"></p>
         </section>
