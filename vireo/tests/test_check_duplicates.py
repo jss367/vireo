@@ -684,8 +684,8 @@ def test_check_duplicates_zero_byte_source_not_recovered_from_fifo(
     """A FIFO at the planned name is not a recovery, matching the import
     job's S_ISREG guard: it stats as size 0, so without the regular-file
     rule both sides would treat it as this empty source's archive copy.
-    The preview gets this right for free — ``_planned_folder_listing``
-    only records ``is_file(follow_symlinks=False)`` entries."""
+    The preview retains the occupied name but records no regular-file
+    metadata for it, so the shared adoption policy cannot accept it."""
     from datetime import datetime
 
     app, db, fid = app_and_db
