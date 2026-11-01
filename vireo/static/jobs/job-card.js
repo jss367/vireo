@@ -6,6 +6,7 @@ import {
   canRestartInPlace, hasActiveRetryFor, importResumeHint, importResumeTakeover, importRetryBody,
   importTakeoverNote, inPlaceRestartJobId, isResumableImport,
 } from './import-retry.js';
+import { findJob, followUpText, isSystemJob, repeatText } from './lineage.js';
 import { renderMoveRoute } from './move-route.js';
 import { renderSourceCleanup } from './source-cleanup.js';
 import { renderRichStep } from './steps.js';
@@ -63,7 +64,51 @@ import {
   return html;
 }
 
-/** @param {JobsRow} job @param {{workspaceName?:string}=} options */ export function renderJobCard(job, options) {
+/**
+ * The card's header row (type, workspace label, status, a live job's
+ * controls) and the banner explaining a control that is unavailable.
+ * @param {JobsRow} job @param {{workspaceName?:string}} options @param {boolean} isLive
+ */
+function renderCardHeader(job, options, isLive) {
+  var html = '<div class="job-card-header">';
+  html += '<span class="job-detail-title">' + escapeHtml(formatJobType(job.type)) + '</span>';
+  if (options.workspaceName) {
+    html += '<span class="job-card-workspace">' + escapeHtml(options.workspaceName) + '</span>';
+  }
+  html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
+  if (isLive) html += renderJobControls(job);
+  html += '</div>';
+
+  if (isLive && (job.control_unavailable_reason || (!job.pausable && job.pause_unavailable_reason))) {
+    html += '<div class="job-pause-banner">' + escapeHtml(job.control_unavailable_reason || job.pause_unavailable_reason) + '</div>';
+  }
+  return html;
+}
+
+/**
+ * Who started the job: Vireo (with why), or the job it follows.
+ * @param {JobsRow} job
+ */
+function renderProvenance(job) {
+  var parts = [];
+  if (job.parent_job_id) {
+    var parent = findJob(job.parent_job_id, [state.activeJobs, state.historyJobs]);
+    var text = escapeHtml(followUpText(job, parent));
+    if (parent) {
+      text += ' <button class="btn-link" data-show-job="' + escapeAttr(parent.id) + '">Show</button>';
+    }
+    parts.push(text);
+  } else if (isSystemJob(job)) {
+    parts.push('<span class="job-origin-chip">Started by Vireo</span>' +
+      (job.reason ? ' ' + escapeHtml(job.reason) : ''));
+  }
+  var repeats = repeatText(job);
+  if (repeats) parts.push(escapeHtml(repeats));
+  if (!parts.length) return '';
+  return '<div class="job-provenance">' + parts.join(' &middot; ') + '</div>';
+}
+
+/** @param {JobsRow} job @param {{workspaceName?:string, followUp?:boolean}=} options */ export function renderJobCard(job, options) {
   options = options || {};
   // Queued pipelines are "live" for UI purposes: they have a real
   // backend identity, they're cancellable (runner.cancel_job handles
@@ -82,21 +127,9 @@ import {
     elapsed = formatElapsed((new Date(job.finished_at).getTime() - new Date(job.started_at).getTime()) / 1000);
   }
 
-  var html = '<div class="job-card">';
-
-  // Header: type, workspace label, status, cancel
-  html += '<div class="job-card-header">';
-  html += '<span class="job-detail-title">' + escapeHtml(formatJobType(job.type)) + '</span>';
-  if (options.workspaceName) {
-    html += '<span class="job-card-workspace">' + escapeHtml(options.workspaceName) + '</span>';
-  }
-  html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
-  if (isLive) html += renderJobControls(job);
-  html += '</div>';
-
-  if (isLive && (job.control_unavailable_reason || (!job.pausable && job.pause_unavailable_reason))) {
-    html += '<div class="job-pause-banner">' + escapeHtml(job.control_unavailable_reason || job.pause_unavailable_reason) + '</div>';
-  }
+  var html = '<div class="job-card' + (options.followUp ? ' job-card-follow-up' : '') + '">';
+  html += renderCardHeader(job, options, isLive);
+  html += renderProvenance(job);
 
   // Meta: started, elapsed, overall %
   html += '<div class="job-detail-meta">';

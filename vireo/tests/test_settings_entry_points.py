@@ -70,27 +70,42 @@ def _opens_database(node: ast.AST) -> bool:
 def unbootstrapped_database_opens(source: str) -> list[int]:
     """Line numbers of ``Database(...)`` calls with no earlier config import."""
     tree = ast.parse(source)
-    if any(_imports_config(node) for node in tree.body):
-        return []
+    # The earliest module-level bootstrap statement, in execution order; a
+    # later `import config` cannot rescue a `Database(...)` call that already
+    # ran at module load.
+    module_bootstrap_line = next(
+        (node.lineno for node in tree.body if _bootstraps(node)),
+        None,
+    )
     scopes = [node for node in ast.walk(tree)
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    in_functions = {id(n) for scope in scopes for n in ast.walk(scope)}
     offenders = []
     for scope in scopes:
-        nodes = list(ast.walk(scope))
-        for node in nodes:
+        for node in ast.walk(scope):
             if not _opens_database(node):
                 continue
-            # Any enclosing function may have imported config before this call.
+            # Any enclosing function may have imported config before this call,
+            # or a module-level bootstrap must precede the outermost enclosing
+            # function's def so loading the module installs it first.
             enclosing = [s for s in scopes if s.lineno <= node.lineno <= (s.end_lineno or s.lineno)]
-            if not any(
+            outer_fn_line = min((s.lineno for s in enclosing), default=node.lineno)
+            if any(
                 _bootstraps(n) and n.lineno <= node.lineno
                 for s in enclosing for n in ast.walk(s)
             ):
-                offenders.append(node.lineno)
+                continue
+            if module_bootstrap_line is not None and module_bootstrap_line < outer_fn_line:
+                continue
+            offenders.append(node.lineno)
     # Module-level opens outside any function.
-    in_functions = {id(n) for scope in scopes for n in ast.walk(scope)}
-    offenders += [n.lineno for n in ast.walk(tree)
-                  if _opens_database(n) and id(n) not in in_functions]
+    for n in ast.walk(tree):
+        if (
+            _opens_database(n)
+            and id(n) not in in_functions
+            and (module_bootstrap_line is None or module_bootstrap_line > n.lineno)
+        ):
+            offenders.append(n.lineno)
     return sorted(set(offenders))
 
 
@@ -117,6 +132,10 @@ def test_entry_points_import_config_before_opening_a_database():
     ("def f(p):\n    from config import DEFAULTS\n    import db\n    return db.Database(p)\n", []),
     ("import db\nDB = db.Database(':memory:')\n", [2]),
     ("def f(p):\n    import config\n    def g():\n        return Database(p)\n    return g\n", []),
+    # A later module-level `import config` cannot rescue a `Database(...)` that
+    # already ran at module load.
+    ("from db import Database\nDB = Database(':memory:')\nimport config\n", [2]),
+    ("import config\nfrom db import Database\nDB = Database(':memory:')\n", []),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines

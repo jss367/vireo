@@ -68,21 +68,34 @@ class JobHistoryRepository:
 
     def terminal(
         self, workspace_id: int | None, statuses: Sequence[str], limit: int,
+        origin: str | None = None,
     ) -> list[sqlite3.Row]:
-        """Newest-first rows in ``statuses``, of one workspace or (``None``) every one."""
+        """Up to ``limit`` newest-first rows in ``statuses``.
+
+        Of one workspace or (``None``) every one. A workspace's rows include
+        the global ones (``workspace_id`` NULL: storage maintenance, model
+        downloads), which belong to every workspace; leaving them out hid
+        Vireo's own maintenance from the Jobs page entirely.
+
+        ``origin`` (``user`` / ``system``) narrows the window to one origin.
+        ``limit`` is always the total row cap; a caller that shows one
+        origin asks for it here, so newer rows of the other origin cannot
+        fill the window and hide older retained ones (pruning keeps the
+        two quotas apart for the same reason).
+        """
         placeholders = ",".join(["?"] * len(statuses))
+        clauses = [f"status IN ({placeholders})"]
+        params: list[object] = list(statuses)
         if workspace_id is not None:
-            return self.conn.execute(
-                f"SELECT * FROM job_history "
-                f"WHERE workspace_id = ? AND status IN ({placeholders}) "
-                f"ORDER BY started_at DESC LIMIT ?",
-                (workspace_id, *statuses, limit),
-            ).fetchall()
+            clauses.append("(workspace_id = ? OR workspace_id IS NULL)")
+            params.append(workspace_id)
+        if origin is not None:
+            clauses.append("origin = ?")
+            params.append(origin)
         return self.conn.execute(
-            f"SELECT * FROM job_history "
-            f"WHERE status IN ({placeholders}) "
+            f"SELECT * FROM job_history WHERE {' AND '.join(clauses)} "
             f"ORDER BY started_at DESC LIMIT ?",
-            (*statuses, limit),
+            (*params, limit),
         ).fetchall()
 
     def analysis_retry_results(self, workspace_id: int) -> list[sqlite3.Row]:
@@ -145,7 +158,7 @@ class JobHistoryRepository:
     def chained_job_row(self, parent_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT 1 FROM job_history "
-            "WHERE json_extract(config, '$.chained_from') = ? "
+            "WHERE parent_job_id = ? "
             "  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
             "  AND NOT (type='pipeline' AND status='cancelled' AND duration IS NULL "
             "           AND (result IS NULL OR result='null')) "

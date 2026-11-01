@@ -19,13 +19,22 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def delete_workspace_results(catalog_dir: str, workspace_id: int | str) -> list[str]:
+def delete_workspace_results(
+    catalog_dir: str, workspace_id: int | str, removed: list[str] | None = None,
+) -> list[str]:
+    """Remove a workspace's result files; return the errors.
+
+    Paths actually removed are appended to ``removed`` when it is given, so
+    a caller can report the work done, not only the failures.
+    """
     errors = []
     workspace_id = int(workspace_id)
     for kind in ("pipeline", "culling"):
         path = os.path.join(catalog_dir, f"{kind}_results_ws{workspace_id}.json")
         try:
             os.unlink(path)
+            if removed is not None:
+                removed.append(path)
         except FileNotFoundError:
             pass
         except OSError as exc:

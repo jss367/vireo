@@ -15,6 +15,8 @@ from job_runner.control import JobControl
 from job_runner.events import EventStreams
 from job_runner.history import INTERRUPTED_BY_RESTART as INTERRUPTED_BY_RESTART
 from job_runner.history import JobHistory
+from job_runner.lineage import JobLineage as JobLineage
+from job_runner.lineage import resolve_lineage
 from job_runner.pipeline_queue import SLOT_CAP as SLOT_CAP
 from job_runner.pipeline_queue import PipelineQueue
 from job_runner.reservations import WorkspaceBusyError as WorkspaceBusyError
@@ -23,7 +25,12 @@ from job_runner.reservations import describe_job as describe_job
 from job_runner.reservations import describe_jobs as describe_jobs
 from job_runner.reservations import format_duration as format_duration
 from job_runner.steps import StepTree
-from job_runner.views import new_job_dict, snapshot_job, synthesize_queued_view
+from job_runner.views import (
+    new_job_dict,
+    queued_lineage,
+    snapshot_job,
+    synthesize_queued_view,
+)
 from job_runner.workers import WorkerThreads
 from resource_ledger import (
     bind_resource_cancel_check,
@@ -45,6 +52,8 @@ _NO_SLEEP_ASSERTION_JOB_TYPES = frozenset({
     "missing_originals_scan",
     "working_copy_backfill",
     "thumb_path_backfill",
+    "label-list-species-ids",
+    "exif_search_backfill",
     "verify-models",
 })
 
@@ -227,24 +236,49 @@ class JobRunner:
         )
 
     def enqueue_pipeline(self, work_fn, config=None, workspace_id=None,
-                         runtime_warning=None, workspace_paths=None):
+                         runtime_warning=None, workspace_paths=None, lineage=None):
         """Admit and persist a pipeline, then attempt promotion into a free slot.
 
         ``workspace_paths`` are the realpath'd folders of every photo the
-        pipeline processes; see ``start``.
+        pipeline processes; see ``start``. ``lineage`` (a ``JobLineage``)
+        names the job this run follows and who caused it; see
+        ``job_runner.lineage``.
         """
+        resolved = self._resolve_lineage(lineage)
         # Cover the persistence window before the queued context is published.
         # A transfer must not slip between checking admission and publishing it.
         with self._lock:
             self._reservations.check_admission_locked(workspace_id, paths=workspace_paths)
             self._queue.admit_locked(workspace_id)
         try:
-            return self._enqueue_pipeline_admitted(work_fn, config, workspace_id, runtime_warning)
+            return self._enqueue_pipeline_admitted(
+                work_fn, config, workspace_id, runtime_warning, resolved,
+            )
         finally:
             self._queue.release_admission(workspace_id)
 
+    def _resolve_lineage(self, lineage):
+        """Resolve ``lineage`` to job-dict fields, inheriting the parent's origin.
+
+        The parent is looked up among live and queued jobs first, then in
+        history (a chained job usually starts as its parent finishes). Never
+        called with the runner lock held: the history read opens SQLite.
+        """
+        parent_id = lineage.parent_job_id if lineage is not None else None
+        parent_origin = None
+        if parent_id:
+            with self._lock:
+                parent = self._jobs.get(parent_id)
+                if parent is not None:
+                    parent_origin = parent.get("origin")
+                elif parent_id in self._queue.queued:
+                    parent_origin = queued_lineage(self._queue.queued[parent_id])["origin"]
+            if parent_origin is None and self._history.db_path:
+                parent_origin = self._history.origin_of(parent_id)
+        return resolve_lineage(lineage, parent_origin)
+
     def _enqueue_pipeline_admitted(self, work_fn, config=None, workspace_id=None,
-                                   runtime_warning=None):
+                                   runtime_warning=None, lineage=None):
         """Enqueue a pipeline job and attempt promotion before returning.
 
         Unlike ``start`` (which spawns a worker thread synchronously),
@@ -267,8 +301,11 @@ class JobRunner:
         now_iso = datetime.now().isoformat()
         config_blob = config or {}
 
+        lineage = lineage or resolve_lineage(None, None)
         if self._history.db_path:
-            self._history.insert_queued_row(job_id, now_iso, config_blob, workspace_id)
+            self._history.insert_queued_row(
+                job_id, now_iso, config_blob, workspace_id, lineage,
+            )
 
         with self._lock:
             self._queue.add_locked(job_id, {
@@ -277,6 +314,7 @@ class JobRunner:
                 "workspace_id": workspace_id,
                 "runtime_warning": runtime_warning,
                 "started_at": now_iso,
+                **lineage,
             })
             shutdown_raced = self._workers.shutting_down
 
@@ -381,6 +419,7 @@ class JobRunner:
             "cancellable": True,
             "control_unavailable_reason": None,
             "runtime_warning": ctx["runtime_warning"],
+            **queued_lineage(ctx),
             # Pre-seeded for iteration safety — see start().
             "_start_time": time.time(),
             "_ended_at": None,
@@ -420,7 +459,7 @@ class JobRunner:
             "errors": [],
         })
         if self._history.db_path:
-            self._history.persist_job(job, 0.0)
+            self._persist_final(job, 0.0)
         job["_persisted"] = True
 
     def _record_terminal_queued_pipeline(self, job_id, ctx, status="cancelled"):
@@ -442,6 +481,7 @@ class JobRunner:
             "counts_for_badge": True,
             "pausable": False,
             "runtime_warning": ctx.get("runtime_warning"),
+            **queued_lineage(ctx),
             "_ended_at": time.time(),
             "_persisted": True,
         }
@@ -463,7 +503,7 @@ class JobRunner:
     def start(self, job_type, work_fn, config=None, workspace_id=None,
               ephemeral=False, runtime_warning=None, counts_for_badge=True,
               pausable=None, blocks_local_transitions=None,
-              workspace_transfer_batch=None, workspace_paths=None):
+              workspace_transfer_batch=None, workspace_paths=None, lineage=None):
         """Start a background job.
 
         Args:
@@ -473,11 +513,12 @@ class JobRunner:
             config: optional dict of job configuration (persisted to history)
             workspace_id: optional workspace id to associate with this job
             ephemeral: if True, the job runs and streams events normally but
-                       is never written to ``job_history``. Use for transient
-                       background work surfaced to the user for transparency
-                       (e.g. the new-images filesystem walk) — it is fine to
-                       lose the record on process restart and we don't want
-                       it to clutter the history list.
+                       is never written to ``job_history`` and holds no
+                       sleep assertion. Not for Vireo's own background work:
+                       start that with ``lineage=JobLineage.system(...)``,
+                       whose row survives a crash and whose no-op runs are
+                       dropped from history instead (see
+                       ``JobHistory.system_disposition``).
             runtime_warning: optional user-facing warning metadata to expose
                        while the job is running.
             counts_for_badge: if False, the job remains visible in job lists
@@ -502,6 +543,9 @@ class JobRunner:
                       not is refused while any transfer runs in its workspace.
                       Only declare trees that bound everything the job
                       touches, its catalog writes included.
+            lineage: a ``JobLineage``: whether Vireo started this on its own
+                      (and why), or which job it follows. Default: the
+                      user's own job.
 
         Returns:
             job_id string
@@ -514,8 +558,11 @@ class JobRunner:
             blocks_local_transitions=blocks_local_transitions,
             workspace_transfer_batch=workspace_transfer_batch,
             workspace_paths=workspace_paths,
+            lineage=lineage,
         )
-        log.info("Job %s started type=%s", job["id"], job_type)
+        log.info(
+            "Job %s started type=%s origin=%s", job["id"], job_type, job["origin"],
+        )
         if not self._workers.start(job, work_fn):
             self._discard_unstarted_job(job["id"])
             raise RuntimeError("JobRunner is shut down")
@@ -524,13 +571,13 @@ class JobRunner:
     def _register_and_prepare(self, job_type, work_fn, *, config, workspace_id,
                               ephemeral, runtime_warning, counts_for_badge,
                               pausable, blocks_local_transitions,
-                              singleton_key=None, workspace_transfer_batch=None,
-                              workspace_paths=None):
+                              workspace_transfer_batch=None,
+                              workspace_paths=None, lineage=None):
         """Allocate an id and register the job dict under the runner lock.
 
         Returns the (job, work_fn) pair the caller should hand to a thread.
-        Kept separate from start()/start_singleton so both paths share the
-        same registration semantics.
+        ``start_singleton`` registers inline instead, under the same lock
+        acquisition as its existence check.
         """
         # Monotonic suffix (shared with enqueue_pipeline) so two same-type
         # starts in the same millisecond can't collide — a collision makes
@@ -539,6 +586,7 @@ class JobRunner:
         blocks_local_transitions = _resolve_blocking(
             job_type, blocks_local_transitions,
         )
+        resolved = self._resolve_lineage(lineage)
         with self._lock:
             if self._workers.shutting_down:
                 raise RuntimeError("JobRunner is shut down")
@@ -558,8 +606,8 @@ class JobRunner:
                 pausable=pausable,
                 blocks_local_transitions=blocks_local_transitions,
                 runtime_warning=runtime_warning,
-                singleton_key=singleton_key,
                 workspace_paths=workspace_paths,
+                lineage=resolved,
             )
             self._prune_finished_jobs()
             job["workspace_transfer_batch"] = workspace_transfer_batch
@@ -609,10 +657,11 @@ class JobRunner:
         return None, None
 
     def start_singleton(self, job_type, work_fn, *, singleton_key,
-                        config=None, workspace_id=None, ephemeral=False,
+                        config=None, workspace_id=None,
                         runtime_warning=None, counts_for_badge=True,
                         pausable=None, blocks_local_transitions=None,
-                        exclusive_workspace=False, workspace_paths=None):
+                        exclusive_workspace=False, workspace_paths=None,
+                        lineage=None):
         """Start a job unless one with the same (type, singleton_key) is active.
 
         The existence check AND the new-job registration happen under a
@@ -633,6 +682,7 @@ class JobRunner:
         ``workspace_paths`` are the trees it moves, and only jobs whose own
         declared trees miss them may start while it runs (see ``start``).
         """
+        resolved = self._resolve_lineage(lineage)
         # Compute the joined snapshot / register a new job under one lock
         # acquisition so the check-and-start is genuinely atomic.
         with self._lock:
@@ -659,12 +709,13 @@ class JobRunner:
             job = new_job_dict(
                 job_id, job_type,
                 config=config, workspace_id=workspace_id,
-                ephemeral=ephemeral, counts_for_badge=counts_for_badge,
+                ephemeral=False, counts_for_badge=counts_for_badge,
                 pausable=pausable,
                 blocks_local_transitions=blocks_local_transitions,
                 runtime_warning=runtime_warning,
                 singleton_key=singleton_key,
                 workspace_paths=workspace_paths,
+                lineage=resolved,
             )
             job["exclusive_workspace"] = bool(exclusive_workspace)
             self._prune_finished_jobs()
@@ -796,7 +847,7 @@ class JobRunner:
             job["id"], job["type"], job["status"], elapsed, phase or "-",
         )
         if self._history.db_path and not job.get("ephemeral"):
-            self._history.persist_job(job, elapsed)
+            self._persist_final(job, elapsed)
         # Mark the in-memory job dict as fully persisted so test code
         # can synchronize with `job_history` reads. Ephemeral jobs are
         # also flagged so callers waiting on this don't hang.
@@ -807,6 +858,25 @@ class JobRunner:
         # method is a no-op when nothing is queued.
         if job["type"] == "pipeline":
             self._try_promote_queued()
+
+    def _persist_final(self, job, duration):
+        """Write a finished job's row; a system job's under ``write_lock``.
+
+        A checkpoint snapshots the live jobs and writes them later, with
+        ``INSERT OR IGNORE`` for a row that is missing. A system job's final
+        write may delete its own row (a no-op run); between those two steps
+        that would let the stale snapshot re-create it as ``running``, and
+        the next startup would fail a run that succeeded. Holding
+        ``write_lock`` makes the two serial: a checkpoint either finishes
+        before the final write, or snapshots after the job has left the live
+        statuses. The user's jobs always keep their row, so their final
+        writes stay off the lock and never queue behind one another.
+        """
+        if job.get("origin") != "system":
+            self._history.persist_job(job, duration)
+            return
+        with self._checkpoints.write_lock:
+            self._history.persist_job(job, duration)
 
     def get(self, job_id):
         """Get a job by id. Returns a copy so callers don't mutate (or race
@@ -834,14 +904,14 @@ class JobRunner:
                 jobs.append(synthesize_queued_view(job_id, ctx))
             return jobs
 
-    def get_history(self, db, limit=10):
+    def get_history(self, db, limit=10, origin=None):
         """Recent terminal job history rows; see ``JobHistory.get_history``.
 
         Args:
             db: Database instance (must be from the calling thread)
             limit: max number of rows
         """
-        return self._history.get_history(db, limit)
+        return self._history.get_history(db, limit, origin)
 
     def push_event(self, job_id, event_type, data):
         """Push an event to the job's event stream."""

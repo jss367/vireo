@@ -16,6 +16,7 @@ import subprocess
 
 from job_runner.subprocess_control import run_controlled_process
 
+from .paths import _unsafe_destination_directory
 from .remote import _ssh_rsh_string
 from .transfer import FINDER_METADATA_FILES, _rsync_finder_metadata_exclude_file
 
@@ -182,7 +183,7 @@ def _find_content_conflict(src_path, dest_path, *, checkpoint=None):
     content check.
     """
     for root, directories, files in os.walk(src_path):
-        mismatch = _directory_symlink_mismatch(
+        mismatch = _directory_mismatch(
             root, directories, src_path, dest_path, allow_missing=True)
         if mismatch is not None:
             return mismatch
@@ -274,8 +275,8 @@ def _matching_independent_symlink(source, destination):
         return False
 
 
-def _directory_symlink_mismatch(root, directories, src_path, dest_path, *, allow_missing=False):
-    """Verify opaque directory links without traversing their targets.
+def _directory_mismatch(root, directories, src_path, dest_path, *, allow_missing=False):
+    """Verify physical destination parents and opaque directory links.
 
     ``os.walk(..., followlinks=False)`` puts directory symlinks in ``dirs``
     but never visits their contents. A file-only verifier would silently
@@ -283,6 +284,11 @@ def _directory_symlink_mismatch(root, directories, src_path, dest_path, *, allow
     lstat also rejects a destination parent alias back into the source.
     Preflight allows missing destinations; final verification does not.
     """
+    relative = os.path.relpath(root, src_path)
+    destination_dir = dest_path if relative == "." else os.path.join(dest_path, relative)
+    unsafe = _unsafe_destination_directory(dest_path, destination_dir, allow_missing=allow_missing)
+    if unsafe is not None:
+        return os.path.relpath(unsafe, dest_path)
     for name in directories:
         source = os.path.join(root, name)
         if not os.path.islink(source):
@@ -345,7 +351,7 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     """
     checked = 0
     for root, directories, files in os.walk(src_path):
-        mismatch = _directory_symlink_mismatch(root, directories, src_path, dest_path)
+        mismatch = _directory_mismatch(root, directories, src_path, dest_path)
         if mismatch is not None:
             return mismatch
         rel = os.path.relpath(root, src_path)
@@ -464,13 +470,17 @@ def preview_merge(src_path, dest_path):
     # transfer semantics the merge applies, so each such entry is one item.
     for root, dirs, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
+        target_dir = dest_path if rel == "." else os.path.join(dest_path, rel)
+        unsafe_parent = _unsafe_destination_directory(dest_path, target_dir, allow_missing=True) is not None
         for d in dirs:
             src_sub = os.path.join(root, d)
             if not os.path.islink(src_sub):
                 continue
             rel_name = d if rel == "." else os.path.join(rel, d)
             dst_sub = os.path.join(dest_path, rel_name)
-            if not os.path.lexists(dst_sub):
+            if unsafe_parent:
+                will_block += 1
+            elif not os.path.lexists(dst_sub):
                 will_copy += 1
             elif _matching_independent_symlink(src_sub, dst_sub):
                 will_skip += 1
@@ -492,7 +502,9 @@ def preview_merge(src_path, dest_path):
                 continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
-            if not os.path.lexists(dst_file):
+            if unsafe_parent:
+                will_block += 1
+            elif not os.path.lexists(dst_file):
                 will_copy += 1
             elif _verifier_would_accept_skip(src_file, dst_file):
                 will_skip += 1
@@ -536,9 +548,9 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
     """
     src_count = 0
     for root, directories, files in os.walk(src_path):
-        mismatch = _directory_symlink_mismatch(root, directories, src_path, transfer_dest)
+        mismatch = _directory_mismatch(root, directories, src_path, transfer_dest)
         if mismatch is not None:
-            return f"'{mismatch}' directory symlink missing or different at destination"
+            return f"'{mismatch}' directory missing, linked, or different at destination"
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)

@@ -109,6 +109,13 @@ def _build_source_root_guard(sources: Iterable[str]) -> Callable[[str | Path], b
 
 
 def _is_source_backed_dest(ctx: _DestContext, source_file: Path, dest_path: str) -> bool:
+    """Apply the run's source-root guard to a destination candidate."""
+    return _is_source_backed_path(source_file, dest_path, ctx.path_under_any_source)
+
+
+def _is_source_backed_path(
+    source_file: Path, dest_path: str, path_under_any_source: Callable[[str | Path], bool],
+) -> bool:
     """True when ``dest_path`` IS the source file or resolves under any
     source root — i.e. writing to it, or adopting it, would attest bytes
     the card still owns.
@@ -164,7 +171,7 @@ def _is_source_backed_dest(ctx: _DestContext, source_file: Path, dest_path: str)
     # ``path_under_any_source`` realpaths its argument, so this is
     # also what catches a candidate that is a SYMLINK into the card.
     # See PR #1107 review.
-    return ctx.path_under_any_source(dest_path)
+    return path_under_any_source(dest_path)
 
 
 def _reject_source_backed_dest(

@@ -20,6 +20,49 @@ log = logging.getLogger("jobs")
 
 INTERRUPTED_BY_RESTART = "Interrupted by Vireo restart"
 
+TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+
+# Finished operations kept per workspace and origin. An operation is a root
+# job plus every follow-up it started (``parent_job_id``), pruned together so
+# a grouped Jobs page never shows a chained run whose import was dropped.
+# Vireo's own work keeps a separate quota, so recurring checks cannot evict
+# the user's history.
+HISTORY_OPERATIONS_PER_ORIGIN = 100
+
+_PRUNE_OPERATIONS_SQL = """
+WITH RECURSIVE
+ws_rows AS (
+    SELECT id, parent_job_id, origin, started_at FROM job_history
+     WHERE workspace_id IS ?
+),
+lineage(id, root) AS (
+    SELECT id, id FROM ws_rows
+     WHERE parent_job_id IS NULL
+        OR parent_job_id NOT IN (SELECT id FROM ws_rows)
+    UNION
+    SELECT child.id, lineage.root FROM job_history child
+      JOIN lineage ON child.parent_job_id = lineage.id
+),
+open_roots AS (
+    SELECT DISTINCT lineage.root FROM lineage
+      JOIN job_history j ON j.id = lineage.id
+     WHERE j.status IS NULL
+        OR j.status NOT IN ('completed', 'failed', 'cancelled')
+),
+ranked AS (
+    SELECT id, ROW_NUMBER() OVER (
+               PARTITION BY origin ORDER BY started_at DESC
+           ) AS rank
+      FROM ws_rows
+     WHERE id IN (SELECT root FROM lineage)
+       AND id NOT IN (SELECT root FROM open_roots)
+)
+DELETE FROM job_history WHERE id IN (
+    SELECT lineage.id FROM lineage JOIN ranked ON ranked.id = lineage.root
+     WHERE ranked.rank > ?
+)
+"""
+
 
 class JobHistoryUnavailable(RuntimeError):
     """The ``job_history`` rows could not be read from the catalog.
@@ -27,6 +70,16 @@ class JobHistoryUnavailable(RuntimeError):
     Raised instead of returning ``[]``: an empty list reads as "no jobs have
     run", which is not what happened. The message is user-facing.
     """
+
+
+def _is_noop(result):
+    """Whether a work function reported that its run changed nothing."""
+    return isinstance(result, dict) and result.get("noop") is True
+
+
+def _primary_error(result):
+    """The error a failed row reports, or None when it has none."""
+    return result.get("error") if isinstance(result, dict) else None
 
 
 def _load_json(blob):
@@ -154,14 +207,19 @@ class JobHistory:
         """
         conn.execute(
             "INSERT OR IGNORE INTO job_history "
-            "(id, type, status, started_at, config, workspace_id, error_count) "
-            "VALUES (?, ?, 'running', ?, ?, ?, 0)",
+            "(id, type, status, started_at, config, workspace_id, error_count, "
+            " origin, parent_job_id, reason, task_scope) "
+            "VALUES (?, ?, 'running', ?, ?, ?, 0, ?, ?, ?, ?)",
             (
                 job["id"],
                 job["type"],
                 job["started_at"],
                 json.dumps(job.get("config") or {}, default=str),
                 job.get("workspace_id"),
+                job.get("origin") or "user",
+                job.get("parent_job_id"),
+                job.get("reason"),
+                job.get("task_scope"),
             ),
         )
 
@@ -249,20 +307,29 @@ class JobHistory:
     # Queued pipeline rows
     # ------------------------------------------------------------------
 
-    def insert_queued_row(self, job_id, now_iso, config_blob, workspace_id):
+    def insert_queued_row(self, job_id, now_iso, config_blob, workspace_id,
+                          lineage=None):
         """Persist a pipeline's ``queued`` row.
 
-        Uses a thread-local connection so we don't share the caller's DB
-        handle across thread boundaries.
+        ``lineage`` is the resolved ``origin`` / ``parent_job_id`` /
+        ``reason`` fields. Uses a thread-local connection so we don't share
+        the caller's DB handle across thread boundaries.
         """
+        lineage = lineage or {}
         conn = sqlite3.connect(self.db_path, timeout=30)
         try:
             conn.execute(
                 "INSERT INTO job_history "
                 "(id, type, status, started_at, config, workspace_id, "
-                " error_count) "
-                "VALUES (?, 'pipeline', 'queued', ?, ?, ?, 0)",
-                (job_id, now_iso, json.dumps(config_blob), workspace_id),
+                " error_count, origin, parent_job_id, reason, task_scope) "
+                "VALUES (?, 'pipeline', 'queued', ?, ?, ?, 0, ?, ?, ?, ?)",
+                (
+                    job_id, now_iso, json.dumps(config_blob), workspace_id,
+                    lineage.get("origin") or "user",
+                    lineage.get("parent_job_id"),
+                    lineage.get("reason"),
+                    lineage.get("task_scope"),
+                ),
             )
             conn.commit()
         finally:
@@ -309,12 +376,9 @@ class JobHistory:
     # Final rows
     # ------------------------------------------------------------------
 
-    def persist_job(self, job, duration):
-        """Persist job to history table using a thread-local connection."""
-        if not self.db_path:
-            return
-
-
+    @staticmethod
+    def final_result(job):
+        """The result a finished job's row stores, with its primary error."""
         result_data = job["result"]
         if job["status"] == "failed" and job["errors"]:
             # Preserve a structured result (e.g. the pipeline's stages dict)
@@ -332,67 +396,59 @@ class JobHistory:
                     result_data["partial_failure"] = error_total(job)
             else:
                 result_data = {"error": primary_error}
+        return result_data
 
-        tree_json = json.dumps(job.get("steps", []))
+    def persist_job(self, job, duration):
+        """Persist job to history table using a thread-local connection.
+
+        A job Vireo started on its own (``origin='system'``) is compared with
+        the previous run of the same task first; see ``system_disposition``.
+        """
+        if not self.db_path:
+            return
+
+        result_data = self.final_result(job)
         summary = build_summary(job, result_data)
-
-        persisted_error_count = error_total(job)
-
-        params = (
-            job["id"],
-            job["type"],
-            job["status"],
-            job["started_at"],
-            job["finished_at"],
-            round(duration, 1),
-            json.dumps(result_data),
-            persisted_error_count,
-            json.dumps(job["config"]),
-            job.get("workspace_id"),
-            tree_json,
-            summary,
-            job.get("resource_wait_seconds", 0.0),
-            job.get("resource_wait_count", 0),
-        )
-
+        config_json = json.dumps(job["config"])
         for attempt in range(3):
             conn = None
             try:
                 conn = sqlite3.connect(self.db_path, timeout=30)
+                action, previous = self.system_disposition(conn, job, result_data)
+                if action == "drop":
+                    # Routine: the check ran and found nothing to do. Its
+                    # running row goes; a crash would have left it failed.
+                    conn.execute("DELETE FROM job_history WHERE id = ?", (job["id"],))
+                    conn.commit()
+                    return
+                repeat_count, repeat_since = 1, None
+                if action == "collapse":
+                    repeat_count = int(previous["repeat_count"] or 1) + 1
+                    repeat_since = previous["repeat_since"] or previous["started_at"]
+                    self.replace_row(conn, previous["id"], job["id"])
                 conn.execute(
                     """INSERT OR REPLACE INTO job_history
                        (id, type, status, started_at, finished_at, duration,
                         result, error_count, config, workspace_id, tree, summary,
-                        resource_wait_seconds, resource_wait_count)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    params,
+                        resource_wait_seconds, resource_wait_count,
+                        origin, parent_job_id, reason, repeat_count, repeat_since,
+                        task_scope)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, ?, ?, ?)""",
+                    (
+                        job["id"], job["type"], job["status"],
+                        job["started_at"], job["finished_at"],
+                        round(duration, 1), json.dumps(result_data),
+                        error_total(job), config_json, job.get("workspace_id"),
+                        json.dumps(job.get("steps", [])), summary,
+                        job.get("resource_wait_seconds", 0.0),
+                        job.get("resource_wait_count", 0),
+                        job.get("origin") or "user", job.get("parent_job_id"),
+                        job.get("reason"), repeat_count, repeat_since,
+                        job.get("task_scope"),
+                    ),
                 )
-                ws_id = job.get("workspace_id")
-                # Keep separate 100-row terminal histories for discovery
-                # probes and other jobs, so periodic checks cannot evict
-                # the user's pipeline/import history. Non-terminal rows
-                # stay outside both quotas. Excluding these rows is
-                # load-bearing: a queued pipeline waiting behind a
-                # busy slot can sit in the table for a long time;
-                # if its row got pruned by an unrelated job
-                # completing, the next promotion attempt would see
-                # rowcount==0 on its conditional UPDATE and treat
-                # that as a cancel, silently dropping the run.
-                for discovery in (False, True):
-                    conn.execute(
-                        """DELETE FROM job_history
-                       WHERE workspace_id IS ?
-                         AND status IN ('completed', 'failed', 'cancelled')
-                         AND (type IN ('new_images_walk', 'missing_originals_scan')) = ?
-                         AND id NOT IN (
-                           SELECT id FROM job_history
-                           WHERE workspace_id IS ?
-                             AND status IN ('completed', 'failed', 'cancelled')
-                             AND (type IN ('new_images_walk', 'missing_originals_scan')) = ?
-                           ORDER BY started_at DESC LIMIT 100
-                       )""",
-                        (ws_id, discovery, ws_id, discovery),
-                    )
+                self.prune_operations(conn, job.get("workspace_id"))
                 conn.commit()
                 return
             except sqlite3.OperationalError:
@@ -409,11 +465,104 @@ class JobHistory:
                 if conn is not None:
                     conn.close()
 
+    @staticmethod
+    def system_disposition(conn, job, result_data):
+        """How a finished job's row relates to the previous run of its task.
+
+        Returns ``(action, previous_row)``, ``action`` one of:
+
+        - ``"keep"``: write a new row. Every job the user caused, every
+          cancelled run, every success that changed something, and any
+          failure that differs from the last.
+        - ``"collapse"``: the previous run of the same system task (same
+          type, workspace and ``task_scope``) failed with the same error. Its row
+          is replaced by this one, carrying the repeat count and when the
+          streak began, so an unmounted NAS failing every check is one row,
+          not hundreds. Successes never collapse: two runs with the same
+          summary can still differ in detail (which folder was offline),
+          and folding them would claim a sameness the rows don't have.
+        - ``"drop"``: a successful system run that changed nothing
+          (``result["noop"]``) after a run that also changed nothing, or
+          the first such run. A no-op that follows a failure or a run that
+          found something is kept: it records that the state changed.
+        """
+        if job.get("origin") != "system" or job["status"] not in ("completed", "failed"):
+            return "keep", None
+        conn.row_factory = sqlite3.Row
+        previous = conn.execute(
+            "SELECT id, status, summary, result, started_at, repeat_count, "
+            "       repeat_since "
+            "FROM job_history "
+            "WHERE type = ? AND workspace_id IS ? AND task_scope IS ? "
+            "  AND origin = 'system' AND id != ? AND started_at <= ? "
+            "  AND status IN ('completed', 'failed', 'cancelled') "
+            "ORDER BY started_at DESC LIMIT 1",
+            (job["type"], job.get("workspace_id"), job.get("task_scope"), job["id"],
+             job["started_at"]),
+        ).fetchone()
+        conn.row_factory = None
+        if job["status"] == "completed" and _is_noop(result_data):
+            if previous is None or (
+                previous["status"] == "completed"
+                and _is_noop(_load_json(previous["result"]))
+            ):
+                return "drop", None
+            return "keep", None
+        if (
+            job["status"] == "failed" and previous is not None
+            and previous["status"] == "failed"
+            and _primary_error(_load_json(previous["result"])) is not None
+            and _primary_error(_load_json(previous["result"])) == _primary_error(result_data)
+        ):
+            return "collapse", previous
+        return "keep", None
+
+    @staticmethod
+    def replace_row(conn, old_id, new_id):
+        """Delete ``old_id``'s row; follow-ups it started now name ``new_id``."""
+        conn.execute(
+            "UPDATE job_history SET parent_job_id = ? WHERE parent_job_id = ?",
+            (new_id, old_id),
+        )
+        conn.execute("DELETE FROM job_history WHERE id = ?", (old_id,))
+
+    @staticmethod
+    def prune_operations(conn, workspace_id):
+        """Keep the newest finished operations of each origin in a workspace.
+
+        Operations with any row still queued or running are never pruned:
+        a queued pipeline waiting behind a busy slot can sit in the table
+        for a long time, and if its row got pruned by an unrelated job
+        completing, the next promotion attempt would see rowcount==0 on its
+        conditional UPDATE and treat that as a cancel, silently dropping
+        the run.
+        """
+        conn.execute(
+            _PRUNE_OPERATIONS_SQL,
+            (workspace_id, HISTORY_OPERATIONS_PER_ORIGIN),
+        )
+
+    def origin_of(self, job_id):
+        """The recorded origin of ``job_id``, or None when there is no row."""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5)
+            row = conn.execute(
+                "SELECT origin FROM job_history WHERE id = ?", (job_id,),
+            ).fetchone()
+            return row[0] if row else None
+        except sqlite3.Error as exc:
+            log.warning("Could not read the origin of job %s: %s", job_id, exc)
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
 
-    def get_history(self, db, limit=10):
+    def get_history(self, db, limit=10, origin=None):
         """Get recent job history from the database.
 
         Only TERMINAL rows (completed/failed/cancelled) are returned —
@@ -426,6 +575,7 @@ class JobHistory:
         Args:
             db: Database instance (must be from the calling thread)
             limit: max number of rows
+            origin: ``user`` or ``system`` to read only that origin's rows
 
         Raises:
             JobHistoryUnavailable: the rows could not be read.
@@ -433,7 +583,7 @@ class JobHistory:
         try:
             ws_id = db.active_workspace_id
             terminal = ("completed", "failed", "cancelled")
-            rows = db.job_history.terminal(ws_id, terminal, limit)
+            rows = db.job_history.terminal(ws_id, terminal, limit, origin)
             result = []
             for r in rows:
                 d = dict(r)

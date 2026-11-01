@@ -4,29 +4,22 @@ bytes already at the destination.
 
 from __future__ import annotations
 
-import logging
 import os
-import stat as stat_mod
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from import_job.copy_verify import DestReadCancelled, _hash_dest_file
-from import_job.destination import _is_source_backed_dest
-from import_job.siblings import _companion_key, _sibling_blocks_slot, _slot_for
+from import_job.collision import Adoption, candidate_adoption, collision_candidates
+from import_job.copy_verify import _hash_dest_file
+from import_job.siblings import _companion_key, _sibling_blocks_slot
 from import_job.state import _counts, _LandedFile, _record_checker
-from scanner import EMPTY_FILE_SHA256
 
 if TYPE_CHECKING:
     from import_dedup import DuplicateChecker
     from import_job.destination import _DestContext
     from import_job.import_types import StopCheck
     from import_job.state import _ImportBatchState, _ImportRunState
-    # An adoptable candidate: ``(dest_path, verified_hash, record_hash)``.
-    _Adoption = tuple[str, str, str | None]
-
-log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -139,19 +132,13 @@ def _resolve_dest_collision(
     Returns ``(_WALK_HANDLED, None)`` or ``(_WALK_PLACED, basename)``.
     """
     source_file = src.file
-    stem, suffix = os.path.splitext(source_file.name)
+    stem = os.path.splitext(source_file.name)[0]
     group_key = _companion_key(source_file)
     anchor = batch_st.companion_slots.get(group_key)
-    counter = 0
-    while True:
+    for counter, probe in enumerate(collision_candidates(source_file, batch_st.dest_folder, anchor)):
         if _stopped_while_advancing(counter, stop_requested):
             return _WALK_CANCELLED, None
-        # ``slot`` is the numeric suffix this probe tries; ``counter``
-        # only counts probes. They differ when a same-stem sibling
-        # already landed at a suffix (see ``_slot_for``).
-        slot = _slot_for(counter, anchor)
-        candidate = source_file.name if slot == 0 else f"{stem}_{slot}{suffix}"
-        cand_path = os.path.join(batch_st.dest_folder, candidate)
+        slot, candidate, cand_path = probe.slot, probe.name, probe.path
         if claims is not None:
             candidate_key = ctx.fold_basename(candidate)
             if candidate_key in claims:
@@ -159,7 +146,6 @@ def _resolve_dest_collision(
                     state, batch_st, claims[candidate_key], src, checker=checker,
                 ):
                     return _WALK_HANDLED, None
-                counter += 1
                 continue
         if os.path.lexists(cand_path):
             # ``lexists``, not ``exists``: a DANGLING symlink is a
@@ -175,7 +161,7 @@ def _resolve_dest_collision(
             # spec row 13.) Nothing to adopt either — there are no bytes
             # behind it — so advance.
             adopt = _existing_candidate_adoption(
-                state, ctx, src, cand_path=cand_path,
+                ctx, src, cand_path=cand_path,
                 stop_requested=stop_requested,
             )
             if adopt is not None and _settle_adoption(
@@ -184,7 +170,6 @@ def _resolve_dest_collision(
                 anchor=anchor, candidate=candidate,
             ):
                 return _WALK_HANDLED, None
-            counter += 1
             continue
         if anchor is None and _sibling_blocks_slot(
             batch_st, source_file, stem, slot,
@@ -196,10 +181,10 @@ def _resolve_dest_collision(
             # be renamed away from us (or the same collision is already
             # queued for the rsync batch under that basename). Move the
             # whole group on together.
-            counter += 1
             continue
         batch_st.companion_slots.setdefault(group_key, slot)
         return _WALK_PLACED, candidate
+    raise AssertionError("collision candidate traversal must not end")
 
 
 def _stopped_while_advancing(counter: int, stop_requested: StopCheck) -> bool:
@@ -262,157 +247,23 @@ def _skip_claimed_identical_sibling(
 
 
 def _existing_candidate_adoption(
-    state: _ImportRunState, ctx: _DestContext, src: _CardFile, *, cand_path: str,
+    ctx: _DestContext, src: _CardFile, *, cand_path: str,
     stop_requested: StopCheck,
-) -> _Adoption | None:
-    """Decide whether the existing entry at ``cand_path`` holds this
-    source's bytes.
-
-    Returns ``(dest_path, verified_hash, record_hash)`` for an adoptable
-    candidate, or ``None`` when the walk must advance past it.
-    """
-    # ONE stat serves as both the existence probe and the
-    # metadata read: a dangling symlink is ``lexists`` but raises
-    # ENOENT here, so the single ``except OSError`` covers the
-    # dangling case AND a candidate that cannot be stat'd, and
-    # both advance. Merged deliberately — a separate
-    # ``os.path.exists`` would be a second round trip per
-    # candidate on a network archive, and it made the
-    # unreadable-candidate branch untestable by hiding which call
-    # a test had to intercept (Codex review of PR #1450).
+) -> Adoption | None:
+    """Probe one occupied entry; a failed stat advances rather than frees it."""
     try:
         cand_stat = os.stat(cand_path)
     except OSError:
-        # Unreadable candidate (or a dangling symlink): advance
-        # rather than fail the source file (PR 7b flip C).
-        # Deliberately not folded into the zero-byte test below —
-        # a failed stat must never read as "empty".
         return None
-    # Never hash, and never adopt, a candidate that is really
-    # source media (spec decision 13). The hazard is precise: the
-    # walk would read the CARD's own bytes back through the link,
-    # byte-match them against themselves, book
-    # ``skipped_duplicate``, and let ``safe_to_format`` go green
-    # over bytes that exist nowhere but the card. Unlike the
-    # orchestrator's primary-name guard this ADVANCES rather than
-    # failing the file: one poisoned entry does not poison the
-    # sibling slots, so the photo can still be imported safely.
-    # (At counter 0 the orchestrator's guard has already rejected
-    # this geometry with the same two probes, so this can only
-    # fire from counter 1 on — it is kept unconditional so the
-    # walk does not depend on its caller's ordering.)
-    if _is_source_backed_dest(ctx, src.file, cand_path):
-        log.warning(
-            "%s: destination candidate %s resolves to source "
-            "media; skipping it (never adopt bytes the card "
-            "still owns)", state.log_label, cand_path,
-        )
-        return None
-    # Already on disk. Byte-identical -> adopt; different ->
-    # advance to the next suffix. Adopting matters because a
-    # crash-interrupted retry may already have written THIS
-    # source's bytes under an earlier suffix: an earlier run
-    # copied a colliding different file to ``name.ext``, put this
-    # source's bytes at ``name_1.ext``, then died before its
-    # scan. Advancing past ``name_1.ext`` without hashing it
-    # would re-copy identical bytes to ``name_2.ext`` and leave
-    # two archive copies of one source photo. See PR #1107
-    # review.
-    if not stat_mod.S_ISREG(cand_stat.st_mode):
-        # FIFOs, device nodes and sockets all stat as size 0, so
-        # the zero-byte branch below would adopt one as this
-        # source's archive copy without ever reading it. (Today
-        # that ends as a spurious failure rather than a silent
-        # lie — the post-scan validation finds no photo row and
-        # reclassifies the file to failed — but failing a healthy
-        # card file over a stray FIFO is still wrong.) The
-        # size-MATCHED branch needs no such guard: it reads the
-        # candidate, and a blocked FIFO read becomes an OSError
-        # advance via _hash_dest_file's watchdog. A directory at
-        # the candidate name lands here too, and advancing is
-        # equally right for it. CodeRabbit review of PR #1450.
-        return None
-    return _candidate_bytes_adoption(
-        src.file, cand_path, cand_stat.st_size, src_size=src.size,
-        src_hash_fn=src.hash_fn, stop_requested=stop_requested,
+    return candidate_adoption(
+        src.file, cand_path, cand_stat, source_size=src.size,
+        source_hash=src.hash_fn, path_under_any_source=ctx.path_under_any_source,
+        hash_candidate=lambda path: _hash_dest_file(path, stop_requested),
     )
 
 
-def _candidate_bytes_adoption(
-    source_file: Path, cand_path: str, cand_size: int, *, src_size: int,
-    src_hash_fn: Callable[[], str | None], stop_requested: StopCheck,
-) -> _Adoption | None:
-    """Compare a regular-file candidate's bytes with the source's.
-
-    Returns ``(dest_path, verified_hash, record_hash)`` on a match, or
-    ``None`` when the walk must advance.
-    """
-    if src_size == 0 and cand_size == 0:
-        # Zero-byte twin: identical by definition, but kept out
-        # of the duplicate-identity index (see ingest), so it is
-        # an adopted landing rather than a cataloged twin — a
-        # crash may have left these bytes on disk before any
-        # folder/photo row was committed. Size, not hash: a
-        # checker'd zero-byte source hashes to None by
-        # convention and could never match. Adopts at ANY
-        # candidate position on both transports (PR 7b flip A).
-        #
-        # Re-stat the SOURCE first. ``src_size`` was captured by
-        # ``enqueue``'s opening stat, and this is the one adopt
-        # branch that reads nothing — the size-matched branch
-        # below re-reads the source through ``src_hash_fn`` and
-        # would notice a change. A source still being written to
-        # the card can therefore be empty at that stat and have
-        # real bytes by now, and adopting an empty destination
-        # for it books ``skipped_duplicate`` over bytes that
-        # exist only on the card: the destination validates fine
-        # (it IS empty), and a verified run reports
-        # ``safe_to_format=True``. Formatting then loses them.
-        # If it is no longer empty, this candidate simply is not
-        # a match — advance, and the copy/transfer that follows
-        # moves the real bytes. An OSError here means we cannot
-        # confirm emptiness, so advance for the same reason (the
-        # copy then fails with the real error). Codex review of
-        # PR #1450 (P1); the local primary-name case predates
-        # PR 7b, flip A widened it to the other positions.
-        try:
-            still_empty = source_file.stat().st_size == 0
-        except OSError:
-            still_empty = False
-        if not still_empty:
-            return None
-        return (cand_path, EMPTY_FILE_SHA256, EMPTY_FILE_SHA256)
-    # Size pre-check: equal hashes imply equal sizes, so a
-    # mismatch rules out a byte match without reading the
-    # file. The archive is often a network mount.
-    if cand_size != src_size:
-        return None
-    try:
-        cand_hash = _hash_dest_file(cand_path, stop_requested)
-    except DestReadCancelled:
-        # MUST come first: DestReadCancelled subclasses
-        # OSError, so the advance handler below would
-        # otherwise absorb a Stop and let the run keep
-        # touching the wedged destination (PR #1423).
-        raise
-    except OSError:
-        cand_hash = None
-    src_hash = src_hash_fn()
-    if (cand_hash is not None and src_hash is not None
-            and cand_hash == src_hash):
-        # Byte-identical file already at the destination
-        # (e.g. a previous run died between copy and
-        # catalog). Treat as landed: catalog + stamp it
-        # rather than skipping — the designed self-heal for
-        # crash-shaped interruptions. ``src_hash`` is
-        # non-None here by the gate, so it serves as both
-        # the ledger and the raw record hash.
-        return (cand_path, src_hash, src_hash)
-    return None
-
-
 def _settle_adoption(
-    state: _ImportRunState, batch_st: _ImportBatchState, ctx: _DestContext, adopt: _Adoption,
+    state: _ImportRunState, batch_st: _ImportBatchState, ctx: _DestContext, adopt: Adoption,
     src: _CardFile, *, checker: DuplicateChecker | None, claims: dict[str, str | None] | None,
     stop_requested: StopCheck, slot: int, anchor: int | None, candidate: str,
 ) -> bool:

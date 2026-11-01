@@ -1,8 +1,10 @@
 {
  "upward_edges": [
   "db -> services",
+  "db -> services.grouping_history",
   "db -> services.identity_alternatives",
   "db -> services.pending_changes",
+  "db -> services.species_provenance",
   "repositories.duplicates -> volume_reachability",
   "repositories.sync -> sidecar_identity",
   "schema -> file_replace",
@@ -64,6 +66,7 @@
    "services.dashboard_stats",
    "services.detection_store",
    "services.duplicate_resolution",
+   "services.grouping_history",
    "services.hf_cache",
    "services.identity_alternatives",
    "services.moves_merge",

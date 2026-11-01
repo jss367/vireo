@@ -5952,7 +5952,7 @@ def test_move_folder_merge_rejects_symlinked_dest_file(move_env, monkeypatch):
 
 def test_move_folder_merge_rejects_symlinked_dest_subdir(move_env, monkeypatch):
     """A destination subdirectory that is a symlink back into the source
-    tree must also fail verification. os.path.isfile/getsize on the joined
+    tree must be rejected before copying. os.path.isfile/getsize on the joined
     path would silently follow the link to the source's own bytes and
     pass — and then rmtree(src_path) would destroy the only copy."""
     import move as move_mod
@@ -5975,14 +5975,16 @@ def test_move_folder_merge_rejects_symlinked_dest_subdir(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
-                        lambda *a, **k: (0, "", False))
+    def must_not_copy(*args, **kwargs):
+        pytest.fail("preflight must reject the linked directory before copying")
+
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", must_not_copy)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
     )
     assert result["moved"] == 0
-    assert any("Verification failed" in e for e in result["errors"])
+    assert any("Conflict" in e for e in result["errors"])
     # Source files still present at the real path — not destroyed via the
     # symlinked-parent shortcut.
     assert (sub_src / "bird1.jpg").exists()
