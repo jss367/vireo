@@ -70,15 +70,26 @@ def _opens_database(node: ast.AST) -> bool:
 def unbootstrapped_database_opens(source: str) -> list[int]:
     """Line numbers of ``Database(...)`` calls with no earlier config import."""
     tree = ast.parse(source)
-    if any(_imports_config(node) for node in tree.body):
-        return []
     scopes = [node for node in ast.walk(tree)
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    in_functions = {id(n) for scope in scopes for n in ast.walk(scope)}
+    # A top-level ``import config`` bootstraps every function-level call: a
+    # function body only runs after module import has completed, so later
+    # imports in the module are fine for calls inside functions. Module-level
+    # calls, which execute during import, still need an import that precedes
+    # them in source order and must be checked against the module body itself.
+    module_bootstrapped = any(_imports_config(node) for node in tree.body)
     offenders = []
+    for node in ast.walk(tree):
+        if not _opens_database(node) or id(node) in in_functions:
+            continue
+        if not _bootstraps_in_body(tree, node.lineno):
+            offenders.append(node.lineno)
     for scope in scopes:
-        nodes = list(ast.walk(scope))
-        for node in nodes:
+        for node in ast.walk(scope):
             if not _opens_database(node):
+                continue
+            if module_bootstrapped:
                 continue
             # Any enclosing function may have bootstrapped before this call,
             # but only a statement at the top level of that function's body
@@ -90,10 +101,6 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
                 _bootstraps_in_body(s, node.lineno) for s in enclosing
             ):
                 offenders.append(node.lineno)
-    # Module-level opens outside any function.
-    in_functions = {id(n) for scope in scopes for n in ast.walk(scope)}
-    offenders += [n.lineno for n in ast.walk(tree)
-                  if _opens_database(n) and id(n) not in in_functions]
     return sorted(set(offenders))
 
 
@@ -136,6 +143,15 @@ def test_entry_points_import_config_before_opening_a_database():
     ("def f(p):\n    configure_repo()\n    from db import Database\n    return Database(p)\n", []),
     ("def f(p):\n    from config import DEFAULTS\n    import db\n    return db.Database(p)\n", []),
     ("import db\nDB = db.Database(':memory:')\n", [2]),
+    # A module-level ``Database(...)`` followed by a late ``import config``
+    # runs the call before the provider is installed, so it is flagged even
+    # though the file imports config elsewhere.
+    ("DB = Database(':memory:')\nimport config\n", [1]),
+    # The import ahead of the module-level call is the valid bootstrap.
+    ("import config\nDB = Database(':memory:')\n", []),
+    # A late module-level import still bootstraps function-level calls: the
+    # function runs only after module initialization has imported config.
+    ("def f(p):\n    return Database(p)\nimport config\n", []),
     ("def f(p):\n    import config\n    def g():\n        return Database(p)\n    return g\n", []),
     # An import inside a nested helper that is not on the path to the call
     # does not run before it; the Database(p) at line 4 is unbootstrapped.
