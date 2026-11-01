@@ -1616,7 +1616,7 @@ def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
     real_scandir, real_hash = os.scandir, scanner.compute_file_hash
 
     def scandir(path):
-        if Path(path) == folder:
+        if isinstance(path, (str, os.PathLike)) and Path(path) == folder:
             listings.append(Path(path))
         return real_scandir(path)
 
