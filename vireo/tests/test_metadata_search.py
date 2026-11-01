@@ -220,6 +220,7 @@ def test_metadata_search_sees_edits_and_scopes(catalog):
     db.untag_photo(ids["hawk"], keyword_id)
     assert db.collections.query_photo_ids(rules) == [ids["owl"]]
     collection = db.collections.add("Resting birds", json.dumps(rules))
+    db.commit()
     assert db.collections.count_photos_for_rules([], collection_id=collection) == 1
     other_ws = db.create_workspace("Other workspace")
     db.set_active_workspace(other_ws)

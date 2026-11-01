@@ -355,6 +355,7 @@ def test_version_23_import_catalog_gains_identity_state_without_changing_import_
         fid = workspace_folders.add_folder(db, '/photos', name='Photos')
         pid = photo_ingest.add_photo(db, fid, 'bird.jpg', '.jpg', 100, 1.0)
         cid = db.collections.add_import('Original imported photos', [pid, pid + 10])
+        db.commit()
         original = dict(db.collections.import_provenance(cid))
     with sqlite3.connect(path) as conn:
         conn.execute('DROP TABLE photo_identity_alternatives')
@@ -390,6 +391,7 @@ def test_version_22_catalog_runs_import_and_identity_registry_migrations(tmp_pat
     path = str(tmp_path / 'pre-import-v22.db')
     with Database(path) as db:
         collection = db.collections.add('Historical import', '[{"field":"photo_ids","value":[1,2]}]')
+        db.commit()
     with sqlite3.connect(path) as conn:
         conn.execute('DROP TABLE photo_identity_alternatives')
         conn.execute('ALTER TABLE collections DROP COLUMN original_import_count')

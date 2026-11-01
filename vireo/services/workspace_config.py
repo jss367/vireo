@@ -121,4 +121,5 @@ def set_workspace_active_labels(db: Database, labels_files: list[str]) -> None:
 def create_default_collections_for_all_workspaces(db: Database) -> None:
     """Create missing default smart collections in every workspace."""
     for ws in db.workspaces.list_all():
-        db.collections.create_defaults(workspace_id=ws["id"])
+        with db.transaction():
+            db.collections.create_defaults(workspace_id=ws["id"])

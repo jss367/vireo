@@ -1074,6 +1074,7 @@ def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     db = Database(db_path)
     db.set_active_workspace(db._active_workspace_id)
     col_id = db.collections.add("Test", json.dumps([]))
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -1098,6 +1099,7 @@ def test_pipeline_job_config_includes_collection_name(app_and_db, monkeypatch):
     db = Database(app.config["DB_PATH"])
     db.set_active_workspace(db._active_workspace_id)
     col_id = db.collections.add("Costa Rica selects", json.dumps([]))
+    db.commit()
 
     def fake_run(job, runner, db_path, workspace_id, params, thumb_cache_dir=None,
                  **_kwargs):
@@ -1129,6 +1131,7 @@ def test_pipeline_auto_skips_classify_when_no_model(app_and_db):
     db = Database(db_path)
     db.set_active_workspace(db._active_workspace_id)
     col_id = db.collections.add("Test", json.dumps([]))
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -1243,6 +1246,7 @@ def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
         'Thumbnail progress',
         json.dumps([{'field': 'photo_ids', 'value': photo_ids}]),
     )
+    db.commit()
     resp = client.post('/api/jobs/pipeline', json={
         'collection_id': collection_id,
         'skip_classify': True,
@@ -1277,6 +1281,7 @@ def test_pipeline_preview_step_has_progress(app_and_db, tmp_path):
         'Preview progress',
         json.dumps([{'field': 'photo_ids', 'value': photo_ids}]),
     )
+    db.commit()
     resp = client.post('/api/jobs/pipeline', json={
         'collection_id': collection_id,
         'skip_classify': True,
@@ -2255,6 +2260,7 @@ def test_pipeline_with_healthy_collection_skips_scan(app_and_db):
     col_id = db.collections.add(
         "healthy", json.dumps([{"field": "photo_ids", "value": photo_ids}])
     )
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -2320,6 +2326,7 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
     col_id = db.collections.add(
         "broken", json.dumps([{"field": "photo_ids", "value": [pid]}])
     )
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -2395,6 +2402,7 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
         "broken_tracked",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -2449,6 +2457,7 @@ def test_pipeline_with_broken_collection_handles_unreachable_folder(app_and_db):
         "broken_unreachable",
         json.dumps([{"field": "photo_ids", "value": [bird1]}]),
     )
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -2532,6 +2541,7 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
     col_id = db.collections.add(
         "broken_thumb", json.dumps([{"field": "photo_ids", "value": [pid]}])
     )
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -2600,6 +2610,7 @@ def test_pipeline_repair_respects_excluded_photo_ids(
         "with_excluded",
         json.dumps([{"field": "photo_ids", "value": [bird1, bird2]}]),
     )
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -2765,6 +2776,7 @@ def test_extract_masks_route_writes_photo_masks_row(
         "extract-masks-test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     client = app.test_client()
     resp = client.post(
@@ -2944,6 +2956,7 @@ def test_extract_masks_route_skips_sam_when_cached(
         "extract-masks-cache-test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     client = app.test_client()
 
@@ -3515,7 +3528,8 @@ def _make_collection(app):
 
     db = Database(app.config["DB_PATH"])
     db.set_active_workspace(db._active_workspace_id)
-    return db.collections.add("Strategy test", json_mod.dumps([]))
+    with db.transaction():
+        return db.collections.add("Strategy test", json_mod.dumps([]))
 
 
 def _job_config(client, job_id):
@@ -4228,11 +4242,12 @@ def _make_visual_collection(app):
     from db import Database
 
     with Database(app.config["DB_PATH"]) as db:
-        return db.collections.add(
-            "Visual test",
-            json_mod.dumps([{"field": "rating", "op": ">=", "value": 3}]),
-            visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
-        )
+        with db.transaction():
+            return db.collections.add(
+                "Visual test",
+                json_mod.dumps([{"field": "rating", "op": ">=", "value": 3}]),
+                visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
+            )
 
 
 def test_pipeline_rejects_visual_collection(app_and_db, monkeypatch):
@@ -4347,6 +4362,7 @@ def test_jobs_regroup_collection_scope_clears_group_fingerprint(app_and_db, monk
     col_id = db.collections.add(
         "Subset", json.dumps([{"field": "photo_ids", "value": [first]}]),
     )
+    db.commit()
     saved = []
     _stub_regroup_pipeline(monkeypatch, [{"id": first}], saved)
     with app.test_client() as client:
@@ -4548,6 +4564,7 @@ def test_jobs_regroup_coverage_uses_photo_snapshot(app_and_db, monkeypatch):
         "MatchesAll",
         json.dumps([{"field": "photo_ids", "value": all_ids}]),
     )
+    db.commit()
     loaded = all_ids[:-1]
     saved = []
     _stub_regroup_pipeline(
@@ -6109,6 +6126,7 @@ def test_pending_archive_deleted_collection_does_not_relink(app_and_db, tmp_path
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     collection_id = imported["result"]["collection_id"]
     db.collections.delete(collection_id)
+    db.commit()
     # Force ID reuse, as SQLite may do for the newest deleted collection.
     db.conn.execute(
         "INSERT INTO collections (id, name, workspace_id) VALUES (?, ?, ?)",
@@ -13828,6 +13846,7 @@ def test_extract_masks_route_reports_unreadable_sources(
         "unreadable-source-test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     client = app.test_client()
     resp = client.post(

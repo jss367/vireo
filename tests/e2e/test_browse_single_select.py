@@ -2491,6 +2491,7 @@ def test_reject_shortcut_refreshes_rejected_collection_count(live_server, page):
     db = live_server["db"]
     rules = json.dumps([{"field": "flag", "op": "is", "value": "rejected"}])
     collection_id = db.collections.add("Rejected", rules)
+    db.commit()
 
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -2559,6 +2560,7 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
     db = live_server["db"]
     rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
     collection_id = db.collections.add("All JPGs", rules)
+    db.commit()
 
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -2626,6 +2628,7 @@ def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
     db = live_server["db"]
     rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
     collection_id = db.collections.add("Debounce Collection", rules)
+    db.commit()
 
     url = live_server["url"]
     page.goto(f"{url}/browse")

@@ -80,6 +80,7 @@ def _prediction(db, photo_id, *, confidence=0.9, taxonomy=None, status="pending"
 
 def test_add_collection_commits_and_returns_id(db):
     cid = db.collections.add("Best", json.dumps([{"field": "all"}]), '{"prompt": "x"}')
+    db.commit()
     with _reader(db) as other:
         row = other.execute(
             "SELECT name, rules, workspace_id, visual_json FROM collections WHERE id = ?",
@@ -95,10 +96,13 @@ def test_add_collection_commits_and_returns_id(db):
 
 def test_get_collections_is_workspace_scoped_and_name_ordered(db):
     db.collections.add("b", "[]")
+    db.commit()
     db.collections.add("a", "[]", "{}")
+    db.commit()
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
     db.collections.add("elsewhere", "[]")
+    db.commit()
     db.set_active_workspace(1)
     rows = db.collections.list_all()
     assert [tuple(r.keys()) for r in rows] == [("id", "name", "rules", "visual_json")] * 2
@@ -107,12 +111,16 @@ def test_get_collections_is_workspace_scoped_and_name_ordered(db):
 
 def test_delete_collection_commits_and_ignores_other_workspace(db):
     keep = db.collections.add("keep", "[]")
+    db.commit()
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
     foreign = db.collections.add("foreign", "[]")
+    db.commit()
     db.set_active_workspace(1)
     db.collections.delete(keep)
+    db.commit()
     db.collections.delete(foreign)
+    db.commit()
     with _reader(db) as other:
         names = [r["name"] for r in other.execute("SELECT name FROM collections")]
     assert names == ["foreign"]
@@ -120,7 +128,9 @@ def test_delete_collection_commits_and_ignores_other_workspace(db):
 
 def test_rename_collection_commits(db):
     cid = db.collections.add("old", "[]")
+    db.commit()
     db.collections.rename(cid, "new")
+    db.commit()
     assert not db.conn.in_transaction
     with _reader(db) as other:
         assert other.execute(
@@ -132,11 +142,14 @@ def test_rename_collection_missing_or_foreign_raises(db):
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
     foreign = db.collections.add("foreign", "[]")
+    db.commit()
     db.set_active_workspace(1)
     with pytest.raises(ValueError, match="^collection not found$"):
         db.collections.rename(foreign, "stolen")
+        db.commit()
     with pytest.raises(ValueError, match="^collection not found$"):
         db.collections.rename(9999, "x")
+        db.commit()
     db.conn.rollback()
     assert db.conn.execute(
         "SELECT name FROM collections WHERE id = ?", (foreign,)
@@ -147,13 +160,18 @@ def test_rename_collection_needs_active_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
         db.collections.rename(1, "x")
+        db.commit()
 
 
 def test_duplicate_collection_names_copies_incrementally(db):
     cid = db.collections.add("Birds", '[{"field": "all"}]', '{"prompt": "owl"}')
+    db.commit()
     first = db.collections.duplicate(cid)
+    db.commit()
     second = db.collections.duplicate(cid)
+    db.commit()
     third = db.collections.duplicate(cid)
+    db.commit()
     with _reader(db) as other:
         rows = {
             r["id"]: dict(r) for r in other.execute(
@@ -170,15 +188,20 @@ def test_duplicate_collection_names_copies_incrementally(db):
 def test_duplicate_collection_missing_raises(db):
     with pytest.raises(ValueError, match="^collection not found$"):
         db.collections.duplicate(9999)
+        db.commit()
 
 
 def test_get_collections_for_picker_orders_case_insensitively_then_by_id(db):
     b = db.collections.add("b", "[]")
+    db.commit()
     upper_a = db.collections.add("A", "[]", "{}")
+    db.commit()
     lower_a = db.collections.add("a", "[]")
+    db.commit()
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
     db.collections.add("elsewhere", "[]")
+    db.commit()
     db.set_active_workspace(1)
     rows = db.collections.list_for_picker()
     assert [tuple(r.keys()) for r in rows] == [("id", "name", "rules", "visual_json")] * 3
@@ -190,9 +213,11 @@ def test_get_collections_for_picker_orders_case_insensitively_then_by_id(db):
 
 def test_get_collection_is_workspace_scoped(db):
     cid = db.collections.add("Mine", '[{"field": "all"}]', '{"prompt": "owl"}')
+    db.commit()
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
     foreign = db.collections.add("foreign", "[]")
+    db.commit()
     db.set_active_workspace(1)
     assert dict(db.collections.get(cid)) == {
         "id": cid, "name": "Mine", "rules": '[{"field": "all"}]',
@@ -207,6 +232,7 @@ def test_get_collection_is_workspace_scoped(db):
 
 def test_update_collection_writes_only_the_given_columns_and_commits(db):
     cid = db.collections.add("old", '[{"field": "all"}]', '{"prompt": "owl"}')
+    db.commit()
 
     def stored():
         with _reader(db) as other:
@@ -216,23 +242,28 @@ def test_update_collection_writes_only_the_given_columns_and_commits(db):
             ).fetchone())
 
     db.collections.update(cid, name="new")
+    db.commit()
     assert not db.in_transaction
     assert stored() == {
         "name": "new", "rules": '[{"field": "all"}]', "visual_json": '{"prompt": "owl"}',
     }
     db.collections.update(cid, rules_json="[]")
+    db.commit()
     assert stored()["rules"] == "[]"
     # An explicit None clears the visual clause; omitting it leaves it alone.
     db.collections.update(cid, name="newer", rules_json='[{"field": "flag"}]', visual_json=None)
+    db.commit()
     assert stored() == {"name": "newer", "rules": '[{"field": "flag"}]', "visual_json": None}
 
 
 def test_update_collection_with_nothing_runs_no_statement(db):
     cid = db.collections.add("old", "[]")
+    db.commit()
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
         db.collections.update(cid)
+        db.commit()
     finally:
         db.conn.set_trace_callback(None)
     assert statements == []
@@ -242,8 +273,10 @@ def test_update_collection_ignores_other_workspace(db):
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
     foreign = db.collections.add("foreign", "[]")
+    db.commit()
     db.set_active_workspace(1)
     db.collections.update(foreign, name="stolen", rules_json='[{"field": "all"}]')
+    db.commit()
     with _reader(db) as other:
         row = other.execute(
             "SELECT name, rules FROM collections WHERE id = ?", (foreign,)
@@ -252,6 +285,7 @@ def test_update_collection_ignores_other_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
         db.collections.update(foreign, name="x")
+        db.commit()
 
 
 # -- Rules engine ------------------------------------------------------------
@@ -736,6 +770,7 @@ def test_rule_queries_and_restrictions_with_a_where_clause(db, folder, tmp_path)
     _photo(db, sub, "c.jpg", rating=1)
     rated = [{"field": "rating", "op": ">=", "value": 4}]
     cid = db.collections.add("Rated", json.dumps(rated))
+    db.commit()
     rows = db.collections.get_photos(cid, photo_ids=[nested, top])
     assert sorted(r["id"] for r in rows) == [top, nested]
     assert db.collections.count_photo_availability(cid) == {
@@ -805,6 +840,7 @@ def test_get_collection_photos_narrowed_by_photo_ids(db, folder):
     a = _photo(db, folder, "a.jpg")
     b = _photo(db, folder, "b.jpg")
     cid = db.collections.add("All", json.dumps([{"field": "all"}]))
+    db.commit()
     assert db.collections.get_photos(cid, photo_ids=[]) == []
     rows = db.collections.get_photos(cid, photo_ids=[b, b])
     assert [r["id"] for r in rows] == [b]
@@ -814,6 +850,7 @@ def test_get_collection_photos_narrowed_by_photo_ids(db, folder):
 def test_collection_queries_sql_shape(db, folder):
     _photo(db, folder, "a.jpg")
     cid = db.collections.add("All", json.dumps([{"field": "all"}]))
+    db.commit()
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
@@ -901,6 +938,7 @@ def test_keyword_filter_values(db, folder):
 
 def test_create_default_collections_commits(db):
     db.collections.create_defaults()
+    db.commit()
     with _reader(db) as other:
         rows = {
             r["name"]: json.loads(r["rules"]) for r in other.execute(
@@ -917,6 +955,7 @@ def test_create_default_collections_for_explicit_workspace_skips_active(db):
     other_ws = db.create_workspace("other")
     db.set_active_workspace(None)
     db.collections.create_defaults(workspace_id=other_ws)
+    db.commit()
     count = db.conn.execute(
         "SELECT COUNT(*) FROM collections WHERE workspace_id = ?", (other_ws,)
     ).fetchone()[0]

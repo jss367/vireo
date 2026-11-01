@@ -598,6 +598,7 @@ def test_new_photo_drops_a_stale_collection_entry_for_its_reused_id(tmp_path):
         "Pipeline old",
         json.dumps([{"field": "photo_ids", "value": [kept_id, next_id]}]),
     )
+    db.commit()
 
     later = tmp_path / "later"
     later.mkdir()
@@ -626,10 +627,11 @@ def test_new_photo_preserves_collection_created_after_insert(
     state = {}
 
     def add_membership(photo_id):
-        return writer.collections.add(
-            "User selected bird",
-            json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
-        )
+        with writer.transaction():
+            return writer.collections.add(
+                "User selected bird",
+                json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+            )
 
     def insert_then_user_selection(*args, **kwargs):
         result = real_add(*args, **kwargs)
@@ -698,6 +700,7 @@ def test_new_photo_rechecks_collections_between_scan_inserts(tmp_path):
                     [{"field": "photo_ids", "value": [photo_id + 1]}],
                 ),
             )
+            writer.commit()
 
     try:
         scan(str(card), db, hooks=ScanHooks(photo=after_each_insert))
@@ -928,6 +931,7 @@ def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
                     [{"field": "photo_ids", "value": [cur.lastrowid]}],
                 ),
             )
+            self.commit()
         return real_add_photo(self, *args, **kwargs)
 
     monkeypatch.setattr(photo_ingest, "add_photo", racing_add_photo)
@@ -1391,6 +1395,7 @@ def test_scan_refreshes_collection_membership_between_insert_commits(tmp_path, s
             "Selection saved during scan",
             json.dumps([{"field": "photo_ids", "value": [photo_id, photo_id + 1]}]),
         )
+        writer.commit()
 
     try:
         scan(str(card), db, hooks=ScanHooks(photo=save_stale_selection))
@@ -1412,6 +1417,7 @@ def test_scan_collection_cache_does_not_reuse_rolled_back_revision(tmp_path):
         collection = db.collections.add(
             "Selection", json.dumps([{"field": "photo_ids", "value": [101]}]),
         )
+        db.commit()
         scanner = _CollectionMembership(db)
         # Read a modified rule inside a transaction that later rolls back.
         db.conn.execute("UPDATE collections SET rules=? WHERE id=?", (

@@ -45,6 +45,7 @@ def test_api_v1_collection_photos(app_and_db):
     cid = db.collections.add(
         "Picked", json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     )
+    db.commit()
     resp = client.get(f"/api/v1/collections/{cid}/photos", headers=_auth(app))
     assert resp.status_code == 200
     body = resp.get_json()

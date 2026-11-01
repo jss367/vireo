@@ -1881,6 +1881,7 @@ def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_s
     collection_id = live_server["db"].collections.add(
         "First hawk", json.dumps([{"field": "photo_ids", "value": [all_ids[0]]}]),
     )
+    live_server["db"].commit()
     regroup_payloads = []
     flag_payloads = []
 

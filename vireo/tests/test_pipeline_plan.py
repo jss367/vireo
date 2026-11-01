@@ -3143,6 +3143,7 @@ def test_api_pipeline_plan_rejects_visual_collection(app_and_db):
         json_mod.dumps([]),
         visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
     )
+    db.commit()
     client = app.test_client()
     resp = client.post(
         "/api/pipeline/plan",

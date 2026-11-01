@@ -308,6 +308,7 @@ def test_grants_reach_browse_collections_but_not_missing_siblings(tmp_path):
         assert db.collections.query_photo_ids([]) == [visible]
         assert db.collections.count_photos_for_rules([]) == 1
         cid = db.collections.add('Granted', json.dumps([]))
+        db.commit()
         assert db.collections.get_photo_ids(cid) == [visible]
         assert [r['id'] for r in db.collections.get_photos(cid)] == [visible]
         (tmp_path / 'folder' / 'visible.jpg').unlink()

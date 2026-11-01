@@ -220,6 +220,7 @@ def test_dashboard_and_browse_share_collection_date_scope(app_and_db):
             "value": [photos[0]["id"], photos[2]["id"]],
         }]),
     )
+    db.commit()
     query = (
         f"collection_id={collection_id}"
         "&date_from=2024-06-01&date_to=2024-06-30&sort=name"
@@ -513,11 +514,14 @@ def test_dashboard_options_flags_degraded_collections(app_and_db):
     picker can disable them instead of 400ing /api/stats and /api/coverage."""
     app, db = app_and_db
     healthy = db.collections.add("Healthy", "[]")
+    db.commit()
     bad_json = db.collections.add("Broken JSON", "{not json")
+    db.commit()
     bad_rules = db.collections.add(
         "Unresolvable rules",
         json.dumps([{"field": "no_such_field", "op": "equals", "value": 1}]),
     )
+    db.commit()
 
     client = app.test_client()
     resp = client.get("/api/dashboard/options")
@@ -540,11 +544,13 @@ def test_dashboard_options_flags_visual_collections(app_and_db):
     (rules-only). Codex review r3620636595."""
     app, db = app_and_db
     plain = db.collections.add("Plain", "[]")
+    db.commit()
     visual = db.collections.add(
         "Visual",
         json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
+    db.commit()
 
     client = app.test_client()
     resp = client.get("/api/dashboard/options")
@@ -569,6 +575,7 @@ def test_dashboard_scope_rejects_foreign_collection(app_and_db):
     other_workspace = db.create_workspace("Other")
     db.set_active_workspace(other_workspace)
     foreign_collection = db.collections.add("Foreign", "[]")
+    db.commit()
     db.set_active_workspace(db.workspaces.list_all()[0]["id"])
 
     client = app.test_client()
@@ -657,6 +664,7 @@ def test_api_photo_search_rejects_visual_collection(app_and_db):
         json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
+    db.commit()
     client = app.test_client()
     resp = client.get(f"/api/photos/search?q=bird&collection_id={visual}")
     assert resp.status_code == 400, resp.get_json()
@@ -12625,6 +12633,7 @@ def test_browse_stack_count_covers_all_pages(app_and_db, endpoint):
     with db.conn:
         _seed_browse_burst(db, [listed[0]["id"], listed[1]["id"]])
     collection_id = db.collections.add("All photos", "[]")
+    db.commit()
     client = app.test_client()
 
     def fetch(stacks):
@@ -13668,6 +13677,7 @@ def test_api_filter_values_respects_scope(app_and_db):
             "value": [photos["bird1.jpg"], photos["bird3.jpg"]],
         }]),
     )
+    db.commit()
     resp = client.get(
         f'/api/filters/values?field=camera_model&collection_id={collection_id}'
     )
@@ -14132,6 +14142,7 @@ def test_api_calendar_scopes_visual_to_collection(app_and_db, monkeypatch):
         "Only bird3",
         json.dumps([{"field": "photo_ids", "value": [photos["bird3.jpg"]]}]),
     )
+    db.commit()
     _stub_clip(monkeypatch)
     client = app.test_client()
     visual = json.dumps({"prompt": "a bird", "strength": "balanced"})

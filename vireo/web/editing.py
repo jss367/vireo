@@ -50,7 +50,8 @@ def create_editing_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
         if not isinstance(recipe, dict):
             return json_error("recipe must be a JSON object")
         try:
-            preset = db.edits.save_preset(body.get("name"), recipe, fields=body.get("fields"))
+            with db.transaction():
+                preset = db.edits.save_preset(body.get("name"), recipe, fields=body.get("fields"))
         except ValueError as e:  # includes RecipeError
             return json_error(str(e))
         return jsonify({"ok": True, "preset": preset})
@@ -58,7 +59,9 @@ def create_editing_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     @blueprint.route("/api/edit-presets/<int:preset_id>", methods=["DELETE"])
     def api_delete_edit_preset(preset_id: int) -> ResponseReturnValue:
         db = get_db()
-        if not db.edits.delete_preset(preset_id):
+        with db.transaction():
+            deleted = db.edits.delete_preset(preset_id)
+        if not deleted:
             return json_error("preset not found", 404)
         return jsonify({"ok": True})
 

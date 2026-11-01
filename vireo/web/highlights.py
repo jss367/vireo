@@ -1204,7 +1204,8 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             return json_error("name required")
 
         rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
-        cid = db.collections.add(name, rules)
+        with db.transaction():
+            cid = db.collections.add(name, rules)
         return jsonify({"ok": True, "id": cid})
 
     return blueprint

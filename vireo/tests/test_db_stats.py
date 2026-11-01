@@ -199,6 +199,7 @@ def seed(db):
     best = db.collections.add(
         "Best", json.dumps([{"field": "rating", "op": ">=", "value": 5}]),
     )
+    db.commit()
     return {
         "ws": ws, "other_ws": other_ws,
         "f_root": f_root, "f_child": f_child, "f_empty": f_empty,

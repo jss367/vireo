@@ -310,12 +310,14 @@ def _raw_preset(db, name, recipe_json):
 def test_presets_are_global_and_need_no_workspace(db):
     db.set_active_workspace(None)
     saved = db.edits.save_preset("Global", EXPOSURE)
+    db.commit()
     assert db.edits.list_presets() == [saved]
     assert db.edits.delete_preset(saved["id"]) is True
 
 
 def test_save_preset_returns_stored_shape_and_commits(db):
     saved = db.edits.save_preset("  Dawn ", EXPOSURE)
+    db.commit()
     assert list(saved) == ["id", "name", "recipe", "updated_at"]
     assert saved["name"] == "Dawn"
     assert saved["recipe"] == NORMALIZED_EXPOSURE
@@ -336,6 +338,7 @@ def test_save_preset_with_fields_keeps_neutral_values(db):
         {"adjustments": {"exposure": 0, "contrast": 20}},
         fields=["adjustments.exposure"],
     )
+    db.commit()
     assert list(saved) == ["id", "name", "recipe", "fields", "updated_at"]
     assert saved["fields"] == ["adjustments.exposure"]
     assert "contrast" not in saved["recipe"].get("adjustments", {})
@@ -351,8 +354,10 @@ def test_save_preset_with_fields_keeps_neutral_values(db):
 def test_save_preset_rejects_bad_fields(db):
     with pytest.raises(RecipeError, match="Select at least one setting"):
         db.edits.save_preset("Empty fields", EXPOSURE, fields=[])
+        db.commit()
     with pytest.raises(RecipeError, match="Unsupported development setting"):
         db.edits.save_preset("Bad field", EXPOSURE, fields=["nope"])
+        db.commit()
     assert db.edits.list_presets() == []
 
 
@@ -360,6 +365,7 @@ def test_save_preset_rejects_bad_fields(db):
 def test_save_preset_rejects_blank_or_non_string_name(db, name):
     with pytest.raises(ValueError, match="preset name must not be blank"):
         db.edits.save_preset(name, EXPOSURE)
+        db.commit()
 
 
 def test_save_preset_name_length_limit(db):
@@ -368,12 +374,14 @@ def test_save_preset_name_length_limit(db):
     assert db.edits.save_preset(" " + "y" * 80 + " ", EXPOSURE)["name"] == "y" * 80
     with pytest.raises(ValueError, match="preset name must be 80 characters or fewer"):
         db.edits.save_preset("z" * 81, EXPOSURE)
+        db.commit()
 
 
 def test_save_preset_name_limit_reads_instance_attribute(db, monkeypatch):
     monkeypatch.setattr(db, "EDIT_PRESET_NAME_MAX", 5)
     with pytest.raises(ValueError, match="preset name must be 5 characters or fewer"):
         db.edits.save_preset("sixsix", EXPOSURE)
+        db.commit()
     assert db.edits.save_preset("five5", EXPOSURE)["name"] == "five5"
 
 
@@ -381,28 +389,34 @@ def test_save_preset_accepts_json_string_recipe(db):
     saved = db.edits.save_preset(
         "From JSON", json.dumps({"rotation": 90, "adjustments": {"exposure": 0.5}})
     )
+    db.commit()
     assert saved["recipe"] == NORMALIZED_EXPOSURE
 
 
 def test_save_preset_empty_string_recipe_needs_an_adjustment(db):
     with pytest.raises(ValueError, match="preset must include at least one adjustment"):
         db.edits.save_preset("Blank", "")
+        db.commit()
 
 
 def test_save_preset_malformed_string_recipe_raises(db):
     with pytest.raises(RecipeError, match="recipe must be valid JSON"):
         db.edits.save_preset("Broken", "{")
+        db.commit()
 
 
 @pytest.mark.parametrize("recipe", [[1], 3, None])
 def test_save_preset_non_object_recipe_raises(db, recipe):
     with pytest.raises(RecipeError, match="recipe must be an object"):
         db.edits.save_preset("Not an object", recipe)
+        db.commit()
 
 
 def test_save_preset_upsert_keeps_id_and_bumps_recipe(db):
     first = db.edits.save_preset("Same", EXPOSURE)
+    db.commit()
     second = db.edits.save_preset("Same", {"adjustments": {"shadows": 30}})
+    db.commit()
     assert second["id"] == first["id"]
     assert second["recipe"]["adjustments"] == {"shadows": 30.0}
     assert len(db.edits.list_presets()) == 1
@@ -412,6 +426,7 @@ def test_list_presets_skips_malformed_rows(db, caplog):
     _raw_preset(db, "Broken", "{")
     _raw_preset(db, "Bad fields", json.dumps({"recipe": {}, "fields": ["nope"]}))
     good = db.edits.save_preset("good", EXPOSURE)
+    db.commit()
     with caplog.at_level("WARNING"):
         assert db.edits.list_presets() == [good]
     assert "Invalid stored edit preset" in caplog.text
@@ -422,14 +437,18 @@ def test_list_presets_skips_malformed_rows(db, caplog):
 def test_list_presets_sorts_casefolded_and_omits_fields_for_legacy(db):
     for name in ("beta", "Alpha", "gamma", "ALPHA2"):
         db.edits.save_preset(name, EXPOSURE)
+        db.commit()
     listed = db.edits.list_presets()
     assert [p["name"] for p in listed] == ["Alpha", "ALPHA2", "beta", "gamma"]
     assert all(list(p) == ["id", "name", "recipe", "updated_at"] for p in listed)
 
 
-def test_delete_preset_commits_and_reports_removal(db):
+def test_delete_preset_reports_removal_and_commits_with_its_unit(db):
     saved = db.edits.save_preset("Doomed", EXPOSURE)
-    assert db.edits.delete_preset(saved["id"]) is True
+    db.commit()
+    with db.transaction():
+        assert db.edits.delete_preset(saved["id"]) is True
+        assert db.conn.in_transaction
     assert not db.conn.in_transaction
     with _reader(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM edit_presets").fetchone()[0] == 0

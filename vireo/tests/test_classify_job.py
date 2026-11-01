@@ -1644,6 +1644,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
 
     # Seed a collection the classify path can consume.
     coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+    db.commit()
 
     # Force the classifier constructor to raise — simulates
     # weight-corruption or missing-weights at load time.
@@ -1723,6 +1724,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
                       model="BioCLIP", labels_fingerprint="legacy")
 
     coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+    db.commit()
 
     runner = FakeRunner()
 
@@ -1849,6 +1851,7 @@ def test_reclassify_finalizes_steps_on_resource_wait_cancel_during_load(
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
+    db.commit()
 
     runner = FakeRunner()
 
@@ -1956,6 +1959,7 @@ def test_classify_factory_cancel_check_uses_pure_cancel_probe(
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
+    db.commit()
 
     class PureProbeRunner(FakeRunner):
         def __init__(self):
@@ -4935,6 +4939,7 @@ def test_api_route_calls_run_classify_job(app_and_db):
     # Create a collection so the request is valid
     import json as _json
     col_id = db.collections.add("Test", _json.dumps([{"type": "all"}]))
+    db.commit()
 
     captured = {}
 
@@ -5126,6 +5131,7 @@ def _setup_two_photo_classify_workspace(tmp_path):
         "static",
         json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
     )
+    db.commit()
     db.close()
     return db_path, ws, col_id, p1, p2
 
@@ -5376,6 +5382,7 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
     )
+    db.commit()
     db.close()
 
     runner = FakeRunner()
@@ -5453,6 +5460,7 @@ def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
     )
+    db.commit()
     db.close()
 
     runner = FakeRunner()
@@ -7290,6 +7298,7 @@ def test_empty_collection_finalizes_all_step_rows(tmp_path):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     coll_id = db.collections.add("empty", "[]")
+    db.commit()
 
     runner = FakeRunner()
     job = _make_job()
@@ -7335,6 +7344,7 @@ def test_precancelled_job_finalizes_all_step_rows(tmp_path):
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + "]}]",
     )
+    db.commit()
 
     runner = FakeRunner()
     runner.cancelled = True
@@ -8064,6 +8074,7 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
+    db.commit()
 
     import classify_job as classify_job_mod
     monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
@@ -8132,6 +8143,7 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
     coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     model_dir = tmp_path / "timm-inat21-eva02-l"
     model_dir.mkdir()
@@ -8247,6 +8259,7 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
     collection_id = db.collections.add(
         "empty", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
     monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
@@ -8304,6 +8317,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
     collection_id = db.collections.add(
         "legacy", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
     monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
@@ -8368,6 +8382,7 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
     coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     # An active labels_file that ``_load_labels`` will actually load, so
     # the peek path returns real labels and the cached-only branch has a
@@ -8489,6 +8504,7 @@ def test_cached_only_path_publishes_source_when_peek_fails(
     coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     # No models are installed anywhere, and no label list is active — the
     # label peek raises RuntimeError, so ``peek_succeeded`` stays False.
@@ -8577,6 +8593,7 @@ def test_cached_only_path_names_source_of_a_run_that_matched_nothing(
     coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     # No models and no label lists: the label peek raises, so the
     # cached-only finalize recovers the source from the cached runs.
@@ -8841,6 +8858,7 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
+    db.commit()
 
     # Model resolution WOULD fail here — no active model exists. The
     # short-circuit must run before this raises.
@@ -8913,6 +8931,7 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
+    db.commit()
 
     import classify_job as classify_job_mod
     monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
@@ -8988,6 +9007,7 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
         '[{"field":"photo_ids","value":['
         + str(pid_a) + ',' + str(pid_b) + ']}]',
     )
+    db.commit()
 
     import classify_job as classify_job_mod
     monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
@@ -9441,6 +9461,7 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
+    db.commit()
 
     events = []
 

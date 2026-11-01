@@ -1055,7 +1055,8 @@ class ImportService:
 
             ws_id = db.create_workspace(name)
             self.invalidate_missing_originals(workspace_ids=[ws_id])
-            db.collections.create_defaults(workspace_id=ws_id)
+            with db.transaction():
+                db.collections.create_defaults(workspace_id=ws_id)
             db.set_active_workspace(ws_id)
             db.workspaces.update(ws_id, last_opened_at=datetime.now().isoformat())
             ws = db.workspaces.get(ws_id)
@@ -2217,7 +2218,8 @@ class ImportService:
         the exact same scope for their chained pipeline job.
         """
         collection_name = "Import " + datetime.now().strftime("%Y-%m-%d %H:%M")
-        collection_id = thread_db.collections.add_import(collection_name, photo_ids)
+        with thread_db.transaction():
+            collection_id = thread_db.collections.add_import(collection_name, photo_ids)
         return collection_id, collection_name
 
     def _record_import_collection(

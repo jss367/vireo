@@ -5159,9 +5159,9 @@ class Database:
         return photo_ids_named_by_collections(self.conn)
 
     def prune_collection_ids_of_missing_photos(self) -> list[dict[str, Any]]:
-        """Drop ``photo_ids`` entries naming deleted photos, in every workspace; commits."""
+        """Drop ``photo_ids`` entries naming deleted photos, in every workspace; no commit."""
         from repositories.collections import prune_collection_ids_of_missing_photos
-        return prune_collection_ids_of_missing_photos(self.conn, commit=commit_with_retry)
+        return prune_collection_ids_of_missing_photos(self.conn)
 
     def _build_query_from_rules(self, rules, include_offline_folders=False,
                                 row_scoped=False):

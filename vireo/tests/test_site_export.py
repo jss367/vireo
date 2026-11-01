@@ -33,10 +33,13 @@ def test_complete_export_preserves_albums_metadata_and_workspace_scope(tmp_path,
     first = db.collections.add('../Same / name', json.dumps([
         {'field': 'photo_ids', 'value': pids[:2]},
     ]))
+    db.commit()
     second = db.collections.add('../Same / name', json.dumps([
         {'field': 'photo_ids', 'value': pids[1:]},
     ]))
+    db.commit()
     empty = db.collections.add('Empty', '[{"field":"photo_ids","value":[]}]')
+    db.commit()
     db.conn.execute('UPDATE photos SET exif_data = ? WHERE id = ?', (
         json.dumps({'XMP': {'Title': 'A cardinal', 'Description': 'In the garden'},
                     'EXIF': {'UserComment': 'Morning walk'}}), pids[0],
@@ -49,6 +52,7 @@ def test_complete_export_preserves_albums_metadata_and_workspace_scope(tmp_path,
     foreign = photo_ingest.add_photo(db, folder_id=other_folder, filename='private.jpg', extension='.jpg',
                            file_size=1, file_mtime=1)
     db.collections.add('Other album', '[]')
+    db.commit()
     db.set_active_workspace(original_ws)
 
     destination = tmp_path / 'exports'
@@ -153,6 +157,7 @@ def test_album_definitions_respect_location_export_option(tmp_path, monkeypatch,
         {'mode': 'any', 'rules': [{'field': 'gps_lng', 'op': 'equals', 'value': longitude}]},
     ]}
     album_id = db.collections.add('Selected photos', json.dumps(rules))
+    db.commit()
     job = _run_export(app, tmp_path / 'export', include_locations=include_locations)
     assert job['status'] == 'completed', job
     root = Path(job['result']['destination'])
@@ -191,6 +196,7 @@ def test_export_metadata_is_consistent_when_workspace_changes_during_capture(tmp
     album_id = db.collections.add('Original album', json.dumps([
         {'field': 'photo_ids', 'value': [pid]},
     ]))
+    db.commit()
     db.set_photo_edit_recipe(pid, {'crop': {'x': 0, 'y': 0, 'w': 0.5, 'h': 1}})
     db.conn.execute('UPDATE photos SET latitude = 10, longitude = 20, exif_data = ? WHERE id = ?',
                     (json.dumps({'XMP': {'Title': 'Original title'}}), pid))
@@ -387,6 +393,7 @@ def test_visual_album_never_silently_exports_metadata_only_matches(tmp_path, mon
 
     _, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     album_id = db.collections.add('Visual birds', '[]', '{"prompt":"bird","strength":"medium"}')
+    db.commit()
 
     def resolve(*args, **kwargs):
         return ({'status': 'ok' if visual_available else 'no_model'},

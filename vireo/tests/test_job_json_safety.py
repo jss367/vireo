@@ -88,6 +88,7 @@ def test_job_list_serializes_while_classify_job_runs(app_and_db, reclassify):
     col_id = db.collections.add(
         "All", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
     in_classify = threading.Event()
     release = threading.Event()
 

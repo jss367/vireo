@@ -722,6 +722,7 @@ def test_photo_context_menu_adds_photo_to_existing_collection(live_server, page)
         "Process Review Picks",
         json.dumps([{"field": "photo_ids", "value": []}]),
     )
+    db.commit()
 
     page.goto(f"{live_server['url']}/pipeline/review")
     card = page.locator(".photo-card[data-photo-id]").first
@@ -1211,6 +1212,7 @@ def test_group_context_menu_preserves_selection_for_collection_action(
         "Burst Shortlist",
         json.dumps([{"field": "photo_ids", "value": []}]),
     )
+    db.commit()
 
     page.goto(f"{live_server['url']}/pipeline/review")
     expect(page.locator(".photo-card[data-photo-id]")).to_have_count(4)
@@ -1959,6 +1961,7 @@ def test_read_only_scope_blocks_collection_and_keyword_writes(live_server, page)
         "Read-only target",
         json.dumps([{"field": "photo_ids", "value": []}]),
     )
+    db.commit()
 
     page.goto(f"{live_server['url']}/pipeline/review")
     expect(page.locator(".photo-card[data-photo-id]")).to_have_count(4)

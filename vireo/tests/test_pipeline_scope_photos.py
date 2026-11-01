@@ -31,10 +31,12 @@ def scoped_app(tmp_path):
     coll_id = db.collections.add(
         "picked", json.dumps([{"field": "photo_ids", "value": [p_child]}]),
     )
+    db.commit()
     visual_id = db.collections.add(
         "owls", json.dumps([]),
         visual_json=json.dumps({"prompt": "owl", "strength": "medium"}),
     )
+    db.commit()
     db.close()
 
     thumb_dir = str(tmp_path / "thumbs")

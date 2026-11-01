@@ -13,6 +13,7 @@ def test_negative_extension_with_extensionless_companion(tmp_path, companion, op
     db.conn.execute('UPDATE photos SET companion_path=? WHERE filename=?',(companion,'_D854674.NEF'))
     db.conn.commit()
     cid=db.collections.add('negative',json.dumps([{'field':'extension','op':op,'value':value}]))
+    db.commit()
     assert sorted(p['filename'] for p in db.collections.get_photos(cid))==['_D854674.NEF','lone.nef']
 
 @pytest.mark.parametrize('companion', ['bird.edit.JPG','bird ä.版本.JpG','bird.JPG'])

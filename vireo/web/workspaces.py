@@ -701,7 +701,8 @@ def create_workspace_blueprint(
                 # active during a future Vireo restart — which is how a
                 # workspace in the wild ended up with zero defaults and broke
                 # "All Photos" in the pipeline collection picker.
-                db.collections.create_defaults(workspace_id=ws_id)
+                with db.transaction():
+                    db.collections.create_defaults(workspace_id=ws_id)
                 # Link selected folders if provided
                 for folder_id in folder_ids:
                     workspace_folders.add_workspace_folder(db, ws_id, folder_id)
@@ -834,7 +835,8 @@ def create_workspace_blueprint(
 
         # Activate the new workspace
         db.set_active_workspace(ws_id)
-        db.collections.create_defaults(workspace_id=ws_id)
+        with db.transaction():
+            db.collections.create_defaults(workspace_id=ws_id)
         db.workspaces.update(ws_id, last_opened_at=datetime.now().isoformat())
 
         # Return the target workspace's saved page path

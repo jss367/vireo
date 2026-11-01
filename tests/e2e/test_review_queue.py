@@ -32,6 +32,7 @@ def seed_queue(live_server, tmp_path):
     db.photo_review.set_flag(pids[0], 'flagged')
     db.photo_review.set_flag(pids[1], 'rejected')
     collection = db.collections.add('Inspection queue test', json.dumps([{'field': 'photo_ids', 'value': pids}]))
+    db.commit()
     return pids, subjects, collection
 
 

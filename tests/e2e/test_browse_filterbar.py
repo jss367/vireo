@@ -549,6 +549,7 @@ def test_shortcuts_narrow_collection_with_any_rules(live_server, page, shortcut)
             {"field": "filename", "op": "is", "value": "hawk2.jpg"},
         ],
     }))
+    db.commit()
     with db.conn:
         db.conn.execute("UPDATE photos SET flag='flagged' WHERE id IN (?, ?)",
                         (photos[1], photos[4]))
@@ -1094,6 +1095,7 @@ def test_top_species_filters_predictions_and_preserves_scope(live_server, page, 
     cid = db.collections.add("First two hawks", json.dumps([
         {"field": "photo_ids", "op": "in", "value": live_server["data"]["photos"][:2]}
     ]))
+    db.commit()
     folder_id = live_server["data"]["folders"][0]
     query = {
         "combined": f"collection_id={cid}&folder_id={folder_id}&dashboard_scope=1",
@@ -1129,6 +1131,7 @@ def test_top_species_narrows_match_any_collection(live_server, page):
             {"field": "filename", "op": "contains", "value": "robin"},
         ]
     }))
+    live_server["db"].commit()
     page.goto(f"{live_server['url']}/browse?collection_id={cid}")
     page.wait_for_function("VireoFilter.isReady() && !pageModules.pagination.pagination.loading")
     expect(page.locator("#grid .grid-card")).to_have_count(5)

@@ -65,6 +65,7 @@ def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
         "Hawk review",
         json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
     )
+    db.commit()
 
     page.goto(f"{url}/misses?collection_id={collection_id}")
     page.locator("[data-testid^='miss-card-no_subject-']").first.wait_for(
@@ -132,6 +133,7 @@ def test_malformed_legacy_scope_id_fails_closed(live_server, page, scope_key):
             "Hawk review",
             json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
         )
+        db.commit()
     else:
         scope_id = live_server["data"]["folders"][0]
 
@@ -156,6 +158,7 @@ def test_filter_bootstrap_failure_keeps_requested_scope_closed(
             "Hawk review",
             json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
         )
+        db.commit()
     elif scope_key == "folder_id":
         scope_id = live_server["data"]["folders"][0]
     else:
@@ -347,6 +350,7 @@ def test_collections_fetch_failure_fails_closed(live_server, page):
         "Hawk review",
         json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
     )
+    db.commit()
 
     page.add_init_script("""(() => {
       const realFetch = window.fetch.bind(window);

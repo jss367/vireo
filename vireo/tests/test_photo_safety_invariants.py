@@ -731,6 +731,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                 f"Scan {self.next_job}",
                 json.dumps([{"field": "photo_ids", "value": reported}]),
             )
+            self.db.commit()
             self.next_job += 1
         live = {row["id"] for row in self._catalog_rows()}
         assert set(reported) <= live, (
@@ -750,6 +751,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             f"Picked {self.next_job}",
             json.dumps([{"field": "photo_ids", "value": chosen}]),
         )
+        self.db.commit()
         self.next_job += 1
 
     def _check_scan_catalogs_folder(self, root):

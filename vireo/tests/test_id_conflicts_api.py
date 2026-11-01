@@ -38,6 +38,7 @@ def compare_collection(app_and_db):
     cid = db.collections.add(
         "Everything", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
     return app, db, cid, photo_ids
 
 
@@ -184,6 +185,7 @@ def test_refresh_photo_id_picks_up_a_sibling_that_just_joined(app_and_db):
         "Birds",
         json.dumps([{"field": "keyword", "op": "equals", "value": "Bird"}]),
     )
+    db.commit()
 
     first = _get(app, cid, filter="all")
     assert first["total"] == 2
@@ -298,6 +300,7 @@ def test_a_joining_sibling_that_carries_a_new_model_reassesses(app_and_db):
         "Birds",
         json.dumps([{"field": "keyword", "op": "equals", "value": "Bird"}]),
     )
+    db.commit()
 
     first = _get(app, cid, filter="all")
     assert first["models"] == ["model-a"]
@@ -353,6 +356,7 @@ def test_a_widening_refresh_shows_every_model_it_advertises(app_and_db):
         "Birds",
         json.dumps([{"field": "keyword", "op": "equals", "value": "Bird"}]),
     )
+    db.commit()
 
     first = _get(app, cid, filter="all")
     db.tag_photo(photo_ids[1], bird)
@@ -394,6 +398,7 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
         "Birds",
         json.dumps([{"field": "keyword", "op": "equals", "value": "Bird"}]),
     )
+    db.commit()
 
     first = _get(app, cid, filter="all", model="model-a")
     assert first["models"] == ["model-a"]

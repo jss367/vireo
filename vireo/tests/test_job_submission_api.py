@@ -48,10 +48,11 @@ def _collection_with_photo_count(db, count):
                 file_mtime=float(idx),
             )
         )
-    return db.collections.add(
-        f"runtime-warning-{count}",
-        json.dumps([{"field": "photo_ids", "value": photo_ids[:count]}]),
-    )
+    with db.transaction():
+        return db.collections.add(
+            f"runtime-warning-{count}",
+            json.dumps([{"field": "photo_ids", "value": photo_ids[:count]}]),
+        )
 
 
 def _job_from_response(client, job_id):

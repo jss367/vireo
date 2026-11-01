@@ -571,6 +571,7 @@ def test_archive_stage_rejects_retired_import_archive_params_late(
     monkeypatch.setenv("HOME", str(tmp_path))
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Empty", "[]")
+    db.commit()
     params = PipelineParams(
         collection_id=col_id,
         skip_classify=True,
@@ -596,6 +597,7 @@ def test_pipeline_job_with_collection_skips_scan(tmp_path):
 
     # Create an empty collection so classify has something to query
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     params = PipelineParams(
         collection_id=col_id,
@@ -842,6 +844,7 @@ def test_pipeline_collection_repair_scan_invokes_missing_originals_invalidator(
         "Repair me",
         json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
     )
+    db.commit()
 
     params = PipelineParams(
         collection_id=collection_id,
@@ -1024,6 +1027,7 @@ def test_pipeline_skips_scan_with_collection_id(tmp_path):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", json.dumps([]))
+    db.commit()
 
     params = PipelineParams(
         collection_id=col_id,
@@ -1073,6 +1077,7 @@ def test_pipeline_result_has_duration(tmp_path):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Empty", json.dumps([]))
+    db.commit()
 
     params = PipelineParams(
         collection_id=col_id,
@@ -1135,6 +1140,7 @@ def test_pipeline_previews_stage_runs(tmp_path):
 
     # Create an empty collection so classify has something to query
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     # Patch scanner, thumbnails, etc. to be no-ops — we just need to verify
     # the previews stage appears in the result
@@ -1248,6 +1254,7 @@ def test_pipeline_previews_stage_bounds_non_crop_recipe_loads(tmp_path, monkeypa
         "Edited",
         json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
     )
+    db.commit()
 
     original_load_image = image_loader.load_image
     seen_max_sizes = []
@@ -2315,6 +2322,7 @@ def test_pipeline_collection_mode_marks_scan_skipped(tmp_path):
 
     # Create an empty collection to reference
     coll_id = db.collections.add("test collection", json.dumps([]))
+    db.commit()
 
     params = PipelineParams(
         collection_id=coll_id,
@@ -2566,6 +2574,7 @@ def test_pipeline_raises_when_stage_fails(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2616,6 +2625,7 @@ def test_pipeline_translates_verify_failure_to_repair_message(tmp_path, monkeypa
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2671,6 +2681,7 @@ def test_pipeline_preflight_accepts_unverified_model(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2722,6 +2733,7 @@ def test_pipeline_translates_incomplete_model_error(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2767,6 +2779,7 @@ def test_pipeline_cancellation_takes_precedence_over_failure(tmp_path, monkeypat
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2800,6 +2813,7 @@ def test_pipeline_loops_over_multiple_models(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -2862,6 +2876,7 @@ def test_pipeline_classify_step_names_the_label_set(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(
@@ -2914,6 +2929,7 @@ def test_pipeline_pause_during_classifier_load_parks_and_resumes(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2987,6 +3003,7 @@ def test_pipeline_model_ids_back_compat_with_model_id(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -3044,6 +3061,7 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
         "No detections",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(detector, "ensure_megadetector_weights", lambda **_k: None)
@@ -3178,6 +3196,7 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
         "No detections",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     import detector
@@ -3309,6 +3328,7 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
         "Raw noise box",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     raw_detection = {
@@ -3420,6 +3440,7 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
         "Confident person",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     person_det = {
@@ -3537,6 +3558,7 @@ def test_pipeline_precreates_full_image_anchor_for_noise_only_photo(
         "Noise only",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     raw_detection = {
@@ -3660,6 +3682,7 @@ def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     # Helper installs a no-op download_taxonomy stub; override it AFTER the
     # helper so this test's recording stub wins. Order matters: the helper's
@@ -3713,6 +3736,7 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     # Override the helper's no-op download stub AFTER calling the helper, so
     # this test's recording stub wins. See sibling test above.
@@ -3765,6 +3789,7 @@ def _run_pipeline_with_taxonomy_files(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(taxonomy_mod, "download_taxonomy", download)
     monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
@@ -3914,6 +3939,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -4054,6 +4080,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -4159,6 +4186,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
     db.predictions.add(detection, "Robin", 0.2, "BioCLIP", status="accepted")
     db.model_runs.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
     collection = db.collections.add("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
+    db.commit()
     model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(labels_fingerprint, "compute_fingerprint", lambda *a, **k: "legacy")
     monkeypatch.setattr(classifier, "Classifier", lambda *a, **k: object())
@@ -4244,6 +4272,7 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
         "Weak bridge",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
     captured = []
@@ -4319,6 +4348,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -4398,6 +4428,7 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
     # Reclassify re-detects the SAME box → content-addressed id == prior_id.
@@ -4491,6 +4522,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -4612,6 +4644,7 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo1_id, photo2_id]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -4733,6 +4766,7 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo1_id, photo2_id]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -4822,6 +4856,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -5014,6 +5049,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -5150,6 +5186,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -5313,6 +5350,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -5455,6 +5493,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -5559,6 +5598,7 @@ def test_onnx_load_failure_writes_verify_failed_sentinel(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     model_dir = tmp_path / "models" / model_id
@@ -5633,6 +5673,7 @@ def test_onnx_load_failure_skips_sentinel_when_files_verify_ok(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     model_dir = tmp_path / "models" / model_id
@@ -5695,6 +5736,7 @@ def test_pipeline_continues_when_first_model_fails(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -5779,6 +5821,7 @@ def test_pipeline_continues_when_secondary_model_fails(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -5850,6 +5893,7 @@ def test_pipeline_single_model_still_aborts_on_failure(tmp_path, monkeypatch):
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -5923,6 +5967,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
             {"field": "photo_ids", "value": [photo_with_det, photo_without_det]}
         ]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6083,6 +6128,7 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     # Simulate a prior standalone classify run that inserted a full-image
     # detection anchor for this photo.
@@ -6185,6 +6231,7 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     # Real MegaDetector hit, but at confidence 0.05 — well below the default
     # 0.2 detector_confidence threshold. The detection row is real, but
@@ -6301,6 +6348,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [masked_id, lowconf_id]}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6385,6 +6433,7 @@ def test_extract_masks_with_only_subthreshold_detections_keeps_process_green(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [lowconf_id]}]),
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6466,6 +6515,7 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
     )
+    db.commit()
 
     det_p1 = db.detections.save(
         p1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -6566,6 +6616,7 @@ def test_pipeline_step_defs_include_detect_and_per_model_classify(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -6625,6 +6676,7 @@ def test_pipeline_step_defs_cover_every_requested_id_on_partial_resolution(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     # Install the first model as downloaded; second is requested but not
     # downloaded, so resolution raises partway through.
@@ -6666,6 +6718,7 @@ def test_pipeline_single_model_gets_per_model_classify_row(tmp_path, monkeypatch
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6722,6 +6775,7 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -6830,6 +6884,7 @@ def test_pipeline_one_model_fails_to_load_other_model_still_runs(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
     bad_id = model_ids[0]
@@ -6919,6 +6974,7 @@ def test_pipeline_per_model_step_summary_includes_prediction_count(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -6985,6 +7041,7 @@ def test_pipeline_reclassify_purge_deferred_until_a_model_succeeds(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -7061,6 +7118,7 @@ def test_pipeline_fatal_error_does_not_overwrite_completed_model_rows(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
     first_id, second_id = model_ids
@@ -7123,6 +7181,7 @@ def test_pipeline_loader_abort_finalizes_detect_and_classify_rows(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -7187,6 +7246,7 @@ def test_pipeline_loader_failure_marks_classify_rows_failed_not_skipped(
 
     db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.collections.add("Test", "[]")
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -8825,6 +8885,7 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
         "Weak mask bridge",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
     state = _stub_extract_masks_heavy_ops(monkeypatch)
 
     params = PipelineParams(
@@ -8886,6 +8947,7 @@ def test_extract_masks_stage_masks_full_image_rescued_dropout(tmp_path, monkeypa
         "Full-image mask bridge",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
     state = _stub_extract_masks_heavy_ops(monkeypatch)
     params = PipelineParams(
         collection_id=collection_id, skip_classify=True,
@@ -8942,6 +9004,7 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     state = _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -9104,6 +9167,7 @@ def test_extract_masks_source_lost_midrun_fails_stage(tmp_path, monkeypatch):
         "Lost source",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     state = _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -9182,6 +9246,7 @@ def test_extract_masks_offline_folder_does_not_stop_healthy_folder(
         "Mixed reachability",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     state = _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -9251,6 +9316,7 @@ def test_extract_masks_mount_outage_still_processes_other_sources(
         "Volume plus local disk",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     state = _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -9331,6 +9397,7 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
         "Partly cached",
         json.dumps([{"field": "photo_ids", "value": [uncached, cached]}]),
     )
+    db.commit()
 
     pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
     sam2_variant = pipeline_cfg.get("sam2_variant")
@@ -9408,6 +9475,7 @@ def test_extract_masks_preflight_offline_photos_are_counted_unreadable(
         "Gone before we started",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -9456,6 +9524,7 @@ def test_extract_masks_single_unreadable_file_is_reported_not_skipped(
         "One corrupt file",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     state = _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -9510,6 +9579,7 @@ def test_extract_masks_no_subject_still_counts_as_benign_skip(
         "No subject",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -9604,6 +9674,7 @@ def _run_extract_masks_for_test(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     generate_mask_calls = []
 
@@ -10652,6 +10723,7 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     # Stub extract_masks heavies so it sails through (eye_keypoints is
     # gated on extract_masks running). We do NOT trigger abort during
@@ -10758,6 +10830,7 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -10833,6 +10906,7 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -10900,6 +10974,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -10972,6 +11047,7 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11079,6 +11155,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11143,6 +11220,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11210,6 +11288,7 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11294,6 +11373,7 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11405,6 +11485,7 @@ def _run_eye_keypoints_download_failure_through_runner(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
     monkeypatch.setattr(
@@ -11522,6 +11603,7 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11642,6 +11724,7 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11723,6 +11806,7 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11811,6 +11895,7 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -11881,6 +11966,7 @@ def test_pipeline_regroup_per_run_eye_optin_reaches_scoring_config(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     # Give load_photo_features a photo to return so regroup does not
     # short-circuit on "No photos with pipeline features found."
@@ -11956,6 +12042,7 @@ def test_pipeline_regroup_full_strategy_default_does_not_force_scoring_config(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     monkeypatch.setattr(
         pipeline_mod, "load_photo_features",
@@ -12027,6 +12114,7 @@ def test_pipeline_regroup_no_optin_leaves_scoring_config_untouched(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     monkeypatch.setattr(
         pipeline_mod, "load_photo_features",
@@ -12097,6 +12185,7 @@ def test_pipeline_regroup_no_optin_preserves_settings_eye_on(
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     monkeypatch.setattr(
         pipeline_mod, "load_photo_features",
@@ -12766,6 +12855,7 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
     collection_id = db.collections.add("Test", json.dumps([]))
+    db.commit()
 
     def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
         os.makedirs(cache_dir, exist_ok=True)
@@ -12851,6 +12941,7 @@ def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(
     )
     db.conn.commit()
     collection_id = db.collections.add("Test", json.dumps([]))
+    db.commit()
 
     def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
         os.makedirs(cache_dir, exist_ok=True)
@@ -13667,6 +13758,7 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
         "Test",
         json_mod.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -13930,6 +14022,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
         "Resume test",
         json_mod.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -14869,6 +14962,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -15036,6 +15130,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -15227,6 +15322,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -15403,6 +15499,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -15500,6 +15597,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -15647,6 +15745,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -15859,6 +15958,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -16039,6 +16139,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -16161,6 +16262,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -16277,6 +16379,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -16459,6 +16562,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -16643,6 +16747,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
         json.dumps([{"field": "photo_ids",
                      "value": [gone_photo_id, healthy_photo_id]}]),
     )
+    db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
     # ``_setup_two_fake_downloaded_models`` only installs the model files;
@@ -16881,6 +16986,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
         json.dumps([{"field": "photo_ids",
                      "value": [gone_photo_id, healthy_photo_id]}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -17068,6 +17174,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -17249,6 +17356,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -17463,6 +17571,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -17627,6 +17736,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -17747,6 +17857,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -17870,6 +17981,7 @@ def test_pipeline_extract_masks_offline_survives_finalizer_override(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     # Delete the folder from disk AFTER seeding the DB. _still_offline_folder_ids_of
     # probes the folder's stored path via os.path.isdir — an absent directory
@@ -18034,6 +18146,7 @@ def test_extract_masks_outage_rollup_counts_only_offline_photos(
         "One corrupt file, one dead volume",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     state = _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -18098,6 +18211,7 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
         "Half already masked",
         json.dumps([{"field": "photo_ids", "value": [unmasked, masked]}]),
     )
+    db.commit()
 
     pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
     sam2_variant = pipeline_cfg.get("sam2_variant")
@@ -18172,6 +18286,7 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
         "All already masked",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
     sam2_variant = pipeline_cfg.get("sam2_variant")
@@ -18247,6 +18362,7 @@ def test_extract_masks_cancelled_total_covers_preflight_drops(
         "Cancelled after an outage",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -18315,6 +18431,7 @@ def test_extract_masks_cancelled_step_warning_covers_unreadable(
         "Cancel-after-outage warning count",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -18408,6 +18525,7 @@ def test_extract_masks_preflight_error_denominator_matches_stage_total(
         "Mixed detections plus outage",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -18486,6 +18604,7 @@ def test_extract_masks_preflight_stale_cached_mask_is_still_at_risk(
         "Stale prompt",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
     # Mask cached against a box that no longer matches the live detection
@@ -18537,6 +18656,7 @@ def test_extract_masks_preflight_ignores_photos_with_no_detection(
         "No mask candidates",
         json.dumps([{"field": "photo_ids", "value": [no_det]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -18678,6 +18798,7 @@ def test_extract_masks_preflight_counts_rescued_weak_detections(
         "Rescued weak burst",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -18743,6 +18864,7 @@ def test_extract_masks_preflight_ignores_isolated_weak_detections(
         "Isolated weak frame",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     _stub_extract_masks_heavy_ops(monkeypatch)
 
@@ -19056,6 +19178,7 @@ def test_extract_masks_records_person_only_skip_without_claiming_sam_ran(tmp_pat
     collection_id = db.collections.add("Portrait", json.dumps([
         {"field": "photo_ids", "value": [photo_id]},
     ]))
+    db.commit()
     state = _stub_extract_masks_heavy_ops(monkeypatch)
     _, result = _run_extract_masks_only(db_path, ws_id, collection_id)
     diagnostics = result["stages"]["extract_masks"]["outcomes"]
@@ -19074,6 +19197,7 @@ def test_extract_masks_retains_exception_type_and_photo_in_result(tmp_path, monk
     collection_id = db.collections.add("Portrait", json.dumps([
         {"field": "photo_ids", "value": [photo_id]},
     ]))
+    db.commit()
     _stub_extract_masks_heavy_ops(monkeypatch)
     import masking
 
@@ -19121,6 +19245,7 @@ def test_extract_masks_distinguishes_zero_boxes_from_missing_execution(
     collection_id = db.collections.add("Portrait", json.dumps([
         {"field": "photo_ids", "value": [photo_id]},
     ]))
+    db.commit()
     _stub_extract_masks_heavy_ops(monkeypatch)
     _, result = _run_extract_masks_only(db_path, ws_id, collection_id)
     assert result["stages"]["extract_masks"]["outcomes"]["counts"] == {reason: 1}

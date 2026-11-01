@@ -6,6 +6,7 @@ import json
 def _clear_default_collections(db):
     for c in db.collections.list_all():
         db.collections.delete(c["id"])
+        db.commit()
 
 
 def test_duplicate_collection_copies_name_and_rules(app_and_db):
@@ -16,6 +17,7 @@ def test_duplicate_collection_copies_name_and_rules(app_and_db):
 
     rules = [{"field": "rating", "op": ">=", "value": 3}]
     cid = db.collections.add("My Picks", json.dumps(rules))
+    db.commit()
 
     with app.test_client() as c:
         resp = c.post(f"/api/collections/{cid}/duplicate", json={})
@@ -44,6 +46,7 @@ def test_duplicate_collection_copies_static_photo_memberships(app_and_db):
     pids = [p["id"] for p in photos][:3]
 
     cid = db.collections.add("Static", json.dumps([]))
+    db.commit()
     # Use the existing add-photos endpoint to seed membership.
     with app.test_client() as c:
         resp = c.post(
@@ -110,6 +113,7 @@ def test_duplicate_collection_is_workspace_scoped(app_and_db):
 
     source_ws = db._active_workspace_id
     cid = db.collections.add("Wsp", json.dumps([{"field": "all"}]))
+    db.commit()
 
     # Create a second workspace with no collections, and make it active.
     other_ws = db.create_workspace("Other")
@@ -120,10 +124,12 @@ def test_duplicate_collection_is_workspace_scoped(app_and_db):
 
     with pytest.raises(ValueError):
         db.collections.duplicate(cid)
+        db.commit()
 
     # Duplicating from the source workspace lands the copy there.
     db.set_active_workspace(source_ws)
     new_id = db.collections.duplicate(cid)
+    db.commit()
 
     row = db.conn.execute(
         "SELECT workspace_id FROM collections WHERE id = ?", (new_id,)

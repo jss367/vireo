@@ -411,9 +411,10 @@ def test_startup_repair_finds_missing_ids_either_way_it_reads_photos(
     coll = _static_collection(db, db._ws_id(), "c", [kept, kept + 1, beyond_rowids])
     statements.clear()
 
-    pruned = collections_repo.prune_collection_ids_of_missing_photos(
-        db.conn, commit=lambda conn: conn.commit(),
-    )
+    with db.transaction():
+        pruned = collections_repo.prune_collection_ids_of_missing_photos(
+            db.conn,
+        )
 
     db.conn.set_trace_callback(None)
     looked_up = any("FROM photos WHERE id IN" in s for s in statements)

@@ -275,10 +275,11 @@ def create_collections_blueprint(
             visual = validate_visual_arg(body.get("visual"))
         except ValueError as e:
             return json_error(str(e), 400)
-        cid = db.collections.add(
-            name, json.dumps(rules),
-            visual_json=json.dumps(visual) if visual else None,
-        )
+        with db.transaction():
+            cid = db.collections.add(
+                name, json.dumps(rules),
+                visual_json=json.dumps(visual) if visual else None,
+            )
         return jsonify({"ok": True, "id": cid})
 
     @blueprint.route("/api/collections/preview", methods=["POST"])
@@ -322,7 +323,8 @@ def create_collections_blueprint(
     @blueprint.route("/api/collections/<int:collection_id>", methods=["DELETE"])
     def api_delete_collection(collection_id: int) -> ResponseReturnValue:
         db = get_db()
-        db.collections.delete(collection_id)
+        with db.transaction():
+            db.collections.delete(collection_id)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/collections/<int:collection_id>", methods=["PUT"])
@@ -357,8 +359,11 @@ def create_collections_blueprint(
             except ValueError as e:
                 return json_error(str(e), 400)
             updates["visual_json"] = json.dumps(visual) if visual else None
-        if updates and not db.collections.update(collection_id, **updates):
-            return json_error("collection not found", 404)
+        if updates:
+            with db.transaction():
+                updated = db.collections.update(collection_id, **updates)
+            if not updated:
+                return json_error("collection not found", 404)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
@@ -441,7 +446,8 @@ def create_collections_blueprint(
             existing.add(pid)
         ids_rule["value"] = sorted(existing)
 
-        db.collections.update(collection_id, rules_json=json.dumps(rules))
+        with db.transaction():
+            db.collections.update(collection_id, rules_json=json.dumps(rules))
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
 
     @blueprint.route("/api/collections/<int:collection_id>/duplicate", methods=["POST"])
@@ -449,7 +455,8 @@ def create_collections_blueprint(
         """Duplicate a collection within the active workspace. Returns {id}."""
         db = get_db()
         try:
-            new_id = db.collections.duplicate(collection_id)
+            with db.transaction():
+                new_id = db.collections.duplicate(collection_id)
         except ValueError:
             return json_error("collection not found", 404)
         return jsonify({"ok": True, "id": new_id})

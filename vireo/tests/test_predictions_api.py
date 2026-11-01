@@ -108,6 +108,7 @@ def test_prediction_lists_honor_detector_floor_and_current_labels(app_and_db):
     db.conn.execute("UPDATE predictions SET created_at = '2026-01-01'")
     db.commit()
     cid = db.collections.add("All photos", "[]")
+    db.commit()
     client = app.test_client()
     expected = {"Current Species", "Full Image Species"}
     for query in ("", f"?photo_ids={pid}", f"?collection_id={cid}"):
@@ -480,6 +481,7 @@ def test_predictions_for_collection(app_and_db):
     # Create a static collection containing only the first photo
     rules = json.dumps([{"field": "photo_ids", "value": [photos[0]['id']]}])
     coll_id = db.collections.add('Test Collection', rules)
+    db.commit()
 
     resp = client.get(f'/api/predictions?collection_id={coll_id}')
     assert resp.status_code == 200
