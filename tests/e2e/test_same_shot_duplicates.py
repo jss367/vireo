@@ -213,13 +213,14 @@ def test_same_shot_stat_renders_without_exact_proposals_and_when_all_are_filtere
         same_shot_photo_id,
     )
     expect(stat).to_contain_text("Same-shot to review")
+    expect(stat.locator(".num")).to_have_text("1")
     expect(page.locator("#applyBar")).to_be_hidden()
     expect(page.locator("#results")).to_contain_text(
         "No duplicate groups match the active filters"
     )
     expect(section.locator(".same-shot-group")).to_have_count(1)
-    # Reviewing the sole likely group drops the live stat to 0 and leaves no
-    # exact-byte control resurrected by the empty/filtered branches.
+    # Reviewing the sole likely group drops the live stat from 1 to 0 and
+    # leaves no exact-byte control resurrected by the empty/filtered branches.
     section.get_by_role("button", name="Keep all copies").click()
     expect(stat.locator(".num")).to_have_text("0")
     expect(page.locator("#applyBar")).to_be_hidden()
