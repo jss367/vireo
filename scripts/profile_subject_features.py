@@ -31,17 +31,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vireo"))
 def sample_photos(db_path, first, last, variant, sample, seed):
     conn = sqlite3.connect(f"file:{os.path.expanduser(db_path)}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
+    cursor = conn.execute(
         "SELECT p.id, p.filename, f.path AS folder, pm.prompt_x AS x, pm.prompt_y AS y,"
         " pm.prompt_w AS w, pm.prompt_h AS h"
         " FROM photos p JOIN folders f ON f.id = p.folder_id"
         " JOIN photo_masks pm ON pm.photo_id = p.id AND pm.variant = ?"
         " WHERE p.id BETWEEN ? AND ? ORDER BY p.id",
         (variant, first, last),
-    ).fetchall()
+    )
+    rng = random.Random(seed)
+    reservoir = []
+    for index, row in enumerate(cursor):
+        if index < sample:
+            reservoir.append(row)
+            continue
+        slot = rng.randint(0, index)
+        if slot < sample:
+            reservoir[slot] = row
     conn.close()
-    random.seed(seed)
-    return random.sample(rows, min(sample, len(rows)))
+    return reservoir
 
 
 def analyze(crop_completeness, quality_features, proxy, mask):
