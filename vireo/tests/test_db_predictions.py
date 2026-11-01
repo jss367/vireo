@@ -83,6 +83,7 @@ def cat(db, tmp_path, monkeypatch):
 def test_add_prediction_requires_detection(db, cat):
     with pytest.raises(ValueError, match="non-null detection_id"):
         db.predictions.add(None, "Robin", 0.5, "m1")
+        db.commit()
 
 
 def test_add_prediction_stores_normalized_output_and_commits(db, cat):
@@ -93,6 +94,7 @@ def test_add_prediction_stores_normalized_output_and_commits(db, cat):
                   "family": "F", "genus": "G", "scientific_name": "S", "taxon_id": 7},
         labels_fingerprint="fp1", labels_fingerprint_full="full", match_score=3.5,
     )
+    db.commit()
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -104,6 +106,7 @@ def test_add_prediction_stores_normalized_output_and_commits(db, cat):
     assert db.conn.execute("SELECT COUNT(*) FROM prediction_review").fetchone()[0] == 0
     # A label that normalizes to empty keeps its raw spelling.
     db.predictions.add(det, "’", 0.1, "m1", labels_fingerprint="fp1")
+    db.commit()
     assert _pred_id(db, det, "’")
 
 
@@ -111,8 +114,10 @@ def test_add_prediction_pending_needs_no_workspace(db, cat):
     det = _det(db, cat["p"][0])
     db.set_active_workspace(None)
     db.predictions.add(det, "Robin", 0.5, "m1")
+    db.commit()
     with pytest.raises(RuntimeError):
         db.predictions.add(det, "Robin", 0.5, "m1", status="accepted")
+        db.commit()
 
 
 def test_add_prediction_reuse_backfills_without_overwriting(db, cat):
@@ -122,12 +127,14 @@ def test_add_prediction_reuse_backfills_without_overwriting(db, cat):
                       labels_fingerprint_full="full-1", match_score=1.0)
     db.predictions.add(det, "Robin", 0.9, "m1", labels_fingerprint="fp1",
                       labels_fingerprint_full="full-2", match_score=2.0)
+    db.commit()
     row = db.conn.execute(
         "SELECT confidence, labels_fingerprint_full, match_score FROM predictions"
     ).fetchone()
     assert tuple(row) == (0.5, "full-1", 1.0)
     db.predictions.add(det, "Robin", 0.9, "m1", labels_fingerprint="fp1",
                       match_score=4.0, from_fresh_inference=True)
+    db.commit()
     assert db.conn.execute("SELECT match_score FROM predictions").fetchone()[0] == 4.0
     assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 1
 
@@ -136,11 +143,13 @@ def test_add_prediction_refresh_output_keeps_id_and_clears_alternative(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="fp1",
                       status="alternative")
+    db.commit()
     pid = _pred_id(db, det, "Robin")
     db.predictions.add(det, "Robin", 0.8, "m1", category="change",
                       taxonomy={"genus": "Turdus"}, labels_fingerprint="fp1",
                       refresh_output=True, group_id="g", vote_count=2, total_votes=3,
                       individual='{"Robin": 2}')
+    db.commit()
     assert _pred_id(db, det, "Robin") == pid
     row = db.conn.execute(
         "SELECT confidence, category, taxonomy_genus FROM predictions WHERE id = ?",
@@ -151,6 +160,7 @@ def test_add_prediction_refresh_output_keeps_id_and_clears_alternative(db, cat):
     # A refresh with no burst clears the old metadata (plain overwrite).
     db.predictions.add(det, "Robin", 0.8, "m1", labels_fingerprint="fp1",
                       refresh_output=True)
+    db.commit()
     assert _review(db, pid) == ("pending", None, None, None, None)
 
 
@@ -158,9 +168,11 @@ def test_add_prediction_review_state_coalesces(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", group_id="g1", vote_count=3,
                       total_votes=4, individual='{"Robin": 3}')
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     assert _review(db, pid) == ("pending", '{"Robin": 3}', "g1", 3, 4)
     db.predictions.add(det, "Robin", 0.5, "m1", status="accepted")
+    db.commit()
     assert _review(db, pid) == ("accepted", '{"Robin": 3}', "g1", 3, 4)
     assert not db.conn.in_transaction
 
@@ -169,15 +181,18 @@ def test_add_prediction_review_state_coalesces(db, cat):
 def test_add_prediction_preserves_manual_decisions(db, cat, status):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", status=status)
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.predictions.add(det, "Robin", 0.5, "m1", status="pending", group_id="g",
                       preserve_manual_review=True)
+    db.commit()
     assert _review(db, pid)[:3] == (status, None, None)
     assert not db.conn.in_transaction
     # refresh_output keeps the decision but recomputes burst membership,
     # dropping the auto-match marker.
     db.predictions.add(det, "Robin", 0.5, "m1", refresh_output=True, group_id="g2",
                       vote_count=1, total_votes=1, individual=AUTO_MATCH_REVIEW_MARKER)
+    db.commit()
     assert _review(db, pid) == (status, None, "g2", 1, 1)
 
 
@@ -185,9 +200,11 @@ def test_add_prediction_overrides_auto_match_review(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", status="accepted",
                       individual=AUTO_MATCH_REVIEW_MARKER)
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.predictions.add(det, "Robin", 0.5, "m1", status="pending", group_id="g",
                       preserve_manual_review=True)
+    db.commit()
     assert _review(db, pid)[:3] == ("pending", AUTO_MATCH_REVIEW_MARKER, "g")
 
 
@@ -195,9 +212,11 @@ def test_retain_prediction_candidates(db, cat):
     det = _det(db, cat["p"][0])
     for sp in ("Robin", "Swinhoe's White-eye", "Old"):
         db.predictions.add(det, sp, 0.5, "m1", labels_fingerprint="fp1")
+        db.commit()
     db.predictions.add(det, "Other fp", 0.5, "m1", labels_fingerprint="fp2")
     db.predictions.retain_candidates(det, "m1", "fp1",
                                     ["Robin", "Swinhoe’s White-eye"])
+    db.commit()
     assert not db.conn.in_transaction
     assert sorted(r[0] for r in _visible(db, "SELECT species FROM predictions")) == [
         "Other fp", "Robin", "Swinhoe's White-eye",
@@ -217,18 +236,23 @@ def test_reconcile_match_review_state(db, cat, monkeypatch):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", category="match", status="accepted",
                       individual=AUTO_MATCH_REVIEW_MARKER, labels_fingerprint="fp1")
+    db.commit()
     pid = _pred_id(db, det, "Robin")
     commits.clear()
     db.predictions.reconcile_match_review_state(det, "m1", "fp1", "Missing", "new")
+    db.commit()
     assert commits == []
     db.predictions.reconcile_match_review_state(det, "m1", "fp1", "Robin", "match")
+    db.commit()
     assert _review(db, pid)[0] == "accepted"
-    assert len(commits) == 1
+    assert commits == []  # the caller's ``db.commit()`` committed it
     db.predictions.reconcile_match_review_state(det, "m1", "fp1", "Robin", "match", auto_accept=False)
+    db.commit()
     assert _review(db, pid) is None
     db.predictions.add(det, "Robin", 0.5, "m1", status="accepted",
                       individual=AUTO_MATCH_REVIEW_MARKER, labels_fingerprint="fp1")
     db.predictions.reconcile_match_review_state(det, "m1", "fp1", "Robin", "new")
+    db.commit()
     assert _review(db, pid) is None
     assert db.conn.execute("SELECT category FROM predictions WHERE id = ?",
                            (pid,)).fetchone()[0] == "new"
@@ -239,8 +263,10 @@ def test_reconcile_keeps_manual_accept_and_normalizes_species(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Say's phoebe", 0.5, "m1", category="match",
                       status="accepted", labels_fingerprint="fp1")
+    db.commit()
     pid = _pred_id(db, det, "Say's phoebe")
     db.predictions.reconcile_match_review_state(det, "m1", "fp1", "Say’s phoebe", "change")
+    db.commit()
     assert _review(db, pid)[0] == "accepted"
     assert db.conn.execute("SELECT category FROM predictions").fetchone()[0] == "change"
 
@@ -262,10 +288,12 @@ def test_clear_predictions_filters_and_run_keys(db, cat):
         db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="fp1")
         db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="fp2")
         db.predictions.add(det, "Robin", 0.5, "m2", labels_fingerprint="fp1")
+        db.commit()
         _seed_runs(db, det)
         _seed_runs(db, det, fp="fp2")
     db.conn.commit()
     db.predictions.clear(model="m1", labels_fingerprint="fp1", collection_photo_ids=[p0])
+    db.commit()
     assert not db.conn.in_transaction
     left = _visible(db, "SELECT detection_id, classifier_model, labels_fingerprint "
                         "FROM predictions ORDER BY 1, 2, 3")
@@ -277,11 +305,13 @@ def test_clear_predictions_filters_and_run_keys(db, cat):
     assert (d0, "fp1") not in scores and (d0, "fp2") in scores
     # clear_run_keys=False keeps the runs but still drops the match scores.
     db.predictions.clear(model="m2", clear_run_keys=False)
+    db.commit()
     assert not db.conn.in_transaction
     assert (d1, "m2") not in _visible(db, "SELECT detection_id, classifier_model FROM predictions")
     assert (d1, "fp1") in _visible(db, "SELECT detection_id, labels_fingerprint FROM classifier_runs")
     # No filters: every workspace-visible row goes, the other folder's stay.
     db.predictions.clear()
+    db.commit()
     left = _visible(db, "SELECT DISTINCT detection_id FROM predictions")
     assert left == [(dout,)]
     assert _visible(db, "SELECT DISTINCT detection_id FROM classifier_runs") == [(dout,)]
@@ -290,8 +320,10 @@ def test_clear_predictions_filters_and_run_keys(db, cat):
 def test_clear_predictions_chunks_photo_ids(db, cat):
     p0 = cat["p"][0]
     db.predictions.add(_det(db, p0), "Robin", 0.5, "m1")
+    db.commit()
     statements = _trace(db)
     db.predictions.clear(collection_photo_ids=list(range(10_000, 10_800)) + [p0])
+    db.commit()
     db.conn.set_trace_callback(None)
     distinct = list(dict.fromkeys(s.strip() for s in statements))
     assert len([s for s in distinct if s.startswith("DELETE FROM predictions")]) == 2
@@ -335,6 +367,7 @@ def test_get_predictions_filters(db, cat, monkeypatch):
                       status="accepted")
     db.predictions.add(d1, "Jay", 0.7, "m1", labels_fingerprint="fp1")
     db.predictions.add(_det(db, cat["outside"]), "Hidden", 0.99, "m1")
+    db.commit()
     rows = db.predictions.get_rows()
     assert [r["species"] for r in rows] == ["Sparrow", "Jay", "Robin"]
     assert rows[0]["status"] == "accepted" and rows[0]["model"] == "m2"
@@ -347,6 +380,7 @@ def test_get_predictions_latest_fingerprint_only(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Old", 0.9, "m1", labels_fingerprint="old")
     db.predictions.add(det, "New", 0.2, "m1", labels_fingerprint="new")
+    db.commit()
     db.conn.execute("UPDATE predictions SET created_at = '2030-01-01' WHERE species = 'New'")
     assert [r["species"] for r in db.predictions.get_rows()] == ["New"]
 
@@ -372,6 +406,7 @@ def test_get_predictions_detector_floor_and_current_labels(db, cat, floor, scope
         (full, "Full Image", 0.8, "new"),
     ]:
         db.predictions.add(det, species, confidence, "m1", labels_fingerprint=fingerprint)
+        db.commit()
     # All inserts can share a timestamp: the larger id must break the tie.
     db.conn.execute("UPDATE predictions SET created_at = '2026-01-01'")
     db.commit()
@@ -394,6 +429,7 @@ def test_get_predictions_chunks_and_resorts(db, cat):
     p0, p1 = cat["p"][:2]
     db.predictions.add(_det(db, p0), "Low", 0.2, "m1")
     db.predictions.add(_det(db, p1), "High", 0.8, "m1")
+    db.commit()
     db.conn.execute("UPDATE predictions SET confidence = NULL WHERE species = 'Low'")
     ids = [p0] + list(range(10_000, 10_800)) + [p1]
     statements = _trace(db)
@@ -407,6 +443,7 @@ def test_get_predictions_rules_route_through_facade(db, cat, monkeypatch):
     p0, p1 = cat["p"][:2]
     db.predictions.add(_det(db, p0), "Robin", 0.5, "m1")
     db.predictions.add(_det(db, p1), "Jay", 0.9, "m1")
+    db.commit()
     calls = []
     real_build = db._build_query_from_rules
     monkeypatch.setattr(db, "_build_query_from_rules",
@@ -458,6 +495,7 @@ def test_group_predictions_with_alternatives(db, cat):
     db.predictions.add(d0, "Thrush", 0.3, "m1", status="alternative", labels_fingerprint="fp1")
     db.predictions.add(d0, "Stale", 0.2, "m1", status="alternative", labels_fingerprint="fp0")
     db.predictions.add(d1, "Robin", 0.8, "m1", group_id="g1", labels_fingerprint="fp1")
+    db.commit()
     db.conn.execute("UPDATE photos SET quality_score = ? WHERE id = ?", (0.9, p1))
     db.conn.execute("UPDATE photos SET quality_score = ? WHERE id = ?", (0.1, p0))
     rows = db.predictions.get_group("g1")
@@ -471,6 +509,7 @@ def test_existing_prediction_photo_ids(db, cat):
     db.predictions.add(_det(db, p0), "Robin", 0.5, "m1", labels_fingerprint="fp1")
     db.predictions.add(_det(db, p1), "Robin", 0.5, "m1", labels_fingerprint="fp2")
     db.predictions.add(_det(db, cat["outside"]), "Robin", 0.5, "m1", labels_fingerprint="fp1")
+    db.commit()
     assert db.predictions.get_existing_photo_ids("m1") == {p0, p1}
     assert db.predictions.get_existing_photo_ids("m1", "fp1") == {p0}
     assert db.predictions.get_existing_photo_ids("m2") == set()
@@ -482,6 +521,7 @@ def test_top_prediction_for_photo(db, cat):
     low = _det(db, p0, conf=0.1, x=0.6, model="md-b")
     db.predictions.add(high, "Robin", 0.6, "m1", taxonomy={"scientific_name": "T. m."})
     db.predictions.add(low, "Hawk", 0.95, "m1")
+    db.commit()
     top = db.predictions.get_top_for_photo(p0)
     # Provenance rides along so readers can tell a guessed binomial from evidence.
     assert tuple(top) == ("Hawk", None, 0.95, low, "m1", "legacy", None)
@@ -493,6 +533,7 @@ def test_top_prediction_for_photo(db, cat):
 def test_top_prediction_confidences(db, cat, monkeypatch):
     p0, p1 = cat["p"][:2]
     db.predictions.add(_det(db, p0), "Robin", 0.6, "m1")
+    db.commit()
     calls = []
     real = db._top_prediction_confidence_params
     monkeypatch.setattr(db, "_top_prediction_confidence_params",
@@ -512,6 +553,7 @@ def test_top_unrejected_predictions_by_photo(db, cat):
     db.predictions.add(det, "Robin", 0.99, "m1", labels_fingerprint="old")
     db.predictions.add(det, "Jay", 0.7, "m1", labels_fingerprint="new")
     db.predictions.add(det, "Wren", 0.8, "m1", labels_fingerprint="new")
+    db.commit()
     jay = _pred_id(db, det, "Jay", fp="new")
     wren = _pred_id(db, det, "Wren", fp="new")
     db.update_prediction_status(wren, "rejected")
@@ -523,14 +565,17 @@ def test_top_unrejected_predictions_by_photo(db, cat):
     tie = _det(db, p1)
     db.predictions.add(tie, "Hawk", 0.5, "m1")
     db.predictions.add(tie, "Kite", 0.5, "m1")
+    db.commit()
     kite = _pred_id(db, tie, "Kite", fp="legacy")
 
     only_rejected = _det(db, p2)
     db.predictions.add(only_rejected, "Owl", 0.9, "m1")
+    db.commit()
     db.update_prediction_status(_pred_id(db, only_rejected, "Owl", fp="legacy"), "rejected")
 
     # Not filtered by workspace visibility.
     db.predictions.add(_det(db, cat["outside"]), "Crow", 0.4, "m1")
+    db.commit()
 
     got = db.predictions.top_unrejected_by_photo([p0, p1, p2, p3, cat["outside"]])
     assert set(got) == {p0, p1, cat["outside"]}
@@ -565,10 +610,12 @@ def test_top_unrejected_predictions_by_detection_keeps_every_subject(db, cat):
     db.predictions.add(teal_det, "Mallard", 0.3, "m1")
     db.predictions.add(wigeon_det, "American Wigeon", 0.8, "m1")
     db.predictions.add(wigeon_det, "Gadwall", 0.85, "m1")
+    db.commit()
     db.update_prediction_status(
         _pred_id(db, wigeon_det, "Gadwall", fp="legacy"), "rejected",
     )
     db.predictions.add(_det(db, p1), "Robin", 0.5, "m1")
+    db.commit()
 
     got = db.predictions.top_unrejected_by_detection([p0, p1])
     assert [(r["detection_id"], r["species"]) for r in got[p0]] == [
@@ -591,6 +638,7 @@ def test_prediction_for_photo(db, cat):
     p0 = cat["p"][0]
     det = _det(db, p0)
     db.predictions.add(det, "Robin", 0.6, "m1", labels_fingerprint="fp1")
+    db.commit()
     assert tuple(db.predictions.get_for_photo(p0, "m1")) == ("Robin", 0.6, det)
     assert tuple(db.predictions.get_for_photo(p0, "m1", "fp1")) == ("Robin", 0.6, det)
     assert db.predictions.get_for_photo(p0, "m1", "fp2") is None
@@ -609,6 +657,7 @@ def test_inspector_predictions_for_photo(db, cat):
     db.predictions.add(high, "Wren", 0.7, "m2", labels_fingerprint="fp-x")
     db.predictions.add(low, "Hawk", 0.95, "m1", labels_fingerprint="fp-new")
     db.predictions.add(full, "Heron", 0.8, "m1", labels_fingerprint="fp-new")
+    db.commit()
     robin = _pred_id(db, high, "Robin", fp="fp-new")
     db.set_review_status(robin, ws, "accepted", individual="Bob", group_id="g1")
     other_ws = db.create_workspace("Other")
@@ -641,6 +690,7 @@ def test_inspector_predictions_for_photo(db, cat):
 def test_update_prediction_status_leaves_commit_to_caller(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1")
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.update_prediction_status(pid, "rejected")
     assert db.conn.in_transaction
@@ -658,6 +708,7 @@ def test_update_predictions_status_by_photo_leaves_commit_to_caller(db, cat):
     d1 = _det(db, p0, x=0.6, model="md-b")
     db.predictions.add(d0, "Robin", 0.5, "m1")
     db.predictions.add(d1, "Jay", 0.5, "m1", status="accepted")
+    db.commit()
     db.conn.commit()
     db.update_predictions_status_by_photo(p0, "rejected")
     assert db.conn.in_transaction
@@ -673,6 +724,7 @@ def test_update_predictions_status_by_photo_leaves_commit_to_caller(db, cat):
 def test_ungroup_prediction_leaves_commit_to_caller(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", group_id="g1")
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.conn.commit()
     db.ungroup_prediction(pid)
@@ -688,6 +740,7 @@ def test_ungroup_prediction_leaves_commit_to_caller(db, cat):
 def test_review_status_get_and_set(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1")
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     other = db.create_workspace("Other")
     assert db.predictions.get_review_status(pid, cat["ws"]) == "pending"
@@ -711,26 +764,31 @@ def test_group_info_update_and_clear(db, cat, monkeypatch, fp):
     db.predictions.add(det, "Robin", 0.8, "m1", labels_fingerprint="fp1")
     db.predictions.add(det, "Thrush", 0.9, "m1", labels_fingerprint="fp1",
                       status="alternative")
+    db.commit()
     primary = _pred_id(db, det, "Robin")
     commits.clear()
     db.predictions.update_group_info(det, "m1", "g1", 2, 3, '{"Robin": 2}',
                                     labels_fingerprint=fp)
-    assert commits == [1]
+    db.commit()
+    assert commits == []  # the repository never commits
     assert not db.conn.in_transaction
     assert _review(db, primary) == ("pending", '{"Robin": 2}', "g1", 2, 3)
     db.predictions.clear_group_info(det, "m1", labels_fingerprint=fp)
-    assert commits == [1, 1]
+    db.commit()
+    assert commits == []
     assert _review(db, primary) == ("pending", None, None, None, None)
     # No matching primary: nothing written, nothing committed.
     db.predictions.update_group_info(det, "m9", "g", 1, 1, None, labels_fingerprint=fp)
     db.predictions.clear_group_info(det, "m9", labels_fingerprint=fp)
-    assert commits == [1, 1]
+    db.commit()
+    assert commits == []
 
 
 def test_clear_group_info_never_inserts(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.8, "m1")
     db.predictions.clear_group_info(det, "m1")
+    db.commit()
     assert db.conn.execute("SELECT COUNT(*) FROM prediction_review").fetchone()[0] == 0
 
 
@@ -744,6 +802,7 @@ def test_accept_prediction_leaves_commit_to_caller_and_rolls_back_with_its_unit(
     p0 = cat["p"][0]
     det = _det(db, p0)
     db.predictions.add(det, "Robin", 0.9, "m1")
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.conn.commit()
     result = db.accept_prediction(pid)
@@ -770,6 +829,7 @@ def test_accept_subject_species(db, cat, monkeypatch):
     db.predictions.add(det, "Robin", 0.6, "m3", labels_fingerprint="fp1",
                       status="rejected")
     db.predictions.add(det, "Jay", 0.5, "m1", labels_fingerprint="fp1")
+    db.commit()
     top = _pred_id(db, det, "Robin")
     calls = []
     real = db.accept_prediction
@@ -788,12 +848,14 @@ def test_accept_subject_species(db, cat, monkeypatch):
     # A prediction on a photo outside the workspace is not a target.
     out_det = _det(db, cat["outside"])
     db.predictions.add(out_det, "Robin", 0.9, "m1")
+    db.commit()
     assert db.accept_subject_species(_pred_id(db, out_det, "Robin", fp="legacy")) is None
 
 
 def test_accept_subject_species_rolls_back(db, cat, monkeypatch):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.9, "m1")
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.conn.commit()
 
@@ -815,6 +877,7 @@ def test_accept_subject_species_rolls_back(db, cat, monkeypatch):
 def test_accept_subject_species_no_accept(db, cat, monkeypatch):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.9, "m1")
+    db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     monkeypatch.setattr(db, "accept_prediction",
                         lambda pid, **kw: {"accepted_prediction_ids": [], "affected": []})
@@ -835,6 +898,7 @@ def _scope_preds(db, photo_id, species, model="m1", fp="fp1", x=0.1):
     ids = []
     for name in species:
         db.predictions.add(det, name, 0.5, model, labels_fingerprint=fp)
+        db.commit()
         ids.append(_pred_id(db, det, name, model=model, fp=fp))
     return det, ids
 
@@ -868,6 +932,7 @@ def test_predictions_by_id_keeps_superseded_rows_and_votes(db, cat):
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="old")
     db.predictions.add(det, "Robin", 0.6, "m1", labels_fingerprint="new",
                       group_id="g", individual="Robin")
+    db.commit()
     old = _pred_id(db, det, "Robin", fp="old")
     new = _pred_id(db, det, "Robin", fp="new")
     rows = {r["id"]: r for r in db.predictions.get_rows_by_ids([old, new, 987_654])}
@@ -884,6 +949,7 @@ def test_decided_and_superseded_prediction_ids(db, cat):
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="old")
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="new")
     db.predictions.add(det, "Jay", 0.5, "m2", labels_fingerprint="old")
+    db.commit()
     old = _pred_id(db, det, "Robin", fp="old")
     new = _pred_id(db, det, "Robin", fp="new")
     jay = _pred_id(db, det, "Jay", model="m2", fp="old")
@@ -950,6 +1016,7 @@ def test_scope_review_statuses(db, cat):
         db, cat["p"][0], ["Robin", "Jay", "Wren"],
     )
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="fp2")
+    db.commit()
     other_set = _pred_id(db, det, "Robin", fp="fp2")
     db.update_prediction_status(pick, "rejected")
     db.update_prediction_status(sib, "accepted")
@@ -966,6 +1033,7 @@ def test_prediction_scope_and_sibling_reads(db, cat):
         db, cat["p"][0], ["Robin", "Jay", "Wren", "Crow"],
     )
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="fp2")
+    db.commit()
     other_set = _pred_id(db, det, "Robin", fp="fp2")
     db.update_prediction_status(alt, "alternative")
     db.update_prediction_status(decided, "rejected")
@@ -987,6 +1055,7 @@ def test_prediction_statuses_with_supersession(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="old")
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="new")
+    db.commit()
     old = _pred_id(db, det, "Robin", fp="old")
     new = _pred_id(db, det, "Robin", fp="new")
     db.update_prediction_status(new, "accepted")
@@ -1056,6 +1125,7 @@ def test_replace_row_upserts_raw_output_without_committing(db, cat):
 def test_id_for_key_matches_the_full_cache_key(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="fp1")
+    db.commit()
     pred = _pred_id(db, det, "Robin")
     db.set_active_workspace(None)
     assert db.predictions.id_for_key(det, "m1", "fp1", "Robin") == pred

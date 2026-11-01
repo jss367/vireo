@@ -227,6 +227,7 @@ def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
               "confidence": 0.95, "category": "animal"}],
             detector_model="megadetector-v6",
         )
+        db.commit()
 
     compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
 
@@ -274,6 +275,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
           "confidence": 0.95, "category": "animal"}],
             detector_model="megadetector-v6",
     )
+    db.commit()
 
     # Folder linked to B — add while B is active.
     db.set_active_workspace(ws_b)
@@ -293,6 +295,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
           "confidence": 0.95, "category": "animal"}],
             detector_model="megadetector-v6",
     )
+    db.commit()
     db.conn.commit()
 
     # B is active; compute must only touch B's photo.
@@ -351,6 +354,7 @@ def test_compute_misses_scoped_to_collection_leaves_others_untouched(tmp_path):
               "confidence": 0.95, "category": "animal"}],
             detector_model="megadetector-v6",
         )
+        db.commit()
     db.conn.commit()
 
     # Static collection scoped to just p_in.
@@ -420,6 +424,7 @@ def test_compute_misses_respects_exclude_photo_ids(tmp_path):
               "confidence": 0.95, "category": "animal"}],
             detector_model="megadetector-v6",
         )
+        db.commit()
     db.conn.commit()
 
     n = compute_misses_for_workspace(
@@ -469,6 +474,7 @@ def test_compute_misses_uses_injected_now_timestamp(tmp_path):
           "confidence": 0.95, "category": "animal"}],
             detector_model="megadetector-v6",
     )
+    db.commit()
     db.conn.commit()
 
     fixed_ts = "2026-04-22T12:34:56.789012+00:00"
@@ -502,6 +508,7 @@ def _photo_with_weak_detection(db, name, file_mtime, det_conf=0.143):
           "confidence": det_conf, "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
     db.conn.commit()
     return pid, det_ids[0]
 
@@ -520,6 +527,7 @@ def test_high_classifier_confidence_overrides_no_subject(tmp_path):
         det_id, species="Allen's Hummingbird", confidence=0.996,
         model="BioCLIP-2.5",
     )
+    db.commit()
     db.conn.commit()
 
     n = compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
@@ -566,6 +574,7 @@ def test_low_classifier_confidence_does_not_override_no_subject(tmp_path):
         det_id, species="Maybe-A-Bird", confidence=0.40,
         model="BioCLIP-2.5",
     )
+    db.commit()
     db.conn.commit()
 
     compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
@@ -608,6 +617,7 @@ def test_classifier_override_threshold_is_configurable(tmp_path):
         det_id, species="Probably-A-Bird", confidence=0.50,
         model="BioCLIP-2.5",
     )
+    db.commit()
     db.conn.commit()
 
     pipeline_config = {

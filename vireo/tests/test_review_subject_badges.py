@@ -29,6 +29,7 @@ def _two_subject_photo(db, filename="redshank-egret.jpg"):
     # stored snapshot says disagreement.
     db.predictions.add(egret_det, "Little Egret", 0.9, "bioclip",
                       category="disagreement", labels_fingerprint="fp1")
+    db.commit()
     db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
     db.commit()
     return photo_id

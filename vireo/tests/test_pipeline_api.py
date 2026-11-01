@@ -3292,6 +3292,7 @@ def _seed_workspace_with_large_only_masks(db_path):
               "confidence": 0.9, "category": "animal"}],
             detector_model="megadetector-v6",
         )
+        db.commit()
         db.masks_features.upsert_mask(
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
@@ -3675,6 +3676,7 @@ def test_live_burst_gap_preserves_encounter_continuity(setup, tmp_path, endpoint
                 "confidence": 0.06 if i == 1 else 0.8, "category": "animal",
             }])[0]
             db.predictions.add(did, "Bluebird", 0.99, "classifier")
+            db.commit()
     response = app.test_client().post(f"/api/pipeline/{endpoint}", json={
         "config": {"burst_time_gap": live_gap}, "save_cache": False,
     })

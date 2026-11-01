@@ -85,6 +85,7 @@ def test_choice_remembered_when_detection_temporarily_disappears(db, subject_pho
     select_primary(db, photo_id, ids[0])
     original = dict(detection_store.get_detections(db, photo_id)[0])
     db.detections.clear(photo_id)
+    db.commit()
     assert payload(db, photo_id)["choice_unavailable"]
     detection_store.write_detection_batch(db, photo_id, original["detector_model"], [{
         "box": {k: original["box_" + k] for k in "xywh"}, "confidence": .95, "category": "animal"}])
@@ -179,6 +180,7 @@ def test_predictions_stay_attached_to_each_subject_and_respect_review(db, subjec
     db.predictions.add(ids[0], 'House Finch', .85, 'bioclip', labels_fingerprint='current')
     db.predictions.add(ids[1], 'Blue Jay', .95, 'bioclip', status='rejected')
     db.predictions.add(ids[1], 'Steller’s Jay', .8, 'bioclip')
+    db.commit()
     result = payload(db, photo_id)
     by_id = {s['id']: s for s in result['subjects']}
     assert [p['species'] for p in by_id[ids[0]]['predictions']] == ['House Finch']
@@ -246,6 +248,7 @@ def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident
     for index, detection_id in enumerate(ids[:2]):
         db.predictions.add(detection_id, f'Bird {index}', .9, 'bioclip',
                           taxonomy={'class': 'Aves', 'scientific_name': 'Test bird'})
+        db.commit()
     # A production photo has ``mask_path`` set only through
     # ``set_active_mask_variant``, which requires a matching photo_masks
     # row for the current primary. The stale-mask predicate now insists
@@ -287,6 +290,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     for detection_id in ids[:2]:
         db.predictions.add(detection_id, 'Test', .9, 'bioclip',
                           taxonomy={'class': 'Aves', 'scientific_name': 'Test bird'})
+        db.commit()
     det_hi = next(d for d in detection_store.get_detections(db, photo_id) if d['id'] == ids[1])
     db.conn.execute(
         "INSERT INTO photo_masks(photo_id,variant,path,created_at,"
@@ -332,6 +336,7 @@ def test_empty_redetection_clears_previous_subject_quality(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     db.detections.clear(photo_id)
+    db.commit()
     assert analyze_photo(db, photo_id, path) == 0
     assert db.conn.execute('SELECT quality_score FROM photos WHERE id=?', (photo_id,)).fetchone()[0] is None
 
@@ -351,6 +356,7 @@ def test_reclassify_cancellation_clears_previous_subject(db, subject_photo, monk
     db.conn.commit()
     # Standalone Classify clears immediately before entering _detect_batch.
     db.detections.clear(photo_id)
+    db.commit()
 
     def detect(_path):
         if cancel_during_detection:
@@ -407,6 +413,7 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
     db.conn.execute("UPDATE photos SET mask_path='old.png', eye_x=.7, dino_subject_embedding=X'01' WHERE id=?", (photo_id,))
     if empty:
         db.detections.clear(photo_id)
+        db.commit()
         detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [])
     else:
         db.conn.execute("UPDATE detections SET detector_confidence=.1 WHERE photo_id=?", (photo_id,))

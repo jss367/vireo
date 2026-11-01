@@ -1005,6 +1005,12 @@ def create_photos_blueprint(
         keywords = db.photo_keywords.get_for_photo(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
         result["species_assignments"] = db.species_provenance.assignments(photo_id)
+        names_by_keyword = {a["keyword_id"]: a for a in result["species_assignments"]}
+        for keyword in result["keywords"]:
+            names = names_by_keyword.get(keyword["id"], {})
+            keyword.update({key: names[key] for key in (
+                "display_name", "synonyms", "taxon_id", "source_taxon_id", "scientific_name",
+            ) if key in names})
         # Export naming uses the species-rank keyword list, which is narrower
         # than the detail payload's life-list identifications (that list can
         # also contain genus/family rows). Expose the exact export metadata so

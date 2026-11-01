@@ -559,6 +559,7 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
             {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
         ], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
+        db.commit()
 
     if with_embeddings:
         # Embeddings are keyed on the same classifier_model the predictions
@@ -745,6 +746,7 @@ def test_analyze_for_culling_backfills_phash_from_working_copy(tmp_path):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
+    db.commit()
     db.conn.commit()
 
     analyze_for_culling(db, vireo_dir=str(vireo_dir))
@@ -777,6 +779,7 @@ def test_analyze_for_culling_reports_missing_phash_count(tmp_path):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
+    db.commit()
     db.conn.commit()
 
     result = analyze_for_culling(db, vireo_dir=str(tmp_path))
@@ -830,6 +833,7 @@ def test_analyze_for_culling_falls_back_to_source_when_working_copy_corrupt(tmp_
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
+    db.commit()
     db.conn.commit()
 
     result = analyze_for_culling(db, vireo_dir=str(vireo_dir))
@@ -873,6 +877,7 @@ def test_phash_backfill_commits_per_photo(tmp_path):
              "confidence": 0.9, "category": "animal"},
         ], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
+        db.commit()
         pids.append(pid)
     db.conn.commit()
 
@@ -945,6 +950,7 @@ def test_phash_backfill_does_not_swallow_commit_errors(tmp_path):
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
+    db.commit()
     db.conn.commit()
 
     real_conn = db.conn

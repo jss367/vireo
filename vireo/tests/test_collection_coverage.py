@@ -40,6 +40,7 @@ def _prediction(db, photo, status, individual=None):
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], "test-detector")[0]
+    db.commit()
     return db.predictions.add(
         detection, "Unidentified bird", 0.9, "test-classifier",
         status=status, individual=individual,

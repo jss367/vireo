@@ -169,6 +169,7 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
         }], detector_model="test-detector")[0]
         db.predictions.add(detection_id=detection, species="Red-tailed Hawk",
                           confidence=0.92, model="BioCLIP-2")
+        db.commit()
 
     if scope == "keyword":
         _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")

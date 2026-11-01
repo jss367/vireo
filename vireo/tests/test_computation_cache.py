@@ -442,6 +442,7 @@ def test_database_export_bundle_import_and_duplicate_fanout(tmp_path):
         1,
         full_fingerprint=labels_full,
     )
+    source.commit()
 
     artifacts, summary = exportable_artifacts(source)
     assert summary["detector_runs"] == 1
@@ -660,6 +661,7 @@ def test_fresh_classifier_run_is_promoted_and_published(tmp_path):
     source.model_runs.record_classifier_run(
         detection_id, "BioCLIP", labels_short, prediction_count=1,
     )
+    source.commit()
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -745,6 +747,7 @@ def test_evicted_working_copy_classifier_run_stays_local_only(tmp_path):
     source.model_runs.record_classifier_run(
         detection_id, "BioCLIP", labels_short, prediction_count=1,
     )
+    source.commit()
 
     # Quota eviction wins after inference but before delayed promotion.
     source.conn.execute(
@@ -1081,6 +1084,7 @@ def test_classification_deferred_until_detector_run_available(tmp_path):
     destination.model_runs.upsert_labels_fingerprint(
         labels_short, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination.commit()
     # Only the classification artifact is present — no detector artifact
     # was exported.  materialize_artifacts must count it as deferred (not
     # applied) since the detector_run dependency does not exist yet.
@@ -1118,6 +1122,7 @@ def test_unknown_classifier_runtime_is_quarantined_not_installed(tmp_path):
     destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination.commit()
 
     # Detector runtime is recognized (via known_runtimes), but no
     # classifier runtime is trusted and no local classifier can
@@ -1187,6 +1192,7 @@ def test_materialize_local_store_honors_persisted_trust(tmp_path):
     destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination.commit()
     store = ArtifactStore(tmp_path / "cache")
     # Publish detector + classifier artifacts into the store as an import
     # would, then record the trust decision the API endpoint takes.
@@ -1214,6 +1220,7 @@ def test_materialize_local_store_honors_persisted_trust(tmp_path):
     destination2.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination2.commit()
     untrusted = materialize_local_store(destination2, store=fresh_store)
     assert untrusted["detector_runs_applied"] == 0
     assert untrusted["classifier_runs_applied"] == 0
@@ -1369,6 +1376,7 @@ def test_materialize_handles_predictions_without_classifier_run(tmp_path, review
     db.predictions.add(detection_id, "Robin", .5, "bioclip-2.5",
                       status="accepted" if reviewed else "pending", labels_fingerprint="3" * 12,
                       taxonomy={"scientific_name": "Old species"})
+    db.commit()
     assert db.conn.execute("SELECT count(*) FROM classifier_runs").fetchone()[0] == 0
     artifact = classification_artifact(candidates=[{"species": "Robin", "confidence": .9,
                                                   "taxonomy": {"scientific_name": "Erithacus rubecula", "taxon_id": 123}}])
@@ -1394,6 +1402,7 @@ def _materialized_classification(tmp_path, name, **artifact_kwargs):
     destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination.commit()
     applied = materialize_artifacts(
         destination,
         [detection_artifact(), classification_artifact(**artifact_kwargs)],
@@ -1486,6 +1495,7 @@ def test_match_strength_survives_publish_and_export(tmp_path):
         match_margin=0.04, top_species="Robin", label_count=1255,
         score_kind="cosine",
     )
+    source.commit()
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -1580,6 +1590,7 @@ def test_zero_candidate_run_is_publishable_when_it_recorded_a_match(tmp_path):
         match_margin=0.002, top_species="Robin", label_count=1255,
         score_kind="cosine",
     )
+    source.commit()
 
     model_dir = tmp_path / "empty-model"
     model_dir.mkdir()
@@ -1661,6 +1672,7 @@ def test_replacement_artifact_without_match_clears_prior_summary(tmp_path):
     destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination.commit()
     # First materialization records a summary row.
     first_runtime = runtime_fingerprint({
         "type": "classification",
@@ -1727,6 +1739,7 @@ def test_replacement_artifact_with_match_overwrites_prior_summary(tmp_path):
     destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination.commit()
     first_runtime = runtime_fingerprint({
         "type": "classification",
         "model": "bioclip-2.5",
@@ -1817,6 +1830,7 @@ def test_enriched_artifact_wins_over_pre_feature_same_identity(tmp_path):
         destination.model_runs.upsert_labels_fingerprint(
             "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
         )
+        destination.commit()
         materialize_artifacts(
             destination,
             [detection_artifact(), *order],
@@ -1856,6 +1870,7 @@ def test_backfill_enriches_a_prior_pre_feature_materialize(tmp_path):
     destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination.commit()
     pre_feature = classification_artifact(
         candidates=[{"species": "Robin", "confidence": 0.9}],
     )
@@ -1922,6 +1937,7 @@ def test_backfill_never_overwrites_existing_match_scores(tmp_path):
     destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
+    destination.commit()
     original = classification_artifact(
         candidates=[{"species": "Robin", "confidence": 0.9,
                      "match_score": 0.31}],
@@ -2032,6 +2048,7 @@ def test_complete_enrichment_beats_partial_enrichment_same_identity(tmp_path):
         destination.model_runs.upsert_labels_fingerprint(
             "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
         )
+        destination.commit()
         materialize_artifacts(
             destination,
             [detection, *order],
@@ -2094,6 +2111,7 @@ def test_materialize_prefers_installed_classifier_runtime(tmp_path):
 
     db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
     db.model_runs.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.commit()
     r_old = runtime_fingerprint({"rev": "old-taxonomy"})
     r_new = runtime_fingerprint({"rev": "new-taxonomy"})
     a_old = classification_artifact(
@@ -2131,6 +2149,7 @@ def test_materialize_ignores_unrecognized_existing_classifier_runtime(tmp_path):
 
     db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
     db.model_runs.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.commit()
     r_old = runtime_fingerprint({"rev": "old-taxonomy"})
     r_new = runtime_fingerprint({"rev": "new-taxonomy"})
     a_old = classification_artifact(
@@ -2167,6 +2186,7 @@ def test_materialize_competing_classifier_runtimes_settle_on_one(tmp_path):
 
     db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
     db.model_runs.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.commit()
     r_a = runtime_fingerprint({"rev": "a"})
     r_b = runtime_fingerprint({"rev": "b"})
     artifacts = [
@@ -2198,6 +2218,7 @@ def test_materialize_keeps_every_per_detection_classification(tmp_path):
 
     db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
     db.model_runs.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.commit()
     box_a = {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.20}
     box_b = {"x": 0.60, "y": 0.60, "w": 0.20, "h": 0.20}
     detections = detection_artifact(subjects=[
@@ -2286,6 +2307,7 @@ def test_exported_classification_keeps_input_recipe(tmp_path):
         labels_fingerprint_full=full, runtime_fingerprint=CLASSIFIER_RUNTIME,
         input_fingerprint=classifier_fp, input_recipe="raw-subject-v1",
     )
+    source.commit()
     artifacts, _summary = exportable_artifacts(source)
     classification = [a for a in artifacts if a["type"] == "classification"]
     assert [a["input_recipe"] for a in classification] == ["raw-subject-v1"]

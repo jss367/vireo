@@ -122,6 +122,7 @@ def test_stage_finds_eye_on_reference_mammal(tmp_path):
             "scientific_name": "Vulpes vulpes",
         },
     )
+    db.commit()
 
     detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
 

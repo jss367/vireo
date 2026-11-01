@@ -37,6 +37,7 @@ def _analyze(db, tmp_path, pid, **changes):
     db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .4, "h": .4},
                               "confidence": .9, "category": "animal"}], detector_model="megadetector-v6")
     db.model_runs.record_detector_run(pid, "megadetector-v6", 1)
+    db.commit()
     db.masks_features.upsert_mask(pid, "sam2-small", str(mask), "megadetector-v6",
                                  (.1, .1, .4, .4), MaskQuality(**quality))
     db.masks_features.set_active_variant(pid, "sam2-small", .2)
@@ -161,6 +162,7 @@ def test_reopening_updates_settings_source_and_comparison_cohort(db, tmp_path):
     from computation_cache import source_input
     db.model_runs.record_detector_run(ids[0], "megadetector-v6", 1, "r", source_input(
         "a" * 64, "vireo-detector-source-v1")[1])
+    db.commit()
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", ("b" * 64, ids[0]))
     db.commit()
     assert load_results(str(tmp_path), db.active_workspace_id, db=db)["photos"][0]["analysis_reasons"] == ["detection_stale"]
@@ -221,9 +223,11 @@ def _classification(db, pid, species, confidence=.9, fingerprint='current'):
     if not detections:
         db.detections.save(pid, [{'box': {'x': .1, 'y': .1, 'w': .4, 'h': .4},
                                   'confidence': .9, 'category': 'animal'}], detector_model='megadetector-v6')
+        db.commit()
         detections = db.detections.get(pid, 0, None)
     db.predictions.add(detections[0]['id'], species, confidence, 'review-classifier',
                        labels_fingerprint=fingerprint)
+    db.commit()
     return db.conn.execute('SELECT id FROM predictions WHERE detection_id=? AND species=? AND labels_fingerprint=?',
                            (detections[0]['id'], species, fingerprint)).fetchone()['id']
 

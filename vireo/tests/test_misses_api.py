@@ -70,6 +70,7 @@ def db_with_misses(tmp_path, monkeypatch):
         }],
         detector_model="megadetector-v6",
     )
+    db.commit()
 
     for pid in (p_ns, p_clip, p_oof):
         Image.new("RGB", (100, 100)).save(os.path.join(thumb_dir, f"{pid}.jpg"))
@@ -439,6 +440,7 @@ def test_api_misses_preview_uses_classifier_rescue_override(tmp_path, monkeypatc
         det_id, species="Likely Bird", confidence=0.70,
         model="BioCLIP-2.5",
     )
+    db.commit()
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
     client = app.test_client()
@@ -502,6 +504,7 @@ def test_api_misses_preview_ignores_non_animal_detection_confidence(
         }],
         detector_model="megadetector-v6",
     )
+    db.commit()
 
     r = client.post(
         "/api/misses/preview",
@@ -589,6 +592,7 @@ def test_api_misses_recompute_can_save_workspace_defaults(tmp_path, monkeypatch)
         det_id, species="Likely Bird", confidence=0.70,
         model="BioCLIP-2.5",
     )
+    db.commit()
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
     client = app.test_client()

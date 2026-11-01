@@ -38,6 +38,7 @@ def test_confirmation_contract_counts_identity_warnings_and_undo(app_and_db, mod
     db.commit()
     db.detections.save(ids[1], [{'box': {'x': .1, 'y': .1, 'w': .2, 'h': .3},
                                'confidence': .01, 'category': 'animal'}], detector_model='test')
+    db.commit()
     body = {'species': 'blue jay', 'photo_ids': ids[:2], 'source_photo_ids': ids, 'add': True,
             'response_mode': mode}
     result = apply(client, body, request_preview(client, body)).json
@@ -112,8 +113,10 @@ def test_bulk_distinct_and_overlapping_targets_one_undo_preserves_flags_and_subj
     dids = db.detections.save(ids[0], [
         {'box': {'x': x, 'y': .1, 'w': .2, 'h': .3}, 'confidence': .01, 'category': 'animal'}
         for x in (.1, .6)], detector_model='test')
+    db.commit()
     for did, name in zip(dids, ['Blue Jay', 'Cardinal'], strict=True):
         db.predictions.add(detection_id=did, species=name, confidence=.9, model='test')
+        db.commit()
     preds = [row['id'] for row in db.predictions.get_rows(photo_ids=ids)]
     assignments = [
         {'species': 'Blue Jay', 'photo_ids': ids[:1], 'detection_ids': dids[:1]},

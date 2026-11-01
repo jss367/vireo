@@ -26,6 +26,7 @@ def _photo(db, filename="DSC_0320.NEF"):
         timestamp="2026-04-25T10:30:00", width=6000, height=4000,
     )
     det = db.detections.save(pid, [_DET], detector_model="MDV6")[0]
+    db.commit()
     return pid, det
 
 
@@ -242,6 +243,7 @@ def test_prediction_round_trips_match_score(db):
     db.predictions.add(detection_id=det, species="Yellow-breasted Chat",
                            confidence=0.999, model="BioCLIP-2.5",
                            match_score=0.3142)
+    db.commit()
     row = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()
@@ -253,6 +255,7 @@ def test_match_score_defaults_to_null_not_zero(db):
     _, det = _photo(db)
     db.predictions.add(detection_id=det, species="House Sparrow",
                            confidence=0.8, model="BioCLIP-2.5")
+    db.commit()
     row = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()
@@ -270,12 +273,14 @@ def test_replay_backfills_null_but_never_overwrites(db):
                   model="BioCLIP-2.5")
     db.predictions.add(**kwargs)
     db.predictions.add(**kwargs, match_score=0.30)
+    db.commit()
     score = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
     assert score == 0.30
 
     db.predictions.add(**kwargs, match_score=0.99)
+    db.commit()
     score = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
@@ -296,6 +301,7 @@ def test_fresh_inference_overwrites_a_prior_runtimes_score(db):
                   model="BioCLIP-2.5")
     db.predictions.add(**kwargs, match_score=0.30, from_fresh_inference=True)
     db.predictions.add(**kwargs, match_score=0.61, from_fresh_inference=True)
+    db.commit()
     score = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
@@ -303,6 +309,7 @@ def test_fresh_inference_overwrites_a_prior_runtimes_score(db):
 
     # ...and a replay afterwards still does not undo the fresh measurement.
     db.predictions.add(**kwargs, match_score=0.30)
+    db.commit()
     score = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
@@ -321,6 +328,7 @@ def test_match_score_recorded_for_a_run_with_no_predictions(db):
         top_species="Rufous-winged Sparrow", label_count=1255,
         score_kind="cosine",
     )
+    db.commit()
     rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert len(rows) == 1
     assert rows[0]["max_match_score"] == 0.11
@@ -339,6 +347,7 @@ def test_match_score_is_keyed_per_label_list(db):
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "us-wide", max_match_score=0.36,
         score_kind="cosine")
+    db.commit()
     rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert [r["max_match_score"] for r in rows] == [0.36, 0.19]
 
@@ -351,6 +360,7 @@ def test_rerunning_one_list_updates_in_place(db):
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.22,
         score_kind="cosine")
+    db.commit()
     rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert len(rows) == 1
     assert rows[0]["max_match_score"] == 0.22
@@ -364,9 +374,11 @@ def test_clear_predictions_clears_match_scores(db):
                            labels_fingerprint="fp1", match_score=0.3)
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "fp1", max_match_score=0.3, score_kind="cosine")
+    db.commit()
     assert db.model_runs.get_match_scores_for_photo(photo_id)
 
     db.predictions.clear()
+    db.commit()
     assert db.model_runs.get_match_scores_for_photo(photo_id) == []
 
 
@@ -375,8 +387,10 @@ def test_clear_predictions_for_one_model_spares_the_other(db):
     for model in ("BioCLIP-2.5", "iNat21 (EVA-02 Large)"):
         db.model_runs.record_classifier_match_score(
             det, model, "fp1", max_match_score=0.3, score_kind="cosine")
+        db.commit()
 
     db.predictions.clear(model="BioCLIP-2.5")
+    db.commit()
     remaining = db.model_runs.get_match_scores_for_photo(photo_id)
     assert [r["classifier_model"] for r in remaining] == ["iNat21 (EVA-02 Large)"]
 
@@ -412,6 +426,7 @@ def test_pipeline_inspector_reports_runs_the_prediction_table_hides(app_and_db):
     db.model_runs.record_classifier_match_score(
         full, "BioCLIP-2.5", "california", max_match_score=0.31,
         top_species="Yellow-breasted Chat", score_kind="cosine")
+    db.commit()
 
     data = app.test_client().get(f"/api/photos/{photo_id}/pipeline").get_json()
     assert data["predictions"] == []
@@ -436,6 +451,7 @@ def test_pipeline_summary_uses_the_best_crop_per_model(app_and_db):
         db.model_runs.record_classifier_match_score(
             det, "BioCLIP-2.5", "california", max_match_score=score,
             score_kind="cosine")
+        db.commit()
 
     data = app.test_client().get(f"/api/photos/{photo_id}/pipeline").get_json()
     # Uncalibrated by default, and the summary must say so rather than pass.
@@ -452,6 +468,7 @@ def test_predictions_api_reports_match_state_per_photo(app_and_db):
                       confidence=0.8, model="BioCLIP-2.5", match_score=0.11)
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "legacy", max_match_score=0.11, score_kind="cosine")
+    db.commit()
 
     data = app.test_client().get(
         f"/api/predictions?photo_ids={photo_id}"
@@ -486,6 +503,7 @@ def test_calibrated_threshold_reaches_the_api(app_and_db):
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "legacy", max_match_score=0.11,
         top_species="Rufous-winged Sparrow", score_kind="cosine")
+    db.commit()
 
     client = app.test_client()
     pipeline = client.get(f"/api/photos/{photo_id}/pipeline").get_json()
@@ -605,6 +623,7 @@ def _reclassified_against_two_lists(db):
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.11,
         top_species="Rufous-winged Sparrow", score_kind="cosine")
+    db.commit()
     return photo_id, det
 
 
@@ -643,6 +662,7 @@ def test_a_run_with_no_predictions_is_still_current(db):
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.11,
         score_kind="cosine")
+    db.commit()
     rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert [r["is_current"] for r in rows] == [1]
     assert mc.summarize_photo(rows, _COSINE_CFG)["state"] == mc.UNLISTED
@@ -682,6 +702,7 @@ def test_pipeline_reports_superseded_runs_with_the_current_verdict(app_and_db):
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.11,
         top_species="Rufous-winged Sparrow", score_kind="cosine")
+    db.commit()
 
     data = app.test_client().get(
         f"/api/photos/{photo_id}/pipeline"
@@ -821,6 +842,7 @@ def test_get_unscored_current_prediction_runs_matches_migrated_shape(db):
         det, "BioCLIP-2.5", "california", max_match_score=0.40,
         top_species="Yellow-breasted Chat", score_kind="cosine",
     )
+    db.commit()
     pairs = db.model_runs.get_unscored_current_prediction_runs(photo_id)
     assert [(p["detection_id"], p["classifier_model"]) for p in pairs] == [
         (det, "Legacy-Model")

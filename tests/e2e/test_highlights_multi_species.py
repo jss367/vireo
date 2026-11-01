@@ -47,6 +47,7 @@ def _seed_two_species_photo(db, data):
     )
     db.predictions.add(hawk_det, "Red-tailed Hawk", 0.92, "m")
     db.predictions.add(coopers_det, "Cooper's Hawk", 0.86, "m")
+    db.commit()
     return pid
 
 
@@ -178,6 +179,7 @@ def test_picking_promotes_photo_into_unloaded_second_bucket(live_server, page, r
         )
         db.predictions.add(hawk_det, "Red-tailed Hawk", 0.92, "m")
         db.predictions.add(robin_det, "American Robin", 0.9, "m")
+        db.commit()
 
     folder_id = data["folders"][1]
     for i in range(21):
