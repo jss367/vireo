@@ -64,6 +64,8 @@
     font-size: 11px; color: var(--text-dim); text-transform: uppercase;
     letter-spacing: 0.5px;
   }
+  .summary-stat-link { text-decoration: none; border-radius: 4px; }
+  .summary-stat-link:hover .label, .summary-stat-link:focus-visible .label { color: var(--accent); text-decoration: underline; }
 
   .category-summary { margin-bottom: 20px; }
   .category-summary h2 { font-size: 15px; margin: 0 0 6px; }
@@ -112,6 +114,8 @@
   .dup-card.loser { opacity: 0.65; }
   .same-shot-group .section-sub { font-size: 12px; line-height: 1.5; color: var(--text-secondary); margin-bottom: 12px; }
   .same-shot-capture-time { font-size: 12px; line-height: 1.5; color: var(--text-primary); margin: 6px 0; }
+  .same-shot-differing { margin-top: 28px; }
+  .same-shot-differing h3 { font-size: 14px; margin: 0 0 6px; }
   .same-shot-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
   .same-shot-review-note { color: var(--text-secondary); font-size: 12px; }
   #sameShotCompare { width: min(1100px, 94vw); max-height: 90vh; margin: auto; padding: 24px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-secondary); color: var(--text-primary); }

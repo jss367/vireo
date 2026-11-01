@@ -106,6 +106,7 @@ export function handleSameShotReviewClick(target) {
   if (target.closest('[data-same-shot-toggle-reviewed]') && state.lastScanResult && !state.scanInProgress) {
     state.sameShotShowReviewed = !state.sameShotShowReviewed;
     state.sameShotVisibleLimit = 50;
+    state.sameShotDifferingVisibleLimit = 50;
     renderSameShotResults(state.lastScanResult);
     return true;
   }

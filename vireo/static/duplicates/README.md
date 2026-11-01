@@ -21,7 +21,7 @@ and the browser loads every other file through `boot.js`'s imports.
 | `resolved.js` | Pruning resolved hashes from the last scan, rendering unresolved and resolved groups, the resolved section's toggle, and the protected-winner rule |
 | `trash-progress.js` | The batched Trash progress line and which skips are actionable |
 | `card.js` | Photo cards and their right-click menu |
-| `same-shot.js` | Camera identity candidates, evidence, capture times, review visibility and file-manager reveal; never feeds exact-byte resolution or cleanup |
+| `same-shot.js` | Camera identity candidates, evidence, capture times, review visibility and file-manager reveal; the likely copies apart from the collapsed groups whose images and capture times both differ, and the summary bar's "Same-shot to review" count; never feeds exact-byte resolution or cleanup |
 | `same-shot-review.js` | Side-by-side cached thumbnail comparison, saving library-wide review notes and reopening them; pending writes and stale response guards |
 | `restore.js` | Restoring the last scan or the catalog's rejected copies |
 | `reveal.js` | Reveal in the file manager for a bucket's folders |
@@ -53,7 +53,10 @@ bucket card pinned above the results while its Keep-for-all runs:
   bucket), `data-reveal-bucket` and `data-retry-trash` on bucket buttons;
 - `data-duplicate-category` on the category summary's buttons and
   `data-show-category` on the "View remaining copies" notice;
-- `data-same-shot-more` and `data-same-shot-reveal` in the same-shot list;
+- `data-same-shot-more` (`"likely"` or `"differing"`, the list it extends) and
+  `data-same-shot-reveal` in the same-shot list; `data-same-shot-toggle-differing`
+  shows or hides the groups whose images and capture times both differ (most
+  likely a reused shutter count), which are listed apart from the likely copies;
 - `data-same-shot-key` identifies a catalog snapshot for comparison and review
   controls; `data-same-shot-toggle-reviewed` includes or hides reviewed groups;
 - `change` on a `.group-check` updates the apply bar;

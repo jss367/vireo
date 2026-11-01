@@ -97,6 +97,112 @@ def test_visual_evidence_is_reported_without_claiming_identical_bytes(catalog, t
     assert group["visual_evidence"] == evidence
 
 
+def _pair(db, folder, count, *, phash_b, times):
+    exif = metadata(count=count)
+    seed(db, folder / "a", f"{count}a.jpg", f"{count}a", exif=exif, timestamp=times[0])
+    seed(db, folder / "b", f"{count}b.jpg", f"{count}b", exif=exif, phash=phash_b, timestamp=times[1])
+
+
+def test_a_reused_shutter_count_is_flagged_and_listed_after_likely_copies(catalog, tmp_path):
+    """A counter reset makes different photos share a count months apart.
+
+    Neither signal alone tells them from copies: a denoised or exported
+    derivative has a different visual hash but the same capture time, and a
+    capture-time correction moves the time but keeps the image.
+    """
+    other_image = "ffffffffffffffff"
+    _pair(catalog, tmp_path, 1, phash_b=other_image, times=("2020-01-08T05:57:43.69", "2020-03-07T17:19:11"))
+    _pair(catalog, tmp_path, 2, phash_b=other_image, times=("2016-07-26T16:27:10.5", "2016-07-26T16:27:10"))
+    _pair(catalog, tmp_path, 3, phash_b=None, times=("2023-01-01T00:07:35.91", "2026-04-03T12:06:25.91"))
+    _pair(catalog, tmp_path, 4, phash_b="123456789abcdef0", times=("2023-01-01T00:00:08", "2026-04-03T12:12:32"))
+    _pair(catalog, tmp_path, 5, phash_b=other_image, times=("2020-01-08T05:57:43", None))
+
+    result = run_duplicate_scan({}, catalog)
+    flags = [(group["shutter_count"], group["images_and_times_differ"]) for group in result["same_shot_groups"]]
+    assert flags == [(4, False), (3, False), (2, False), (5, False), (1, True)]
+    restored = revalidate_scan_result(catalog, {**result, "same_shot_groups": result["same_shot_groups"][::-1]})
+    assert [group["shutter_count"] for group in restored["same_shot_groups"]] == [4, 3, 2, 5, 1]
+
+
+def test_mixed_group_with_a_copy_pair_stays_in_the_likely_review_list(catalog, tmp_path):
+    """A 3+ photo group that contains at least one real copy pair must not be flagged.
+
+    Hashes ``[A, A, B]`` with times ``[t_jan, t_jan, t_march]`` describe
+    a derivative pair and a counter-reuse photo sharing one shutter
+    count. The ``[A, A]`` pair is a likely copy and must stay in the
+    review list; the flag only fires when every pair disagrees.
+    """
+    exif = metadata(count=42)
+    first = "123456789abcdef0"
+    other = "ffffffffffffffff"
+    seed(catalog, tmp_path / "orig", "orig.jpg", "orig", exif=exif, phash=first, timestamp="2020-01-08T05:57:43")
+    seed(catalog, tmp_path / "edit", "edit.dng", "edit", exif=exif, phash=first, timestamp="2020-01-08T05:57:43")
+    seed(catalog, tmp_path / "reuse", "reuse.jpg", "reuse", exif=exif, phash=other, timestamp="2020-03-07T17:19:11")
+    group, = scan_same_shot_candidates(catalog, {})["same_shot_groups"]
+    assert group["visual_evidence"] == "different"
+    assert group["images_and_times_differ"] is False
+
+
+@pytest.mark.parametrize("phashes,times,expected_differ,label", [
+    # A missing hash leaves one pair unverified by visual evidence, so the
+    # whole triple stays in review. Keeps a genuine unknown pair discoverable.
+    ((None, "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+     ("2020-01-01T00:00:00", "2020-03-01T00:00:00", "2020-05-01T00:00:00"),
+     False, "missing_hash"),
+    # Three distinct hashes but two capture times within 60 s: the close pair
+    # could still be a derivative, so the triple is not flagged.
+    (("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"),
+     ("2020-01-08T05:57:43", "2020-01-08T05:57:43", "2021-05-01T00:00:00"),
+     False, "distinct_hash_close_time"),
+    # Control: three distinct hashes and every pair of times more than a
+    # minute apart. Every pair disagrees, so the triple is flagged.
+    (("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"),
+     ("2020-01-01T00:00:00", "2020-03-01T00:00:00", "2020-05-01T00:00:00"),
+     True, "all_pairs_different"),
+])
+def test_images_and_times_differ_requires_every_pair_to_disagree(
+    catalog, tmp_path, phashes, times, expected_differ, label,
+):
+    """Three-photo coverage for the mixed-group rule.
+
+    Every pair must disagree in both image and capture time before the
+    group is folded into the shutter-count-reuse pile. A missing hash or a
+    within-minute time keeps the triple in the likely-review list.
+    """
+    exif = metadata(count=7)
+    for i, (ph, ts) in enumerate(zip(phashes, times, strict=True)):
+        seed(catalog, tmp_path / f"triple-{label}-{i}", f"{label}{i}.jpg", f"{label}{i}",
+             exif=exif, phash=ph, timestamp=ts)
+    group, = scan_same_shot_candidates(catalog, {})["same_shot_groups"]
+    assert group["images_and_times_differ"] is expected_differ
+
+
+def test_restore_preserves_mixed_group_classification(catalog, tmp_path):
+    """``revalidate_scan_result`` must keep ``[A, A, B]`` out of the flagged pile.
+
+    The restored catalog can host different ids and paths than the fresh scan
+    did; what must stay stable is the classification. Serializing the scan
+    and reading it back through the restore path still shows one likely
+    mixed group with ``images_and_times_differ`` false.
+    """
+    exif = metadata(count=99)
+    first = "123456789abcdef0"
+    other = "ffffffffffffffff"
+    seed(catalog, tmp_path / "orig", "orig.jpg", "orig", exif=exif, phash=first,
+         timestamp="2020-01-08T05:57:43")
+    seed(catalog, tmp_path / "edit", "edit.dng", "edit", exif=exif, phash=first,
+         timestamp="2020-01-08T05:57:43")
+    seed(catalog, tmp_path / "reuse", "reuse.jpg", "reuse", exif=exif, phash=other,
+         timestamp="2020-03-07T17:19:11")
+    fresh = run_duplicate_scan({}, catalog)
+    assert [g["images_and_times_differ"] for g in fresh["same_shot_groups"]] == [False]
+    serialized = json.loads(json.dumps(fresh))
+    restored = revalidate_scan_result(catalog, serialized)
+    assert [g["images_and_times_differ"] for g in restored["same_shot_groups"]] == [False]
+    assert {p["id"] for p in restored["same_shot_groups"][0]["photos"]} == \
+        {p["id"] for p in fresh["same_shot_groups"][0]["photos"]}
+
+
 def test_identical_hashes_and_rejected_or_empty_photos_are_excluded(catalog, tmp_path):
     seed(catalog, tmp_path, "a.jpg", "same")
     b = seed(catalog, tmp_path, "b.jpg", "same")

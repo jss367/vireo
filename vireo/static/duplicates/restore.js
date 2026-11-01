@@ -46,6 +46,7 @@ export async function tryRestoreLastScan(forceCleanup) {
   // loading/error state. A subsequent filter edit must not revive them either.
   state.lastScanResult = null;
   state.sameShotVisibleLimit = 50;
+  state.sameShotDifferingVisibleLimit = 50;
   /** @type {HTMLElement} */ (document.getElementById('sameShotResults')).innerHTML = '';
   state.proposals = [];
   /** @type {HTMLElement} */ (document.getElementById('results')).innerHTML = '';

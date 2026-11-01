@@ -68,8 +68,16 @@ function onDuplicatesClick(event) {
     selectDuplicateCategory(category.dataset.duplicateCategory || category.dataset.showCategory || 'all');
     return;
   }
-  if (target.closest('[data-same-shot-more]') && state.lastScanResult && !state.scanInProgress) {
-    state.sameShotVisibleLimit += 50;
+  var sameShotMore = target.closest(/** @type {'button'} */ ('[data-same-shot-more]'));
+  if (sameShotMore && state.lastScanResult && !state.scanInProgress) {
+    if (sameShotMore.dataset.sameShotMore === 'differing') state.sameShotDifferingVisibleLimit += 50;
+    else state.sameShotVisibleLimit += 50;
+    renderSameShotResults(state.lastScanResult);
+    return;
+  }
+  if (target.closest('[data-same-shot-toggle-differing]') && state.lastScanResult && !state.scanInProgress) {
+    state.sameShotShowDiffering = !state.sameShotShowDiffering;
+    state.sameShotDifferingVisibleLimit = 50;
     renderSameShotResults(state.lastScanResult);
     return;
   }

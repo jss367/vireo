@@ -19,6 +19,8 @@
  *   refresh the UI.
  * @property {number} sameShotVisibleLimit
  * @property {boolean} sameShotShowReviewed
+ * @property {boolean} sameShotShowDiffering
+ * @property {number} sameShotDifferingVisibleLimit
  * @property {Set<string>} sameShotReviewPending
  * @property {SameShotGroup | null} sameShotComparison
  * @property {Set<number> | null} filterMatchedIds
@@ -77,6 +79,8 @@ export const state = {
   lastScanResult: null,
   sameShotVisibleLimit: 50,
   sameShotShowReviewed: false,
+  sameShotShowDiffering: false,
+  sameShotDifferingVisibleLimit: 50,
   sameShotReviewPending: new Set(),
   sameShotComparison: null,
   filterMatchedIds: null,

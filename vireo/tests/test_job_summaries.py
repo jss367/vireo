@@ -88,12 +88,25 @@ def test_known_shapes_from_history():
             "0 of 1 photo developed, 1 error",
         ("duplicate-scan", '{"proposals": [{"status": "resolved"}, {"status": "pending"}]}'):
             "2 duplicate groups found, 1 resolved",
+        ("duplicate-scan", '{"proposals": [{"status": "resolved"}], "same_shot_groups": [{}, {}, {"images_and_times_differ": true}]}'):
+            "1 duplicate group found, 1 resolved; 2 possible same-shot groups",
+        ("duplicate-scan", '{"proposals": [], "same_shot_groups": [{}]}'):
+            "No exact duplicates found; 1 possible same-shot group",
         ("publish-site", '{"destination": "/Volumes/Lexar/Pictures", "data_files": ["a"], "exported_images": 5656, "errors": ["x: missing"]}'):
             "5,656 images published to /Volumes/Lexar/Pictures, 1 error",
     }
     for (job_type, raw), expected in cases.items():
         out = describe_result(job_type, json.loads(raw))
         assert out["summary"] == expected, (job_type, out["summary"])
+
+
+def test_duplicate_scan_reports_same_shot_groups_whose_images_and_times_differ():
+    out = describe_result("duplicate-scan", {"proposals": [], "same_shot_groups": [
+        {}, {"images_and_times_differ": True}, {"images_and_times_differ": True}]})
+    assert out["summary"] == "No exact duplicates found; 1 possible same-shot group"
+    assert out["details"] == ["2 more same-shot groups share a shutter count but differ in image and capture time"]
+    alone = describe_result("duplicate-scan", {"proposals": [], "same_shot_groups": [{"images_and_times_differ": True}]})
+    assert alone["details"] == ["1 same-shot group shares a shutter count but differs in image and capture time"]
 
 
 def test_regroup_and_fetch_labels_details():

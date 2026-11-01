@@ -101,9 +101,56 @@ def test_same_shot_review_has_no_cleanup_actions_and_respects_filters(live_serve
       pageModules.results.renderResults(result);
     }""")
     expect(section.locator(".same-shot-group")).to_have_count(50)
-    expect(section).to_contain_text("Showing 50 of 51 matching groups")
+    expect(section).to_contain_text("Showing 50 of 51 likely groups")
     section.locator("[data-same-shot-more]").click()
     expect(section.locator(".same-shot-group")).to_have_count(51)
+
+
+def _add_photo(db, folder, name, file_hash, *, timestamp, exif=None, phash=None):
+    folder.mkdir(exist_ok=True)
+    fid = workspace_folders.add_folder(db, str(folder))
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg", file_size=4000,
+                                file_mtime=100.0, file_hash=file_hash, timestamp=timestamp)
+    db.conn.execute("UPDATE photos SET exif_data=?, phash=? WHERE id=?",
+                    (json.dumps(exif) if exif else None, phash, pid))
+    return pid
+
+
+def test_top_stat_leads_to_likely_copies_and_reused_counts_stay_collapsed(live_server, page, tmp_path):
+    """Exact-copy results fill the top of the page; the same-shot list sits below them."""
+    db = live_server["db"]
+    seed_same_shot_review(db, tmp_path)
+    _add_photo(db, tmp_path / "exact-a", "copy.jpg", "exact", timestamp="2024-05-01T10:00:00")
+    _add_photo(db, tmp_path / "exact-b", "copy.jpg", "exact", timestamp="2024-05-01T10:00:00")
+    reused = {"EXIF": {"Make": "Nikon", "Model": "D850", "SerialNumber": "3066996"},
+              "MakerNotes": {"ShutterCount": 27930}}
+    _add_photo(db, tmp_path / "Costa Rica", "D85_7699.jpg", "trip", timestamp="2020-01-08T05:57:43",
+               exif=reused, phash="91c7797c061f6538")
+    _add_photo(db, tmp_path / "USA", "_D850037.jpg", "home", timestamp="2020-03-07T17:19:11",
+               exif=reused, phash="84817b7d240b7b75")
+    db.commit()
+    result = run_duplicate_scan({}, db)
+    db.conn.execute("UPDATE job_history SET result=? WHERE id='same-shot-e2e'", (json.dumps(result),))
+    db.commit()
+
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(f"{live_server['url']}/duplicates")
+    stat = page.locator("#summary a.summary-stat-link")
+    expect(stat.locator(".num")).to_have_text("1")
+    expect(stat.locator(".label")).to_have_text("Same-shot to review")
+    stat.click()
+    section = page.locator("#sameShotResults")
+    expect(section).to_be_in_viewport()
+    expect(section.locator(".same-shot-group")).to_have_count(1)
+    expect(section).to_contain_text("Showing 1 of 1 likely group")
+    expect(section).to_contain_text("1 more group with a matching shutter count but different images and capture times")
+    expect(section).not_to_contain_text("Shutter count 27930")
+    section.get_by_role("button", name="Show these groups").click()
+    expect(section.locator(".same-shot-group")).to_have_count(2)
+    expect(section.locator(".same-shot-group").last).to_contain_text("Shutter count 27930")
+
+    section.locator(".same-shot-group").first.get_by_role("button", name="Keep all copies").click()
+    expect(stat.locator(".num")).to_have_text("0")
 
 
 def test_scan_discovers_camera_matches_without_an_exact_duplicate(live_server, page, tmp_path):
@@ -116,6 +163,67 @@ def test_scan_discovers_camera_matches_without_an_exact_duplicate(live_server, p
     expect(page.locator("#applyBar")).to_be_hidden()
     page.reload()
     expect(page.locator("#sameShotResults .same-shot-group")).to_have_count(1)
+
+
+def test_same_shot_stat_renders_without_exact_proposals_and_when_all_are_filtered(
+    live_server, page, tmp_path,
+):
+    """The summary stat/link must stay visible when the exact-byte section is empty.
+
+    ``renderResults`` short-circuits to ``renderNoDuplicateGroups`` when
+    there are no exact-byte proposals, and to ``renderAllGroupsFiltered``
+    when every exact proposal is hidden by filters. Both paths route the
+    same-shot stat through ``renderSameShotOnlySummaryBar`` and must keep
+    the link to ``#sameShotResults`` and its count visible, without
+    reviving the exact-byte apply bar.
+    """
+    db = live_server["db"]
+    seed_same_shot_review(db, tmp_path)
+    # Branch 1: no exact duplicates — only same-shot likely groups exist.
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(f"{live_server['url']}/duplicates")
+    stat = page.locator("#summary a.summary-stat-link")
+    expect(stat.locator(".num")).to_have_text("1")
+    expect(stat.locator(".label")).to_have_text("Same-shot to review")
+    expect(page.locator("#applyBar")).to_be_hidden()
+    expect(page.locator("#results")).to_contain_text("No exact-byte duplicates found")
+    section = page.locator("#sameShotResults")
+    expect(section.locator(".same-shot-group")).to_have_count(1)
+    stat.click()
+    expect(section).to_be_in_viewport()
+    # Branch 2: exact-byte proposals exist but every one is filtered out,
+    # while a same-shot member still matches the active photo filter.
+    _add_photo(db, tmp_path / "exact-a", "copy.jpg", "exact",
+               timestamp="2024-05-01T10:00:00")
+    _add_photo(db, tmp_path / "exact-b", "copy.jpg", "exact",
+               timestamp="2024-05-01T10:00:00")
+    db.commit()
+    refreshed = run_duplicate_scan({}, db)
+    assert refreshed["proposals"], "branch 2 needs at least one exact-byte proposal to filter out"
+    db.conn.execute("UPDATE job_history SET result=? WHERE id='same-shot-e2e'",
+                    (json.dumps(refreshed),))
+    db.commit()
+    same_shot_photo_id = refreshed["same_shot_groups"][0]["photos"][0]["id"]
+    page.reload()
+    expect(stat.locator(".num")).to_have_text("1")
+    # Hide every exact-byte group by filtering to a same-shot member id only.
+    page.evaluate(
+        "id => { duplicatesState.filterMatchedIds = new Set([id]);"
+        " pageModules.results.renderResults(duplicatesState.lastScanResult); }",
+        same_shot_photo_id,
+    )
+    expect(stat.locator(".label")).to_have_text("Same-shot to review")
+    expect(stat.locator(".num")).to_have_text("1")
+    expect(page.locator("#applyBar")).to_be_hidden()
+    expect(page.locator("#results")).to_contain_text(
+        "No duplicate groups match the active filters"
+    )
+    expect(section.locator(".same-shot-group")).to_have_count(1)
+    # Reviewing the sole likely group drops the live stat from 1 to 0 and
+    # leaves no exact-byte control resurrected by the empty/filtered branches.
+    section.get_by_role("button", name="Keep all copies").click()
+    expect(stat.locator(".num")).to_have_text("0")
+    expect(page.locator("#applyBar")).to_be_hidden()
 
 
 def test_compare_save_reload_reopen_and_rescan(live_server, page, tmp_path):
