@@ -302,6 +302,7 @@ def test_settings_and_pending_changes_are_respected(discrepancy_catalog):
     assert resolve(client, photos, 'assigned').status_code == 409
     assert db.pending_changes.list_all() == []
     db.queue_change(photos[0]['id'], 'location', 'effective')
+    db.commit()
     assert resolve(client, photos, 'keep').status_code == 409
     assert db.conn.execute('SELECT COUNT(*) FROM location_gps_reviews').fetchone()[0] == 0
 

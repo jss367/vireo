@@ -453,6 +453,7 @@ def test_run_duplicate_scan_attaches_edit_recipes(tmp_path):
     p2 = _add(db, fid, "owl-copy.jpg", file_hash="HEDIT")
     _reset_flags(db, "HEDIT")
     db.set_photo_edit_recipe(p1, {"rotation": 90})
+    db.commit()
 
     result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
     assert len(result["proposals"]) == 1

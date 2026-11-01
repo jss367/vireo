@@ -296,6 +296,7 @@ def test_lightbox_u_unflags_photo(live_server, page):
 
     # Pre-flag the photo so we can verify that `u` clears it.
     db.photo_review.set_flag(pid, "flagged")
+    db.commit()
     assert db.photos.get(pid)["flag"] == "flagged"
 
     page.keyboard.press("u")

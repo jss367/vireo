@@ -522,6 +522,7 @@ def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
 def test_queue_change_uses_workspace(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
     db.queue_change(photo_id, "keyword_add", "Robin")
+    db.commit()
     row = db.conn.execute(
         "SELECT workspace_id FROM pending_changes WHERE photo_id = ?", (photo_id,)
     ).fetchone()
@@ -531,6 +532,7 @@ def test_queue_change_uses_workspace(db_with_workspace):
 def test_get_pending_changes_scoped(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
     db.queue_change(photo_id, "keyword_add", "Robin")
+    db.commit()
     ws2 = db.create_workspace("Other")
     db.set_active_workspace(ws2)
     assert len(db.pending_changes.list_all()) == 0
@@ -541,6 +543,7 @@ def test_get_pending_changes_scoped(db_with_workspace):
 def test_count_pending_changes_scoped(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
     db.queue_change(photo_id, "keyword_add", "Robin")
+    db.commit()
     assert db.pending_changes.count() == 1
     ws2 = db.create_workspace("Other")
     db.set_active_workspace(ws2)
@@ -550,13 +553,16 @@ def test_count_pending_changes_scoped(db_with_workspace):
 def test_queue_change_dedup_within_workspace(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
     db.queue_change(photo_id, "keyword_add", "Robin")
+    db.commit()
     db.queue_change(photo_id, "keyword_add", "Robin")
+    db.commit()
     assert db.pending_changes.count() == 1
 
 
 def test_cascade_delete_removes_pending_changes(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
     db.queue_change(photo_id, "keyword_add", "Robin")
+    db.commit()
     workspace_lifecycle.delete_workspace(db, ws_id)
     count = db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0]
     assert count == 0
@@ -916,7 +922,9 @@ def test_get_collection_photos_scoped_to_workspace_folders(db):
     p1 = photo_ingest.add_photo(db, f1, "lion.jpg", ".jpg", 1000, 1.0)
     p2 = photo_ingest.add_photo(db, f2, "eagle.jpg", ".jpg", 1000, 1.0)
     db.photo_review.set_rating(p1, 5)
+    db.commit()
     db.photo_review.set_rating(p2, 5)
+    db.commit()
     db.set_active_workspace(ws)
     cid = db.collections.add("High Rated", json.dumps([{"field": "rating", "op": ">=", "value": 4}]))
     db.commit()
@@ -1164,11 +1172,14 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     # Queue an unsynced keyword_add under the legacy spelling. Simulates a
     # tag applied before this normalization pass landed.
     db.queue_change(pid_a, "keyword_add", "\u2018apapane")
+    db.commit()
     # Also queue a duplicate under the destination name so we exercise the
     # dedupe branch (the merge must drop the source row without producing
     # two identical pending entries).
     db.queue_change(pid_b, "keyword_add", "apapane")
+    db.commit()
     db.queue_change(pid_b, "keyword_add", "\u2018apapane")
+    db.commit()
 
     db.keyword_tree.merge_duplicates()
 
@@ -2043,6 +2054,7 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip")
     db.queue_change(photo_id, "keyword_add", "Robin")
+    db.commit()
 
     ws2 = db.create_workspace("Target")
 
@@ -2082,6 +2094,7 @@ def test_move_folders_bumps_source_pending_changes_version(db_with_workspace):
     """
     db, ws1, folder_id, photo_id = db_with_workspace
     db.queue_change(photo_id, "rating", "5")
+    db.commit()
     ws2 = db.create_workspace("Target")
 
     def version(ws):

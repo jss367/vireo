@@ -123,8 +123,8 @@ def _queue_shared_keyword(
         # The global retirement above already cancels opposing intents. A
         # flat-only removal must not briefly queue a full hierarchy removal.
         if not flat_only:
-            queue(db, photo_id, name, workspace_id=workspace_id, _commit=False)
-        db.queue_change(photo_id, kind, name, workspace_id=workspace_id, _commit=False)
+            queue(db, photo_id, name, workspace_id=workspace_id)
+        db.queue_change(photo_id, kind, name, workspace_id=workspace_id)
         if may_have_written or db.pending_changes.keyword_sidecar_alias(photo_id, workspace_id, name):
             mark_sync_started(db, photo_id, workspace_id, kind, name)
 

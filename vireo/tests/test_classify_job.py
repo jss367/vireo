@@ -5342,6 +5342,7 @@ def test_classify_job_always_skips_wildlife_excluded_photos(tmp_path):
     db = Database(db_path)
     db.set_active_workspace(ws)
     db.update_photo_wildlife_excluded(p2, True)
+    db.commit()
     db.close()
 
     seen, events, _ = _run_classify_capturing_photos(

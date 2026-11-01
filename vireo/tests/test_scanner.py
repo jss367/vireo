@@ -3327,6 +3327,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
         file_size=2000, file_mtime=1.0,
     )
     db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
+    db.commit()
     recipe_json = recipe_to_json({"rotation": 90}) or ""
     db.record_edit(
         "edit_recipe",
@@ -3499,6 +3500,7 @@ def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
         {"region": "subject", "adjustments": {"exposure": 1}},
     ]}}
     db.set_photo_edit_recipe(jpeg_id, recipe)
+    db.commit()
     ref = mask["ref"]
     src_snap = snapshot_path(str(tmp_path), jpeg_id, ref)
     unreferenced = snapshot_path(str(tmp_path), jpeg_id, "111111111111")
@@ -8905,6 +8907,7 @@ def test_xmp_import_skips_a_location_keyword_the_user_already_changed(tmp_path):
     db.conn.commit()
     db.set_photo_location(photo_id, new_leaf)
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     _import_keywords_for_photo(db, photo_id, xmp_path)
 

@@ -324,6 +324,7 @@ def test_publish_renders_saved_edits_and_developed_images(tmp_path, monkeypatch,
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     if cropped:
         db.set_photo_edit_recipe(meta["p1"], {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}})
+        db.commit()
     if source != "original":
         if source == "custom_developed":
             output = tmp_path / "custom-developed"

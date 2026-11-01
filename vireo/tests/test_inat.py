@@ -1032,6 +1032,7 @@ def test_api_inat_submit_uses_edited_render(app_and_db):
     original_path = os.path.join(folder["path"], "bird.jpg")
     Image.new("RGB", (80, 40), (220, 30, 20)).save(original_path)
     db.set_photo_edit_recipe(pid, {"rotation": 90})
+    db.commit()
 
     client = app.test_client()
     with patch(
@@ -1071,6 +1072,7 @@ def test_api_inat_submit_uses_working_copy_when_raw_source_missing(app_and_db):
     )
     db.conn.commit()
     db.set_photo_edit_recipe(pid, {"rotation": 90})
+    db.commit()
 
     client = app.test_client()
     with patch(
@@ -1108,6 +1110,7 @@ def test_api_inat_submit_uses_companion_when_raw_source_missing(app_and_db):
     )
     db.conn.commit()
     db.set_photo_edit_recipe(pid, {"rotation": 90})
+    db.commit()
 
     client = app.test_client()
     with patch(
@@ -1145,6 +1148,7 @@ def test_api_inat_submit_uses_companion_for_cropped_raw_source_missing(app_and_d
     )
     db.conn.commit()
     db.set_photo_edit_recipe(pid, {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}})
+    db.commit()
 
     client = app.test_client()
     with patch(
@@ -1182,6 +1186,7 @@ def test_inat_upload_handoff_meta_includes_math_version(app_and_db):
         os.path.join(folder["path"], "bird.jpg"),
     )
     db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
+    db.commit()
 
     client = app.test_client()
     with patch(

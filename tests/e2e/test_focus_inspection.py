@@ -28,6 +28,7 @@ def test_manual_focus_center_and_subject_inspection_preserve_decisions(page, liv
             {'box': {'x': .65, 'y': .1, 'w': .2, 'h': .3}, 'confidence': .052, 'category': 'animal'},
         ])
         db.set_photo_edit_recipe(pid, {'crop': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'rotation': 90})
+        db.commit()
         pids.append(pid)
     before = {pid: (dict(db.photos.get(pid)), db.get_photo_edit_recipe(pid)) for pid in pids}
     db.commit()

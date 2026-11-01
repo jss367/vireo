@@ -27,6 +27,7 @@ def test_selective_discard_blocks_row_replacement(app_and_db, monkeypatch):
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     db.queue_change(pid, "flag", "flagged")
+    db.commit()
     change = db.pending_changes.list_all()[0]
     original = SyncRepository.get_by_ids
     blocked = []
@@ -61,7 +62,9 @@ def test_selective_discard_rolls_back_when_history_fails(app_and_db, monkeypatch
     pid = db.photos.list_page()[0]["id"]
     ws2 = db.create_workspace("Sibling")
     db.queue_change(pid, "keyword_remove_flat", "Wildlife")
+    db.commit()
     db.queue_change(pid, "keyword_remove_flat", "Wildlife", workspace_id=ws2)
+    db.commit()
     change_id = db.pending_changes.list_all()[0]["id"]
 
     def fail(*args, **kwargs):
@@ -79,6 +82,7 @@ def test_selective_discard_counts_repeated_ids_once(app_and_db):
 
     app, db = app_and_db
     db.queue_change(db.photos.list_page()[0]["id"], "rating", "4")
+    db.commit()
     cid = db.pending_changes.list_all()[0]["id"]
     response = app.test_client().post(
         "/api/sync/discard", json={"change_ids": [cid] * (_SQLITE_PARAM_CHUNK_SIZE + 1)},
@@ -117,7 +121,9 @@ def test_culling_failure_rolls_back_flags_queue_and_history(app_and_db, monkeypa
     cfg.save({"sync_flags_to_xmp": True})
     pids = [row["id"] for row in db.photos.list_page()[:3]]
     db.photo_review.set_flag(pids[2], "rejected")
+    db.commit()
     db.queue_flag_change_if_enabled(pids[2], "rejected")
+    db.commit()
     before_flags = {pid: db.photos.get(pid)["flag"] for pid in pids}
     before_queue = [dict(row) for row in db.pending_changes.list_all()]
     owner, method = {"flag": (PhotoReviewRepository, "set_flag"),
@@ -180,6 +186,7 @@ def test_location_detail_and_sync_preview_choose_exported_location(client_with_p
     assert photo_locations.get_photo_location_keyword_ids(db, [pid]) == {pid: chosen}
     assert serialize_photo_location(db, pid)["keyword_id"] == chosen
     db.queue_change(pid, "location", "effective")
+    db.commit()
     photo = app.test_client().get("/api/sync/preview").get_json()["photos"][0]
     assert photo["changes"][0]["presentation"]["after"] == "Paris, France"
     assert db.locations.photo_location_leaf(pid)["id"] == chosen

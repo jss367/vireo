@@ -1506,7 +1506,7 @@ def create_pipeline_blueprint(
                     # that still fires the invalidation trigger, and
                     # set_current_flag_note republishes the explicit note
                     # so Cull sees the photographer's confirmation.
-                    db.photo_review.set_flag(pid, target, _commit=False)
+                    db.photo_review.set_flag(pid, target)
                     attributed_ids.append(pid)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": target})
                 if attributed_ids:
@@ -1543,7 +1543,7 @@ def create_pipeline_blueprint(
             for item in flag_items:
                 if item["old_value"] != item["new_value"]:
                     db.queue_flag_change_if_enabled(
-                        item["photo_id"], item["new_value"], _commit=False,
+                        item["photo_id"], item["new_value"],
                     )
         changed_ids = [item["photo_id"] for item in (flag_items or ())]
 

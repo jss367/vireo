@@ -124,6 +124,7 @@ def test_assessments_preserve_predictions_tags_flags_and_can_be_revisited(app_an
     det = detection(db, pid)
     add(db, det, 'Common Poorwill', .99)
     db.photo_review.set_flag(pid, 'flagged')
+    db.commit()
     before = [tuple(row) for row in db.conn.execute('SELECT * FROM predictions')]
     keywords = [tuple(row) for row in db.photo_keywords.get_for_photo(pid)]
     changes = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')]

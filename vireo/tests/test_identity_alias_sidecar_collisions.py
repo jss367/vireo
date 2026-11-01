@@ -84,6 +84,7 @@ def test_drained_alias_confirmation_survives_collision_sync_reimport_and_history
         db.tag_photo(survivor, higher, source='manual')
         db.tag_photo(survivor, note, source='manual')
         db.photo_review.set_flag(survivor, 'rejected')
+        db.commit()
         with db.transaction():
             save_alternatives(db, [losing], [candidate, 'Uncataloged other bird'], 'Retain the call evidence', 'Audio')
             # Normal resolution retains an already attached equivalent spelling.

@@ -31,6 +31,7 @@ def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path
     db.predictions.add(ids[0], 'American Robin', .91, 'bioclip')
     db.predictions.add(ids[1], 'Blue Jay', .87, 'bioclip')
     original_recipe = db.set_photo_edit_recipe(photo_id, {'adjustments': {'exposure': .4, 'contrast': 10}})
+    db.commit()
     page.goto(live_server['url'] + '/browse')
     page.evaluate("id => openLightbox(id, 'two-subjects.jpg')", photo_id)
     expect(page.locator('#lightboxSubjects')).to_be_visible()

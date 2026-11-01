@@ -288,6 +288,7 @@ def export_env(tmp_path):
                        timestamp="2024-06-16T09:00:00")
 
     db.photo_review.set_rating(p1, 5)
+    db.commit()
 
     # Add a species keyword to p1
     k = db.add_keyword("Red-tailed Hawk", is_species=True)
@@ -994,6 +995,7 @@ def test_export_photos_applies_edit_recipe(export_env):
             "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1},
         },
     )
+    env['db'].commit()
 
     result = export_photos(
         db=env["db"],
@@ -1026,6 +1028,7 @@ def test_export_photos_applies_adjustment_recipe(export_env):
             },
         },
     )
+    env['db'].commit()
 
     result = export_photos(
         db=env["db"],
@@ -1055,6 +1058,7 @@ def test_export_photos_applies_presence_recipe(export_env, key):
     source_path = env["src"] / "bird1.jpg"
     Image.fromarray(pixels).save(source_path, quality=95)
     env["db"].set_photo_edit_recipe(env["p1"], {"adjustments": {key: 75}})
+    env['db'].commit()
 
     result = export_photos(
         db=env["db"], vireo_dir=env["vireo_dir"], photo_ids=[env["p1"]],
@@ -1076,6 +1080,7 @@ def test_export_non_crop_recipe_loads_with_requested_size(export_env, monkeypatc
 
     env = export_env
     env["db"].set_photo_edit_recipe(env["p2"], {"rotation": 90})
+    env['db'].commit()
     original_load_image = export_module.load_image
     seen_max_sizes = []
 
@@ -1114,6 +1119,7 @@ def test_export_cropped_recipe_avoids_undersized_working_copy(export_env):
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     result = export_photos(
         db=db,
@@ -1315,6 +1321,7 @@ def test_export_edited_raw_skips_companion_jpeg_substitution(
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     load_calls = []
 
@@ -1366,6 +1373,7 @@ def test_export_edited_raw_uses_working_copy_when_source_missing(export_env):
     )
     db.conn.commit()
     db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+    db.commit()
 
     result = export_photos(
         db=db,
@@ -1409,6 +1417,7 @@ def test_export_pins_working_copy_decode_when_source_missing(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+    db.commit()
 
     real_load_image = export_mod.load_image
     held_during_decode = False
@@ -1475,6 +1484,7 @@ def test_export_edited_raw_uses_working_copy_when_folder_missing(export_env):
     db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (env["fid"],))
     db.conn.commit()
     db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+    db.commit()
 
     result = export_photos(
         db=db,
@@ -1508,6 +1518,7 @@ def test_export_edited_raw_uses_companion_when_source_missing(export_env):
     )
     db.conn.commit()
     db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+    db.commit()
 
     result = export_photos(
         db=db,
@@ -1557,6 +1568,7 @@ def test_export_falls_back_to_companion_when_raw_decode_fails(
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     load_calls = []
 
@@ -1633,6 +1645,7 @@ def test_export_falls_back_to_companion_when_raw_returns_undersized_image(
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     load_calls = []
 
@@ -1705,6 +1718,7 @@ def test_export_falls_back_to_companion_when_raw_short_edge_is_smaller(
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     load_calls = []
 
@@ -1763,6 +1777,7 @@ def test_export_rejects_reduced_companion_when_raw_decode_fails(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(env["p1"], {"rotation": 0})
+    db.commit()
 
     load_calls = []
 
@@ -1815,6 +1830,7 @@ def test_export_keeps_raw_when_decode_succeeds_at_full_size(
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     load_calls = []
 
@@ -1856,6 +1872,7 @@ def test_export_cropped_recipe_avoids_undersized_developed_output(export_env):
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     developed = env["tmp_path"] / "developed"
     developed_subdir = developed / developed_folder_key(str(env["src"]))
@@ -1895,6 +1912,7 @@ def test_export_cropped_recipe_uses_sufficient_developed_output(export_env):
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.1, "h": 0.1}},
     )
+    db.commit()
 
     developed = env["tmp_path"] / "developed"
     developed_subdir = developed / developed_folder_key(str(env["src"]))
@@ -1947,6 +1965,7 @@ def test_export_cropped_recipe_uses_exif_oriented_original_dimensions(export_env
         env["p1"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
 
     developed = env["tmp_path"] / "developed"
     developed_subdir = developed / developed_folder_key(str(env["src"]))
@@ -2672,6 +2691,7 @@ def test_export_photos_convert_tiff_applies_recipe_and_resize(export_env):
             "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1},
         },
     )
+    env['db'].commit()
 
     result = export_photos(
         db=env["db"],
@@ -4093,6 +4113,7 @@ def test_export_applies_point_curves_and_sampled_color(export_env):
         'point_curves': {'red': [[0, 0], [100, 75]]},
         'point_color': [{'sample': [0, 55, 35], 'hue_range': 60, 'hue': 120}],
     }})
+    env['db'].commit()
     result = export_photos(db=env['db'], vireo_dir=env['vireo_dir'],
                            photo_ids=[env['p1']], destination=env['dest'],
                            options={'naming_template': '{original}'})

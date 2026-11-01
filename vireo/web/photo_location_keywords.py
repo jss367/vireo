@@ -107,10 +107,11 @@ def create_photo_location_keywords_blueprint(
         # source='manual': a person clicked Add. Stamping the association
         # itself keeps authorship recoverable after _prune_edit_history()
         # drops the keyword_add entry recorded just below.
-        db.tag_photo(photo_id, kid, source='manual')
-        queue_keyword_add(db, photo_id, name)
-        db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
-                       [{'photo_id': photo_id, 'old_value': '', 'new_value': str(kid)}])
+        with db.transaction():
+            db.tag_photo(photo_id, kid, source='manual')
+            queue_keyword_add(db, photo_id, name)
+            db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
+                           [{'photo_id': photo_id, 'old_value': '', 'new_value': str(kid)}])
         return jsonify({"ok": True, "keyword_id": kid})
 
     @blueprint.route(
@@ -130,20 +131,21 @@ def create_photo_location_keywords_blueprint(
                 break
         else:
             return jsonify({"ok": True})
-        db.untag_photo(photo_id, keyword_id, _record_history=True)
-        queue_keyword_remove(db, photo_id, kw_name)
-        # A ``keyword_remove`` on a ``type='location'`` tag strips the flat
-        # and hierarchical entries but leaves ``vireo:locationKeywords`` and
-        # its ownership claim in the sidecar. If the user later recreates
-        # that keyword in Lightroom and assigns another place in Vireo,
-        # ``set_location_keywords`` treats the stale marker as authoritative
-        # and can delete the user's new entry. Queue a ``location`` change so
-        # ``sync_to_xmp`` clears the marker (or rewrites it to a still-
-        # tagged location, if the photo has one) on the next sync.
-        if kw_type == "location":
-            queue_location_sync_if_enabled(db, photo_id)
-        db.record_edit('keyword_remove', f'Removed keyword "{kw_name}"', str(keyword_id),
-                       [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
+        with db.transaction():
+            db.untag_photo(photo_id, keyword_id, _record_history=True)
+            queue_keyword_remove(db, photo_id, kw_name)
+            # A ``keyword_remove`` on a ``type='location'`` tag strips the flat
+            # and hierarchical entries but leaves ``vireo:locationKeywords`` and
+            # its ownership claim in the sidecar. If the user later recreates
+            # that keyword in Lightroom and assigns another place in Vireo,
+            # ``set_location_keywords`` treats the stale marker as authoritative
+            # and can delete the user's new entry. Queue a ``location`` change so
+            # ``sync_to_xmp`` clears the marker (or rewrites it to a still-
+            # tagged location, if the photo has one) on the next sync.
+            if kw_type == "location":
+                queue_location_sync_if_enabled(db, photo_id)
+            db.record_edit('keyword_remove', f'Removed keyword "{kw_name}"', str(keyword_id),
+                           [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
 
     # Location keywords don't propagate to dc:subject sidecars — structured XMP (exif:GPS*, Iptc4xmpCore:Location) is a future feature.

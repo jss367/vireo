@@ -1150,8 +1150,8 @@ def create_predictions_blueprint(
             flat_removals = db.pending_changes.flat_keyword_removals(photo_id, item_species)
             # accept_prediction queues an add directly. Reconcile it
             # with any pending removal before applying the shared helper.
-            db.remove_pending_changes(photo_id, "keyword_add", item_species, _commit=False)
-            queue_keyword_add(db, photo_id, item_species, _commit=False)
+            db.remove_pending_changes(photo_id, "keyword_add", item_species)
+            queue_keyword_add(db, photo_id, item_species)
             # Keep the suppression records cleared by the add, including
             # those in other workspaces sharing this photo's sidecar.
             old_meta.update(symmetric_keyword_queue=True, flat_removals=flat_removals)
@@ -1947,12 +1947,12 @@ def create_predictions_blueprint(
                 )
                 added_picks = []
                 for pid in actionable_picks:
-                    db.photo_review.set_flag(pid, "flagged", _commit=False)
+                    db.photo_review.set_flag(pid, "flagged")
                     if pid in already_has_species:
                         continue
                     db.tag_photo(pid, kid, source="manual", _commit=False)
                     db.queue_change(
-                        pid, "keyword_add", local_species, _commit=False,
+                        pid, "keyword_add", local_species,
                     )
                     added_picks.append(pid)
 
@@ -1962,11 +1962,11 @@ def create_predictions_blueprint(
                 already_has_species = set()
                 added_picks = []
                 for pid in actionable_picks:
-                    db.photo_review.set_flag(pid, "flagged", _commit=False)
+                    db.photo_review.set_flag(pid, "flagged")
 
             # Reject rejects
             for pid in actionable_rejects:
-                db.photo_review.set_flag(pid, "rejected", _commit=False)
+                db.photo_review.set_flag(pid, "rejected")
 
             # Republish current attribution for every explicit zone decision.
             # The flag UPDATE trigger wiped prior attribution; without this,
@@ -2008,7 +2008,7 @@ def create_predictions_blueprint(
             return None
         for item in flag_items:
             db.queue_flag_change_if_enabled(
-                item["photo_id"], item["new_value"], _commit=False
+                item["photo_id"], item["new_value"]
             )
         return db.record_edit(
             'flag', desc, 'group_apply', flag_items,

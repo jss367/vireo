@@ -811,30 +811,18 @@ class ImportService:
         return tags, location_choices, None
 
     def _queue_import_keyword_add(
-        self,     db: Database, photo_id: int, keyword_name: str, workspace_id: int, *, commit: bool = False,
+        self, db: Database, photo_id: int, keyword_name: str, workspace_id: int,
     ) -> None:
-        """Thread-safe equivalent of queue_keyword_add for import jobs."""
+        """Thread-safe equivalent of queue_keyword_add for import jobs (no commit)."""
         removed = db.remove_pending_changes(
             photo_id, "keyword_remove", keyword_name,
-            workspace_id=workspace_id, _commit=commit,
+            workspace_id=workspace_id,
         )
         if removed == 0:
             db.queue_change(
                 photo_id, "keyword_add", keyword_name,
-                workspace_id=workspace_id, _commit=commit,
+                workspace_id=workspace_id,
             )
-
-    def _queue_import_location_sync(
-        self,     db: Database, photo_id: int, workspace_id: int, *, commit: bool = False,
-    ) -> None:
-        """Thread-safe equivalent of queue_location_sync_if_enabled."""
-        db.remove_pending_changes(
-            photo_id, "location", workspace_id=workspace_id, _commit=commit,
-        )
-        db.queue_change(
-            photo_id, "location", "effective",
-            workspace_id=workspace_id, _commit=commit,
-        )
 
     @staticmethod
     def _import_tag_cancel_check(

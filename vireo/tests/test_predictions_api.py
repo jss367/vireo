@@ -46,6 +46,7 @@ def test_list_predictions_includes_photo_edit_recipe(app_and_db):
     app, db = app_and_db
     photos = _seed_predictions(db)
     db.set_photo_edit_recipe(photos[0]["id"], {"rotation": 90})
+    db.commit()
     client = app.test_client()
 
     resp = client.get('/api/predictions')
@@ -327,6 +328,7 @@ def test_get_prediction_group(app_and_db):
     app, db = app_and_db
     photos = _seed_predictions(db)
     db.set_photo_edit_recipe(photos[0]["id"], {"rotation": 90})
+    db.commit()
     client = app.test_client()
 
     resp = client.get('/api/predictions/group/g1')
@@ -644,6 +646,7 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     # Make each stale in one of the two ways the eligibility gate covers.
     # Preference rows themselves remain intact (undo-friendly).
     db.photo_review.set_flag(rejected_pid, 'rejected')
+    db.commit()
     db.untag_photo(photos[2]['id'], kid_untagged)
 
     client = app.test_client()

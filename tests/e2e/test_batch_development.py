@@ -25,6 +25,7 @@ def batch_photos(live_server, tmp_path):
             'crop': {'x': .1 * index, 'y': .1, 'w': .8, 'h': .8},
             'adjustments': {'exposure': exposure, 'white_balance': {'temperature': index * 15 + 5}},
         })
+        db.commit()
         ids.append(pid)
     return ids
 

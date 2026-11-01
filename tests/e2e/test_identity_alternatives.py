@@ -27,6 +27,7 @@ def test_save_reload_edit_resolve_and_undo(live_server, page):
     ids = open_panel(live_server, page)
     db = live_server['db']
     db.photo_review.set_flag(ids[0], 'rejected')
+    db.commit()
     before_species = db.photo_species.get_species_for_photos(ids)
     page.locator('#identitySave').click()
     group = page.locator('#identityAlternativesGroups article')
@@ -212,6 +213,7 @@ def test_same_species_aliases_are_rejected_without_losing_form_or_confirmation(l
     scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
     db.tag_photo(ids[0], scientific, source='accept')
     db.photo_review.set_flag(ids[0], 'rejected')
+    db.commit()
     history = [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items')]
     page.locator('#identityCandidates').fill('Tropical Kingbird\nTyrannus melancholicus')
     with page.expect_response(lambda response: response.url.endswith('/api/identity-alternatives') and response.request.method == 'POST') as response:

@@ -48,20 +48,17 @@ def test_invalid_flag_baseline_is_rejected(client_with_photo, baseline):
 
 def test_flag_compare_occurs_after_writer_lock(client_with_photo, monkeypatch):
     _, db, photo_id = client_with_photo
-    original = db._photo_review_repository
-    def repository():
-        repo = original()
-        flag_write = repo.flag_write
-        from contextlib import contextmanager
-        @contextmanager
-        def racing_writer():
-            # Another completed writer wins just before this writer enters its lock.
-            db.photo_review.set_flag(photo_id, 'flagged')
-            with flag_write() as owns_transaction:
-                yield owns_transaction
-        repo.flag_write = racing_writer
-        return repo
-    monkeypatch.setattr(db, '_photo_review_repository', repository)
+    original = db.transaction
+    from contextlib import contextmanager
+
+    @contextmanager
+    def racing_transaction(**options):
+        # Another completed writer wins just before this writer enters its lock.
+        db.photo_review.set_flag(photo_id, 'flagged')
+        db.commit()
+        with original(**options):
+            yield
+    monkeypatch.setattr(db, 'transaction', racing_transaction)
     with pytest.raises(FlagConflict):
         PhotoReviewService(db).set_flag(photo_id, 'rejected', observed_flag='none')
     assert db.photos.get(photo_id)['flag'] == 'flagged'

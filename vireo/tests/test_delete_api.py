@@ -63,6 +63,7 @@ def test_delete_photos_removes_pending_changes(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]["id"]
     db.queue_change(pid, "rating", "5")
+    db.commit()
 
     catalog_deletion.delete_photos(db, [pid])
 

@@ -383,6 +383,7 @@ def test_edit_preview_and_export_render_same_real_raw(app_and_db, tmp_path, save
     recipe = {'adjustments': {'exposure': -1, 'highlights': -20, 'sharpen': 10}}
     if saved_edit:
         db.set_photo_edit_recipe(photo['id'], recipe)
+        db.commit()
     else:
         recipe = None
     photo = db.photos.get(photo['id'])

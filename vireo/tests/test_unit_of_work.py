@@ -359,3 +359,153 @@ def test_a_failed_rollback_does_not_hide_the_failure(db, monkeypatch, caplog):
     monkeypatch.setattr(db.conn, "rollback", real_rollback)
     db.rollback()
     assert _committed(db) == []
+
+
+def test_a_joining_unit_leaves_a_callers_transaction_to_the_caller(db):
+    # ``join=True`` (a service callable from an unconverted owner): inside a
+    # transaction someone else began it is a savepoint and never commits.
+    db.begin_immediate()
+    _write(db, "caller")
+    with db.transaction(immediate=True, join=True):
+        _write(db, "service")
+    assert db.in_transaction
+    assert _committed(db) == []
+    with pytest.raises(RuntimeError), db.transaction(immediate=True, join=True):
+        _write(db, "failed")
+        raise RuntimeError("boom")
+    assert db.in_transaction
+    db.commit()
+    assert _committed(db) == ["caller", "service"]
+
+
+def test_a_joining_unit_with_nothing_open_owns_its_transaction(db):
+    with db.transaction(immediate=True, join=True):
+        assert _writer_lock_is_held(db)
+        _write(db, "own")
+    assert not db.in_transaction
+    assert _committed(db) == ["own"]
+
+
+def test_after_commit_is_refused_inside_a_joined_unit(db):
+    # Savepoint release is not a durable commit, so a callback that ran at
+    # the end of a joined block could perform an irreversible side effect
+    # for writes the unconverted owner later rolls back. The attempt is
+    # refused: callers that need durable follow-up work check
+    # ``owns_transaction`` and run it after the join block.
+    db.begin_immediate()
+    _write(db, "caller")
+    seen = []
+    with pytest.raises(TransactionOwnershipError, match="joined unit"):
+        with db.transaction(immediate=True, join=True):
+            _write(db, "service")
+            db.after_commit(lambda: seen.append("ran"))
+    assert seen == []
+    # The caller's transaction is still open and uncommitted; the owner
+    # decides what to do next.
+    assert db.in_transaction
+    db.rollback()
+    assert _committed(db) == []
+
+
+def test_after_commit_is_refused_in_a_nested_unit_inside_a_joined_one(db):
+    # A nested unit above a joined outer has no durable commit of its own to
+    # hook into either; the refusal propagates to the whole joined stack.
+    db.begin_immediate()
+    _write(db, "caller")
+    seen = []
+    with pytest.raises(TransactionOwnershipError, match="joined unit"):
+        with db.transaction(immediate=True, join=True):
+            with db.transaction():
+                db.after_commit(lambda: seen.append("ran"))
+    assert seen == []
+    db.rollback()
+    assert _committed(db) == []
+
+
+def test_a_failed_joined_unit_keeps_the_callers_provenance_snapshot(db):
+    # A joined rollback releases its savepoint but leaves the caller's SQL
+    # transaction (and the writes it already made) alive. The caller's
+    # ``_species_provenance_before`` entries describe those earlier writes
+    # and must survive the failed service call so the caller can still
+    # record their history correctly.
+    db.begin_immediate()
+    _write(db, "caller")
+    db._species_provenance_before[(5, 6)] = {"before": "caller"}
+    with pytest.raises(RuntimeError), db.transaction(immediate=True, join=True):
+        db._species_provenance_before[(7, 8)] = {"before": "joined service"}
+        _write(db, "service")
+        raise RuntimeError("boom")
+    assert db._species_provenance_before == {(5, 6): {"before": "caller"}}
+    assert db.in_transaction
+    db.commit()
+    assert _committed(db) == ["caller"]
+
+
+def test_after_commit_still_runs_for_a_joined_unit_with_no_owner(db):
+    # ``join=True`` entered with nothing open falls through to an owned
+    # outermost unit, so its ``after_commit`` runs at the owned commit as
+    # usual.
+    seen = []
+    with db.transaction(immediate=True, join=True):
+        _write(db, "own")
+        db.after_commit(lambda: seen.append(_committed(db)))
+        assert seen == []
+    assert seen == [["own"]]
+
+
+def test_a_failed_joined_set_flag_preserves_history_and_undo_for_caller_species_removal(db, tmp_path):
+    # End-to-end regression for the in-memory survival pinned above. A real
+    # attributed species removal snapshots its before-state; a joined
+    # ``PhotoReviewService.set_flag`` whose ``observed_flag`` is stale
+    # raises ``FlagConflict`` and its savepoint rolls back. The caller
+    # catches it, finishes the pending ``keyword_remove`` through
+    # ``record_edit`` and commits. The persisted history row must carry the
+    # original attribution, and Undo must restore it on the real
+    # association.
+    import json
+
+    from services import photo_ingest, workspace_folders
+    from services.edit_history import undo_last_edit
+    from services.photo_review import FlagConflict, PhotoReviewService
+
+    fid = workspace_folders.add_folder(db, str(tmp_path / "photos"))
+    photo_id = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
+    kid = db.add_keyword("Robin", is_species=True)
+    db.tag_photo(photo_id, kid, source="accept", provenance={
+        "method": "direct_visual", "reviewer": "Original reviewer",
+        "reason": "Clear plumage markings",
+    })
+    before = db.species_provenance.state(photo_id, kid)
+    assert before is not None and before["species_provenance"]
+    db.commit()
+
+    db.begin_immediate()
+    db.untag_photo(photo_id, kid, _commit=False, _record_history=True)
+    assert db.species_provenance.state(photo_id, kid) is None
+    assert (photo_id, kid) in db._species_provenance_before
+    with pytest.raises(FlagConflict):
+        PhotoReviewService(db).set_flag(photo_id, "rejected", observed_flag="flagged")
+    # The joined savepoint rolled back, but the caller's open transaction
+    # and the snapshot that describes its earlier untag survive.
+    assert db.in_transaction
+    assert (photo_id, kid) in db._species_provenance_before
+
+    db.record_edit(
+        "keyword_remove", "Removed Robin", str(kid),
+        [{"photo_id": photo_id, "old_value": "", "new_value": str(kid)}],
+        _commit=False,
+    )
+    db.commit()
+
+    with contextlib.closing(sqlite3.connect(db._db_path)) as other:
+        row = other.execute(
+            "SELECT species_provenance FROM edit_history_items ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert row is not None and row[0], "persisted history row is missing provenance"
+    saved = json.loads(row[0])[str(kid)]["before"]
+    assert saved is not None
+    assert "direct_visual" in saved["species_provenance"]
+    assert "Original reviewer" in saved["species_provenance"]
+
+    undo_last_edit(db)
+    assert db.species_provenance.state(photo_id, kid) == before

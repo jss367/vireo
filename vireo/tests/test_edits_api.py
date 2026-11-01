@@ -366,6 +366,7 @@ def test_undo_old_rating_action_does_not_clear_new_pending_change_reusing_id(app
         if c['photo_id'] == pid and c['change_type'] == 'rating' and c['value'] == '4'
     )
     pending_changes.clear_pending(db, [old_change['id']])
+    db.commit()
 
     db.conn.execute(
         """INSERT INTO pending_changes (id, photo_id, change_type, value, change_token, workspace_id)
@@ -541,6 +542,7 @@ def test_sync_status(app_and_db):
 
     photos = db.photos.list_page()
     db.queue_change(photos[0]['id'], 'rating', '3')
+    db.commit()
 
     resp = client.get('/api/sync/status')
     data = resp.get_json()
@@ -556,6 +558,7 @@ def test_sync_preview_pages_photos_with_stable_summary(app_and_db):
     assert len(photo_ids) == 2
     for index, photo_id in enumerate(photo_ids, start=3):
         db.queue_change(photo_id, "rating", str(index))
+        db.commit()
 
     client = app.test_client()
     first = client.get("/api/sync/preview?limit=1&offset=0")
@@ -589,10 +592,12 @@ def test_sync_preview_rejects_stale_progressive_revision(app_and_db):
     app, db = app_and_db
     photo_ids = [photo["id"] for photo in db.photos.list_page()[:2]]
     db.queue_change(photo_ids[0], "rating", "3")
+    db.commit()
     client = app.test_client()
     first = client.get("/api/sync/preview?limit=1&offset=0").get_json()
 
     db.queue_change(photo_ids[1], "rating", "4")
+    db.commit()
     stale = client.get(
         "/api/sync/preview?limit=1&offset=1&revision=" + first["revision"]
     )
@@ -616,6 +621,7 @@ def test_sync_preview_revalidates_after_final_page_enrichment(
     )
     db.conn.commit()
     db.queue_change(photo_ids[0], "rating", "3")
+    db.commit()
     original_read = web_sync.read_sync_preview_metadata
     mutated = False
 
@@ -624,6 +630,7 @@ def test_sync_preview_revalidates_after_final_page_enrichment(
         if not mutated:
             mutated = True
             db.queue_change(photo_ids[1], "rating", "4")
+            db.commit()
         return original_read(path)
 
     web_sync.read_sync_preview_metadata = mutate_queue_during_read
@@ -651,6 +658,7 @@ def test_sync_preview_reuses_snapshot_across_page_requests(app_and_db):
     assert len(photo_ids) == 3
     for index, photo_id in enumerate(photo_ids, start=1):
         db.queue_change(photo_id, "rating", str(index))
+        db.commit()
 
     client = app.test_client()
     first = client.get("/api/sync/preview?limit=2&offset=0").get_json()
@@ -694,6 +702,7 @@ def test_sync_preview_cache_isolated_by_database(app_and_db, tmp_path):
     _app, first_db = app_and_db
     first_photo = first_db.photos.list_page()[0]
     first_db.queue_change(first_photo["id"], "rating", "3")
+    first_db.commit()
     first_snapshot = web_sync._sync_preview_get_snapshot(
         first_db, first_db._ws_id(), None,
     )
@@ -714,6 +723,7 @@ def test_sync_preview_cache_isolated_by_database(app_and_db, tmp_path):
             file_mtime=1.0,
         )
         second_db.queue_change(second_photo, "rating", "3")
+        second_db.commit()
         second_snapshot = web_sync._sync_preview_get_snapshot(
             second_db, second_ws, first_snapshot["revision"],
         )
@@ -735,9 +745,11 @@ def test_sync_preview_cache_evicts_obsolete_workspace_revision(app_and_db):
     database_key = os.path.abspath(db._db_path)
     photos = db.photos.list_page()[:2]
     db.queue_change(photos[0]["id"], "rating", "3")
+    db.commit()
     first_snapshot = web_sync._sync_preview_get_snapshot(db, ws_id, None)
 
     db.queue_change(photos[1]["id"], "rating", "4")
+    db.commit()
     second_snapshot = web_sync._sync_preview_get_snapshot(db, ws_id, None)
 
     assert second_snapshot["revision"] != first_snapshot["revision"]
@@ -767,6 +779,7 @@ def test_sync_preview_detects_top_id_replacement(app_and_db):
     photo_ids = [photo["id"] for photo in db.photos.list_page()[:2]]
     assert len(photo_ids) == 2
     original_token = db.queue_change(photo_ids[0], "rating", "3")
+    db.commit()
     assert original_token is not None
 
     client = app.test_client()
@@ -782,6 +795,7 @@ def test_sync_preview_detects_top_id_replacement(app_and_db):
     db.conn.execute("DELETE FROM pending_changes WHERE id = ?", (original_id,))
     db.conn.commit()
     reused_token = db.queue_change(photo_ids[1], "rating", "3")
+    db.commit()
     assert reused_token is not None
     reused_id = db.conn.execute(
         "SELECT id FROM pending_changes WHERE change_token = ?",
@@ -824,6 +838,7 @@ def test_sync_preview_describes_location_keyword_as_xmp_delta(
     db.conn.commit()
     db.set_photo_location(photo_id, tallahassee_id)
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     photo = db.photos.get(photo_id)
     folder = db.conn.execute(
@@ -862,6 +877,7 @@ def test_sync_preview_keeps_location_assignment_clear_when_xmp_writes_are_disabl
     db.conn.commit()
     db.set_photo_location(photo_id, location_id)
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -886,6 +902,7 @@ def test_sync_preview_does_not_promise_rating_write_without_sidecar(
     """Rating sync cannot create a sidecar, so the preview says it stays in Vireo."""
     app, db, photo_id = client_with_photo
     db.queue_change(photo_id, "rating", "5")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -911,7 +928,9 @@ def test_sync_preview_accounts_for_selected_change_creating_rating_sidecar(
     """A selected keyword write creates the sidecar before rating sync runs."""
     app, db, photo_id = client_with_photo
     db.queue_change(photo_id, "rating", "5")
+    db.commit()
     db.queue_change(photo_id, "keyword_add", "Raptor")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -958,7 +977,9 @@ def test_sync_preview_reports_rating_persisted_when_location_creates_sidecar(
     db.conn.commit()
     db.set_photo_location(photo_id, location_id)
     db.queue_change(photo_id, "rating", "4")
+    db.commit()
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -993,7 +1014,9 @@ def test_sync_preview_does_not_persist_rating_when_location_lacks_gps(
     db.conn.commit()
     db.set_photo_location(photo_id, location_id)
     db.queue_change(photo_id, "rating", "2")
+    db.commit()
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1022,7 +1045,9 @@ def test_sync_preview_reports_rating_persisted_when_edit_recipe_creates_sidecar(
     """A non-empty edit recipe creates a sidecar through SidecarEditor."""
     app, db, photo_id = client_with_photo
     db.queue_change(photo_id, "rating", "5")
+    db.commit()
     db.queue_change(photo_id, "edit_recipe", '{"exposure": 0.5}')
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1053,6 +1078,7 @@ def test_sync_preview_shows_hierarchical_keyword_before_removal(
         hierarchical_keywords={"Animals|Birds|Raptor"},
     )
     db.queue_change(photo_id, "keyword_remove", "Birds")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1083,6 +1109,7 @@ def test_sync_preview_reports_flat_and_hierarchy_when_both_will_be_removed(
         hierarchical_keywords={"Animals|Birds|Raptor"},
     )
     db.queue_change(photo_id, "keyword_remove", "Raptor")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1114,7 +1141,9 @@ def test_sync_preview_preserves_hierarchy_during_paired_keyword_rename(
         hierarchical_keywords={"Animals|Birds|Raptor"},
     )
     db.queue_change(photo_id, "keyword_remove", "Birds")
+    db.commit()
     db.queue_change(photo_id, "keyword_add", "Birds")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1166,8 +1195,11 @@ def test_sync_preview_clears_rename_flags_after_discarding_paired_keyword_add(
         hierarchical_keywords={"Animals|Birds|Raptor"},
     )
     db.queue_change(photo_id, "keyword_remove", "Birds")
+    db.commit()
     db.queue_change(photo_id, "keyword_add", "Birds")
+    db.commit()
     db.queue_change(photo_id, "rating", "4")
+    db.commit()
 
     client = app.test_client()
     initial = client.get("/api/sync/preview").get_json()
@@ -1203,6 +1235,7 @@ def test_sync_preview_treats_flag_as_unchanged_when_sync_is_disabled(
     ).fetchone()["path"]
     write_pick_flag(os.path.join(folder, "test.xmp"), "rejected")
     db.queue_change(photo_id, "flag", "flagged")
+    db.commit()
     config = cfg.load()
     config["sync_flags_to_xmp"] = False
     cfg.save(config)
@@ -1233,6 +1266,7 @@ def test_sync_preview_does_not_promise_removal_from_unreadable_xmp(
     with open(os.path.join(folder, "test.xmp"), "w") as sidecar:
         sidecar.write("not xml")
     db.queue_change(photo_id, "keyword_remove", "Raptor")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1283,6 +1317,7 @@ def test_sync_preview_keyword_add_matches_actual_sidecar_change(
         write_sidecar(sidecar, flat_keywords=existing, hierarchical_keywords=hierarchy)
     original_bytes = sidecar.read_bytes() if sidecar.exists() else None
     db.queue_change(photo_id, "keyword_add", "Western meadowlark")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1315,6 +1350,7 @@ def test_sync_preview_treats_absent_keyword_removal_as_unchanged(
     """A keyword removal against a missing sidecar accurately reports a no-op."""
     app, db, photo_id = client_with_photo
     db.queue_change(photo_id, "keyword_remove", "Raptor")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1356,7 +1392,9 @@ def test_sync_preview_reports_paired_flat_rename_as_replacement(
         hierarchical_keywords=set(),
     )
     db.queue_change(photo_id, "keyword_remove", "‘apapane")
+    db.commit()
     db.queue_change(photo_id, "keyword_add", "apapane")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1402,7 +1440,9 @@ def test_sync_preview_skips_writes_when_folder_is_offline(client_with_photo):
     ).fetchone()["path"]
 
     db.queue_change(photo_id, "keyword_add", "Raptor")
+    db.commit()
     db.queue_change(photo_id, "rating", "4")
+    db.commit()
 
     # Simulate the NAS going offline between when the photo was cataloged
     # and when the preview is opened.
@@ -1454,6 +1494,7 @@ def test_sync_preview_does_not_promise_edit_clear_from_unreadable_xmp(
     with open(os.path.join(folder, "test.xmp"), "w") as sidecar:
         sidecar.write("not xml")
     db.queue_change(photo_id, "edit_recipe", "")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1477,6 +1518,7 @@ def test_sync_preview_treats_absent_edit_marker_clear_as_unchanged(
     """A clear against a missing sidecar accurately reports a no-op."""
     app, db, photo_id = client_with_photo
     db.queue_change(photo_id, "edit_recipe", "")
+    db.commit()
 
     response = app.test_client().get("/api/sync/preview")
 
@@ -1900,6 +1942,7 @@ def test_sync_discard_records_history(app_and_db):
     pid = photos[0]['id']
 
     db.queue_change(pid, 'rating', '5')
+    db.commit()
     changes = db.pending_changes.list_all()
     change_ids = [c['id'] for c in changes]
 
@@ -1917,10 +1960,12 @@ def test_sync_discard_all_rejects_stale_preview_revision(app_and_db):
     app, db = app_and_db
     photos = db.photos.list_page()[:2]
     db.queue_change(photos[0]["id"], "rating", "3")
+    db.commit()
     client = app.test_client()
     revision = client.get("/api/sync/preview").get_json()["revision"]
 
     db.queue_change(photos[1]["id"], "rating", "4")
+    db.commit()
     response = client.post(
         "/api/sync/discard",
         json={"discard_all": True, "revision": revision},
@@ -1936,7 +1981,9 @@ def test_sync_discard_all_uses_reviewed_revision(app_and_db):
     app, db = app_and_db
     photos = db.photos.list_page()[:2]
     db.queue_change(photos[0]["id"], "rating", "3")
+    db.commit()
     db.queue_change(photos[1]["id"], "rating", "4")
+    db.commit()
     client = app.test_client()
     revision = client.get("/api/sync/preview").get_json()["revision"]
 
@@ -2327,6 +2374,7 @@ def test_sync_preview_names_the_location_keyword_it_will_write(client_with_photo
     _enable_location_keyword_writes(db)
     _assign_location(db, photo_id, ["United States", "California", "Kumeyaay Lake"])
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     payload = app.test_client().get("/api/sync/preview").get_json()
 
@@ -2349,6 +2397,7 @@ def test_sync_preview_reports_a_location_keyword_already_in_xmp(client_with_phot
     _enable_location_keyword_writes(db)
     _assign_location(db, photo_id, ["France", "Pont de Gau"])
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     photo = db.photos.get(photo_id)
     folder = db.folders.get(photo["folder_id"])["path"]
@@ -2384,6 +2433,7 @@ def test_sync_preview_reports_a_normalized_hierarchy_variant_as_already_listed(
     _enable_location_keyword_writes(db)
     _assign_location(db, photo_id, ["France", "Camargue", "Pont de Gau"])
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     photo = db.photos.get(photo_id)
     folder = db.folders.get(photo["folder_id"])["path"]
@@ -2420,6 +2470,7 @@ def test_sync_preview_reports_removing_location_keywords_when_disabled(
     app, db, photo_id = client_with_photo
     _assign_location(db, photo_id, ["France", "Pont de Gau"])
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     photo = db.photos.get(photo_id)
     folder = db.folders.get(photo["folder_id"])["path"]
@@ -2790,6 +2841,7 @@ def test_sync_preview_says_marker_only_when_the_keyword_is_already_gone(
     app, db, photo_id = client_with_photo
     _assign_location(db, photo_id, ["France", "Pont de Gau"])
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     photo = db.photos.get(photo_id)
     folder = db.folders.get(photo["folder_id"])["path"]
@@ -3139,6 +3191,7 @@ def test_photo_payloads_carry_render_key(app_and_db):
 
     def keys_for(recipe):
         db.set_photo_edit_recipe(pid, recipe)
+        db.commit()
         detail = client.get(f"/api/photos/{pid}").get_json()
         listing = client.get("/api/photos").get_json()
         query = client.post(

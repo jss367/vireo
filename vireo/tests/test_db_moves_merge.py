@@ -979,6 +979,7 @@ def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_p
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(survivor, unrelated)
     db.photo_review.set_flag(survivor, 'rejected')
+    db.commit()
     with db.transaction():
         edit_id = save_alternatives(db, [losing], ['Tropical Kingbird', "Couch's Kingbird"], 'Uncertain call', 'Audio')
         if status == 'resolved':

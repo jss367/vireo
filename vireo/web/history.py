@@ -61,12 +61,13 @@ def create_history_blueprint(
             return {}
         invalidate_photo_render_cache(db, photo_ids)
         updates: dict[str, JsonDict | None] = {}
-        for photo_id in photo_ids:
-            recipe = db.get_photo_edit_recipe(photo_id)
-            updates[str(photo_id)] = recipe
-            queue_edit_recipe_sync(
-                db, photo_id, recipe_to_json(recipe) or "",
-            )
+        with db.transaction():
+            for photo_id in photo_ids:
+                recipe = db.get_photo_edit_recipe(photo_id)
+                updates[str(photo_id)] = recipe
+                queue_edit_recipe_sync(
+                    db, photo_id, recipe_to_json(recipe) or "",
+                )
         return updates
 
     def _refresh_pipeline_cache_species_from_edit(db: Database, entry: JsonDict) -> bool:

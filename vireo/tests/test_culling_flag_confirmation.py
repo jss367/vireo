@@ -25,6 +25,7 @@ from keep_safety import review_culling_suggestions
 from repositories.edit_history import EditHistoryRepository
 from repositories.photo_review import PhotoReviewRepository
 from services.photo_review import PhotoReviewService, flag_note
+from unit_of_work import UnitOfWork
 
 
 def replay_methods():
@@ -63,6 +64,7 @@ class Catalog:
         create_current_flag_attribution(self.conn)
         self.active_workspace_id = 1
         self.fail_history = False
+        self._unit = UnitOfWork()
         self.history = EditHistoryRepository(
             self.conn, lambda: self.active_workspace_id, non_undoable=[],
             restore_species_representative=lambda *args: None,
@@ -74,6 +76,17 @@ class Catalog:
         return PhotoReviewRepository(self.conn, self.active_workspace_id)
 
     @property
+    def in_transaction(self):
+        return self.conn.in_transaction
+
+    def transaction(self, **options):
+        return self._unit.enter(self.conn, immediate=options.get("immediate", False),
+                                retry_busy=False, join=options.get("join", False))
+
+    def commit(self):
+        self.conn.commit()
+
+    @property
     def photos(self):
         def get_by_ids(ids):
             return {row["id"]: dict(row) for row in self.conn.execute(
@@ -82,10 +95,8 @@ class Catalog:
             ) if row["id"] in ids}
         return SimpleNamespace(get_by_ids=get_by_ids)
 
-    def queue_flag_change_if_enabled(self, photo_id, flag, *, _commit=True):
+    def queue_flag_change_if_enabled(self, photo_id, flag):
         self.conn.execute("INSERT INTO queued_flags VALUES(?,?)", (photo_id, flag))
-        if _commit:
-            self.conn.commit()
 
     def record_edit(self, *args, **kwargs):
         if self.fail_history:
@@ -135,6 +146,7 @@ class CullingFlagConfirmationTests(unittest.TestCase):
 
     def test_legacy_and_cached_claims_do_not_establish_confirmation(self):
         self.db.photo_review.set_flag(7, "flagged")
+        self.db.commit()
         for states in (None, {7: "flagged"}):
             with self.subTest(states=states):
                 result, photo = self.cull(states)
@@ -185,6 +197,7 @@ class CullingFlagConfirmationTests(unittest.TestCase):
 
     def test_undo_redo_preserve_captured_manual_and_unknown_states(self):
         self.db.photo_review.flag_ranked_candidate(7)
+        self.db.commit()
         self.service.set_flag(7, "flagged")
         first = self.latest_edit()
         self.db.replay(first, undo=True)
@@ -283,6 +296,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
     def test_real_catalog_undo_redo_preserves_confirmation(self):
         pid = self.ids[0]
         self.db.photo_review.flag_ranked_candidate(pid)
+        self.db.commit()
         self.service.set_flag(pid, "flagged")
         self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "flagged")
         undo_last_edit(self.db)
@@ -300,6 +314,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.service.set_flag(self.ids[0], "flagged")
         self.service.set_flag(self.ids[1], "rejected")
         self.db.photo_review.flag_ranked_candidate(self.ids[2])
+        self.db.commit()
         app = Flask(__name__)
         app.register_blueprint(create_caches_blueprint(
             lambda: self.db, lambda message, status: (jsonify(error=message), status), str(self.db_path), {},
@@ -340,9 +355,11 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         for source, reason in [(None, None), ("ranker", None), (None, "automated")]:
             with self.subTest(source=source, reason=reason):
                 self.db.photo_review.set_flag(best, "none")
+                self.db.commit()
                 self.db.photo_review.flag_ranked_candidate(best)
+                self.db.commit()
                 if source or reason:
-                    with self.db.photo_review.flag_write():
+                    with self.db.transaction(immediate=True):
                         self.db.photo_review.set_current_flag_note(
                             [best], "flagged", "ranking", source=source, reason=reason,
                         )
@@ -360,6 +377,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         # photographer decision either. Once both are confirmed, replay is valid.
         self.service.set_flag(best, "flagged")
         self.db.photo_review.set_flag(reject, "rejected")
+        self.db.commit()
         payload = {"best_photo_id": best, "reject_photo_ids": [reject]}
         self.assertEqual(client.post("/api/batch/best-batch-flags", json=payload).status_code, 409)
         self.assertIsNone(self.db.photo_review.culling_flag_states([reject])[reject]["confirmed_flag"])
@@ -474,6 +492,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
                 self.service.set_flag(survivor, "flagged")
                 if evidence == "unknown":
                     self.db.photo_review.set_flag(loser, "rejected")
+                    self.db.commit()
                 winning_flag = "rejected" if winner_is_loser else "flagged"
                 if evidence == "stale":
                     winning_flag = "none"
@@ -592,6 +611,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         from web.caches import create_caches_blueprint
 
         self.db.photo_review.flag_ranked_candidate(self.ids[0])
+        self.db.commit()
         app = Flask(__name__)
         app.register_blueprint(create_caches_blueprint(
             lambda: self.db, lambda message, status=400: (jsonify(error=message), status),
@@ -635,6 +655,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
 
         pid = self.ids[0]
         self.db.photo_review.flag_ranked_candidate(pid)
+        self.db.commit()
         self.db.conn.execute("DROP TABLE flag_attribution_history")
         self.db.conn.execute("PRAGMA user_version=25")
         self.db.commit()
@@ -658,6 +679,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.service.set_flag(self.ids[0], "flagged")
         self.service.set_flag(self.ids[1], "rejected")
         self.db.photo_review.flag_ranked_candidate(self.ids[2])
+        self.db.commit()
         photos = [{"id": pid, "flag": "flagged", "flag_confirmation_status": "confirmed", "label": "KEEP",
                    "automatic_keep_eligible": True, "keep_status": "validated"}
                   for pid in self.ids + [999999]]
@@ -688,6 +710,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
                 self.service.set_flag(self.ids[0], "flagged")
                 self.service.set_flag(self.ids[1], "rejected")
                 self.db.photo_review.flag_ranked_candidate(self.ids[2])
+                self.db.commit()
                 changed = True
 
         result = analyze_for_culling(self.db, pause_callback=confirm_during_run)

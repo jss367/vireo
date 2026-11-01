@@ -85,6 +85,7 @@ def test_api_photos_includes_edit_recipe(app_and_db):
     app, db = app_and_db
     photo = db.photos.list_page()[0]
     db.set_photo_edit_recipe(photo["id"], {"rotation": 90})
+    db.commit()
 
     client = app.test_client()
     resp = client.get('/api/photos')
@@ -895,6 +896,7 @@ def test_best_batch_cards_require_live_photographer_confirmation(app_and_db):
     for pid in pids:
         _mark_best_batch_quality(db, pid, 100.)
     db.photo_review.flag_ranked_candidate(pids[0])
+    db.commit()
     service = PhotoReviewService(db)
     service.set_flag(pids[1], "flagged")
     service.set_flag(pids[2], "rejected")
@@ -978,7 +980,9 @@ def test_api_best_batch_flags_cannot_apply_provisional_rank_or_overwrite_user_fl
     app, db = app_and_db
     best_id, reject_id, other_id = [p["id"] for p in db.photos.list_page()]
     db.photo_review.set_flag(reject_id, "flagged")
+    db.commit()
     db.photo_review.set_flag(other_id, "rejected")
+    db.commit()
     client = app.test_client()
     before = {p["id"]: p["flag"] for p in db.photos.list_page()}
     history = db.edit_history.list_recent()
@@ -1218,6 +1222,7 @@ def test_photo_detail_life_list_uses_primary_eligible_rep(app_and_db):
     db.set_species_representative("American Robin", p1)
     db.set_species_representative("American Robin", p2)
     db.photo_review.set_flag(p2, "rejected")
+    db.commit()
 
     data = client.get(f"/api/photos/{p1}").get_json()
 
@@ -1290,6 +1295,7 @@ def test_photo_detail_life_list_empty_for_rejected_photo(app_and_db):
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
     db.photo_review.set_flag(pid, "rejected")
+    db.commit()
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["life_list"] == []
@@ -1452,6 +1458,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
             "bioclip",
         )
     db.set_photo_edit_recipe(ordered_ids[0], {"rotation": 90})
+    db.commit()
 
     client = app.test_client()
     resp = client.post("/api/pipeline/selection-results", json={"photo_ids": ordered_ids})
@@ -2376,6 +2383,7 @@ def test_edited_original_retries_source_when_working_copy_is_evicted(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     assert db.get_photo_edit_recipe(photo_id), (
         "precondition: the edited-original branch only runs with a recipe"
     )
@@ -3219,6 +3227,7 @@ def test_edited_original_uses_working_copy_after_current_raw_failure(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
 
     loaded_paths = []
     original_load_image = image_loader.load_image
@@ -3973,6 +3982,7 @@ def test_edit_preview_pins_working_copy_when_original_is_offline(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(pid, {"rotation": 90})
+    db.commit()
 
     real_guard = media_module.working_copy_publication_guard
     guard_entered = False
@@ -4704,6 +4714,7 @@ def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypat
 
     app, db, photo_id = client_with_photo
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     original_load_image = image_loader.load_image
     seen_max_sizes = []
 
@@ -4759,6 +4770,7 @@ def test_edited_preview_does_not_adopt_stale_untracked_file_after_unlink_failure
     stale_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
     Image.new("RGB", (10, 10), "purple").save(stale_path, "JPEG")
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     assert db.caches.preview_get(photo_id, 1920) is None
     original_remove = app_module.os.remove
 
@@ -4791,6 +4803,7 @@ def test_cleared_recipe_does_not_adopt_stale_edited_preview_after_unlink_failure
     preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
 
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     edited = client.get(f"/photos/{photo_id}/preview?size=1920")
     assert edited.status_code == 200
     assert db.caches.preview_get(photo_id, 1920) is not None
@@ -4993,6 +5006,7 @@ def test_cropped_thumbnail_uses_original_when_working_copy_is_too_small(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     rendered = client.get(f"/thumbnails/{photo_id}.jpg")
 
@@ -5035,6 +5049,7 @@ def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
     from image_loader import RAW_DECODE_LINEAR
     original_load_image = thumbnails.load_image
     loaded = []
@@ -5107,6 +5122,7 @@ def test_cropped_thumbnail_uses_working_copy_on_first_raw_decode_failure(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
 
     original_load_image = thumbnails.load_image
     loaded_paths = []
@@ -5175,6 +5191,7 @@ def test_thumbnail_falls_back_when_raw_short_edge_is_smaller(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     original_load_image = thumbnails.load_image
     loaded_paths = []
@@ -5268,6 +5285,7 @@ def test_edited_raw_original_uses_trusted_working_copy_when_source_missing(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     rendered = client.get(f"/photos/{photo_id}/original")
 
@@ -5308,6 +5326,7 @@ def test_edited_original_uses_companion_after_raw_failure_marker(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     original_load_image = image_loader.load_image
     loaded_paths = []
@@ -5366,6 +5385,7 @@ def test_edited_original_records_raw_marker_when_companion_rescues_decode(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     def fake_load_image(file_path, max_size=1024, **kwargs):
         if str(file_path).lower().endswith(".nef"):
@@ -5426,6 +5446,7 @@ def test_edited_original_decodes_raw_with_highlight_preservation(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     load_calls = []
 
@@ -5457,6 +5478,7 @@ def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
 
     app, db, photo_id = client_with_photo
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     calls = []
     original_replace = app_module.os.replace
@@ -5504,6 +5526,7 @@ def test_cropped_preview_uses_original_when_working_copy_is_too_small(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
 
@@ -5541,6 +5564,7 @@ def test_cropped_preview_keeps_full_size_working_copy_fallback(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
 
     rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
 
@@ -6143,6 +6167,7 @@ def test_cropped_preview_uses_companion_before_raw_failure_marker(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
     original_load_image = image_loader.load_image
     loaded_paths = []
 
@@ -6193,6 +6218,7 @@ def test_non_crop_preview_uses_companion_before_raw_failure_marker(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     original_load_image = image_loader.load_image
     loaded_paths = []
 
@@ -6542,6 +6568,7 @@ def test_preview_falls_back_to_companion_on_first_raw_decode_failure(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     original_load_image = image_loader.load_image
     loaded_paths = []
@@ -6616,6 +6643,7 @@ def test_preview_falls_back_to_working_copy_on_first_raw_decode_failure(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
 
     original_load_image = image_loader.load_image
     loaded_paths = []
@@ -6682,6 +6710,7 @@ def test_preview_falls_back_to_companion_when_raw_short_edge_is_smaller(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+    db.commit()
 
     original_load_image = image_loader.load_image
     loaded_paths = []
@@ -6744,6 +6773,7 @@ def test_preview_keeps_raw_result_when_companion_is_smaller(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+    db.commit()
 
     original_load_image = image_loader.load_image
     loaded_paths = []
@@ -6811,6 +6841,7 @@ def test_edited_original_skips_recent_failed_raw_before_decode(
 
     app, db, photo_id = client_with_photo
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     file_mtime = db.conn.execute(
         "SELECT file_mtime FROM photos WHERE id=?", (photo_id,)
     ).fetchone()["file_mtime"]
@@ -7316,6 +7347,7 @@ def test_edited_original_uses_companion_when_raw_returns_undersized(
     # An edit recipe routes the request through the highlight-preserving
     # decode path that the new size-validation guards.
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     load_calls = []
 
@@ -7765,6 +7797,7 @@ def test_preview_job_applies_edit_recipe_to_warmed_file(
     preview_dir = os.path.join(vireo_dir, "previews")
     preview_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     original_load_image = image_loader.load_image
     seen_max_sizes = []
 
@@ -7824,6 +7857,7 @@ def test_preview_job_honors_raw_failure_marker_after_source_selection(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
         (photo_id,),
@@ -7957,6 +7991,7 @@ def test_preview_job_does_not_adopt_untracked_edited_preview_after_unlink_failur
     os.makedirs(preview_dir, exist_ok=True)
     preview_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     with open(preview_path, "wb") as f:
         f.write(b"stale-preview")
     assert db.caches.preview_get(photo_id, 1920) is None
@@ -8027,6 +8062,7 @@ def test_preview_job_uses_detail_row_exif_for_cropped_source_selection(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
     loaded_paths = []
 
     def tracking_load_image(file_path, max_size=1024):
@@ -8071,6 +8107,7 @@ def test_preview_job_preserves_existing_edited_preview_when_source_missing(
     app, db, photo_id = client_with_photo
     client = app.test_client()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
     assert rendered.status_code == 200
 
@@ -8409,6 +8446,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
         width=200, height=150,
     )
     db.set_photo_edit_recipe(pid_edited, {"adjustments": {"exposure": 1.0}})
+    db.commit()
 
     # Simulate a pre-version-bump deployment: cached renders exist on disk
     # and in preview_cache, and the stored version lags behind the current.
@@ -8517,6 +8555,7 @@ def test_edit_math_version_migration_leaves_version_on_failed_purge(
         width=200, height=150,
     )
     db.set_photo_edit_recipe(pid_edited, {"adjustments": {"exposure": 1.0}})
+    db.commit()
 
     edited_thumb = thumb_dir / f"{pid_edited}.jpg"
     edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
@@ -8578,6 +8617,7 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
         file_size=100, file_mtime=0.0, width=40, height=30,
     )
     db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
+    db.commit()
     db.meta.set("edit_math_version", str(EDIT_MATH_VERSION - 1))
     db.conn.commit()
     db.close()
@@ -8638,6 +8678,7 @@ def test_external_edit_handoff_meta_includes_math_version(
     app, db, photo_id = client_with_photo
     client = app.test_client()
     db.set_photo_edit_recipe(photo_id, {"adjustments": {"exposure": 0.5}})
+    db.commit()
 
     resp = client.post(
         "/api/photos/open-external",
@@ -8688,6 +8729,7 @@ def test_edit_math_version_migration_scans_preview_dir_once(
         db.set_photo_edit_recipe(
             pid, {"adjustments": {"exposure": 0.2 * (i + 1)}},
         )
+        db.commit()
         edited_pids.append(pid)
         # An untracked preview file (not in preview_cache) so the migration
         # actually exercises the listdir-driven orphan sweep.
@@ -12684,6 +12726,7 @@ def _seed_sortable_photos(db, count=12):
         )
         # Reverse the rating order relative to filename order.
         db.photo_review.set_rating(photo_id, 5 if index >= count - 2 else 1)
+        db.commit()
         ids.append(photo_id)
     return folder, ids
 
@@ -14674,6 +14717,7 @@ def test_edit_render_touches_working_copy_source(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     # Age the WC well past the throttle so a touch is not skipped as a
     # recent modification.
@@ -14733,6 +14777,7 @@ def test_edit_render_touches_working_copy_source_under_guard(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     aged = time.time() - 24 * 3600
     os.utime(wc_path, (aged, aged))
@@ -14812,6 +14857,7 @@ def test_edit_preview_touches_working_copy_under_guard(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     aged = time.time() - 24 * 3600
     os.utime(wc_path, (aged, aged))
@@ -15097,6 +15143,7 @@ def test_partial_local_preset_rebinds_masks_and_keeps_target_global_edits(client
     assert "rotation" not in preset["recipe"]
     assert preset["recipe"]["local"]["mask"]["ref"] != mask["ref"]
     current = db.set_photo_edit_recipe(pid, {"rotation": 270, "adjustments": {"exposure": -1}})
+    db.commit()
     preview = client.post(f'/api/photos/{pid}/edit-recipe/compose', json={
         "current": current, "recipe": preset["recipe"], "fields": preset["fields"],
     })

@@ -73,6 +73,7 @@ def test_sync_to_xmp_writes_keyword_add(tmp_path):
 
     # Queue a keyword_add change
     db.queue_change(pid, 'keyword_add', 'Northern cardinal')
+    db.commit()
 
     result = sync_to_xmp(db)
     assert result['synced'] == 1
@@ -108,6 +109,7 @@ def test_sync_to_xmp_keyword_add_canonicalizes_existing_variant(tmp_path):
     )
 
     db.queue_change(pid, 'keyword_add', 'apapane')
+    db.commit()
 
     result = sync_to_xmp(db)
     assert result['synced'] == 1
@@ -147,6 +149,7 @@ def test_sync_to_xmp_keyword_add_preserves_hierarchies_with_matching_segment(
     )
 
     db.queue_change(pid, 'keyword_add', 'Hawk')
+    db.commit()
 
     result = sync_to_xmp(db)
     assert result['synced'] == 1
@@ -183,6 +186,7 @@ def test_sync_to_xmp_keyword_remove_flat_leaves_matching_hierarchy(tmp_path):
     )
 
     db.queue_change(pid, 'keyword_remove_flat', 'Verdin')
+    db.commit()
 
     result = sync_to_xmp(db)
     assert result['synced'] == 1
@@ -224,9 +228,11 @@ def test_sync_to_xmp_clears_sibling_workspace_flat_removals(tmp_path, monkeypatc
     db.queue_change(
         pid, "keyword_remove_flat", "Wildlife", workspace_id=ws1,
     )
+    db.commit()
     db.queue_change(
         pid, "keyword_remove_flat", "Wildlife", workspace_id=ws2,
     )
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -260,6 +266,7 @@ def test_sync_to_xmp_writes_rating(tmp_path):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     db.queue_change(pid, 'rating', '4')
+    db.commit()
 
     result = sync_to_xmp(db)
     assert result['synced'] == 1
@@ -288,6 +295,7 @@ def test_sync_to_xmp_writes_edit_recipe(tmp_path):
         "edit_recipe",
         '{"crop":{"h":0.8,"w":0.7,"x":0.1,"y":0.1},"version":1}',
     )
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -313,7 +321,9 @@ def test_sync_to_xmp_writes_rating_after_edit_recipe_creates_sidecar(tmp_path):
     os.remove(xmp_path)
 
     db.queue_change(pid, "rating", "5")
+    db.commit()
     db.queue_change(pid, "edit_recipe", '{"exposure":0.5}')
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -341,6 +351,7 @@ def test_sync_to_xmp_clears_edit_recipe_marker(tmp_path):
     write_edit_recipe(xmp_path, '{"rotation":90,"version":1}')
 
     db.queue_change(pid, "edit_recipe", "")
+    db.commit()
     result = sync_to_xmp(db)
 
     assert result["synced"] == 1
@@ -370,6 +381,7 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     original_token = db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     (original_row,) = db.pending_changes.list_all()
     original_id = original_row["id"]
 
@@ -389,6 +401,7 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
             replacement_token = db.queue_change(
                 pid, "keyword_add", "Kestrel",
             )
+            db.commit()
             (replacement_row,) = db.pending_changes.list_all()
             assert replacement_row["id"] == original_id
             assert replacement_row["change_token"] == replacement_token
@@ -424,7 +437,9 @@ def test_sync_to_xmp_limits_sync_to_selected_change_ids(tmp_path):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     db.queue_change(pid, "keyword_add", "Northern cardinal")
+    db.commit()
     db.queue_change(pid, "rating", "4")
+    db.commit()
     pending = db.pending_changes.list_all()
     ids_by_type = {c["change_type"]: c["id"] for c in pending}
 
@@ -455,6 +470,7 @@ def test_sync_to_xmp_handles_missing_file(tmp_path):
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='missing.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.queue_change(pid, 'keyword_add', 'Test')
+    db.commit()
 
     result = sync_to_xmp(db)
     assert result['failed'] == 1
@@ -562,6 +578,7 @@ def test_sync_from_xmp_does_not_restore_keyword_with_pending_removal(tmp_path):
         tmp_path, db, keywords={"Wildlife"},
     )
     db.queue_change(pid, "keyword_remove_flat", "Wildlife")
+    db.commit()
 
     sync_from_xmp(db, [pid])
 
@@ -589,6 +606,7 @@ def test_sync_from_xmp_flat_removal_preserves_same_name_hierarchy(tmp_path):
     db.tag_photo(pid, flat)
     db.tag_photo(pid, nested)
     db.queue_change(pid, "keyword_remove_flat", "Wildlife")
+    db.commit()
 
     sync_from_xmp(db, [pid])
 
@@ -706,6 +724,7 @@ def test_sync_to_xmp_reports_unsupported_flag_changes_when_disabled(tmp_path, mo
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     db.queue_change(pid, 'flag', 'flagged')
+    db.commit()
 
     before = ET.tostring(ET.parse(xmp_path).getroot(), encoding='unicode')
     result = sync_to_xmp(db)
@@ -737,6 +756,7 @@ def test_sync_to_xmp_writes_flag_when_enabled(tmp_path, monkeypatch):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     db.queue_change(pid, 'flag', 'rejected')
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -771,6 +791,7 @@ def test_sync_to_xmp_treats_legacy_null_flag_as_none(tmp_path, monkeypatch):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     db.queue_change(pid, 'flag', None)
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -815,6 +836,7 @@ def test_sync_to_xmp_writes_effective_location(tmp_path, monkeypatch):
     )
     db.conn.commit()
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -861,7 +883,9 @@ def test_sync_to_xmp_writes_rating_after_location_creates_sidecar(
     db.conn.commit()
 
     db.queue_change(pid, "rating", "4")
+    db.commit()
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -892,6 +916,7 @@ def test_sync_to_xmp_removes_stale_vireo_location_when_effective_location_missin
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     write_gps_location(xmp_path, 48.8566, 2.3522, source="keyword")
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -930,6 +955,7 @@ def test_sync_to_xmp_clears_location_change_without_writing_when_disabled(tmp_pa
     )
     db.conn.commit()
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -960,6 +986,7 @@ def test_sync_to_xmp_disabled_location_change_removes_stale_vireo_gps(tmp_path, 
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     write_gps_location(xmp_path, 48.8566, 2.3522, source="keyword")
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -996,6 +1023,7 @@ def test_sync_to_xmp_location_cleanup_does_not_write_exif_fallback(tmp_path, mon
     db.conn.commit()
     write_gps_location(xmp_path, 48.8566, 2.3522, source="keyword")
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -1045,6 +1073,7 @@ def test_sync_to_xmp_location_lookup_bypasses_workspace_membership(tmp_path, mon
     )
     db.conn.commit()
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     # Simulate the unlinked-staging shape: the folder that holds the
     # photo is no longer linked to any workspace. get_assigned_photo_location
@@ -1104,7 +1133,9 @@ def test_sync_to_xmp_add_survives_normalized_remove_for_same_photo(tmp_path):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"‘apapane"})
 
     db.queue_change(pid, "keyword_remove", "‘apapane")
+    db.commit()
     db.queue_change(pid, "keyword_add", "apapane")
+    db.commit()
 
     result = sync_to_xmp(db)
     assert result["synced"] == 1
@@ -1139,7 +1170,9 @@ def test_sync_to_xmp_selected_add_pulls_in_paired_legacy_remove(tmp_path):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"‘apapane"})
 
     db.queue_change(pid, "keyword_remove", "‘apapane")
+    db.commit()
     db.queue_change(pid, "keyword_add", "apapane")
+    db.commit()
     pending = db.pending_changes.list_all()
     ids_by_type = {c["change_type"]: c["id"] for c in pending}
 
@@ -1184,7 +1217,9 @@ def test_sync_to_xmp_normalized_rename_preserves_unrelated_hierarchy(tmp_path):
     )
 
     db.queue_change(pid, 'keyword_remove', '‘Birds')
+    db.commit()
     db.queue_change(pid, 'keyword_add', 'Birds')
+    db.commit()
 
     result = sync_to_xmp(db)
     assert result['synced'] == 1
@@ -1264,6 +1299,7 @@ def test_sync_result_reports_partial_failure_to_the_job_layer(tmp_path, monkeypa
     db.set_active_workspace(db.ensure_default_workspace())
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, 'keyword_add', 'Test')
+    db.commit()
 
     def refuse(tree, xmp_path):
         raise PermissionError(13, "Permission denied")
@@ -1299,6 +1335,7 @@ def test_sync_failure_reasons_are_deduplicated(tmp_path, monkeypatch):
         pid = photo_ingest.add_photo(db, folder_id=fid, filename=f'missing{i}.jpg',
                            extension='.jpg', file_size=100, file_mtime=1.0)
         db.queue_change(pid, 'keyword_add', 'Test')
+        db.commit()
 
     result = sync_to_xmp(db)
     assert result["failed"] == 3
@@ -1327,6 +1364,7 @@ def test_sync_failure_reason_ignores_per_photo_filename(tmp_path, monkeypatch):
     for i in range(4):
         pid, _ = _setup_photo_with_xmp(tmp_path / f"lot{i}", db)
         db.queue_change(pid, 'keyword_add', 'Test')
+        db.commit()
         pids.append(pid)
 
     def refuse_with_filename(tree, xmp_path):
@@ -1499,9 +1537,13 @@ def test_sync_publishes_each_sidecar_once(tmp_path, monkeypatch):
     db.set_active_workspace(db.ensure_default_workspace())
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"Wildlife"})
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(pid, "keyword_remove", "Wildlife")
+    db.commit()
     db.queue_change(pid, "rating", "4")
+    db.commit()
     db.queue_change(pid, "flag", "flagged")
+    db.commit()
 
     published = _count_publishes(monkeypatch)
     result = sync_to_xmp(db)
@@ -1525,12 +1567,16 @@ def test_sync_skips_publishing_an_already_correct_sidecar(tmp_path, monkeypatch)
     db.set_active_workspace(db.ensure_default_workspace())
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"Osprey"})
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(pid, "rating", "3")
+    db.commit()
     assert sync_to_xmp(db)["synced"] == 1
 
     before = os.path.getmtime(xmp_path)
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(pid, "rating", "3")
+    db.commit()
 
     published = _count_publishes(monkeypatch)
     result = sync_to_xmp(db)
@@ -1561,6 +1607,7 @@ def test_sync_writes_independent_sidecars_concurrently(tmp_path):
     for i in range(2):
         pid, _ = _setup_photo_with_xmp(tmp_path / f"lot{i}", db)
         db.queue_change(pid, "keyword_add", "Osprey")
+        db.commit()
 
     barrier = threading.Barrier(2, timeout=30)
     original = xmp_document._write_tree_atomic
@@ -1596,7 +1643,9 @@ def test_sync_keeps_photos_sharing_a_sidecar_on_one_writer(tmp_path):
     raw_id = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(jpeg_id, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(raw_id, "keyword_add", "Kestrel")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -1619,10 +1668,12 @@ def test_sync_resolves_paths_once_per_run_and_folder(tmp_path, monkeypatch):
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     folder_id = db.photos.get(pid)["folder_id"]
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     for i in range(4):
         sibling = photo_ingest.add_photo(db, folder_id=folder_id, filename=f"more{i}.jpg",
                                extension=".jpg", file_size=100, file_mtime=1.0)
         db.queue_change(sibling, "keyword_add", "Osprey")
+        db.commit()
 
     tree_calls = []
     original_tree = FolderRepository.tree
@@ -1670,7 +1721,9 @@ def test_sync_serializes_photos_reached_through_folder_alias(tmp_path):
         file_size=100, file_mtime=1.0,
     )
     db.queue_change(jpeg_id, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(raw_id, "keyword_add", "Kestrel")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -1720,7 +1773,9 @@ def test_sync_serializes_case_variant_sidecars_without_merging_them(tmp_path):
     upper_path = os.path.join(folder, "BIRD.xmp")
     write_sidecar(upper_path, flat_keywords=set(), hierarchical_keywords=set())
     db.queue_change(a_id, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(b_id, "keyword_add", "Kestrel")
+    db.commit()
 
     threads = []
     original = xmp_document._write_tree_atomic
@@ -1790,7 +1845,9 @@ def test_sync_decouples_failure_between_case_variant_sidecars(tmp_path):
     write_sidecar(upper_path, flat_keywords=set(), hierarchical_keywords=set())
 
     db.queue_change(a_id, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(b_id, "keyword_add", "Kestrel")
+    db.commit()
 
     original = xmp_document._write_tree_atomic
 
@@ -1842,7 +1899,9 @@ def test_sync_serializes_photos_whose_sidecars_are_symlinked_together(tmp_path):
     os.symlink(target_xmp, os.path.join(folder, "hawk.xmp"))
 
     db.queue_change(target_id, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(link_id, "keyword_add", "Kestrel")
+    db.commit()
 
     # Widen the window between parse and publish so an unserialized run
     # would reliably lose one of the two keywords.
@@ -1879,7 +1938,9 @@ def test_sync_reports_a_malformed_queue_row_without_aborting_the_run(tmp_path):
     bad_id, _ = _setup_photo_with_xmp(tmp_path / "bad", db)
     good_id, good_xmp = _setup_photo_with_xmp(tmp_path / "good", db)
     db.queue_change(bad_id, "rating", "not-a-number")
+    db.commit()
     db.queue_change(good_id, "keyword_add", "Osprey")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -1925,7 +1986,9 @@ def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
     write_sidecar(xmp_b, flat_keywords=set(), hierarchical_keywords=set())
 
     db.queue_change(a_id, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(b_id, "keyword_add", "Kestrel")
+    db.commit()
 
     threads = []
     original = xmp_document._write_tree_atomic
@@ -1963,6 +2026,7 @@ def test_sync_clears_by_token_so_a_replacement_row_survives(tmp_path, monkeypatc
     db.set_active_workspace(db.ensure_default_workspace())
     photo, _xmp_path = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(photo, "keyword_add", "Osprey")
+    db.commit()
     selected = db.conn.execute("SELECT id FROM pending_changes").fetchone()["id"]
 
     real_write = sync._write_photo_sync
@@ -2066,6 +2130,7 @@ def test_sync_to_xmp_writes_location_keywords(tmp_path, monkeypatch):
     )
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -2100,6 +2165,7 @@ def test_sync_to_xmp_writes_location_keywords_without_coordinates(
     leaf = _add_location_chain(db, ["Grandma's garden"])
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     assert sync_to_xmp(db)["synced"] == 1
     assert read_keywords(xmp_path) == {"Grandma's garden"}
@@ -2123,6 +2189,7 @@ def test_sync_to_xmp_creates_a_sidecar_for_location_keywords(tmp_path, monkeypat
     leaf = _add_location_chain(db, ["France", "Camargue"])
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     assert sync_to_xmp(db)["synced"] == 1
     assert os.path.exists(xmp_path)
@@ -2158,6 +2225,7 @@ def test_sync_to_xmp_keeps_pipe_named_location_change_queued(
     leaf = _add_location_chain(db, ["Home|Cabin"])
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     result = sync_to_xmp(db)
 
@@ -2188,11 +2256,13 @@ def test_sync_to_xmp_rewrites_location_keywords_when_the_place_changes(
     first = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
     db.set_photo_location(pid, first)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
 
     second = _add_location_chain(db, ["France", "Pont de Gau"])
     db.set_photo_location(pid, second)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
 
     assert read_keywords(xmp_path) == {"Pont de Gau"}
@@ -2216,10 +2286,12 @@ def test_sync_to_xmp_removes_location_keywords_when_the_place_is_cleared(
     leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
 
     db.locations.clear_photo(pid)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
 
     assert read_keywords(xmp_path) == {"House finch"}
@@ -2243,11 +2315,13 @@ def test_sync_to_xmp_removes_location_keywords_when_the_setting_is_off(
     leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
     assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
 
     _location_keyword_config(tmp_path, monkeypatch, keywords=False)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
 
     assert read_keywords(xmp_path) == set()
@@ -2268,6 +2342,7 @@ def test_sync_to_xmp_leaves_lightroom_location_keywords_alone(tmp_path, monkeypa
     )
 
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
 
     assert read_keywords(xmp_path) == {"Somebody's own place name"}
@@ -2299,6 +2374,7 @@ def test_sync_to_xmp_defers_location_when_config_read_fails(
     leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
     assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
 
@@ -2318,6 +2394,7 @@ def test_sync_to_xmp_defers_location_when_config_read_fails(
     monkeypatch.setattr(cfg, "load_strict", _raise)
 
     db.queue_change(pid, "location", "effective")
+    db.commit()
     result = sync_to_xmp(db)
 
     assert result["synced"] == 0
@@ -2353,6 +2430,7 @@ def test_sync_to_xmp_defers_location_when_config_file_is_corrupt(
     leaf = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
     assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
 
@@ -2366,6 +2444,7 @@ def test_sync_to_xmp_defers_location_when_config_file_is_corrupt(
         f.write("not valid json {{{")
 
     db.queue_change(pid, "location", "effective")
+    db.commit()
     result = sync_to_xmp(db)
 
     assert result["synced"] == 0
@@ -2402,6 +2481,7 @@ def test_sync_to_xmp_preserves_ordinary_keyword_matching_cleared_location_leaf(
     leaf = _add_location_chain(db, ["France", "Paris"])
     db.set_photo_location(pid, leaf)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
     assert read_keywords(xmp_path) == {"Paris"}
 
@@ -2410,7 +2490,9 @@ def test_sync_to_xmp_preserves_ordinary_keyword_matching_cleared_location_leaf(
     # no-op; cleanup must not strip it under the marker's flat ownership.
     db.locations.clear_photo(pid)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     db.queue_change(pid, "keyword_add", "Paris")
+    db.commit()
     sync_to_xmp(db)
 
     assert "Paris" in read_keywords(xmp_path)
@@ -2441,13 +2523,16 @@ def test_sync_to_xmp_preserves_ordinary_keyword_matching_reassigned_location_lea
     first = _add_location_chain(db, ["France", "Paris"])
     db.set_photo_location(pid, first)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
     assert read_keywords(xmp_path) == {"Paris"}
 
     second = _add_location_chain(db, ["United Kingdom", "London"])
     db.set_photo_location(pid, second)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     db.queue_change(pid, "keyword_add", "Paris")
+    db.commit()
     sync_to_xmp(db)
 
     assert read_keywords(xmp_path) == {"Paris", "London"}
@@ -2488,6 +2573,7 @@ def test_sync_from_xmp_ignores_a_stale_vireo_location_keyword(tmp_path, monkeypa
     first = _add_location_chain(db, ["United States", "Kumeyaay Lake"])
     db.set_photo_location(pid, first)
     db.queue_change(pid, "location", "effective")
+    db.commit()
     sync_to_xmp(db)
 
     # Reassigned in Vireo but not yet written out: the sidecar still names the
@@ -2495,6 +2581,7 @@ def test_sync_from_xmp_ignores_a_stale_vireo_location_keyword(tmp_path, monkeypa
     second = _add_location_chain(db, ["France", "Pont de Gau"])
     db.set_photo_location(pid, second)
     db.queue_change(pid, "location", "effective")
+    db.commit()
 
     sync_from_xmp(db, [pid])
 
@@ -2516,6 +2603,7 @@ def test_sync_checkpoint_survives_interruption_and_retry(tmp_path, db, monkeypat
         pid, path = _setup_photo_with_xmp(tmp_path / str(index), db)
         photos.append((pid, path))
         db.queue_change(pid, "keyword_add", "Osprey")
+        db.commit()
     monkeypatch.setattr(sync, "as_completed", lambda futures: iter(futures))
     monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1 if trigger == "count" else 500)
     clock = iter([0, 6, 6])
@@ -2558,10 +2646,14 @@ def test_sync_checkpoint_preserves_failures_and_reports_counts(tmp_path, db, mon
     failed, failed_path = _setup_photo_with_xmp(tmp_path / "failed", db)
     malformed, _ = _setup_photo_with_xmp(tmp_path / "malformed", db)
     db.queue_change(good, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(good, "flag", "flagged")
+    db.commit()
     monkeypatch.setattr(sync, "_sync_flags_to_xmp_enabled", lambda db: False)
     db.queue_change(failed, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(malformed, "rating", "invalid")
+    db.commit()
     real_write = sync._write_photo_sync
 
     def write(path, *args, **kwargs):
@@ -2590,6 +2682,7 @@ def test_sync_checkpoint_waits_for_shared_sidecar_group(tmp_path, db, monkeypatc
                           extension=".nef", file_size=100, file_mtime=1.0)
     for pid in (first, second):
         db.queue_change(pid, "keyword_add", str(pid))
+        db.commit()
     monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1)
     real_write = sync._write_photo_sync
     writes = []
@@ -2618,6 +2711,7 @@ def test_sync_legacy_checkpoint_keeps_tokened_replacement(tmp_path, db, monkeypa
     db.set_active_workspace(db.ensure_default_workspace())
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     db.conn.execute("UPDATE pending_changes SET change_token = NULL")
     db.conn.commit()
     rowid = db.pending_changes.list_all()[0]["id"]
@@ -2625,7 +2719,9 @@ def test_sync_legacy_checkpoint_keeps_tokened_replacement(tmp_path, db, monkeypa
 
     def replace_before_clear(*args, **kwargs):
         db.remove_pending_changes(pid)
+        db.commit()
         db.queue_change(pid, "rating", "5")
+        db.commit()
         assert db.pending_changes.list_all()[0]["id"] == rowid
         return real_clear(*args, **kwargs)
 
@@ -2646,6 +2742,7 @@ def test_sync_checkpoint_failure_keeps_unacknowledged_changes(tmp_path, db, monk
         pid, _ = _setup_photo_with_xmp(tmp_path / str(index), db)
         photos.append(pid)
         db.queue_change(pid, "keyword_add", "Osprey")
+        db.commit()
     monkeypatch.setattr(sync, "as_completed", lambda futures: iter(futures))
     monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1)
     real_clear = pending_changes.clear_pending_by_token
@@ -2683,6 +2780,7 @@ def test_cancel_keyword_during_write_keeps_durable_repair(
         tmp_path, db, keywords={keyword} if initial_kind == "keyword_remove" else set(),
     )
     db.queue_change(pid, initial_kind, keyword)
+    db.commit()
     opposite = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
     real_publish = xmp.document._write_tree_atomic
     observed = []
@@ -2693,7 +2791,8 @@ def test_cancel_keyword_during_write_keeps_durable_repair(
             editor_db.set_active_workspace(db._ws_id())
             kind = initial_kind
             for _ in range(toggles):
-                editor_db._flip_pending_keyword_change(pid, keyword, kind, opposite[kind])
+                with editor_db.transaction():
+                    editor_db._flip_pending_keyword_change(pid, keyword, kind, opposite[kind])
                 kind = opposite[kind]
             observed.extend(dict(c) for c in editor_db.pending_changes.list_all())
         finally:
@@ -2727,10 +2826,12 @@ def test_keyword_cancelled_before_sync_claim_is_not_written(tmp_path, db, monkey
     db.set_active_workspace(db.ensure_default_workspace())
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     real_claim = pending_changes.claim_pending_changes_for_sync
 
     def cancel_then_claim(sync_db, changes):
-        db._flip_pending_keyword_change(pid, "Osprey", "keyword_add", "keyword_remove")
+        with db.transaction():
+            db._flip_pending_keyword_change(pid, "Osprey", "keyword_add", "keyword_remove")
         return real_claim(sync_db, changes)
 
     monkeypatch.setattr(pending_changes, "claim_pending_changes_for_sync", cancel_then_claim)
@@ -2762,12 +2863,18 @@ def test_shared_sidecar_preserves_interleaved_edits(tmp_path, db, alias, kind):
                           extension=os.path.splitext(filename)[1], file_size=100, file_mtime=1.0)
     if kind == "rating":
         db.queue_change(first, "rating", "1")
+        db.commit()
         db.queue_change(second, "rating", "2")
+        db.commit()
         db.queue_change(first, "rating", "3")
+        db.commit()
     else:
         db.queue_change(first, "keyword_add", "Osprey")
+        db.commit()
         db.queue_change(second, "keyword_remove", "Osprey")
+        db.commit()
         db.queue_change(first, "keyword_add", "Kestrel")
+        db.commit()
     result = sync.sync_to_xmp(db)
     assert result["ok"], result
     assert result["synced"] == 2
@@ -2788,9 +2895,13 @@ def test_shared_sidecar_keeps_latest_intent_per_field(tmp_path, db, monkeypatch)
     second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "rating", "1")
+    db.commit()
     db.queue_change(second, "rating", "2")
+    db.commit()
     db.queue_change(second, "flag", "flagged")
+    db.commit()
     db.queue_change(first, "flag", "rejected")
+    db.commit()
     assert sync.sync_to_xmp(db)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "2"
     assert read_sync_preview_metadata(path)["flag"] == "rejected"
@@ -2806,6 +2917,7 @@ def test_shared_sidecar_failure_retains_order_for_retry(tmp_path, db, monkeypatc
                           extension=".nef", file_size=100, file_mtime=1.0)
     for pid, rating in [(first, "1"), (second, "2"), (first, "3")]:
         db.queue_change(pid, "rating", rating)
+        db.commit()
     real_write = sync._write_photo_sync
 
     def fail_middle(path, plan, *args, **kwargs):
@@ -2837,6 +2949,7 @@ def test_shared_sidecar_keyword_rename_stays_together(tmp_path, db):
         "VALUES (?, 'keyword_add', 'Birds', 'rename-add', ?)", (first, db._ws_id()),
     )
     db.queue_change(second, "keyword_add", "Kestrel")
+    db.commit()
     db.conn.execute(
         "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) "
         "VALUES (?, 'keyword_remove', '‘Birds', 'rename-remove', ?)", (first, db._ws_id()),
@@ -2857,7 +2970,9 @@ def test_shared_sidecar_creating_keyword_keeps_earlier_rating(tmp_path, db):
     second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "rating", "3")
+    db.commit()
     db.queue_change(second, "keyword_add", "Osprey")
+    db.commit()
     assert sync.sync_to_xmp(db)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "3"
 
@@ -2868,7 +2983,9 @@ def test_unwritten_keyword_round_trip_still_cancels(tmp_path, db, kind):
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     opposite = "keyword_remove" if kind == "keyword_add" else "keyword_add"
     db.queue_change(pid, kind, "Osprey")
-    db._flip_pending_keyword_change(pid, "Osprey", kind, opposite)
+    db.commit()
+    with db.transaction():
+        db._flip_pending_keyword_change(pid, "Osprey", kind, opposite)
     assert not db.pending_changes.list_all()
 
 
@@ -2879,11 +2996,14 @@ def test_sync_claim_does_not_take_a_replacement_with_reused_id(tmp_path, db, mon
     db.set_active_workspace(db.ensure_default_workspace())
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     real_claim = pending_changes.claim_pending_changes_for_sync
 
     def replace_then_claim(sync_db, changes):
         db.remove_pending_changes(pid)
+        db.commit()
         db.queue_change(pid, "keyword_add", "Kestrel")
+        db.commit()
         assert db.pending_changes.list_all()[0]["id"] == changes[0]["id"]
         return real_claim(sync_db, changes)
 
@@ -2901,10 +3021,13 @@ def test_sync_claim_only_marks_selected_rows(tmp_path, db):
     db.set_active_workspace(db.ensure_default_workspace())
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(pid, "keyword_add", "Kestrel")
+    db.commit()
     selected = db.pending_changes.list_all()[0]["id"]
     assert sync.sync_to_xmp(db, change_ids=[selected])["ok"]
-    db._flip_pending_keyword_change(pid, "Kestrel", "keyword_add", "keyword_remove")
+    with db.transaction():
+        db._flip_pending_keyword_change(pid, "Kestrel", "keyword_add", "keyword_remove")
     assert not db.pending_changes.list_all()
 
 
@@ -2912,8 +3035,10 @@ def test_started_keyword_cancellation_rolls_back_with_edit(tmp_path, db):
     db.set_active_workspace(db.ensure_default_workspace())
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
     claimed = pending_changes.claim_pending_changes_for_sync(db, db.pending_changes.list_all())
-    db.remove_pending_changes(pid, "keyword_add", "Osprey", _commit=False)
+    db.commit()
+    db.remove_pending_changes(pid, "keyword_add", "Osprey")
     assert [c["change_type"] for c in db.pending_changes.list_all()] == ["keyword_remove"]
     db.conn.rollback()
     assert [dict(c) for c in db.pending_changes.list_all()] == [dict(c) for c in claimed]
@@ -2928,7 +3053,9 @@ def test_shared_sidecar_preparation_failure_retains_newer_edits(tmp_path, db):
     second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "rating", "malformed")
+    db.commit()
     db.queue_change(second, "rating", "2")
+    db.commit()
     result = sync.sync_to_xmp(db)
     assert result["failed"] == 2
     assert result["synced"] == 0
@@ -2957,6 +3084,7 @@ def test_sync_case_aliases_preserve_order_and_retry(tmp_path, db, monkeypatch, f
                           extension=".nef", file_size=100, file_mtime=1.0)
     for pid, rating in [(first, "1"), (second, "2"), (first, "3")]:
         db.queue_change(pid, "rating", rating)
+        db.commit()
     if fail_middle:
         real_write = sync._write_photo_sync
 
@@ -2996,6 +3124,7 @@ def test_sync_distinct_missing_aliases_make_independent_progress(
     for pid in ([bad, good] if failing_first else [good, bad]):
         db.queue_change(pid, "rating" if pid == bad and failure_kind == "prepare" else "keyword_add",
                         "malformed" if pid == bad and failure_kind == "prepare" else "Osprey")
+        db.commit()
     real_stat, real_write = os.stat, sync._write_photo_sync
     written = []
 
@@ -3032,7 +3161,9 @@ def test_sync_missing_case_alias_preparation_failure_keeps_shared_queue(tmp_path
     second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="BIRD.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "rating", "malformed")
+    db.commit()
     db.queue_change(second, "keyword_add", "Osprey")
+    db.commit()
     result = sync.sync_to_xmp(db)
     assert result["synced"] == 0
     assert result["failed"] == 2
@@ -3059,7 +3190,9 @@ def test_sync_missing_case_alias_removal_survives_failed_add(tmp_path, db, monke
     second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="BIRD.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(second, "keyword_remove", "Osprey")
+    db.commit()
     real_write = sync._write_photo_sync
 
     def fail_add(path, plan, *args, **kwargs):
@@ -3097,6 +3230,7 @@ def test_keyword_edit_during_sync_keeps_corrective_intent(
     initial_op = 'keyword_remove' if initially_present else 'keyword_add'
     inverse_op = 'keyword_add' if initially_present else 'keyword_remove'
     db.queue_change(pid, initial_op, 'Osprey')
+    db.commit()
     fired = False
 
     def edit_after_snapshot(_status):
@@ -3106,9 +3240,11 @@ def test_keyword_edit_during_sync_keeps_corrective_intent(
         fired = True
         with Database(db._db_path, initialize_schema=False) as editor:
             editor.set_active_workspace(db._ws_id())
-            editor._flip_pending_keyword_change(pid, 'Osprey', initial_op, inverse_op)
+            with editor.transaction():
+                editor._flip_pending_keyword_change(pid, 'Osprey', initial_op, inverse_op)
             if revert_again:
-                editor._flip_pending_keyword_change(pid, 'Osprey', inverse_op, initial_op)
+                with editor.transaction():
+                    editor._flip_pending_keyword_change(pid, 'Osprey', inverse_op, initial_op)
 
     sync.sync_to_xmp(db, status_callback=edit_after_snapshot)
     sync.sync_to_xmp(db)
@@ -3126,6 +3262,7 @@ def test_interrupted_sync_claim_survives_restart(tmp_path, db, monkeypatch):
     db.set_active_workspace(db.ensure_default_workspace())
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, 'keyword_add', 'Osprey')
+    db.commit()
     original_write = sync._write_photo_sync
 
     def write_then_fail(*args, **kwargs):
@@ -3136,7 +3273,8 @@ def test_interrupted_sync_claim_survives_restart(tmp_path, db, monkeypatch):
     assert sync.sync_to_xmp(db)['failed'] == 1
     with Database(db._db_path, initialize_schema=False) as restarted:
         restarted.set_active_workspace(db._ws_id())
-        restarted._flip_pending_keyword_change(pid, 'Osprey', 'keyword_add', 'keyword_remove')
+        with restarted.transaction():
+            restarted._flip_pending_keyword_change(pid, 'Osprey', 'keyword_add', 'keyword_remove')
         assert [(c["change_type"], c["sync_started"]) for c in restarted.pending_changes.list_all()] == [("keyword_remove", 1)]
         monkeypatch.setattr(sync, '_write_photo_sync', original_write)
         assert sync.sync_to_xmp(restarted)['synced'] == 1
@@ -3167,6 +3305,7 @@ def test_shared_sidecar_preserves_interleaved_intents(tmp_path, db, kind, values
     for pid, value in zip((first, second, first), values, strict=True):
         db.queue_change(pid, value if kind == 'keyword' else kind,
                         'Osprey' if kind == 'keyword' else value)
+        db.commit()
     result = sync.sync_to_xmp(db)
     assert result['synced'] == 2
     assert not db.pending_changes.list_all()
@@ -3186,6 +3325,7 @@ def test_shared_sidecar_failure_retries_the_whole_sequence(tmp_path, db, monkeyp
                           extension='.nef', file_size=100, file_mtime=1)
     for pid, value in ((first, '1'), (second, '2'), (first, '3')):
         db.queue_change(pid, 'rating', value)
+        db.commit()
     original_write = sync._write_photo_sync
 
     def fail_second(path, plan, *args, **kwargs):
@@ -3211,6 +3351,7 @@ def test_sidecar_resolution_failure_does_not_abort_other_photos(tmp_path, db, mo
     good, good_path = _setup_photo_with_xmp(tmp_path / 'good', db)
     for pid in (bad, good):
         db.queue_change(pid, 'keyword_add', 'Osprey')
+        db.commit()
     realpath = os.path.realpath
 
     def fail_one(path, *args, **kwargs):
@@ -3256,10 +3397,13 @@ def test_keyword_cancellation_does_not_hide_latest_shared_sidecar_intent(
     initial = 'keyword_remove' if initially_present else 'keyword_add'
     inverse = 'keyword_add' if initially_present else 'keyword_remove'
     db.queue_change(first, initial, 'Osprey')
+    db.commit()
     db.queue_change(second, initial, 'Osprey')
+    db.commit()
     # Cancelling the first edit must preserve its inverse after the sibling
     # write, even when the sidecars have different stored paths/basenames.
-    db._flip_pending_keyword_change(first, 'Osprey', initial, inverse)
+    with db.transaction():
+        db._flip_pending_keyword_change(first, 'Osprey', initial, inverse)
     assert sync_to_xmp(db)['synced'] == 2
     assert read_keywords(path) == ({'Osprey'} if initially_present else set())
     assert not db.pending_changes.list_all()
@@ -3282,7 +3426,9 @@ def test_keyword_cancellation_before_case_variant_sidecars_are_created(tmp_path,
         photos.append(photo_ingest.add_photo(db, fid, filename, os.path.splitext(filename)[1], 1, 1.0))
     for pid in photos:
         db.queue_change(pid, 'keyword_add', 'Osprey')
-    db._flip_pending_keyword_change(photos[1], 'Osprey', 'keyword_add', 'keyword_remove')
+        db.commit()
+    with db.transaction():
+        db._flip_pending_keyword_change(photos[1], 'Osprey', 'keyword_add', 'keyword_remove')
     result = sync_to_xmp(db, create_missing_sidecars=True)
     assert result['failed'] == 0
     assert result['synced'] == (2 if shared else 1)
@@ -3305,8 +3451,11 @@ def test_keyword_cancellation_distinguishes_case_sensitive_sidecars(tmp_path, db
     second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)['folder_id'], filename='BIRD.nef',
                           extension='.nef', file_size=100, file_mtime=1)
     db.queue_change(first, 'keyword_add', 'Osprey')
+    db.commit()
     db.queue_change(second, 'keyword_add', 'Osprey')
-    db._flip_pending_keyword_change(second, 'Osprey', 'keyword_add', 'keyword_remove')
+    db.commit()
+    with db.transaction():
+        db._flip_pending_keyword_change(second, 'Osprey', 'keyword_add', 'keyword_remove')
     assert not [c for c in db.pending_changes.list_all() if c['photo_id'] == second]
     assert sync_to_xmp(db)['synced'] == 1
     assert read_keywords(other_path) == {'Osprey'}
@@ -3324,6 +3473,7 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
     keyword = db.add_keyword('Osprey')
     db.tag_photo(pid, keyword, source='manual')
     db.queue_change(pid, 'keyword_add', 'Osprey')
+    db.commit()
     db.record_edit('keyword_add', 'Added Osprey', str(keyword),
                    [{'photo_id': pid, 'old_value': '', 'new_value': str(keyword)}])
     with monkeypatch.context() as patch:
@@ -3380,6 +3530,7 @@ def test_casefold_collision_write_failure_leaves_other_sidecar_successful(tmp_pa
     monkeypatch.setattr(sync.os.path, 'normcase', collision_key)
     for pid, rating in ((photos[0], '1'), (photos[1], '2'), (photos[0], '3')):
         db.queue_change(pid, 'rating', rating)
+        db.commit()
     original_write = sync._write_photo_sync
 
     def fail_one(path, *args, **kwargs):
@@ -3409,6 +3560,7 @@ def test_failed_case_alias_is_retained_when_other_write_creates_sidecar(tmp_path
     paths = [str(folder / (name + '.xmp')) for name in ('bird', 'BIRD')]
     for pid, rating in zip(photos, ('1', '2'), strict=True):
         db.queue_change(pid, 'rating', rating)
+        db.commit()
     write = sync._write_photo_sync
 
     def fail_first(path, *args, **kwargs):
@@ -3440,6 +3592,7 @@ def test_opposing_keyword_intents_use_normalized_identity(tmp_path, db, monkeypa
     db.set_active_workspace(db.ensure_default_workspace())
     pid, path = _setup_photo_with_xmp(tmp_path, db, keywords={'Osprey'})
     db.queue_change(pid, initial, 'Osprey')
+    db.commit()
     write = sync._write_photo_sync
 
     def interrupted(*args, **kwargs):
@@ -3449,6 +3602,7 @@ def test_opposing_keyword_intents_use_normalized_identity(tmp_path, db, monkeypa
     monkeypatch.setattr(sync, '_write_photo_sync', interrupted)
     assert sync.sync_to_xmp(db)['failed'] == 1
     db.queue_change(pid, inverse, 'osprey')
+    db.commit()
     monkeypatch.setattr(sync, '_write_photo_sync', write)
     assert sync.sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == expected
@@ -3464,8 +3618,11 @@ def test_shared_sidecar_repeated_add_after_case_variant_removal(tmp_path, db):
     second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)['folder_id'], filename='bird.nef',
                           extension='.nef', file_size=100, file_mtime=1)
     db.queue_change(first, 'keyword_add', 'Osprey')
+    db.commit()
     db.queue_change(second, 'keyword_remove', 'osprey')
+    db.commit()
     db.queue_change(first, 'keyword_add', 'Osprey')
+    db.commit()
     assert sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == {'Osprey'}
     assert not db.pending_changes.list_all()

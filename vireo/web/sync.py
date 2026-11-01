@@ -1301,7 +1301,7 @@ def create_sync_blueprint(get_db: GetDb, json_error: JsonError, get_runner: GetR
                         ),
                     )
                 changes = db.pending_changes.delete_workspace(ws_id)
-                db.pending_changes.clear_equivalent_flat_removals(changes, _commit=False)
+                db.pending_changes.clear_equivalent_flat_removals(changes)
                 if changes:
                     items = _discard_history_items(changes)
                     db.record_edit(
@@ -1340,7 +1340,7 @@ def create_sync_blueprint(get_db: GetDb, json_error: JsonError, get_runner: GetR
             db.begin_immediate()
             changes = db.pending_changes.get_by_ids(change_ids)
             pending_changes.clear_pending(
-                db, change_ids, clear_equivalent_flat_removals=True, _commit=False,
+                db, change_ids, clear_equivalent_flat_removals=True,
             )
             if changes:
                 items = _discard_history_items(changes)

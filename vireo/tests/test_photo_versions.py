@@ -18,6 +18,7 @@ def test_virtual_copy_is_independent_and_history_is_reversible(app_and_db):
     client = app.test_client()
     pid = db.photos.list_page()[0]["id"]
     db.set_photo_edit_recipe(pid, {"rotation": 90})
+    db.commit()
     before_count = db.conn.execute("SELECT count(*) FROM photos").fetchone()[0]
     copy = create(client, pid)
     other = create(client, pid, source_version_id=copy["id"])

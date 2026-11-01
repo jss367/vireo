@@ -234,6 +234,7 @@ def test_api_add_keyword_clears_shared_flat_removals(app_and_db):
             photo["id"], "keyword_remove_flat", "Wildlife",
             workspace_id=ws_id,
         )
+        db.commit()
 
     resp = client.post(
         f"/api/photos/{photo['id']}/keywords",
@@ -5109,6 +5110,7 @@ def test_pipeline_page_init_attaches_photo_edit_recipes(app_and_db, monkeypatch)
     app, db = app_and_db
     photo = db.photos.list_page()[0]
     db.set_photo_edit_recipe(photo["id"], {"rotation": 90})
+    db.commit()
     db.conn.execute(
         """UPDATE photos
               SET eye_x = 0.72, eye_y = 0.31,
@@ -10039,6 +10041,7 @@ def test_batch_wildlife_excluded_updates_only_changed_photos_and_undoes(app_and_
         ).fetchall()
     ]
     db.update_photo_wildlife_excluded(photo_ids[0], True)
+    db.commit()
     client = app.test_client()
 
     resp = client.post(
@@ -10331,6 +10334,7 @@ def test_selection_wildlife_state_counts_full_selection_including_off_page(app_a
     ]
     assert len(ids) >= 2
     db.update_photo_wildlife_excluded(ids[0], True)
+    db.commit()
     client = app.test_client()
 
     resp = client.post(
@@ -13287,6 +13291,7 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     # the bucket. The stored rank is retained for undo, but it must not make the
     # active-selection filter report that Alpha still has a chosen highlight.
     db.photo_review.set_flag(photo_ids["Alpha Bird"], "rejected")
+    db.commit()
     assert species_for(highlight_selection="yes") == {"Gamma Bird"}
     assert species_for(
         highlight_selection="no", species_representative="no"
@@ -13295,17 +13300,20 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
         "Alpha Bird": {photo_ids["Alpha Bird"]: 1}
     }
     db.photo_review.set_flag(photo_ids["Alpha Bird"], "none")
+    db.commit()
     assert species_for(highlight_selection="yes") == {"Alpha Bird", "Gamma Bird"}
 
     # Representative preferences follow the same active-state rule while
     # keeping their stored row available for an un-reject.
     db.photo_review.set_flag(photo_ids["Beta Bird"], "rejected")
+    db.commit()
     assert species_for(species_representative="yes") == {"Gamma Bird"}
     assert db.get_species_representatives() == {
         "Beta Bird": photo_ids["Beta Bird"],
         "Gamma Bird": photo_ids["Gamma Bird"],
     }
     db.photo_review.set_flag(photo_ids["Beta Bird"], "none")
+    db.commit()
     assert species_for(species_representative="yes") == {"Beta Bird", "Gamma Bird"}
 
     response = client.get(
@@ -16610,6 +16618,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
             db.predictions.add(det_ids[0], species, 0.9 - i * 0.05, "bioclip", category="match")
             (collection_pids if enc_idx == 0 else other_pids).append(pid)
     db.set_photo_edit_recipe(collection_pids[0], {"rotation": 90})
+    db.commit()
 
     import json as _json
     cid = db.collections.add(
@@ -17508,6 +17517,7 @@ def test_sync_discard_reports_true_count(app_and_db):
     client = app.test_client()
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     db.queue_change(pid, "keyword_add", "Test Bird")
+    db.commit()
     change_id = db.pending_changes.list_all()[0]["id"]
 
     resp = client.post('/api/sync/discard',
@@ -17558,9 +17568,11 @@ def test_sync_discard_clears_sibling_workspace_flat_removals(app_and_db):
         db.queue_change(
             pid, "keyword_remove_flat", "Wildlife", workspace_id=ws1,
         )
+        db.commit()
         db.queue_change(
             pid, "keyword_remove_flat", "Wildlife", workspace_id=ws2,
         )
+        db.commit()
         return db.conn.execute(
             """SELECT id FROM pending_changes
                WHERE photo_id = ? AND workspace_id = ?
@@ -19030,6 +19042,7 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
     photo, _ = _seed_prediction_photo(db, "all-sidecar.jpg", species, 0.9)
     if pending_removal:
         db.queue_change(photo, "keyword_remove", "Bald Eagle")
+        db.commit()
 
     def pending_types():
         return [
@@ -19045,6 +19058,7 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
     assert pending_types() == ([] if pending_removal else ["keyword_add"])
     if sync_after_accept:
         pending_changes.clear_pending(db, [row["id"] for row in db.pending_changes.list_all()])
+        db.commit()
     sidecar_has_keyword = pending_removal or sync_after_accept
     for _ in range(2):
         undo_last_edit(db)
@@ -19067,7 +19081,9 @@ def test_batch_accept_on_all_undo_restores_flat_removals(app_and_db, delete_othe
     other_ws = db.create_workspace("Shared sidecar")
     for ws, value in [(active_ws, "Bald Eagle"), (other_ws, "bald eagle")]:
         db.queue_change(photo, "keyword_remove_flat", value, workspace_id=ws)
+        db.commit()
     db.queue_change(photo, "keyword_remove_flat", "Osprey")
+    db.commit()
 
     def flat_removals():
         return {

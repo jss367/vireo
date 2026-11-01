@@ -341,6 +341,7 @@ def test_profile_metadata_flows_to_preview_export_thumbnails_and_source_receipt(
     assert lens.resolve_profile(photo) == lens.resolve_profile(bulk)
     recipe = {"adjustments": {"lens_profile": True}}
     db.set_photo_edit_recipe(pid, recipe)
+    db.commit()
     decoded = load_image(source, raw_decode=RAW_DECODE_LINEAR, max_size=None)
     expected = apply_recipe_to_loaded_image(decoded, recipe, camera_metadata=photo)
     assert not np.allclose(expected, apply_recipe_to_loaded_image(decoded, {}))
@@ -404,6 +405,7 @@ def test_handoff_fallback_cache_reuses_and_recovers(database, app_and_db, tmp_pa
                     (*[metadata[k] for k in ("camera_make", "camera_model", "lens", "focal_length", "aperture")], "companion.jpg", pid))
     db.conn.commit()
     db.set_photo_edit_recipe(pid, {"adjustments": {"lens_profile": True}})
+    db.commit()
     photo = db.photos.get_with_folder_path(pid)
     now = [100000.0]
     monkeypatch.setattr(render_fingerprint, "time", SimpleNamespace(time=lambda: now[0]))
@@ -471,6 +473,7 @@ def test_background_optical_cache_handles_disappearing_folder(database, app_and_
     db.conn.commit()
     recipe = {"adjustments": {"lens_profile": True}}
     db.set_photo_edit_recipe(pid, recipe)
+    db.commit()
     photo = db.photos.get(pid)
     cache = tmp_path / "cache"
     cache.mkdir()

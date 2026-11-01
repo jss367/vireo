@@ -379,7 +379,7 @@ def create_batch_blueprint(
         # UPDATE trigger invalidates attribution rows; without the
         # republish below the explicit Best Batch decision would show as
         # unverified in Cull even for photos already flagged "flagged".
-        with db.photo_review.flag_write():
+        with db.transaction(immediate=True, join=True):
             before_attributions = db.photo_review.flag_attributions(photo_ids)
             items = []
             flagged_ids = []
@@ -387,8 +387,8 @@ def create_batch_blueprint(
             for pid in photo_ids:
                 new_flag = desired_flags[pid]
                 old_flag = photos_map[pid]["flag"]
-                db.photo_review.set_flag(pid, new_flag, verify_workspace=False, _commit=False)
-                db.queue_flag_change_if_enabled(pid, new_flag, _commit=False)
+                db.photo_review.set_flag(pid, new_flag, verify_workspace=False)
+                db.queue_flag_change_if_enabled(pid, new_flag)
                 items.append({
                     "photo_id": pid,
                     "old_value": old_flag,
@@ -475,7 +475,7 @@ def create_batch_blueprint(
         with db.transaction():
             for pid in added_ids:
                 db.tag_photo(pid, kid, source='manual', _commit=False)
-                queue_keyword_add(db, pid, name, _commit=False)
+                queue_keyword_add(db, pid, name)
             items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
             if items:
                 db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
@@ -529,7 +529,7 @@ def create_batch_blueprint(
         for photo_id in changed_ids:
             old_value = "1" if accessible_state[photo_id] else "0"
             db.update_photo_wildlife_excluded(
-                photo_id, excluded, verify_workspace=False, _commit=False,
+                photo_id, excluded, verify_workspace=False,
             )
             items.append({
                 "photo_id": photo_id,
@@ -598,29 +598,31 @@ def create_batch_blueprint(
         removed_ids = [pid for pid in clean_ids if pid in tagged_set]
         name = keyword_row["name"]
         is_location = (keyword_row["type"] or "") == "location"
-        for pid in removed_ids:
-            db.untag_photo(pid, keyword_id, _record_history=True)
-            queue_keyword_remove(db, pid, name)
-            # See ``api_remove_keyword``: a ``keyword_remove`` on a
-            # ``type='location'`` tag leaves the sidecar's
-            # ``vireo:locationKeywords`` marker and ownership claim in
-            # place. Queue a ``location`` change so the next sync clears
-            # the marker (or rewrites it to a still-tagged location).
-            if is_location:
-                queue_location_sync_if_enabled(db, pid)
+        # Untags, their sidecar work and the one undo entry land together.
+        with db.transaction():
+            for pid in removed_ids:
+                db.untag_photo(pid, keyword_id, _record_history=True)
+                queue_keyword_remove(db, pid, name)
+                # See ``api_remove_keyword``: a ``keyword_remove`` on a
+                # ``type='location'`` tag leaves the sidecar's
+                # ``vireo:locationKeywords`` marker and ownership claim in
+                # place. Queue a ``location`` change so the next sync clears
+                # the marker (or rewrites it to a still-tagged location).
+                if is_location:
+                    queue_location_sync_if_enabled(db, pid)
 
-        items = [
-            {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
-            for pid in removed_ids
-        ]
-        if items:
-            db.record_edit(
-                "keyword_remove",
-                f'Removed "{name}" from {len(removed_ids)} photos',
-                str(keyword_id),
-                items,
-                is_batch=True,
-            )
+            items = [
+                {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
+                for pid in removed_ids
+            ]
+            if items:
+                db.record_edit(
+                    "keyword_remove",
+                    f'Removed "{name}" from {len(removed_ids)} photos',
+                    str(keyword_id),
+                    items,
+                    is_batch=True,
+                )
         return jsonify({"ok": True, "updated": len(removed_ids)})
 
     @blueprint.route("/api/batch/delete", methods=["POST"])

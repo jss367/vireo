@@ -1250,6 +1250,7 @@ def test_pipeline_previews_stage_bounds_non_crop_recipe_loads(tmp_path, monkeypa
         height=600,
     )
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     collection_id = db.collections.add(
         "Edited",
         json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
@@ -2438,6 +2439,7 @@ def test_pipeline_collection_mode_edited_thumbnail_uses_working_copy(
         photo["id"],
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
+    db.commit()
     os.remove(original)
 
     thumb_dir = os.path.join(os.path.dirname(db_path), "thumbnails")
@@ -12860,6 +12862,7 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
     collection_id = db.collections.add("Test", json.dumps([]))
     db.commit()
 
@@ -13050,6 +13053,7 @@ def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
             photo_id,
             {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
         )
+        scan_db.commit()
         scanned["done"] = True
         if progress_callback:
             progress_callback(1, 1)
@@ -13140,6 +13144,7 @@ def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
             photo_id,
             {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
         )
+        scan_db.commit()
         if progress_callback:
             progress_callback(1, 1)
         if photo_callback:

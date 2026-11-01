@@ -391,7 +391,7 @@ class LocationRepository:
         for photo_id in photo_ids:
             if queue_change(
                 photo_id, "location", "effective",
-                workspace_id=ws_id, _commit=False,
+                workspace_id=ws_id,
             ):
                 queued += 1
         self.conn.commit()

@@ -192,7 +192,7 @@ def _repair_identity_merge_sidecar(conn: sqlite3.Connection, survivor: int, name
         key = keyword_match_key(name)
         kind = 'keyword_add' if key in current else ('keyword_remove_flat' if key in ancestors else 'keyword_remove')
         for workspace in workspaces:
-            queue.queue(survivor, kind, current.get(key, name), workspace_id=workspace, _commit=False)
+            queue.queue(survivor, kind, current.get(key, name), workspace_id=workspace)
 
 
 def remap_photo_identities(conn: sqlite3.Connection, mapping: dict[int, int | None]) -> None:

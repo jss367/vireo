@@ -73,7 +73,7 @@ def change_photo_location(
     new_value = db.edit_history.photo_location_state(photo_id)
     # The saved place may have gained coordinates before this assignment.
     # Its unchanged links still need a sidecar refresh, without a new undo step.
-    queue_location_sync_if_enabled(db, photo_id, _commit=False)
+    queue_location_sync_if_enabled(db, photo_id)
     if old_value == new_value:
         return None
     return {'photo_id': photo_id, 'old_value': old_value, 'new_value': new_value}

@@ -295,6 +295,7 @@ def test_generate_all_retries_edited_raw_thumbnail_with_companion(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     loaded_paths = []
     original_load_image = thumbnails.load_image
@@ -354,6 +355,7 @@ def test_generate_all_retries_when_raw_thumbnail_short_edge_is_smaller(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     loaded_paths = []
     original_load_image = thumbnails.load_image
@@ -564,6 +566,7 @@ def test_generate_all_uses_near_full_working_copy_after_current_raw_failure(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
 
     loaded_paths = []
     original_load_image = thumbnails_mod.load_image
@@ -805,6 +808,7 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
     # is already a developed image and must remain landscape rather than
     # receiving this RAW-only rotation a second time.
     db.set_photo_edit_recipe(pid, {"rotation": 90})
+    db.commit()
 
     import image_loader
     import thumbnails
@@ -1308,6 +1312,7 @@ def test_serve_thumbnail_retries_original_after_working_copy_eviction(
     db.set_photo_edit_recipe(
         pid, {"crop": {"x": 0, "y": 0, "w": 0.75, "h": 1}},
     )
+    db.commit()
 
     real_load_image = thumbnails.load_image
     loaded_paths = []
@@ -1427,6 +1432,7 @@ def test_serve_thumbnail_skips_failed_raw_after_crop_rejects_working_copy(
         pid,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
 
     called = {"generate": False}
 

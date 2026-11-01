@@ -255,6 +255,7 @@ def test_search_narrows_the_listed_rows(compare_collection):
 def test_excludes_are_applied_and_counted(compare_collection):
     app, db, cid, photo_ids = compare_collection
     db.photo_review.set_flag(photo_ids[0], "rejected")
+    db.commit()
 
     payload = _get(app, cid, filter="all", exclude="rejected")
 
@@ -434,6 +435,7 @@ def test_compare_rows_carry_the_render_key_their_thumbnails_need(compare_collect
     app, db, cid, photo_ids = compare_collection
     edited = photo_ids[0]
     db.set_photo_edit_recipe(edited, {"adjustments": {"exposure": 1.5}})
+    db.commit()
 
     # Snapshot path (a normal page) and refresh path (after a decision) are
     # built separately; both feed the same renderer.

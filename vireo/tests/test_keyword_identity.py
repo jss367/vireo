@@ -428,6 +428,7 @@ def test_drop_stale_vireo_location_keywords_keeps_a_users_flat_leaf(catalog, tmp
 
     db, photos = catalog
     db.queue_change(photos[0], 'location', 'effective')
+    db.commit()
     sidecar = tmp_path / 'photo.xmp'
     _sidecar_with_marker(
         sidecar,
@@ -452,6 +453,7 @@ def test_drop_stale_vireo_location_keywords_keeps_a_users_hierarchy(catalog, tmp
 
     db, photos = catalog
     db.queue_change(photos[0], 'location', 'effective')
+    db.commit()
     sidecar = tmp_path / 'photo.xmp'
     _sidecar_with_marker(
         sidecar,
@@ -475,6 +477,7 @@ def test_drop_stale_vireo_location_keywords_legacy_marker_drops_both(catalog, tm
 
     db, photos = catalog
     db.queue_change(photos[0], 'location', 'effective')
+    db.commit()
     sidecar = tmp_path / 'photo.xmp'
     _sidecar_with_marker(
         sidecar,
@@ -995,6 +998,7 @@ def test_disambiguated_child_carries_its_dependent_names(catalog):
     db.tag_photo(photos[0], old_bird)
     db.tag_photo(photos[1], new_bird)
     db.queue_change(photos[0], 'keyword_add', 'Hummingbird')
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     merge_keywords(db, [old, new], new, preview['preview_token'])
@@ -1697,6 +1701,7 @@ def test_manual_merge_rename_carries_pending_edits_and_curation(catalog):
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
     db.queue_change(photos[1], 'keyword_add', 'Wing Street Canyon')
+    db.commit()
 
     overrides = {'name': 'Wing Canyon'}
     preview = preview_keyword_merge(db, [source, target], target, overrides)
@@ -1963,6 +1968,7 @@ def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp
     workspace_folders.add_workspace_folder(db, other, folder)
     for workspace in (ws, other):
         db.queue_change(photos[1], 'keyword_remove', 'Old spelling', workspace_id=workspace)
+        db.commit()
     before = [dict(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
     directory = tmp_path / 'photos'
     directory.mkdir()
@@ -2017,7 +2023,9 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
         assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target, unrelated}
     db.untag_photo(photos[0], target)
     db.remove_pending_changes(photos[0], 'keyword_add', 'New leaf')
+    db.commit()
     db.queue_change(photos[0], 'keyword_remove', 'New leaf')
+    db.commit()
     sync_photo()
     assert read_keywords(sidecar) == {'Detail'}
     assert set(read_hierarchical_keywords(sidecar)) == {'Things|Old leaf|Detail'}
@@ -2469,6 +2477,7 @@ def test_location_merge_rename_preserves_sidecar_ownership(
             flat.add(old_name)
         write_sidecar(str(path), flat_keywords=flat, hierarchical_keywords=set())
         db.queue_change(pid, 'location', 'effective')
+        db.commit()
     sync_to_xmp(db)
     overrides = {'name': 'New Lake'}
     preview = preview_keyword_merge(db, [kept, source], kept, overrides)
@@ -2479,6 +2488,7 @@ def test_location_merge_rename_preserves_sidecar_ownership(
         assert read_keywords(str(path)) == {'New Lake'}
         db.untag_photo(pid, kept)
         db.queue_change(pid, 'location', 'effective')
+        db.commit()
     assert sync_to_xmp(db)['failed'] == 0
     for index in range(2):
         path = folder / f'{index}.xmp'
@@ -2512,6 +2522,7 @@ def test_location_merge_preserves_directly_tagged_ancestor(catalog, tmp_path, mo
     old_name = 'Alternate County' if tag_source else 'Old County'
     write_sidecar(sidecar, flat_keywords={old_name}, hierarchical_keywords=set())
     db.queue_change(photo, 'location', 'effective')
+    db.commit()
     assert sync_to_xmp(db)['failed'] == 0
     overrides = {'name': 'New County'}
     preview = preview_keyword_merge(db, [source, target], target, overrides)
@@ -2523,5 +2534,6 @@ def test_location_merge_preserves_directly_tagged_ancestor(catalog, tmp_path, mo
     # Clearing the exported leaf must leave the separately assigned ancestor.
     db.untag_photo(photo, leaf)
     db.queue_change(photo, 'location', 'effective')
+    db.commit()
     assert sync_to_xmp(db)['failed'] == 0
     assert read_keywords(sidecar) == {'New County'}

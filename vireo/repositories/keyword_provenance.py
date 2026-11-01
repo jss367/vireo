@@ -1818,7 +1818,7 @@ class KeywordProvenanceRepository:
             self.tag_photo(
                 photo_id, kid, source="manual", _commit=False,
             )
-            self.queue_change(photo_id, "keyword_add", species, _commit=False)
+            self.queue_change(photo_id, "keyword_add", species)
         return _affected_entry(
             photo_id, this_pred_id, old_species, changed_tag,
             replace_species,
@@ -2513,12 +2513,11 @@ def _queue_replaced_species_removals(
         if old_name.lower() == new_species_lower:
             continue
         cancelled = remove_pending_changes(
-            photo_id, "keyword_add", old_name, _commit=False,
+            photo_id, "keyword_add", old_name,
         )
         if cancelled == 0:
             queue_change(
                 photo_id, "keyword_remove", old_name,
-                _commit=False,
             )
 
 

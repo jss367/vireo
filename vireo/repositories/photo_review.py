@@ -8,22 +8,19 @@ cannot be rated or flagged through the ``verify_workspace=True`` writes.
 ``self._ws_id()`` — so ``_photo_review_repository()`` (and the
 ``db.photo_review`` accessor) never raises off the active workspace; the
 ``verify_workspace=True`` writes and ``wildlife_excluded_states`` still raise
-if the workspace is unset. ``_commit=False`` on ``set_flag`` is carried
-through unchanged for callers that already hold ``BEGIN IMMEDIATE`` (the
-prediction-decision lock), so the writer lock is not released mid-decision.
+if the workspace is unset. No write commits: the route, job or service
+that calls them owns the unit of work (``db.transaction()``).
 
 Callers reach it as ``db.photo_review`` (a fresh repository per access, see
 ``Database.photo_review``); there are no forwarding wrappers on ``Database``.
 The wildlife-exclusion toggle (``Database.update_photo_wildlife_excluded``)
 is a different column whose workspace check stays on ``Database``; its write
-(``set_wildlife_excluded``, ``_commit=False`` for a batch that records one
-edit and commits once) lives here but is reached only through that method.
+(``set_wildlife_excluded``) lives here but is reached only through that method.
 """
 
 import json
 import sqlite3
 from collections.abc import Collection, Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager
 
 
 class PhotoReviewRepository:
@@ -35,9 +32,9 @@ class PhotoReviewRepository:
         self.chunk_size = chunk_size
 
     def set_rating(
-        self, photo_id: int, rating: int, *, verify_workspace: bool = True, _commit: bool = True,
+        self, photo_id: int, rating: int, *, verify_workspace: bool = True,
     ) -> None:
-        """Set a photo's rating (0-5); leave commit to the caller when requested.
+        """Set a photo's rating (0-5); the caller's unit of work commits.
 
         ``verify_workspace=True`` (the default) raises ``ValueError`` if the
         photo is not visible in the active workspace (``RuntimeError`` when
@@ -50,11 +47,9 @@ class PhotoReviewRepository:
         self.conn.execute(
             "UPDATE photos SET rating = ? WHERE id = ?", (rating, photo_id)
         )
-        if _commit:
-            self.conn.commit()
 
     def set_ratings(
-        self, photo_ids: Collection[int], rating: int, *, verify_workspace: bool = True, _commit: bool = True,
+        self, photo_ids: Collection[int], rating: int, *, verify_workspace: bool = True,
     ) -> None:
         """Set the rating of several photos in one transaction.
 
@@ -66,37 +61,29 @@ class PhotoReviewRepository:
             "rating",
             rating,
             verify_workspace=verify_workspace,
-            _commit=_commit,
         )
 
     def set_flag(
-        self, photo_id: int, flag: str, *, verify_workspace: bool = True, _commit: bool = True,
+        self, photo_id: int, flag: str, *, verify_workspace: bool = True,
     ) -> None:
         """Set a photo's flag (``'none'``, ``'flagged'``, ``'rejected'``).
 
-        ``verify_workspace`` works as in ``set_rating``. ``_commit=False``
-        skips the commit (the caller owns the transaction). Callers that
-        hold ``BEGIN IMMEDIATE`` — the prediction decision lock, for
-        example — must pass False so the writer lock is not released
-        mid-decision.
+        ``verify_workspace`` works as in ``set_rating``. No commit: the
+        caller's unit of work owns it.
         """
         if verify_workspace:
             self._verify_photo(photo_id)
         self.conn.execute(
             "UPDATE photos SET flag = ? WHERE id = ?", (flag, photo_id)
         )
-        if _commit:
-            self.conn.commit()
 
-    def set_wildlife_excluded(self, photo_id: int, excluded: bool, *, _commit: bool = True) -> None:
+    def set_wildlife_excluded(self, photo_id: int, excluded: bool) -> None:
         self.conn.execute(
             "UPDATE photos SET wildlife_excluded = ? WHERE id = ?",
             (1 if excluded else 0, photo_id),
         )
-        if _commit:
-            self.conn.commit()
 
-    def flag_ranked_candidate(self, photo_id: int, *, _commit: bool = True) -> bool:
+    def flag_ranked_candidate(self, photo_id: int) -> bool:
         """Record a provisional winner without overwriting any existing choice.
 
         The condition and write are one statement so a concurrent photographer
@@ -114,8 +101,6 @@ class PhotoReviewRepository:
                                  AND a.source IS NULL AND a.reason IS NULL)""",
             (photo_id, self.workspace_id),
         ).rowcount
-        if _commit:
-            self.conn.commit()
         return bool(changed)
 
     def wildlife_excluded_states(self, photo_ids: Iterable[int]) -> dict[int, int]:
@@ -145,7 +130,7 @@ class PhotoReviewRepository:
         return states
 
     def set_flags(
-        self, photo_ids: Collection[int], flag: str, *, verify_workspace: bool = True, _commit: bool = True,
+        self, photo_ids: Collection[int], flag: str, *, verify_workspace: bool = True,
     ) -> None:
         """Set the flag of several photos in one transaction; see ``set_ratings``."""
         self._set_many(
@@ -153,59 +138,23 @@ class PhotoReviewRepository:
             "flag",
             flag,
             verify_workspace=verify_workspace,
-            _commit=_commit,
         )
 
-    def _set_many(self, photo_ids, column, value, *, verify_workspace, _commit=True):
+    def _set_many(self, photo_ids, column, value, *, verify_workspace):
         if not photo_ids:
             return
         if verify_workspace:
             for photo_id in photo_ids:
                 self._verify_photo(photo_id)
-        try:
-            for chunk in self._chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"UPDATE photos SET {column} = ? WHERE id IN ({placeholders})",
-                    [value, *chunk],
-                )
-            if _commit:
-                self.conn.commit()
-        except Exception:
-            if _commit:
-                self.conn.rollback()
-            raise
-
-    @contextmanager
-    def review_write(self) -> Iterator[bool]:
-        """Keep a review, sync and history atomic, preserving a caller's transaction."""
-        owns_transaction = not self.conn.in_transaction
-        if owns_transaction:
-            self.conn.execute("BEGIN IMMEDIATE")
-        self.conn.execute("SAVEPOINT photo_review_write")
-        try:
-            yield owns_transaction
-        except BaseException:
-            self.conn.execute("ROLLBACK TO photo_review_write")
-            self.conn.execute("RELEASE photo_review_write")
-            if owns_transaction:
-                self.conn.rollback()
-            raise
-        else:
-            self.conn.execute("RELEASE photo_review_write")
-            if owns_transaction:
-                try:
-                    self.conn.commit()
-                except BaseException:
-                    self.conn.rollback()
-                    raise
-
-    def flag_write(self) -> AbstractContextManager[bool]:
-        """Compatibility entry point for flag writers sharing the review transaction."""
-        return self.review_write()
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE photos SET {column} = ? WHERE id IN ({placeholders})",
+                [value, *chunk],
+            )
 
     def set_current_flag_note(self, photo_ids, flag, description, *, source=None, reason=None):
-        """Publish only inside the flag writer's transaction, with no history dependency."""
+        """Publish only inside the flag writer's unit of work, with no history dependency."""
         if self.workspace_id is None:
             raise RuntimeError("No active workspace set")
         if not self.conn.in_transaction:
@@ -283,7 +232,7 @@ class PhotoReviewRepository:
             raise ValueError("Duplicate winner no longer exists")
         flag = row[0] or "none"
         if row[0] is None:
-            self.set_flag(winner_id, flag, verify_workspace=False, _commit=False)
+            self.set_flag(winner_id, flag, verify_workspace=False)
         self.set_current_flag_note([winner_id], flag, "Kept this duplicate copy")
         self.set_current_flag_note(loser_ids, "rejected", "Rejected duplicate copies by user choice")
 

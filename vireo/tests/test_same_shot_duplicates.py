@@ -312,6 +312,7 @@ def test_changed_evidence_needs_new_review(app_and_db, tmp_path, change):
         seed(db, tmp_path, "c.jpg", "c")
     elif change == "edit":
         db.edits.set_photo_recipe(b, {"adjustments": {"exposure": 0.5}})
+        db.commit()
     else:
         sql, args = {
             "hash": ("UPDATE photos SET file_hash='changed' WHERE id=?", (b,)),

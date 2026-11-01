@@ -366,6 +366,7 @@ def test_folder_bursts_lists_every_burst_with_folder_coverage(app_and_db):
     close = _seed_burst(db, folder_id, 3100, [50, 49], ts_base="2024-03-01T13:00:")
     partial = _seed_burst(db, folder_id, 3200, [60, None], ts_base="2024-03-01T14:00:")
     db.photo_review.set_flag(sharp[0], "rejected")
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/api/folders/{folder_id}/bursts")

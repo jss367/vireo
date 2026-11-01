@@ -668,7 +668,7 @@ def test_delete_keyword_detaches_children_unlinks_photos_and_commits(db, lib):
     db.tag_photo(p0, parent)
     db.tag_photo(p1, child)
     # A statement the caller left open shares the delete's commit.
-    db.queue_change(p1, "location", "effective", _commit=False)
+    db.queue_change(p1, "location", "effective")
     db.keyword_tree.delete(parent)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT id FROM keywords WHERE id = ?", (parent,)) == []
@@ -1047,7 +1047,9 @@ def test_update_keyword_merge_keeps_unrelated_pending_removal(db, lib):
     db.tag_photo(p1, egret)
     db.untag_photo(p0, egret)
     db.queue_change(p0, "keyword_remove", "Egret", workspace_id=ws)
+    db.commit()
     db.queue_change(p1, "keyword_add", "Egret", workspace_id=ws)
+    db.commit()
 
     assert db.update_keyword(egret, name="Heron") == heron
 
@@ -1075,6 +1077,7 @@ def test_merge_duplicate_keywords_keeps_unrelated_pending_removal(db, lib):
     db.tag_photo(p0, keep)
     db.tag_photo(p1, dup)
     db.queue_change(p0, "keyword_remove", "heron", workspace_id=ws)
+    db.commit()
 
     assert db.keyword_tree.merge_duplicates() >= 1
 
@@ -1731,6 +1734,7 @@ def test_merge_taxonomy_root_twins_folds_top_level_rows_into_tree(db, lib):
     db.tag_photo(p1, twin)
     db.tag_photo(p2, placed, source=None)
     db.queue_change(p1, "keyword_add", "American Robin")
+    db.commit()
     pending = _visible(db, "SELECT photo_id, change_type, value FROM pending_changes")
 
     assert db.merge_taxonomy_root_twins() == 1

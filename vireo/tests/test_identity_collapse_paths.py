@@ -44,6 +44,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     note = db.add_keyword('Unrelated note')
     db.tag_photo(survivor, note, source='manual')
     db.photo_review.set_flag(survivor, 'rejected')
+    db.commit()
     with db.transaction():
         saved = save_alternatives(db, [losing], ['Heron', 'Egret'], 'Distant frame', 'Bill')
         edited = resolve_alternatives(db, [losing], 'Heron') if status == 'resolved' else saved
@@ -77,6 +78,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
         assert moved['change_token'] != row['change_token'] and moved['sync_started'] == 1
         from services.pending_changes import clear_pending_by_token
         clear_pending_by_token(db, [row['change_token']])
+        db.commit()
         assert db.conn.execute('SELECT 1 FROM pending_changes WHERE change_token=?', (moved['change_token'],)).fetchone()
     for action in (None, 'undo', 'redo'):
         db.set_active_workspace(ws)
@@ -199,6 +201,7 @@ def test_staged_identity_intents_cannot_be_acknowledged_by_old_path_writer(db, t
     db.commit()
     counts = moves_merge.merge_staged_tree_into_archive(db, tree['stage_root'], tree['arch'])
     clear_pending_by_token(db, [row['change_token'] for row in before])
+    db.commit()
     for row in before:
         replacement = db.conn.execute('SELECT * FROM pending_changes WHERE id=?', (row['id'],)).fetchone()
         assert replacement['photo_id'] == survivor

@@ -78,6 +78,7 @@ def test_get_recipe_returns_none_without_a_row(db, photos):
 def test_set_recipe_commits_and_returns_normalized_copy(db, photos):
     inside, _ = photos
     result = db.set_photo_edit_recipe(inside, EXPOSURE)
+    db.commit()
     assert result == NORMALIZED_EXPOSURE
     assert not db.conn.in_transaction
     assert json.loads(_stored_recipe(db, inside)) == NORMALIZED_EXPOSURE
@@ -90,7 +91,9 @@ def test_set_recipe_commits_and_returns_normalized_copy(db, photos):
 def test_set_recipe_upserts_existing_row(db, photos):
     inside, _ = photos
     db.set_photo_edit_recipe(inside, EXPOSURE)
+    db.commit()
     db.set_photo_edit_recipe(inside, {"adjustments": {"contrast": 10}})
+    db.commit()
     with _reader(db) as conn:
         rows = conn.execute(
             "SELECT recipe_json FROM photo_edit_recipes WHERE photo_id = ?",
@@ -106,10 +109,12 @@ def test_set_recipe_accepts_json_string(db, photos):
 
 
 @pytest.mark.parametrize("noop", [None, {}, ""])
-def test_set_noop_recipe_deletes_row_and_commits(db, photos, noop):
+def test_set_noop_recipe_deletes_row(db, photos, noop):
     inside, _ = photos
     db.set_photo_edit_recipe(inside, EXPOSURE)
-    assert db.set_photo_edit_recipe(inside, noop) is None
+    db.commit()
+    with db.transaction():
+        assert db.set_photo_edit_recipe(inside, noop) is None
     assert not db.conn.in_transaction
     assert _stored_recipe(db, inside) is None
     assert db.get_photo_edit_recipe(inside) is None
@@ -117,7 +122,7 @@ def test_set_noop_recipe_deletes_row_and_commits(db, photos, noop):
 
 def test_set_recipe_without_commit_joins_callers_transaction(db, photos):
     inside, _ = photos
-    assert db.set_photo_edit_recipe(inside, EXPOSURE, _commit=False) == (
+    assert db.set_photo_edit_recipe(inside, EXPOSURE) == (
         NORMALIZED_EXPOSURE
     )
     assert db.conn.in_transaction
@@ -129,7 +134,8 @@ def test_set_recipe_without_commit_joins_callers_transaction(db, photos):
 def test_set_noop_recipe_without_commit_joins_callers_transaction(db, photos):
     inside, _ = photos
     db.set_photo_edit_recipe(inside, EXPOSURE)
-    assert db.set_photo_edit_recipe(inside, None, _commit=False) is None
+    db.commit()
+    assert db.set_photo_edit_recipe(inside, None) is None
     assert db.conn.in_transaction
     assert _stored_recipe(db, inside) is not None
     db.conn.rollback()
@@ -140,6 +146,7 @@ def test_set_invalid_recipe_raises_and_writes_nothing(db, photos):
     inside, _ = photos
     with pytest.raises(RecipeError, match="recipe must be an object"):
         db.set_photo_edit_recipe(inside, [1])
+        db.commit()
     assert _stored_recipe(db, inside) is None
 
 
@@ -147,6 +154,7 @@ def test_set_recipe_verifies_workspace_by_default(db, photos):
     _, outside = photos
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
         db.set_photo_edit_recipe(outside, EXPOSURE)
+        db.commit()
     assert _stored_recipe(db, outside) is None
     assert db.set_photo_edit_recipe(
         outside, EXPOSURE, verify_workspace=False
@@ -161,6 +169,7 @@ def test_set_recipe_without_verify_needs_no_active_workspace(db, photos):
     ) == NORMALIZED_EXPOSURE
     with pytest.raises(RuntimeError, match="No active workspace set"):
         db.set_photo_edit_recipe(inside, EXPOSURE)
+        db.commit()
 
 
 def test_get_recipe_skips_workspace_check_by_default(db, photos):
@@ -250,11 +259,12 @@ def test_get_recipes_chunks_past_the_sqlite_parameter_limit(db, tmp_path):
 def test_clear_recipe_reports_whether_a_row_was_removed(db, photos):
     inside, _ = photos
     db.set_photo_edit_recipe(inside, EXPOSURE)
-    assert db.clear_photo_edit_recipe(inside) is True
+    db.commit()
+    with db.transaction():
+        assert db.clear_photo_edit_recipe(inside) is True
     assert not db.conn.in_transaction
     assert _stored_recipe(db, inside) is None
     assert db.clear_photo_edit_recipe(inside) is False
-    assert not db.conn.in_transaction
 
 
 def test_clear_recipe_verifies_workspace_by_default(db, photos):
@@ -262,9 +272,11 @@ def test_clear_recipe_verifies_workspace_by_default(db, photos):
     _raw_recipe(db, outside, json.dumps(EXPOSURE))
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
         db.clear_photo_edit_recipe(outside)
+        db.commit()
     assert _stored_recipe(db, outside) is not None
     db.set_active_workspace(None)
-    assert db.clear_photo_edit_recipe(outside, verify_workspace=False) is True
+    with db.transaction():
+        assert db.clear_photo_edit_recipe(outside, verify_workspace=False) is True
     assert _stored_recipe(db, outside) is None
 
 
@@ -512,7 +524,7 @@ def test_edits_facade_signatures_are_unchanged():
     ]
     assert params(Database, "set_photo_edit_recipe") == [
         ("self", empty), ("photo_id", empty), ("recipe", empty),
-        ("verify_workspace", True), ("_commit", True),
+        ("verify_workspace", True),
     ]
     assert params(Database, "clear_photo_edit_recipe") == [
         ("self", empty), ("photo_id", empty), ("verify_workspace", True),

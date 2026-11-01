@@ -80,6 +80,7 @@ def test_apply_clears_flag_when_photo_moved_to_candidates(app_and_db):
     pids = _photo_ids(db)
     pid = pids[0]
     db.photo_review.set_flag(pid, 'rejected')
+    db.commit()
     client = app.test_client()
 
     resp = client.post('/api/pipeline/group/apply', json={
@@ -136,6 +137,7 @@ def test_apply_records_attribution_history_without_flag_transition(app_and_db):
     # Direct set_flag writes the legacy flag without publishing
     # attribution — the condition the finding this test covers describes.
     db.photo_review.set_flag(pid, 'flagged')
+    db.commit()
     client = app.test_client()
 
     # Snapshot edit history count.
@@ -202,6 +204,7 @@ def test_apply_does_not_touch_keyword_pending_changes(app_and_db):
     pid = pids[0]
     # Pre-existing pending remove for "Coyote".
     db.queue_change(pid, 'keyword_remove', 'Coyote')
+    db.commit()
     client = app.test_client()
 
     resp = client.post('/api/pipeline/group/apply', json={
@@ -336,7 +339,9 @@ def test_state_endpoint_returns_current_flags_and_keyword_status(app_and_db):
     pids = _photo_ids(db)
     flagged_id, rejected_id, neutral_id = pids[0], pids[1], pids[2]
     db.photo_review.set_flag(flagged_id, 'flagged')
+    db.commit()
     db.photo_review.set_flag(rejected_id, 'rejected')
+    db.commit()
     kid = db.add_keyword('Coyote', is_species=True)
     db.tag_photo(flagged_id, kid)
     client = app.test_client()
@@ -446,6 +451,7 @@ def test_state_endpoint_gates_representative_on_current_eligibility(app_and_db):
     # Make each stale in one of the two ways the shared payload attachers
     # already filter on. The preference rows themselves remain intact.
     db.photo_review.set_flag(rejected_id, 'rejected')
+    db.commit()
     db.untag_photo(untagged_id, kid_untagged)
 
     client = app.test_client()

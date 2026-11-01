@@ -81,7 +81,6 @@
   "repositories/keywords.py": 1,
   "repositories/locations.py": 1,
   "repositories/moves_merge.py": 2,
-  "repositories/photo_review.py": 3,
   "repositories/photo_row_deletion.py": 2,
   "repositories/photos.py": 2,
   "repositories/pipeline_features.py": 1,

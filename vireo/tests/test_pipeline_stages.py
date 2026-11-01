@@ -818,6 +818,7 @@ def test_scanned_raw_thumbnail_renders_available_companion(
             db.set_photo_edit_recipe(
                 photo_id, {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
             )
+            db.commit()
         if mode == "missing":
             raw.unlink()
         elif mode == "unreadable":

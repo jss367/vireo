@@ -35,6 +35,7 @@ def test_disagreement_is_bound_to_each_subject_and_read_is_nonmutating(app_and_d
     db.predictions.add(first, "Mallard", .8, "model B", labels_fingerprint=fp)
     db.predictions.add(second, "Mallard", .9, "model A", labels_fingerprint=fp)
     db.photo_review.set_flag(1, "flagged")
+    db.commit()
     before = db.conn.total_changes
     history_before = len(db.edit_history.list_recent())
     result = packet(app, [1, 2])

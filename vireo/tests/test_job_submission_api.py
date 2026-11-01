@@ -353,6 +353,7 @@ def test_job_sync_accepts_selected_change_ids(app_and_db):
     client = app.test_client()
     pid = db.photos.list_page()[0]["id"]
     db.queue_change(pid, "rating", "4")
+    db.commit()
     change_id = db.pending_changes.list_all()[0]["id"]
 
     resp = client.post("/api/jobs/sync", json={"change_ids": [change_id]})
@@ -496,7 +497,9 @@ def test_sync_job_publishes_checkpoint_and_outcome_counts(app_and_db, tmp_path, 
         db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (str(path), folder['id']))
     db.conn.commit()
     db.queue_change(photos[0]['id'], 'keyword_add', 'Osprey')
+    db.commit()
     db.queue_change(photos[1]['id'], 'rating', 'invalid')
+    db.commit()
     monkeypatch.setattr(sync, '_SYNC_CHECKPOINT_CHANGES', 1)
     client = app.test_client()
     job_id = client.post('/api/jobs/sync').get_json()['job_id']

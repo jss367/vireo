@@ -328,6 +328,7 @@ def test_get_best_batch_rows_by_ids(db, lib):
 def test_get_photo_flags_ratings_and_eyes(db, lib):
     assert db.photos.flags_ratings_and_eyes([]) == {}
     db.photo_review.set_flag(lib["b"], "flagged")
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET rating = 3, eye_x = 0.25, eye_y = 0.5, eye_conf = 0.9,"
         " eye_tenengrad = 12.0 WHERE id = ?",
@@ -533,8 +534,11 @@ def test_get_photos_pages_and_scopes(db, lib):
 
 def test_listing_filters_agree(db, lib):
     db.photo_review.set_rating(lib["a"], 5)
+    db.commit()
     db.photo_review.set_rating(lib["b"], 2)
+    db.commit()
     db.photo_review.set_flag(lib["b"], "flagged")
+    db.commit()
     db.photo_labels.set(lib["a"], "red")
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
@@ -703,6 +707,7 @@ def test_get_calendar_data(db, lib):
         "2023-06-01": 1,
     }
     db.photo_review.set_rating(lib["b"], 4)
+    db.commit()
     assert db.photos.get_calendar_data(
         2024, rules=[{"field": "rating", "op": ">=", "value": 4}],
     )["days"] == {"2024-03-07": 1}
@@ -762,6 +767,7 @@ def test_get_browse_summary(db, lib, isolated_config):
     assert by_folder["filtered_total"] == 1
     assert by_folder["top_species"] == []
     db.photo_review.set_rating(lib["a"], 5)
+    db.commit()
     ruled = browse_queries.get_browse_summary(
         db, rules=[{"field": "rating", "op": ">=", "value": 5}],
     )
@@ -875,6 +881,7 @@ def test_delete_photos_removes_rows_and_dependents(db, lib, cache, monkeypatch):
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
     db.queue_change(lib["a"], "keyword_add", "Heron")
+    db.commit()
     _detect(db, lib["a"], 0.9, "Heron")
     db.conn.execute(
         "UPDATE folders SET photo_count = 5 WHERE id = ?", (lib["root"],),

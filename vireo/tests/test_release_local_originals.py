@@ -39,7 +39,9 @@ def test_release_preserves_sources_metadata_and_generated_assets(client_with_pho
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo, sidecars=True)
     db.photo_review.set_rating(pid, 4)
+    db.commit()
     db.set_photo_edit_recipe(pid, {"rotation": 90})
+    db.commit()
     keyword = db.add_keyword("Hawk")
     db.tag_photo(pid, keyword)
     before = dict(db.photos.get(pid))

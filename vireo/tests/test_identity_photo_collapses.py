@@ -50,6 +50,7 @@ def test_folder_merge_keeps_resolved_tags_provenance_pending_and_history(catalog
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(survivor, unrelated, source='manual')
     db.photo_review.set_flag(survivor, 'rejected')
+    db.commit()
     with db.transaction():
         save_alternatives(db, [losing], CANDIDATES, 'Uncertain calls', 'Audio')
         edit = resolve_alternatives(db, [losing], CANDIDATES[0])
@@ -152,6 +153,7 @@ def test_collapse_does_not_reintroduce_candidate_outvoted_by_newer_visible_revie
     keyword = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(losing, keyword)
     db.queue_change(losing, 'keyword_add', CANDIDATES[0])
+    db.commit()
     db.conn.execute("UPDATE pending_changes SET created_at='2020-01-01' WHERE photo_id=?", (losing,))
     db.commit()
     with db.transaction():
@@ -183,7 +185,9 @@ def test_folder_collapse_repairs_alias_intents_in_both_visible_workspaces(catalo
         db.tag_photo(losing, scientific, source='manual', _commit=False)
         resolve_alternatives(db, [losing], CANDIDATES[0])
     db.queue_change(survivor, 'keyword_add', CANDIDATES[0], workspace_id=first)
+    db.commit()
     db.queue_change(losing, 'keyword_remove', CANDIDATES[0], workspace_id=second)
+    db.commit()
     old_token = db.conn.execute("SELECT change_token FROM pending_changes WHERE photo_id=? AND change_type='keyword_add' AND value=?", (losing, scientific_name)).fetchone()[0]
     db.conn.execute("UPDATE pending_changes SET sync_started=1 WHERE change_token=?", (old_token,))
     db.commit()

@@ -83,6 +83,7 @@ def test_reject_burst_and_undo_restores_prior_flags(live_server, page):
     db = live_server["db"]
     photo_ids = live_server["data"]["photos"][:4]
     db.photo_review.set_flag(photo_ids[0], "flagged")
+    db.commit()
     _write_grouped_pipeline_cache(live_server, photo_ids)
 
     page.goto(f"{live_server['url']}/pipeline/review")
@@ -347,6 +348,7 @@ def test_clear_rejects_reads_live_db_flags(live_server, page):
     # already-rendered pipelineResults cache does not. The bulk button still
     # reads "Clear rejects" even though the first photo is now a pick.
     db.photo_review.set_flag(photo_ids[0], "flagged")
+    db.commit()
     expect(burst_buttons.first).to_have_attribute("aria-label", "Clear rejects")
 
     burst_buttons.first.click()

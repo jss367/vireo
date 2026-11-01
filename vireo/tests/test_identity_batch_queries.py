@@ -112,6 +112,7 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
         db.tag_photo(photo, scientific, source='accept')
         db.tag_photo(photo, note, source='manual')
         db.photo_review.set_flag(photo, 'rejected')
+        db.commit()
         with db.transaction():
             saved = save_alternatives(db, [photo], ['Puma', 'Bobcat'], 'Ambiguous silhouette', 'Bill')
         assert not db.conn.execute('SELECT 1 FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (photo, scientific)).fetchone()
@@ -143,6 +144,7 @@ def test_photo_collapse_without_identity_names_skips_taxonomy_scans(tmp_path):
         db.conn.executemany("INSERT INTO keywords(name,type,is_species) VALUES (?,'taxonomy',1)",
                             [(f'Catalog species {i}',) for i in range(2000)])
         db.queue_change(photos[0], 'keyword_add', 'Catalog species 1')
+        db.commit()
         before = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
         scans = []
         db.conn.set_trace_callback(lambda sql: scans.append(sql) if 'FROM keywords k ' in sql else None)

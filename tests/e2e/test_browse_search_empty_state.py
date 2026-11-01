@@ -2131,7 +2131,9 @@ def test_flag_quick_filters_show_picks_and_rejects(live_server, page):
     pick_id = photos[0]["id"]
     reject_id = photos[1]["id"]
     db.photo_review.set_flag(pick_id, "flagged")
+    db.commit()
     db.photo_review.set_flag(reject_id, "rejected")
+    db.commit()
 
     page.goto(f"{url}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
@@ -2163,6 +2165,7 @@ def test_toolbar_history_requeries_flag_filter_and_keeps_collection(live_server,
     db = live_server['db']
     ids = live_server['data']['photos'][:2]
     db.photo_review.set_flag(ids[1], 'rejected')
+    db.commit()
     collection_id = db.collections.add('Rejected history test', json.dumps([
         {'field': 'flag', 'op': 'is', 'value': 'rejected'},
     ]))
@@ -2193,7 +2196,9 @@ def test_toolbar_history_requeries_rating_sort(live_server, page):
     db = live_server['db']
     ids = live_server['data']['photos'][:2]
     db.photo_review.set_rating(ids[0], 2)
+    db.commit()
     db.photo_review.set_rating(ids[1], 1)
+    db.commit()
     page.goto(live_server['url'] + '/browse')
     page.locator('#sortSelect').select_option('rating')
     expect(page.locator('.grid-card').first).to_have_attribute('data-id', str(ids[0]))
