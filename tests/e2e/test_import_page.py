@@ -2479,11 +2479,11 @@ def test_import_county_only_spots_offer_named_places_nearby(live_server, page, t
                            "source": "google_area"},
             "nearby_places": [
                 {"place_id": "lake", "name": "Big Laguna Lake", "type": "natural_feature",
-                 "distance_m": 386},
+                 "distance_m": 386, "farthest_m": 1504},
                 {"place_id": "meadow", "name": "Laguna Meadow", "type": "natural_feature",
-                 "distance_m": 666},
+                 "distance_m": 666, "farthest_m": 912},
                 {"place_id": "lmra", "name": "Laguna Mountain Recreation Area", "type": "park",
-                 "distance_m": 2386},
+                 "distance_m": 2386, "farthest_m": 2412},
             ],
         }], "file_cells": dict(zip(paths, cells, strict=True)), "no_gps_paths": [],
          "location_options": []},
@@ -2515,7 +2515,7 @@ def test_import_county_only_spots_offer_named_places_nearby(live_server, page, t
     expect(group.locator("input[type=text]")).to_have_value("San Diego County")
     expect(group).to_contain_text("Google Maps only has a broad area name for these spots")
     buttons = group.locator(".import-location-nearby-place")
-    expect(buttons).to_have_text(["Big Laguna Lake · 386 m", "Laguna Meadow · 666 m",
+    expect(buttons).to_have_text(["Big Laguna Lake · 386 m–1.5 km", "Laguna Meadow · 666–912 m",
                                   "Laguna Mountain Recreation Area · 2.4 km"])
     buttons.nth(0).click()
     expect(group.locator("input[type=text]")).to_have_value("Big Laguna Lake")

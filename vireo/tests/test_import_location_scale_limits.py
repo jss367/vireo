@@ -56,7 +56,8 @@ def test_preview_never_offers_more_than_the_group_work_bound(count: int) -> None
 
     ns['_finish_group'] = finish
     subject = SimpleNamespace(_db=object(), _groups={i: {'suggestion': None, 'file_count': 1, 'broad_cells': []}
-                              for i in range(count)}, _cells={})
+                              for i in range(count)}, _cells={},
+                              _split_outings=lambda: None)
     result = ns['result'](subject)
     if count > 1000:
         assert result['groups'] == [] and result['file_cells'] == {}

@@ -24,12 +24,13 @@ A cell's suggestion comes from, in order:
 Cells with no suggestion form one unnamed group the user can still name.
 
 When Google can only name a county or broader for a cell (a trail deep in a
-national forest), the cell's group also lists ``nearby_places``: visited
-parks and natural features from ``places.nearby_named_places``, each with the
-distance from the closest of those photos to the place's map pin. They are
+national forest), such cells are split into outings, one group each, and each
+group also lists ``nearby_places``: visited parks and natural features from
+``places.nearby_named_places`` whose map pin is within reach of every photo
+in the group, with the closest and farthest photo's distance to it. They are
 offered, never chosen: Google's pins are points, so Vireo cannot tell whether
-the photos were taken inside the place. Choosing one tags the photos with
-that place's keyword and leaves their own GPS as measured.
+the photos were taken inside the place. Choosing one tags the whole group
+with that place's keyword and leaves the photos' own GPS as measured.
 """
 
 from __future__ import annotations
@@ -76,10 +77,14 @@ MAX_CHOICE_CELLS = MAX_SUGGESTION_PATHS
 MAX_CHOICES = 1000
 MAX_LOCATION_NAME = 200
 
-# How far a nearby named place's map pin may be from the closest of a group's
-# photos, and how many such places a group offers. A recreation area's pin
-# sits at its visitor center, often kilometers from its trails.
+# How far a nearby named place's map pin may be from every photo of a group,
+# and how many such places a group offers. A recreation area's pin sits at its
+# visitor center, often kilometers from its trails.
 NEARBY_RADIUS_M = 5000
+# Broadly named cells (all "San Diego County") are split into outings: cells
+# within this distance of each other, directly or through a chain of cells,
+# are one outing. Two outings in one county must not share a nearby place.
+OUTING_LINK_M = 2000
 MAX_NEARBY_PLACES = 6
 # Nearby lookups are made once per bucket of this many degrees (about 2 km),
 # from its center, not once per ~110 m cell: one walk spans dozens of cells.
@@ -456,6 +461,61 @@ def _finish_group(db: Database, group: JsonDict) -> JsonDict | None:
     }
 
 
+def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[str]]:
+    """Split cells into chains of cells within :data:`OUTING_LINK_M` of each other.
+
+    Single linkage over a grid of link-sized buckets, so each cell is only
+    compared with the cells in its own and the eight neighboring buckets.
+    Outings come back in the order of their first cell.
+    """
+    parent = {key: key for key in keys}
+
+    def root(key: str) -> str:
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    lat_deg = OUTING_LINK_M / _M_PER_DEG_LAT
+    grid: dict[tuple[int, int], list[str]] = {}
+    for key in keys:
+        cell = cells[key]
+        lng_deg = lat_deg / max(0.01, math.cos(math.radians(cell["lat"])))
+        bucket = (math.floor(cell["lat"] / lat_deg), math.floor(cell["lng"] / lng_deg))
+        here = {"latitude": cell["lat"], "longitude": cell["lng"]}
+        for dlat in (-1, 0, 1):
+            for dlng in (-1, 0, 1):
+                for other in grid.get((bucket[0] + dlat, bucket[1] + dlng), ()):
+                    there = {"latitude": cells[other]["lat"], "longitude": cells[other]["lng"]}
+                    if distance_meters(here, there) <= OUTING_LINK_M:
+                        parent[root(other)] = root(key)
+        grid.setdefault(bucket, []).append(key)
+    outings: dict[str, list[str]] = {}
+    for key in keys:
+        outings.setdefault(root(key), []).append(key)
+    return list(outings.values())
+
+
+def _spread_m(points: Iterable[tuple[float, float]]) -> float:
+    """The diagonal of the points' bounding box, in meters."""
+    lats, lngs = zip(*points, strict=True)
+    return distance_meters({"latitude": min(lats), "longitude": min(lngs)},
+                           {"latitude": max(lats), "longitude": max(lngs)})
+
+
+def _pin_reach(place: JsonDict, points: Iterable[tuple[float, float]]) -> tuple[int, int] | None:
+    """``(closest, farthest)`` meters from a place's pin to the points, or None
+    once one point is beyond :data:`NEARBY_RADIUS_M`."""
+    pin = {"latitude": place["lat"], "longitude": place["lng"]}
+    closest, farthest = math.inf, 0.0
+    for lat, lng in points:
+        distance = distance_meters({"latitude": lat, "longitude": lng}, pin)
+        if distance > NEARBY_RADIUS_M:
+            return None
+        closest, farthest = min(closest, distance), max(farthest, distance)
+    return round(closest), round(farthest)
+
+
 class ImportLocationSuggester:
     """Names an import's GPS cells one at a time, then groups them.
 
@@ -479,6 +539,8 @@ class ImportLocationSuggester:
         self._groups: dict[str, JsonDict] = {}
         self._nearby_found: dict[_NearbyKey, list[JsonDict] | str] = {}
         self._nearby_over_limit = False
+        self._named: dict[str, tuple[JsonDict | None, str | None, bool]] = {}
+        self._outings_split = False
         self.cell_keys = list(self._cells)
 
     def name_cell(self, key: str) -> None:
@@ -490,11 +552,43 @@ class ImportLocationSuggester:
                 self._db, cell["lat"], cell["lng"], self._api_key, self._language,
                 self._grid_cache,
             )
+        self._named[key] = (suggestion, reason, broad)
         group_key = _group_key(suggestion)
         group = self._groups.setdefault(group_key, _new_group(group_key, suggestion))
         _add_cell(group, key, cell, suggestion, reason)
         if broad:
             group["broad_cells"].append(key)
+
+    def _split_outings(self) -> None:
+        """Give each outing among broadly named cells its own group.
+
+        A county-wide name groups every spot in the county; its nearby places
+        only make sense for one outing. The broad cells of a group are split
+        by :func:`_outings`; a group that is one outing and nothing else keeps
+        its key, and each other outing is keyed by its first cell, so a
+        repeated preview of the same files keeps the user's per-group edits.
+        """
+        if self._outings_split:
+            return
+        self._outings_split = True
+        regrouped: dict[str, JsonDict] = {}
+        for key, group in self._groups.items():
+            outings = _outings(self._cells, group["broad_cells"]) if group["broad_cells"] else []
+            if len(outings) == 1 and len(outings[0]) == len(group["cells"]):
+                regrouped[key] = group
+                continue
+            broad = {cell for outing in outings for cell in outing}
+            rest = [cell for cell in group["cells"] if cell not in broad]
+            parts = [(key, rest)] if rest else []
+            parts += [(f"{key}@{min(outing)}", outing) for outing in outings]
+            for part_key, cells in parts:
+                part = regrouped[part_key] = _new_group(part_key, self._named[cells[0]][0])
+                for cell_key_ in cells:
+                    suggestion, reason, is_broad = self._named[cell_key_]
+                    _add_cell(part, cell_key_, self._cells[cell_key_], suggestion, reason)
+                    if is_broad:
+                        part["broad_cells"].append(cell_key_)
+        self._groups = regrouped
 
     def nearby_keys(self) -> list[_NearbyKey]:
         """The buckets to look up after naming: those of cells Google named broadly.
@@ -506,6 +600,7 @@ class ImportLocationSuggester:
         refusal, whether as 100,000 groups refused by :meth:`result` or as
         one group of many spread cells :meth:`result` would accept.
         """
+        self._split_outings()
         if len(self._groups) > MAX_CHOICES:
             return []
         buckets: list[_NearbyKey] = []
@@ -527,18 +622,17 @@ class ImportLocationSuggester:
         self._nearby_found[bucket] = _lookup_nearby(bucket, self._api_key, self._language)
 
     def _nearby_places(self, group: JsonDict) -> tuple[list[JsonDict], str | None]:
-        """A broadly named group's nearby places, nearest first, or why there are none.
+        """A broadly named outing's nearby places, nearest first, or why there are none.
 
-        Each entry carries the ``cells`` within ``NEARBY_RADIUS_M`` of its pin
-        (not every cell in the group), so picking one tags only the photos
-        actually near that place: two outings in the same county fall into the
-        same broad group, and a park near one would otherwise be sent with
-        every cell and mis-tag photos many kilometers away.
+        A place is offered only when its pin is within ``NEARBY_RADIUS_M`` of
+        every photo in the group, so choosing it, which tags the whole group,
+        never names a photo taken far from it. Each entry carries
+        ``distance_m`` and ``farthest_m``: the closest and farthest of the
+        group's measured photo points from the pin.
         """
-        closest: dict[str, JsonDict] = {}
-        cells_by_place: dict[str, list[str]] = {}
+        points = {point for key in group["broad_cells"] for point in self._cells[key]["points"]}
+        candidates: dict[str, JsonDict] = {}
         reasons: Counter[str] = Counter()
-        exclude = (group["suggestion"] or {}).get("place_id")
         for key in group["broad_cells"]:
             cell = self._cells[key]
             found = self._nearby_found.get(_nearby_bucket(cell["lat"], cell["lng"]))
@@ -546,36 +640,28 @@ class ImportLocationSuggester:
                 reasons[found or "not_looked_up"] += 1
                 continue
             for place in found:
-                if place["place_id"] == exclude:
-                    continue
-                # Distance from the pin to the closest actual photo spot in
-                # the cell, not the cell's averaged centroid: a cell can span
-                # ~110 m, enough to flip inclusion at the 5 km boundary, and
-                # the response advertises this as a per-photo distance.
-                pin = {"latitude": place["lat"], "longitude": place["lng"]}
-                distance = round(min(
-                    distance_meters({"latitude": lat, "longitude": lng}, pin)
-                    for lat, lng in cell["points"]
-                ))
-                if distance > NEARBY_RADIUS_M:
-                    continue
-                place_cells = cells_by_place.setdefault(place["place_id"], [])
-                if not place_cells or place_cells[-1] != key:
-                    place_cells.append(key)
-                best = closest.get(place["place_id"])
-                if best is None or distance < best["distance_m"]:
-                    closest[place["place_id"]] = {
-                        "place_id": place["place_id"], "name": place["name"],
-                        "type": place["type"], "distance_m": distance,
-                    }
-        for place_id, entry in closest.items():
-            entry["cells"] = cells_by_place[place_id]
-        ranked = sorted(closest.values(), key=lambda p: (p["distance_m"], p["name"]))
-        if ranked or not reasons:
-            return ranked[:MAX_NEARBY_PLACES], None
+                candidates.setdefault(place["place_id"], place)
+        candidates.pop((group["suggestion"] or {}).get("place_id") or "", None)
+        if candidates and _spread_m(points) > 2 * math.sqrt(2) * NEARBY_RADIUS_M:
+            # Points all within reach of one pin fit in a square of side twice
+            # the reach, so no pin can cover this outing; skip measuring each.
+            return [], "spread_out"
+        offered = []
+        for place in candidates.values():
+            reach = _pin_reach(place, points)
+            if reach is not None:
+                closest, farthest = reach
+                offered.append({
+                    "place_id": place["place_id"], "name": place["name"],
+                    "type": place["type"], "distance_m": closest, "farthest_m": farthest,
+                })
+        offered.sort(key=lambda p: (p["distance_m"], p["name"]))
+        if offered or not reasons:
+            return offered[:MAX_NEARBY_PLACES], None
         return [], reasons.most_common(1)[0][0]
 
     def result(self) -> JsonDict:
+        self._split_outings()
         if len(self._groups) > MAX_CHOICES or getattr(self, "_nearby_over_limit", False):
             return {
                 "groups": [], "file_cells": {},
@@ -619,11 +705,15 @@ def suggest_import_locations(
     it. Each group's ``suggestion`` is None or a dict with ``kind``
     (``"keyword"`` with ``keyword_id``, ``name`` and ``parents``, or
     ``"google"`` with ``place_id``, ``name`` and ``summary``) and ``source``.
-    A group Google could name only as a county or broader also carries
-    ``nearby_places`` (``place_id``, ``name``, ``type`` and ``distance_m``
-    from its closest photo spot to the place's pin, nearest first), plus
-    ``nearby_unresolved`` (``no_api_key`` or ``transient_error``) when the
-    list is empty because the lookup could not run.
+    Cells Google could name only as a county or broader are split into
+    outings (:data:`OUTING_LINK_M`), one group each, and each such group
+    also carries ``nearby_places``: places whose pin is within
+    :data:`NEARBY_RADIUS_M` of every photo in it (``place_id``, ``name``,
+    ``type``, and ``distance_m`` / ``farthest_m``, the closest and farthest
+    photo from the pin), nearest first, plus ``nearby_unresolved``
+    (``no_api_key``, ``transient_error`` or ``spread_out``) when the list is
+    empty because the lookup could not run or no pin could reach the whole
+    outing.
     Over-budget previews return empty groups and ``work_limit_error``;
     callers must require fewer files or explicit GPS opt-out before import.
     """

@@ -291,9 +291,26 @@ function importLocationDistanceText(meters) {
   return meters < 1000 ? meters + ' m' : (meters / 1000).toFixed(1) + ' km';
 }
 
-// Named places near spots Google Maps could only name broadly (a county or
-// state). Offered, not chosen: a pin is one point, so the distance is all
-// Vireo knows. 5 km is NEARBY_RADIUS_M in services/import_locations.py.
+// The closest and farthest photo from a place's pin, as one short range.
+/** @param {ImportLocationNearbyPlace} place */
+function importLocationReachText(place) {
+  const near = importLocationDistanceText(place.distance_m);
+  const far = importLocationDistanceText(place.farthest_m);
+  if (near === far) return near;
+  const unit = / (k?m)$/;
+  const nearUnit = near.match(unit);
+  const farUnit = far.match(unit);
+  // "666–912 m" and "1.2–2.4 km"; mixed units keep both ("386 m–1.5 km").
+  return nearUnit && farUnit && nearUnit[1] === farUnit[1]
+    ? near.replace(unit, '') + '–' + far
+    : near + '–' + far;
+}
+
+// Named places near an outing Google Maps could only name broadly (a county
+// or state). Offered, not chosen: a pin is one point, so the distance is all
+// Vireo knows. Each place's pin is within 5 km (NEARBY_RADIUS_M in
+// services/import_locations.py) of every photo in the group, so a pick
+// applies to the whole group.
 /** @param {ImportLocationGroup} group @param {(place: ImportLocationNearbyPlace) => void} onPick */
 function renderImportLocationNearby(group, onPick) {
   const places = group.nearby_places;
@@ -307,12 +324,14 @@ function renderImportLocationNearby(group, onPick) {
       ? 'Google Maps only has a broad area name for these spots. Add a Google Maps API key in Settings to see named places nearby.'
       : group.nearby_unresolved === 'transient_error'
         ? 'Google Maps only has a broad area name for these spots, and didn’t answer when asked for named places nearby. Preview again to retry.'
-        : 'Google Maps only has a broad area name for these spots, and no visited park or natural feature within 5 km of them.';
+        : group.nearby_unresolved === 'spread_out'
+          ? 'Google Maps only has a broad area name for these spots, and they are too spread out for one nearby place to cover them all.'
+          : 'Google Maps only has a broad area name for these spots, and no visited park or natural feature within 5 km of all of them.';
     box.appendChild(note);
     return box;
   }
-  note.textContent = 'Google Maps only has a broad area name for these spots. Named places nearby,'
-    + ' with the distance from the closest of these photos to the place’s map pin'
+  note.textContent = 'Google Maps only has a broad area name for these spots. Named places within 5 km'
+    + ' of all these photos, with the closest and farthest photo’s distance to the place’s map pin'
     + ' (a pin is one point, so Vireo can’t tell whether the photos were taken inside the place):';
   const list = document.createElement('div');
   list.className = 'import-location-nearby-list';
@@ -320,7 +339,7 @@ function renderImportLocationNearby(group, onPick) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'btn import-location-nearby-place';
-    btn.textContent = place.name + ' · ' + importLocationDistanceText(place.distance_m);
+    btn.textContent = place.name + ' · ' + importLocationReachText(place);
     btn.title = (place.type === 'natural_feature' ? 'Natural feature' : 'Park or recreation area')
       + ' on Google Maps. The photos keep their own GPS.';
     btn.addEventListener('click', () => onPick(place));
@@ -442,17 +461,10 @@ function importLocationChoices() {
     if (!importLocationGroupCount(group, counts)) return;
     const target = importLocationTarget(group);
     if (target.kind === 'skip') return;
-    // A picked nearby place scopes the choice to the cells within range of
-    // its pin, not every cell in the broad group: two outings in the same
-    // county share a broad group, so sending `group.cells.slice()` for a
-    // park near one outing would mis-tag the other outing's photos.
-    const picked = target.kind === 'google'
-      ? (group.nearby_places || []).find(p => p.place_id === target.place_id)
-      : null;
-    const cells = picked && Array.isArray(picked.cells)
-      ? picked.cells.slice()
-      : group.cells.slice();
-    choices.push({ ...target, cells });
+    // Every target, a picked nearby place included, covers the whole group:
+    // broadly named spots are split into outings on the server, and a place
+    // is only offered when its pin reaches every photo in the outing.
+    choices.push({ ...target, cells: group.cells.slice() });
   });
   return choices;
 }

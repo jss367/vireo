@@ -191,8 +191,10 @@ test('a clicked nearby place becomes a Google choice only while the box names it
   h.ctx.data.groups[0].suggestion = {kind: 'google', source: 'google_area',
     place_id: 'county', name: 'San Diego County', summary: 'San Diego County · California'};
   h.ctx.data.groups[0].nearby_places = [
-    {place_id: 'lake', name: 'Big Laguna Lake', type: 'natural_feature', distance_m: 574},
-    {place_id: 'lmra', name: 'Laguna Mountain Recreation Area', type: 'park', distance_m: 2176}];
+    {place_id: 'lake', name: 'Big Laguna Lake', type: 'natural_feature',
+      distance_m: 574, farthest_m: 2186},
+    {place_id: 'lmra', name: 'Laguna Mountain Recreation Area', type: 'park',
+      distance_m: 2176, farthest_m: 2210}];
   h.run(`importLocations.data = data;
     globalThis.row = renderImportLocationGroup(data.groups[0]);
     globalThis.body = row.children[2];
@@ -200,7 +202,8 @@ test('a clicked nearby place becomes a Google choice only while the box names it
     globalThis.nearby = body.children[4];`);
   assert.equal(h.choices()[0].place_id, 'county', 'the broad suggestion stays the default');
   const labels = JSON.parse(h.run('JSON.stringify(nearby.children[1].children.map(b => b.textContent))'));
-  assert.deepEqual(labels, ['Big Laguna Lake · 574 m', 'Laguna Mountain Recreation Area · 2.2 km']);
+  // Closest–farthest photo; a range that rounds to one value reads as one.
+  assert.deepEqual(labels, ['Big Laguna Lake · 574 m–2.2 km', 'Laguna Mountain Recreation Area · 2.2 km']);
   assert.match(h.run('nearby.children[0].textContent'), /can’t tell whether the photos were taken inside/);
 
   h.run('nearby.children[1].children[0].handlers.click();');
@@ -216,9 +219,9 @@ test('a clicked nearby place becomes a Google choice only while the box names it
   assert.equal(h.choices()[0].place_id, 'lake', 'back to the picked name is the picked place');
 });
 
-test('a picked nearby place scopes the choice to the cells within reach of its pin', () => {
-  // The broad group spans two outings in the same county; picking one park
-  // must tag only the cells near it, not every cell in the group.
+test('a picked nearby place is sent with every cell of its outing', () => {
+  // The server splits broad names into outings and offers only places whose
+  // pin reaches every photo, so a pick never drops part of the group.
   const h = harness();
   h.ctx.data.groups[0].cells = ['0,0', '1,0', '2,0'];
   h.ctx.data.file_cells = {'/invented/0': '0,0', '/invented/1': '1,0', '/invented/2': '2,0'};
@@ -226,27 +229,15 @@ test('a picked nearby place scopes the choice to the cells within reach of its p
     place_id: 'county', name: 'San Diego County', summary: 'San Diego County · California'};
   h.ctx.data.groups[0].nearby_places = [
     {place_id: 'lake', name: 'Big Laguna Lake', type: 'natural_feature',
-      distance_m: 574, cells: ['0,0', '1,0']},
-    {place_id: 'coast', name: 'Coast Park', type: 'park',
-      distance_m: 300, cells: ['2,0']}];
+      distance_m: 574, farthest_m: 2186}];
   h.ctx.importPreviewedPaths = ['/invented/0', '/invented/1', '/invented/2'];
   h.run(`importLocations.data = data;
-    globalThis.row = renderImportLocationGroup(data.groups[0]);
-    globalThis.body = row.children[2];
-    globalThis.input = body.children[1];
-    globalThis.nearby = body.children[4];`);
-  // Default (broad suggestion) still sends every cell in the group.
-  assert.deepEqual(h.choices()[0].cells.slice().sort(), ['0,0', '1,0', '2,0']);
-  // Picking the lake sends only the lake's two cells, not the coast cell.
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.deepEqual(h.choices()[0].cells, ['0,0', '1,0', '2,0']);
   h.run('nearby.children[1].children[0].handlers.click();');
-  const lake = h.choices()[0];
+  const [lake] = h.choices();
   assert.equal(lake.place_id, 'lake');
-  assert.deepEqual(lake.cells.slice().sort(), ['0,0', '1,0']);
-  // Picking the coast sends only its one cell.
-  h.run('nearby.children[1].children[1].handlers.click();');
-  const coast = h.choices()[0];
-  assert.equal(coast.place_id, 'coast');
-  assert.deepEqual(coast.cells, ['2,0']);
+  assert.deepEqual(lake.cells, ['0,0', '1,0', '2,0']);
 });
 
 test('a clicked nearby place wins over a same-named broad suggestion', () => {
@@ -256,7 +247,7 @@ test('a clicked nearby place wins over a same-named broad suggestion', () => {
   h.ctx.data.groups[0].suggestion = {kind: 'google', source: 'google_area',
     place_id: 'county', name: 'Laguna', summary: 'Laguna · California'};
   h.ctx.data.groups[0].nearby_places = [
-    {place_id: 'park', name: 'Laguna', type: 'park', distance_m: 500}];
+    {place_id: 'park', name: 'Laguna', type: 'park', distance_m: 500, farthest_m: 900}];
   h.run(`importLocations.data = data;
     globalThis.row = renderImportLocationGroup(data.groups[0]);
     globalThis.body = row.children[2];
@@ -274,9 +265,12 @@ test('a broadly named group says why it has no nearby places', () => {
   h.run(`importLocations.data = data;
     globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
   assert.match(h.run('nearby.children[0].textContent'), /didn’t answer.*Preview again/);
+  h.run(`data.groups[0].nearby_unresolved = 'spread_out';
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.match(h.run('nearby.children[0].textContent'), /too spread out for one nearby place/);
   h.run('delete data.groups[0].nearby_unresolved;');
   h.run('globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];');
-  assert.match(h.run('nearby.children[0].textContent'), /no visited park or natural feature within 5 km/);
+  assert.match(h.run('nearby.children[0].textContent'), /no visited park or natural feature within 5 km of all of them/);
   const backend = readFileSync('vireo/services/import_locations.py', 'utf8');
   assert.match(backend, /NEARBY_RADIUS_M = 5000\b/);
 });
