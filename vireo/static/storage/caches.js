@@ -160,9 +160,10 @@ export async function recheckThumbnails() {
   var button = /** @type {HTMLButtonElement} */ (document.getElementById('recheckThumbnailsBtn'));
   button.disabled = true;
   try {
-    var result = /** @type {{job_id: string, joined: boolean}} */ (
+    var result = /** @type {{job_id: string, joined: boolean, cancelling?: boolean}} */ (
       await safeFetch('/api/thumbnail-cache/recheck', {method: 'POST'}));
-    showToast(result.joined ? 'Thumbnail recheck is already running. See Jobs for progress.' :
+    showToast(result.cancelling ? 'Thumbnail recheck is stopping. Start another check after it finishes.' :
+      result.joined ? 'Thumbnail recheck is already running. See Jobs for progress.' :
       'Thumbnail recheck started. See Jobs for progress.', 'info');
   } catch (_) { /* safeFetch reports the request error. */ }
   finally { button.disabled = false; }

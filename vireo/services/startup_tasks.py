@@ -371,7 +371,10 @@ class StartupTasks:
             singleton_key="thumbnail-recheck", workspace_id=None,
             config={"trigger": "user"},
         )
-        return {"job_id": job_id, "joined": joined}
+        result = {"job_id": job_id, "joined": joined}
+        if joined and self._app._job_runner.is_cancelled(job_id):
+            result["cancelling"] = True
+        return result
 
     def _recheck_thumbnail_paths(self, job: JobDict) -> JobResult:
         from thumbnails import backfill_thumb_paths

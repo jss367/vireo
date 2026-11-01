@@ -108,3 +108,32 @@ def test_unavailable_thumbnail_cache_preserves_records(client_with_photo, monkey
     with pytest.raises(OSError):
         thumbnails.backfill_thumb_paths(db, root)
     assert db.photos.get(pid)['thumb_path'] == f'{pid}.jpg'
+
+
+def test_cancelled_recheck_keeps_singleton_until_worker_finishes(client_with_photo, monkeypatch):
+    import thumbnails
+
+    app, _, _ = client_with_photo
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def recheck(*args, **kwargs):
+        calls.append(1)
+        entered.set()
+        assert release.wait(synchronization_timeout(5))
+        return {'checked': 0}
+    monkeypatch.setattr(thumbnails, 'backfill_thumb_paths', recheck)
+    try:
+        first = app.test_client().post('/api/thumbnail-cache/recheck').json
+        assert entered.wait(synchronization_timeout(5))
+        app._job_runner.cancel_job(first['job_id'])
+        second = app.test_client().post('/api/thumbnail-cache/recheck').json
+        assert second == {'job_id': first['job_id'], 'joined': True, 'cancelling': True}
+        assert calls == [1]
+    finally:
+        release.set()
+    assert wait_for_job_via_runner(app._job_runner, first['job_id'])['status'] == 'cancelled'
+    third = app.test_client().post('/api/thumbnail-cache/recheck').json
+    assert third['job_id'] != first['job_id']
+    assert third['joined'] is False
+    assert wait_for_job_via_runner(app._job_runner, third['job_id'])['status'] == 'completed'
+    assert calls == [1, 1]

@@ -682,7 +682,8 @@ class JobRunner:
 
         Must be called with self._lock held. Returns (job_id, job_dict) or
         (None, None). "Active" means running/queued/pausing/paused — a
-        completed/failed/cancelled job releases the slot.
+        completed/failed/cancelled job releases the slot. A cancellation
+        request alone does not: its worker may still be reading or writing.
 
         A ``singleton_key`` of None is not a valid key: without this guard,
         every plain ``start()`` job (which stores singleton_key=None) would
@@ -695,7 +696,6 @@ class JobRunner:
                 j.get("type") == job_type
                 and j.get("singleton_key") == singleton_key
                 and j.get("status") in ("running", "queued", "pausing", "paused")
-                and jid not in self._control.cancelled
             ):
                 return jid, j
         return None, None
