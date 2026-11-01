@@ -80,9 +80,7 @@ def test_browse_menu_sets_representative(live_server, page):
     expect(card.locator(".representative-badge", has_text="Representative")).to_be_visible()
     card.click(button="right")
     item = page.locator(".vireo-ctx-menu .vireo-ctx-item", has_text="Set Representative — Red-tailed Hawk")
-    expect(item).to_be_visible()
-    assert "vireo-ctx-disabled" in (item.get_attribute("class") or "")
-    assert item.get_attribute("title") == "Already representative"
+    expect(item).to_have_count(0)
 
 
 def test_browse_menu_hidden_for_photo_without_species(live_server, page):
@@ -131,7 +129,7 @@ def test_browse_menu_hidden_for_rejected_photo(live_server, page):
     expect(menu.locator(".vireo-ctx-item", has_text="Set Representative")).to_have_count(0)
 
 
-def test_browse_menu_disabled_for_multi_select(live_server, page):
+def test_browse_menu_hides_representative_for_multi_select(live_server, page):
     url = live_server["url"]
     hawk = live_server["data"]["photos"][0]
     other = live_server["data"]["photos"][1]
@@ -147,9 +145,7 @@ def test_browse_menu_disabled_for_multi_select(live_server, page):
     menu = page.locator(".vireo-ctx-menu")
     expect(menu).to_be_visible()
     item = menu.locator(".vireo-ctx-item", has_text="Set Representative")
-    expect(item).to_be_visible()
-    assert "vireo-ctx-disabled" in (item.get_attribute("class") or "")
-    assert item.get_attribute("title") == "Select a single photo"
+    expect(item).to_have_count(0)
 
 
 def test_lightbox_panel_add_and_flip_to_selected(live_server, page):
