@@ -1459,8 +1459,10 @@ def test_edit_history_facade_signatures_are_unchanged():
         ("new_value", empty), ("items", empty), ("is_batch", False),
         ("_commit", True), ("source", None), ("reason", None),
     ]
-    assert params("undo_last_edit") == [("self", empty)]
-    assert params("redo_last_undo") == [("self", empty)]
+    # ``cache_restore`` lets the undo/redo routes keep a pipeline-cache
+    # restoration open through their decision's commit.
+    assert params("undo_last_edit") == [("self", empty), ("cache_restore", None)]
+    assert params("redo_last_undo") == [("self", empty), ("cache_restore", None)]
     assert params("_prune_edit_history") == [("self", empty)]
 
 
