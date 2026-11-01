@@ -69,6 +69,7 @@ def test_get_saved_process_returns_dict_with_python_types(db):
     pid = db.processes.create(
         "Typed", skip_classify=True, miss_enabled=False, review_mode="species",
     )
+    db.commit()
     proc = db.processes.get(pid)
     assert type(proc) is dict
     assert set(proc) == _DICT_KEYS
@@ -89,6 +90,7 @@ def test_get_saved_process_missing_returns_none(db):
 
 def test_get_saved_process_coerces_nonzero_integers_to_true(db):
     pid = db.processes.create("Raw")
+    db.commit()
     db.conn.execute(
         "UPDATE saved_processes SET skip_regroup = 7, is_seed = 2 WHERE id = ?",
         (pid,),
@@ -102,8 +104,11 @@ def test_get_saved_process_coerces_nonzero_integers_to_true(db):
 def test_get_saved_processes_orders_by_sort_order_then_id(db):
     _clear_processes(db)
     a = db.processes.create("A")
+    db.commit()
     b = db.processes.create("B")
+    db.commit()
     c = db.processes.create("C")
+    db.commit()
     # Tie a and c on sort_order 5 and put b first: id breaks the tie.
     db.conn.execute("UPDATE saved_processes SET sort_order = 5 WHERE id IN (?, ?)", (a, c))
     db.conn.execute("UPDATE saved_processes SET sort_order = 1 WHERE id = ?", (b,))
@@ -126,6 +131,7 @@ def test_resolve_process_layers_flags_over_base(db):
     pid = db.processes.create(
         "Resolve", skip_classify=True, skip_regroup=True, review_mode="species",
     )
+    db.commit()
     flags = saved_processes.resolve_process(db, pid)
     assert flags == {
         **ps._BASE,
@@ -148,8 +154,9 @@ def test_resolve_process_unknown_id_message(db):
 # -- create ------------------------------------------------------------------
 
 
-def test_create_commits_and_is_visible_to_another_connection(db):
+def test_create_is_visible_to_another_connection_once_committed(db):
     pid = db.processes.create("Visible")
+    db.commit()
     assert isinstance(pid, int)
     assert not db.conn.in_transaction
     row = _raw_row(db, pid)
@@ -159,6 +166,7 @@ def test_create_commits_and_is_visible_to_another_connection(db):
 
 def test_create_defaults(db):
     pid = db.processes.create("Defaults")
+    db.commit()
     row = _raw_row(db, pid)
     assert (row["skip_classify"], row["skip_extract_masks"],
             row["skip_eye_keypoints"], row["skip_regroup"],
@@ -171,6 +179,7 @@ def test_create_strips_name_and_stores_flags_as_0_or_1(db):
         "  Padded  ", skip_classify="yes", skip_extract_masks=5,
         skip_eye_keypoints=[1], skip_regroup=0, miss_enabled="",
     )
+    db.commit()
     row = _raw_row(db, pid)
     assert row["name"] == "Padded"
     assert (row["skip_classify"], row["skip_extract_masks"],
@@ -186,13 +195,16 @@ def test_create_appends_after_max_sort_order(db):
     )
     db.conn.commit()
     pid = db.processes.create("After")
+    db.commit()
     assert db.processes.get(pid)["sort_order"] == max(top, 40) + 1
 
 
 def test_create_into_empty_table_starts_sort_order_at_zero(db):
     _clear_processes(db)
     first = db.processes.create("First")
+    db.commit()
     second = db.processes.create("Second")
+    db.commit()
     assert db.processes.get(first)["sort_order"] == 0
     assert db.processes.get(second)["sort_order"] == 1
 
@@ -202,6 +214,7 @@ def test_create_rejects_blank_or_non_string_name(db, name):
     before = db.processes.list_all()
     with pytest.raises(ValueError, match="process name is required"):
         db.processes.create(name)
+        db.commit()
     assert db.processes.list_all() == before
 
 
@@ -209,13 +222,16 @@ def test_create_rejects_blank_or_non_string_name(db, name):
 def test_create_rejects_bad_review_mode(db, mode):
     with pytest.raises(ValueError, match=r"review_mode must be 'species' or null"):
         db.processes.create("Bad mode", review_mode=mode)
+        db.commit()
     assert all(p["name"] != "Bad mode" for p in db.processes.list_all())
 
 
 def test_create_duplicate_name_message_uses_stripped_name(db):
     db.processes.create("Dup")
+    db.commit()
     with pytest.raises(ValueError, match=r"a process named 'Dup' already exists") as exc:
         db.processes.create("  Dup ")
+        db.commit()
     assert isinstance(exc.value.__cause__, sqlite3.IntegrityError)
     assert [p["name"] for p in db.processes.list_all()].count("Dup") == 1
 
@@ -223,8 +239,9 @@ def test_create_duplicate_name_message_uses_stripped_name(db):
 # -- update ------------------------------------------------------------------
 
 
-def test_update_commits_and_returns_true(db):
+def test_update_returns_true(db):
     pid = db.processes.create("Before")
+    db.commit()
     assert saved_processes.update_saved_process(db, pid, name="  After  ", skip_eye_keypoints=True) is True
     assert not db.conn.in_transaction
     row = _raw_row(db, pid)
@@ -241,6 +258,7 @@ def test_update_with_no_fields_rewrites_same_values(db):
     pid = db.processes.create(
         "Same", skip_classify=True, miss_enabled=False, review_mode="species",
     )
+    db.commit()
     before = db.processes.get(pid)
     assert saved_processes.update_saved_process(db, pid) is True
     assert db.processes.get(pid) == before
@@ -248,6 +266,7 @@ def test_update_with_no_fields_rewrites_same_values(db):
 
 def test_update_each_flag_independently(db):
     pid = db.processes.create("Flags")
+    db.commit()
     saved_processes.update_saved_process(db, pid, skip_classify=True)
     saved_processes.update_saved_process(db, pid, skip_extract_masks=True)
     saved_processes.update_saved_process(db, pid, skip_regroup=True)
@@ -273,6 +292,7 @@ def test_update_preserves_is_seed_and_sort_order(db):
 
 def test_update_review_mode_sentinel_vs_explicit_none(db):
     pid = db.processes.create("Review", review_mode="species")
+    db.commit()
     saved_processes.update_saved_process(db, pid, name="Review2")
     assert db.processes.get(pid)["review_mode"] == "species"
     saved_processes.update_saved_process(db, pid, review_mode=None)
@@ -281,6 +301,7 @@ def test_update_review_mode_sentinel_vs_explicit_none(db):
 
 def test_update_bad_review_mode_leaves_row_untouched(db):
     pid = db.processes.create("Keep")
+    db.commit()
     before = db.processes.get(pid)
     with pytest.raises(ValueError, match=r"review_mode must be 'species' or null"):
         saved_processes.update_saved_process(db, pid, name="Changed", review_mode="nope")
@@ -289,6 +310,7 @@ def test_update_bad_review_mode_leaves_row_untouched(db):
 
 def test_update_blank_name_rejected(db):
     pid = db.processes.create("Named")
+    db.commit()
     with pytest.raises(ValueError, match="process name is required"):
         saved_processes.update_saved_process(db, pid, name="   ")
     assert db.processes.get(pid)["name"] == "Named"
@@ -296,7 +318,9 @@ def test_update_blank_name_rejected(db):
 
 def test_update_duplicate_name_message_uses_stripped_name(db):
     db.processes.create("Taken")
+    db.commit()
     pid = db.processes.create("Mine")
+    db.commit()
     with pytest.raises(ValueError, match=r"a process named 'Taken' already exists") as exc:
         saved_processes.update_saved_process(db, pid, name=" Taken  ")
     assert isinstance(exc.value.__cause__, sqlite3.IntegrityError)
@@ -306,8 +330,9 @@ def test_update_duplicate_name_message_uses_stripped_name(db):
 # -- delete ------------------------------------------------------------------
 
 
-def test_delete_commits_and_is_visible_to_another_connection(db):
+def test_delete_is_visible_to_another_connection_once_committed(db):
     pid = db.processes.create("Gone")
+    db.commit()
     assert saved_processes.delete_saved_process(db, pid) is True
     assert not db.conn.in_transaction
     assert _raw_row(db, pid) is None
@@ -325,6 +350,7 @@ def test_delete_missing_returns_false_and_leaves_workspaces_alone(db):
 
 def test_delete_rewrites_only_the_matching_pointer(db):
     pid = db.processes.create("Target")
+    db.commit()
     ws = db.create_workspace(
         "WS",
         config_overrides={
@@ -348,6 +374,7 @@ def test_delete_rewrites_only_the_matching_pointer(db):
 
 def test_delete_rewrites_every_referencing_workspace(db):
     pid = db.processes.create("Shared")
+    db.commit()
     ws_ids = [
         db.create_workspace(
             f"WS{i}", config_overrides={"pipeline": {"default_process_id": pid}},
@@ -374,6 +401,7 @@ def test_delete_rewrites_every_referencing_workspace(db):
 )
 def test_delete_skips_workspaces_it_cannot_or_need_not_rewrite(db, raw):
     pid = db.processes.create("Skip")
+    db.commit()
     ws = db.create_workspace("WS")
     _set_overrides_raw(db, ws, raw)
     assert saved_processes.delete_saved_process(db, pid) is True
@@ -383,6 +411,7 @@ def test_delete_skips_workspaces_it_cannot_or_need_not_rewrite(db, raw):
 
 def test_delete_skips_null_overrides(db):
     pid = db.processes.create("Nulls")
+    db.commit()
     ws = db.create_workspace("WS")
     assert _overrides_raw(db, ws) is None
     assert saved_processes.delete_saved_process(db, pid) is True
@@ -392,6 +421,7 @@ def test_delete_skips_null_overrides(db):
 def test_delete_compares_pointer_by_equality(db):
     # A string pointer "N" is not the integer id N; only == matches rewrite.
     pid = db.processes.create("Typed pointer")
+    db.commit()
     ws_str = db.create_workspace(
         "WSstr", config_overrides={"pipeline": {"default_process_id": str(pid)}},
     )
@@ -401,6 +431,7 @@ def test_delete_compares_pointer_by_equality(db):
 
 def test_delete_mixed_rows_rewrites_matches_and_skips_malformed(db):
     pid = db.processes.create("Mixed")
+    db.commit()
     bad = db.create_workspace("Bad")
     good = db.create_workspace(
         "Good", config_overrides={"pipeline": {"default_process_id": pid}},
@@ -414,6 +445,7 @@ def test_delete_mixed_rows_rewrites_matches_and_skips_malformed(db):
 def test_static_helpers_live_on_the_repository(db):
     """The row and field helpers are ``ProcessesRepository`` statics."""
     pid = db.processes.create("Static", skip_regroup=True)
+    db.commit()
     row = db.conn.execute(
         "SELECT * FROM saved_processes WHERE id = ?", (pid,)
     ).fetchone()
@@ -433,6 +465,7 @@ def test_static_helpers_live_on_the_repository(db):
 def test_saved_processes_do_not_require_an_active_workspace(db):
     db.set_active_workspace(None)
     pid = db.processes.create("Global")
+    db.commit()
     assert db.processes.get(pid)["name"] == "Global"
     assert any(p["id"] == pid for p in db.processes.list_all())
     assert saved_processes.resolve_process(db, pid)["skip_classify"] is False
@@ -523,6 +556,7 @@ def test_existence_checks_go_through_the_repository_get(db, monkeypatch):
     every access, so a class-level patch reaches every existence check.
     """
     pid = db.processes.create("Patched")
+    db.commit()
     monkeypatch.setattr(ProcessesRepository, "get", lambda self, process_id: None)
     assert saved_processes.update_saved_process(db, pid, name="Nope") is False
     assert saved_processes.delete_saved_process(db, pid) is False

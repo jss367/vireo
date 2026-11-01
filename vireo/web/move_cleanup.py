@@ -93,7 +93,8 @@ def create_move_cleanup_blueprint(
                     return json_error("The move result is still being saved; review again in a moment", 409)
                 cleanup = cleanup_source(db, source, body.get("review_token"), trash_paths)
                 result["source_cleanup"] = cleanup
-                db.job_history.set_result(job_id, json.dumps(result))
+                with db.transaction():
+                    db.job_history.set_result(job_id, json.dumps(result))
                 return jsonify(cleanup)
         except (ValueError, OSError, WorkspaceBusyError) as exc:
             return json_error(str(exc), 409)

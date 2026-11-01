@@ -100,7 +100,6 @@ class ProcessesRepository:
             raise ValueError(
                 f"a process named {name.strip()!r} already exists"
             ) from e
-        self.conn.commit()
         return cur.lastrowid
 
     def update(self, process_id: int, current: dict[str, Any], *,
@@ -110,7 +109,7 @@ class ProcessesRepository:
                skip_regroup: bool | None = None, miss_enabled: bool | None = None,
                review_mode: Any = UNSET) -> bool:
         """Merge the given fields over ``current`` (the existing row as a
-        dict), write them, commit, and return True.
+        dict), write them (no commit), and return True.
 
         Any field left at its sentinel default (None, or UNSET for
         review_mode which is legitimately None) keeps its ``current`` value.
@@ -141,12 +140,11 @@ class ProcessesRepository:
             raise ValueError(
                 f"a process named {merged['name'].strip()!r} already exists"
             ) from e
-        self.conn.commit()
         return True
 
     def delete(self, process_id: int) -> bool:
         """Delete a saved process, null every workspace default pointing at
-        it, commit, and return True. The caller checks that it exists.
+        it (no commit), and return True. The caller checks that it exists.
         """
         self.conn.execute(
             "DELETE FROM saved_processes WHERE id = ?", (process_id,)
@@ -175,5 +173,4 @@ class ProcessesRepository:
                     "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
                     (json.dumps(overrides), row["id"]),
                 )
-        self.conn.commit()
         return True

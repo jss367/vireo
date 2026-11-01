@@ -34,7 +34,7 @@ class PendingArchiveRepository:
     def register(
         self, archive_id: str, destination: str, staging_destination: str, target: Any,
     ) -> None:
-        """Record a transfer for the active workspace (kept if the id exists) and commit.
+        """Record a transfer for the active workspace (kept if the id exists; no commit).
 
         ``target`` is stored as JSON in ``target_json``.
         """
@@ -43,7 +43,6 @@ class PendingArchiveRepository:
             "(id, workspace_id, destination, staging_destination, target_json) VALUES (?, ?, ?, ?, ?)",
             (archive_id, self.workspace_id_fn(), destination, staging_destination, json.dumps(target)),
         )
-        self.conn.commit()
 
     def get(self, archive_id: str) -> sqlite3.Row | None:
         """One of the active workspace's transfers by id, or None."""
@@ -74,12 +73,11 @@ class PendingArchiveRepository:
         ).fetchall()
 
     def delete(self, archive_id: str) -> None:
-        """Forget one of the workspace's transfers (the row only) and commit."""
+        """Forget one of the workspace's transfers (the row only; no commit)."""
         self.conn.execute(
             "DELETE FROM pending_archives WHERE id = ? AND workspace_id = ?",
             (archive_id, self.workspace_id_fn()),
         )
-        self.conn.commit()
 
     def cataloged_photo_totals(self, folder_ids: Iterable[int]) -> tuple[int, int | None]:
         """Count main photo files in a transfer tree, regardless of workspace visibility.
@@ -102,12 +100,11 @@ class PendingArchiveRepository:
         return count, None if unknown else size
 
     def set_state(self, archive_id: str, state: str, error: str = "") -> None:
-        """Set a transfer's ``state`` and ``error`` by id, in any workspace, and commit."""
+        """Set a transfer's ``state`` and ``error`` by id, in any workspace (no commit)."""
         self.conn.execute(
             "UPDATE pending_archives SET state = ?, error = ? WHERE id = ?",
             (state, error, archive_id),
         )
-        self.conn.commit()
 
     def attach_collection(self, col_id: int | None, pending_archive_id: str) -> None:
         self.conn.execute(

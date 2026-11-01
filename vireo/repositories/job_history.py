@@ -129,16 +129,10 @@ class JobHistoryRepository:
         ).fetchone()
 
     def set_result(self, job_id: str, result_json: str) -> None:
-        """Replace the stored ``result`` JSON of ``job_id`` and commit.
-
-        The commit goes through the connection's own ``commit``, so it stays
-        a no-op inside a unit of work (``Database.transaction()``; undo/redo
-        replay), like every other repository write.
-        """
+        """Replace the stored ``result`` JSON of ``job_id`` (no commit)."""
         self.conn.execute(
             "UPDATE job_history SET result = ? WHERE id = ?", (result_json, job_id),
         )
-        self.conn.commit()
 
     def parent_import_row(self, parent_id: str) -> sqlite3.Row | None:
         return self.conn.execute(

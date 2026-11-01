@@ -15,7 +15,8 @@ LIVE_STATUSES = {"running", "queued", "pausing", "paused"}
 
 
 def register_pending_archive(db, archive_id, destination, staging_destination, target):
-    db.pending_archives.register(archive_id, destination, staging_destination, target)
+    with db.transaction():
+        db.pending_archives.register(archive_id, destination, staging_destination, target)
 
 
 def get_pending_archive(db, archive_id):

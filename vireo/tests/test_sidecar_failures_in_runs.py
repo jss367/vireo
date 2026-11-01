@@ -134,6 +134,7 @@ def test_import_names_the_photo_and_still_processes(
         xmp = archive / "trip" / "heron.xmp"
         xmp.write_text(CORRUPT_XMP)
     process_id = db.processes.create("After import")
+    db.commit()
     service.enqueue_process_job.return_value = ("processing", None, None)
 
     response = getattr(service, method)(db, {

@@ -42,20 +42,22 @@ def update_saved_process(
     ValueError on a blank/duplicate name or a bad review_mode.
     """
     repo = db.processes
-    current = repo.get(process_id)
-    if current is None:
-        return False
-    return repo.update(
-        process_id,
-        current,
-        name=name,
-        skip_classify=skip_classify,
-        skip_extract_masks=skip_extract_masks,
-        skip_eye_keypoints=skip_eye_keypoints,
-        skip_regroup=skip_regroup,
-        miss_enabled=miss_enabled,
-        review_mode=review_mode,
-    )
+    # The merge reads the row it overwrites, so read it under the lock.
+    with db.transaction(immediate=True):
+        current = repo.get(process_id)
+        if current is None:
+            return False
+        return repo.update(
+            process_id,
+            current,
+            name=name,
+            skip_classify=skip_classify,
+            skip_extract_masks=skip_extract_masks,
+            skip_eye_keypoints=skip_eye_keypoints,
+            skip_regroup=skip_regroup,
+            miss_enabled=miss_enabled,
+            review_mode=review_mode,
+        )
 
 
 def delete_saved_process(db: Database, process_id: int) -> bool:
@@ -67,6 +69,7 @@ def delete_saved_process(db: Database, process_id: int) -> bool:
     which owns config-file I/O. Does not run inside an outer transaction.
     """
     repo = db.processes
-    if repo.get(process_id) is None:
-        return False
-    return repo.delete(process_id)
+    with db.transaction(immediate=True):
+        if repo.get(process_id) is None:
+            return False
+        return repo.delete(process_id)

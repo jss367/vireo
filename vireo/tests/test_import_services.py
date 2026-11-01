@@ -81,6 +81,7 @@ def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import
     scanner.scan(str(source), db, options=ScanOptions(incremental=True))
     Image.new("RGB", (32, 32), "blue").save(source / "unselected.jpg")
     process_id = db.processes.create("After import")
+    db.commit()
     frozen_process = saved_processes.resolve_process(db, process_id)
     parent_id = _interrupted_in_place(db, {
         "sources": [str(source)], "source_snapshot_id": snapshot_id,
@@ -141,6 +142,7 @@ def test_restart_in_place_uses_frozen_snapshot_when_saved_process_deleted(
     source.mkdir()
     Image.new("RGB", (32, 32)).save(source / "bird.jpg")
     process_id = db.processes.create("After import")
+    db.commit()
     frozen_process = saved_processes.resolve_process(db, process_id)
     parent_id = _interrupted_in_place(db, {
         "sources": [str(source)], "after_import": process_id,
@@ -164,6 +166,7 @@ def test_restart_in_place_does_not_duplicate_processing(import_service, tmp_path
     source.mkdir()
     Image.new("RGB", (32, 32)).save(source / "bird.jpg")
     process_id = db.processes.create("After import")
+    db.commit()
     parent_id = _interrupted_in_place(db, {
         "sources": [str(source)], "after_import": process_id,
         "after_import_owner": "earlier-import", "skip_after_import": True,

@@ -925,7 +925,7 @@ def record_known_mount_roots(db, baseline: dict[str, bool]) -> None:
             db.commit()
             return
         db.meta.set(
-            KNOWN_MOUNT_ROOTS_KEY, json.dumps(sorted(merged)), _commit=False,
+            KNOWN_MOUNT_ROOTS_KEY, json.dumps(sorted(merged)),
         )
         db.commit()
     except Exception:  # broad: persisting evidence is best-effort; the next run lacks it

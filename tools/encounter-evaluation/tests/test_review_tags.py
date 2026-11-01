@@ -117,6 +117,43 @@ def test_library_failure_rolls_back_tags_but_retains_reference_and_retry(writabl
         assert sync_review_tags(conn, pid)['status'] == 'applied'
 
 
+@pytest.mark.parametrize('write_receipt', [False, True])
+def test_receipt_failure_rolls_back_tags_history_and_xmp_then_retries(writable_queue, monkeypatch, write_receipt):
+    from repositories.meta import MetaRepository
+
+    queue, db, pid, old, preserved = writable_queue
+    original = MetaRepository.set
+    markers = []
+
+    def fail_receipt(self, key, value):
+        markers.append(key)
+        if write_receipt:
+            original(self, key, value)
+        raise OSError('simulated receipt failure')
+
+    monkeypatch.setattr(MetaRepository, 'set', fail_receipt)
+    result = save_and_sync(queue, pid, ['inat:102'])
+    assert result['status'] == 'pending'
+    assert result['error'] == 'simulated receipt failure'
+    assert len(markers) == 1
+    assert db.meta.get(markers[0]) is None
+    assert keywords(db, pid) == preserved | {old}
+    assert not db.edit_history.list_recent()
+    assert not db.pending_changes.list_all()
+
+    monkeypatch.setattr(MetaRepository, 'set', original)
+    with connect(queue) as conn:
+        result = sync_review_tags(conn, pid)
+    assert result['status'] == 'applied', result
+    receipt = json.loads(db.meta.get(markers[0]))
+    assert receipt['revision'] == result['revision']
+    assert receipt['result'] == {'added': 1, 'removed': 1}
+    assert old not in keywords(db, pid)
+    assert preserved <= keywords(db, pid)
+    assert len(db.edit_history.list_recent()) == 2
+    assert len(db.pending_changes.list_all()) == 2
+
+
 def test_retry_after_library_commit_does_not_repeat_or_overwrite_later_edits(writable_queue, monkeypatch):
     from encounter_eval import review_tags
 

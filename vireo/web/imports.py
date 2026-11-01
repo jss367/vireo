@@ -1378,7 +1378,8 @@ def create_imports_blueprint(
                 return json_error("Local originals are available. Send them to NAS before removing this transfer", 409)
             # Forget only the transfer, never files or catalog entries. This is
             # explicit recovery for lost storage, including interrupted sends.
-            db.pending_archives.delete(archive_id)
+            with db.transaction():
+                db.pending_archives.delete(archive_id)
         return jsonify({"ok": True})
 
     def _sync_before_archive_transfer(
@@ -1526,7 +1527,8 @@ def create_imports_blueprint(
             def work(job: JobDict) -> JsonDict:
                 with Database(db_path) as thread_db:
                     thread_db.set_active_workspace(workspace_id)
-                    thread_db.pending_archives.set_state(archive_id, "sending")
+                    with thread_db.transaction():
+                        thread_db.pending_archives.set_state(archive_id, "sending")
                     steps = None
                     try:
                         steps = _send_archive_steps(runner, job, archive, sync_first)
@@ -1539,7 +1541,8 @@ def create_imports_blueprint(
                         if sync_first:
                             result = _with_metadata_sync_summary(result, synced, residual)
                         _finish_send_steps(steps, result, archive, sync_first, synced, residual)
-                        thread_db.pending_archives.set_state(archive_id, "complete")
+                        with thread_db.transaction():
+                            thread_db.pending_archives.set_state(archive_id, "complete")
                         try:
                             invalidate_missing_originals()
                         except Exception:
@@ -1550,7 +1553,8 @@ def create_imports_blueprint(
                     except Exception as e:  # broad: mark the archive retryable before propagating any worker failure
                         if steps is not None:
                             steps.fail(str(e), status="cancelled" if runner.cancellation_requested(job["id"]) else "failed")
-                        thread_db.pending_archives.set_state(archive_id, "pending", str(e))
+                        with thread_db.transaction():
+                            thread_db.pending_archives.set_state(archive_id, "pending", str(e))
                         raise
 
             job_id, _, _ = runner.start_singleton(

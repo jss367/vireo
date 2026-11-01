@@ -75,5 +75,5 @@ def repair_on_upgrade(db):
         return 0
     with db.transaction():
         count = apply_repairs(db, plan_repairs(db))
-        db.meta.set(marker, "1", _commit=False)
+        db.meta.set(marker, "1")
     return count

@@ -961,7 +961,8 @@ def create_inat_blueprint(
         except inat.InatApiError as e:
             return json_error(str(e), 502)
 
-        db.inat.record_submission(photo_id, obs_id, obs_url)
+        with db.transaction():
+            db.inat.record_submission(photo_id, obs_id, obs_url)
         return jsonify({"observation_id": obs_id, "observation_url": obs_url})
 
     def _submit_batch_item(db: Database, inat: ModuleType, token: str, min_conf: float, sub: JsonDict) -> JsonDict:
@@ -1024,7 +1025,8 @@ def create_inat_blueprint(
                 description=sub.get("description"),
                 geoprivacy=sub.get("geoprivacy", "open"),
             )
-            db.inat.record_submission(photo_id, obs_id, obs_url)
+            with db.transaction():
+                db.inat.record_submission(photo_id, obs_id, obs_url)
             return {"photo_id": photo_id, "observation_id": obs_id, "observation_url": obs_url}
         except inat.InatPartialUploadError as e:
             return {
