@@ -6,6 +6,7 @@ import pytest
 from db import Database
 from scanner.companions import _pair_raw_jpeg_companions
 from services import moves_merge, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 from sync import sync_from_xmp, sync_to_xmp
 from test_db_moves_merge import _collision_tree
@@ -108,7 +109,7 @@ def test_drained_alias_confirmation_survives_collision_sync_reimport_and_history
         for action in (None, 'undo', 'redo'):
             db.set_active_workspace(first)
             if action:
-                result = db.undo_last_edit() if action == 'undo' else db.redo_last_undo()
+                result = undo_last_edit(db) if action == 'undo' else redo_last_undo(db)
                 assert result['id'] == edit
             db.set_active_workspace(second)
             assert sync_to_xmp(db)['failed'] == 0

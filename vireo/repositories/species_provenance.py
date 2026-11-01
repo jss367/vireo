@@ -22,8 +22,55 @@ def evidence_for_photo_copy(value: str | None, photo_id: int) -> str | None:
 
 
 class SpeciesProvenanceRepository:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection,
+        pending_before: dict[tuple[int, int], dict[str, Any] | None] | None = None,
+    ) -> None:
         self.conn = conn
+        # ``Database._species_provenance_before``: the attribution each
+        # undoable keyword/species write saw before it changed, keyed by
+        # ``(photo_id, keyword_id)``, until ``history_items`` folds it into
+        # the edit-history row (or a replay discards it).
+        self.pending_before = {} if pending_before is None else pending_before
+
+    def remember_before(self, photo_id: int, keyword_id: int, *, force: bool = False) -> None:
+        """Track assignment attribution before mutation; ``history_items`` consumes the snapshot."""
+        state = self.state(photo_id, keyword_id)
+        if not force and (state is None or not state['is_species']):
+            return
+        self.pending_before.setdefault((photo_id, keyword_id), state)
+
+    def history_items(self, action: str, items: Any) -> list[dict[str, Any]]:
+        """Attach evidence snapshots to species/keyword edits, preserving other payloads."""
+        items = [dict(item) for item in items]
+        if action not in {'keyword_add', 'keyword_remove', 'species_replace', 'prediction_accept',
+                          'identity_alternatives'}:
+            return items
+        pending = self.pending_before
+        by_photo: dict[int, dict[int, Any]] = {}
+        for (pid, keyword_id), before in pending.items():
+            by_photo.setdefault(pid, {})[keyword_id] = before
+        for item in items:
+            pid = item['photo_id']
+            changes = {}
+            for keyword_id, before in by_photo.pop(pid, {}).items():
+                changes[str(keyword_id)] = {'before': before,
+                    'after': self.state(pid, keyword_id)}
+                pending.pop((pid, keyword_id))
+            if changes:
+                item['species_provenance'] = json.dumps(changes, sort_keys=True)
+        return items
+
+    def replay_history(self, items: Any, *, undo: bool, restore_source: bool = True) -> None:
+        """Restore attribution after the normal association and sidecar handlers."""
+        for item in items:
+            self.replay(item['photo_id'], dict(item).get('species_provenance'),
+                        undo=undo, restore_source=restore_source)
+        self.pending_before.clear()
+
+    def forget_snapshots(self) -> None:
+        """Drop every pending snapshot (a failed or retired replay must not leak them)."""
+        self.pending_before.clear()
 
     def state(self, photo_id: int, keyword_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(

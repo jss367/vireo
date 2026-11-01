@@ -26,6 +26,7 @@ from repositories.photo_labels import PhotoLabelRepository
 from repositories.photo_review import PhotoReviewRepository
 from repositories.species_curation import SpeciesCurationRepository
 from services import photo_ingest, workspace_folders, workspace_lifecycle
+from services.edit_history import redo_last_undo, undo_last_edit
 
 
 @contextlib.contextmanager
@@ -127,7 +128,7 @@ def test_record_edit_clears_only_this_workspaces_redo_stack(db, pids):
     second = _rating_edit(db, pids[0], 1, 2)
     foreign_undone = _raw_edit(db, "rating", "3", workspace_id=other, undone=1)
     db.photo_review.set_rating(pids[0], 2)
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert _history_rows(db, "id = ?", (second,))[0]["undone"] == 1
 
     third = _rating_edit(db, pids[0], 1, 4)
@@ -259,8 +260,8 @@ def test_item_values_with_local_adjustments_spans_workspaces_old_then_new(db, pi
 def test_undo_returns_none_when_only_non_undoable_entries(db, pids):
     for action in Database._NON_UNDOABLE:
         _raw_edit(db, action, "x", items=[(pids[0], "a", "b")])
-    assert db.undo_last_edit() is None
-    assert db.redo_last_undo() is None
+    assert undo_last_edit(db) is None
+    assert redo_last_undo(db) is None
     assert all(r["undone"] == 0 for r in _history_rows(db))
 
 
@@ -272,7 +273,7 @@ def test_undo_skips_non_undoable_and_marks_entry_undone(db, pids):
                    "prediction_replace_species"):
         _raw_edit(db, action, "x")
 
-    entry = db.undo_last_edit()
+    entry = undo_last_edit(db)
 
     assert isinstance(entry, dict)
     assert entry["id"] == target
@@ -286,7 +287,7 @@ def test_undo_skips_non_undoable_and_marks_entry_undone(db, pids):
 def test_undo_reads_non_undoable_from_instance(db, pids):
     _rating_edit(db, pids[0], 0, 1)
     db._NON_UNDOABLE = ("rating",)
-    assert db.undo_last_edit() is None
+    assert undo_last_edit(db) is None
 
 
 def test_undo_picks_latest_and_redo_replays_oldest_first(db, pids):
@@ -296,18 +297,18 @@ def test_undo_picks_latest_and_redo_replays_oldest_first(db, pids):
                        items=[(pids[0], "1", "2")])
     db.photo_review.set_rating(pids[0], 2)
 
-    assert db.undo_last_edit()["id"] == second
-    assert db.undo_last_edit()["id"] == first
+    assert undo_last_edit(db)["id"] == second
+    assert undo_last_edit(db)["id"] == first
     assert db.photos.get(pids[0])["rating"] == 0
 
-    redone = db.redo_last_undo()
+    redone = redo_last_undo(db)
     assert redone["id"] == first
     assert not db.conn.in_transaction
     assert _history_rows(db, "id = ?", (first,))[0]["undone"] == 0
     assert db.photos.get(pids[0])["rating"] == 1
-    assert db.redo_last_undo()["id"] == second
+    assert redo_last_undo(db)["id"] == second
     assert db.photos.get(pids[0])["rating"] == 2
-    assert db.redo_last_undo() is None
+    assert redo_last_undo(db) is None
 
 
 def test_undo_redo_ignore_other_workspaces(db, pids):
@@ -315,8 +316,8 @@ def test_undo_redo_ignore_other_workspaces(db, pids):
     _raw_edit(db, "rating", "1", workspace_id=other, items=[(pids[0], "0", "1")])
     _raw_edit(db, "rating", "1", workspace_id=other, undone=1,
               items=[(pids[0], "0", "1")])
-    assert db.undo_last_edit() is None
-    assert db.redo_last_undo() is None
+    assert undo_last_edit(db) is None
+    assert redo_last_undo(db) is None
 
 
 @pytest.mark.parametrize("direction", ["undo", "redo"])
@@ -324,7 +325,7 @@ def test_history_without_handler_does_not_advance_cursor(db, pids, direction):
     undone = int(direction == "redo")
     edit_id = _raw_edit(db, "mystery_action", "x", undone=undone,
                         items=[(pids[0], "a", "b")])
-    method = db.undo_last_edit if direction == "undo" else db.redo_last_undo
+    method = (lambda: undo_last_edit(db)) if direction == "undo" else (lambda: redo_last_undo(db))
     with pytest.raises(ValueError, match="Unsupported history action"):
         method()
     assert _history_rows(db, "id = ?", (edit_id,))[0]["undone"] == undone
@@ -333,9 +334,9 @@ def test_history_without_handler_does_not_advance_cursor(db, pids, direction):
 def test_undo_redo_require_active_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.undo_last_edit()
+        undo_last_edit(db)
     with pytest.raises(RuntimeError):
-        db.redo_last_undo()
+        redo_last_undo(db)
 
 
 def test_undo_and_redo_route_through_apply_hooks(db, pids, monkeypatch):
@@ -349,8 +350,8 @@ def test_undo_and_redo_route_through_apply_hooks(db, pids, monkeypatch):
 
     monkeypatch.setattr(db, "_apply_undo", fake_apply("undo"))
     monkeypatch.setattr(db, "_apply_redo", fake_apply("redo"))
-    db.undo_last_edit()
-    db.redo_last_undo()
+    undo_last_edit(db)
+    redo_last_undo(db)
     item_row = _item_rows(db, edit_id)[0]
     assert seen == [("undo", edit_id, [item_row]), ("redo", edit_id, [item_row])]
 
@@ -388,10 +389,10 @@ def test_field_setters_route_through_facade(db, pids, monkeypatch):
         _raw_edit(db, action, new, items=[(pid, old, new)])
 
     for _ in range(4):
-        db.undo_last_edit()
+        undo_last_edit(db)
     undo_calls, calls[:] = list(calls), []
     for _ in range(4):
-        db.redo_last_undo()
+        redo_last_undo(db)
 
     assert undo_calls == [
         ("set_photo_edit_recipe", (pid, None), {"verify_workspace": False}),
@@ -439,10 +440,10 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
         [{"photo_id": pid, "old_value": old_value, "new_value": str(kid)}],
     )
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert _status(db, p["a_top"]) == "alternative"
     assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert _status(db, p["a_top"]) == "rejected"
     assert any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
     assert curation_calls == [
@@ -457,9 +458,9 @@ def test_keyword_remove_redo_untags_again(db, pids):
         "keyword_remove", "Removed Hawk", str(kid),
         [{"photo_id": pids[0], "old_value": str(kid), "new_value": ""}],
     )
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
 
 
@@ -507,7 +508,7 @@ def test_grouping_entry_success_flips_cursor_inside_restore(
     undone = 0 if direction == "undo" else 1
     edit_id = _raw_edit(db, "pipeline_grouping", "{}", undone=undone,
                         items=[(pids[0], "a", "b")])
-    method = db.undo_last_edit if direction == "undo" else db.redo_last_undo
+    method = (lambda: undo_last_edit(db)) if direction == "undo" else (lambda: redo_last_undo(db))
     entry = method()
     assert entry["id"] == edit_id
     assert calls == [
@@ -524,7 +525,7 @@ def test_species_confirm_cache_success_flips_cursor(db, monkeypatch, direction):
     _grouping_hooks(monkeypatch, calls=calls)
     undone = 0 if direction == "undo" else 1
     edit_id = _raw_edit(db, "species_confirm_cache", "{}", undone=undone)
-    method = db.undo_last_edit if direction == "undo" else db.redo_last_undo
+    method = (lambda: undo_last_edit(db)) if direction == "undo" else (lambda: redo_last_undo(db))
     assert method()["id"] == edit_id
     assert calls == [("restore", edit_id, direction == "undo")]
     assert _history_rows(db, "id = ?", (edit_id,))[0]["undone"] == 1 - undone
@@ -556,7 +557,7 @@ def test_stale_grouping_with_photo_edit_keeps_photo_half(
         (edit_id, "{}"),
     )
     db.conn.commit()
-    method = db.undo_last_edit if direction == "undo" else db.redo_last_undo
+    method = (lambda: undo_last_edit(db)) if direction == "undo" else (lambda: redo_last_undo(db))
 
     with pytest.raises(gh.GroupingHistoryStale) as info:
         method()
@@ -590,7 +591,7 @@ def test_stale_cache_entry_without_photo_half_is_deleted(
     gh = _grouping_hooks(monkeypatch, stale=True)
     undone = 0 if direction == "undo" else 1
     edit_id = _raw_edit(db, action, new_value, undone=undone)
-    method = db.undo_last_edit if direction == "undo" else db.redo_last_undo
+    method = (lambda: undo_last_edit(db)) if direction == "undo" else (lambda: redo_last_undo(db))
     with pytest.raises(gh.GroupingHistoryStale, match="superseded"):
         method()
     assert not db.conn.in_transaction
@@ -629,7 +630,7 @@ def test_undo_keyword_remove_of_deleted_keyword_is_noop(db, pids):
         "keyword_remove", "Removed", "987654",
         [{"photo_id": pids[0], "old_value": "987654", "new_value": ""}],
     )
-    assert db.undo_last_edit()["id"] == edit_id
+    assert undo_last_edit(db)["id"] == edit_id
     assert db.photo_keywords.get_for_photo(pids[0]) == []
 
 
@@ -665,11 +666,11 @@ def test_prediction_accept_flat_removals_restore_only_live_workspaces(db, pids):
     workspace_lifecycle.delete_workspace(db, gone)
     db.set_active_workspace(ws)
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert ("keyword_remove_flat", "Hawk", other) in _pending(db, pids[0])
     assert all(p[2] != gone for p in _pending(db, pids[0]))
 
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert ("keyword_remove_flat", "Hawk", other) not in _pending(db, pids[0])
 
 
@@ -854,11 +855,11 @@ def test_prediction_accept_undo_redo_round_trip(db, pids):
         "prediction_accept", "Accepted Finch", str(kid),
         [{"photo_id": pids[0], "old_value": str(p["a_mid"]), "new_value": str(kid)}],
     )
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert _status(db, p["a_top"]) == "pending"
     assert _status(db, p["a_mid"]) == "alternative"
     assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert _status(db, p["a_mid"]) == "accepted"
     assert _status(db, p["a_top"]) == "rejected"
     assert any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
@@ -1101,10 +1102,10 @@ def test_species_replace_undo_redo_moves_curation(db, pids):
         [{"photo_id": p0, "old_value": old_value, "new_value": str(new_kid)}],
     )
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     hl, _, _ = _curation_state(db, ws)
     assert hl == [("Old Bird", p0, 1)]
-    db.redo_last_undo()
+    redo_last_undo(db)
     hl, _, _ = _curation_state(db, ws)
     assert hl == [("New Bird", p0, 1)]
 
@@ -1345,7 +1346,7 @@ _REMOVED_WRAPPERS = (
 )
 
 _DELEGATING = (
-    "record_edit", "undo_last_edit", "redo_last_undo",
+    "record_edit",
     "_undo_keyword_add", "_redo_keyword_add", "_undo_species_replace",
     "_redo_species_replace", "_undo_prediction_accept_statuses",
     "_redo_prediction_accept_statuses", "_prune_edit_history",
@@ -1459,11 +1460,16 @@ def test_edit_history_facade_signatures_are_unchanged():
         ("new_value", empty), ("items", empty), ("is_batch", False),
         ("_commit", True), ("source", None), ("reason", None),
     ]
-    # ``cache_restore`` lets the undo/redo routes keep a pipeline-cache
-    # restoration open through their decision's commit.
-    assert params("undo_last_edit") == [("self", empty), ("cache_restore", None)]
-    assert params("redo_last_undo") == [("self", empty), ("cache_restore", None)]
     assert params("_prune_edit_history") == [("self", empty)]
+
+
+def test_history_replay_services_accept_outer_cache_restoration():
+    for replay in (undo_last_edit, redo_last_undo):
+        params = list(inspect.signature(replay).parameters.values())
+        assert [(p.name, p.default) for p in params] == [
+            ("db", inspect.Parameter.empty), ("cache_restore", None),
+        ]
+        assert params[1].kind == inspect.Parameter.KEYWORD_ONLY
 
 
 def test_accessor_methods_keep_the_removed_wrappers_signatures():

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from db import Database
 from services import catalog_deletion, moves_merge, photo_ingest, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
 
@@ -80,7 +81,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     for action in (None, 'undo', 'redo'):
         db.set_active_workspace(ws)
         if action:
-            result = db.undo_last_edit() if action == 'undo' else db.redo_last_undo()
+            result = undo_last_edit(db) if action == 'undo' else redo_last_undo(db)
             assert result['id'] == edited
         db.set_active_workspace(sharing)
         assert sync_to_xmp(db)['failed'] == 0
@@ -131,16 +132,16 @@ def test_collapse_keeps_current_tags_for_redo_only_identity_history(db, tmp_path
     db.tag_photo(losing, keyword, source='accept')
     with db.transaction():
         saved = save_alternatives(db, [losing], ['Heron', 'Egret'], 'Redo evidence', 'Bill')
-    db.undo_last_edit()
+    undo_last_edit(db)
     if path == 'folder':
         db.folders.merge_into_existing(source, target, str(target_path))
     else:
         from scanner.companions import _pair_raw_jpeg_companions
         _pair_raw_jpeg_companions(db)
     assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (survivor, keyword)).fetchone()[0] == 'accept'
-    assert db.redo_last_undo()['id'] == saved
+    assert redo_last_undo(db)['id'] == saved
     assert db.identity_alternatives.for_photos([survivor])[survivor]['reason'] == 'Redo evidence'
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (survivor, keyword)).fetchone()[0] == 'accept'
 
 
@@ -159,8 +160,8 @@ def test_real_deletion_cascades_identity_and_history_only_for_deleted_photos(db,
     assert not db.conn.execute('SELECT 1 FROM photo_identity_alternatives WHERE photo_id=?', (losing,)).fetchone()
     assert not db.conn.execute('SELECT 1 FROM edit_history_items WHERE photo_id=?', (losing,)).fetchone()
     assert survivor in db.identity_alternatives.for_photos([survivor], include_resolved=True)
-    db.undo_last_edit()
-    db.redo_last_undo()
+    undo_last_edit(db)
+    redo_last_undo(db)
 
 
 @pytest.mark.parametrize('failure', [RuntimeError, KeyboardInterrupt, GeneratorExit])

@@ -948,13 +948,12 @@ class _SpeciesConfirmation:
             )
 
         if self.provenance is not None and not self.remove_mode and not self.preserve_existing_provenance:
-            from services.species_provenance import remember_before
             # Equivalent hierarchy aliases must retain their actual keyword ID.
             # Not remove mode, so resolve_target_keyword stored the new keyword id.
             equivalent = self.db.photo_species.equivalent_assignment_ids(self.already_has_new, cast(int, self.kid))
             for pid, keyword_ids in equivalent.items():
                 for keyword_id in keyword_ids:
-                    remember_before(self.db, pid, keyword_id, force=True)
+                    self.db.species_provenance.remember_before(pid, keyword_id, force=True)
                     self.db.species_provenance.set(pid, keyword_id, self.provenance)
                 self.attribution_only.append(pid)
 

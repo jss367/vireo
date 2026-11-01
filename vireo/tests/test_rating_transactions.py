@@ -5,6 +5,7 @@ from contextlib import closing
 
 import pytest
 from services import photo_ingest, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 from services.photo_review import PhotoReviewService
 
 
@@ -15,7 +16,7 @@ def rated_photos(db):
     service = PhotoReviewService(db)
     service.set_ratings(ids, 2)
     service.set_ratings(ids, 3)
-    db.undo_last_edit()
+    undo_last_edit(db)
     return ids
 
 
@@ -94,7 +95,7 @@ def test_failed_rating_preserves_unrelated_outer_writes(db, rated_photos, monkey
 def test_successful_rating_can_be_undone_and_redone_with_sync(db, rated_photos, batch):
     _write(PhotoReviewService(db), rated_photos, batch)
     ids = rated_photos if batch else rated_photos[:1]
-    for rating, operation in [(5, None), (2, db.undo_last_edit), (5, db.redo_last_undo)]:
+    for rating, operation in [(5, None), (2, (lambda: undo_last_edit(db))), (5, (lambda: redo_last_undo(db)))]:
         if operation:
             operation()
         assert [db.photos.get(pid)["rating"] for pid in ids] == [rating] * len(ids)

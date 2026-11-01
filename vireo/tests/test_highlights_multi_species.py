@@ -7,6 +7,7 @@ bucket's species.
 """
 
 from highlights_payload import photo_highlight_entries
+from services.edit_history import redo_last_undo, undo_last_edit
 
 
 def _folder(db, path="/ms"):
@@ -177,7 +178,7 @@ def test_confirm_from_a_bucket_adds_that_species_and_keeps_the_other(app_and_db)
     # The other subject's prediction is a different detection's decision.
     assert db.predictions.get_review_status(teal_pred, ws) == "pending"
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone["action_type"] == "prediction_accept"
     keywords = _keywords(db, pid)
     assert "Green-winged Teal" in keywords
@@ -257,13 +258,13 @@ def test_relabel_from_a_bucket_replaces_only_that_species(app_and_db):
         'Replaced "American Wigeon" with "Eurasian Wigeon" on 1 photos'
     )
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     keywords = _keywords(db, pid)
     assert {"Green-winged Teal", "American Wigeon"} <= keywords
     assert "Eurasian Wigeon" not in keywords
     assert db.predictions.get_review_status(wigeon_pred, ws) == "pending"
 
-    db.redo_last_undo()
+    redo_last_undo(db)
     keywords = _keywords(db, pid)
     assert {"Green-winged Teal", "Eurasian Wigeon"} <= keywords
     assert "American Wigeon" not in keywords
@@ -286,7 +287,7 @@ def test_relabel_candidate_onto_a_species_the_photo_has_survives_undo(app_and_db
     assert resp.get_json()["rejected_prediction_ids"] == [wigeon_pred]
     assert "Green-winged Teal" in _keywords(db, pid)
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert "Green-winged Teal" in _keywords(db, pid)
     assert db.predictions.get_review_status(wigeon_pred, db._ws_id()) == "pending"
 
@@ -308,7 +309,7 @@ def test_relabel_candidate_keeps_the_tagged_species(app_and_db):
     assert db.predictions.get_review_status(wigeon_pred, ws) == "rejected"
     assert db.predictions.get_review_status(teal_pred, ws) == "pending"
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     keywords = _keywords(db, pid)
     assert "Green-winged Teal" in keywords
     assert "Eurasian Wigeon" not in keywords

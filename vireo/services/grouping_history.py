@@ -666,7 +666,6 @@ def apply_grouping_photo_edit(
     db: Database, entry: HistoryEntry, items: Iterable[sqlite3.Row], *, undo: bool,
 ) -> None:
     """Replay the photo half of a grouping action without releasing its transaction."""
-    from services.species_provenance import replay_history
     items = list(items)
     payload = json.loads(entry["new_value"])
     flag_items = payload.get("flag_items", []) if (payload.get("photo_edit") or {}).get("action_type") != "flag" else []
@@ -705,4 +704,4 @@ def apply_grouping_photo_edit(
             name = db.edit_history.keyword_name(kid)
             if name and db.remove_pending_changes(pid, 'keyword_remove', name, _commit=False) == 0:
                 db.queue_change(pid, 'keyword_add', name, _commit=False)
-    replay_history(db, items, undo=undo)
+    db.species_provenance.replay_history(items, undo=undo)

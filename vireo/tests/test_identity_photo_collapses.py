@@ -5,6 +5,7 @@ from db import Database
 from repositories.identity_alternatives import IdentityMergeConflict
 from scanner.companions import _pair_raw_jpeg_companions
 from services import photo_ingest, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
 CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
@@ -69,9 +70,9 @@ def test_folder_merge_keeps_resolved_tags_provenance_pending_and_history(catalog
     assert db.photos.get(survivor)['flag'] == 'rejected'
     assert not db.conn.execute('SELECT 1 FROM pending_changes WHERE photo_id=?', (losing,)).fetchone()
     assert {row[0] for row in db.conn.execute("SELECT workspace_id FROM pending_changes WHERE photo_id=? AND change_type='keyword_add' AND value=?", (survivor, CANDIDATES[0]))} == {first, second}
-    assert db.undo_last_edit()['id'] == edit
+    assert undo_last_edit(db)['id'] == edit
     assert db.identity_alternatives.for_photos()[survivor]['status'] == 'unresolved'
-    assert db.redo_last_undo()['id'] == edit
+    assert redo_last_undo(db)['id'] == edit
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == before
     assert db.photos.get(survivor)['flag'] == 'rejected'
     db.set_active_workspace(second)
@@ -113,8 +114,8 @@ def test_companion_pairing_keeps_identity_tags_and_normal_history(catalog, tmp_p
     assert _pair_raw_jpeg_companions(db) == {companion: primary}
     assert db.identity_alternatives.for_photos([primary], include_resolved=True)[primary] == before
     assert unrelated in {row['id'] for row in db.photo_keywords.get_for_photos([primary])[primary]}
-    assert db.undo_last_edit()['id'] == edit
-    assert db.redo_last_undo()['id'] == edit
+    assert undo_last_edit(db)['id'] == edit
+    assert redo_last_undo(db)['id'] == edit
     assert db.identity_alternatives.for_photos([primary], include_resolved=True)[primary] == before
 
 

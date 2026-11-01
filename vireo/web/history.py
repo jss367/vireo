@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from services import prediction_decisions
+from services.edit_history import redo_last_undo, undo_last_edit
 from services.render_cache import queue_edit_recipe_sync
 
 if TYPE_CHECKING:
@@ -221,7 +222,7 @@ def create_history_blueprint(
                 if latest is None or latest["id"] != body["edit_id"]:
                     return json_error("This edit is no longer the latest undoable edit", 409)
             try:
-                entry = db.undo_last_edit(cache_restore=cache_restore)
+                entry = undo_last_edit(db, cache_restore=cache_restore)
             except (GroupingHistoryStale, IdentityHistoryStale) as exc:
                 # The stale entry was retired: that retirement commits with
                 # the decision, and the caller reports the 409 afterwards.
@@ -288,7 +289,7 @@ def create_history_blueprint(
 
         def _apply() -> ErrorResponse | None:
             try:
-                entry = db.redo_last_undo(cache_restore=cache_restore)
+                entry = redo_last_undo(db, cache_restore=cache_restore)
             except (GroupingHistoryStale, IdentityHistoryStale) as exc:
                 # Retired with the decision; reported after it, as in undo.
                 stale.append(exc)
