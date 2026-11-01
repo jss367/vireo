@@ -153,20 +153,21 @@ class StartupTasks:
                     result[key] = result.get(key, 0) + count
                     retired_total[key] = retired_total.get(key, 0) + count
             result_workspace_ids = {ws_id for _path, _kind, ws_id in result_files(os.path.dirname(self._db_path))}
+            orphans_removed: list[str] = []
             for ws_id in result_workspace_ids:
                 checkpoint()
                 # A workspace may have been created while the preceding
                 # maintenance passes were running. Check current ownership
                 # rather than deleting from the earlier workspace snapshot.
                 if db.workspaces.get(ws_id) is None:
-                    errors = delete_workspace_results(os.path.dirname(self._db_path), ws_id)
+                    errors = delete_workspace_results(
+                        os.path.dirname(self._db_path), ws_id, orphans_removed,
+                    )
                     result["errors"].extend(errors)
                     result["errors_total"] += len(errors)
                     result["ok"] = result["ok"] and not errors
-            result["noop"] = not (
-                result.get("deleted") or result.get("errors_total")
-                or any(retired_total.values())
-            )
+            result["orphan_results_removed"] = len(orphans_removed)
+            result["noop"] = retained_maintenance_noop(result, retired_total)
             return result
 
     def run_catalog_repairs(self) -> None:
@@ -538,6 +539,19 @@ class StartupTasks:
             )
         except Exception:
             log.exception("Failed to start EXIF search backfill job")
+
+
+def retained_maintenance_noop(result: JsonDict, retired: Mapping[str, int]) -> bool:
+    """Whether a storage-maintenance pass removed, retired and reported nothing.
+
+    Every kind of removal counts: generated files, grouping undo snapshots
+    (``retired``) and the result files of deleted workspaces. So does any
+    error, which must stay visible.
+    """
+    return not (
+        result.get("deleted") or result.get("orphan_results_removed")
+        or result.get("errors_total") or any(retired.values())
+    )
 
 
 def utc_iso_now() -> str:

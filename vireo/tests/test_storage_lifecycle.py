@@ -867,3 +867,63 @@ def test_global_maintenance_job_history_has_bounded_retention(app_and_db):
     wait_for_job_via_client(app.test_client(), job_id, wait_for_history=True)
     assert db.conn.execute('SELECT COUNT(*) FROM job_history WHERE workspace_id IS NULL').fetchone()[0] == 100
     assert db.job_history.get('workspace-owned')
+
+
+def test_maintenance_that_only_removed_orphan_results_is_kept_in_history(app_and_db, tmp_path, monkeypatch):
+    """Result files of a deleted workspace are real work, not a routine no-op."""
+    from jobs import JobLineage
+    from services.startup_tasks import StartupTasks
+
+    app, db = app_and_db
+    monkeypatch.setattr(app._job_runner, "is_cancelled", lambda _id: False)
+    tasks = StartupTasks(app, db._db_path, db)
+    orphans = [tmp_path / f"{kind}_results_ws999.json" for kind in ("pipeline", "culling")]
+    for path in orphans:
+        path.write_text("{}")
+    job_id = app._job_runner.start(
+        "retained-cache-maintenance", tasks._maintain_retained_caches,
+        lineage=JobLineage.system("Hourly cleanup"),
+    )
+    job = wait_for_job_via_client(app.test_client(), job_id, wait_for_history=True)
+    assert job["status"] == "completed", job
+    assert not any(path.exists() for path in orphans)
+    assert job["result"]["orphan_results_removed"] == 2
+    assert job["result"]["noop"] is False
+    row = db.conn.execute(
+        "SELECT origin, summary FROM job_history WHERE id = ?", (job_id,),
+    ).fetchone()
+    assert row is not None and row["origin"] == "system"
+    assert "2 result files of deleted workspaces" in row["summary"]
+
+
+def test_maintenance_with_nothing_to_do_is_a_noop(app_and_db, monkeypatch):
+    from services.startup_tasks import StartupTasks
+
+    app, db = app_and_db
+    monkeypatch.setattr(app._job_runner, "is_cancelled", lambda _id: False)
+    result = StartupTasks(app, db._db_path, db)._maintain_retained_caches({"id": "test"})
+    assert result["orphan_results_removed"] == 0
+    assert result["noop"] is True
+
+
+def test_maintenance_orphan_unlink_error_stays_visible(app_and_db, tmp_path, monkeypatch):
+    from services import result_files
+    from services.startup_tasks import StartupTasks
+
+    app, db = app_and_db
+    monkeypatch.setattr(app._job_runner, "is_cancelled", lambda _id: False)
+    locked = tmp_path / "pipeline_results_ws999.json"
+    locked.write_text("{}")
+    real_unlink = result_files.os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if str(path) == str(locked):
+            raise PermissionError("locked by another process")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(result_files.os, "unlink", unlink)
+    result = StartupTasks(app, db._db_path, db)._maintain_retained_caches({"id": "test"})
+    assert locked.exists()
+    assert result["orphan_results_removed"] == 0
+    assert result["errors_total"] == 1 and "locked by another process" in result["errors"][0]
+    assert result["noop"] is False and result["ok"] is False
