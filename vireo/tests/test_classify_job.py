@@ -2371,6 +2371,106 @@ def test_store_grouped_predictions_keeps_a_photos_predictions_together(tmp_path,
     assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
 
 
+def test_store_grouped_predictions_two_member_burst_reads_outside_tx_and_rolls_back(
+    tmp_path, monkeypatch,
+):
+    """A multi-member burst reads sidecars before the write transaction opens
+    and rolls back the whole group when a later member's write fails.
+
+    Together these guard the burst unit's two separable invariants that a
+    single-photo rollback test cannot cover: that the second member's XMP
+    read is not held under SQLite's writer lock, and that a later member's
+    write failure also rolls back the first member's writes.
+    """
+    import classify_job
+    import xmp
+    from repositories.predictions import PredictionRepository
+
+    db, folder_id, photo_id_a = _one_detection_catalog(tmp_path)
+    photo_id_b = photo_ingest.add_photo(
+        db, folder_id, "b.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
+    )
+    det_a = db.detections.save(
+        photo_id_a,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    det_b = db.detections.save(
+        photo_id_b,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.commit()
+
+    in_tx_during_reads: list[bool] = []
+
+    def spy_read_keywords(path):
+        in_tx_during_reads.append(db.conn.in_transaction)
+        return []
+
+    monkeypatch.setattr(xmp, "read_keywords", spy_read_keywords)
+    # A truthy taxonomy forces ``_xmp_review_category`` to actually read the
+    # sidecar; the categorize stub keeps every member on the pending-review
+    # path so each one writes through ``predictions.add``.
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_kw: "new")
+
+    real_add = PredictionRepository.add
+
+    def fail_on_second_member(self, *args, **kwargs):
+        if kwargs.get("species") == "Jay":
+            raise RuntimeError("disk full")
+        return real_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(PredictionRepository, "add", fail_on_second_member)
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    from datetime import datetime
+
+    ts = datetime(2026, 1, 1, 12, 0, 0)
+    raw_results = [
+        {
+            "photo": {
+                "id": photo_id_a, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": ts, "burst_id": None,
+            },
+            "folder_path": "/tmp/p",
+            "detection_id": det_a,
+            "prediction": "Robin",
+            "confidence": 0.88,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": ts,
+        },
+        {
+            "photo": {
+                "id": photo_id_b, "filename": "b.jpg",
+                "folder_id": folder_id, "timestamp": ts, "burst_id": None,
+            },
+            "folder_path": "/tmp/p",
+            "detection_id": det_b,
+            "prediction": "Jay",
+            "confidence": 0.80,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": ts,
+        },
+    ]
+    with pytest.raises(RuntimeError, match="disk full"):
+        classify_job._store_grouped_predictions(
+            raw_results, job_id="job-abc", model_name="bioclip-2",
+            grouping_window=0, similarity_threshold=0.99, tax=Tax(), db=db,
+            labels_fingerprint="fp-active",
+        )
+    # Both members' sidecars were read before the writer transaction opened.
+    assert in_tx_during_reads == [False, False]
+    # And the whole group rolls back: no row from the first member survives.
+    assert not db.conn.in_transaction
+    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+
+
 def test_full_image_anchor_keeps_detection_and_run_together(tmp_path, monkeypatch):
     """The full-image detection and its detector run are one unit of work.
 
