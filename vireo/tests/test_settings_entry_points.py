@@ -82,9 +82,14 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
                 continue
             # Any enclosing function may have imported config before this call.
             enclosing = [s for s in scopes if s.lineno <= node.lineno <= (s.end_lineno or s.lineno)]
+            # A bootstrap inside a nested helper (one not on the path to the
+            # call) does not run before it; only consider nodes reached from an
+            # enclosing scope without crossing another FunctionDef.
+            enclosing_ids = {id(s) for s in enclosing}
             if not any(
                 _bootstraps(n) and n.lineno <= node.lineno
-                for s in enclosing for n in ast.walk(s)
+                for s in enclosing
+                for n in _walk_within_scope(s, enclosing_ids)
             ):
                 offenders.append(node.lineno)
     # Module-level opens outside any function.
@@ -92,6 +97,20 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
     offenders += [n.lineno for n in ast.walk(tree)
                   if _opens_database(n) and id(n) not in in_functions]
     return sorted(set(offenders))
+
+
+def _walk_within_scope(root: ast.AST, allowed_scope_ids: set[int]):
+    """Yield ``root`` and descendants, skipping any nested ``FunctionDef`` /
+    ``AsyncFunctionDef`` whose body is not itself an enclosing scope of the
+    call being checked."""
+    yield root
+    for child in ast.iter_child_nodes(root):
+        if (
+            isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and id(child) not in allowed_scope_ids
+        ):
+            continue
+        yield from _walk_within_scope(child, allowed_scope_ids)
 
 
 def test_entry_points_import_config_before_opening_a_database():
@@ -117,6 +136,11 @@ def test_entry_points_import_config_before_opening_a_database():
     ("def f(p):\n    from config import DEFAULTS\n    import db\n    return db.Database(p)\n", []),
     ("import db\nDB = db.Database(':memory:')\n", [2]),
     ("def f(p):\n    import config\n    def g():\n        return Database(p)\n    return g\n", []),
+    # An import inside a nested helper that is not on the path to the call
+    # does not run before it; the Database(p) at line 4 is unbootstrapped.
+    ("def f(p):\n    def g():\n        import config\n    return Database(p)\n", [4]),
+    # An import in a sibling helper is not a bootstrap either.
+    ("def f(p):\n    def g():\n        pass\n    def h():\n        import config\n    return Database(p)\n", [6]),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines
