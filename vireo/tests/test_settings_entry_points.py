@@ -72,11 +72,37 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
     tree = ast.parse(source)
     scopes = [node for node in ast.walk(tree)
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    in_functions = {id(n) for scope in scopes for n in ast.walk(scope)}
+    # Only ``FunctionDef``/``AsyncFunctionDef``/``Lambda`` *body* subtrees
+    # defer until the function is called. Argument defaults, decorators,
+    # parameter annotations and the return annotation execute while the
+    # ``def``/``lambda`` statement itself runs, so a ``Database(...)`` sitting
+    # in a default of a module-level ``def`` is a module-init open, not a
+    # deferred one.
+    in_function_body: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for stmt in node.body:
+                for n in ast.walk(stmt):
+                    in_function_body.add(id(n))
+        elif isinstance(node, ast.Lambda):
+            for n in ast.walk(node.body):
+                in_function_body.add(id(n))
     local_funcs = {
         n.name: n for n in tree.body
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    # Methods of module-level classes, so ``C(...)`` at init enters
+    # ``C.__init__`` and ``self.m(...)`` inside a method of ``C`` enters
+    # ``C.m``. Classes nested inside functions are not tracked (their body
+    # runs only when the enclosing function runs).
+    class_methods: dict[tuple[str, str], ast.AST] = {}
+    method_class: dict[int, str] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ClassDef):
+            for sub in stmt.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    class_methods[(stmt.name, sub.name)] = sub
+                    method_class[id(sub)] = stmt.name
     # Earliest module-level bootstrap, as a (lineno, col_offset) pair. ``None``
     # if the module has no top-level bootstrap at all. A function body only
     # runs after module import has completed, so a late module-level import
@@ -89,27 +115,30 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
             module_bootstrap_pos = (stmt.lineno, stmt.col_offset)
             break
     module_bootstrapped = module_bootstrap_pos is not None
-    first_init_entry = _functions_invoked_during_init(tree, local_funcs)
+    first_init_entry = _functions_invoked_during_init(
+        tree, local_funcs, class_methods, method_class
+    )
     offenders = []
     for node in ast.walk(tree):
-        if not _opens_database(node) or id(node) in in_functions:
+        if not _opens_database(node) or id(node) in in_function_body:
             continue
-        if not _bootstraps_in_body(tree, node.lineno):
+        if not _bootstraps_in_body(tree, (node.lineno, node.col_offset)):
             offenders.append(node.lineno)
     for scope in scopes:
         for node in ast.walk(scope):
-            if not _opens_database(node):
+            if not _opens_database(node) or id(node) not in in_function_body:
                 continue
             # Any enclosing function may have bootstrapped before this call,
             # but only a statement at the top level of that function's body
             # is guaranteed to execute before entering a nested scope: an
             # ``import config`` inside ``if cond:`` runs only when ``cond``
             # is true, so it is not a reliable bootstrap for a static check.
+            node_pos = (node.lineno, node.col_offset)
             enclosing = [s for s in scopes if s.lineno <= node.lineno <= (s.end_lineno or s.lineno)]
-            if any(_bootstraps_in_body(s, node.lineno) for s in enclosing):
+            if any(_bootstraps_in_body(s, node_pos) for s in enclosing):
                 continue
             outermost = min(enclosing, key=lambda s: s.lineno)
-            entry_pos = first_init_entry.get(outermost.name)
+            entry_pos = first_init_entry.get(id(outermost))
             if entry_pos is not None:
                 # The outermost enclosing function is reached during module
                 # init at ``entry_pos``; the module-level bootstrap must
@@ -137,52 +166,90 @@ def _walk_module_level(node: ast.AST):
 
 
 def _functions_invoked_during_init(
-    tree: ast.Module, local_funcs: dict[str, ast.AST]
-) -> dict[str, tuple[int, int]]:
-    """Local functions reached during module init, keyed by earliest entry
-    position. A call site at module top level enters its target then; a call
-    inside an already-reached function's own body propagates the caller's
-    entry position (that's when the call runs). Calls nested inside deferred
-    bodies — a further ``def``, ``class`` or ``lambda`` — do not."""
-    entry: dict[str, tuple[int, int]] = {}
+    tree: ast.Module,
+    local_funcs: dict[str, ast.AST],
+    class_methods: dict[tuple[str, str], ast.AST],
+    method_class: dict[int, str],
+) -> dict[int, tuple[int, int]]:
+    """Scopes reached during module init, keyed by ``id(ast node)`` with
+    earliest entry position. A call site at module top level enters its
+    target then; a call inside an already-reached scope's own body
+    propagates the caller's entry position (that's when the call runs).
+    Calls nested inside deferred bodies — a further ``def``, ``class`` or
+    ``lambda`` — do not. A direct ``C(...)`` enters ``C.__init__``, and a
+    ``self.m(...)`` inside a method of ``C`` enters ``C.m``."""
+
+    def _target(call: ast.Call, in_class: str | None) -> ast.AST | None:
+        func = call.func
+        if isinstance(func, ast.Name):
+            name = func.id
+            if name in local_funcs:
+                return local_funcs[name]
+            init = class_methods.get((name, "__init__"))
+            if init is not None:
+                return init
+            return None
+        if (in_class is not None
+                and isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "self"):
+            return class_methods.get((in_class, func.attr))
+        return None
+
+    scope_by_id: dict[int, ast.AST] = {id(fn): fn for fn in local_funcs.values()}
+    scope_by_id.update({id(fn): fn for fn in class_methods.values()})
+
+    entry: dict[int, tuple[int, int]] = {}
     for stmt in tree.body:
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
         for child in _walk_module_level(stmt):
-            if (isinstance(child, ast.Call)
-                    and isinstance(child.func, ast.Name)
-                    and child.func.id in local_funcs):
-                pos = (child.lineno, child.col_offset)
-                prev = entry.get(child.func.id)
-                if prev is None or pos < prev:
-                    entry[child.func.id] = pos
+            if not isinstance(child, ast.Call):
+                continue
+            target = _target(child, None)
+            if target is None:
+                continue
+            pos = (child.lineno, child.col_offset)
+            prev = entry.get(id(target))
+            if prev is None or pos < prev:
+                entry[id(target)] = pos
     changed = True
     while changed:
         changed = False
-        for name in list(entry):
-            caller_pos = entry[name]
-            for stmt in local_funcs[name].body:
+        for scope_id in list(entry):
+            scope = scope_by_id.get(scope_id)
+            if scope is None:
+                continue
+            caller_pos = entry[scope_id]
+            in_class = method_class.get(scope_id)
+            for stmt in scope.body:
                 for child in _walk_module_level(stmt):
-                    if (isinstance(child, ast.Call)
-                            and isinstance(child.func, ast.Name)
-                            and child.func.id in local_funcs):
-                        callee = child.func.id
-                        prev = entry.get(callee)
-                        if prev is None or caller_pos < prev:
-                            entry[callee] = caller_pos
-                            changed = True
+                    if not isinstance(child, ast.Call):
+                        continue
+                    target = _target(child, in_class)
+                    if target is None:
+                        continue
+                    prev = entry.get(id(target))
+                    if prev is None or caller_pos < prev:
+                        entry[id(target)] = caller_pos
+                        changed = True
     return entry
 
 
-def _bootstraps_in_body(scope: ast.AST, max_lineno: int) -> bool:
-    """A bootstrap sits as a top-level statement of ``scope.body`` whose line
-    is at or before ``max_lineno``. Statements nested in ``if`` / ``try`` /
-    ``with`` / loops are not accepted: static analysis can't prove they run."""
+def _bootstraps_in_body(scope: ast.AST, max_pos: tuple[int, int]) -> bool:
+    """A bootstrap sits as a top-level statement of ``scope.body`` whose
+    (lineno, col_offset) is at or before ``max_pos``. Statements nested in
+    ``if`` / ``try`` / ``with`` / loops are not accepted: static analysis
+    can't prove they run. The column-aware ordering distinguishes
+    semicolon-separated statements on one line: in
+    ``Database(path); import config`` the import follows the call, so it
+    does not bootstrap it."""
     body = getattr(scope, "body", None)
     if not isinstance(body, list):
         return False
     for stmt in body:
-        if stmt.lineno > max_lineno:
+        stmt_pos = (stmt.lineno, stmt.col_offset)
+        if stmt_pos > max_pos:
             return False
         if _bootstraps(stmt):
             return True
@@ -267,6 +334,42 @@ def test_entry_points_import_config_before_opening_a_database():
     # ``setup``, so the module-level ``import config`` that runs before
     # ``open_db`` is ever actually called is a valid bootstrap for it.
     ("def setup():\n    def unused():\n        open_db()\ndef open_db():\n    return Database(p)\nsetup()\nimport config\n", []),
+    # Argument defaults, decorators, parameter annotations and the return
+    # annotation of a module-level ``def`` run when the ``def`` statement
+    # itself runs, not when the function is called, so a ``Database(...)``
+    # sitting in one of them is a module-init open: a late ``import config``
+    # does not bootstrap it.
+    ("def f(db=Database(':memory:')):\n    pass\nimport config\n", [1]),
+    ("import config\ndef f(db=Database(':memory:')):\n    pass\n", []),
+    ("@Database(':memory:')\ndef f():\n    pass\nimport config\n", [1]),
+    ("def f(x: Database(p) = None) -> None:\n    pass\nimport config\n", [1]),
+    # The default of a *nested* ``def`` runs when its enclosing function
+    # runs, which is deferred until that function is called. The outer
+    # function is never invoked at init, so the later import bootstraps it.
+    ("def outer():\n    def inner(x=Database(p)):\n        pass\nimport config\n", []),
+    # ``C(...)`` at module level enters ``C.__init__``. A ``Database(...)``
+    # in ``__init__``'s body is reached during init, so a later
+    # ``import config`` is too late.
+    ("class C:\n    def __init__(self):\n        Database(':memory:')\nC()\nimport config\n", [3]),
+    ("import config\nclass C:\n    def __init__(self):\n        Database(':memory:')\nC()\n", []),
+    # A bootstrap inside ``__init__``'s own body still counts for the open
+    # that follows it in that body.
+    ("class C:\n    def __init__(self):\n        import config\n        Database(':memory:')\nC()\n", []),
+    # ``self.m(...)`` inside a method of ``C`` enters ``C.m``; the
+    # ``Database(...)`` in ``setup`` runs during init, so a late import is
+    # too late.
+    ("class C:\n    def __init__(self):\n        self.setup()\n    def setup(self):\n        Database(':memory:')\nC()\nimport config\n", [5]),
+    # A class whose instance is never created has no init-reached methods.
+    ("class C:\n    def __init__(self):\n        Database(':memory:')\nimport config\n", []),
+    # Semicolon-separated statements on one line: the import after the
+    # ``Database(...)`` call does not bootstrap it, because the call runs
+    # first. Column-aware ordering distinguishes the two statements even
+    # though they share a line number.
+    ("Database(':memory:'); import config\n", [1]),
+    ("import config; Database(':memory:')\n", []),
+    # Same column-aware ordering inside an init-reached function body.
+    ("def f():\n    Database(':memory:'); import config\nf()\n", [2]),
+    ("def f():\n    import config; Database(':memory:')\nf()\n", []),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines
