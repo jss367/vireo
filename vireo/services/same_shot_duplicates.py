@@ -90,15 +90,25 @@ def _photo(row: sqlite3.Row) -> JsonDict:
     }
 
 
-def _capture_times_differ(photos: list[JsonDict]) -> bool:
-    """True only when every time parses and two are more than a minute apart."""
+def _images_and_times_differ(photos: list[JsonDict]) -> bool:
+    """True only when every pair of photos disagrees in both image and time.
+
+    A mixed group like ``[A, A, B]`` with times ``[t, t, t2]`` keeps the
+    real ``[A, A]`` copy pair, so the whole group stays in the review
+    list instead of being folded into the shutter-count-reuse pile.
+    """
+    phashes = [photo["phash"] for photo in photos]
+    if any(hashed is None for hashed in phashes) or len(set(phashes)) != len(phashes):
+        return False
     times = []
     for photo in photos:
         try:
             times.append(datetime.fromisoformat(photo["timestamp"]).replace(tzinfo=None))
         except (TypeError, ValueError):
             return False
-    return (max(times) - min(times)).total_seconds() > _SAME_CAPTURE_SECONDS
+    times.sort()
+    return all((later - earlier).total_seconds() > _SAME_CAPTURE_SECONDS
+               for earlier, later in zip(times, times[1:], strict=False))
 
 
 def same_shot_sort_key(group: JsonDict) -> tuple[bool, int, list[object]]:
@@ -119,7 +129,7 @@ def _group(identity: ShotIdentity, photos: list[JsonDict]) -> JsonDict | None:
         "identity": list(identity), "camera": f"{make} {model}".upper(),
         "serial_number": serial, "shutter_count": count,
         "visual_evidence": visual, "photos": sorted(photos, key=lambda p: p["path"]),
-        "images_and_times_differ": visual == "different" and _capture_times_differ(photos),
+        "images_and_times_differ": _images_and_times_differ(photos),
     }
 
 

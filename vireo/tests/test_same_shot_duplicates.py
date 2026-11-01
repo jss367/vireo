@@ -124,6 +124,25 @@ def test_a_reused_shutter_count_is_flagged_and_listed_after_likely_copies(catalo
     assert [group["shutter_count"] for group in restored["same_shot_groups"]] == [4, 3, 2, 5, 1]
 
 
+def test_mixed_group_with_a_copy_pair_stays_in_the_likely_review_list(catalog, tmp_path):
+    """A 3+ photo group that contains at least one real copy pair must not be flagged.
+
+    Hashes ``[A, A, B]`` with times ``[t_jan, t_jan, t_march]`` describe
+    a derivative pair and a counter-reuse photo sharing one shutter
+    count. The ``[A, A]`` pair is a likely copy and must stay in the
+    review list; the flag only fires when every pair disagrees.
+    """
+    exif = metadata(count=42)
+    first = "123456789abcdef0"
+    other = "ffffffffffffffff"
+    seed(catalog, tmp_path / "orig", "orig.jpg", "orig", exif=exif, phash=first, timestamp="2020-01-08T05:57:43")
+    seed(catalog, tmp_path / "edit", "edit.dng", "edit", exif=exif, phash=first, timestamp="2020-01-08T05:57:43")
+    seed(catalog, tmp_path / "reuse", "reuse.jpg", "reuse", exif=exif, phash=other, timestamp="2020-03-07T17:19:11")
+    group, = scan_same_shot_candidates(catalog, {})["same_shot_groups"]
+    assert group["visual_evidence"] == "different"
+    assert group["images_and_times_differ"] is False
+
+
 def test_identical_hashes_and_rejected_or_empty_photos_are_excluded(catalog, tmp_path):
     seed(catalog, tmp_path, "a.jpg", "same")
     b = seed(catalog, tmp_path, "b.jpg", "same")

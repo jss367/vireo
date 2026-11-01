@@ -69,6 +69,14 @@ export function renderCategoryBadge(group) {
     escapeHtml(DuplicateCategories.label(DuplicateCategories.classify(group))) + '</span>';
 }
 
+/** The "Same-shot to review" stat markup, or '' when it does not apply. @param {DuplicateScan} result */
+function sameShotStatHtml(result) {
+  if (!result.same_shot_scanned || result.catalog_cleanup) return '';
+  return '<a class="summary-stat summary-stat-link" href="#sameShotResults">' +
+    '<div class="num" id="sameShotLikelyToReview">' + sameShotLikelyToReview(result).toLocaleString() + '</div>' +
+    '<div class="label">Same-shot to review</div></a>';
+}
+
 /** @param {DuplicateScan} result @param {DuplicateProposal[]} unresolved @param {DuplicateProposal[]} resolved */
 export function renderSummaryBar(result, unresolved, resolved) {
   var extras = unresolved.reduce(function(n, p) { return n + (p.losers || []).length; }, 0);
@@ -82,10 +90,7 @@ export function renderSummaryBar(result, unresolved, resolved) {
       '<div class="label">Need review</div></div>' +
     '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + extras + '</div>' +
       '<div class="label">Extras to reject</div></div>';
-  if (result.same_shot_scanned && !result.catalog_cleanup) html +=
-    '<a class="summary-stat summary-stat-link" href="#sameShotResults">' +
-      '<div class="num" id="sameShotLikelyToReview">' + sameShotLikelyToReview(result).toLocaleString() + '</div>' +
-      '<div class="label">Same-shot to review</div></a>';
+  html += sameShotStatHtml(result);
   if (resolved.length > 0 || result.catalog_cleanup) {
     html +=
       '<div class="summary-stat"><div class="num">' + resolved.length + '</div>' +
@@ -97,6 +102,20 @@ export function renderSummaryBar(result, unresolved, resolved) {
         emptyGroups + '</div><div class="label">Empty-file groups</div></div>';
   }
   return html + '</div>';
+}
+
+/** A summary bar carrying only the "Same-shot to review" stat, or '' when none applies.
+ *
+ * ``renderResults`` short-circuits to ``renderNoDuplicateGroups`` /
+ * ``renderAllGroupsFiltered`` when exact-byte proposals are empty or
+ * every one is hidden by filters. Same-shot cards still render below in
+ * both cases, so the stat and its link to ``#sameShotResults`` must
+ * stay with them.
+ * @param {DuplicateScan} result
+ */
+export function renderSameShotOnlySummaryBar(result) {
+  var stat = sameShotStatHtml(result);
+  return stat ? '<div class="summary-bar">' + stat + '</div>' : '';
 }
 
 /** @param {Set<number>} photoIds */

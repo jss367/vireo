@@ -9,8 +9,8 @@ import {
 } from './cleanup.js';
 import { visibleBucket } from './filter.js';
 import {
-  groupMatchesFilter, groupMatchesPhotoFilter, renderCategorySummary, renderSummaryBar,
-  updateApplyCount,
+  groupMatchesFilter, groupMatchesPhotoFilter, renderCategorySummary,
+  renderSameShotOnlySummaryBar, renderSummaryBar, updateApplyCount,
 } from './patterns.js';
 import { isBulkTrashProtected, renderResolvedGroup, renderUnresolvedGroup } from './resolved.js';
 import { cancelDuplicateLoad } from './restore.js';
@@ -19,16 +19,29 @@ import { renderSameShotResults } from './same-shot.js';
 import { hideProgress, hideRestoredBanner, setEmptyVisible } from './scan.js';
 import { escapeHtml, formatBytes } from './shared.js';
 
-/** Every group is hidden by the active filters: say so, and hide the stale summary and apply bar. @param {number} hiddenByFilter */
+/** Keep only the same-shot stat visible when the exact-byte section is hidden.
+ *
+ * The sticky apply bar still goes away: there are no exact-byte groups
+ * to reject here, and leaving a "Reject N extras" button next to the
+ * same-shot stat would act on hidden (or absent) groups.
+ * @param {DuplicateScan|null} result
+ */
+function keepSameShotSummaryOnly(result) {
+  var summary = duplicatesEl('summary');
+  var sameShotBar = result ? renderSameShotOnlySummaryBar(result) : '';
+  if (sameShotBar) {
+    summary.innerHTML = sameShotBar;
+    summary.style.display = '';
+  } else {
+    summary.style.display = 'none';
+  }
+  duplicatesEl('applyBar').style.display = 'none';
+}
+
+/** Every group is hidden by the active filters: say so, and keep only the same-shot stat visible. @param {number} hiddenByFilter */
 export function renderAllGroupsFiltered(hiddenByFilter) {
   setEmptyVisible(false);
-  // Hide the previously-rendered summary and sticky apply bar so a
-  // stale "Reject N extra copies" button (or the summary counts) does
-  // not remain visible under the "no groups match" message — that
-  // button would otherwise post loser hashes for groups the active
-  // filter has hidden.
-  duplicatesEl('summary').style.display = 'none';
-  duplicatesEl('applyBar').style.display = 'none';
+  keepSameShotSummaryOnly(state.lastScanResult);
   duplicatesEl('results').innerHTML =
     '<div class="no-results">No duplicate groups match the active filters (' +
     hiddenByFilter + ' hidden). Clear or pause filters to see them.</div>';
@@ -38,8 +51,7 @@ export function renderAllGroupsFiltered(hiddenByFilter) {
 /** The scan has no groups left: explain why (cleanup done, out of date, or clean). @param {DuplicateScan} result */
 export function renderNoDuplicateGroups(result) {
   setEmptyVisible(false);
-  duplicatesEl('summary').style.display = 'none';
-  duplicatesEl('applyBar').style.display = 'none';
+  keepSameShotSummaryOnly(result);
   // A restored scan with every group revalidated out is only out of
   // date if the catalog has duplicates a new scan would show: groups
   // added since, or a stale group's hash that still forms one.
