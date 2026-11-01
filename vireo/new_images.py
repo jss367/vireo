@@ -334,14 +334,22 @@ def _root_excluded_before_walk(root_path, mount_root):
     return not os.path.isdir(root_path)
 
 
+def _root_checkpoint(progress):
+    """Restart a stale root snapshot instead of waiting and then using it."""
+    if progress.should_yield is not None:
+        if progress.should_yield():
+            raise DiscoveryDeferred()
+    elif progress.checkpoint is not None:
+        progress.checkpoint()
+
+
 def _count_root_new_images(tally, root, known, reachability, staged_sources,
                            source_resolutions, reachability_generation,
                            sample_limit, progress,
                            stall_timeout, listing_cache):
     """Walk one mapped root and add what it holds to ``tally``."""
     root_path = root["path"]
-    if progress.checkpoint is not None:
-        progress.checkpoint()
+    _root_checkpoint(progress)
     # prune_scan_dirs filters only children; if the root is, or sits
     # inside, an excluded bundle (e.g. user added
     # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
@@ -821,8 +829,7 @@ def _walk_root_bounded(walk, known, seen_new_paths, progress, stall_timeout, *,
     # Recorded on this root if the watchdog fires: it dates the outage to the
     # world this walk started in, so a later recheck can tell it apart from
     # one observed after the user asked us to look again.
-    if progress.checkpoint is not None:
-        progress.checkpoint()
+    _root_checkpoint(progress)
     walk_epoch = _current_walk_epoch()
     if not _reserve_root_walk(walk):
         return None

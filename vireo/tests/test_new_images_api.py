@@ -227,7 +227,8 @@ def test_api_new_images_defers_walk_during_folder_move(app_and_db, query, job_ty
 
 
 @pytest.mark.parametrize("action", ["resume", "cancel"])
-def test_inflight_discovery_yields_to_a_new_nas_transfer(app_and_db, monkeypatch, action):
+@pytest.mark.parametrize("pause_at", ["root", "entry"])
+def test_inflight_discovery_yields_to_a_new_nas_transfer(app_and_db, monkeypatch, action, pause_at):
     import os
     import threading
 
@@ -241,16 +242,25 @@ def test_inflight_discovery_yields_to_a_new_nas_transfer(app_and_db, monkeypatch
     entered, next_entry, waiting, release = [threading.Event() for _ in range(4)]
     reading = threading.Event()
     closed = threading.Event()
+    closed.set()  # No directory reader is open before the first root.
     runner = app._job_runner
     original_push = runner.push_event
+    original_count_root = module._count_root_new_images
+
+    def count_root(*args, **kwargs):
+        if pause_at == "root" and not entered.is_set():
+            entered.set()
+            assert next_entry.wait(synchronization_timeout(5))
+        return original_count_root(*args, **kwargs)
 
     def walk(top, **kwargs):
         closed.clear()
         try:
             with os.scandir(top) as entries:
                 for entry in entries:
-                    entered.set()
-                    assert next_entry.wait(synchronization_timeout(5))
+                    if pause_at == "entry":
+                        entered.set()
+                        assert next_entry.wait(synchronization_timeout(5))
                     kwargs["on_entry"]()
                     reading.set()
                     yield top, [], [entry.name]
@@ -273,6 +283,7 @@ def test_inflight_discovery_yields_to_a_new_nas_transfer(app_and_db, monkeypatch
         return {}
 
     monkeypatch.setattr(module, "safe_scan_walk", walk)
+    monkeypatch.setattr(module, "_count_root_new_images", count_root)
     monkeypatch.setattr(runner, "push_event", push)
     client = app.test_client()
     try:
