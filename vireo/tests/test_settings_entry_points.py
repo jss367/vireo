@@ -109,6 +109,13 @@ class _BootstrapCheck:
             self.active.remove(id(function))
 
     def node(self, node, ready, functions):
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+            ready = self.node(node.value, ready, functions)
+            func = node.value.func
+            function = functions.get(func.id) if isinstance(func, ast.Name) else None
+            if isinstance(function, ast.AsyncFunctionDef):
+                return self.function(function, ready, functions)
+            return ready
         if isinstance(node, ast.If):
             ready = self.node(node.test, ready, functions)
             yes = self.block(node.body, ready, functions)
@@ -137,7 +144,7 @@ class _BootstrapCheck:
             return True
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             function = functions.get(node.func.id)
-            if function is not None:
+            if isinstance(function, ast.FunctionDef):
                 return self.function(function, ready, functions)
         return ready
 
@@ -187,6 +194,9 @@ def test_entry_points_import_config_before_opening_a_database():
     ("def f():\n    def g():\n        return Database('x')\n    g()\n    import config\nf()\n", [3]),
     ("def f(db=Database('x')):\n    pass\nimport config\n", [1]),
     ("def f():\n    return Database('x')\ndef g():\n    return f()\ng()\nimport config\n", [2]),
+    ("async def boot():\n    import config\nboot()\nDatabase('x')\n", [4]),
+    ("async def boot():\n    import config\nasync def main():\n    await boot()\n    Database('x')\n", []),
+    ("async def boot():\n    import config\nasync def main():\n    boot()\n    Database('x')\n", [5]),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines
