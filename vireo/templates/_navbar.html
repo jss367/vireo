@@ -317,6 +317,8 @@
     <div id="lightboxSubjectDetails"></div>
     <label><input id="lightboxSubjectCorrected" type="checkbox" checked> Preview suggested exposure</label>
     <div class="lb-subject-controls">
+      <button id="lightboxSubjectDraw" type="button">Draw subject box</button>
+      <button id="lightboxSubjectRetry" type="button">Retry selected box analysis</button>
       <button id="lightboxSubjectAnalyze" type="button">Analyze subjects</button>
       <button id="lightboxSubjectUseCrop" type="button">Use crop</button>
       <button id="lightboxSubjectUseExposure" type="button">Use exposure</button>
@@ -623,6 +625,10 @@
   color: #eee; background: rgba(12, 20, 26, .95); border: 1px solid #53606b;
   font-size: 12px; text-align: left;
 }
+.lb-subject-box-dialog { margin: auto; padding: 18px; max-width: min(94vw, 1200px); max-height: 94vh; background: #222; color: #eee; border: 1px solid #777; border-radius: 8px; }
+.lb-subject-box-dialog::backdrop { background: #000b; }
+.lb-subject-box-dialog canvas { display: block; max-width: 100%; max-height: 65vh; width: auto; height: auto; cursor: crosshair; touch-action: none; }
+.lb-subject-box-dialog button { padding: 8px 12px; }
 .lb-subject-panel[hidden] { display: none; }
 .lb-subject-panel summary { cursor: pointer; font-size: 14px; font-weight: 600; }
 .lb-subject-list { display: flex; gap: 8px; overflow-x: auto; margin: 12px 0; }

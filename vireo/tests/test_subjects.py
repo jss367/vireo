@@ -421,3 +421,74 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
     for column in ("mask_path", "eye_x", "dino_subject_embedding", "quality_score"):
         assert row[column] is None
     assert db.conn.execute("SELECT 1 FROM photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone() is None
+
+
+def test_reviewer_region_keeps_fallback_separate_and_retries_only_that_box(db, subject_photo):
+    from subjects import select_reviewer_box
+    photo_id, ids, path = subject_photo
+    analyze_photo(db, photo_id, path)
+    fallback = detection_store.write_detection_batch(db, photo_id, 'full-image', [
+        {'box': dict(x=0, y=0, w=1, h=1), 'confidence': 1, 'category': 'animal'}])[0]
+    db.predictions.add(fallback, 'Unlocalized guess', .9, 'bioclip')
+    db.commit()
+    old = dict(db.subjects.analysis(ids[1]))
+    chosen = select_reviewer_box(db, photo_id, dict(x=.1, y=.2, w=.1, h=.2))
+    result = payload(db, photo_id)
+    assert result['primary_detection_id'] == chosen
+    assert result['subjects'][0]['evidence_basis'] == 'reviewer_box'
+    assert result['subjects'][0]['predictions'] == []
+    assert result['subjects'][0]['analysis'] is None
+    assert result['full_image_predictions'][0]['species'] == 'Unlocalized guess'
+    photo = db.photos.get(photo_id)
+    assert photo['quality_score'] is None
+    assert photo['subject_sharpness'] is None
+    assert photo['eye_x'] is None
+    assert analyze_photo(db, photo_id, path, detection_id=chosen, force=True) == 1
+    assert dict(db.subjects.analysis(ids[1])) == old
+    assert payload(db, photo_id)['subjects'][0]['analysis']['basis'] == 'detection_box'
+    # The explicit region survives a fresh, empty detector batch.
+    detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', [])
+    assert payload(db, photo_id)['primary_detection_id'] == chosen
+
+
+@pytest.mark.parametrize('box', [None, {}, dict(x=True, y=0, w=.1, h=.1),
+    dict(x=0, y=0, w=float('nan'), h=.1), dict(x=.9, y=0, w=.2, h=.1),
+    dict(x=0, y=0, w=0, h=.1), dict(x=-.1, y=0, w=.2, h=.1)])
+def test_invalid_reviewer_box_preserves_previous_analysis(db, subject_photo, box):
+    from subjects import select_reviewer_box
+    photo_id, ids, path = subject_photo
+    analyze_photo(db, photo_id, path)
+    before = payload(db, photo_id)
+    with pytest.raises(ValueError):
+        select_reviewer_box(db, photo_id, box)
+    assert payload(db, photo_id) == before
+
+
+def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monkeypatch):
+    import subjects
+    photo_id, ids, path = subject_photo
+    chosen = subjects.select_reviewer_box(db, photo_id, dict(x=.1, y=.1, w=.1, h=.1))
+    original = subjects.analyze_image
+    def replace(image, detections):
+        results = original(image, detections)
+        subjects.select_reviewer_box(db, photo_id, dict(x=.7, y=.1, w=.1, h=.1))
+        return results
+    monkeypatch.setattr(subjects, 'analyze_image', replace)
+    with pytest.raises(ValueError, match='changed during analysis'):
+        analyze_photo(db, photo_id, path, detection_id=chosen)
+    assert payload(db, photo_id)['subjects'][0]['analysis'] is None
+
+
+def test_reviewer_box_api_validates_scope_and_subject(app_and_db):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    client = app.test_client()
+    url = f'/api/photos/{pid}/subjects/reviewer-box'
+    assert client.put(url, json={'box': dict(x=0, y=0, w=2, h=1)}).status_code == 400
+    result = client.put(url, json={'box': dict(x=.1, y=.1, w=.1, h=.1)})
+    assert result.status_code == 200
+    assert result.get_json()['subjects'][0]['evidence_basis'] == 'reviewer_box'
+    assert client.post(f'/api/photos/{pid}/subjects/analyze', json={'detection_id': True}).status_code == 400
+    other = db.create_workspace('Hidden photo')
+    client.post(f'/api/workspaces/{other}/activate')
+    assert client.put(url, json={'box': dict(x=.1, y=.1, w=.1, h=.1)}).status_code == 404

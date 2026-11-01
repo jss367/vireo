@@ -1551,6 +1551,14 @@ def create_photos_blueprint(
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("not found", 404)
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("Expected an object")
+        detection_id = body.get("detection_id")
+        from subjects import retained
+        if detection_id is not None and (type(detection_id) is not int
+                or not any(d["id"] == detection_id for d in retained(db, photo_id))):
+            return json_error("Choose a retained subject from this photo")
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
         def work(job: JobDict) -> None:
@@ -1564,13 +1572,34 @@ def create_photos_blueprint(
                     raise ValueError("Photo is no longer in this workspace")
                 folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
                 path = get_canonical_image_path(photo, vireo_dir, folders)
-                count = analyze_photo(thread_db, photo_id, path,
-                                      checkpoint=lambda: ctx.checkpoint(job))
-                job["result"] = {"photo_id": photo_id, "subjects_analyzed": count}
+                count = analyze_photo(thread_db, photo_id, path, detection_id=detection_id,
+                                      force=detection_id is not None, checkpoint=lambda: ctx.checkpoint(job))
+                job["result"] = {"photo_id": photo_id, "detection_id": detection_id, "subjects_analyzed": count}
             finally:
                 thread_db.close()
 
-        return ctx.start("analyze-subjects", work, config={"photo_id": photo_id})
+        return ctx.start("analyze-subjects", work, config={"photo_id": photo_id, "detection_id": detection_id})
+
+    @blueprint.route("/api/photos/<int:photo_id>/subjects/reviewer-box", methods=["PUT"])
+    def api_reviewer_subject_box(photo_id: int) -> ResponseReturnValue:
+        from pipeline_locks import acquire_photo_mask
+        from subjects import payload, select_reviewer_box
+        db = get_db()
+        if db.photos.get(photo_id, verify_workspace=True) is None:
+            return json_error("not found", 404)
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("box is required")
+        lock = acquire_photo_mask(photo_id)
+        if not lock.acquire(blocking=False):
+            return json_error("Subject analysis is running for this photo. Try again when it finishes.", 409)
+        try:
+            select_reviewer_box(db, photo_id, body.get("box"))
+        except ValueError as exc:
+            return json_error(str(exc))
+        finally:
+            lock.release()
+        return jsonify(payload(db, photo_id))
 
     @blueprint.route("/api/photos/<int:photo_id>/primary-subject", methods=["PUT"])
     def api_primary_subject(photo_id: int) -> ResponseReturnValue:

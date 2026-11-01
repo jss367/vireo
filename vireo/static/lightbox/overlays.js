@@ -376,7 +376,8 @@ export function _lbLoadDetections(/** @type {number} */ photoId) {
         var box = document.createElement('div');
         box.className = 'lb-detection-box';
         box.style.cssText = 'left:' + (transformed.x * 100).toFixed(2) + '%;top:' + (transformed.y * 100).toFixed(2) + '%;width:' + (transformed.w * 100).toFixed(2) + '%;height:' + (transformed.h * 100).toFixed(2) + '%;border-color:' + color + ';';
-        var conf = det.detector_confidence ? Math.round(det.detector_confidence * 100) + '%' : '';
+        var conf = det.detector_model === 'reviewer-selected' ? 'Reviewer-selected'
+          : det.detector_confidence ? Math.round(det.detector_confidence * 100) + '%' : '';
         if (conf) {
           box.innerHTML = '<span class="lb-detection-label" style="background:' + color + ';color:#0A1F2E;">' + conf + '</span>';
         }

@@ -12,6 +12,7 @@ import numpy as np
 from services import detection_store
 
 ANALYSIS_VERSION = 1
+REVIEWER_MODEL = "reviewer-selected"
 
 
 def retained(db, photo_id, min_conf=None, *, detector_model=None):
@@ -75,12 +76,16 @@ def analyze_image(image, detections):
     return results
 
 
-def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None):
+def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None, detection_id=None):
     """Backfill on cached detection runs too; failed/offline reads remain retryable."""
     from image_loader import load_image
     from pipeline_locks import acquire_photo_mask
 
     detections = retained(db, photo_id, min_conf)
+    if detection_id is not None:
+        detections = [d for d in detections if d["id"] == detection_id]
+        if not detections:
+            raise ValueError("Chosen subject is no longer available")
     if not detections:
         # Migrated catalogs have legacy subject-derived fields on ``photos``
         # without any ``photo_subject_state`` row. Triggering ``sync_primary``
@@ -117,6 +122,8 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         if checkpoint:
             checkpoint()
         # The detector may have been replaced while the image was decoded.
+        if detection_id is not None and not any(d["id"] == detection_id for d in retained(db, photo_id, min_conf)):
+            raise ValueError("Chosen subject changed during analysis; select it again")
         db.subjects.save_analyses(source_key, results)
         sync_primary(db, photo_id, min_conf=min_conf)
         db.commit_with_retry()
@@ -183,9 +190,39 @@ def payload(db, photo_id):
         detection["analysis"] = ({"crop": json.loads(analysis["crop"]),
             "quality_score": analysis["quality_score"], "exposure_ev": analysis["exposure_ev"],
             "basis": "detection_box", "source_key": analysis["source_key"]} if analysis else None)
+        detection["evidence_basis"] = "reviewer_box" if detection["detector_model"] == REVIEWER_MODEL else "detector_box"
         detection["predictions"] = grouped.get(detection["id"], [])
         detection["is_primary"] = detection is detections[0]
     primary_id = detections[0]["id"] if detections else None
-    return {"photo_id": photo_id, "subjects": detections, "primary_detection_id": primary_id,
+    full_image_ids = {d["id"] for d in detection_store.get_detections(db, photo_id, min_conf=0)
+                      if d["detector_model"] == "full-image"}
+    return {"photo_id": photo_id, "subjects": detections,
+            "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])], "primary_detection_id": primary_id,
             "selection": "manual" if choice else "automatic",
             "choice_unavailable": bool(choice and choice["detection_id"] != primary_id)}
+
+
+def select_reviewer_box(db, photo_id, box):
+    """Save an explicit human region separately from model output, then select it.
+
+    Coordinates use the upright, unedited source frame. The stored confidence
+    of 1 keeps the explicit choice above detector thresholds; it is not a
+    model probability. No detector run or species prediction is manufactured.
+    Caller holds the photo lock.
+    """
+    if not isinstance(box, dict) or set(box) != set("xywh"):
+        raise ValueError("box must contain x, y, w and h")
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+           for v in box.values()):
+        raise ValueError("Box coordinates must be finite numbers")
+    x, y, w, h = (box[k] for k in "xywh")
+    if min(x, y) < 0 or min(w, h) <= 0 or x + w > 1 or y + h > 1:
+        raise ValueError("Choose a nonempty box inside the source image")
+    with db.transaction(immediate=True):
+        # Clear previous measurements even if a legacy catalog lacks primary state.
+        db.subjects.clear_primary_features(photo_id)
+        ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [
+            {"box": box, "confidence": 1.0, "category": "animal"}], "reviewer-v1")
+        db.subjects.set_choice(photo_id, ids[0])
+        sync_primary(db, photo_id)
+    return ids[0]
