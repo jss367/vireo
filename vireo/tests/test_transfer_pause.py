@@ -481,3 +481,128 @@ def test_folder_merge_rejects_symlink_conflicts_before_copying(transfer_env, mon
     assert sorted(path.name for path in landing.iterdir()) == ["link"]
     assert os.readlink(landing / "link") == original_target
     assert source.exists()
+
+
+@pytest.mark.parametrize("redirection", ["subdirectory", "inside_tree", "root"])
+def test_resumed_fallback_never_writes_through_destination_directory_links(transfer_env, monkeypatch, redirection):
+    import move.folder_transfer as transfer
+
+    runner, db_path, _, folder_id, source, destination = transfer_env
+    (source / "nested").mkdir()
+    (source / "nested" / "nested.jpg").write_bytes(b"nested photo")
+    external = source.parent / "external"
+    external.mkdir()
+    (external / "sentinel.txt").write_text("untouched")
+    entered, release = threading.Event(), threading.Event()
+    original = transfer._copy_tree_with_progress
+
+    def copy_with_boundary(src, dst, skip, total, progress, **kwargs):
+        def report(current, count, name, phase):
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(synchronization_timeout(5))
+            progress(current, count, name, phase)
+
+        return original(src, dst, skip, total, report, **kwargs)
+
+    monkeypatch.setattr(transfer, "_copy_tree_with_progress", copy_with_boundary)
+    job_id = start_move(transfer_env)
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        assert runner.pause_job(job_id)
+        release.set()
+        wait_status(runner, job_id, "paused")
+        landing = destination / source.name
+        if redirection == "inside_tree":
+            external = landing / "other-files"
+            external.mkdir()
+            (external / "sentinel.txt").write_text("untouched")
+        if redirection == "root":
+            landing.rename(destination / "completed-prefix")
+            redirected = landing
+        else:
+            redirected = landing / "nested"
+        try:
+            redirected.symlink_to(external, target_is_directory=True)
+        except OSError:
+            pytest.skip("Directory symlinks are unavailable")
+        original_link = os.readlink(redirected)
+        assert runner.resume_job(job_id)
+        job = wait_for_job_via_runner(runner, job_id)
+        assert job["status"] == "failed", job
+        assert (source / "nested" / "nested.jpg").read_bytes() == b"nested photo"
+        assert sorted(path.name for path in external.iterdir()) == ["sentinel.txt"]
+        assert (external / "sentinel.txt").read_text() == "untouched"
+        assert os.readlink(redirected) == original_link
+        with Database(db_path) as db:
+            assert db.folders.get(folder_id)["path"] == str(source)
+    finally:
+        release.set()
+        runner.cancel_job(job_id)
+
+
+@pytest.mark.parametrize("linked_root", [False, True])
+def test_verifiers_reject_external_directory_aliases_with_independent_bytes(tmp_path, linked_root):
+    from move.verify import _find_content_conflict, _first_missing_source_file, _fresh_copy_mismatch, preview_merge
+
+    source, destination, external = (tmp_path / name for name in ("source", "destination", "external"))
+    (source / "nested").mkdir(parents=True)
+    (external / "nested").mkdir(parents=True)
+    (source / "nested" / "photo.bin").write_bytes(b"same bytes")
+    (external / "nested" / "photo.bin").write_bytes(b"same bytes")
+    try:
+        if linked_root:
+            destination.symlink_to(external, target_is_directory=True)
+        else:
+            destination.mkdir()
+            (destination / "nested").symlink_to(external / "nested", target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
+    assert not os.path.samefile(source / "nested" / "photo.bin", destination / "nested" / "photo.bin")
+    for verify in (_find_content_conflict, _first_missing_source_file, _fresh_copy_mismatch):
+        assert verify(str(source), str(destination)) is not None, verify.__name__
+    assert preview_merge(str(source), str(destination)) == {
+        "will_copy": 0, "will_skip": 0, "will_block": 1, "source_total": 1,
+    }
+
+
+def test_configured_alias_above_destination_tree_remains_supported(tmp_path):
+    from move.verify import _find_content_conflict, _first_missing_source_file, _fresh_copy_mismatch, preview_merge
+
+    source, physical = tmp_path / "source", tmp_path / "physical"
+    source.mkdir()
+    physical.mkdir()
+    alias = tmp_path / "configured-alias"
+    try:
+        alias.symlink_to(physical, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
+    destination = alias / "landing"
+    destination.mkdir()
+    (source / "photo.bin").write_bytes(b"photo")
+    (destination / "photo.bin").write_bytes(b"photo")
+    for verify in (_find_content_conflict, _first_missing_source_file, _fresh_copy_mismatch):
+        assert verify(str(source), str(destination)) is None, verify.__name__
+    assert preview_merge(str(source), str(destination))["will_skip"] == 1
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_fallback_merge_preserves_finder_named_file_symlinks(transfer_env, broken):
+    from move import move_folder
+
+    _, db_path, workspace_id, folder_id, source, destination = transfer_env
+    target = source.parent / "external-file"
+    if not broken:
+        target.write_bytes(b"external")
+    try:
+        (source / ".DS_Store").symlink_to(target)
+    except OSError:
+        pytest.skip("Symlinks are unavailable")
+    expected_target = os.readlink(source / ".DS_Store")
+    (destination / source.name).mkdir()
+    with Database(db_path) as db:
+        db.set_active_workspace(workspace_id)
+        result = move_folder(db, folder_id, str(destination), merge=True)
+    assert not result["errors"], result
+    assert not source.exists()
+    assert os.readlink(destination / source.name / ".DS_Store") == expected_target
