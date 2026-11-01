@@ -193,6 +193,7 @@ def _seed_detection_and_mask(db, readiness_photo):
     db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .4, "h": .4},
                               "confidence": .9, "category": "animal"}], detector_model="megadetector-v6")
     db.model_runs.record_detector_run(pid, "megadetector-v6", 1)
+    db.commit()
     db.masks_features.upsert_mask(pid, "sam2-small", str(mask_path), "megadetector-v6",
                                  (.1, .1, .4, .4), quality)
     db.masks_features.set_active_variant(pid, "sam2-small", .2)
@@ -211,6 +212,7 @@ def test_loader_empty_completed_detector_and_person_box_are_explicit_no_subject(
     db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .4, "h": .4},
                               "confidence": .9, "category": "person"}], detector_model="megadetector-v6")
     db.model_runs.record_detector_run(pid, "megadetector-v6", 1)
+    db.commit()
     photo = _loaded_photo(db, pid)
     run_triage([{"photos": [photo]}])
     assert photo["analysis_status"] == "complete"
@@ -235,6 +237,7 @@ def test_loader_checks_current_mask_inputs_and_settings(db, readiness_photo, cha
     elif changed == "source":
         db.model_runs.record_detector_run(pid, "megadetector-v6", 1, "r", source_input(
             "a" * 64, "vireo-detector-source-v1")[1])
+        db.commit()
         db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", ("b" * 64, pid))
     elif changed == "threshold":
         db.conn.execute("UPDATE detections SET detector_confidence=.1 WHERE photo_id=?", (pid,))

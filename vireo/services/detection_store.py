@@ -53,15 +53,18 @@ def write_detection_batch(
         raise ValueError("detector_model is required")
     # The pin check comes from the model-runs domain, so a patched
     # ``model_runs.detector_run_is_pinned`` still applies inside the transaction.
-    return db.detections.write_batch(
-        photo_id,
-        detector_model,
-        detections,
-        runtime_fingerprint,
-        input_fingerprint,
-        force_runtime_replace,
-        is_pinned=db.model_runs.detector_run_is_pinned,
-    )
+    # One unit: a crash between the two writes cannot leave detection rows
+    # without their detector_runs row.
+    with db.transaction():
+        return db.detections.write_batch(
+            photo_id,
+            detector_model,
+            detections,
+            runtime_fingerprint,
+            input_fingerprint,
+            force_runtime_replace,
+            is_pinned=db.model_runs.detector_run_is_pinned,
+        )
 
 
 def get_detections(
@@ -157,13 +160,13 @@ def delete_detections_by_ids(db: Database, detection_ids: Iterable[int]) -> None
     """
     if not detection_ids:
         return
-    repo = db.detections
-    affected_subject_photos = repo.delete_by_ids(detection_ids)
-    if affected_subject_photos:
-        from subjects import sync_primary
-        for photo_id in affected_subject_photos:
-            sync_primary(db, photo_id)
-    repo.commit()
+    # One unit: the delete and the primary-subject resync land together.
+    with db.transaction():
+        affected_subject_photos = db.detections.delete_by_ids(detection_ids)
+        if affected_subject_photos:
+            from subjects import sync_primary
+            for photo_id in affected_subject_photos:
+                sync_primary(db, photo_id)
 
 
 def upsert_photo_embedding(

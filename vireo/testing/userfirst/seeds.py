@@ -198,6 +198,7 @@ def prediction_selection_seed(db_path, thumb_dir, photos_root):
             db.predictions.add(
                 detection_ids[1], "Blue-breasted Quail", 0.93, "bioclip",
             )
+        db.commit()
 
     db.close()
 

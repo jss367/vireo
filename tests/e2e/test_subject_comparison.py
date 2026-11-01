@@ -27,6 +27,7 @@ def test_species_comparison_selects_ambiguous_bird_and_analyzes_it(page, live_se
         for i, did in enumerate(ids):
             species = "Vermilion Flycatcher" if index == 0 or i == 0 else "Sparrow"
             db.predictions.add(did, species, .95, "test", status="accepted")
+            db.commit()
         pids.append(pid)
         dids.append(ids)
     db.commit()

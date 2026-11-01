@@ -77,7 +77,6 @@ def _run_classifier_on_detection(
             # labels" into the table calibration reads.
             pred.get("raw_score"),
         )
-    db.commit_with_retry()
     return predictions
 
 
@@ -101,14 +100,17 @@ def _classify_detection_gated(db: Database, detection_id: int, classifier_model:
         existing = db.model_runs.get_classifier_run_keys(detection_id)
         if (classifier_model, labels_fingerprint) in existing:
             return []
-    predictions = _run_classifier_on_detection(
-        db, detection_id, classifier_model, labels,
-        labels_fingerprint=labels_fingerprint,
-        classify_fn=classify_fn,
-    )
-    if predictions:
-        db.model_runs.record_classifier_run(
-            detection_id, classifier_model, labels_fingerprint,
-            prediction_count=len(predictions),
+    # One unit: the predictions and the run row that marks them done land
+    # together. Inference runs before the first write, so it holds no lock.
+    with db.transaction():
+        predictions = _run_classifier_on_detection(
+            db, detection_id, classifier_model, labels,
+            labels_fingerprint=labels_fingerprint,
+            classify_fn=classify_fn,
         )
+        if predictions:
+            db.model_runs.record_classifier_run(
+                detection_id, classifier_model, labels_fingerprint,
+                prediction_count=len(predictions),
+            )
     return predictions

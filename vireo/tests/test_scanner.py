@@ -3623,6 +3623,7 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.85, "bioclip")
+    db.commit()
 
     # Now add the raw file and rescan — this creates a new photo record for the raw,
     # then the classify job also runs on the raw (simulated here)
@@ -3688,6 +3689,7 @@ def test_pairing_collapses_duplicate_detections_across_raw_jpeg(tmp_path):
     ], detector_model="MDV6")
     db.predictions.add(jpeg_det[0], "Robin", 0.95, "bioclip")
     db.predictions.add(raw_det[0], "Robin", 0.70, "bioclip")
+    db.commit()
 
     # Run pairing — should NOT raise IntegrityError
     _pair_raw_jpeg_companions(db)

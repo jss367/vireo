@@ -27,6 +27,7 @@ def _seed(db):
             db.predictions.add(detections[index], name, .9, model,
                                labels_fingerprint='current', taxonomy=BLUE,
                                group_id=group, vote_count=2, total_votes=2)
+            db.commit()
             ids.append(db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0])
     db.commit()
     return photos, detections, ids
@@ -105,6 +106,7 @@ def test_stale_card_is_refused_atomically(app_and_db, decision, changed):
     if changed == 'superseded':
         db.predictions.add(detections[2], 'Blue Tit', .95, 'third-model',
                            labels_fingerprint='new', taxonomy=BLUE)
+        db.commit()
     elif changed == 'workspace':
         body['observed_workspace_id'] += 1
     else:
@@ -122,6 +124,7 @@ def test_other_species_and_disjoint_bursts_stay_separate(app_and_db):
     _, detections, ids = _seed(db)
     db.predictions.add(detections[0], 'Blue Tit', .95, 'other-species',
                        taxonomy={'taxon_id': 999, 'scientific_name': 'Other species'})
+    db.commit()
     other = db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0]
     client = app.test_client()
     rows = {p['id']: p for p in client.get('/api/predictions').get_json()['predictions']}
@@ -181,10 +184,12 @@ def test_compare_legacy_aliases_undo_redo_tags_and_sidecar_intent(
         'box': {'x': .1, 'y': .1, 'w': .3, 'h': .4}, 'confidence': .9,
         'category': 'animal',
     }], detector_model='MDV6')[0]
+    db.commit()
     ids = []
     for index, name in enumerate(aliases):
         db.predictions.add(detection_id, name, .9 - index * .1, f'custom-{index}',
                            labels_fingerprint='legacy')
+        db.commit()
         ids.append(db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0])
     assert all(row['source_taxon_id'] is None for row in db.predictions.get_rows_by_ids(ids))
     db.commit()
@@ -260,6 +265,7 @@ def test_decided_and_stale_rows_do_not_hide_pending_cards(app_and_db):
     db.commit()
     db.predictions.add(detections[2], 'Blue Tit', .99, 'third-model',
                        labels_fingerprint='old', taxonomy=BLUE)
+    db.commit()
     stale = db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0]
     db.conn.execute("UPDATE predictions SET created_at='2000-01-01' WHERE id=?", (stale,))
     db.commit()
@@ -276,6 +282,7 @@ def test_card_undo_preserves_existing_keyword_and_prior_alternative_decision(app
     db.commit()
     db.predictions.add(detections[1], 'Other bird', .1, 'BioCLIP',
                        labels_fingerprint='current', status='reviewed')
+    db.commit()
     earlier = db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0]
     client = app.test_client()
     assert client.post(f'/api/predictions/{ids[0]}/accept', json=_body(db, ids)).status_code == 200
@@ -294,6 +301,7 @@ def test_alternative_statuses_round_trip_with_card(app_and_db, decision):
     _, detections, ids = _seed(db)
     db.predictions.add(detections[1], 'Other bird', .1, 'BioCLIP',
                        labels_fingerprint='current', status='alternative')
+    db.commit()
     alt = db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0]
     client = app.test_client()
     assert client.post(f'/api/predictions/{ids[0]}/{decision}', json=_body(db, ids)).status_code == 200
@@ -403,12 +411,14 @@ def _seed_two_detections_same_photo(db, grouped=False):
         'box': {'x': .55, 'y': .1, 'w': .3, 'h': .4}, 'confidence': .9,
         'category': 'animal',
     }], detector_model='MDV6-right')[0]
+    db.commit()
     ids_by_detection: dict[int, list[int]] = {left: [], right: []}
     for detection in (left, right):
         for model, name in [('BioCLIP', 'Eurasian Blue Tit'), ('iNat21', 'Blue Tit')]:
             db.predictions.add(detection, name, .9, model,
                                labels_fingerprint='current', taxonomy=BLUE,
                                group_id=f'{model}-shared' if grouped else None)
+            db.commit()
             ids_by_detection[detection].append(
                 db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0],
             )

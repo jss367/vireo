@@ -295,6 +295,7 @@ def app_and_db(tmp_path):
     ], detector_model="MDV6")
     d.predictions.add(det_ids[0], "Northern Cardinal", 0.95, "test-model",
                      taxonomy={"scientific_name": "Cardinalis cardinalis"})
+    d.commit()
     # A custom-label prediction's binomial comes from resolving its label
     # against the catalog's taxonomy, as in a real catalog.
     d.conn.execute("INSERT INTO taxa (inat_id, name, common_name, rank) "
@@ -1352,6 +1353,7 @@ def _add_second_subject(db, pid, species="Blue Jay", confidence=0.8,
     ], detector_model="MDV6")
     db.predictions.add(det_ids[1], species, confidence, "test-model",
                        taxonomy={"scientific_name": scientific})
+    db.commit()
     return det_ids[1]
 
 
@@ -1376,6 +1378,7 @@ def test_api_inat_prepare_offers_each_detections_top_species(app_and_db):
     # A lower guess on the same detection is not a separate species.
     db.predictions.add(det, "Steller's Jay", 0.1, "test-model",
                        taxonomy={"scientific_name": "Cyanocitta stelleri"})
+    db.commit()
     data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
     assert data["species"] == "Northern Cardinal"
     assert data["scientific_name"] == "Cardinalis cardinalis"
@@ -1444,6 +1447,7 @@ def test_api_inat_prepare_preserves_distinct_taxa_sharing_a_common_name(app_and_
     db.predictions.add(det_ids[1], "Red-crowned Parrot", 0.96, "test-model",
                        taxonomy={"scientific_name": "Amazona rhodocorytha",
                                  "taxon_id": 18977})
+    db.commit()
     data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
     options = data["species_options"]
     assert [o["species"] for o in options] == [

@@ -1089,6 +1089,7 @@ def test_highlights_unidentified_search_includes_low_confidence_predictions(live
         confidence=0.55,
         model="BioCLIP-2",
     )
+    db.commit()
     db.conn.commit()
 
     base = live_server["url"]
@@ -1153,6 +1154,7 @@ def test_highlights_search_recomputes_bucket_accepted_status(live_server):
         confidence=0.9,
         model="BioCLIP-2",
     )
+    db.commit()
     db.conn.commit()
 
     base = live_server["url"]

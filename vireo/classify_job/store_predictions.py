@@ -48,16 +48,18 @@ def _record_match_scores(db: Database, raw_results: list[RawResult], model_name:
             continue
         seen.add(det_id)
         try:
-            db.model_runs.record_classifier_match_score(
-                det_id,
-                model_name,
-                labels_fingerprint,
-                max_match_score=match["max_match_score"],
-                match_margin=match.get("match_margin"),
-                top_species=match.get("top_species"),
-                label_count=match.get("label_count"),
-                score_kind=match.get("score_kind"),
-            )
+            # Batch boundary: one detection's match summary.
+            with db.transaction():
+                db.model_runs.record_classifier_match_score(
+                    det_id,
+                    model_name,
+                    labels_fingerprint,
+                    max_match_score=match["max_match_score"],
+                    match_margin=match.get("match_margin"),
+                    top_species=match.get("top_species"),
+                    label_count=match.get("label_count"),
+                    score_kind=match.get("score_kind"),
+                )
         except Exception:
             # broad: diagnostic data must never fail a classification run.
             log.warning(
@@ -433,11 +435,15 @@ def _xmp_review_category(
 def _store_burst_group(
     db: Database, group: list[RawResult], gid: str, model_name: str, labels_fingerprint: str,
     tax: Taxonomy | None, identity_for: Callable[[RawResult], SpeciesIdentity],
-    comparison_name: Callable[[RawResult], str],
     consensus_prediction: Callable[[list[dict[str, Any]]], dict[str, Any] | None],
-    read_keywords: Callable[[str], Iterable[str]],
+    member_categories: list[tuple[str, bool]],
 ) -> tuple[int, int]:
     """Store one burst group's predictions under its consensus vote.
+
+    ``member_categories`` is the ``(category, auto_accept)`` pair for each
+    member, computed by the caller *before* opening the write transaction so
+    the per-member XMP sidecar reads do not hold SQLite's writer lock across
+    a slow or disconnected mounted volume.
 
     Returns ``(stored, already_labeled)``; both are 0 when the group has no
     consensus.
@@ -474,11 +480,7 @@ def _store_burst_group(
     )
     stored_in_group = 0
     skipped_match = 0
-    for item in group:
-        category, auto_accept = _xmp_review_category(
-            item, tax, comparison_name, read_keywords,
-        )
-
+    for item, (category, auto_accept) in zip(group, member_categories, strict=True):
         if auto_accept:
             _store_match_prediction(
                 db, item, model_name, labels_fingerprint, tax,
@@ -505,17 +507,17 @@ def _store_burst_group(
 
 def _store_single_prediction(
     db: Database, item: RawResult, model_name: str, labels_fingerprint: str, tax: Taxonomy | None,
-    comparison_name: Callable[[RawResult], str], read_keywords: Callable[[str], Iterable[str]],
+    category: str, auto_accept: bool,
 ) -> tuple[int, int]:
     """Store a result that formed no burst group.
+
+    ``category`` / ``auto_accept`` are computed by the caller before the
+    write transaction opens; see ``_store_burst_group`` for why the XMP
+    sidecar read stays out of the transaction.
 
     Returns ``(stored, already_labeled)``: ``(0, 1)`` when it auto-accepted
     as a match, ``(1, 0)`` when it went to review.
     """
-    category, auto_accept = _xmp_review_category(
-        item, tax, comparison_name, read_keywords,
-    )
-
     if auto_accept:
         _store_match_prediction(
             db, item, model_name, labels_fingerprint, tax,
@@ -531,19 +533,19 @@ def _store_single_prediction(
 def _release_stored_classifier_runs(
     db: Database, raw_results: list[RawResult], model_name: str, labels_fingerprint: str,
 ) -> None:
-    """Mark this run's freshly stored classifier_runs reusable, then commit.
+    """Mark this run's freshly stored classifier_runs reusable, in one unit.
 
     A flush only reserves a run. It becomes reusable once its predictions
     were actually stored. Cancellation before this point leaves an explicit
     cache miss instead of an empty 'legacy' cache hit.
     """
-    for item in raw_results:
-        did = item.get("detection_id")
-        if did is not None and not item.get("_existing"):
-            db.model_runs.release_incomplete_classifier_run(
-                did, model_name, labels_fingerprint,
-            )
-    db.commit()
+    with db.transaction():
+        for item in raw_results:
+            did = item.get("detection_id")
+            if did is not None and not item.get("_existing"):
+                db.model_runs.release_incomplete_classifier_run(
+                    did, model_name, labels_fingerprint,
+                )
 
 
 def _store_grouped_predictions(
@@ -602,22 +604,29 @@ def _store_grouped_predictions(
     skipped_match = 0
 
     for group in groups:
+        # XMP sidecar reads happen outside the batch transaction so a slow
+        # mount cannot block other catalog writers under the writer lock.
+        member_categories = [
+            _xmp_review_category(item, tax, comparison_name, read_keywords)
+            for item in group
+        ]
         if len(group) == 1:
-            stored, matched = _store_single_prediction(
-                db, group[0], model_name, labels_fingerprint, tax,
-                comparison_name, read_keywords,
-            )
+            with db.transaction():  # one photo's predictions land together
+                stored, matched = _store_single_prediction(
+                    db, group[0], model_name, labels_fingerprint, tax,
+                    *member_categories[0],
+                )
         else:
             group_count += 1
             group_namespace = hashlib.sha256(
                 json.dumps([job_id, model_name, labels_fingerprint]).encode()
             ).hexdigest()[:16]
             gid = f"g{group_namespace}-{group_count:04d}"
-            stored, matched = _store_burst_group(
-                db, group, gid, model_name, labels_fingerprint, tax,
-                identity_for, comparison_name, consensus_prediction,
-                read_keywords,
-            )
+            with db.transaction():  # one burst group, consensus + members
+                stored, matched = _store_burst_group(
+                    db, group, gid, model_name, labels_fingerprint, tax,
+                    identity_for, consensus_prediction, member_categories,
+                )
         predictions_stored += stored
         skipped_match += matched
 

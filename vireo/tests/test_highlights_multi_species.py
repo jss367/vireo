@@ -41,6 +41,7 @@ def _subjects(db, pid, count=2):
 
 def _pred(db, det, species, confidence):
     db.predictions.add(det, species, confidence, "m")
+    db.commit()
     return db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, species),

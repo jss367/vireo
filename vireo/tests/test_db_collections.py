@@ -73,6 +73,7 @@ def _prediction(db, photo_id, *, confidence=0.9, taxonomy=None, status="pending"
         model="bioclip-2.5", category="match", taxonomy=taxonomy,
         status=status,
     )
+    db.commit()
 
 
 # -- CRUD ------------------------------------------------------------------
@@ -1224,6 +1225,7 @@ def test_top_predicted_species_matches_summary(db, folder):
         det = db.detections.save(pid, [
             {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": floor}
         ], detector_model="test")[0]
+        db.commit()
         for species, confidence, fingerprint, created in [
             ("Stale", .99, "old", "2026-01-01"),
             ("Runner-up", .5, "current", "2026-02-01"),

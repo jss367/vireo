@@ -80,6 +80,7 @@ def test_get_photos_missing_masks(tmp_path):
     db.detections.save(pid1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9},
     ], detector_model="megadetector")
+    db.commit()
 
     # Photo with no detection — should NOT appear
     pid2 = photo_ingest.add_photo(db, fid, "b.jpg", ".jpg", 100, 1.0)
@@ -89,6 +90,7 @@ def test_get_photos_missing_masks(tmp_path):
     db.detections.save(pid3, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, "confidence": 0.8},
     ], detector_model="megadetector")
+    db.commit()
     db.masks_features.update_pipeline_features(pid3, PipelineFeatures(mask_path="/masks/3.png"))
 
     photos = subject_masks.get_photos_missing_masks(db)

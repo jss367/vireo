@@ -280,10 +280,11 @@ def _record_labels_fingerprint(
 ) -> None:
     """Populate the labels_fingerprints sidecar. Cosmetic — powers UX lookups."""
     display = ", ".join(os.path.basename(s) for s in (sources or [])) or None
-    db.model_runs.upsert_labels_fingerprint(
-        fingerprint=fingerprint,
-        display_name=display,
-        sources=sources,
-        label_count=len(labels or []),
-        full_fingerprint=full_fingerprint,
-    )
+    with db.transaction():
+        db.model_runs.upsert_labels_fingerprint(
+            fingerprint=fingerprint,
+            display_name=display,
+            sources=sources,
+            label_count=len(labels or []),
+            full_fingerprint=full_fingerprint,
+        )

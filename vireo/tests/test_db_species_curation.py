@@ -186,9 +186,11 @@ def _detect(db, pid, species_conf, model="m1", fingerprint="fp1"):
           "confidence": 0.9, "category": "animal"}],
         "md",
     )
+    db.commit()
     for species, conf in species_conf:
         db.predictions.add(det_ids[0], species, conf, model,
                           labels_fingerprint=fingerprint)
+        db.commit()
     return det_ids[0]
 
 
@@ -245,6 +247,7 @@ def test_highlights_candidates_skip_rejected_and_stale_predictions(db, cur):
     p = cur["p"]
     det = _detect(db, p["plain"], [("Old Label", 0.99)], fingerprint="old")
     db.predictions.add(det, "New Label", 0.3, "m1", labels_fingerprint="new")
+    db.commit()
     db.conn.execute(
         "UPDATE predictions SET created_at = '2030-01-01' WHERE species = 'New Label'"
     )
@@ -876,8 +879,10 @@ def _detect_subjects(db, pid, species_conf, model="m1"):
          for i in range(len(species_conf))],
         "md",
     )
+    db.commit()
     for det, (species, conf) in zip(det_ids, species_conf, strict=True):
         db.predictions.add(det, species, conf, model, labels_fingerprint="fp1")
+        db.commit()
     return det_ids
 
 

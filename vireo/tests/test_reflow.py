@@ -60,6 +60,7 @@ def _setup_db(tmp_path):
             {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9, "category": "animal"},
         ], detector_model="megadetector-v6")
         db.model_runs.record_detector_run(pid, "megadetector-v6", 1)
+        db.commit()
         quality = MaskQuality(subject_size=.1, **{
             key: getattr(features, key) for key in REQUIRED_QUALITY_FIELDS if key != "subject_size"
         })
@@ -67,6 +68,7 @@ def _setup_db(tmp_path):
                                      (.2, .2, .4, .4), quality)
         db.masks_features.set_active_variant(pid, "sam2-small", .2)
         db.predictions.add(det_ids[0], "robin", 0.9, "bioclip", category="match")
+        db.commit()
 
     return db
 

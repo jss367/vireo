@@ -34,6 +34,7 @@ def comparison_library(app_and_db, tmp_path, monkeypatch):
         ])
         for did, species in zip(ids, (TARGET, OTHER), strict=True):
             db.predictions.add(did, species, .95, "test", status="accepted")
+            db.commit()
         # Deliberately poison every legacy projection with the wrong bird.
         db.subjects.set_choice(photo_id, ids[1])
         db.subjects.set_primary_state(photo_id, ids[1])
@@ -115,6 +116,7 @@ def test_missing_analysis_is_review_and_does_not_enter_percentiles(comparison_li
 def test_same_species_subjects_require_explicit_choice(comparison_library):
     app, db, pids, ids = comparison_library
     db.predictions.add(ids[pids[0]][1], TARGET, .9, "another-model", status="accepted")
+    db.commit()
     # Remove its old accepted sparrow identity: now genuinely two target birds.
     row = db.conn.execute("SELECT id FROM predictions WHERE detection_id=? AND species=?", (ids[pids[0]][1], OTHER)).fetchone()
     db.update_prediction_status(row["id"], "rejected")
@@ -324,6 +326,7 @@ def test_classification_change_during_inference_does_not_publish_stale_eyes(comp
     detection, _ = resolve_subject(db, pids[0], SubjectComparison(TARGET))
     def reclassify(*args):
         db.predictions.add(ids[pids[0]][0], "Another species", .99, "replacement", status="accepted")
+        db.commit()
         return {"eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None}
     monkeypatch.setattr("subject_analysis.measure_eye", reclassify)
     with pytest.raises(ValueError, match="inputs changed"):
@@ -361,6 +364,7 @@ def test_mixed_species_confirmations_block_automatic_subject_selection(compariso
     app, db, pids, ids = comparison_library
     # The right bird carries conflicting accepted identities, one of them the target.
     db.predictions.add(ids[pids[0]][1], TARGET, .9, "conflicting-model", status="accepted")
+    db.commit()
     if not clean_candidate:
         row = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (ids[pids[0]][0],)).fetchone()
         db.update_prediction_status(row["id"], "pending")
@@ -403,6 +407,7 @@ def test_subject_only_comparisons_report_conflicting_confirmations(comparison_li
     # The default primary is on the right; the explicit choice below is on the left.
     did = ids[pids[0]][1 if selection == "primary" else 0]
     db.predictions.add(did, "Mule Deer", .9, "conflicting-mammal-model", status="accepted")
+    db.commit()
     context = {"compare_subjects": True}
     if selection == "explicit":
         context["subject_overrides"] = {str(pids[0]): did}
@@ -451,6 +456,7 @@ def test_previously_returned_media_rejects_a_new_identity_conflict(comparison_li
     _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
     card = _pack(app, pids, requested_species=TARGET)["cards"][0]
     db.predictions.add(card["subject"]["detection_id"], "Mule Deer", .9, "conflicting-model", status="accepted")
+    db.commit()
     def never_decode(*args):
         raise AssertionError("Conflicted subject must be rejected before loading pixels")
     monkeypatch.setattr("web.media_crops._focus_source_image", never_decode)
@@ -555,6 +561,7 @@ def test_weak_identity_conflicts_do_not_block_a_clean_retained_target(comparison
     pid = pids[0]
     target_id, weak_id = ids[pid]
     db.predictions.add(weak_id, TARGET, .9, 'conflicting-model', status='accepted')
+    db.commit()
     db.conn.execute('UPDATE detections SET detector_confidence=.052 WHERE id=?', (weak_id,))
     db.commit()
     selected, selection = resolve_subject(db, pid, SubjectComparison(TARGET))

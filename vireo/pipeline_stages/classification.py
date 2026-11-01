@@ -1699,12 +1699,13 @@ class _ClassifyPass:
             else:
                 clear_ids = [p["id"] for p in self.photos]
             if clear_ids:
-                thread_db.predictions.clear(
-                    model=spec.model_name,
-                    collection_photo_ids=clear_ids,
-                    labels_fingerprint=spec.fp,
-                    clear_run_keys=False,
-                )
+                with thread_db.transaction():
+                    thread_db.predictions.clear(
+                        model=spec.model_name,
+                        collection_photo_ids=clear_ids,
+                        labels_fingerprint=spec.fp,
+                        clear_run_keys=False,
+                    )
 
         group_result = self.classify_job._store_grouped_predictions(
             spec.raw_results, self.run.job["id"], spec.model_name,

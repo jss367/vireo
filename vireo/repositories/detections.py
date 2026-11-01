@@ -54,9 +54,6 @@ class DetectionsRepository:
         # ``db`` code and a monkeypatch of the module function still applies.
         self.commit_with_retry = commit_with_retry
 
-    def commit(self) -> None:
-        self.conn.commit()
-
     # -- writes -------------------------------------------------------------
 
     def save(
@@ -75,7 +72,7 @@ class DetectionsRepository:
         IDs are content-addressed (see vireo.detection_id) so two pipelines
         writing the same (photo, model, detections) produce identical rows
         — the second writer's UPSERT is a no-op rather than a CASCADE-deleting
-        DELETE+INSERT. Commits.
+        DELETE+INSERT. Does not commit.
 
         Args:
             photo_id: the photo
@@ -89,7 +86,6 @@ class DetectionsRepository:
         ids = self.upsert_rows(
             photo_id, detector_model, detections, runtime_fingerprint,
         )
-        self.commit_with_retry(self.conn)
         return ids
 
     def upsert_rows(
@@ -198,82 +194,77 @@ class DetectionsRepository:
         *,
         is_pinned: Callable[[int, str], bool],
     ) -> list[int]:
-        """Replace detections and record the detector_runs row in one commit.
+        """Replace detections and record the detector_runs row (no commit).
 
         ``is_pinned(photo_id, detector_model)`` is
         ``ModelRunsRepository.detector_run_is_pinned``; it is consulted only when the
         run's identity changed and the caller did not force the replace.
         See ``Database.write_detection_batch``.
         """
-        try:
-            previous = self.conn.execute(
-                """SELECT runtime_fingerprint, input_fingerprint
-                   FROM detector_runs
+        previous = self.conn.execute(
+            """SELECT runtime_fingerprint, input_fingerprint
+               FROM detector_runs
+               WHERE photo_id = ? AND detector_model = ?""",
+            (photo_id, detector_model),
+        ).fetchone()
+        identity_changed = previous is not None and (
+            previous["runtime_fingerprint"] != runtime_fingerprint
+            or (
+                previous["input_fingerprint"] is not None
+                and input_fingerprint is not None
+                and previous["input_fingerprint"] != input_fingerprint
+            )
+        )
+        # No authoritative run record but detection rows may still exist
+        # (legacy state, or rows written via ``save_detections`` which
+        # never touches ``detector_runs``). A forced replace means the
+        # caller wants a full retirement, so treat this like an identity
+        # change: without the DELETE, ``upsert_rows``' same-runtime sweep
+        # would leave any other-runtime rows behind.
+        no_run_replace = previous is None and force_runtime_replace
+        if (
+            identity_changed
+            and not force_runtime_replace
+            and is_pinned(photo_id, detector_model)
+        ):
+            rows = self.conn.execute(
+                """SELECT id FROM detections
+                   WHERE photo_id = ? AND detector_model = ?
+                   ORDER BY detector_confidence DESC, id ASC""",
+                (photo_id, detector_model),
+            ).fetchall()
+            return [row["id"] for row in rows]
+
+        if identity_changed or no_run_replace:
+            # Runtime ownership changes are an explicit retirement event.
+            # Deleting first prevents old-runtime rows from surviving the
+            # new run's same-runtime stale-row sweep.
+            self.conn.execute(
+                """DELETE FROM detections
                    WHERE photo_id = ? AND detector_model = ?""",
                 (photo_id, detector_model),
-            ).fetchone()
-            identity_changed = previous is not None and (
-                previous["runtime_fingerprint"] != runtime_fingerprint
-                or (
-                    previous["input_fingerprint"] is not None
-                    and input_fingerprint is not None
-                    and previous["input_fingerprint"] != input_fingerprint
-                )
             )
-            # No authoritative run record but detection rows may still exist
-            # (legacy state, or rows written via ``save_detections`` which
-            # never touches ``detector_runs``). A forced replace means the
-            # caller wants a full retirement, so treat this like an identity
-            # change: without the DELETE, ``upsert_rows``' same-runtime sweep
-            # would leave any other-runtime rows behind.
-            no_run_replace = previous is None and force_runtime_replace
-            if (
-                identity_changed
-                and not force_runtime_replace
-                and is_pinned(photo_id, detector_model)
-            ):
-                rows = self.conn.execute(
-                    """SELECT id FROM detections
-                       WHERE photo_id = ? AND detector_model = ?
-                       ORDER BY detector_confidence DESC, id ASC""",
-                    (photo_id, detector_model),
-                ).fetchall()
-                return [row["id"] for row in rows]
 
-            if identity_changed or no_run_replace:
-                # Runtime ownership changes are an explicit retirement event.
-                # Deleting first prevents old-runtime rows from surviving the
-                # new run's same-runtime stale-row sweep.
-                self.conn.execute(
-                    """DELETE FROM detections
-                       WHERE photo_id = ? AND detector_model = ?""",
-                    (photo_id, detector_model),
-                )
-
-            ids = self.upsert_rows(
-                photo_id, detector_model, detections, runtime_fingerprint,
-            )
-            self.conn.execute(
-                """INSERT INTO detector_runs
-                     (photo_id, detector_model, runtime_fingerprint,
-                      input_fingerprint, box_count)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(photo_id, detector_model)
-                   DO UPDATE SET runtime_fingerprint = excluded.runtime_fingerprint,
-                                 input_fingerprint = excluded.input_fingerprint,
-                                 box_count = excluded.box_count,
-                                 run_at = datetime('now')""",
-                (photo_id, detector_model, runtime_fingerprint,
-                 input_fingerprint, len(ids)),
-            )
-            self.commit_with_retry(self.conn)
-            return ids
-        except Exception:
-            self.conn.rollback()
-            raise
+        ids = self.upsert_rows(
+            photo_id, detector_model, detections, runtime_fingerprint,
+        )
+        self.conn.execute(
+            """INSERT INTO detector_runs
+                 (photo_id, detector_model, runtime_fingerprint,
+                  input_fingerprint, box_count)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(photo_id, detector_model)
+               DO UPDATE SET runtime_fingerprint = excluded.runtime_fingerprint,
+                             input_fingerprint = excluded.input_fingerprint,
+                             box_count = excluded.box_count,
+                             run_at = datetime('now')""",
+            (photo_id, detector_model, runtime_fingerprint,
+             input_fingerprint, len(ids)),
+        )
+        return ids
 
     def clear(self, photo_id: int, detector_model: str | None = None) -> None:
-        """Remove detections (and cascaded predictions) for a photo and commit.
+        """Remove detections (and cascaded predictions) for a photo (no commit).
 
         Also clears the matching ``detector_runs`` rows so a subsequent
         non-reclassify pass actually re-runs MegaDetector. Without this,
@@ -302,7 +293,6 @@ class DetectionsRepository:
                 "DELETE FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
                 (photo_id, detector_model),
             )
-        self.conn.commit()
 
     def delete_by_ids(self, detection_ids: Iterable[int]) -> set[int]:
         """Delete detection rows by id in chunks of 900, without committing.
@@ -652,12 +642,11 @@ class DetectionsRepository:
         return photos
 
     def clear_miss_flag(self, photo_id: int, category: str) -> None:
-        """Zero one miss column on a photo and commit."""
+        """Zero one miss column on a photo (no commit)."""
         col = self.miss_column(category)
         self.conn.execute(
             f"UPDATE photos SET {col}=0 WHERE id=?", (photo_id,)
         )
-        self.conn.commit()
 
     def select_misses_to_reject(
         self,

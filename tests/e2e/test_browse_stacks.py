@@ -29,6 +29,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
         "confidence": 0.91,
         "category": "animal",
     }], detector_model="test-detector")
+    db.commit()
 
     page.goto(f"{live_server['url']}/browse")
     cards = page.locator("#grid > .grid-card")

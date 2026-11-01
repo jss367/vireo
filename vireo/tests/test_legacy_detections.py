@@ -11,6 +11,7 @@ def _predict(db, photo_id, *, fingerprint="legacy", model="old-model", runtime="
     }], "megadetector-v6", runtime_fingerprint=runtime)[0]
     db.predictions.add(detection, "Robin", 0.01, model,
                        labels_fingerprint=fingerprint, status="rejected")
+    db.commit()
     return detection
 
 
@@ -32,6 +33,7 @@ def test_legacy_folders_count_photos_once_without_visibility_filters(app_and_db)
     # Redetection retires old detections and their sentinel predictions.
     for photo in (first, last):
         db.detections.clear(photo["id"])
+        db.commit()
         _predict(db, photo["id"], fingerprint="current-labels", runtime="raw-detector-runtime")
     assert app.test_client().get("/api/pipeline/legacy-detections").json == {"folders": []}
 
@@ -109,6 +111,7 @@ def test_raw_detector_run_hides_surviving_legacy_classifier_rows(db, empty_scene
         "box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1,
     }], "full-image")[0]
     db.predictions.add(anchor, "Robin", 0.9, "old-model")
+    db.commit()
     assert db.predictions.legacy_detection_folders()[0]["photo_count"] == 1
 
     ids = detection_store.write_detection_batch(db, photo, "megadetector-v6", [] if empty_scene else [{
@@ -123,6 +126,7 @@ def test_raw_detector_run_hides_surviving_legacy_classifier_rows(db, empty_scene
         ).fetchone()
         # Reclassify clears only its selected label fingerprint, not legacy rows.
         db.predictions.clear(model="old-model", collection_photo_ids=[photo], labels_fingerprint="current-labels")
+        db.commit()
     assert db.conn.execute(
         "SELECT 1 FROM predictions WHERE detection_id = ? AND labels_fingerprint = 'legacy'", (anchor,),
     ).fetchone()
@@ -134,6 +138,7 @@ def test_legacy_detector_run_still_needs_raw_detection(db):
     photo = photo_ingest.add_photo(db, folder, "old.jpg", ".jpg", 10, 1.0)
     _predict(db, photo)
     db.model_runs.record_detector_run(photo, "megadetector-v6", 1, runtime_fingerprint="legacy")
+    db.commit()
     assert db.predictions.legacy_detection_folders() == [{
         "id": folder, "path": "/photos/legacy", "photo_count": 1,
     }]
@@ -148,8 +153,10 @@ def test_unclassified_legacy_detector_output_is_found(db, evidence):
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
             "confidence": 0.01, "category": "animal",
         }], "megadetector-v6" if evidence == "boxes" else "full-image")
+        db.commit()
     elif evidence in ("run", "empty-run"):
         db.model_runs.record_detector_run(photo, "megadetector-v6", 0 if evidence == "empty-run" else 1)
+        db.commit()
     assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
     expected = [] if evidence in ("none", "synthetic-only") else [{
         "id": folder, "path": "/photos/legacy", "photo_count": 1,
@@ -167,12 +174,15 @@ def test_incomplete_raw_run_does_not_hide_legacy_evidence(db, runtime):
         "box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1,
     }], "full-image")[0]
     db.predictions.add(anchor, "Robin", 0.9, "old-model")
+    db.commit()
     if runtime is not None:
         db.detections.save(photo, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
             "confidence": 0.01, "category": "animal",
         }], "megadetector-v6", runtime_fingerprint=runtime)
+        db.commit()
     db.model_runs.record_detector_run(photo, "megadetector-v6", 1, runtime_fingerprint="raw-runtime")
+    db.commit()
     expected = [] if runtime == "raw-runtime" else [{
         "id": folder, "path": "/photos/legacy", "photo_count": 1,
     }]
@@ -189,6 +199,7 @@ def test_legacy_sentinel_discovery_is_independent_of_workspace_reviews(db, statu
         "box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1,
     }], "full-image")[0]
     db.predictions.add(anchor, "Robin", 0.01, "old-model")
+    db.commit()
     prediction = db.predictions.id_for_key(anchor, "old-model", "legacy", "Robin")
     db.predictions.set_review_status(prediction, db.active_workspace_id, status)
     other = db.create_workspace("Other reviews")

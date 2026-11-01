@@ -107,6 +107,7 @@ def seed_e2e_data(db, thumb_dir):
             labels_fingerprint=TOL_SENTINEL,
             prediction_count=1,
         )
+        db.commit()
 
     return {"photos": photos, "folders": [f1, f2]}
 

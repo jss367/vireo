@@ -9,6 +9,7 @@ def test_questionable_detections_and_revisitable_uncertainty(page, live_server):
     det = db.conn.execute('SELECT id FROM detections WHERE photo_id=?', (pid,)).fetchone()[0]
     db.predictions.add(det, 'American Golden-Plover', .9994, 'BioCLIP-2.5')
     db.predictions.add(det, 'Black-bellied Plover', .3651, 'test second classifier')
+    db.commit()
     before_keywords = [tuple(row) for row in db.photo_keywords.get_for_photo(pid)]
     before_flag = db.photos.get(pid)['flag']
     page.goto(live_server['url'] + f'/review?photo_id={pid}')

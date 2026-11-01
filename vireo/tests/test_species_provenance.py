@@ -163,6 +163,7 @@ def test_subject_scoping_and_confidence_meaning(app_and_db):
     client = app.test_client()
     did = db.detections.save(1, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5},
                                   'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
+    db.commit()
     confirm(client, 'Robin', provenance={'method': 'model_proposed', 'detection_id': did,
                                       'confidence': .8, 'confidence_meaning': 'Uncalibrated model similarity score',
                                       'evidence_source': 'test-model'})
@@ -335,6 +336,7 @@ def test_copied_subject_evidence_keeps_origin_and_remains_editable(app_and_db):
     app, db = app_and_db
     did = db.detections.save(1, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5},
                                  'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
+    db.commit()
     kid = db.add_keyword('Mallard', is_species=True)
     db.tag_photo(1, kid, provenance={'method': 'direct_visual', 'detection_id': did,
                                   'reason': 'Visible markings'})
@@ -361,6 +363,7 @@ def test_copied_historical_subject_can_be_preserved_after_source_deletion(app_an
     app, db = app_and_db
     did = db.detections.save(1, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5},
                                  'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
+    db.commit()
     kid = db.add_keyword('Mallard', is_species=True)
     db.tag_photo(1, kid, provenance={'method': 'direct_visual', 'detection_id': did, 'supporting_photo_ids': [1]})
     db.commit()

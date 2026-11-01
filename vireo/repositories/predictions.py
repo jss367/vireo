@@ -69,11 +69,13 @@ What deliberately stays on ``Database``:
   called as ``self.<name>(...)``, so monkeypatches of ``Database`` methods
   keep reaching the moved code.
 
-The review-decision writers (``update_status``, ``update_status_by_photo``,
-``ungroup``, ``accept_subject_species``, ``set_review_status``) never
-commit: the prediction-decision unit of work owns the transaction. The
-classifier-output writers still commit per call until the model-run jobs
-own their batch boundaries.
+No writer here commits. The prediction-decision unit of work owns the
+review-decision writes (``update_status``, ``update_status_by_photo``,
+``ungroup``, ``accept_subject_species``, ``set_review_status``), and the
+classify job owns its classifier-output writes (``add``,
+``retain_candidates``, ``reconcile_match_review_state``, ``clear``,
+``update_group_info``, ``clear_group_info``), one unit per photo or burst
+group.
 """
 
 from collections.abc import Callable
@@ -457,7 +459,6 @@ class PredictionRepository:
                 pred_id, status, group_id, vote_count, total_votes, individual,
                 preserve_manual_review, refresh_output,
             )
-        self.conn.commit()
 
     def retain_candidates(self, detection_id, model, labels_fingerprint, species):
         """Remove obsolete candidates after their replacement outputs were stored.
@@ -475,7 +476,6 @@ class PredictionRepository:
             "DELETE FROM predictions WHERE id=?",
             [(row["id"],) for row in rows if row["species"] not in retained],
         )
-        self.conn.commit()
 
     def reconcile_match_review_state(
         self,
@@ -542,7 +542,6 @@ class PredictionRepository:
                 "UPDATE predictions SET category = ? WHERE id = ?",
                 (category, pred_id),
             )
-        self.commit_with_retry(self.conn)
 
     def _clear_prediction_chunk(
         self, ws, chunk, extra_conds, extra_params, cms_extra_conds,
@@ -728,14 +727,12 @@ class PredictionRepository:
             )
 
         if not clear_run_keys:
-            self.conn.commit()
             return
 
         self._clear_classifier_run_keys(ws, id_chunks, model, labels_fingerprint)
         # ``classifier_match_scores`` is already cleared alongside the
         # predictions above, whether or not classifier_runs is being wiped
         # here — see the companion delete inside the predictions loop.
-        self.conn.commit()
 
     def get_states(self, photo_ids):
         """Explain, per photo, why it may have no predictions to show.
@@ -1556,7 +1553,6 @@ class PredictionRepository:
                 WHERE prediction_id = ? AND workspace_id = ?""",
             (row["id"], ws),
         )
-        self.commit_with_retry(self.conn)
 
     def update_group_info(self, detection_id, model, group_id,
                                      vote_count, total_votes, individual,
@@ -1614,7 +1610,6 @@ class PredictionRepository:
                              reviewed_at = excluded.reviewed_at""",
             (pred_id, ws, individual, group_id, vote_count, total_votes),
         )
-        self.commit_with_retry(self.conn)
 
     def accept_subject_species(self, prediction_id):
         """Accept agreeing model predictions for one detected subject.

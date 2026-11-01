@@ -77,6 +77,7 @@ def seed_photo(db, tmp_path, name):
         "box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
         "confidence": 0.9, "category": "animal",
     }], detector_model="MegaDetector")
+    db.commit()
     return pid
 
 

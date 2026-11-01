@@ -909,44 +909,66 @@ class _ClassifyJobRun:
                     )
                 except (ValueError, CacheFormatError):
                     full_input = None
-            existing_full = detection_store.get_detections(
-                thread_db, photo_id, detector_model="full-image", min_conf=0,
+            self._store_full_image_detection(
+                thread_db, photo_id, full_runtime, full_input,
             )
-            if not existing_full:
-                thread_db.detections.save(
-                    photo_id,
-                    [{
-                        "box": {"x": 0, "y": 0, "w": 1, "h": 1},
-                        "confidence": 0,
-                        "category": "animal",
-                    }],
-                    detector_model="full-image",
-                    runtime_fingerprint=full_runtime,
-                )
-            else:
-                # Promote a legacy full-image detection row so its
-                # ``runtime_fingerprint`` matches the run we're
-                # about to record.  ``exportable_artifacts`` reads
-                # the detector runtime from ``detections`` — if we
-                # leave the row at ``'legacy'`` an export skips
-                # the attached classifier run and emits an empty
-                # full-image detection artifact for this photo.
-                thread_db.detections.promote_full_image_runtime(
-                    photo_id, full_runtime,
-                )
-                thread_db.commit()
-            existing_runtime = thread_db.model_runs.detector_runtime_fingerprint(
-                photo_id, "full-image",
+
+    @staticmethod
+    def _store_full_image_detection(
+        thread_db: Database, photo_id: int, full_runtime: str, full_input: str | None,
+    ) -> None:
+        """Write one photo's full-image detection and its detector run.
+
+        Batch boundary: both land in one unit of work, so a failure between
+        them cannot leave a detection row without its ``detector_runs`` row
+        (which the runtime-aware reuse gates would read as never detected).
+        """
+        with thread_db.transaction():
+            _ClassifyJobRun._write_full_image_detection(
+                thread_db, photo_id, full_runtime, full_input,
             )
-            if (
-                existing_runtime is None
-                or existing_runtime != full_runtime
-            ):
-                thread_db.model_runs.record_detector_run(
-                    photo_id, "full-image", box_count=1,
-                    runtime_fingerprint=full_runtime,
-                    input_fingerprint=full_input,
-                )
+
+    @staticmethod
+    def _write_full_image_detection(
+        thread_db: Database, photo_id: int, full_runtime: str, full_input: str | None,
+    ) -> None:
+        existing_full = detection_store.get_detections(
+            thread_db, photo_id, detector_model="full-image", min_conf=0,
+        )
+        if not existing_full:
+            thread_db.detections.save(
+                photo_id,
+                [{
+                    "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                    "confidence": 0,
+                    "category": "animal",
+                }],
+                detector_model="full-image",
+                runtime_fingerprint=full_runtime,
+            )
+        else:
+            # Promote a legacy full-image detection row so its
+            # ``runtime_fingerprint`` matches the run we're
+            # about to record.  ``exportable_artifacts`` reads
+            # the detector runtime from ``detections`` — if we
+            # leave the row at ``'legacy'`` an export skips
+            # the attached classifier run and emits an empty
+            # full-image detection artifact for this photo.
+            thread_db.detections.promote_full_image_runtime(
+                photo_id, full_runtime,
+            )
+        existing_runtime = thread_db.model_runs.detector_runtime_fingerprint(
+            photo_id, "full-image",
+        )
+        if (
+            existing_runtime is None
+            or existing_runtime != full_runtime
+        ):
+            thread_db.model_runs.record_detector_run(
+                photo_id, "full-image", box_count=1,
+                runtime_fingerprint=full_runtime,
+                input_fingerprint=full_input,
+            )
 
     def _known_classifier_runtimes(self, local_runtime: str | None, full_runtime: str) -> set[str]:
         """Compute the classifier runtimes this job would produce.

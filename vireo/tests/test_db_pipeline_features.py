@@ -89,9 +89,11 @@ def test_prediction_rows_latest_or_pinned_label_set_and_continuity(db, catalog):
     ws, photos, dets = catalog
     strong, weak = dets[photos[0]]
     db.predictions.add(strong, "Old", 0.95, "m", labels_fingerprint="old")
+    db.commit()
     db.conn.execute("UPDATE predictions SET created_at='2000-01-01'")
     db.predictions.add(strong, "Robin", 0.9, "m", labels_fingerprint="new")
     db.predictions.add(weak, "Wren", 0.5, "m", labels_fingerprint="new")
+    db.commit()
     features = db.pipeline_features
 
     def species(**kw):
@@ -124,6 +126,7 @@ def test_readiness_counts(db, catalog):
     assert features.count_subject_embeddings(ws, variant="v", legacy_bytes=8) == 1
 
     db.predictions.add(dets[photos[0]][0], "Robin", 0.9, "m")
+    db.commit()
     db.conn.execute("UPDATE photos SET mask_path='/m.png', eye_kp_fingerprint='fp' WHERE id=?",
                     (photos[0],))
     assert features.count_eye_keypoint_attempts(ws, .2, "fp") == 1
