@@ -467,7 +467,7 @@ def test_reader_includes_photo_grants_without_siblings_or_source_writes(library,
 
 
 def test_verified_name_refresh_unifies_sources_and_reference_labels(library, tmp_path):
-    from species_identity_repair import refresh_common_name_index
+    from taxonomy import refresh_common_name_index
 
     conn = sqlite3.connect(library)
     conn.execute("CREATE TABLE taxa_common_names(taxon_id, name, locale, UNIQUE(taxon_id,name,locale))")
