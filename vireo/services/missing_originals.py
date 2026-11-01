@@ -461,6 +461,10 @@ class _FolderHealthDeferred(Exception):
     """A transfer superseded this automatic folder-health pass."""
 
 
+class _AutomaticScanDeferred(Exception):
+    """An automatic missing-originals pass yielded without publishing a result."""
+
+
 class MissingOriginals:
     """Per-app Missing Originals scan state and the folder-health loop.
 
@@ -820,7 +824,13 @@ class MissingOriginals:
             progress = _scan_progress_callback(runner, job)
 
             def cancel_check() -> bool:
-                return runner.is_cancelled(job["id"])
+                if runner.is_cancelled(job["id"]):
+                    return True
+                # Do not wait: a same-workspace transfer may itself be waiting
+                # for this scan to release its workspace reservation.
+                if scan.automatic and runner.storage_transfer_active():
+                    raise _AutomaticScanDeferred()
+                return False
 
             # The 30-minute automatic check reuses the listing of every
             # folder unchanged since it was last read; a check the user
@@ -871,6 +881,8 @@ class MissingOriginals:
                 "folders_read": listing_pass.read,
                 "folders_unchanged": listing_pass.unchanged,
             }
+        except _AutomaticScanDeferred:
+            return {"deferred": True, "reason": "storage_move_active", "scope": scan.scope_label}
         except MissingPhotosCancelled:
             raise
         except Exception as exc:

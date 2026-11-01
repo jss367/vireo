@@ -147,3 +147,66 @@ def test_folder_health_abandons_observations_when_transfer_starts(app_and_db, tm
         release.set()
         for job_id in transfer_ids:
             wait_for_job_via_runner(runner, job_id)
+
+
+@pytest.mark.parametrize("automatic", [True, False])
+@pytest.mark.parametrize("transfer_type", ["send-to-nas", "move-folder", "move-photos"])
+def test_running_automatic_missing_scan_yields_and_can_retry(app_and_db, monkeypatch, automatic, transfer_type):
+    from services import missing_originals
+
+    app, db = app_and_db
+    runner = app._job_runner
+    entered, next_probe, release = threading.Event(), threading.Event(), threading.Event()
+    probes = []
+    service = missing_originals.MissingOriginals(
+        db_path=db._db_path, config=app.config, get_runner=lambda: runner,
+    )
+
+    def build_rows(connection, *, cancel_callback, **kwargs):
+        assert not cancel_callback()
+        probes.append("first")
+        entered.set()
+        assert next_probe.wait(synchronization_timeout(5))
+        assert not cancel_callback()
+        probes.append("second")
+        return []
+
+    monkeypatch.setattr(service, "build_rows", build_rows)
+    scan = service.start_scan(db, automatic=automatic)
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        transfer = runner.start(
+            transfer_type, lambda _: release.wait(synchronization_timeout(10)),
+            workspace_id=db.active_workspace_id,
+        )
+        next_probe.set()
+        # The scan must finish BEFORE the transfer is released: parking here
+        # would deadlock a transfer waiting for this workspace's scan to drain.
+        job = wait_for_job_via_runner(runner, scan["job_id"])
+        assert job["status"] == "completed", job
+        assert not job["errors"]
+        assert not service.inflight and not service.errors
+        if automatic:
+            assert job["result"]["deferred"] is True
+            assert job["summary"] == "Check deferred until photo transfer finishes"
+            assert probes == ["first"]
+            assert not service.cache
+        else:
+            assert not job["result"].get("deferred")
+            assert probes == ["first", "second"]
+            assert service.cache
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+        if automatic:
+            previous = {job["id"] for job in runner.list_jobs()}
+            retry = service.start_scan(db, automatic=True)
+            retry_id = retry["job_id"] or next(
+                job["id"] for job in runner.list_jobs() if job["id"] not in previous
+            )
+            finished = wait_for_job_via_runner(runner, retry_id)
+            assert finished["status"] == "completed", finished
+            assert not finished["result"].get("deferred")
+            assert service.cache
+    finally:
+        next_probe.set()
+        release.set()

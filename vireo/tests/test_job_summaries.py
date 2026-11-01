@@ -600,6 +600,8 @@ def test_new_images_walk_leads_with_the_count_and_says_which_folders_were_read()
 
 
 def test_missing_originals_scan_leads_with_the_answer():
+    out = describe_result("missing_originals_scan", {"deferred": True, "scope": "workspace"})
+    assert out["summary"] == "Check deferred until photo transfer finishes"
     out = describe_result("missing_originals_scan", {
         "missing_count": 0, "checked_at": "2026-09-28T19:00:00Z",
         "scope": "workspace", "stale": False,
