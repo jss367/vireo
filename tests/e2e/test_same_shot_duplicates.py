@@ -165,6 +165,66 @@ def test_scan_discovers_camera_matches_without_an_exact_duplicate(live_server, p
     expect(page.locator("#sameShotResults .same-shot-group")).to_have_count(1)
 
 
+def test_same_shot_stat_renders_without_exact_proposals_and_when_all_are_filtered(
+    live_server, page, tmp_path,
+):
+    """The summary stat/link must stay visible when the exact-byte section is empty.
+
+    ``renderResults`` short-circuits to ``renderNoDuplicateGroups`` when
+    there are no exact-byte proposals, and to ``renderAllGroupsFiltered``
+    when every exact proposal is hidden by filters. Both paths route the
+    same-shot stat through ``renderSameShotOnlySummaryBar`` and must keep
+    the link to ``#sameShotResults`` and its count visible, without
+    reviving the exact-byte apply bar.
+    """
+    db = live_server["db"]
+    seed_same_shot_review(db, tmp_path)
+    # Branch 1: no exact duplicates — only same-shot likely groups exist.
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(f"{live_server['url']}/duplicates")
+    stat = page.locator("#summary a.summary-stat-link")
+    expect(stat).to_contain_text("1")
+    expect(stat).to_contain_text("Same-shot to review")
+    expect(page.locator("#applyBar")).to_be_hidden()
+    expect(page.locator("#results")).to_contain_text("No exact-byte duplicates found")
+    section = page.locator("#sameShotResults")
+    expect(section.locator(".same-shot-group")).to_have_count(1)
+    stat.click()
+    expect(section).to_be_in_viewport()
+    # Branch 2: exact-byte proposals exist but every one is filtered out,
+    # while a same-shot member still matches the active photo filter.
+    _add_photo(db, tmp_path / "exact-a", "copy.jpg", "exact",
+               timestamp="2024-05-01T10:00:00")
+    _add_photo(db, tmp_path / "exact-b", "copy.jpg", "exact",
+               timestamp="2024-05-01T10:00:00")
+    db.commit()
+    refreshed = run_duplicate_scan({}, db)
+    assert refreshed["proposals"], "branch 2 needs at least one exact-byte proposal to filter out"
+    db.conn.execute("UPDATE job_history SET result=? WHERE id='same-shot-e2e'",
+                    (json.dumps(refreshed),))
+    db.commit()
+    same_shot_photo_id = refreshed["same_shot_groups"][0]["photos"][0]["id"]
+    page.reload()
+    expect(stat).to_contain_text("1")
+    # Hide every exact-byte group by filtering to a same-shot member id only.
+    page.evaluate(
+        "id => { duplicatesState.filterMatchedIds = new Set([id]);"
+        " pageModules.results.renderResults(duplicatesState.lastScanResult); }",
+        same_shot_photo_id,
+    )
+    expect(stat).to_contain_text("Same-shot to review")
+    expect(page.locator("#applyBar")).to_be_hidden()
+    expect(page.locator("#results")).to_contain_text(
+        "No duplicate groups match the active filters"
+    )
+    expect(section.locator(".same-shot-group")).to_have_count(1)
+    # Reviewing the sole likely group drops the live stat to 0 and leaves no
+    # exact-byte control resurrected by the empty/filtered branches.
+    section.get_by_role("button", name="Keep all copies").click()
+    expect(stat.locator(".num")).to_have_text("0")
+    expect(page.locator("#applyBar")).to_be_hidden()
+
+
 def test_compare_save_reload_reopen_and_rescan(live_server, page, tmp_path):
     db = live_server["db"]
     a, b = seed_same_shot_review(db, tmp_path)

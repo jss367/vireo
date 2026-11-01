@@ -143,6 +143,66 @@ def test_mixed_group_with_a_copy_pair_stays_in_the_likely_review_list(catalog, t
     assert group["images_and_times_differ"] is False
 
 
+@pytest.mark.parametrize("phashes,times,expected_differ,label", [
+    # A missing hash leaves one pair unverified by visual evidence, so the
+    # whole triple stays in review. Keeps a genuine unknown pair discoverable.
+    ((None, "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+     ("2020-01-01T00:00:00", "2020-03-01T00:00:00", "2020-05-01T00:00:00"),
+     False, "missing_hash"),
+    # Three distinct hashes but two capture times within 60 s: the close pair
+    # could still be a derivative, so the triple is not flagged.
+    (("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"),
+     ("2020-01-08T05:57:43", "2020-01-08T05:57:43", "2021-05-01T00:00:00"),
+     False, "distinct_hash_close_time"),
+    # Control: three distinct hashes and every pair of times more than a
+    # minute apart. Every pair disagrees, so the triple is flagged.
+    (("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"),
+     ("2020-01-01T00:00:00", "2020-03-01T00:00:00", "2020-05-01T00:00:00"),
+     True, "all_pairs_different"),
+])
+def test_images_and_times_differ_requires_every_pair_to_disagree(
+    catalog, tmp_path, phashes, times, expected_differ, label,
+):
+    """Three-photo coverage for the mixed-group rule.
+
+    Every pair must disagree in both image and capture time before the
+    group is folded into the shutter-count-reuse pile. A missing hash or a
+    within-minute time keeps the triple in the likely-review list.
+    """
+    exif = metadata(count=7)
+    for i, (ph, ts) in enumerate(zip(phashes, times, strict=True)):
+        seed(catalog, tmp_path / f"triple-{label}-{i}", f"{label}{i}.jpg", f"{label}{i}",
+             exif=exif, phash=ph, timestamp=ts)
+    group, = scan_same_shot_candidates(catalog, {})["same_shot_groups"]
+    assert group["images_and_times_differ"] is expected_differ
+
+
+def test_restore_preserves_mixed_group_classification(catalog, tmp_path):
+    """``revalidate_scan_result`` must keep ``[A, A, B]`` out of the flagged pile.
+
+    The restored catalog can host different ids and paths than the fresh scan
+    did; what must stay stable is the classification. Serializing the scan
+    and reading it back through the restore path still shows one likely
+    mixed group with ``images_and_times_differ`` false.
+    """
+    exif = metadata(count=99)
+    first = "123456789abcdef0"
+    other = "ffffffffffffffff"
+    seed(catalog, tmp_path / "orig", "orig.jpg", "orig", exif=exif, phash=first,
+         timestamp="2020-01-08T05:57:43")
+    seed(catalog, tmp_path / "edit", "edit.dng", "edit", exif=exif, phash=first,
+         timestamp="2020-01-08T05:57:43")
+    seed(catalog, tmp_path / "reuse", "reuse.jpg", "reuse", exif=exif, phash=other,
+         timestamp="2020-03-07T17:19:11")
+    fresh = run_duplicate_scan({}, catalog)
+    assert [g["images_and_times_differ"] for g in fresh["same_shot_groups"]] == [False]
+    serialized = json.loads(json.dumps(fresh))
+    restored = revalidate_scan_result(catalog, serialized)
+    assert [g["images_and_times_differ"] for g in restored["same_shot_groups"]] == [False]
+    assert {p["id"] for p in restored["same_shot_groups"][0]["photos"]} == \
+        {p["id"] for p in fresh["same_shot_groups"][0]["photos"]}
+
+
 def test_identical_hashes_and_rejected_or_empty_photos_are_excluded(catalog, tmp_path):
     seed(catalog, tmp_path, "a.jpg", "same")
     b = seed(catalog, tmp_path, "b.jpg", "same")
