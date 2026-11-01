@@ -303,7 +303,7 @@ def _inventory_stale(
 
 
 def _new_images_walk_compute(db_path: str, ws_id: int, walk_result: JsonDict, walk_error: JsonDict,
-                            checkpoint: Callable[[], None]) -> Callable[..., JsonDict]:
+                            checkpoint: Callable[[], None], should_yield: Callable[[], bool]) -> Callable[..., JsonDict]:
     """The cache worker's compute: one full new-images walk of ``ws_id``.
 
     Records the result, or the exception, in the holders the recorded job
@@ -311,30 +311,30 @@ def _new_images_walk_compute(db_path: str, ws_id: int, walk_result: JsonDict, wa
     """
     import dir_listing_cache
     from db import Database
-    from new_images import count_new_images_for_workspace
+    from new_images import DiscoveryDeferred, count_new_images_for_workspace
 
     def compute(progress_callback: Callable[..., None] | None = None) -> JsonDict:
-        # Close explicitly: this connection lives for the whole walk
-        # (minutes on large volumes), and connections left to __del__
-        # accumulate and exhaust the per-process fd limit.
-        wdb = Database(db_path)
-        try:
-            wdb.set_active_workspace(ws_id)
-            # Reuse the listing of every folder unchanged since the last
-            # walk; "Check again" clears the cache so a recheck reads all.
-            result = count_new_images_for_workspace(
-                wdb, ws_id, sample_limit=None,
-                progress_callback=progress_callback,
-                listing_cache=dir_listing_cache.get_shared(),
-                checkpoint=checkpoint,
-            )
-            walk_result["result"] = result
-            return result
-        except Exception as e:
-            walk_error["exc"] = e
-            raise
-        finally:
-            wdb.close()
+        while True:
+            try:
+                # A transfer can rebase catalog paths. Restart the whole
+                # pass with a fresh connection, root list, and known paths.
+                with Database(db_path) as wdb:
+                    wdb.set_active_workspace(ws_id)
+                    result = count_new_images_for_workspace(
+                        wdb, ws_id, sample_limit=None,
+                        progress_callback=progress_callback,
+                        listing_cache=dir_listing_cache.get_shared(),
+                        checkpoint=checkpoint, should_yield=should_yield,
+                    )
+                    walk_result["result"] = result
+                    return result
+            except DiscoveryDeferred:
+                # The root worker has exited and closed every iterator;
+                # no file, directory, or database handle is retained here.
+                checkpoint()
+            except Exception as e:
+                walk_error["exc"] = e
+                raise
 
     return compute
 
@@ -1255,7 +1255,12 @@ def create_workspace_blueprint(
         walk_job: dict[str, str] = {}
         def checkpoint() -> None:
             get_runner().wait_for_background_io(walk_job.get("id"))
-        compute = _new_images_walk_compute(db_path, ws_id, walk_result, walk_error, checkpoint)
+        def should_yield() -> bool:
+            runner = get_runner()
+            if runner.cancellation_requested(walk_job.get("id")):
+                raise RuntimeError("Background work cancelled")
+            return runner.storage_transfer_active()
+        compute = _new_images_walk_compute(db_path, ws_id, walk_result, walk_error, checkpoint, should_yield)
 
         # Surface the walk as a recorded job so the user can see it in the
         # bottom panel rather than wondering why their workspace is silent.
