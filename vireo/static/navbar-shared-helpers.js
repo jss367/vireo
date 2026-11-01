@@ -1690,9 +1690,12 @@ function renderJobList(jobs) {
     html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
     html += '<span style="width:6px;height:6px;border-radius:50%;background:' + dotBg + ';flex-shrink:0;"></span>';
     html += '<span style="font-weight:600;">' + bpEscape(formatJobType(j.type)) + '</span>';
-    // Work Vireo started on its own says so, with why on hover.
-    if (j.origin === 'system') {
-      html += '<span title="' + bpEscape(j.reason || 'Started by Vireo').replace(/"/g, '&quot;') + '" style="font-size:10px;padding:0 5px;border-radius:3px;border:1px solid var(--border-subtle);color:var(--text-muted);">Vireo</span>';
+    // Label the operation's origin; follow-ups inherit their parent's origin.
+    if (j.origin === 'system' || j.origin === 'user') {
+      var originLabel = j.origin === 'system' ? 'Vireo' : 'User';
+      var originTitle = j.origin === 'system' ? (j.reason || 'Started by Vireo')
+        : (j.parent_job_id ? 'Part of a user-started operation' : 'Started by you');
+      html += '<span title="' + bpEscape(originTitle).replace(/"/g, '&quot;') + '" style="font-size:10px;padding:0 5px;border-radius:3px;border:1px solid var(--border-subtle);color:var(--text-muted);">' + originLabel + '</span>';
     }
     if (isWaiting || isPaused) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
     if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';

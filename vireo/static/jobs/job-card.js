@@ -86,7 +86,7 @@ function renderCardHeader(job, options, isLive) {
 }
 
 /**
- * Who started the job: Vireo (with why), or the job it follows.
+ * Who started the job: User, Vireo (with why), or the job it follows.
  * @param {JobsRow} job
  */
 function renderProvenance(job) {
@@ -101,6 +101,8 @@ function renderProvenance(job) {
   } else if (isSystemJob(job)) {
     parts.push('<span class="job-origin-chip">Started by Vireo</span>' +
       (job.reason ? ' ' + escapeHtml(job.reason) : ''));
+  } else if (job.origin === 'user') {
+    parts.push('<span class="job-origin-chip">Started by User</span>');
   }
   var repeats = repeatText(job);
   if (repeats) parts.push(escapeHtml(repeats));
