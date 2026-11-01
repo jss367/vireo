@@ -11,6 +11,7 @@ The single-table writes (``db.detections.save``, ...) are reached through the
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
@@ -18,7 +19,7 @@ from config import config_value
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from db import Database
 
@@ -103,6 +104,36 @@ def with_reviewer_regions(
     reviewer_ids = {d["id"] for d in reviewer}
     return [dict(d) for d in detections if d.get("detector_model") != "reviewer-selected"
             and d["id"] not in reviewer_ids] + reviewer
+
+
+def reviewer_box_snapshot(detection: Mapping[str, Any]) -> tuple[float, ...] | None:
+    """Keep exact coordinates; content-addressed IDs quantize small edits."""
+    if detection.get("detector_model") != "reviewer-selected":
+        return None
+    return tuple(detection[key] for key in ("box_x", "box_y", "box_w", "box_h"))
+
+
+@contextmanager
+def guard_reviewer_results[Entry: Mapping[str, Any]](
+    db: Database, entries: list[Entry],
+) -> Iterator[None]:
+    """Drop stale reviewer crops and block redraws during their publication.
+
+    Inference runs without photo locks. Each publication boundary takes the
+    same locks as the reviewer-box API, then compares the captured coordinates.
+    Sorted acquisition keeps batches with overlapping photos deadlock-free.
+    """
+    from pipeline_locks import acquire_photo_mask
+
+    photo_ids = sorted({e["photo"]["id"] for e in entries if e.get("_reviewer_box") is not None})
+    with ExitStack() as stack:
+        for photo_id in photo_ids:
+            stack.enter_context(acquire_photo_mask(photo_id))
+        live = {d["id"]: reviewer_box_snapshot(dict(d)) for photo_id in photo_ids
+                for d in get_detections(db, photo_id, min_conf=0, detector_model="reviewer-selected")}
+        entries[:] = [e for e in entries if e.get("_reviewer_box") is None
+                      or live.get(e.get("detection_id")) == e["_reviewer_box"]]
+        yield
 
 
 def get_detections_for_photos(

@@ -587,3 +587,16 @@ def test_oversized_box_api_preserves_catalog_and_history(app_and_db):
             box[coordinate] = huge
             assert client.put(url, json={'box': box}).status_code == 400
             assert tuple(db.conn.iterdump()) == before
+
+
+def test_classification_publication_blocks_reviewer_redraw(app_and_db):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    client = app.test_client()
+    url = f'/api/photos/{pid}/subjects/reviewer-box'
+    chosen = client.put(url, json={'box': dict(x=.1, y=.1, w=.2, h=.2)}).json['primary_detection_id']
+    entries = [{'photo': {'id': pid}, 'detection_id': chosen, '_reviewer_box': (.1, .1, .2, .2)}]
+    with detection_store.guard_reviewer_results(db, entries):
+        assert len(entries) == 1
+        assert client.put(url, json={'box': dict(x=.6, y=.1, w=.2, h=.2)}).status_code == 409
+    assert client.put(url, json={'box': dict(x=.6, y=.1, w=.2, h=.2)}).status_code == 200

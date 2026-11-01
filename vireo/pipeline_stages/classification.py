@@ -62,6 +62,7 @@ class _InferenceEntry(TypedDict):
     input_recipe: str | None
     photo: sqlite3.Row
     detection_id: int
+    _reviewer_box: tuple[float, ...] | None
     folder_path: str
     image_path: str
     img: Image.Image
@@ -911,6 +912,7 @@ class _ClassifyPass:
                 "input_recipe": self.input_recipe,
                 "photo": photo,
                 "detection_id": detection["id"],
+                "_reviewer_box": detection_store.reviewer_box_snapshot(detection),
                 "folder_path": folder_path,
                 "image_path": image_path,
                 "img": img,
@@ -1132,9 +1134,9 @@ class _ClassifyPass:
             )
             if cached:
                 self._count_cache_hit(spec, photo)
-                spec.raw_results.append(self._cached_raw_result(
-                    spec, photo, detection, cached[0], n_detections,
-                ))
+                result = self._cached_raw_result(spec, photo, detection, cached[0], n_detections)
+                result["_reviewer_box"] = detection_store.reviewer_box_snapshot(detection)
+                spec.raw_results.append(result)
                 return True
             # No cached prediction rows: honor a measured
             # ``classifier_match_scores`` summary for the same triple as

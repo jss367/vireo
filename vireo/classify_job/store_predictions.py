@@ -16,6 +16,7 @@ from classify_job.common import log
 from db import AUTO_MATCH_REVIEW_MARKER
 from keyword_normalization import folded_species_key as _folded_species_key
 from keyword_normalization import species_match_key as _species_match_key
+from services import detection_store
 
 if TYPE_CHECKING:
     import sqlite3
@@ -549,6 +550,19 @@ def _release_stored_classifier_runs(
 
 
 def _store_grouped_predictions(
+    raw_results: list[RawResult], job_id: str, model_name: str, grouping_window: int,
+    similarity_threshold: float, tax: Taxonomy | None, db: Database,
+    labels_fingerprint: str = "legacy",
+) -> dict[str, int]:
+    """Publish only results still bound to the reviewer region that was read."""
+    with detection_store.guard_reviewer_results(db, raw_results):
+        return _store_current_predictions(
+            raw_results, job_id, model_name, grouping_window,
+            similarity_threshold, tax, db, labels_fingerprint,
+        )
+
+
+def _store_current_predictions(
     raw_results: list[RawResult], job_id: str, model_name: str, grouping_window: int,
     similarity_threshold: float, tax: Taxonomy | None, db: Database,
     labels_fingerprint: str = "legacy",

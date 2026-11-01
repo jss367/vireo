@@ -4317,7 +4317,7 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
     ('classify', True), ('classify', 'detector-failed'),
 ])
 @pytest.mark.parametrize('reviewer_box', [None, 'accepted', 'rejected'])
-def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, reviewer_box, fresh_automatic, job_kind):
+def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, reviewer_box, fresh_automatic, job_kind, redraw=None):
     """Both job entry points refresh reviewer and automatic evidence together.
 
     Empty detector output must preserve human regions; nonempty output must
@@ -4391,7 +4391,36 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
+    replacement = []
+
+    def redraw_box():
+        if replacement:
+            return
+        from subjects import select_reviewer_box
+        writer = Database(db_path)
+        writer.set_active_workspace(ws_id)
+        replacement.append(select_reviewer_box(
+            writer, photo_id, dict(x=redraw[1], y=.2, w=.2, h=.2)))
+        writer.close()
+
+    class RedrawingClassifier(_RobinClassifier):
+        def classify_batch_with_embedding(self, images, threshold=0):
+            result = super().classify_batch_with_embedding(images, threshold)
+            if redraw and redraw[0] == 'inference':
+                redraw_box()
+            return result
+
+    monkeypatch.setattr(classifier_mod, "Classifier", RedrawingClassifier)
+    if redraw and redraw[0] == 'storage':
+        import classify_job.job_run as job_run
+        original_store = classify_job._store_grouped_predictions
+
+        def redraw_then_store(*args, **kwargs):
+            redraw_box()
+            return original_store(*args, **kwargs)
+
+        monkeypatch.setattr(classify_job, '_store_grouped_predictions', redraw_then_store)
+        monkeypatch.setattr(job_run, '_store_grouped_predictions', redraw_then_store)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -4417,7 +4446,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
 
         monkeypatch.setattr(job_run, '_detect_subjects', fake_subjects)
         monkeypatch.setattr(job_run, '_load_labels', lambda *a, **k: (["Robin"], False, []))
-        monkeypatch.setattr(job_run, 'Classifier', _RobinClassifier)
+        monkeypatch.setattr(job_run, 'Classifier', RedrawingClassifier)
         classify_job.run_classify_job(job, runner, db_path, ws_id, classify_job.ClassifyParams(
             collection_id=col_id, model_id=model_ids[0], model_name=None,
             labels_file=None, labels_files=None, grouping_window=0,
@@ -4431,7 +4460,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     remaining = detection_store.get_detections(verify_db, photo_id)
     preserved_stale_boxes = prior_det_ids if fresh_automatic == 'detector-failed' else []
     assert {d['id'] for d in remaining} == set(
-        fresh_ids + preserved_stale_boxes + ([chosen] if chosen else []))
+        fresh_ids + preserved_stale_boxes + (replacement or ([chosen] if chosen else [])))
     for prior_id in prior_det_ids:
         assert detection_store.get_predictions_for_detection(
             verify_db, prior_id, classifier_model='BioCLIP') == []
@@ -4440,6 +4469,17 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
             verify_db, automatic_id, classifier_model='BioCLIP')
         assert len(automatic) == 1
         assert automatic[0]['confidence'] == .9
+    if redraw:
+        assert replacement
+        current = replacement[0]
+        assert (current == chosen) == (redraw[1] == .20001)
+        assert verify_db.subjects.choice(photo_id)['detection_id'] == current
+        predictions = detection_store.get_predictions_for_detection(
+            verify_db, current, classifier_model='BioCLIP')
+        assert all(p['confidence'] != .9 for p in predictions)
+        assert ('BioCLIP', 'legacy') not in verify_db.model_runs.get_classifier_run_keys(current)
+        assert verify_db.get_photo_edit_recipe(photo_id) == recipe
+        return
     if reviewer_box:
         from subjects import payload
         result = payload(verify_db, photo_id)
@@ -4453,6 +4493,15 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
         assert active[0]['confidence'] == .9  # fresh inference replaced the .4 score
         assert verify_db.predictions.current_status(active[0]['id']) == reviewer_box  # human decision survived
         assert verify_db.get_photo_edit_recipe(photo_id) == recipe
+
+
+@pytest.mark.parametrize('job_kind', ['process', 'classify'])
+@pytest.mark.parametrize('phase', ['inference', 'storage'])
+@pytest.mark.parametrize('replacement_x', [.20001, .5])
+def test_reviewer_redraw_during_classification_discards_old_region_results(
+        tmp_path, monkeypatch, job_kind, phase, replacement_x):
+    test_pipeline_reclassify_purges_stale_detection_rows(
+        tmp_path, monkeypatch, 'accepted', True, job_kind, redraw=(phase, replacement_x))
 
 
 def test_pipeline_reclassify_same_boxes_preserves_predictions(

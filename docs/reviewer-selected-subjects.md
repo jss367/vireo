@@ -15,6 +15,9 @@ reviewer box for that photo. Detector reruns and Reclassify leave it intact.
 Both Process and standalone Classify include the current reviewer box alongside
 automatic animal boxes, even when detection returns no animals. Reclassification
 refreshes matching species scores while retaining their accepted/rejected decisions.
+If the reviewer redraws during classification, results from the old coordinates
+are discarded before publication. Publication briefly locks the photo against
+redraws; inference itself does not hold that lock.
 The internal confidence value of 1 preserves the explicit region through
 confidence filtering; it is not a model probability. The lightbox labels the
 region as reviewer-selected instead of displaying a detector percentage.
