@@ -13,7 +13,9 @@ def new_job_dict(job_id, job_type, *, config, workspace_id,
                  blocks_local_transitions, runtime_warning,
                  singleton_key=None, workspace_paths=None, lineage=None):
     """A fresh running job; ``lineage`` is ``resolve_lineage``'s fields."""
-    lineage = lineage or {"origin": "user", "parent_job_id": None, "reason": None}
+    lineage = lineage or {
+        "origin": "user", "parent_job_id": None, "reason": None, "task_scope": None,
+    }
     pausable, pause_unavailable_reason = resolve_pause_policy(job_type, pausable)
     return {
         "id": job_id,
@@ -45,6 +47,7 @@ def new_job_dict(job_id, job_type, *, config, workspace_id,
         "origin": lineage["origin"],
         "parent_job_id": lineage["parent_job_id"],
         "reason": lineage["reason"],
+        "task_scope": lineage["task_scope"],
         "resource_wait_seconds": 0.0,
         "resource_wait_count": 0,
         # Pre-seeded so later writes from worker threads update an
@@ -96,6 +99,7 @@ def queued_lineage(ctx):
         "origin": ctx.get("origin") or "user",
         "parent_job_id": ctx.get("parent_job_id"),
         "reason": ctx.get("reason"),
+        "task_scope": ctx.get("task_scope"),
     }
 
 

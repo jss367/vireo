@@ -226,9 +226,34 @@ def test_system_failures_of_different_scopes_do_not_collapse(runner_db):
     for folder in (1, 2):
         _run(
             runner, "check", RuntimeError("offline"), ws_id=ws_id,
-            lineage=SYSTEM, config={"folder_id": folder},
+            lineage=JobLineage.system("Regular check", scope=f"folder:{folder}"),
+            config={"folder_id": folder},
         )
     assert len(_rows(db, "check")) == 2
+
+
+def test_task_identity_ignores_display_config(runner_db):
+    """Renaming the workspace changes config text, not which task this is."""
+    runner, db, ws_id = runner_db
+    first = _run(runner, "check", RuntimeError("offline"), ws_id=ws_id,
+                 lineage=SYSTEM, config={"workspace_name": "Birds"})
+    last = _run(runner, "check", RuntimeError("offline"), ws_id=ws_id,
+                lineage=SYSTEM, config={"workspace_name": "Birds 2026"})
+    [row] = _rows(db, "check")
+    assert (row["id"], row["repeat_count"], row["repeat_since"]) == (
+        last["id"], 2, first["started_at"],
+    )
+
+
+def test_all_clear_after_a_rename_still_replaces_the_actionable_result(runner_db):
+    runner, db, ws_id = runner_db
+    _run(runner, "check", {"new_count": 4}, ws_id=ws_id,
+         lineage=SYSTEM, config={"workspace_name": "Birds"})
+    _run(runner, "check", {"new_count": 0, "noop": True}, ws_id=ws_id,
+         lineage=SYSTEM, config={"workspace_name": "Birds 2026"})
+    rows = _rows(db, "check")
+    assert [json.loads(r["result"])["new_count"] for r in rows] == [4, 0]
+    assert all(r["task_scope"] is None for r in rows)
 
 
 def test_system_successes_that_found_something_never_collapse(runner_db):
@@ -319,7 +344,8 @@ def test_migration_31_backfills_parent_and_origin(tmp_path):
     Database(path).close()
     with sqlite3.connect(path) as conn:
         conn.execute("DROP INDEX idx_job_history_parent")
-        for column in ("origin", "parent_job_id", "reason", "repeat_count", "repeat_since"):
+        for column in ("origin", "parent_job_id", "reason", "repeat_count",
+                       "repeat_since", "task_scope"):
             conn.execute(f"ALTER TABLE job_history DROP COLUMN {column}")
         conn.executemany(
             "INSERT INTO job_history (id, type, status, config) VALUES (?, ?, 'completed', ?)",

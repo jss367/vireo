@@ -208,8 +208,8 @@ class JobHistory:
         conn.execute(
             "INSERT OR IGNORE INTO job_history "
             "(id, type, status, started_at, config, workspace_id, error_count, "
-            " origin, parent_job_id, reason) "
-            "VALUES (?, ?, 'running', ?, ?, ?, 0, ?, ?, ?)",
+            " origin, parent_job_id, reason, task_scope) "
+            "VALUES (?, ?, 'running', ?, ?, ?, 0, ?, ?, ?, ?)",
             (
                 job["id"],
                 job["type"],
@@ -219,6 +219,7 @@ class JobHistory:
                 job.get("origin") or "user",
                 job.get("parent_job_id"),
                 job.get("reason"),
+                job.get("task_scope"),
             ),
         )
 
@@ -320,13 +321,14 @@ class JobHistory:
             conn.execute(
                 "INSERT INTO job_history "
                 "(id, type, status, started_at, config, workspace_id, "
-                " error_count, origin, parent_job_id, reason) "
-                "VALUES (?, 'pipeline', 'queued', ?, ?, ?, 0, ?, ?, ?)",
+                " error_count, origin, parent_job_id, reason, task_scope) "
+                "VALUES (?, 'pipeline', 'queued', ?, ?, ?, 0, ?, ?, ?, ?)",
                 (
                     job_id, now_iso, json.dumps(config_blob), workspace_id,
                     lineage.get("origin") or "user",
                     lineage.get("parent_job_id"),
                     lineage.get("reason"),
+                    lineage.get("task_scope"),
                 ),
             )
             conn.commit()
@@ -412,9 +414,7 @@ class JobHistory:
             conn = None
             try:
                 conn = sqlite3.connect(self.db_path, timeout=30)
-                action, previous = self.system_disposition(
-                    conn, job, result_data, config_json,
-                )
+                action, previous = self.system_disposition(conn, job, result_data)
                 if action == "drop":
                     # Routine: the check ran and found nothing to do. Its
                     # running row goes; a crash would have left it failed.
@@ -431,9 +431,10 @@ class JobHistory:
                        (id, type, status, started_at, finished_at, duration,
                         result, error_count, config, workspace_id, tree, summary,
                         resource_wait_seconds, resource_wait_count,
-                        origin, parent_job_id, reason, repeat_count, repeat_since)
+                        origin, parent_job_id, reason, repeat_count, repeat_since,
+                        task_scope)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?)""",
                     (
                         job["id"], job["type"], job["status"],
                         job["started_at"], job["finished_at"],
@@ -444,6 +445,7 @@ class JobHistory:
                         job.get("resource_wait_count", 0),
                         job.get("origin") or "user", job.get("parent_job_id"),
                         job.get("reason"), repeat_count, repeat_since,
+                        job.get("task_scope"),
                     ),
                 )
                 self.prune_operations(conn, job.get("workspace_id"))
@@ -464,7 +466,7 @@ class JobHistory:
                     conn.close()
 
     @staticmethod
-    def system_disposition(conn, job, result_data, config_json):
+    def system_disposition(conn, job, result_data):
         """How a finished job's row relates to the previous run of its task.
 
         Returns ``(action, previous_row)``, ``action`` one of:
@@ -473,7 +475,7 @@ class JobHistory:
           cancelled run, every success that changed something, and any
           failure that differs from the last.
         - ``"collapse"``: the previous run of the same system task (same
-          type, workspace and config) failed with the same error. Its row
+          type, workspace and ``task_scope``) failed with the same error. Its row
           is replaced by this one, carrying the repeat count and when the
           streak began, so an unmounted NAS failing every check is one row,
           not hundreds. Successes never collapse: two runs with the same
@@ -491,11 +493,11 @@ class JobHistory:
             "SELECT id, status, summary, result, started_at, repeat_count, "
             "       repeat_since "
             "FROM job_history "
-            "WHERE type = ? AND workspace_id IS ? AND config = ? "
+            "WHERE type = ? AND workspace_id IS ? AND task_scope IS ? "
             "  AND origin = 'system' AND id != ? AND started_at <= ? "
             "  AND status IN ('completed', 'failed', 'cancelled') "
             "ORDER BY started_at DESC LIMIT 1",
-            (job["type"], job.get("workspace_id"), config_json, job["id"],
+            (job["type"], job.get("workspace_id"), job.get("task_scope"), job["id"],
              job["started_at"]),
         ).fetchone()
         conn.row_factory = None

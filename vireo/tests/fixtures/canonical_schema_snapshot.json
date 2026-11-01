@@ -976,7 +976,7 @@
    "table",
    "job_history",
    "job_history",
-   "CREATE TABLE job_history (\n        id          TEXT PRIMARY KEY,\n        type        TEXT,\n        status      TEXT,\n        started_at  TEXT,\n        finished_at TEXT,\n        duration    REAL,\n        result      TEXT,\n        error_count INTEGER DEFAULT 0,\n        config      TEXT,\n        workspace_id INTEGER,\n        resource_wait_seconds REAL DEFAULT 0,\n        resource_wait_count INTEGER DEFAULT 0,\n        tree        TEXT,\n        summary     TEXT DEFAULT '',\n        progress    TEXT,\n        origin      TEXT NOT NULL DEFAULT 'user',\n        parent_job_id TEXT,\n        reason      TEXT,\n        repeat_count INTEGER NOT NULL DEFAULT 1,\n        repeat_since TEXT\n    )"
+   "CREATE TABLE job_history (\n        id          TEXT PRIMARY KEY,\n        type        TEXT,\n        status      TEXT,\n        started_at  TEXT,\n        finished_at TEXT,\n        duration    REAL,\n        result      TEXT,\n        error_count INTEGER DEFAULT 0,\n        config      TEXT,\n        workspace_id INTEGER,\n        resource_wait_seconds REAL DEFAULT 0,\n        resource_wait_count INTEGER DEFAULT 0,\n        tree        TEXT,\n        summary     TEXT DEFAULT '',\n        progress    TEXT,\n        origin      TEXT NOT NULL DEFAULT 'user',\n        parent_job_id TEXT,\n        reason      TEXT,\n        repeat_count INTEGER NOT NULL DEFAULT 1,\n        repeat_since TEXT,\n        task_scope  TEXT\n    )"
   ],
   [
    "index",

@@ -723,7 +723,8 @@ class MissingOriginals:
                 lineage=(
                     JobLineage.system(
                         "Regular check that your photos' original files are "
-                        "still where Vireo expects them"
+                        "still where Vireo expects them",
+                        scope="workspace" if folder_id is None else f"folder:{folder_id}",
                     ) if automatic else None
                 ),
             )

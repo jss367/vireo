@@ -10,6 +10,11 @@ Three separate facts, recorded on the job dict and its ``job_history`` row:
   follow-up always inherits its parent's origin, so a whole operation reads as
   the user's or as Vireo's, never a mix.
 - ``reason``: one sentence saying why a system job started, shown with it.
+- ``task_scope``: which part of a recurring system task this run covers
+  (the folder a missing-originals check scans), stable across runs. History
+  compares a system run with the previous run of the same type, workspace
+  and scope; it never infers the task from ``config``, which also carries
+  display text such as a workspace's name.
 
 Callers pass a ``JobLineage`` to ``JobRunner.start`` / ``start_singleton`` /
 ``enqueue_pipeline``; the runner resolves inheritance and stamps the three
@@ -31,15 +36,20 @@ class JobLineage:
     origin: str | None = None
     parent_job_id: str | None = None
     reason: str | None = None
+    scope: str | None = None
 
     def __post_init__(self) -> None:
         if self.origin is not None and self.origin not in ORIGINS:
             raise ValueError(f"unknown job origin {self.origin!r}")
 
     @classmethod
-    def system(cls, reason: str) -> JobLineage:
-        """Work Vireo starts on its own, with the sentence saying why."""
-        return cls(origin="system", reason=reason)
+    def system(cls, reason: str, scope: str | None = None) -> JobLineage:
+        """Work Vireo starts on its own, with the sentence saying why.
+
+        ``scope`` distinguishes runs of one task type within a workspace
+        that cover different things (a folder vs the whole workspace).
+        """
+        return cls(origin="system", reason=reason, scope=scope)
 
     @classmethod
     def following(cls, parent_job_id: str | None) -> JobLineage:
@@ -60,4 +70,5 @@ def resolve_lineage(lineage: JobLineage | None, parent_origin: str | None) -> di
         "origin": origin,
         "parent_job_id": lineage.parent_job_id,
         "reason": lineage.reason,
+        "task_scope": lineage.scope,
     }

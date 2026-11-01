@@ -64,7 +64,8 @@ FORMERLY_LAZY_OBJECTS = (
         parent_job_id TEXT,
         reason      TEXT,
         repeat_count INTEGER NOT NULL DEFAULT 1,
-        repeat_since TEXT
+        repeat_since TEXT,
+        task_scope  TEXT
     )""",
     # The durable "do not adopt this preview" marker consulted by
     # web.media_previews._PreviewServer._serve_preview:
@@ -124,7 +125,8 @@ JOB_HISTORY_LATER_COLUMNS = (
 # ``origin`` is ``user`` (you asked for it) or ``system`` (Vireo started it on
 # its own); a follow-up job names the job that started it in
 # ``parent_job_id`` and inherits that job's origin; ``reason`` says why a
-# system job started. ``repeat_count`` / ``repeat_since`` record consecutive
+# system job started; ``task_scope`` is its stable scope within its type and
+# workspace. ``repeat_count`` / ``repeat_since`` record consecutive
 # failures of one system task with the same error, folded into a single row.
 JOB_HISTORY_LINEAGE_COLUMNS = (
     ("origin", "TEXT NOT NULL DEFAULT 'user'"),
@@ -132,6 +134,7 @@ JOB_HISTORY_LINEAGE_COLUMNS = (
     ("reason", "TEXT"),
     ("repeat_count", "INTEGER NOT NULL DEFAULT 1"),
     ("repeat_since", "TEXT"),
+    ("task_scope", "TEXT"),
 )
 
 JOB_HISTORY_PARENT_INDEX = (
