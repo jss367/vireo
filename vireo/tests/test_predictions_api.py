@@ -68,6 +68,7 @@ def test_list_predictions_filter_by_status(app_and_db):
         "SELECT id FROM predictions WHERE species = 'House Sparrow'"
     ).fetchone()
     db.update_prediction_status(pred['id'], 'rejected')
+    db.commit()
 
     resp = client.get('/api/predictions?status=pending')
     assert resp.status_code == 200
@@ -278,6 +279,7 @@ def test_mark_prediction_reviewed_rejects_non_pending(app_and_db):
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
     ).fetchone()
     db.update_prediction_status(accepted['id'], 'accepted')
+    db.commit()
 
     resp = client.post(f'/api/predictions/{accepted["id"]}/reviewed')
     assert resp.status_code == 409
@@ -288,6 +290,7 @@ def test_mark_prediction_reviewed_rejects_non_pending(app_and_db):
         "SELECT id FROM predictions WHERE species = 'Northern Cardinal'"
     ).fetchone()
     db.update_prediction_status(rejected['id'], 'rejected')
+    db.commit()
 
     resp = client.post(f'/api/predictions/{rejected["id"]}/reviewed')
     assert resp.status_code == 409
@@ -516,6 +519,7 @@ def test_predictions_include_alternatives(app_and_db):
             "SELECT id FROM predictions WHERE species = ?", (sp,)
         ).fetchone()
         db.update_prediction_status(row['id'], 'alternative')
+        db.commit()
 
     client = app.test_client()
     resp = client.get('/api/predictions')
@@ -561,6 +565,7 @@ def test_predictions_alternatives_survive_row_level_rules(app_and_db):
             "SELECT id FROM predictions WHERE species = ?", (sp,)
         ).fetchone()
         db.update_prediction_status(row['id'], 'alternative')
+        db.commit()
 
     client = app.test_client()
     rules = json.dumps([
@@ -594,6 +599,7 @@ def test_accept_alternative_prediction(app_and_db):
         "SELECT id FROM predictions WHERE species = 'Sparrow'"
     ).fetchone()
     db.set_review_status(alt['id'], ws_id, 'alternative')
+    db.commit()
 
     client = app.test_client()
     resp = client.post(f'/api/predictions/{alt["id"]}/accept')
@@ -888,6 +894,7 @@ def test_get_predictions_status_is_not_keeps_pending_siblings(app_and_db):
         (det,),
     ).fetchone()
     db.update_prediction_status(rejected['id'], 'rejected')
+    db.commit()
 
     rules = [{'field': 'prediction_status', 'op': 'is not', 'value': 'rejected'}]
     preds = db.predictions.get_rows(rules=rules)
@@ -921,6 +928,7 @@ def test_get_predictions_status_not_in_keeps_pending_siblings(app_and_db):
         (det,),
     ).fetchone()
     db.update_prediction_status(rejected['id'], 'rejected')
+    db.commit()
 
     rules = [{'field': 'prediction_status', 'op': 'not_in',
               'value': ['rejected', 'accepted']}]
@@ -953,6 +961,7 @@ def test_get_predictions_needs_review_no_keeps_non_pending_siblings(app_and_db):
         (det,),
     ).fetchone()
     db.update_prediction_status(rejected['id'], 'rejected')
+    db.commit()
 
     rules = [{'field': 'needs_review', 'op': 'is', 'value': False}]
     preds = db.predictions.get_rows(rules=rules)
@@ -1037,6 +1046,7 @@ def test_decision_routes_leave_no_transaction_open(app_and_db):
 
     settled, _ = _one_prediction(db, species='Woodhouse Scrub Jay')
     db.update_prediction_status(settled, 'reviewed')
+    db.commit()
     assert client.post(f'/api/predictions/{settled}/accept').status_code == 409
 
     fresh, photo_id = _one_prediction(db, species='Florida Scrub Jay',
@@ -1275,6 +1285,7 @@ def test_group_apply_skips_photos_decided_since_the_modal_rendered(app_and_db):
     # to the whole burst — every member would then be stale, which is correct
     # but tests nothing about applying the untouched remainder.
     db.update_prediction_status(pred_a, 'rejected')
+    db.commit()
     assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
     flag_before = db.photos.get(photo_a)['flag'] or 'none'
 
@@ -1539,6 +1550,7 @@ def test_reject_expansion_leaves_decided_burst_members_alone(app_and_db):
     _, (pred_a, pred_b) = _burst_pair(db, 'grejectdecided', 'Gray Jay')
     ws = db._active_workspace_id
     db.update_prediction_status(pred_b, 'reviewed')
+    db.commit()
     client = app.test_client()
 
     resp = client.post(f'/api/predictions/{pred_a}/reject')
@@ -1583,6 +1595,7 @@ def test_group_apply_pick_accepts_only_its_member_and_undo_restores_it(
     runner_up = _pred(det_pick, 'Blue Jay')
     reject_member = _pred(det_reject, 'Canada Jay')
     db.update_prediction_status(runner_up, 'alternative')
+    db.commit()
     ws = db._active_workspace_id
     client = app.test_client()
 
@@ -1646,6 +1659,7 @@ def test_group_apply_undo_restores_pick_prior_rejected_status(app_and_db):
     # later re-pick. Any status the generic reset would ignore works here;
     # rejected is the case Codex named.
     db.update_prediction_status(pred_a, 'rejected')
+    db.commit()
     assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
 
     resp = client.post('/api/predictions/group/apply', json={
@@ -1700,6 +1714,7 @@ def test_group_apply_repick_rejects_accepted_sibling_and_undo_restores(app_and_d
     # The earlier decision: the alternative was accepted, the primary lost.
     db.update_prediction_status(alt, 'accepted')
     db.update_prediction_status(pred_a, 'rejected')
+    db.commit()
 
     resp = client.post('/api/predictions/group/apply', json={
         'picks': [pick], 'rejects': [reject], 'removed': [],

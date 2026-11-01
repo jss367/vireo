@@ -575,7 +575,8 @@ def test_compare_full_load_lands_on_the_collection_when_nothing_needs_review(
         for row in db.conn.execute("SELECT id FROM predictions").fetchall()
     ]
     for pred_id in pred_ids:
-        db.update_prediction_status(pred_id, "accepted", _commit=False)
+        db.update_prediction_status(pred_id, "accepted")
+        db.commit()
     db.conn.commit()
     # Seed one settled row so the photo does not collapse to
     # missing_prediction once the pending ones are gone.

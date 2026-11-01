@@ -600,13 +600,14 @@ def test_accept_prediction_tags_manual_and_queues_add_through_the_facade(
     statuses = _spy(monkeypatch, db, "update_prediction_status")
     added = _spy(monkeypatch, db, "add_keyword")
 
-    result = db.accept_prediction(pid)
+    with db.transaction():
+        result = db.accept_prediction(pid)
 
     kid = result["keyword_id"]
     assert added == [(("Robin",), {"is_species": True})]
     assert tags == [((p0, kid), {"source": "manual"})]
     assert queued == [((p0, "keyword_add", "Robin"), {})]
-    assert statuses == [((pid, "accepted"), {"_commit": False})]
+    assert statuses == [((pid, "accepted"), {})]
     assert result["accepted_prediction_ids"] == [pid]
     assert result["affected"] == [{
         "photo_id": p0, "prediction_id": pid, "old_species": [], "changed_tag": True,
@@ -623,19 +624,18 @@ def test_accept_prediction_tags_manual_and_queues_add_through_the_facade(
     ) == [("accepted",)]
 
 
-def test_accept_prediction_without_commit_leaves_transaction_open(db, lib):
+def test_accept_prediction_leaves_commit_to_caller(db, lib):
     p0 = lib["p"][0]
     pid = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
-    db.accept_prediction(pid, _commit=False)
+    db.accept_prediction(pid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM pending_changes") == [(0,)]
     db.conn.rollback()
     assert db.conn.execute("SELECT COUNT(*) FROM photo_keywords").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("commit", [True, False])
-def test_replace_species_requires_explicit_taxonomy_before_writes(db, lib, commit):
+def test_replace_species_requires_explicit_taxonomy_before_writes(db, lib):
     p0 = lib["p"][0]
     old_keyword = db.add_keyword("Jay", is_species=True)
     db.tag_photo(p0, old_keyword)
@@ -644,7 +644,7 @@ def test_replace_species_requires_explicit_taxonomy_before_writes(db, lib, commi
     before = db.conn.total_changes
 
     with pytest.raises(ValueError, match="explicitly pass None"):
-        db.accept_prediction(prediction, replace_species=True, _commit=commit)
+        db.accept_prediction(prediction, replace_species=True)
 
     assert db.conn.total_changes == before
     assert not db.conn.in_transaction
@@ -661,16 +661,16 @@ def test_accept_prediction_rolls_back_when_queueing_fails(db, lib, monkeypatch):
         raise RuntimeError("queue failed")
 
     monkeypatch.setattr(db, "queue_change", boom)
-    with pytest.raises(RuntimeError, match="queue failed"):
+    with pytest.raises(RuntimeError, match="queue failed"), db.transaction():
         db.accept_prediction(pid)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
     assert _visible(db, "SELECT COUNT(*) FROM prediction_review WHERE status = 'accepted'") == [
         (0,),
     ]
-    # With _commit=False the caller owns the rollback.
+    # Without a unit of work the caller owns the rollback.
     with pytest.raises(RuntimeError, match="queue failed"):
-        db.accept_prediction(pid, _commit=False)
+        db.accept_prediction(pid)
     assert db.conn.in_transaction
     db.conn.rollback()
 
@@ -718,8 +718,9 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     prefs = _spy(monkeypatch, db, "rename_photo_preferences_species")
     configs = _spy(monkeypatch, db, "get_effective_config")
 
-    r0 = db.accept_prediction(pred0, replace_species=True, species_taxonomy=None)
-    r1 = db.accept_prediction(pred1, replace_species=True, species_taxonomy=None)
+    with db.transaction():
+        r0 = db.accept_prediction(pred0, replace_species=True, species_taxonomy=None)
+        r1 = db.accept_prediction(pred1, replace_species=True, species_taxonomy=None)
 
     assert r0["affected"][0]["old_species"] == ["Jay"]
     assert r1["affected"][0]["old_species"] == ["Wren"]
@@ -799,7 +800,8 @@ def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
         )
     db.update_prediction_status(preds[2], "rejected")
     db.conn.commit()
-    result = db.accept_prediction(preds[0])
+    with db.transaction():
+        result = db.accept_prediction(preds[0])
     assert sorted(result["accepted_prediction_ids"]) == sorted(preds[:2])
     assert sorted(result["photo_ids"]) == sorted([p0, p1])
     assert sorted(_visible(
@@ -1114,7 +1116,7 @@ def test_keyword_provenance_facade_signatures_unchanged():
         "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",
         "accept_prediction": (
             "(self, prediction_id, replace_species=False, photo_ids=None, "
-            "prediction_ids=None, _commit=True, species_taxonomy=Ellipsis)"
+            "prediction_ids=None, species_taxonomy=Ellipsis)"
         ),
     }
     from repositories.keyword_provenance import KeywordProvenanceRepository

@@ -619,7 +619,7 @@ def create_predictions_blueprint(
                 )
             item = prediction_status_item(
                 db, pred["photo_id"], [pred_id],
-                lambda: db.update_prediction_status(pred_id, "reviewed", _commit=False),
+                lambda: db.update_prediction_status(pred_id, "reviewed"),
             )
             assert item is not None  # The guarded pending -> reviewed transition changed state.
             db.record_edit(
@@ -658,7 +658,7 @@ def create_predictions_blueprint(
             # group, not just this photo) inside one transaction, so grouped
             # photos are replaced consistently.
             result = db.accept_prediction(
-                pred_id, replace_species=True, _commit=False,
+                pred_id, replace_species=True,
                 species_taxonomy=_species_replacement_taxonomy(),
             )
             if result is None:
@@ -1050,7 +1050,6 @@ def create_predictions_blueprint(
             result = db.accept_prediction(
                 pid,
                 prediction_ids=submitted_pred_ids,
-                _commit=False,
             )
             handled.add(pid)
             if result is None:
@@ -1388,7 +1387,7 @@ def create_predictions_blueprint(
         accepted_by_scope: dict[tuple[int, str, str], set[int]] = {}
         for ids in pick_pred_ids.values():
             for pred_id in ids:
-                db.update_prediction_status(pred_id, "accepted", _commit=False)
+                db.update_prediction_status(pred_id, "accepted")
                 detection_id, model, fingerprint = db.predictions.get_scope(pred_id)
                 accepted_by_scope.setdefault((detection_id, model, fingerprint), set()).add(pred_id)
         for scope, accepted_ids in accepted_by_scope.items():
@@ -1396,7 +1395,7 @@ def create_predictions_blueprint(
                 *scope, sorted(accepted_ids),
             )
             for sid in sibling_ids:
-                db.update_prediction_status(sid, "rejected", _commit=False)
+                db.update_prediction_status(sid, "rejected")
 
     def _stale_group_apply_photos(db: Database, observed: dict[int, str]) -> set[int]:
         """Photos whose group member was decided or regenerated since the modal rendered.
@@ -1704,7 +1703,7 @@ def create_predictions_blueprint(
                     f"prediction already {current_status}; cannot accept",
                     409,
                 )
-            result = db.accept_prediction(pred_id, _commit=False)
+            result = db.accept_prediction(pred_id)
             if result and result["affected"]:
                 # ``changed_tag=False`` means the photo already carried an
                 # equivalent species (hierarchical or root) so the accept only
@@ -1793,7 +1792,7 @@ def create_predictions_blueprint(
                     f"prediction already {current_status}; cannot accept",
                     409,
                 )
-            result = db.accept_subject_species(pred_id, _commit=False)
+            result = db.accept_subject_species(pred_id)
             if result is None:
                 return json_error("prediction not found", 404)
             if result["affected"]:
@@ -1903,7 +1902,7 @@ def create_predictions_blueprint(
 
         def apply() -> None:
             for target_id in ids:
-                db.update_prediction_status(target_id, "rejected", _commit=False)
+                db.update_prediction_status(target_id, "rejected")
 
         return prediction_status_item(db, pred["photo_id"], ids, apply)
 
@@ -1929,10 +1928,9 @@ def create_predictions_blueprint(
         photographer's prediction-group decisions as confirmed.
         """
         local_species = species
-        # Flag picks and add species keyword — every write uses
-        # ``_commit=False`` because the enclosing ``BEGIN IMMEDIATE`` owns
-        # the transaction and an intermediate commit would release the
-        # writer lock mid-decision.
+        # Flag picks and add species keyword. None of these writes commits:
+        # the enclosing decision unit owns the transaction, and an
+        # intermediate commit would release the writer lock mid-decision.
         try:
             if local_species:
                 kid = db.add_keyword(
@@ -2179,13 +2177,13 @@ def create_predictions_blueprint(
         )
 
         for pid in actionable_rejects:
-            db.update_predictions_status_by_photo(pid, 'rejected', _commit=False)
+            db.update_predictions_status_by_photo(pid, 'rejected')
 
         # Ungrouping is not a decision — it changes which rows the burst modal
         # shows together, not what any of them means — so it is not gated on
         # the baseline.
         for pred_id in removed:
-            db.ungroup_prediction(pred_id, _commit=False)
+            db.ungroup_prediction(pred_id)
         # ``record_edit`` skips its prune under ``_commit=False``; run it once
         # the decision is durable so history stays bounded.
         db.after_commit(db._prune_edit_history)

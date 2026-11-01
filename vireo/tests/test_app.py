@@ -13485,6 +13485,7 @@ def test_highlights_curation_filter_ignores_rejected_selected_prediction(app_and
     # Rejecting the selected photo's prediction removes that photo from the
     # species bucket, but the second prediction keeps the species visible.
     db.update_prediction_status(prediction_ids[0], "rejected")
+    db.commit()
     response = client.get(
         "/api/highlights",
         query_string={"folder_id": fid, "highlight_selection": "yes"},
@@ -21584,6 +21585,7 @@ def test_batch_accept_dedup_still_rejects_skipped_detection_alternatives(
     }
 
     db.accept_prediction(pred_ids[0], prediction_ids=set(pred_ids))
+    db.commit()
 
     # Every submitted detection's alternative row must end up rejected —
     # the representative's accept path only rejects siblings scoped to its

@@ -118,6 +118,7 @@ def test_same_species_subjects_require_explicit_choice(comparison_library):
     # Remove its old accepted sparrow identity: now genuinely two target birds.
     row = db.conn.execute("SELECT id FROM predictions WHERE detection_id=? AND species=?", (ids[pids[0]][1], OTHER)).fetchone()
     db.update_prediction_status(row["id"], "rejected")
+    db.commit()
     pack = _pack(app, pids, requested_species=TARGET)
     card = next(c for c in pack["cards"] if c["id"] == pids[0])
     assert card["evidence_status"] == "multiple_matching_subjects" and card["subject"]["detection_id"] is None
@@ -130,6 +131,7 @@ def test_photo_keyword_and_pending_top_prediction_do_not_confirm_subject(compari
     app, db, pids, ids = comparison_library
     for row in db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (ids[pids[0]][0],)).fetchall():
         db.update_prediction_status(row["id"], "pending")
+        db.commit()
     keyword = db.add_keyword(TARGET, is_species=True)
     db.tag_photo(pids[0], keyword)
     db.commit()
@@ -278,6 +280,7 @@ def test_background_analysis_is_scoped_and_reports_unresolved_frames(comparison_
     # An unconfirmed bird must not silently analyze its sharp neighbour.
     row = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (ids[pids[0]][0],)).fetchone()
     db.update_prediction_status(row["id"], "pending")
+    db.commit()
     client = app.test_client()
     launched = _pack(app, pids, requested_species=TARGET, analyze=True)
     job = wait_for_job_via_client(client, launched["job_id"], wait_for_history=True)
@@ -361,6 +364,7 @@ def test_mixed_species_confirmations_block_automatic_subject_selection(compariso
     if not clean_candidate:
         row = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (ids[pids[0]][0],)).fetchone()
         db.update_prediction_status(row["id"], "pending")
+        db.commit()
     pack = _pack(app, pids, requested_species=TARGET)
     card = next(c for c in pack["cards"] if c["id"] == pids[0])
     assert card["evidence_status"] == "subject_identity_conflict"
@@ -516,6 +520,7 @@ def test_focus_eye_uses_detection_generation_and_rejects_changed_identity(compar
     assert response.headers['X-Vireo-Focus-Center'] == '0.2000,0.5000'
     prediction = db.conn.execute('SELECT id FROM predictions WHERE detection_id=?', (ids[card['id']][0],)).fetchone()
     db.update_prediction_status(prediction['id'], 'rejected')
+    db.commit()
     assert app.test_client().get(url).status_code == 404
 
 

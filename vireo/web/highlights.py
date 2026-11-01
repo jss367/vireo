@@ -357,7 +357,7 @@ class _HighlightsRelabel:
         db = self.db
         pred = self.top_predictions.get(pid)
         if pred is not None:
-            db.update_prediction_status(pred["id"], "rejected", _commit=False)
+            db.update_prediction_status(pred["id"], "rejected")
             self.rejected_prediction_ids.append(pred["id"])
 
         # A scoped relabel keeps the photo's other species. It still lists
@@ -638,7 +638,7 @@ def _accept_confirm_targets(
         limits = {"photo_ids": key_pids}
         if exact_rows:
             limits["prediction_ids"] = [targets[p]["id"] for p in key_pids]
-        result = db.accept_prediction(pred["id"], _commit=False, **limits)
+        result = db.accept_prediction(pred["id"], **limits)
         if result is None:
             skipped.append({"photo_id": pid, "reason": "prediction_not_found"})
             continue

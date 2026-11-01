@@ -109,6 +109,7 @@ def test_stale_card_is_refused_atomically(app_and_db, decision, changed):
         body['observed_workspace_id'] += 1
     else:
         db.update_prediction_status(ids[-1], changed)
+        db.commit()
     before = _statuses(db, ids)
     response = app.test_client().post(f'/api/predictions/{ids[0]}/{decision}', json=body)
     assert response.status_code == 409, response.get_json()
@@ -256,6 +257,7 @@ def test_decided_and_stale_rows_do_not_hide_pending_cards(app_and_db):
     app, db = app_and_db
     _, detections, ids = _seed(db)
     db.update_prediction_status(ids[1], 'accepted')
+    db.commit()
     db.predictions.add(detections[2], 'Blue Tit', .99, 'third-model',
                        labels_fingerprint='old', taxonomy=BLUE)
     stale = db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0]

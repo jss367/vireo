@@ -145,7 +145,7 @@ def test_a_decision_updates_the_counts_through_refresh_photo_id(compare_collecti
     assert first["summary"]["needs_review"] == len(photo_ids)
 
     for row in db.predictions.get_rows(photo_ids=[photo_ids[0]]):
-        db.update_prediction_status(row["id"], "reviewed", _commit=False)
+        db.update_prediction_status(row["id"], "reviewed")
     db.conn.commit()
 
     refreshed = client.get(
