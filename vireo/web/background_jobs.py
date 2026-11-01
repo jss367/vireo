@@ -28,16 +28,13 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Concatenate, Protocol
 
 from flask import Response, jsonify
+from job_runner.work_control import JobCancelled as JobCancelled
 
 if TYPE_CHECKING:
     from db import Database
     from jobs import JobRunner
     from services.service_types import JobDict, JobWork, JsonDict
     from web.web_types import GetDb, GetRunner
-
-
-class JobCancelled(Exception):
-    """Exit a worker at a safe checkpoint after cancellation."""
 
 
 class JobLaunch:

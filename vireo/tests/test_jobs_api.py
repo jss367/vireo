@@ -1932,7 +1932,7 @@ def test_job_cancel_running_job_marks_cancelled(app_and_db):
             time.sleep(0.05)
         return {"stopped": False}
 
-    job_id = runner.start("test", slow_work)
+    job_id = runner.start("test", slow_work, pausable=False)
 
     with app.test_client() as c:
         resp = c.post(f"/api/jobs/{job_id}/cancel")
@@ -1953,7 +1953,7 @@ def test_job_cancel_finished_job_returns_404(app_and_db):
     def quick_work(job):
         return {"ok": True}
 
-    job_id = runner.start("test", quick_work)
+    job_id = runner.start("test", quick_work, pausable=False)
 
     wait_for_job_via_runner(runner, job_id)
 
@@ -2006,7 +2006,7 @@ def test_job_pause_api_rejects_unsupported_job(app_and_db):
         release.wait(timeout=synchronization_timeout(2))
         return {}
 
-    job_id = runner.start("test", work)
+    job_id = runner.start("test", work, pausable=False)
     with app.test_client() as c:
         resp = c.post(f"/api/jobs/{job_id}/pause")
         assert resp.status_code == 409
@@ -5812,6 +5812,57 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     assert client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["already_sent"]
 
 
+@pytest.mark.parametrize("action", ["resume", "cancel"])
+def test_pending_archive_pause_releases_sync_lock_and_retains_originals(app_and_db, tmp_path, monkeypatch, action):
+    import move
+    from wait import wait_for_job
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    entered, release = threading.Event(), threading.Event()
+    original_copy = move.folder_transfer._copy_tree_with_progress
+
+    def no_rsync(*args, **kwargs):
+        raise FileNotFoundError()
+
+    def copy_with_boundary(src, dst, skip, total, progress, **kwargs):
+        def report(current, count, name, phase):
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(synchronization_timeout(5))
+            progress(current, count, name, phase)
+
+        return original_copy(src, dst, skip, total, report, **kwargs)
+
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_copy_tree_with_progress", copy_with_boundary)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": True})
+    assert response.status_code == 200, response.get_json()
+    job_id = response.get_json()["job_id"]
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
+        release.set()
+        wait_for_job(lambda: client.get(f"/api/jobs/{job_id}").get_json(), terminal=("paused",), timeout=5)
+        assert os.path.isdir(staging)
+        assert app._sync_job_lock.acquire(blocking=False)
+        app._sync_job_lock.release()
+        # A paused transfer still owns its source and joins repeated clicks.
+        assert client.post(f"/api/import/pending-archives/{archive_id}/send",
+                           json={"sync_first": True}).get_json()["job_id"] == job_id
+        assert client.post(f"/api/jobs/{job_id}/{action}").status_code == 200
+        job = wait_for_job_via_client(client, job_id)
+        assert job["status"] == ("completed" if action == "resume" else "cancelled"), job
+        assert os.path.isdir(staging) == (action == "cancel")
+        assert db.pending_archives.get(archive_id)["state"] == ("complete" if action == "resume" else "pending")
+    finally:
+        release.set()
+        app._job_runner.cancel_job(job_id)
+
+
 def test_import_runs_while_another_import_is_sent_to_nas(app_and_db, tmp_path, monkeypatch):
     """A second card imports and processes in the same workspace mid-send.
 
@@ -5902,6 +5953,95 @@ def test_import_runs_while_another_import_is_sent_to_nas(app_and_db, tmp_path, m
     assert os.path.exists(os.path.join(staged, "second.jpg"))
     items = client.get("/api/import/pending-archives").get_json()["items"]
     assert [item["id"] for item in items] == [second["config"]["pending_archive_id"]]
+
+
+
+@pytest.mark.parametrize("mode", ["wait_for_commit", "write_during_pause"])
+def test_pending_archive_sync_first_guards_final_verification(app_and_db, tmp_path, monkeypatch, mode):
+    import move
+    from db import Database
+    from wait import wait_for_job
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = Path(imported["config"]["managed_staging"]["destination"])
+    photo_id = imported["result"]["photo_ids"][0]
+    db.queue_change(photo_id, "keyword_add", "Osprey")
+    sibling = db.create_workspace("Sibling metadata edits")
+    workspace_folders.add_workspace_folder(db, sibling, workspace_folders.add_folder(db, str(staging)), is_root=True)
+    db.queue_change(photo_id, "keyword_add", "Kestrel", workspace_id=sibling)
+    entered, release = threading.Event(), threading.Event()
+    verify = move.folder_transfer._first_missing_source_file
+
+    def hold_after_verification(*args, **kwargs):
+        result = verify(*args, **kwargs)
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(synchronization_timeout(10))
+        return result
+
+    def no_rsync(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_first_missing_source_file", hold_after_verification)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": True})
+    assert response.status_code == 200, response.get_json()
+    job_id = response.get_json()["job_id"]
+    sync_id = None
+    try:
+        assert entered.wait(synchronization_timeout(10))
+        acquired = app._sync_job_lock.acquire(blocking=False)
+        if acquired:
+            app._sync_job_lock.release()
+        assert not acquired, "sidecar writers can change files after verification read them"
+        if mode == "write_during_pause":
+            assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
+            release.set()
+            _wait_for_runner_status(app._job_runner, job_id, "paused")
+            assert app._sync_job_lock.acquire(blocking=False), "paused verification retained the sync lock"
+            app._sync_job_lock.release()
+        assert client.post(f"/api/workspaces/{sibling}/activate").status_code == 200
+        response = client.post("/api/jobs/sync")
+        assert response.status_code == 200, response.get_json()
+        sync_id = response.get_json()["job_id"]
+        if mode == "wait_for_commit":
+            def sync_waiting():
+                job = app._job_runner.get(sync_id)
+                ready = job["progress"].get("phase") == "Waiting for current XMP sync"
+                return {"status": "ready", "job": job} if ready or job["status"] != "running" else None
+
+            waiting = wait_for_job(sync_waiting, terminal=("ready",), timeout=5)
+            assert waiting["job"]["status"] == "running", waiting
+            with Database(app.config["DB_PATH"]) as sibling_db:
+                sibling_db.set_active_workspace(sibling)
+                assert sibling_db.pending_changes.count() == 1, "the sibling edit was cleared before commit"
+            release.set()
+            sent = wait_for_job_via_client(client, job_id)
+            assert sent["status"] == "completed", sent
+            synced = wait_for_job_via_client(client, sync_id)
+            assert synced["status"] == "completed", synced
+            assert not staging.exists()
+            sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+            assert len(sidecars) == 1
+            assert "Kestrel" in sidecars[0].read_text()
+        else:
+            synced = wait_for_job_via_client(client, sync_id)
+            assert synced["status"] == "completed", synced
+            assert client.post(f"/api/jobs/{job_id}/resume").status_code == 200
+            sent = wait_for_job_via_client(client, job_id)
+            assert sent["status"] == "failed", sent
+            assert staging.exists(), "stale verification deleted the newly synced edit"
+            sidecars = list(staging.rglob("*.xmp"))
+            assert len(sidecars) == 1
+            assert "Kestrel" in sidecars[0].read_text()
+    finally:
+        release.set()
+        app._job_runner.cancel_job(job_id)
+        if sync_id is not None:
+            app._job_runner.cancel_job(sync_id)
 
 
 def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_and_db, tmp_path, monkeypatch):

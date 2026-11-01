@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 
 from job_runner.outcome import attach_result_text
+from job_runner.pause_policy import resolve_pause_policy
 from resource_ledger import get_resource_ledger
 
 
@@ -11,6 +12,7 @@ def new_job_dict(job_id, job_type, *, config, workspace_id,
                  ephemeral, counts_for_badge, pausable,
                  blocks_local_transitions, runtime_warning,
                  singleton_key=None, workspace_paths=None, now=None):
+    pausable, pause_unavailable_reason = resolve_pause_policy(job_type, pausable)
     return {
         "id": job_id,
         "type": job_type,
@@ -26,6 +28,9 @@ def new_job_dict(job_id, job_type, *, config, workspace_id,
         "ephemeral": ephemeral,
         "counts_for_badge": counts_for_badge,
         "pausable": bool(pausable),
+        "pause_unavailable_reason": pause_unavailable_reason,
+        "cancellable": True,
+        "control_unavailable_reason": None,
         "blocks_local_transitions": bool(blocks_local_transitions),
         "exclusive_workspace": False,
         "workspace_transfer_batch": None,

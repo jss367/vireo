@@ -7,6 +7,8 @@ import posixpath
 import shutil
 import sys
 
+from job_runner.work_control import JobCancelled
+
 from .folder_catalog import _plan_moved_file_mtimes
 from .remote import _remote_mkdir_p, _ssh_rsh_string, resolve_rsync_bin
 from .transfer import (
@@ -115,7 +117,7 @@ class _FolderTransfer:
     """
 
     def __init__(self, db, src_path, target, *, remote, verify_contents,
-                 progress_cb, progress):
+                 progress_cb, progress, control=None):
         self.db = db
         self.src_path = src_path
         self.target = target
@@ -126,6 +128,7 @@ class _FolderTransfer:
         # None-safe wrapper around it.
         self.progress_cb = progress_cb
         self.progress = progress
+        self.control = control
         self.total_files = 0
         self.rsync_bin = None
         self.mtime_updates = []
@@ -185,10 +188,8 @@ class _FolderTransfer:
         with exclude_ctx as metadata_excludes:
             rsync_flags += metadata_excludes
             try:
-                returncode, stderr, timed_out = _run_rsync_streamed(
-                    src_path, self.target.rsync_target, rsync_flags, total_files,
-                    progress_cb, rsync_bin=rsync_bin, extra_args=extra_args,
-                )
+                returncode, stderr, timed_out = self._copy_rsync(
+                    rsync_flags, total_files, progress_cb, rsync_bin, extra_args)
             except FileNotFoundError:
                 if remote:
                     # No shutil fallback over SSH — the binary path was resolved
@@ -203,14 +204,20 @@ class _FolderTransfer:
                 try:
                     _copy_tree_with_progress(
                         src_path, self.target.catalog_path, dest_exists, total_files,
-                        progress_cb,
+                        self._copy_progress if self.control else progress_cb,
+                        **({"control": self.control} if self.control else {}),
                     )
                     returncode, stderr, timed_out = 0, "", False
+                except JobCancelled:
+                    # A paused job released its serialization slot. Another
+                    # transfer may now own files in this destination; cancel
+                    # must never run destructive fresh-copy cleanup here.
+                    raise
                 except Exception as exc:
                     log.warning("Copy fallback failed for %s", src_path, exc_info=True)
                     # Only remove a destination we created — never one that
                     # pre-existed (a merge target may hold the user's own files).
-                    if not dest_exists:
+                    if self._owns_destination():
                         shutil.rmtree(self.target.catalog_path, ignore_errors=True)
                     return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
             except OSError as exc:
@@ -234,6 +241,47 @@ class _FolderTransfer:
         # so finish the phase's source-file count before entering verification.
         self.progress(total_files, total_files, "", "Copying files")
         return None
+
+    def _owns_destination(self):
+        """A released transfer slot invalidates ownership of a fresh copy."""
+        return not self.target.dest_exists and not (self.control and self.control.generation)
+
+    def _copy_progress(self, current, total, filename, phase):
+        """The shutil fallback has finished the file before this checkpoint."""
+        self.control.checkpoint()
+        self.progress(current, total, filename, phase)
+
+    def _copy_rsync(self, flags, total, progress_cb, rsync_bin, extra_args):
+        """Reap rsync on Pause; keep completed files and resume partials."""
+        if self.control is None:
+            return _run_rsync_streamed(
+                self.src_path, self.target.rsync_target, flags, total,
+                progress_cb, rsync_bin=rsync_bin, extra_args=extra_args)
+        # Partial files must never occupy final names: --ignore-existing
+        # would otherwise skip a truncated file forever on Resume or Retry.
+        flags = [*flags, "--partial-dir=.rsync-partial"]
+        while True:
+            self.control.checkpoint()
+            if self.control.generation:
+                # Files may have arrived while the transfer slot was released.
+                # Resume must preserve them, even if this began as a fresh copy.
+                flags = [flag for flag in flags if flag != "--checksum"]
+                if "--ignore-existing" not in flags:
+                    flags.append("--ignore-existing")
+            stopped = False
+
+            def stop_requested():
+                nonlocal stopped
+                stopped = stopped or self.control.stop_requested()
+                return stopped
+
+            result = _run_rsync_streamed(
+                self.src_path, self.target.rsync_target, flags, total,
+                progress_cb, rsync_bin=rsync_bin, extra_args=extra_args,
+                cancel_check=stop_requested)
+            if not stopped:
+                return result
+            self.control.checkpoint()
 
     def plan_mtime_corrections(self):
         """Read the destination's timestamps BEFORE verifying, not after.
@@ -261,7 +309,7 @@ class _FolderTransfer:
         if not self.remote:
             self.mtime_updates, problem = _plan_moved_file_mtimes(
                 self.db, self.src_path, self.target.transfer_dest,
-                progress_cb=self.progress_cb,
+                progress_cb=self.progress,
             )
             if problem is not None:
                 # Verification below would catch this too. Failing here just
@@ -274,7 +322,7 @@ class _FolderTransfer:
                 # retry into one that demands a merge. A destination that was
                 # already there is never removed -- it may hold the user's own
                 # files.
-                if not self.target.dest_exists:
+                if self._owns_destination():
                     shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
                 return {"moved": 0, "errors": [
                     f"Verification failed: {problem}. Originals preserved."
@@ -307,7 +355,8 @@ class _FolderTransfer:
             # content-conflict and file-count checks.
             verify = _remote_verify_complete(self.rsync_bin, src_path,
                                              self.target.rsync_target, self.remote,
-                                             is_merge=dest_exists)
+                                             is_merge=dest_exists,
+                                             **({"control": self.control} if self.control else {}))
             if verify is not None:
                 name, detail = verify
                 if name == "__ERROR__":
@@ -337,7 +386,8 @@ class _FolderTransfer:
             verify_error = _fresh_copy_mismatch(src_path, transfer_dest,
                                                 progress=report)
             if verify_error is not None:
-                shutil.rmtree(transfer_dest, ignore_errors=True)
+                if self._owns_destination():
+                    shutil.rmtree(transfer_dest, ignore_errors=True)
                 return {"moved": 0, "errors": [
                     f"Verification failed: {verify_error}. Originals preserved."
                 ]}
