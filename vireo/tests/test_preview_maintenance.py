@@ -227,3 +227,76 @@ def test_preview_job_cancellation_skips_eviction(client_with_photo, monkeypatch)
     job = wait_for_job_via_runner(app._job_runner, job_id)
     assert job['status'] == 'cancelled'
     evict.assert_not_called()
+
+
+def test_enabled_startup_waits_for_first_request_before_preview_work(tmp_path, monkeypatch):
+    import app as app_module
+    import config as cfg
+    import models
+    import preview_cache
+    from services.startup_tasks import StartupTasks
+
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setattr(cfg, 'CONFIG_PATH', str(tmp_path / 'config.json'))
+    monkeypatch.setattr(models, 'DEFAULT_MODELS_DIR', str(tmp_path / 'models'))
+    monkeypatch.setattr(models, 'CONFIG_PATH', str(tmp_path / 'models.json'))
+    monkeypatch.delenv('VIREO_DISABLE_STARTUP_BACKFILL_TIMERS')
+    # Isolate unrelated startup workers while leaving preview scheduling enabled.
+    monkeypatch.setattr(StartupTasks, 'mark_species', lambda self: None)
+    monkeypatch.setattr(StartupTasks, 'schedule_retained_cache_maintenance', lambda self: None)
+    monkeypatch.setattr(app_module.MissingOriginals, 'folder_health_loop', lambda self: None)
+    monkeypatch.setattr(app_module, '_schedule_startup_backfills', lambda *args: None)
+    entered, release = threading.Event(), threading.Event()
+    constructed = False
+    calls = []
+    original = StartupTasks.kickoff_preview_cache_maintenance
+    def kickoff(self):
+        calls.append(constructed)
+        return original(self)
+    def reconcile(*args, **kwargs):
+        assert constructed
+        entered.set()
+        assert release.wait(synchronization_timeout(5))
+        return 0
+    monkeypatch.setattr(StartupTasks, 'kickoff_preview_cache_maintenance', kickoff)
+    monkeypatch.setattr(preview_cache, 'reconcile_preview_cache', reconcile)
+    monkeypatch.setattr(preview_cache, 'evict_if_over_quota', lambda *a, **kw: 0)
+    app = app_module.create_app(str(tmp_path / 'catalog.db'), str(tmp_path / 'thumbnails'))
+    try:
+        assert calls == []
+        assert not entered.is_set()
+        constructed = True
+        assert app.test_client().get('/api/jobs').status_code == 200
+        assert entered.wait(synchronization_timeout(5))
+        assert app.test_client().get('/api/jobs').status_code == 200
+        assert calls == [True]
+    finally:
+        release.set()
+        app._cleanup_app_resources()
+
+
+def test_deferred_preview_hook_is_once_for_concurrent_requests():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from flask import Flask
+    from web.app_hooks import start_after_first_request
+
+    app = Flask(__name__)
+    kickoff = Mock(return_value='job')
+    start_after_first_request(app, kickoff)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses = list(pool.map(lambda _: app.test_client().get('/missing'), range(8)))
+    assert all(r.status_code == 404 for r in responses)
+    kickoff.assert_called_once_with()
+
+
+def test_deferred_preview_hook_does_not_break_response_after_shutdown():
+    from flask import Flask
+    from web.app_hooks import start_after_first_request
+
+    app = Flask(__name__)
+    kickoff = Mock(side_effect=RuntimeError('JobRunner is shut down'))
+    start_after_first_request(app, kickoff)
+    assert app.test_client().get('/missing').status_code == 404
+    assert app.test_client().get('/missing').status_code == 404
+    kickoff.assert_called_once_with()

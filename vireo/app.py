@@ -1637,6 +1637,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
 
     _register_v1_aliases(app, _reservation_exempt_endpoints)
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        app_hooks.start_after_first_request(app, app._kickoff_preview_cache_maintenance)
 
     return app
 
@@ -1746,7 +1748,6 @@ def _start_app_runtime(app, db_path):
     app._kickoff_preview_cache_maintenance = startup.kickoff_preview_cache_maintenance
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         startup.schedule_retained_cache_maintenance()
-        startup.kickoff_preview_cache_maintenance()
 
     # Live progress of the most recent new-images walk, keyed by
     # (db_path, workspace_id). Written by the walk's progress callback and
