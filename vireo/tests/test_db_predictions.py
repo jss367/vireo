@@ -1366,8 +1366,9 @@ def test_clear_can_preserve_reviewer_outputs_and_companion_state(db, cat, clear_
         _seed_runs(db, det)
     db.commit()
     reviewer_prediction = _pred_id(db, reviewer, 'Robin')
-    db.predictions.clear(model='m1', collection_photo_ids=[pid], labels_fingerprint='fp1',
-                         clear_run_keys=clear_run_keys, exclude_detector_model='reviewer-selected')
+    with db.transaction():
+        db.predictions.clear(model='m1', collection_photo_ids=[pid], labels_fingerprint='fp1',
+                             clear_run_keys=clear_run_keys, exclude_detector_model='reviewer-selected')
     assert _visible(db, 'SELECT detection_id FROM predictions') == [(reviewer,)]
     assert _review(db, reviewer_prediction)[0] == 'accepted'
     assert _visible(db, 'SELECT detection_id FROM classifier_match_scores') == [(reviewer,)]

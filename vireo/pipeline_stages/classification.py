@@ -1046,12 +1046,7 @@ class _ClassifyPass:
                     d.get("id", 0),
                 ),
             )[:1]
-        # The detector cache cannot reproduce human regions. Read their live
-        # coordinates separately, including when the fresh detector found none.
-        reviewer_boxes = _stored_animal_boxes(self.thread_db, photo_id, 0, "reviewer-selected")
-        reviewer_ids = {d["id"] for d in reviewer_boxes}
-        return [d for d in photo_dets if d.get("detector_model") != "reviewer-selected"
-                and d["id"] not in reviewer_ids] + reviewer_boxes
+        return detection_store.with_reviewer_regions(self.thread_db, photo_id, photo_dets)
 
     def _has_confident_non_animal(self, photo_id: int) -> bool:
         if photo_id in self.cached_detections:

@@ -90,6 +90,21 @@ def get_detections(
     return db.detections.get(photo_id, floor, detector_model)
 
 
+def with_reviewer_regions(
+    db: Database, photo_id: int, detections: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge current human regions into detector candidates for either job path.
+
+    Fresh detector caches cannot reproduce reviewer regions. Read them live so
+    replaced boxes do not linger in a cached candidate list.
+    """
+    reviewer = [dict(d, confidence=d["detector_confidence"]) for d in get_detections(
+        db, photo_id, min_conf=0, detector_model="reviewer-selected")]
+    reviewer_ids = {d["id"] for d in reviewer}
+    return [dict(d) for d in detections if d.get("detector_model") != "reviewer-selected"
+            and d["id"] not in reviewer_ids] + reviewer
+
+
 def get_detections_for_photos(
     db: Database, photo_ids: Iterable[int], min_conf: float | None = None,
     detector_model: str | None = None,

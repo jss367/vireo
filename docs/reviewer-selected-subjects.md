@@ -12,6 +12,9 @@ establish animal absence. Drawing a region does not assign or confirm a species.
 Reviewer boxes are stored under `reviewer-selected`, separate from detector
 output, and become the primary subject. A new box replaces the previous
 reviewer box for that photo. Detector reruns and Reclassify leave it intact.
+Both Process and standalone Classify include the current reviewer box alongside
+automatic animal boxes, even when detection returns no animals. Reclassification
+refreshes matching species scores while retaining their accepted/rejected decisions.
 The internal confidence value of 1 preserves the explicit region through
 confidence filtering; it is not a model probability. The lightbox labels the
 region as reviewer-selected instead of displaying a detector percentage.

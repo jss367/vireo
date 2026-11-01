@@ -592,6 +592,8 @@ class _ClassifyPhotosPass:
 
     def classify_photo(self, i: int, photo: sqlite3.Row) -> None:
         """Clear, report progress for and classify or queue one photo."""
+        photo_detections = detection_store.with_reviewer_regions(
+            self.db, photo["id"], self.detection_map.get(photo["id"], []))
         # Per-photo reclassify predictions purge. Lives here (rather than
         # alongside ``detections.clear`` in the detection loop) so that:
         #   1. A mid-classify cancel leaves the unprocessed tail with its
@@ -627,13 +629,15 @@ class _ClassifyPhotosPass:
                     model=self.model.model_name,
                     collection_photo_ids=[photo["id"]],
                     labels_fingerprint=(
-                        self.fp if self.detection_map.get(photo["id"]) else None
+                        self.fp if photo_detections else None
                     ),
+                    exclude_detector_model="reviewer-selected",
                 )
 
         self._report_progress(i, photo)
 
-        if photo["id"] in self.non_animal_ids:
+        if photo["id"] in self.non_animal_ids and not any(
+                d.get("detector_model") == "reviewer-selected" for d in photo_detections):
             # A confident person or vehicle box takes this photo out of
             # scope for species classification. MegaDetector writes only
             # replace rows for ``megadetector-v6``, so any prior
@@ -651,9 +655,6 @@ class _ClassifyPhotosPass:
 
         folder_path = self.folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
-
-        # Get detections for this photo (list of detection dicts with IDs)
-        photo_detections = self.detection_map.get(photo["id"], [])
 
         if photo_detections:
             self._classify_detections(

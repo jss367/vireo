@@ -4312,18 +4312,14 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
     ) == []
 
 
+@pytest.mark.parametrize('job_kind', ['process', 'classify'])
+@pytest.mark.parametrize('fresh_automatic', [False, True])
 @pytest.mark.parametrize('reviewer_box', [None, 'accepted', 'rejected'])
-def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, reviewer_box):
-    """On reclassify, prior-run detection rows must be deleted after model 1
-    re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
-    stale bounding boxes via get_existing_detection_photo_ids + get_detections.
+def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, reviewer_box, fresh_automatic, job_kind):
+    """Both job entry points refresh reviewer and automatic evidence together.
 
-    Scenario: a photo had a prior detection (potential false positive). The
-    reclassify run finds NO animals this time (fake_detect_batch returns {}).
-    After reclassify the old detection row must be gone so future runs
-    actually call MegaDetector rather than short-circuiting to the stale box.
-
-    Regression for Codex P1 review on #511 line 848.
+    Empty detector output must preserve human regions; nonempty output must
+    classify both candidate sources while retiring the stale automatic box.
     """
     import json
 
@@ -4346,7 +4342,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
              "confidence": 0.9, "category": "animal"},
         ],
-        detector_model="MegaDetector",
+        detector_model=("MegaDetector" if job_kind == "process" else "megadetector-v6"),
     )
     db.commit()
     assert prior_det_ids, "setup sanity: prior detection was inserted"
@@ -4371,11 +4367,21 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     import labels_fingerprint
     monkeypatch.setattr(labels_fingerprint, 'compute_fingerprint', lambda *a, **k: 'legacy')
 
-    # _detect_batch stub: reclassify finds no animals this time (false pos fixed).
+    fresh_ids = []
+
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None, vireo_dir=None):
-        return {p["id"]: [] for p in batch}, 0, {p["id"] for p in batch}
+        dmap = {}
+        for photo in batch:
+            boxes = ([{"box": dict(x=.6, y=.2, w=.2, h=.2),
+                       "confidence": .9, "category": "animal"}] if fresh_automatic else [])
+            with db_.transaction():
+                fresh_ids.extend(detection_store.write_detection_batch(
+                    db_, photo["id"], "megadetector-v6", boxes))
+            dmap[photo["id"]] = [dict(d, confidence=d['detector_confidence']) for d in
+                detection_store.get_detections(db_, photo["id"], detector_model="megadetector-v6")]
+        return dmap, len(fresh_ids), {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
@@ -4392,36 +4398,49 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     runner = FakeRunner()
     job = _make_job()
 
-    run_pipeline_job(job, runner, db_path, ws_id, params)
+    if job_kind == 'process':
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+    else:
+        import classify_job.job_run as job_run
+
+        def fake_subjects(*, photos, folders, runner, job, reclassify, db, **kwargs):
+            dmap, count, _ = fake_detect_batch(photos, folders, runner, job, reclassify, db)
+            return dmap, count
+
+        monkeypatch.setattr(job_run, '_detect_subjects', fake_subjects)
+        monkeypatch.setattr(job_run, '_load_labels', lambda *a, **k: (["Robin"], False, []))
+        monkeypatch.setattr(job_run, 'Classifier', _RobinClassifier)
+        classify_job.run_classify_job(job, runner, db_path, ws_id, classify_job.ClassifyParams(
+            collection_id=col_id, model_id=model_ids[0], model_name=None,
+            labels_file=None, labels_files=None, grouping_window=0,
+            similarity_threshold=.85, reclassify=True,
+        ), computation_cache_dir=str(tmp_path / 'computation-cache'))
 
     # The stale prior-run detection must be gone after reclassify so that
     # future non-reclassify runs don't reuse it via the already-detected path.
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
     remaining = detection_store.get_detections(verify_db, photo_id)
+    assert not set(prior_det_ids) & {d['id'] for d in remaining}
+    assert {d['id'] for d in remaining} == set(fresh_ids + ([chosen] if chosen else []))
+    for automatic_id in fresh_ids:
+        automatic = detection_store.get_predictions_for_detection(
+            verify_db, automatic_id, classifier_model='BioCLIP')
+        assert len(automatic) == 1
+        assert automatic[0]['confidence'] == .9
     if reviewer_box:
         from subjects import payload
-        assert [d['id'] for d in remaining] == [chosen]
         result = payload(verify_db, photo_id)
         assert result['primary_detection_id'] == chosen
-        assert result['subjects'][0]['analysis'] is not None
+        assert next(s for s in result['subjects'] if s['id'] == chosen)['analysis'] is not None
         assert any(p['species'] == 'Ruby-crowned Kinglet' and p['status'] == 'accepted'
-                   for p in result['subjects'][0]['predictions'])
+                   for p in next(s for s in result['subjects'] if s['id'] == chosen)['predictions'])
         active = detection_store.get_predictions_for_detection(verify_db, chosen, classifier_model='BioCLIP')
         assert len(active) == 1
         assert active[0]['species'] == 'Robin'
         assert active[0]['confidence'] == .9  # fresh inference replaced the .4 score
         assert verify_db.predictions.current_status(active[0]['id']) == reviewer_box  # human decision survived
         assert verify_db.get_photo_edit_recipe(photo_id) == recipe
-        return
-    assert remaining == [], (
-        f"Stale prior-run detection rows must be purged during reclassify but "
-        f"db.get_detections({photo_id}) returned {remaining!r}. "
-        "Without this cleanup, future non-reclassify runs short-circuit to "
-        "stale boxes via get_existing_detection_photo_ids + get_detections, "
-        "causing false-positive detections to persist indefinitely. "
-        "Regression for Codex P1 review on #511 line 848."
-    )
 
 
 def test_pipeline_reclassify_same_boxes_preserves_predictions(
