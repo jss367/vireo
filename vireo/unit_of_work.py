@@ -207,6 +207,10 @@ class UnitOfWork:
     def __init__(self) -> None:
         self.depth = 0
         self._retry_busy = False
+        # True while the outermost open unit is a joined one: the owner, not
+        # this unit, owns the commit, so ``after_commit`` has no durable
+        # commit to hook into and is refused.
+        self._in_joined = False
         # One list per open unit, innermost last.
         self._callbacks: list[list[Callable[[], object]]] = []
 
@@ -232,6 +236,18 @@ class UnitOfWork:
 
     def after_commit(self, callback: Callable[[], object]) -> None:
         """Run ``callback`` once the outermost unit commits (now, if none is open)."""
+        if self._in_joined:
+            # A joined unit is a savepoint inside a transaction an
+            # unconverted caller began and will end. Releasing the savepoint
+            # does not commit the owner's transaction, so a callback that ran
+            # here could perform an irreversible side effect for writes the
+            # owner later rolls back. Refuse the callback instead: callers
+            # that need durable follow-up work check ``owns_transaction`` and
+            # run it after the join block, when they also own the commit.
+            raise TransactionOwnershipError(
+                "after_commit cannot be used inside a joined unit of work: "
+                "the owning transaction's commit is out of sight."
+            )
         if not self.depth:
             callback()
             return
@@ -292,15 +308,18 @@ class UnitOfWork:
         """A unit inside a transaction an unconverted caller began and will end.
 
         A savepoint, like a nested unit, and it never commits: the caller
-        that began the transaction owns it. Its ``after_commit`` callbacks run
-        when the block ends, since the owner's commit is out of sight. A
-        migration rule only, like adoption.
+        that began the transaction owns it. ``after_commit`` is refused here
+        because savepoint release is not a durable commit, and the owner's
+        commit is out of sight: callers that need durable follow-up work
+        check ``owns_transaction`` and run it after the join block, when they
+        also own the commit. A migration rule only, like adoption.
         """
         if isinstance(conn, HoldingConnection):
             conn.doomed_at = None
             conn.unit = self
         self.depth = 1
         self._retry_busy = False
+        self._in_joined = True
         self._callbacks = [[]]
         _hold(conn, 1)
         conn.execute("SAVEPOINT uow_join")
@@ -309,15 +328,14 @@ class UnitOfWork:
             yield
             finished = True
         finally:
-            callbacks = self._callbacks[0]
             self._leave(conn)
             if not finished:
                 _roll_back_to(conn, "uow_join")
         _release(conn, "uow_join")
-        _run_callbacks(callbacks)
 
     def _leave(self, conn: sqlite3.Connection) -> None:
         self.depth = 0
+        self._in_joined = False
         self._callbacks = []
         if isinstance(conn, HoldingConnection):
             conn.unit = None

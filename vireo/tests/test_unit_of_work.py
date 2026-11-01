@@ -384,3 +384,51 @@ def test_a_joining_unit_with_nothing_open_owns_its_transaction(db):
         _write(db, "own")
     assert not db.in_transaction
     assert _committed(db) == ["own"]
+
+
+def test_after_commit_is_refused_inside_a_joined_unit(db):
+    # Savepoint release is not a durable commit, so a callback that ran at
+    # the end of a joined block could perform an irreversible side effect
+    # for writes the unconverted owner later rolls back. The attempt is
+    # refused: callers that need durable follow-up work check
+    # ``owns_transaction`` and run it after the join block.
+    db.begin_immediate()
+    _write(db, "caller")
+    seen = []
+    with pytest.raises(TransactionOwnershipError, match="joined unit"):
+        with db.transaction(immediate=True, join=True):
+            _write(db, "service")
+            db.after_commit(lambda: seen.append("ran"))
+    assert seen == []
+    # The caller's transaction is still open and uncommitted; the owner
+    # decides what to do next.
+    assert db.in_transaction
+    db.rollback()
+    assert _committed(db) == []
+
+
+def test_after_commit_is_refused_in_a_nested_unit_inside_a_joined_one(db):
+    # A nested unit above a joined outer has no durable commit of its own to
+    # hook into either; the refusal propagates to the whole joined stack.
+    db.begin_immediate()
+    _write(db, "caller")
+    seen = []
+    with pytest.raises(TransactionOwnershipError, match="joined unit"):
+        with db.transaction(immediate=True, join=True):
+            with db.transaction():
+                db.after_commit(lambda: seen.append("ran"))
+    assert seen == []
+    db.rollback()
+    assert _committed(db) == []
+
+
+def test_after_commit_still_runs_for_a_joined_unit_with_no_owner(db):
+    # ``join=True`` entered with nothing open falls through to an owned
+    # outermost unit, so its ``after_commit`` runs at the owned commit as
+    # usual.
+    seen = []
+    with db.transaction(immediate=True, join=True):
+        _write(db, "own")
+        db.after_commit(lambda: seen.append(_committed(db)))
+        assert seen == []
+    assert seen == [["own"]]
