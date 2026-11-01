@@ -489,6 +489,7 @@ def test_background_optical_cache_handles_disappearing_folder(database, app_and_
         path = cache / f"{pid}_256.jpg"
         Image.new("RGB", (121, 81)).save(path, **cache_save_options(photo, recipe))
         db.caches.preview_insert(pid, 256, path.stat().st_size)
+        db.commit()
         target = _PreviewTarget(str(cache), 256, str(tmp_path), 90)
         assert _preview_photo(db, photo, {}, target) == "cached"
         assert path.is_file()

@@ -91,10 +91,11 @@ def _offline_args(photo_id, **overrides):
 # -- preview_cache ------------------------------------------------------------
 
 
-def test_preview_insert_commits_and_stamps_now(db):
+def test_preview_insert_commits_with_the_callers_unit_and_stamps_now(db):
     pid = _photo(db)
     t0 = time.time()
-    assert db.caches.preview_insert(pid, 1920, 4096) is None
+    with db.transaction():
+        assert db.caches.preview_insert(pid, 1920, 4096) is None
     t1 = time.time()
 
     assert not db.conn.in_transaction
@@ -108,9 +109,11 @@ def test_preview_insert_commits_and_stamps_now(db):
 def test_preview_insert_replaces_existing_entry(db):
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 100)
+    db.commit()
     first = db.caches.preview_get(pid, 1920)["last_access_at"]
     time.sleep(0.01)
     db.caches.preview_insert(pid, 1920, 250)
+    db.commit()
 
     rows = db.conn.execute("SELECT bytes, last_access_at FROM preview_cache").fetchall()
     assert len(rows) == 1
@@ -122,12 +125,14 @@ def test_preview_insert_keys_on_photo_and_size(db):
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 100)
     db.caches.preview_insert(pid, 2560, 200)
+    db.commit()
     assert db.caches.preview_total_bytes() == 300
 
 
 def test_preview_insert_enforces_photo_foreign_key(db):
     with pytest.raises(sqlite3.IntegrityError):
         db.caches.preview_insert(999_999, 1920, 100)
+        db.commit()
 
 
 def test_preview_insert_does_not_retry_locked_errors(db, no_sleep):
@@ -137,20 +142,23 @@ def test_preview_insert_does_not_retry_locked_errors(db, no_sleep):
     try:
         with pytest.raises(sqlite3.OperationalError, match="locked"):
             db.caches.preview_insert(pid, 1920, 100)
+            db.commit()
     finally:
         db.conn = flaky._conn
     assert flaky.execute_calls == 1
     assert no_sleep == []
 
 
-def test_preview_touch_updates_timestamp_and_commits(db):
+def test_preview_touch_updates_timestamp_with_the_callers_unit(db):
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 100)
+    db.commit()
     db.conn.execute("UPDATE preview_cache SET last_access_at = 1.0")
     db.conn.commit()
 
     t0 = time.time()
-    assert db.caches.preview_touch(pid, 1920) is None
+    with db.transaction():
+        assert db.caches.preview_touch(pid, 1920) is None
 
     assert not db.conn.in_transaction
     row = _reader(db).execute(
@@ -164,10 +172,12 @@ def test_preview_touch_only_matching_size(db):
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 100)
     db.caches.preview_insert(pid, 2560, 200)
+    db.commit()
     db.conn.execute("UPDATE preview_cache SET last_access_at = 1.0")
     db.conn.commit()
 
     db.caches.preview_touch(pid, 2560)
+    db.commit()
 
     assert db.caches.preview_get(pid, 1920)["last_access_at"] == 1.0
     assert db.caches.preview_get(pid, 2560)["last_access_at"] > 1.0
@@ -176,17 +186,20 @@ def test_preview_touch_only_matching_size(db):
 def test_preview_touch_missing_is_noop(db):
     pid = _photo(db)
     db.caches.preview_touch(pid, 1920)
+    db.commit()
     assert not db.conn.in_transaction
     assert db.caches.preview_get(pid, 1920) is None
     assert db.caches.preview_oldest_first() == []
 
 
-def test_preview_delete_removes_only_that_size_and_commits(db):
+def test_preview_delete_removes_only_that_size_with_the_callers_unit(db):
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 100)
     db.caches.preview_insert(pid, 2560, 200)
+    db.commit()
 
-    assert db.caches.preview_delete(pid, 1920) is None
+    with db.transaction():
+        assert db.caches.preview_delete(pid, 1920) is None
 
     assert not db.conn.in_transaction
     rows = _reader(db).execute("SELECT size FROM preview_cache").fetchall()
@@ -196,6 +209,7 @@ def test_preview_delete_removes_only_that_size_and_commits(db):
 def test_preview_delete_missing_is_noop(db):
     pid = _photo(db)
     db.caches.preview_delete(pid, 1920)
+    db.commit()
     assert not db.conn.in_transaction
     assert db.caches.preview_total_bytes() == 0
 
@@ -231,6 +245,7 @@ def test_preview_total_bytes_sums_every_row(db):
     db.caches.preview_insert(p1, 1920, 100)
     db.caches.preview_insert(p1, 2560, 50)
     db.caches.preview_insert(p2, 1920, 200)
+    db.commit()
     assert db.caches.preview_total_bytes() == 350
 
 
@@ -240,6 +255,7 @@ def test_preview_oldest_first_orders_by_last_access(db):
     db.caches.preview_insert(p1, 1920, 100)
     db.caches.preview_insert(p2, 2560, 200)
     db.caches.preview_insert(p1, 2560, 300)
+    db.commit()
     for pid, size, ts in ((p1, 1920, 30.0), (p2, 2560, 10.0), (p1, 2560, 20.0)):
         db.conn.execute(
             "UPDATE preview_cache SET last_access_at=? WHERE photo_id=? AND size=?",
@@ -261,6 +277,7 @@ def test_preview_oldest_first_orders_by_last_access(db):
 def test_preview_get_returns_row_or_none(db):
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 100)
+    db.commit()
 
     row = db.caches.preview_get(pid, 1920)
     assert isinstance(row, sqlite3.Row)
@@ -296,9 +313,10 @@ _OFFLINE_COLUMNS = [
 ]
 
 
-def test_offline_original_upsert_stores_every_column_and_commits(db):
+def test_offline_original_upsert_stores_every_column_with_the_callers_unit(db):
     pid = _photo(db)
-    assert db.caches.offline_original_upsert(**_offline_args(pid, error="boom")) is None
+    with db.transaction():
+        assert db.caches.offline_original_upsert(**_offline_args(pid, error="boom")) is None
 
     assert not db.conn.in_transaction
     row = _reader(db).execute(
@@ -323,6 +341,7 @@ def test_offline_original_upsert_positional_and_error_default(db):
     db.caches.offline_original_upsert(
         pid, None, None, None, 0, None, None, 5.0, "error"
     )
+    db.commit()
     row = db.caches.offline_original_get(pid)
     assert tuple(row) == (pid, None, None, None, 0, None, None, 5.0, "error", None)
     assert inspect.signature(CachesRepository.offline_original_upsert).parameters[
@@ -334,6 +353,7 @@ def test_offline_original_upsert_replaces_existing_row(db):
     pid = _photo(db)
     db.caches.offline_original_upsert(**_offline_args(pid, error="old"))
     db.caches.offline_original_upsert(**_offline_args(pid, bytes_=99, status="stale"))
+    db.commit()
 
     rows = db.conn.execute("SELECT * FROM offline_originals").fetchall()
     assert len(rows) == 1
@@ -345,19 +365,23 @@ def test_offline_original_upsert_replaces_existing_row(db):
 def test_offline_original_upsert_enforces_photo_foreign_key(db):
     with pytest.raises(sqlite3.IntegrityError):
         db.caches.offline_original_upsert(**_offline_args(999_999))
+        db.commit()
 
 
-def test_offline_original_upsert_retries_locked_execute_and_commit(db, no_sleep):
+def test_offline_original_upsert_retries_a_locked_execute(db, no_sleep):
     pid = _photo(db)
-    flaky = _FlakyConn(db.conn, fail_execute=2, fail_commit=1)
+    # The repository retries the locked INSERT; it never commits (the
+    # caller's ``db.commit()`` below is the one commit).
+    flaky = _FlakyConn(db.conn, fail_execute=2)
     db.conn = flaky
     try:
         db.caches.offline_original_upsert(**_offline_args(pid))
+        db.commit()
     finally:
         db.conn = flaky._conn
     assert flaky.execute_calls == 3
-    assert flaky.commit_calls == 2
-    assert len(no_sleep) == 3
+    assert flaky.commit_calls == 1
+    assert len(no_sleep) == 2
     row = _reader(db).execute(
         "SELECT status FROM offline_originals WHERE photo_id=?", (pid,)
     ).fetchone()
@@ -371,6 +395,7 @@ def test_offline_original_upsert_propagates_non_transient_errors(db, no_sleep):
     try:
         with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
             db.caches.offline_original_upsert(**_offline_args(pid))
+            db.commit()
     finally:
         db.conn = flaky._conn
     assert flaky.execute_calls == 1
@@ -378,9 +403,9 @@ def test_offline_original_upsert_propagates_non_transient_errors(db, no_sleep):
 
 
 def test_offline_writes_through_the_accessor_use_patched_db_retry_helpers(db, monkeypatch):
-    """A patch of ``db.execute_with_retry`` / ``db.commit_with_retry`` reaches
-    writes made through ``db.caches``: the accessor builds its repository
-    after the patch, reading the helpers from ``db`` at that moment."""
+    """A patch of ``db.execute_with_retry`` reaches writes made through
+    ``db.caches``: the accessor builds its repository after the patch, reading
+    the helper from ``db`` at that moment. The repository never commits."""
     pid = _photo(db)
     calls = []
     real_execute = db_module.execute_with_retry
@@ -399,11 +424,9 @@ def test_offline_writes_through_the_accessor_use_patched_db_retry_helpers(db, mo
 
     db.caches.offline_original_upsert(**_offline_args(pid))
     db.caches.offline_original_delete(pid)
+    db.commit()
 
-    assert calls == [
-        ("execute", db.conn), ("commit", db.conn),
-        ("execute", db.conn), ("commit", db.conn),
-    ]
+    assert calls == [("execute", db.conn), ("execute", db.conn)]
 
 
 def test_offline_original_get_returns_row_or_none(db):
@@ -411,19 +434,22 @@ def test_offline_original_get_returns_row_or_none(db):
     assert db.caches.offline_original_get(pid) is None
 
     db.caches.offline_original_upsert(**_offline_args(pid))
+    db.commit()
     row = db.caches.offline_original_get(pid)
     assert isinstance(row, sqlite3.Row)
     assert row.keys() == _OFFLINE_COLUMNS
     assert row["original_path"] == "/cache/a.NEF"
 
 
-def test_offline_original_delete_removes_row_and_commits(db):
+def test_offline_original_delete_removes_row_with_the_callers_unit(db):
     p1 = _photo(db, "a.jpg")
     p2 = _photo(db, "b.jpg")
     db.caches.offline_original_upsert(**_offline_args(p1))
     db.caches.offline_original_upsert(**_offline_args(p2))
+    db.commit()
 
-    assert db.caches.offline_original_delete(p1) is None
+    with db.transaction():
+        assert db.caches.offline_original_delete(p1) is None
 
     assert not db.conn.in_transaction
     rows = _reader(db).execute("SELECT photo_id FROM offline_originals").fetchall()
@@ -434,6 +460,7 @@ def test_offline_original_delete_removes_row_and_commits(db):
 def test_offline_original_delete_missing_is_noop(db):
     pid = _photo(db)
     db.caches.offline_original_delete(pid)
+    db.commit()
     assert not db.conn.in_transaction
     assert db.caches.offline_original_total_bytes() == 0
 
@@ -441,9 +468,10 @@ def test_offline_original_delete_missing_is_noop(db):
 def test_offline_original_delete_without_commit_stays_in_the_callers_transaction(db):
     p1 = _photo(db, "a.jpg")
     db.caches.offline_original_upsert(**_offline_args(p1))
+    db.commit()
     with db.transaction():
         db.begin_immediate()
-        assert db.caches.offline_original_delete(p1, _commit=False) is None
+        assert db.caches.offline_original_delete(p1) is None
         # Still inside the writer-locked transaction, and nothing committed.
         assert db.conn.in_transaction
         assert db.caches.offline_original_get(p1) is None
@@ -458,24 +486,26 @@ def test_offline_original_delete_without_commit_stays_in_the_callers_transaction
 def test_offline_original_delete_without_commit_rolls_back_with_the_caller(db):
     p1 = _photo(db, "a.jpg")
     db.caches.offline_original_upsert(**_offline_args(p1))
-    db.caches.offline_original_delete(p1, _commit=False)
+    db.commit()
+    db.caches.offline_original_delete(p1)
     db.rollback()
     assert db.caches.offline_original_get(p1) is not None
 
 
-def test_offline_original_delete_retries_locked_errors(db, no_sleep):
+def test_offline_original_delete_retries_a_locked_execute(db, no_sleep):
     pid = _photo(db)
     db.caches.offline_original_upsert(**_offline_args(pid))
-    flaky = _FlakyConn(db.conn, fail_execute=1, fail_commit=1,
-                       message="database is busy")
+    db.commit()
+    flaky = _FlakyConn(db.conn, fail_execute=1, message="database is busy")
     db.conn = flaky
     try:
         db.caches.offline_original_delete(pid)
+        db.commit()
     finally:
         db.conn = flaky._conn
     assert flaky.execute_calls == 2
-    assert flaky.commit_calls == 2
-    assert len(no_sleep) == 2
+    assert flaky.commit_calls == 1
+    assert len(no_sleep) == 1
     assert _reader(db).execute(
         "SELECT COUNT(*) FROM offline_originals"
     ).fetchone()[0] == 0
@@ -489,6 +519,7 @@ def test_offline_original_total_bytes_counts_only_cached_rows(db):
     db.caches.offline_original_upsert(**_offline_args(p1, bytes_=100))
     db.caches.offline_original_upsert(**_offline_args(p2, bytes_=40))
     db.caches.offline_original_upsert(**_offline_args(p3, bytes_=7, status="error"))
+    db.commit()
     total = db.caches.offline_original_total_bytes()
     assert total == 140
     assert isinstance(total, int)
@@ -499,24 +530,28 @@ def test_caches_are_catalog_wide(db):
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 100)
     db.caches.offline_original_upsert(**_offline_args(pid))
+    db.commit()
     db.set_active_workspace(None)
 
     assert db.caches.preview_get(pid, 1920)["bytes"] == 100
     assert db.caches.preview_total_bytes() == 100
     assert len(db.caches.preview_oldest_first()) == 1
     db.caches.preview_touch(pid, 1920)
+    db.commit()
     assert db.caches.offline_original_get(pid)["status"] == "cached"
     assert db.caches.offline_original_total_bytes() == 1234
     db.caches.preview_delete(pid, 1920)
     db.caches.offline_original_delete(pid)
     db.caches.preview_insert(pid, 2560, 5)
     db.caches.offline_original_upsert(**_offline_args(pid))
+    db.commit()
 
 
 def _seed_both_preview_families(db):
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 10)
     db.caches.preview_insert(pid, 2560, 20)
+    db.commit()
     db.caches.paired_preview_insert(pid, "a.jpg", 30)
     db.caches.paired_preview_insert(pid, "b.jpg", 40)
     db.conn.commit()
@@ -534,6 +569,7 @@ def test_preview_delete_entries_removes_only_the_named_rows_and_commits(db):
     pid = _seed_both_preview_families(db)
 
     db.caches.preview_delete_entries([(pid, 1920)], ["a.jpg"])
+    db.commit()
 
     assert not db.conn.in_transaction
     assert _preview_state(db) == ({(pid, 2560)}, {"b.jpg"})
@@ -543,6 +579,7 @@ def test_preview_delete_entries_accepts_one_empty_family(db):
     pid = _seed_both_preview_families(db)
 
     db.caches.preview_delete_entries([], ["a.jpg", "b.jpg"])
+    db.commit()
 
     assert _preview_state(db) == ({(pid, 1920), (pid, 2560)}, set())
 
@@ -551,6 +588,7 @@ def test_paired_preview_delete_removes_one_entry_and_commits(db):
     pid = _seed_both_preview_families(db)
 
     db.caches.paired_preview_delete("b.jpg")
+    db.commit()
 
     assert not db.conn.in_transaction
     assert _preview_state(db) == ({(pid, 1920), (pid, 2560)}, {"a.jpg"})
@@ -560,6 +598,7 @@ def test_preview_clear_all_empties_both_families_and_commits(db):
     _seed_both_preview_families(db)
 
     db.caches.preview_clear_all()
+    db.commit()
 
     assert not db.conn.in_transaction
     assert _preview_state(db) == (set(), set())
@@ -575,8 +614,10 @@ def test_preview_average_bytes_skips_empty_entries(db):
     assert db.caches.preview_average_bytes() is None
     pid = _photo(db)
     db.caches.preview_insert(pid, 1920, 0)
+    db.commit()
     assert db.caches.preview_average_bytes() is None
     db.caches.preview_insert(pid, 2560, 10)
+    db.commit()
     db.caches.paired_preview_insert(pid, "a.jpg", 30)
     db.conn.commit()
     assert db.caches.preview_average_bytes() == 20
@@ -636,6 +677,7 @@ def test_offline_original_cached_count_counts_only_cached_rows(db):
     p2 = _photo(db, "b.jpg")
     db.caches.offline_original_upsert(**_offline_args(p1))
     db.caches.offline_original_upsert(**_offline_args(p2, status="error"))
+    db.commit()
     assert db.caches.offline_original_cached_count() == 1
 
 
@@ -654,6 +696,7 @@ def test_offline_original_ids_excludes_non_cached_rows(db):
         **_offline_args(missing, original_path=None, xmp_path=None,
                         companion_path=None, bytes_=0, status="missing_source"))
     db.caches.offline_original_upsert(**_offline_args(errored, status="error"))
+    db.commit()
 
     assert db.caches.offline_original_ids() == [cached]
     folder_id = db.conn.execute(
@@ -668,6 +711,7 @@ def test_preview_invalidated_reads_the_marker(db):
     pid = _photo(db)
     assert db.caches.preview_invalidated(pid, 1920) is False
     mark_preview_cache_invalid(db, pid, 1920)
+    db.commit()
     assert db.caches.preview_invalidated(pid, 1920) is True
     assert db.caches.preview_invalidated(pid, 2560) is False
 
@@ -741,16 +785,18 @@ def test_caches_is_a_fresh_repository_on_the_connection_per_access(db):
 def test_caches_accessor_picks_up_a_retry_helper_patched_after_an_earlier_access(db, monkeypatch):
     pid = _photo(db)
     db.caches.offline_original_upsert(**_offline_args(pid))
-    commits = []
-    real_commit = db_module.commit_with_retry
+    db.commit()
+    executes = []
+    real_execute = db_module.execute_with_retry
 
-    def commit(conn):
-        commits.append(conn)
-        return real_commit(conn)
+    def execute(conn, sql, params=()):
+        executes.append(conn)
+        return real_execute(conn, sql, params)
 
-    monkeypatch.setattr(db_module, "commit_with_retry", commit)
+    monkeypatch.setattr(db_module, "execute_with_retry", execute)
     db.caches.offline_original_delete(pid)
-    assert commits == [db.conn]
+    db.commit()
+    assert executes == [db.conn]
     assert db.caches.offline_original_get(pid) is None
 
 

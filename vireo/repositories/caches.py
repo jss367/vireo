@@ -5,10 +5,8 @@ It also reads and writes the "do not adopt this preview" markers in
 decides when to commit them).
 
 The caches are catalog-wide (keyed by photo id, not by workspace), so the
-repository takes no workspace id. The lock-retry helpers
-(``execute_with_retry`` / ``commit_with_retry``) live in ``db``; the façade
-passes them in so this module imports no ``db`` code and a monkeypatch of
-``db.commit_with_retry`` still reaches the offline-original writes.
+repository takes no workspace id. No writer here commits: the route, job or
+service that calls it owns the transaction (``with db.transaction():``).
 
 The thumbnail cache's catalog column, ``photos.thumb_path``, is reconciled
 with the files on disk here too, for ``thumbnails.backfill_thumb_paths``.
@@ -43,7 +41,6 @@ class CachesRepository:
             "(photo_id, size, bytes, last_access_at) VALUES (?, ?, ?, ?)",
             (photo_id, size, bytes_, time.time()),
         )
-        self.conn.commit()
 
     def preview_touch(self, photo_id: int, size: int) -> None:
         """Update last_access_at for an existing entry. No-op if missing."""
@@ -52,7 +49,6 @@ class CachesRepository:
             "UPDATE preview_cache SET last_access_at=? WHERE photo_id=? AND size=?",
             (time.time(), photo_id, size),
         )
-        self.conn.commit()
 
     def preview_delete(self, photo_id: int, size: int) -> None:
         """Delete a preview_cache entry (caller removes the file)."""
@@ -60,7 +56,6 @@ class CachesRepository:
             "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
             (photo_id, size),
         )
-        self.conn.commit()
 
     def preview_total_bytes(self) -> int:
         """Return total bytes tracked across ordinary and paired previews."""
@@ -164,7 +159,6 @@ class CachesRepository:
             "UPDATE paired_preview_cache SET last_access_at=? WHERE filename=?",
             (time.time(), filename),
         )
-        self.conn.commit()
 
     def paired_preview_oldest_first(self) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -176,12 +170,11 @@ class CachesRepository:
         self.conn.execute(
             "DELETE FROM paired_preview_cache WHERE filename=?", (filename,),
         )
-        self.conn.commit()
 
     def preview_delete_entries(
         self, preview_keys: Iterable[tuple[int, int]], paired_filenames: Iterable[str],
     ) -> None:
-        """Delete ordinary entries by (photo_id, size) and paired ones by filename, then commit."""
+        """Delete ordinary entries by (photo_id, size) and paired ones by filename (no commit)."""
         self.conn.executemany(
             "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
             list(preview_keys),
@@ -190,13 +183,11 @@ class CachesRepository:
             "DELETE FROM paired_preview_cache WHERE filename=?",
             [(filename,) for filename in paired_filenames],
         )
-        self.conn.commit()
 
     def preview_clear_all(self) -> None:
         """Delete every ordinary and paired preview entry (caller removes the files)."""
         self.conn.execute("DELETE FROM preview_cache")
         self.conn.execute("DELETE FROM paired_preview_cache")
-        self.conn.commit()
 
     # -- offline original cache ----------------------------------------------
 
@@ -232,7 +223,6 @@ class CachesRepository:
                 error,
             ),
         )
-        self.commit_with_retry(self.conn)
 
     def offline_original_get(self, photo_id: int) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -272,14 +262,12 @@ class CachesRepository:
             ids.extend(row["photo_id"] for row in self.conn.execute(query, params))
         return sorted(set(ids))
 
-    def offline_original_delete(self, photo_id: int, _commit: bool = True) -> None:
+    def offline_original_delete(self, photo_id: int) -> None:
         self.execute_with_retry(
             self.conn,
             "DELETE FROM offline_originals WHERE photo_id=?",
             (photo_id,),
         )
-        if _commit:
-            self.commit_with_retry(self.conn)
 
     def offline_original_total_bytes(self) -> int:
         row = self.conn.execute(

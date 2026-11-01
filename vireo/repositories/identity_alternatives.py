@@ -449,11 +449,6 @@ class IdentityAlternativesRepository:
                  state['reason'], state['missing_evidence'], state.get('status', 'unresolved')),
             )
 
-    def begin_batch(self) -> None:
-        """Keep batch identity resolution inside the caller-owned writer transaction."""
-        if not self.conn.in_transaction:
-            self.conn.execute('BEGIN IMMEDIATE')
-
     def candidate_identities(self, candidates: Collection[str]) -> set[str]:
         """Resolve named candidates with the catalog's authoritative source precedence."""
         return candidate_identities(self.conn, candidates, lookup_taxon_id=self._lookup_taxon_id)

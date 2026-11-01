@@ -1352,7 +1352,9 @@ def test_detector_floor_reads_config_through_the_facade(name):
     "sam_variant_rerun_warning", "list_photos_for_eye_keypoint_stage",
 ])
 def test_photo_scope_comes_from_the_stats_repository(name):
-    assert "stats" in _db_attrs(getattr(subject_masks, name))
+    # Through ``stage_counts.staged_scope_clause``, which stages the scope
+    # from ``db.stats`` inside a joined unit of work.
+    assert "staged_scope_clause" in inspect.getsource(getattr(subject_masks, name))
 
 
 def test_upsert_photo_embedding_guards_through_the_facade():

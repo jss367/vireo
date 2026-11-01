@@ -50,7 +50,6 @@ class AuditRepository:
             (workspace_id, check_name, datetime.now().isoformat(),
              int(problem_count)),
         )
-        self.conn.commit()
 
     def get_runs(self) -> dict[str, dict[str, Any]]:
         """Return {check_name: {ran_at, problem_count}} for this workspace."""
@@ -135,9 +134,9 @@ class AuditRepository:
         }
 
     def update_photo_hash_check(self, photo_id: int, status: str,
-                                file_hash: str | None = None, commit: bool = True,
+                                file_hash: str | None = None,
                                 clear_file_hash: bool = False) -> None:
-        """Record a hash-verification verdict for one photo.
+        """Record a hash-verification verdict for one photo (no commit).
 
         When ``file_hash`` is given the stored baseline is replaced too
         (first-time baselining, or the user accepting an external edit).
@@ -169,8 +168,6 @@ class AuditRepository:
                 "WHERE id = ?",
                 (status, now, photo_id),
             )
-        if commit:
-            self.conn.commit()
 
     # -- repairs ---------------------------------------------------------------
 

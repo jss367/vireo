@@ -93,35 +93,28 @@ class WorkingCopyRepository:
         # A snapshot can span thousands of exact directories. Expanding one
         # OR term per directory hits SQLite's default MAX_EXPR_DEPTH=1000.
         # Keep the scope connection-local in a TEMP table instead; executemany
-        # also avoids the bound-parameter limit. Commit only the transaction
-        # opened here so the subsequent main-WAL read cannot retain a stale
-        # snapshot if another job writes before this extractor does.
-        started_in_transaction = self.conn.in_transaction
-        try:
-            self.conn.execute(
-                """CREATE TEMP TABLE IF NOT EXISTS working_copy_scope (
-                       path TEXT NOT NULL,
-                       mode TEXT NOT NULL,
-                       like_pattern TEXT,
-                       PRIMARY KEY (path, mode)
-                   )"""
-            )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS working_copy_scope_mode "
-                "ON working_copy_scope (mode)"
-            )
-            self.conn.execute("DELETE FROM working_copy_scope")
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO working_copy_scope "
-                "(path, mode, like_pattern) VALUES (?, ?, ?)",
-                scope_rows,
-            )
-            if not started_in_transaction and self.conn.in_transaction:
-                self.commit_with_retry(self.conn)
-        except Exception:
-            if not started_in_transaction and self.conn.in_transaction:
-                self.conn.rollback()
-            raise
+        # also avoids the bound-parameter limit. No commit: the caller stages
+        # inside ``with db.transaction(join=True):``, which commits the
+        # transaction it opened so the subsequent main-WAL read cannot retain
+        # a stale snapshot if another job writes before this extractor does.
+        self.conn.execute(
+            """CREATE TEMP TABLE IF NOT EXISTS working_copy_scope (
+                   path TEXT NOT NULL,
+                   mode TEXT NOT NULL,
+                   like_pattern TEXT,
+                   PRIMARY KEY (path, mode)
+               )"""
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS working_copy_scope_mode "
+            "ON working_copy_scope (mode)"
+        )
+        self.conn.execute("DELETE FROM working_copy_scope")
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO working_copy_scope "
+            "(path, mode, like_pattern) VALUES (?, ?, ?)",
+            scope_rows,
+        )
         return """AND (
               EXISTS (
                   SELECT 1 FROM working_copy_scope wcs

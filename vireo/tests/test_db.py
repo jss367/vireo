@@ -4280,6 +4280,7 @@ def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
     db.predictions.add(det_ids[0], "Robin", 0.95, "test")
     db.commit()
     db.caches.preview_insert(pids[0], 1920, 100)
+    db.commit()
     db.conn.execute(
         "INSERT INTO pending_changes "
         "(photo_id, change_type, value, change_token, workspace_id) "
@@ -16206,6 +16207,7 @@ def test_preview_cache_insert_and_touch(tmp_path):
 
     t0 = time.time()
     db.caches.preview_insert(photo_id, size=1920, bytes_=12345)
+    db.commit()
 
     row = db.conn.execute(
         "SELECT bytes, last_access_at FROM preview_cache WHERE photo_id=? AND size=?",
@@ -16217,6 +16219,7 @@ def test_preview_cache_insert_and_touch(tmp_path):
     # Sleep a tiny bit, touch, confirm timestamp advances
     time.sleep(0.05)
     db.caches.preview_touch(photo_id, size=1920)
+    db.commit()
     row2 = db.conn.execute(
         "SELECT last_access_at FROM preview_cache WHERE photo_id=? AND size=?",
         (photo_id, 1920),
@@ -16239,6 +16242,7 @@ def test_preview_cache_total_bytes(tmp_path):
     assert db.caches.preview_total_bytes() == 0
     db.caches.preview_insert(p1, 1920, 100)
     db.caches.preview_insert(p2, 2560, 200)
+    db.commit()
     assert db.caches.preview_total_bytes() == 300
 
 
@@ -16252,6 +16256,7 @@ def test_preview_cache_delete(tmp_path):
     )
     db.caches.preview_insert(p1, 1920, 100)
     db.caches.preview_delete(p1, 1920)
+    db.commit()
     assert db.caches.preview_total_bytes() == 0
 
 
@@ -16270,8 +16275,10 @@ def test_preview_cache_oldest_first(tmp_path):
     )
 
     db.caches.preview_insert(p1, 1920, 100)
+    db.commit()
     time.sleep(0.05)
     db.caches.preview_insert(p2, 1920, 200)
+    db.commit()
 
     rows = db.caches.preview_oldest_first()
     assert [(r["photo_id"], r["size"]) for r in rows] == [(p1, 1920), (p2, 1920)]

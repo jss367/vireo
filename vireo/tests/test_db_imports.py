@@ -205,10 +205,11 @@ def _committed_identities(db):
         ).fetchall()
 
 
-def test_record_recovered_companion_identities_commits_on_release(db, catalog):
+def test_record_recovered_companion_identities_commits_in_a_joined_unit(db, catalog):
     assert not db.in_transaction
-    db.imports.record_recovered_companion_identities(
-        [(catalog["raw"], "bird.jpg", 50, "t", "h-bird")])
+    with db.transaction(join=True):
+        db.imports.record_recovered_companion_identities(
+            [(catalog["raw"], "bird.jpg", 50, "t", "h-bird")])
     assert not db.in_transaction
     assert _committed_identities(db) == [
         (catalog["raw"], "bird.jpg", 50, "t", "h-bird", None, 1)]
@@ -216,8 +217,9 @@ def test_record_recovered_companion_identities_commits_on_release(db, catalog):
 
 def test_record_recovered_companion_identities_nests_in_an_open_transaction(db, catalog):
     db.begin()
-    db.imports.record_recovered_companion_identities(
-        [(catalog["raw"], "bird.jpg", 50, "t", "h-bird")])
+    with db.transaction(join=True):
+        db.imports.record_recovered_companion_identities(
+            [(catalog["raw"], "bird.jpg", 50, "t", "h-bird")])
     assert db.in_transaction
     assert _committed_identities(db) == []
     db.rollback()
@@ -227,12 +229,12 @@ def test_record_recovered_companion_identities_nests_in_an_open_transaction(db, 
 def test_record_recovered_companion_identities_rolls_back_and_reraises(db, catalog):
     db.begin()
     db.conn.execute("UPDATE photos SET rating = 3 WHERE id = ?", (catalog["jpg"],))
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqlite3.IntegrityError), db.transaction(join=True):
         db.imports.record_recovered_companion_identities([
             (catalog["raw"], "bird.jpg", 50, "t", "h-bird"),
             (999999, "ghost.jpg", 1, None, None),  # violates the photo FK
         ])
-    # Only the savepoint's writes are undone; the outer work stays pending.
+    # Only the joined savepoint's writes are undone; the outer work stays pending.
     assert db.in_transaction
     assert db.conn.execute("SELECT COUNT(*) FROM companion_identities").fetchone()[0] == 0
     assert db.conn.execute(

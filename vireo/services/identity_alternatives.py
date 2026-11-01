@@ -47,7 +47,10 @@ class _IdentityBatch:
     def __init__(self, db: Database) -> None:
         # Direct service callers share the HTTP/history transaction contract:
         # no other writer may change taxonomy while this phase reuses it.
-        db.identity_alternatives.begin_batch()
+        # Keep batch identity resolution inside the caller-owned writer
+        # transaction, taking the writer lock now if none is open yet.
+        if not db.in_transaction:
+            db.begin_immediate()
         self.db = db
         self._identities: dict[frozenset[str], set[str]] = {}
 

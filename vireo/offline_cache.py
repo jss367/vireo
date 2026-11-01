@@ -298,7 +298,7 @@ def release_photo_original(
                     except FileNotFoundError:
                         continue
                     freed += size
-                db.caches.offline_original_delete(photo_id, _commit=False)
+                db.caches.offline_original_delete(photo_id)
         except (OSError, sqlite3.Error) as exc:
             return {"status": "failed", "bytes": freed, "reason": str(exc)}
         return {"status": "released", "bytes": freed}
@@ -314,18 +314,19 @@ def _missing_source_result(
             "bytes": existing["bytes"],
             "path": existing_path,
         }
-    db.caches.offline_original_upsert(
-        photo["id"],
-        original_path=None,
-        xmp_path=None,
-        companion_path=None,
-        bytes_=0,
-        source_size=photo["file_size"] or 0,
-        source_mtime=photo["file_mtime"],
-        cached_at=now,
-        status="missing_source",
-        error=error,
-    )
+    with db.transaction():
+        db.caches.offline_original_upsert(
+            photo["id"],
+            original_path=None,
+            xmp_path=None,
+            companion_path=None,
+            bytes_=0,
+            source_size=photo["file_size"] or 0,
+            source_mtime=photo["file_mtime"],
+            cached_at=now,
+            status="missing_source",
+            error=error,
+        )
     return {"status": "missing_source", "bytes": 0, "path": path}
 
 
@@ -470,16 +471,17 @@ def _cache_photo_original(db, photo, vireo_dir, folders):
     )
     copied_bytes += companion_bytes
 
-    db.caches.offline_original_upsert(
-        photo["id"],
-        original_path=original_rel,
-        xmp_path=xmp_rel,
-        companion_path=companion_rel,
-        bytes_=copied_bytes,
-        source_size=st.st_size,
-        source_mtime=st.st_mtime,
-        cached_at=now,
-        status="cached",
-        error=None,
-    )
+    with db.transaction():
+        db.caches.offline_original_upsert(
+            photo["id"],
+            original_path=original_rel,
+            xmp_path=xmp_rel,
+            companion_path=companion_rel,
+            bytes_=copied_bytes,
+            source_size=st.st_size,
+            source_mtime=st.st_mtime,
+            cached_at=now,
+            status="cached",
+            error=None,
+        )
     return {"status": "cached", "bytes": copied_bytes, "path": original_abs}

@@ -3378,6 +3378,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
         ("thumbnails/raw.jpg", raw_id),
     )
     db.caches.preview_insert(raw_id, 800, 1234)
+    db.commit()
 
     _pair_raw_jpeg_companions(db)
 
@@ -6436,6 +6437,7 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     Image.new("RGB", (800, 600), color=(255, 0, 0)).save(display_file, "JPEG")
     file_bytes = preview_file.stat().st_size
     db.caches.preview_insert(photo_id, 1920, file_bytes)
+    db.commit()
     assert db.caches.preview_total_bytes() == file_bytes
 
     # Replace source pixels → new file_hash → invalidation should fire.
@@ -6481,6 +6483,7 @@ def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeyp
     Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
     file_bytes = preview_file.stat().st_size
     db.caches.preview_insert(photo_id, 1920, file_bytes)
+    db.commit()
 
     # Simulate the preview file being un-removable (locked, ACL, etc.).
     real_remove = os.remove

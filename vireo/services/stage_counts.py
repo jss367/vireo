@@ -43,6 +43,18 @@ def _detector_confidence(db: Database, min_conf: float | None) -> float:
         return min_conf
     return config_value(db.get_effective_config(cfg.load()), "detector_confidence")
 
+def staged_scope_clause(db: Database, photo_ids: Iterable[int] | None) -> tuple[str, list[int]]:
+    """``db.stats.scope_clause`` with its TEMP-table staging in a joined unit.
+
+    A large scope is staged in a connection-local TEMP table. Joined, the
+    staging commits when no transaction was open (so none is left open
+    across the reads that follow) and is a savepoint inside one the caller
+    already owns (so a caller's open edit is neither committed nor ended).
+    """
+    with db.transaction(join=True):
+        return db.stats.scope_clause(photo_ids)
+
+
 def count_real_detections_in_scope(
     db: Database, photo_ids: Iterable[int] | None = None, min_conf: float | None = None,
 ) -> dict[str, int]:
@@ -56,7 +68,7 @@ def count_real_detections_in_scope(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, min_conf)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_real_detections_in_scope(min_conf, scope_sql, scope_params)
 
 
@@ -72,7 +84,7 @@ def count_primary_detections_in_scope(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, min_conf)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_primary_detections_in_scope(min_conf, scope_sql, scope_params)
 
 
@@ -89,7 +101,7 @@ def count_classify_pending_pairs(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, min_conf)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_classify_pending_pairs(
         classifier_model, labels_fingerprint, min_conf, scope_sql,
         scope_params,
@@ -107,7 +119,7 @@ def count_primary_classify_pending_pairs(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, min_conf)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_primary_classify_pending_pairs(
         classifier_model, labels_fingerprint, min_conf, scope_sql,
         scope_params,
@@ -130,7 +142,7 @@ def count_classify_stale(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, min_conf)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_classify_stale(
         classifier_model, labels_fingerprint, min_conf, scope_sql,
         scope_params,
@@ -144,7 +156,7 @@ def count_primary_classify_stale(
     """Count stale classifier runs on primary detections only."""
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, min_conf)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_primary_classify_stale(
         classifier_model, labels_fingerprint, min_conf, scope_sql,
         scope_params,
@@ -166,7 +178,7 @@ def count_full_image_fallback_photos(
     disqualified the photo.
     """
     repo = _scoped_stats(db)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_full_image_fallback_photos(
         detector_model, min_conf, scope_sql, scope_params,
     )
@@ -185,7 +197,7 @@ def count_full_image_classify_pending_pairs(
     counts alongside truly empty ``box_count = 0`` runs.
     """
     repo = _scoped_stats(db)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_full_image_classify_pending_pairs(
         classifier_model, labels_fingerprint, detector_model, min_conf,
         scope_sql, scope_params,
@@ -204,7 +216,7 @@ def count_full_image_classify_stale(
     stale-anchor scope alongside the ``box_count = 0`` cases.
     """
     repo = _scoped_stats(db)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_full_image_classify_stale(
         classifier_model, labels_fingerprint, detector_model, min_conf,
         scope_sql, scope_params,
@@ -230,7 +242,7 @@ def count_photos_pending_masks(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, min_conf)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_photos_pending_masks(
         min_conf, sam2_variant, scope_sql, scope_params, rescue_floors=rescue_floors,
     )
@@ -252,7 +264,7 @@ def count_photos_missing_thumb(
     NULL value is a reliable "needs generating" signal.
     """
     repo = _scoped_stats(db)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_photos_missing_thumb(scope_sql, scope_params)
 
 
@@ -272,7 +284,7 @@ def count_photos_missing_preview(
     for "preview present on disk at this size".
     """
     repo = _scoped_stats(db)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_photos_missing_preview(size, scope_sql, scope_params)
 
 
@@ -291,7 +303,7 @@ def count_photos_missing_thumb_or_preview(
     the two missing-sets aren't strict subsets of each other.
     """
     repo = _scoped_stats(db)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_photos_missing_thumb_or_preview(size, scope_sql, scope_params)
 
 
@@ -331,7 +343,7 @@ def count_extract_stale(
     """
     repo = _scoped_stats(db)
     detector_confidence = _detector_confidence(db, detector_confidence)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_extract_stale(
         sam2_variant, detector_confidence, scope_sql, scope_params, rescue_floors=rescue_floors,
     )
@@ -357,7 +369,7 @@ def count_eye_keypoint_eligible(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, None)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_eye_keypoint_eligible(min_conf, scope_sql, scope_params)
 
 
@@ -376,7 +388,7 @@ def count_eye_keypoint_stale(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, None)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_eye_keypoint_stale(min_conf, scope_sql, scope_params)
 
 
@@ -409,7 +421,7 @@ def count_eye_keypoint_attemptable(
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, None)
-    scope_sql, scope_params = repo.scope_clause(photo_ids)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
     return repo.count_eye_keypoint_attemptable(
         min_species_conf, min_conf, scope_sql, scope_params,
     )

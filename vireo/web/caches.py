@@ -289,11 +289,12 @@ def create_caches_blueprint(
                     pass
                 except OSError:
                     failed_paired.add(name)
-        db.caches.preview_delete_entries(
-            [],
-            [row["filename"] for row in paired_rows
-             if row["filename"] not in failed_paired],
-        )
+        with db.transaction():
+            db.caches.preview_delete_entries(
+                [],
+                [row["filename"] for row in paired_rows
+                 if row["filename"] not in failed_paired],
+            )
 
         remaining = db.caches.preview_entry_count()
         cleared = tracked - remaining

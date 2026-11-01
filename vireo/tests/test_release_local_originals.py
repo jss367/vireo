@@ -288,6 +288,7 @@ def test_release_selection_reports_pathless_missing_source_as_not_cached(
         source_mtime=photo["file_mtime"], cached_at=0.0,
         status="missing_source", error="source file missing",
     )
+    db.commit()
     row_before = dict(db.caches.offline_original_get(pid))
 
     job = run_release(app, {"photo_ids": [pid]})

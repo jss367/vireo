@@ -2191,6 +2191,7 @@ def test_concurrent_preview_cache_misses_decode_once(
     with contextlib.suppress(OSError):
         os.unlink(cache_path)
     db.caches.preview_delete(photo_id, 1920)
+    db.commit()
 
     started = threading.Event()
     release = threading.Event()
@@ -2263,6 +2264,7 @@ def test_failed_preview_flight_wakes_waiter_and_next_request_retries(
     with contextlib.suppress(OSError):
         os.unlink(cache_path)
     db.caches.preview_delete(photo_id, 1920)
+    db.commit()
 
     started = threading.Event()
     release = threading.Event()
@@ -7485,6 +7487,7 @@ def test_reconcile_drops_ghost_rows_when_files_missing(tmp_path):
     # Row exists in table but no file on disk — exactly the drift state
     # observed in production (DB says ~2 GB tracked, disk has 0 bytes).
     db.caches.preview_insert(pid, 1920, 450_000)
+    db.commit()
     assert db.caches.preview_total_bytes() == 450_000
 
     dropped = reconcile_preview_cache(db, str(vireo_dir))
@@ -7513,6 +7516,7 @@ def test_reconcile_keeps_live_rows(tmp_path):
     preview_file = preview_dir / f"{pid}_1920.jpg"
     Image.new("RGB", (1920, 1280), (10, 20, 30)).save(str(preview_file), "JPEG")
     db.caches.preview_insert(pid, 1920, preview_file.stat().st_size)
+    db.commit()
 
     dropped = reconcile_preview_cache(db, str(vireo_dir))
     assert dropped == 0
@@ -7551,6 +7555,7 @@ def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
 
     # Seed a ghost row: bytes claimed but no file behind it.
     db.caches.preview_insert(pid, 1920, 450_000)
+    db.commit()
     db.close()
 
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir),
@@ -7752,6 +7757,7 @@ def test_interactive_preview_joins_background_warmer(
     with contextlib.suppress(FileNotFoundError):
         os.unlink(preview_path)
     db.caches.preview_delete(photo_id, 1920)
+    db.commit()
 
     producer_started = threading.Event()
     release_producer = threading.Event()
@@ -8397,6 +8403,7 @@ def test_legacy_sized_preview_backfill_skips_already_tracked(tmp_path, monkeypat
 
     # Row already exists with a recent last_access_at and the real size.
     db.caches.preview_insert(pid, 1920, os.path.getsize(sized))
+    db.commit()
     original_access = db.caches.preview_get(pid, 1920)["last_access_at"]
 
     # Wait long enough that an unintended re-insert would change the timestamp.
@@ -8505,6 +8512,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     plain_raw_thumb.write_bytes(b"plain raw")
     db.caches.preview_insert(pid_edited, 1920, edited_preview.stat().st_size)
     db.caches.preview_insert(pid_plain, 1920, plain_preview.stat().st_size)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET thumb_path = ? WHERE id = ?",
         (f"{pid_edited}.jpg", pid_edited),
@@ -8544,6 +8552,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     new_preview = preview_dir / f"{pid_edited}_1920.jpg"
     new_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 1024)
     db.caches.preview_insert(pid_edited, 1920, new_preview.stat().st_size)
+    db.commit()
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
     assert new_preview.exists()
     assert db.caches.preview_get(pid_edited, 1920) is not None
@@ -9115,6 +9124,7 @@ def test_preview_cache_clear_removes_untracked_and_legacy(client_with_photo):
         with open(p, "wb") as f:
             f.write(b"\xff\xd8\xff\xe0fake")
     db.caches.preview_insert(photo_id, 1920, os.path.getsize(tracked))
+    db.commit()
 
     client = app.test_client()
     resp = client.post("/api/preview-cache/clear")
@@ -9151,6 +9161,7 @@ def test_preview_cache_clear_handles_many_unlink_failures(client_with_photo, mon
         with open(p, "wb") as f:
             f.write(b"\xff\xd8\xff\xe0x")
         db.caches.preview_insert(photo_id, size, os.path.getsize(p))
+        db.commit()
         sized_files.append((p, photo_id, size))
 
     # Fail every unlink for these files — simulates a locked/read-only dir.

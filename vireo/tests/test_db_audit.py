@@ -81,6 +81,7 @@ def test_get_audit_runs_empty(db):
 def test_record_audit_run_commits_and_overwrites(db):
     before = datetime.now()
     db.audit.record_run("verify", 3)
+    db.commit()
     assert not db.conn.in_transaction
 
     conn = _other_conn(db)
@@ -98,6 +99,7 @@ def test_record_audit_run_commits_and_overwrites(db):
     assert datetime.fromisoformat(rows[0]["ran_at"]) >= before
 
     db.audit.record_run("verify", 0)
+    db.commit()
     runs = db.audit.get_runs()
     assert list(runs) == ["verify"]
     assert runs["verify"]["problem_count"] == 0
@@ -107,6 +109,7 @@ def test_record_audit_run_commits_and_overwrites(db):
 def test_record_audit_run_coerces_problem_count_to_int(db):
     db.audit.record_run("drift", "7")
     db.audit.record_run("orphans", 2.9)
+    db.commit()
     runs = db.audit.get_runs()
     assert runs["drift"]["problem_count"] == 7
     assert runs["orphans"]["problem_count"] == 2
@@ -116,16 +119,19 @@ def test_record_audit_run_coerces_problem_count_to_int(db):
 def test_record_audit_run_rejects_non_numeric_count(db):
     with pytest.raises(ValueError):
         db.audit.record_run("drift", "many")
+        db.commit()
     assert db.audit.get_runs() == {}
 
 
 def test_audit_runs_are_scoped_to_active_workspace(db):
     first = db._active_workspace_id
     db.audit.record_run("verify", 1)
+    db.commit()
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
     assert db.audit.get_runs() == {}
     db.audit.record_run("verify", 5)
+    db.commit()
     assert db.audit.get_runs()["verify"]["problem_count"] == 5
     db.set_active_workspace(first)
     assert db.audit.get_runs()["verify"]["problem_count"] == 1
@@ -183,10 +189,13 @@ def test_get_integrity_flagged_filters_and_orders(db, library):
     db.audit.update_photo_hash_check(ids["c_partial"], "corrupt")
     db.audit.update_photo_hash_check(ids["d_missing"], "unreadable")  # missing folder
     db.audit.update_photo_hash_check(ids["e_foreign"], "corrupt")  # other workspace
+    db.commit()
     extra = photo_ingest.add_photo(db, library["folders"]["ok"], "z.jpg", ".jpg", 1, 9.0)
     db.audit.update_photo_hash_check(extra, "unreadable")
+    db.commit()
     ok_photo = photo_ingest.add_photo(db, library["folders"]["ok"], "y.jpg", ".jpg", 1, 9.0)
     db.audit.update_photo_hash_check(ok_photo, "ok")
+    db.commit()
 
     rows = db.audit.get_integrity_flagged()
     assert [(r["hash_status"], r["filename"]) for r in rows] == [
@@ -220,6 +229,7 @@ def test_get_integrity_stats_counts(db, library):
     db.audit.update_photo_hash_check(ids["b_ok"], "corrupt")
     db.audit.update_photo_hash_check(ids["d_missing"], "modified")
     db.audit.update_photo_hash_check(ids["e_foreign"], "modified")
+    db.commit()
     assert db.audit.get_integrity_stats() == {
         "total": 3, "checked": 2, "unchecked": 1, "flagged": 1,
     }
@@ -232,6 +242,7 @@ def test_update_photo_hash_check_status_only_keeps_hash(db, library):
     pid = library["ids"]["a_ok"]
     before = datetime.now()
     db.audit.update_photo_hash_check(pid, "ok")
+    db.commit()
     assert not db.conn.in_transaction
     row = _photo_row(db, pid)
     assert row["hash_status"] == "ok"
@@ -242,6 +253,7 @@ def test_update_photo_hash_check_status_only_keeps_hash(db, library):
 def test_update_photo_hash_check_replaces_hash(db, library):
     pid = library["ids"]["a_ok"]
     db.audit.update_photo_hash_check(pid, "ok", file_hash="h-new")
+    db.commit()
     row = _photo_row(db, pid)
     assert row["hash_status"] == "ok"
     assert row["file_hash"] == "h-new"
@@ -251,6 +263,7 @@ def test_update_photo_hash_check_replaces_hash(db, library):
 def test_update_photo_hash_check_clears_hash(db, library):
     pid = library["ids"]["a_ok"]
     db.audit.update_photo_hash_check(pid, "ok", clear_file_hash=True)
+    db.commit()
     row = _photo_row(db, pid)
     assert row["hash_status"] == "ok"
     assert row["file_hash"] is None
@@ -265,6 +278,7 @@ def test_update_photo_hash_check_rejects_conflicting_hash_args(db, library):
     ):
         db.audit.update_photo_hash_check(pid, "ok", file_hash="h-x",
                                    clear_file_hash=True)
+        db.commit()
     assert not db.conn.in_transaction
     row = _photo_row(db, pid)
     assert row["hash_status"] is None
@@ -273,8 +287,7 @@ def test_update_photo_hash_check_rejects_conflicting_hash_args(db, library):
 
 def test_update_photo_hash_check_commit_false_defers(db, library):
     pid = library["ids"]["a_ok"]
-    db.audit.update_photo_hash_check(pid, "modified", file_hash="h-z",
-                               commit=False)
+    db.audit.update_photo_hash_check(pid, "modified", file_hash="h-z")
     assert db.conn.in_transaction
     assert _photo_row(db, pid)["hash_status"] is None
     db.conn.commit()
@@ -288,22 +301,23 @@ def test_update_photo_hash_check_is_catalog_wide(db, library):
     pid = library["ids"]["e_foreign"]
     db.set_active_workspace(None)
     db.audit.update_photo_hash_check(pid, "corrupt")
+    db.commit()
     assert _photo_row(db, pid)["hash_status"] == "corrupt"
 
 
 def test_update_photo_hash_check_unknown_photo_is_noop(db):
     db.audit.update_photo_hash_check(999_999, "ok")
+    db.commit()
     assert not db.conn.in_transaction
 
 
 def test_update_photo_hash_check_signature_defaults():
     params = inspect.signature(AuditRepository.update_photo_hash_check).parameters
     assert list(params) == [
-        "self", "photo_id", "status", "file_hash", "commit",
+        "self", "photo_id", "status", "file_hash",
         "clear_file_hash",
     ]
     assert params["file_hash"].default is None
-    assert params["commit"].default is True
     assert params["clear_file_hash"].default is False
 
 
@@ -377,6 +391,7 @@ def test_scoped_methods_raise_before_any_sql_without_a_workspace(db):
     ``RuntimeError`` before touching the database (a non-numeric count included,
     which used to fail on the workspace before ``int()`` ran)."""
     db.audit.record_run("verify", 2)
+    db.commit()
     db.set_active_workspace(None)
     repo = db.audit
     statements = []
@@ -402,6 +417,7 @@ def test_scoped_methods_resolve_the_workspace_active_at_each_call(db, library):
     held across the switch reads the new workspace too, since it holds the
     resolver rather than an id."""
     db.audit.record_run("verify", 1)
+    db.commit()
     held = db.audit
     db.set_active_workspace(library["other_ws"])
     assert db.audit.get_runs() == {}

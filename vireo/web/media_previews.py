@@ -119,7 +119,7 @@ def _serve_cached_preview(
         and db.caches.preview_get(photo_id, size)
         and os.path.exists(cache_path)
     ):
-        with contextlib.suppress(sqlite3.Error):
+        with contextlib.suppress(sqlite3.Error), db.transaction():
             db.caches.preview_touch(photo_id, size)
         return send_file(cache_path, mimetype="image/jpeg")
 
@@ -139,7 +139,8 @@ def _serve_cached_preview(
         with open(cache_path, "rb") as f:
             data = f.read()
         try:
-            db.caches.preview_insert(photo_id, size, len(data))
+            with db.transaction():
+                db.caches.preview_insert(photo_id, size, len(data))
             evict_preview_cache_if_over_quota(db, vireo_dir)
         except Exception:
             # broad: the bytes are already in memory; bookkeeping must not
@@ -155,7 +156,7 @@ def _serve_cached_preview(
         and paired_preview_ready(db, paired_cache_path)
         and _camera_cache_matches(paired_cache_path, photo, recipe, source_path)
     ):
-        with contextlib.suppress(sqlite3.Error):
+        with contextlib.suppress(sqlite3.Error), db.transaction():
             db.caches.paired_preview_touch(os.path.basename(paired_cache_path))
         return send_file(paired_cache_path, mimetype="image/jpeg")
     return None
@@ -273,7 +274,8 @@ class _PreviewServer:
         ):
             with contextlib.suppress(OSError):
                 os.remove(cache_path)
-            db.caches.preview_delete(photo_id, size)  # no-op if no row
+            with db.transaction():
+                db.caches.preview_delete(photo_id, size)  # no-op if no row
 
         skip_untracked_preview_adoption = False
         stale_after_failed_invalidation = (
@@ -297,12 +299,14 @@ class _PreviewServer:
             else:
                 self._invalid_preview_cache_paths.discard(cache_path)
                 self._clear_preview_cache_invalid(db, photo_id, size)
-                db.caches.preview_delete(photo_id, size)
+                with db.transaction():
+                    db.caches.preview_delete(photo_id, size)
                 stale_after_failed_invalidation = False
         elif not bypass_cache and stale_after_failed_invalidation:
             self._invalid_preview_cache_paths.discard(cache_path)
             self._clear_preview_cache_invalid(db, photo_id, size)
-            db.caches.preview_delete(photo_id, size)
+            with db.transaction():
+                db.caches.preview_delete(photo_id, size)
             stale_after_failed_invalidation = False
         if (
             not bypass_cache

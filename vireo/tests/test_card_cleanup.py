@@ -319,6 +319,7 @@ def _archive_photo(db, tmp_path, name="IMG_0001.NEF", content=b"raw-one",
     )
     if hash_status is not None:
         db.audit.update_photo_hash_check(pid, hash_status)
+        db.commit()
     return f, pid
 
 
@@ -1062,6 +1063,7 @@ def test_scoped_verify_terminal_alias_does_not_mask_persisted_external_failure(
         file_hash=_sha(str(card)),
     )
     db.audit.update_photo_hash_check(external_pid, "corrupt")
+    db.commit()
 
     # Alias row: a hardlink into the card file itself. Still NULL —
     # never audited. Scoped verify will detect it as same-as-card via
@@ -1405,6 +1407,7 @@ def test_qualify_rejects_hardlink_alias_of_card_file(db, tmp_path):
         file_hash=_sha(str(alias)),
     )
     db.audit.update_photo_hash_check(pid, "ok")
+    db.commit()
     result = _scan(db, tmp_path)
     assert len(_entries(result, "deletable")) == 0
     kept = _entries(result, "kept")

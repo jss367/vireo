@@ -43,6 +43,7 @@ def _archive_photo(db, tmp_path, name="IMG_0001.NEF", content=b"raw-one",
         file_hash=_sha(str(f)),
     )
     db.audit.update_photo_hash_check(pid, "ok")
+    db.commit()
     return f, pid
 
 

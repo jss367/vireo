@@ -135,14 +135,15 @@ class RenderCache:
     # same marker consulted by the lazy-adoption branch in
     # web.media_previews._PreviewServer._serve_preview.
     @staticmethod
-    def mark_preview_cache_invalid(db: Database, photo_id: int, size: int | str, *, commit: bool = True) -> None:
-        preview_cache.mark_preview_cache_invalid(db, photo_id, size, commit=commit)
+    def mark_preview_cache_invalid(db: Database, photo_id: int, size: int | str) -> None:
+        """Record the "do not adopt" marker (no commit: the caller's unit owns it)."""
+        preview_cache.mark_preview_cache_invalid(db, photo_id, size)
 
     @staticmethod
-    def clear_preview_cache_invalid(db: Database, photo_id: int, size: int | str, *, commit: bool = True) -> None:
-        db.caches.clear_preview_invalidation(photo_id, size)
-        if commit:
-            db.commit()
+    def clear_preview_cache_invalid(db: Database, photo_id: int, size: int | str) -> None:
+        """Clear the "do not adopt" marker in its own unit of work."""
+        with db.transaction():
+            db.caches.clear_preview_invalidation(photo_id, size)
 
     def invalidate_photo_render_cache(self, db: Database, photo_ids: Iterable[int]) -> None:
         """Drop cached rendered derivatives after an edit recipe changes."""
@@ -151,13 +152,13 @@ class RenderCache:
         preview_dir = os.path.join(vireo_dir, "previews")
         originals_dir = os.path.join(vireo_dir, "originals")
         external_edits_dir = os.path.join(vireo_dir, "external-edits")
-        for pid in photo_ids:
-            _drop_stale_thumbnails(db, pid, thumb_dir)
-            self._drop_stale_previews(db, pid, preview_dir)
-            _drop_stale_originals_and_external_edits(
-                pid, originals_dir, external_edits_dir,
-            )
-        db.commit()
+        with db.transaction():
+            for pid in photo_ids:
+                _drop_stale_thumbnails(db, pid, thumb_dir)
+                self._drop_stale_previews(db, pid, preview_dir)
+                _drop_stale_originals_and_external_edits(
+                    pid, originals_dir, external_edits_dir,
+                )
 
     def _drop_stale_previews(self, db: Database, pid: int, preview_dir: str) -> None:
         """Unlink ``pid``'s sized previews, marking any that can't be removed."""
@@ -173,18 +174,14 @@ class RenderCache:
             except OSError:
                 if os.path.exists(path):
                     self.invalid_preview_cache_paths.add(path)
-                    self.mark_preview_cache_invalid(
-                        db, pid, size_value, commit=False,
-                    )
+                    self.mark_preview_cache_invalid(db, pid, size_value)
                 log.warning(
                     "Failed to remove stale preview cache %s",
                     path, exc_info=True,
                 )
             else:
                 removed_preview_rows.append((pid, size_value))
-                self.clear_preview_cache_invalid(
-                    db, pid, size_value, commit=False,
-                )
+                db.caches.clear_preview_invalidation(pid, size_value)
         try:
             for name in os.listdir(preview_dir):
                 if not (name.startswith(f"{pid}_") and name.endswith(".jpg")):
@@ -198,17 +195,13 @@ class RenderCache:
                 except OSError:
                     if os.path.exists(path):
                         self.invalid_preview_cache_paths.add(path)
-                        self.mark_preview_cache_invalid(
-                            db, pid, size_part, commit=False,
-                        )
+                        self.mark_preview_cache_invalid(db, pid, size_part)
                     log.warning(
                         "Failed to remove stale preview cache %s",
                         path, exc_info=True,
                     )
                 else:
-                    self.clear_preview_cache_invalid(
-                        db, pid, size_part, commit=False,
-                    )
+                    db.caches.clear_preview_invalidation(pid, size_part)
         except FileNotFoundError:
             pass
         if removed_preview_rows:

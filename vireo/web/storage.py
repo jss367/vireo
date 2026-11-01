@@ -548,7 +548,8 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
             # Keep preview_cache table in sync with the filesystem so
             # Settings "Current usage" and eviction don't see phantoms.
             db = get_db()
-            db.caches.preview_clear_all()
+            with db.transaction():
+                db.caches.preview_clear_all()
             return jsonify({"ok": True})
         elif cache_type == "thumbnails":
             thumb_dir = config["THUMB_CACHE_DIR"]
@@ -747,11 +748,13 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
                 os.remove(fp)
                 deleted += 1
                 if is_paired:
-                    db.caches.paired_preview_delete(safe)
+                    with db.transaction():
+                        db.caches.paired_preview_delete(safe)
                 elif cache_type == "previews":
                     m = sized_pat.match(safe)
                     if m:
-                        db.caches.preview_delete(int(m.group(1)), int(m.group(2)))
+                        with db.transaction():
+                            db.caches.preview_delete(int(m.group(1)), int(m.group(2)))
                         preview_rows_removed += 1
                 elif cache_type == "thumbnails":
                     m = thumb_pat.match(safe)

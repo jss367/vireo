@@ -847,7 +847,7 @@ def _extract_plan(db, params, photo_ids, effective_cfg, new_count=0):
             "state": "will-run",
             "summary": "Recompute quality with per-subject RAW exposure analysis",
         }
-    scope_sql, scope_params = db.stats.scope_clause(photo_ids)
+    scope_sql, scope_params = stage_counts.staged_scope_clause(db, photo_ids)
     if db.stats.has_quality_input_recipe(scope_sql, scope_params):
         return {
             "state": "will-run",

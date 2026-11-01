@@ -409,7 +409,7 @@ def _stamp_cataloged_landing(
     if row["file_hash"] == verified_hash:
         if attests_bytes:
             db.audit.update_photo_hash_check(
-                row["id"], "ok", commit=False,
+                row["id"], "ok",
             )
         state.imported_photo_ids.add(row["id"])
     elif row["file_hash"] is None:
@@ -446,7 +446,6 @@ def _stamp_cataloged_landing(
                         if verified_hash != EMPTY_FILE_SHA256
                         else None
                     ),
-                    commit=False,
                 )
             state.imported_photo_ids.add(row["id"])
         else:

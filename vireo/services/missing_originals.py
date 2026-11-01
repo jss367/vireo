@@ -242,7 +242,8 @@ def missing_photos_subtree_clause(
             # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
             # in a single IN(...) clause. Stage the ids in a
             # connection-local temp table and join through that instead.
-            db.stats.stage_scope_ids("missing_subtree_ids", subtree_ids)
+            with db.transaction(join=True):
+                db.stats.stage_scope_ids("missing_subtree_ids", subtree_ids)
             subtree_clause = (
                 " AND f.id IN (SELECT id FROM missing_subtree_ids)"
             )

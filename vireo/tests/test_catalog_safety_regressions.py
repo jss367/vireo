@@ -25,7 +25,8 @@ def test_large_scope_releases_its_read_transaction(db, tmp_path):
     other = Database(db._db_path)
     try:
         db.conn.commit()
-        clause, params = db.stats.scope_clause(range(1, 802))
+        from services import stage_counts
+        clause, params = stage_counts.staged_scope_clause(db, range(1, 802))
         db.conn.execute("SELECT p.id FROM photos p WHERE 1=1" + clause, params).fetchall()
         assert not db.conn.in_transaction
         other.conn.execute("UPDATE photos SET rating=4 WHERE id=?", (pid,))
