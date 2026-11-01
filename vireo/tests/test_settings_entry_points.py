@@ -124,12 +124,15 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
 
 def _walk_module_level(node: ast.AST):
     """Yield ``node`` and its descendants, but stop at function/class/lambda
-    bodies, which do not execute until the function is called."""
+    bodies, which do not execute until the function is called. The skip
+    applies to ``node`` itself as well: a caller that walks the body of an
+    init-invoked function statement by statement may hand in a nested
+    ``def``/``class``/``lambda``, whose body is still deferred."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                         ast.ClassDef, ast.Lambda)):
+        return
     yield node
     for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                              ast.ClassDef, ast.Lambda)):
-            continue
         yield from _walk_module_level(child)
 
 
@@ -258,6 +261,12 @@ def test_entry_points_import_config_before_opening_a_database():
     # A function defined but never invoked during init is bootstrapped by a
     # late module-level import, since it only runs after module init.
     ("def f(p):\n    return Database(p)\ndef g(p):\n    pass\ng(1)\nimport config\n", []),
+    # A nested ``def`` inside an init-invoked function is itself not called,
+    # so calls in its body do not entrain their callees during initialization:
+    # ``open_db`` here is only called from the uncalled ``unused`` inside
+    # ``setup``, so the module-level ``import config`` that runs before
+    # ``open_db`` is ever actually called is a valid bootstrap for it.
+    ("def setup():\n    def unused():\n        open_db()\ndef open_db():\n    return Database(p)\nsetup()\nimport config\n", []),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines
