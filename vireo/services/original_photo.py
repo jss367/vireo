@@ -953,14 +953,15 @@ class OriginalExtraction:
 
     def commit_generated_original(self, uw: int, uh: int, *, tracked: bool) -> None:
         photo = self.original.photo
-        self.original.db.photos.record_generated_original(
-            self.original.photo_id,
-            self.wc_rel,
-            tracked=tracked,
-            dimensions=(
-                (uw, uh) if not photo["width"] or not photo["height"] else None
-            ),
-        )
+        with self.original.db.transaction():
+            self.original.db.photos.record_generated_original(
+                self.original.photo_id,
+                self.wc_rel,
+                tracked=tracked,
+                dimensions=(
+                    (uw, uh) if not photo["width"] or not photo["height"] else None
+                ),
+            )
 
     def commit_untracked_generated_original(self, uw: int, uh: int) -> None:
         # A transient full-resolution response must not orphan

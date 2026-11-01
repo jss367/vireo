@@ -803,7 +803,7 @@ def create_settings_blueprint(
             # stamp a fresh ``working_copy_evicted_mtime`` after this
             # UPDATE runs, leaving the row permanently ineligible for
             # backfill under the raised ceiling.
-            with working_copy_publication_guard():
+            with working_copy_publication_guard(), quota_db.transaction():
                 quota_db.photos.clear_working_copy_evictions()
 
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])

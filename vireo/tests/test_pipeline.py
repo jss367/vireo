@@ -83,6 +83,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
                 pid,
                 subject_size=0.08 + i * 0.02,
             )
+            db.commit()
 
             # Add a detection in the detections table
             det_ids = db.detections.save(pid, [

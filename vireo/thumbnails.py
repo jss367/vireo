@@ -522,7 +522,8 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
             # coverage query (`thumb_path IS NOT NULL`) reflects this run.
             # Stored value is the bare filename ({id}.jpg) so the column
             # stays correct even if the thumbnail cache dir is later moved.
-            db.photos.set_thumb_path(photo["id"], f"{photo['id']}.jpg")
+            with db.transaction():
+                db.photos.set_thumb_path(photo["id"], f"{photo['id']}.jpg")
         else:
             failed += 1
 

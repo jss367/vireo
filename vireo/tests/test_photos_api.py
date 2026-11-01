@@ -1468,6 +1468,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
         )
         db.commit()
         db.photos.update_quality(pid, subject_size=0.1)
+        db.commit()
         det_id = db.detections.save(
             pid,
             [{"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9}],

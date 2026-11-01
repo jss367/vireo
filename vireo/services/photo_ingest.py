@@ -97,18 +97,21 @@ def add_photo(
     than on their own pre-check SELECT, which cannot see a concurrent
     insert.
     """
-    photo_id, inserted = db.photos.add(
-        folder_id,
-        filename,
-        extension,
-        file_size,
-        file_mtime,
-        timestamp=timestamp,
-        width=width,
-        height=height,
-        xmp_mtime=xmp_mtime,
-        file_hash=file_hash,
-    )
+    # Its own unit, committed before the duplicate resolver below, which
+    # refuses to run inside an open transaction.
+    with db.transaction():
+        photo_id, inserted = db.photos.add(
+            folder_id,
+            filename,
+            extension,
+            file_size,
+            file_mtime,
+            timestamp=timestamp,
+            width=width,
+            height=height,
+            xmp_mtime=xmp_mtime,
+            file_hash=file_hash,
+        )
 
     # Auto-resolve duplicates when we have a file_hash and >1 non-rejected
     # rows share it. Most scanner-path callers leave file_hash=None here

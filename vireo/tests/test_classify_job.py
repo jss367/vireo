@@ -1320,6 +1320,7 @@ def test_detect_batch_skips_quality_score_when_primary_below_threshold(
         quality_score=0.86,
         sharpness=2900.0,
     )
+    db.commit()
 
     img = Image.new("RGB", (100, 100), color="gray")
     img.save(str(tmp_path / "noise.jpg"))

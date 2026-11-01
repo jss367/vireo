@@ -35,6 +35,7 @@ def _analyze(db, tmp_path, pid, **changes):
     ))
     db.commit()
     db.photos.update_quality(pid, subject_size=quality["subject_size"])
+    db.commit()
     db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .4, "h": .4},
                               "confidence": .9, "category": "animal"}], detector_model="megadetector-v6")
     db.model_runs.record_detector_run(pid, "megadetector-v6", 1)

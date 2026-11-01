@@ -36,12 +36,21 @@ def get_browse_summary(
     def detector_confidence() -> float:
         return config_value(db.get_effective_config(cfg.load()), "detector_confidence")
 
-    return db.photos.get_browse_summary(
-        folder_id=folder_id,
-        collection_id=collection_id,
-        rules=rules,
-        detector_confidence=detector_confidence,
-    )
+    # Joined: the TEMP id table and every aggregate share one snapshot, and
+    # a caller's open transaction is neither committed nor ended. With none
+    # open, a deferred BEGIN (no lock until the first read) puts the TEMP
+    # table's creation inside the transaction too, so a superseded search's
+    # interrupt, which makes SQLite roll the transaction back itself, takes
+    # the table with it.
+    with db.transaction(join=True):
+        if not db.in_transaction:
+            db.begin()
+        return db.photos.get_browse_summary(
+            folder_id=folder_id,
+            collection_id=collection_id,
+            rules=rules,
+            detector_confidence=detector_confidence,
+        )
 
 
 def rules_resolvable(db: Database, rules: Any) -> bool:

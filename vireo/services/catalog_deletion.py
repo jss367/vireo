@@ -18,6 +18,7 @@ whole subtree delete has committed.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from functools import partial
@@ -100,14 +101,16 @@ def delete_photos(
     affected_folder_ids = list(folder_counts.keys())
 
     try:
-        db.photos.delete(
-            all_ids,
-            folder_counts,
-            deleted_stems_by_folder,
-            folder_paths,
-            commit=commit,
-            workspace_id_fn=db.require_workspace_id,
-        )
+        # With ``commit`` this call is its own unit of work; without it the
+        # caller's transaction owns the rows (and their rollback).
+        with db.transaction() if commit else contextlib.nullcontext():
+            db.photos.delete(
+                all_ids,
+                folder_counts,
+                deleted_stems_by_folder,
+                folder_paths,
+                workspace_id_fn=db.require_workspace_id,
+            )
     finally:
         # Always invalidate — even on rollback we may have partially dirtied
         # state, and on success the removed rows mean untracked on-disk

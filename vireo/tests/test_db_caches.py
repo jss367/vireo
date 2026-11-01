@@ -676,6 +676,7 @@ def test_thumbnail_path_writes_stay_in_the_callers_transaction(db):
     a = _photo(db, "a.jpg")
     b = _photo(db, "b.jpg")
     db.photos.set_thumb_path(b, f"{b}.jpg")
+    db.commit()
     assert {r["id"]: r["thumb_path"] for r in db.caches.thumbnail_path_rows()} == {
         a: None, b: f"{b}.jpg",
     }

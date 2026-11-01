@@ -16739,6 +16739,7 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
             )
             db.commit()
             db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
+            db.commit()
             det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
@@ -16842,6 +16843,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
             )
             db.commit()
             db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
+            db.commit()
             det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")

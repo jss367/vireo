@@ -724,7 +724,8 @@ def create_jobs_blueprint(
             )
             for r in result["results"]:
                 ctx.checkpoint(job)
-                thread_db.photos.update_sharpness(r["photo_id"], r["sharpness"])
+                with thread_db.transaction():
+                    thread_db.photos.update_sharpness(r["photo_id"], r["sharpness"])
 
             # Auto-flag: flag best in each group, suggest reject for worst
             best_count = 0

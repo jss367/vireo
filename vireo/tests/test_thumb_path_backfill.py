@@ -98,6 +98,7 @@ def test_unavailable_thumbnail_cache_preserves_records(client_with_photo, monkey
 
     app, db, pid = client_with_photo
     db.photos.set_thumb_path(pid, f'{pid}.jpg')
+    db.commit()
     original = thumbnails.os.stat
     root = app.config['THUMB_CACHE_DIR']
     def stat(path, *args, **kwargs):
