@@ -875,6 +875,35 @@ def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
     assert selected["best_photo_id"] is None
 
 
+def test_best_batch_cards_require_live_photographer_confirmation(app_and_db):
+    from services.photo_review import PhotoReviewService
+
+    app, db = app_and_db
+    folder = db.conn.execute("SELECT id FROM folders WHERE path='/photos/2024'").fetchone()["id"]
+    pids = [photo_ingest.add_photo(db, folder, f"DSC_{i:04d}.jpg", ".jpg", 100, 1.)
+            for i in range(3)]
+    for pid in pids:
+        _mark_best_batch_quality(db, pid, 100.)
+    db.photo_review.flag_ranked_candidate(pids[0])
+    service = PhotoReviewService(db)
+    service.set_flag(pids[1], "flagged")
+    service.set_flag(pids[2], "rejected")
+    client = app.test_client()
+
+    def cards():
+        response = client.post("/api/photos/best-batch", json={"photo_ids": pids})
+        assert response.status_code == 200
+        return {c["id"]: c for c in response.get_json()["cards"]}
+
+    result = cards()
+    assert [result[pid]["label"] for pid in pids] == ["REVIEW", "KEEP", "REJECT"]
+    assert [result[pid]["flag_confirmation_status"] for pid in pids] == ["unverified", "confirmed", "confirmed"]
+    service.set_flag(pids[0], "flagged")  # Confirming the same value must take effect immediately.
+    service.set_flag(pids[1], "none")
+    result = cards()
+    assert [result[pid]["label"] for pid in pids] == ["KEEP", "REVIEW", "REJECT"]
+
+
 def test_api_photo_best_batch_capture_time_requires_real_timestamps(app_and_db):
     """Timestamp fallback should not group unrelated null-timestamp photos."""
     app, db = app_and_db

@@ -36,7 +36,7 @@ def review_ranked_suggestions(result):
         decision = explicit_decision(card)
         if decision:
             card["label"] = decision
-            card["role"] = "kept" if decision == "KEEP" else "reject"
+            card["role"] = {"KEEP": "kept", "REJECT": "reject", "REVIEW": "review"}[decision]
         elif card.get("label") != "REJECT" or not card.get("reject_reasons"):
             card["label"] = "REVIEW"
             card["role"] = "review"
@@ -88,8 +88,8 @@ def _review_culling_photo(photo, state):
     photo.update(automatic_keep_eligible=assessment["eligible"], keep_status=assessment["status"],
                  keep_reasons=assessment["reasons"])
     confirmed = state.get("confirmed_flag") == flag
-    decision = explicit_decision(photo) if confirmed else None
     photo["flag_confirmation_status"] = "confirmed" if confirmed else "unverified"
+    decision = explicit_decision(photo)
     photo["label"] = decision or "REVIEW"
     photo["action"] = photo["label"].lower()
     photo["decision_source"] = "confirmed" if decision else "auto"
