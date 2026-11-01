@@ -496,6 +496,7 @@ def apply_recipe_to_loaded_image(
     whole-photo sharpen/NR is never dropped when a local delta is added.
     """
     normalized = normalize_recipe(recipe)
+    lens_profile = _lens_profile_for_image(img, normalized, camera_metadata)
     if normalized is None:
         result = _apply_adjustments(img, {}) if isinstance(img, FloatImage) else img
         mask_geo = None
@@ -503,7 +504,7 @@ def apply_recipe_to_loaded_image(
         result, mask_geo = _apply_recipe_impl(
             img, normalized, local_mask, native_size,
             detail_scale=detail_scale,
-            lens_profile=_lens_profile_for_image(img, normalized, camera_metadata),
+            lens_profile=lens_profile,
         )
     if max_size and max_size > 0 and max(result.size) > max_size:
         result.thumbnail((max_size, max_size), resample=Image.Resampling.LANCZOS)
@@ -532,7 +533,7 @@ def apply_recipe_to_loaded_image(
         from background_denoise import apply_background_denoise
         weight = local_weight_map(
             local_mask, img.size, normalized, native_size, detail_scale=scale,
-            render_size=result.size,
+            render_size=result.size, lens_profile=lens_profile,
         )
         if weight is not None:
             result = apply_background_denoise(
@@ -576,7 +577,7 @@ def _apply_render_detail(result, adjustments, local, mask_geo, scale, denoise_kw
 
 def local_weight_map(
     local_mask, source_size, recipe, native_size=None, detail_scale=None,
-    feather=None, render_size=None, camera_metadata=None,
+    feather=None, render_size=None, camera_metadata=None, lens_profile=None,
 ):
     """The local-adjustment weight map exactly as the renderer computes it.
 
@@ -600,7 +601,10 @@ def local_weight_map(
     local section. With background smoothing enabled this returns its
     subject-protection weight, including filled holes and the outward
     transition. ``render_size`` resizes geometry before computing that
-    transition, matching the final detail pass.
+    transition, matching the final detail pass. ``lens_profile`` supplies
+    the image render's already-resolved calibration; otherwise metadata
+    resolves it. Callers rendering from JPEGs omit both to avoid correcting
+    the mask when the image itself skipped automatic lens correction.
     """
     normalized = normalize_recipe(recipe) or {}
     local = normalized.get("local")
@@ -613,7 +617,8 @@ def local_weight_map(
     fitted = _fit_mask_to_source(local_mask, source_size)
     if fitted is None:
         return None
-    lens_profile = _resolve_lens_profile(normalized, camera_metadata)
+    if lens_profile is None:
+        lens_profile = _resolve_lens_profile(normalized, camera_metadata)
     mask_geo = _apply_geometry(fitted, normalized, lens_profile)
     if render_size and mask_geo.size != render_size:
         mask_geo = mask_geo.resize(render_size, Image.Resampling.BILINEAR)

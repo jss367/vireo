@@ -176,6 +176,49 @@ def test_jpeg_fallback_skips_profile_even_when_raw_catalog_metadata_matches(data
     np.testing.assert_array_equal(actual, expected)
 
 
+@pytest.mark.parametrize("source_kind", ["linear", "jpeg", "srgb"])
+@pytest.mark.parametrize("crop_rotate", [False, True])
+def test_background_protection_matches_source_eligible_lens_geometry(
+    database, monkeypatch, source_kind, crop_rotate,
+):
+    from background_denoise import protection_weight
+    from image_edits import detail_render_scale
+
+    photo = _photo(focal_length=24)
+    pixels = np.full((241, 321, 3), 0.2, dtype=np.float32)
+    source = (Image.fromarray((pixels * 255).astype(np.uint8)) if source_kind == "jpeg"
+              else FloatImage(pixels, encoding=source_kind))
+    mask_pixels = np.zeros((241, 321), dtype=np.uint8)
+    mask_pixels[20:215, 20:110] = 255
+    mask_pixels[70:120, 50:85] = 0  # Preserve this painted correction through geometry.
+    mask = Image.fromarray(mask_pixels)
+    recipe = {
+        "adjustments": {"lens_profile": True, "distortion": -25},
+        "local": {"mask": {"ref": "123456abcdef", "source_digest": "test", "corrected": True},
+                  "regions": [], "background_denoise": 70},
+    }
+    if crop_rotate:
+        recipe.update(rotation=90, flip={"horizontal": True},
+                      crop={"x": 0.1, "y": 0.05, "w": 0.85, "h": 0.9})
+    weights = []
+    def capture_weight(image, weight, amount, scale, metadata):
+        weights.append(weight)
+        return image
+    monkeypatch.setattr("background_denoise.apply_background_denoise", capture_weight)
+    rendered = apply_recipe_to_loaded_image(
+        source, recipe, camera_metadata=photo, local_mask=mask, native_size=source.size, max_size=200,
+    )
+    eligible = lens.resolve_profile(photo) if source_kind == "linear" else None
+    geometry = _apply_geometry(mask, recipe, eligible).resize(rendered.size, Image.Resampling.BILINEAR)
+    scale = detail_render_scale(rendered.size, source.size, recipe)
+    expected = protection_weight(geometry, scale)
+    np.testing.assert_array_equal(weights[0], expected)
+    # The fixture must distinguish missing RAW correction and double-corrected JPEGs.
+    other_profile = None if eligible else lens.resolve_profile(photo)
+    other = _apply_geometry(mask, recipe, other_profile).resize(rendered.size, Image.Resampling.BILINEAR)
+    assert not np.array_equal(expected, protection_weight(other, scale))
+
+
 def test_auto_tone_meters_on_the_lens_corrected_source(database, monkeypatch):
     import auto_tone
 
