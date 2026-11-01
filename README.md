@@ -35,6 +35,7 @@ Vireo helps wildlife photographers triage thousands of photos using machine lear
 - **GPS discrepancy review** — Choose **GPS differs from assigned place** in Review Photo Locations to compare photo GPS with assigned places on a map. Adjust the distance threshold (500 meters by default), select photos, and keep their GPS or queue the assigned coordinates for metadata sync. Skipping makes no changes. Kept decisions can be revisited; corrections remain reviewable until written to XMP, and original photo GPS is preserved.
 - **Workspaces** — Isolated projects with independent predictions, collections, and settings
 - **Lightroom migration** — Import keyword hierarchies from `.lrcat` catalogs via XMP sidecars
+- **[Verified transfers to network storage](docs/verifying-network-copies.md)** — Verify copied originals on the storage server over SSH when available, with full byte comparison as a fallback
 - **Transparent by design** — Live log panel, job progress streaming, pipeline inspector, and full audit system
 
 ## Philosophy

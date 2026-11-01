@@ -50,8 +50,10 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             for a remote move (the destination comes from ``remote``).
         destination_name: optional new name for the folder at the destination.
             Must be one path component. Empty preserves the source name.
-        verify_contents: compare every local destination file byte-for-byte
-            before updating the catalog and deleting the source originals.
+        verify_contents: verify every destination file's contents before
+            updating the catalog and deleting the source originals. Mounted
+            NAS destinations use checksums over a proven saved SSH route
+            when available, with local byte comparison as the fallback.
         pre_commit_check: optional callback that raises if the destination
             is no longer safe, after verification and before catalog changes.
         progress_cb: optional callback(current, total, filename)
@@ -198,7 +200,8 @@ class _FolderMove:
         self.cleanup_error = None
 
     def progress(self, current, total, filename, phase):
-        if self.control and phase in ("Checking timestamps", "Verifying copy"):
+        if self.control and (phase in ("Checking timestamps", "Checking NAS verification")
+                             or phase.startswith("Verifying copy")):
             self.control.checkpoint()
         if self.progress_cb:
             self.progress_cb(current, total, filename, phase)
