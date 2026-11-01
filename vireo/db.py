@@ -1288,7 +1288,7 @@ class Database:
             # transaction and its earlier writes survive, so the snapshot the
             # caller recorded for those writes must survive too.
             if entered and not finished:
-                survives = self._unit.depth or self.conn.in_transaction
+                survives = self._unit.depth or self.in_transaction
                 self._species_provenance_before = provenance if survives else {}
 
     def after_commit(self, callback: Callable[[], object]) -> None:
