@@ -377,8 +377,8 @@ class _FolderTransfer:
             missing = self._verify_local_copy(report)
             if missing is not None:
                 return {"moved": 0, "errors": [
-                    f"Verification failed: '{missing}' is missing, differs, "
-                    f"or is symlinked at destination. Originals preserved."
+                    f"Verification failed ({missing}). The source and destination "
+                    f"could not be confirmed to match. Originals preserved."
                 ]}
         else:
             verify_error = _fresh_copy_mismatch(src_path, transfer_dest,

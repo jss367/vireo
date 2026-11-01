@@ -158,6 +158,27 @@ def test_source_added_during_hash_cannot_be_deleted_unverified(trees, monkeypatc
     assert run_verify(trees) == (True, 'source files changed during checksum verification')
 
 
+@pytest.mark.parametrize('change', ['rewrite', 'replace'])
+def test_destination_changed_after_hash_cannot_authorize_deletion(trees, monkeypatch, change):
+    _, dest, _ = trees
+
+    def checksum(*a, **k):
+        path = dest / 'photo.nef'
+        before = path.stat()
+        if change == 'replace':
+            path.unlink()
+        path.write_bytes(b'x' * before.st_size)
+        # POSIX ctime also catches preserved mtime. Windows ctime records
+        # creation time, so use a changed mtime there instead.
+        if os.name != 'nt':
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        else:
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+
+    monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
+    assert run_verify(trees) == (True, 'destination files changed during checksum verification')
+
+
 def test_merge_ignores_only_regular_finder_metadata(trees, monkeypatch):
     source, dest, _ = trees
     (source / '.DS_Store').write_bytes(b'local metadata')
@@ -234,7 +255,11 @@ def test_ssh_probe_quotes_destination_and_requires_exact_nonce(monkeypatch):
     assert not mv._probe_matches(remote, '.probe', 'different', None)
 
 
-@pytest.mark.parametrize('remote_result', [(False, None), (True, 'photo.nef'), (True, None)])
+@pytest.mark.parametrize('remote_result', [
+    (False, None), (True, 'photo.nef'), (True, None),
+    (True, 'source files changed during checksum verification'),
+    (True, 'destination files changed during checksum verification'),
+])
 def test_transfer_uses_full_byte_fallback_or_remote_verdict(trees, monkeypatch, remote_result):
     import move.folder_transfer as ft
     source, dest, remote = trees
@@ -254,6 +279,8 @@ def test_transfer_uses_full_byte_fallback_or_remote_verdict(trees, monkeypatch, 
         assert result is None
     else:
         assert result['moved'] == 0 and 'Originals preserved' in result['errors'][0]
+        if remote_result[0]:
+            assert f'Verification failed ({remote_result[1]})' in result['errors'][0]
     if not remote_result[0]:
         assert any('NAS verification unavailable' in e[3] for e in events)
 

@@ -20,6 +20,8 @@ same folder. It checks mounted files for missing copies, size differences,
 and unsafe links, then compares contents in batches of 128 files. Jobs shows
 **Verifying copy on NAS**, with counts advancing after each verified batch.
 Vireo rechecks the mapping and mounted files before accepting the result.
+Destination identity, size, modification time, and change time must also
+match their values before the checksum pass; a changed copy blocks the move.
 Temporary verification markers are removed when the check ends.
 
 If SSH, rsync, or the path proof is unavailable, Vireo reads and compares

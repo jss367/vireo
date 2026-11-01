@@ -659,7 +659,7 @@ def test_merge_fallback_still_discards_regular_finder_metadata(tmp_path):
     assert not (destination / ".DS_Store").exists()
 
 
-@pytest.mark.parametrize('action', ['resume', 'cancel'])
+@pytest.mark.parametrize('action', ['resume', 'resume_unchanged', 'cancel'])
 def test_pause_after_nas_checksum_batch_reverifies_before_delete(transfer_env, monkeypatch, action):
     import move.folder_transfer as transfer
     import move.mounted_verify as mv
@@ -699,19 +699,24 @@ def test_pause_after_nas_checksum_batch_reverifies_before_delete(transfer_env, m
         release.set()
         wait_status(runner, job_id, 'paused')
         assert source.exists()
-        if action == 'resume':
-            first = destination / source.name / verified_names[0]
-            first.write_bytes(b'x' * first.stat().st_size)
+        if action.startswith('resume'):
+            if action == 'resume':
+                first = destination / source.name / verified_names[0]
+                first.write_bytes(b'x' * first.stat().st_size)
             assert runner.resume_job(job_id)
         else:
             assert runner.cancel_job(job_id)
         job = wait_for_job_via_runner(runner, job_id)
-        assert job['status'] == ('failed' if action == 'resume' else 'cancelled'), job
-        assert source.exists()
+        expected = {'resume': 'failed', 'resume_unchanged': 'completed', 'cancel': 'cancelled'}
+        assert job['status'] == expected[action], job
+        assert source.exists() == (action != 'resume_unchanged')
         with Database(db_path) as db:
-            assert db.folders.get(folder_id)['path'] == str(source)
+            final_path = destination / source.name if action == 'resume_unchanged' else source
+            assert db.folders.get(folder_id)['path'] == str(final_path)
         assert not list((destination / source.name).glob('.vireo-verify-*'))
         if action == 'resume':
+            assert 'destination files changed during checksum verification' in job['result']['errors'][0]
+        elif action == 'resume_unchanged':
             assert verified_names.count(verified_names[0]) == 2
     finally:
         release.set()

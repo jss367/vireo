@@ -120,10 +120,23 @@ def _source_files(source, is_merge):
             if (is_merge and name in FINDER_METADATA_FILES
                     and not os.path.islink(path) and os.path.isfile(path)):
                 continue
-            stat = os.lstat(path)
             relative = os.path.relpath(path, source)
-            files[relative] = (stat.st_dev, stat.st_ino, stat.st_size,
-                               stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode)
+            files[relative] = _file_signature(path)
+    return files
+
+
+def _file_signature(path):
+    stat = os.lstat(path)
+    return (stat.st_dev, stat.st_ino, stat.st_size,
+            stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode)
+
+
+def _destination_files(destination, names, progress):
+    """Snapshot only source counterparts, never an unrelated archive tree."""
+    files = {}
+    for checked, name in enumerate(names):
+        progress(checked, name)
+        files[name] = _file_signature(os.path.join(destination, name))
     return files
 
 
@@ -186,6 +199,7 @@ def verify_mounted_copy(source, destination, remote, *, is_merge, progress, cont
                                                progress=report_structure)
         if mismatch is not None:
             return True, mismatch
+        destination_files = _destination_files(destination, files, report_structure)
         mismatch = _verify_batches(source, remote, files, progress, control)
         if mismatch is not None:
             name, detail = mismatch
@@ -204,6 +218,8 @@ def verify_mounted_copy(source, destination, remote, *, is_merge, progress, cont
             return True, "source files changed during checksum verification"
         mismatch = _first_missing_source_file(
             source, destination, is_merge=is_merge, progress=report_structure)
+        if mismatch is None and destination_files != _destination_files(destination, files, report_structure):
+            return True, "destination files changed during checksum verification"
         if mismatch is None:
             progress(len(files), len(files), "", "Verifying copy on NAS")
         return True, mismatch
