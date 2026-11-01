@@ -2590,6 +2590,7 @@ def test_pending_archive_panel_sends_remembered_destination(live_server, page, p
     page.goto(live_server["url"] + path)
     panel = page.locator("#pendingArchives")
     expect(panel).to_be_visible()
+    panel.get_by_role("button", name="Show details").click()
     expect(panel).to_contain_text("Photos from the coast")
     destination = panel.locator(".pending-archive-destination")
     if path not in ("/dashboard", "/storage"):
@@ -2631,6 +2632,7 @@ def test_pending_archive_missing_transfer_requires_confirmation(live_server, pag
     page.route("**/api/import/pending-archives/missing/discard", discard)
     page.goto(live_server["url"] + "/import")
     panel = page.locator("#pendingArchives")
+    panel.get_by_role("button", name="Show details").click()
     expect(panel.get_by_role("link", name="Review photos")).to_have_count(0)
     button = panel.get_by_role("button", name="Remove missing transfer")
     page.once("dialog", lambda dialog: dialog.dismiss())

@@ -8,9 +8,28 @@
   if (!listElement || !errorElement) return;
   const list = listElement;
   const error = errorElement;
-  // Dashboard and Storage surface this banner as their primary view of local
-  // originals, so start expanded there without a click; other pages (Browse,
-  // Jobs, Import) show it as a sidebar nudge that opens on demand.
+  const toggleElement = document.getElementById('pendingArchivesToggle');
+  const contentElement = document.getElementById('pendingArchivesContent');
+  const toggleLabelElement = document.getElementById('pendingArchivesToggleLabel');
+  const summary = document.getElementById('pendingArchivesSummary');
+  if (!toggleElement || !contentElement || !toggleLabelElement || !summary) return;
+  const toggle = toggleElement;
+  const content = contentElement;
+  const toggleLabel = toggleLabelElement;
+  const preferenceKey = 'vireo.pendingArchives.expanded';
+
+  /** @param {boolean} expanded */
+  function setExpanded(expanded) {
+    content.hidden = !expanded;
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggleLabel.textContent = expanded ? 'Hide details' : 'Show details';
+  }
+  setExpanded(VireoViewPreferences.read(preferenceKey) === 'true');
+  toggle.addEventListener('click', () => {
+    setExpanded(content.hidden === true);
+    VireoViewPreferences.write(preferenceKey, !content.hidden);
+  });
+  // Dashboard and Storage allow the opened content to use the full page height.
   if (['/dashboard', '/storage'].includes(location.pathname)) {
     panel.dataset.expanded = 'true';
   }
@@ -234,6 +253,10 @@
       if (!Array.isArray(data.items)) throw new Error('Could not check photos waiting for NAS transfer.');
       error.textContent = actionError;
       panel.hidden = !data.items.length;
+      const attention = data.items.some(item => item.error || item.source_available === false);
+      summary.textContent = data.items.length.toLocaleString()
+        + (data.items.length === 1 ? ' pending NAS transfer' : ' pending NAS transfers')
+        + (attention ? ' · Needs attention' : '');
       // Age advances while a dashboard stays open, even if the records do not change.
       const next = JSON.stringify(data.items) + '|' + Math.floor(Date.now() / 60000);
       if (next === signature) return;
@@ -245,6 +268,7 @@
       data.items.forEach(item => renderArchive(item, expanded, existing));
     } catch (e) {
       panel.hidden = false;
+      summary.textContent = 'Transfer status unavailable';
       error.textContent = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
@@ -259,6 +283,7 @@
     const details = Array.from(list.querySelectorAll('details')).find(element =>
       element.dataset.archiveId === String(item.id));
     if (!details) return;
+    setExpanded(true);
     details.open = true;
     const row = details.closest('.pending-archive-row');
     if (!row) return;

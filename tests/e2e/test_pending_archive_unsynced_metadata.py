@@ -159,6 +159,7 @@ def test_banner_offers_to_sync_metadata_before_sending(live_server, page, tmp_pa
 
     banner = page.locator("#pendingArchives")
     expect(banner).to_be_visible()
+    banner.get_by_role("button", name="Show details").click()
     # Nothing queued yet: the plain transfer is the only thing on offer, and
     # no notice invents a problem that does not exist.
     expect(banner.get_by_role("button", name="Send to NAS")).to_be_visible()
