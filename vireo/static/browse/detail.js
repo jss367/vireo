@@ -1,7 +1,7 @@
 /* Browse: single-photo detail panel, metadata, summary panel, undo/redo. ES module (see
    browse/README.md). */
 import { selection } from './selection-state.js';
-import {renderSpeciesProvenance} from './species-provenance.js';
+import {renderSpeciesProvenance, speciesDisplayLabel} from './species-provenance.js';
 import { searchLaneSeq, state } from './state.js';
 import {
   VireoFilter, VireoTime, doRedo, doUndo, escapeHtml, safeFetch, searchLaneHeaders, showToast,
@@ -107,7 +107,7 @@ function renderDetailKeywords(/** @type {BrowsePhoto} */ photo) {
     dropdownHtml += '</div>';
     kwHtml += '<span class="keyword-tag">' +
       '<span class="keyword-type-indicator" data-kw-id="' + k.id + '" data-browse-on="click:toggleTypeDropdown" title="Type: ' + kwTypeLabels[ktype] + '">' + icon + dropdownHtml + '</span>' +
-      escapeHtml(k.name) +
+      escapeHtml(speciesDisplayLabel(k, k.name)) +
       '<span class="remove-kw" data-photo-id="' + photo.id + '" data-kw-id="' + k.id + '" data-browse-on="click:removeKeyword">&times;</span></span>';
   });
   var keywordsEl = /** @type {HTMLElement} */ (document.getElementById('detailKeywords'));

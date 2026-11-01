@@ -384,7 +384,8 @@ def photo_detail(photo, include_exif=False, readiness=None):
     if "species_assignments" in photo:
         out["species_assignments"] = photo["species_assignments"]
     out["keywords"] = [
-        _pick(k, ("id", "name", "type")) for k in photo.get("keywords") or []
+        _pick(k, ("id", "name", "type", "display_name", "synonyms", "taxon_id",
+                  "source_taxon_id", "scientific_name")) for k in photo.get("keywords") or []
     ]
     detections = photo.get("detections")
     if isinstance(detections, list):

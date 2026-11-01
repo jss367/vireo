@@ -21,7 +21,7 @@ interface BrowsePhoto {
 interface BrowseFlagNote {flag: 'none' | 'flagged' | 'rejected'; source: string | null; reason: string | null; description?: string; at?: string | null}
 interface BrowseStack {count: number; kind: string; photo_ids: number[]}
 interface BrowseDetection {x: number; y: number; w: number; h: number; box_x: number; box_y: number; box_w: number; box_h: number; species?: string; category?: string; confidence?: number; detector_confidence?: number}
-interface BrowseKeyword {id: number; name: string; type: string; parent_id?: number | null; place_id?: number | null; photo_count?: number}
+interface BrowseKeyword extends BrowseSpeciesNames {id: number; name: string; type: string; parent_id?: number | null; place_id?: number | null; photo_count?: number}
 interface BrowseKeywordOption extends BrowseKeyword {search: string; place_id: number | null; photo_count: number}
 interface BrowseKeywordAutocomplete {matches: BrowseKeywordOption[]; activeIndex: number; selectedKeyword: BrowseKeywordOption | null; dropdownId: string; submitFn: ((keyword: BrowseKeywordOption | null) => void) | null}
 interface BrowseAnchor {photoId: number; topOffset: number; index: number; detailVisible?: boolean; stackSelection?: boolean; stackIds?: number[] | null}
@@ -213,7 +213,11 @@ interface BrowseLocalFolderData {legacy_workspace_session?: boolean; folders?: B
 interface Window {vireoLocalFolderData?: BrowseLocalFolderData; vireoPendingArchives?: {folder_ids: number[]; state: string; destination?: string}[]}
 interface BrowseFolderStatusResult {statuses: Record<string, BrowseFolderStatus>; synthetic: BrowseFolder[]}
 
-interface BrowseSpeciesAssignment {
+interface BrowseSpeciesNames {
+  display_name?: string; synonyms?: string[];
+  taxon_id?: number; source_taxon_id?: number | null; scientific_name?: string | null;
+}
+interface BrowseSpeciesAssignment extends BrowseSpeciesNames {
   photo_id: number; keyword_id: number; species: string; method: string;
   reviewer?: string | null; reason?: string | null; evidence_source?: string | null;
   supporting_photo_ids?: number[]; detection_id?: number | null; subject_photo_id?: number | null;
