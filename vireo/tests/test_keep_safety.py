@@ -64,8 +64,8 @@ def test_independent_ranker_returns_are_guarded_with_decisions_preserved():
                     {"id": 1, "rank": 1, "role": "best", "label": "KEEP"},
                     {"id": 2, "rank": 2, "role": "alternate", "label": None},
                     {"id": 3, "rank": 3, "role": "reject", "label": "REVIEW"},
-                    {"id": 4, "rank": 4, "role": "reject", "label": "REJECT", "flag": "flagged"},
-                    {"id": 5, "rank": 5, "role": "best", "label": "KEEP", "flag": "rejected"},
+                    {"id": 4, "rank": 4, "role": "reject", "label": "REJECT", "flag": "flagged", "flag_confirmation_status": "confirmed"},
+                    {"id": 5, "rank": 5, "role": "best", "label": "KEEP", "flag": "rejected", "flag_confirmation_status": "confirmed"},
                 ]}, None
 
     response, error = independent_subject_ranker()
@@ -91,10 +91,38 @@ def test_unavailable_evidence_stays_visible_and_unknown_is_not_photographic_fail
 
 @pytest.mark.parametrize("flag,label", [("flagged", "KEEP"), ("picked", "KEEP"), ("rejected", "REJECT")])
 def test_explicit_photographer_decisions_override_unvalidated_evidence(flag, label):
-    photo = measured_photo(flag=flag, subject_tenengrad=0.)
+    photo = measured_photo(flag=flag, flag_confirmation_status="confirmed", subject_tenengrad=0.)
     run_triage([{"photos": [photo]}])
     assert photo["label"] == label
     assert photo["automatic_keep_eligible"] is False
+
+
+@pytest.mark.parametrize("flag", ["flagged", "picked", "rejected"])
+@pytest.mark.parametrize("confirmation", [None, "unverified"])
+def test_bare_flags_cannot_override_pipeline_or_ranked_review(flag, confirmation):
+    photo = measured_photo(flag=flag, flag_confirmation_status=confirmation)
+    run_triage([{"photos": [photo]}])
+    assert photo["label"] == "REVIEW"
+    card = {"id": 1, "rank": 1, "flag": flag, "flag_confirmation_status": confirmation,
+            "label": "KEEP", "role": "best"}
+    result = {"cards": [card]}
+    review_ranked_suggestions(result)
+    assert card["label"] == "REVIEW"
+    assert result["best_photo_id"] is None
+    assert result["suggested_reject_ids"] == []
+
+
+def test_confirmed_clear_prevents_automatic_rejection():
+    photo = measured_photo(flag="none", flag_confirmation_status="confirmed", subject_clip_high=.99)
+    run_triage([{"photos": [photo]}])
+    assert photo["reject_reasons"]  # Real technical evidence remains available for inspection.
+    assert photo["label"] == "REVIEW"
+    card = dict(photo, rank=1, role="reject", label="REJECT")
+    result = {"cards": [card]}
+    review_ranked_suggestions(result)
+    assert card["label"] == "REVIEW"
+    assert card["role"] == "review"
+    assert result["suggested_reject_ids"] == []
 
 
 def test_error_from_ranker_is_preserved():
@@ -123,7 +151,7 @@ def test_reported_before_state_winners_and_clear_wildlife_controls():
         photo = deepcopy(by_id[pid])
         run_triage([{"photos": [photo]}])
         assert photo["quality_composite"] is not None
-        assert photo["label"] == ("KEEP" if photo["flag"] == "flagged" else "REVIEW")
+        assert photo["label"] == "REVIEW"  # Historical flags have no recorded photographer attribution.
         assert photo["automatic_keep_eligible"] is False
 
 

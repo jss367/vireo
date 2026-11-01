@@ -94,7 +94,8 @@ def test_incomplete_frames_do_not_contaminate_any_comparison_cohort(eye_enabled)
 @pytest.mark.parametrize("flag,label", [("flagged", "KEEP"), ("picked", "KEEP"), ("rejected", "REJECT")])
 @pytest.mark.parametrize("missing", [True, False])
 def test_explicit_decisions_survive_scoring_selection_and_rarity(flag, label, missing):
-    photo = complete_photo(flag=flag, crop_complete=None if missing else .01,
+    photo = complete_photo(flag=flag, flag_confirmation_status="confirmed",
+                           crop_complete=None if missing else .01,
                            species_top5=[("Mandarin Duck", .9)])
     _, photos = run_triage([{"photos": [photo]}])
     assert photos[0]["label"] == label
@@ -158,6 +159,31 @@ def _loaded_photo(db, pid, **pipeline_settings):
         "weak_detection_rescue_enabled": False, "sam2_variant": "sam2-small", **pipeline_settings,
     }}
     return load_photo_features(db, photo_ids=[pid], effective_config=effective)[0]
+
+
+@pytest.mark.parametrize("flag,label", [("flagged", "KEEP"), ("rejected", "REJECT"), ("none", "REVIEW")])
+def test_loader_distinguishes_ranked_legacy_and_confirmed_flags(db, readiness_photo, flag, label):
+    from services.photo_review import PhotoReviewService
+
+    pid, _, _ = readiness_photo
+    db.photo_review.flag_ranked_candidate(pid)
+    ranked = _loaded_photo(db, pid)
+    run_triage([{"photos": [ranked]}])
+    assert ranked["flag"] == "flagged"
+    assert ranked["flag_confirmation_status"] == "unverified"
+    assert ranked["label"] == "REVIEW"
+
+    PhotoReviewService(db).set_flag(pid, flag)
+    confirmed = _loaded_photo(db, pid)
+    run_triage([{"photos": [confirmed]}])
+    assert confirmed["flag_confirmation_status"] == "confirmed"
+    assert confirmed["label"] == label
+
+    db.photo_review.set_flag(pid, "flagged")  # A later unattributed writer invalidates confirmation.
+    legacy = _loaded_photo(db, pid)
+    run_triage([{"photos": [legacy]}])
+    assert legacy["flag_confirmation_status"] == "unverified"
+    assert legacy["label"] == "REVIEW"
 
 
 def _seed_detection_and_mask(db, readiness_photo):

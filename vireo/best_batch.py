@@ -322,6 +322,7 @@ def _best_batch_card(photo, photos, best_id, alternate_ids, rank):
         "analysis_status": photo.get("analysis_status"),
         "analysis_reasons": photo.get("analysis_reasons", []),
         "flag": photo.get("flag") or "none",
+        "flag_confirmation_status": photo.get("flag_confirmation_status", "unverified"),
         "rating": photo.get("rating"),
         "reasons": _best_batch_reasons(photo, photos, is_best=photo["id"] == best_id),
     }

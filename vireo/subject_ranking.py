@@ -193,6 +193,7 @@ def comparison_frames(db, photos, comparison, effective_cfg):
                 "quality": None, "quality_pct": None, "focus": None, "focus_basis": None,
                 "sharpness": None, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None,
                 "flag": photo.get("flag") or "none", "rating": photo.get("rating"), "reject_reasons": [],
+                "flag_confirmation_status": photo.get("flag_confirmation_status", "unverified"),
                 "subject": selection, "evidence_status": state, "detection_count": len(selection["candidates"]),
                 "has_mask": bool(analysis), "has_quality": bool(analysis), "has_eye": False,
                 "reasons": [] if state == "ready" else [state.replace("_", " ")],
@@ -200,7 +201,9 @@ def comparison_frames(db, photos, comparison, effective_cfg):
         if analysis:
             features = analysis["features"]
             # No photo-level subject measurement, embedding, or species vote may leak into this scorer.
-            frame = {k: photo.get(k) for k in ("id", "filename", "width", "height", "flag", "rating")}
+            frame = {k: photo.get(k) for k in (
+                "id", "filename", "width", "height", "flag", "rating", "flag_confirmation_status",
+            )}
             frame.update(features)
             frame["subject_mask_available"] = bool(analysis["mask_png"])
             frame["analysis_provenance"] = {"detection": {"status": "complete", "current": True, "no_qualifying_subject": False},

@@ -112,9 +112,12 @@ def test_absolute_exposure_and_crop_rejects_remain_supported_without_relative_fo
     assert any(r.startswith("highlight_clipping") for r in photo["reject_reasons"])
 
 
-@pytest.mark.parametrize("flag,label", [("flagged", "KEEP"), ("picked", "KEEP"), ("rejected", "REJECT")])
+@pytest.mark.parametrize("flag,label", [
+    ("flagged", "KEEP"), ("picked", "KEEP"), ("rejected", "REJECT"), ("none", "REVIEW"),
+])
 def test_focus_policy_preserves_photographer_decisions(flag, label):
-    photo = _make_base_photo(flag=flag, eye_tenengrad=1., subject_clip_high=.5)
+    photo = _make_base_photo(flag=flag, flag_confirmation_status="confirmed",
+                             eye_tenengrad=1., subject_clip_high=.5)
     score_encounter({"photos": [photo]}, {"eye_detect_enabled": True})
     assert photo["label"] == label
     assert photo["flag"] == flag

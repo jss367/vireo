@@ -23,11 +23,26 @@ SCORE_FIELDS = (
 
 def explicit_decision(photo: Mapping[str, Any]) -> str | None:
     """Return a persisted photographer decision, never a prior AI label."""
+    if photo.get("flag_confirmation_status") != "confirmed":
+        return None
     if photo.get("flag") in ("flagged", "picked"):
         return "KEEP"
     if photo.get("flag") == "rejected":
         return "REJECT"
+    if photo.get("flag") == "none":
+        return "REVIEW"
     return None
+
+
+def attach_flag_confirmations(photos, states):
+    """Replace cached claims with current repository attribution, including clears."""
+    for photo in photos:
+        state = states.get(photo["id"], {})
+        flag = state.get("flag") or "none"
+        photo["flag"] = flag
+        photo["flag_confirmation_status"] = (
+            "confirmed" if state.get("confirmed_flag") == flag else "unverified"
+        )
 
 
 def subject_analysis_readiness(photo: Mapping[str, Any]) -> dict[str, Any]:
