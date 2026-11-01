@@ -216,6 +216,39 @@ test('a clicked nearby place becomes a Google choice only while the box names it
   assert.equal(h.choices()[0].place_id, 'lake', 'back to the picked name is the picked place');
 });
 
+test('a picked nearby place scopes the choice to the cells within reach of its pin', () => {
+  // The broad group spans two outings in the same county; picking one park
+  // must tag only the cells near it, not every cell in the group.
+  const h = harness();
+  h.ctx.data.groups[0].cells = ['0,0', '1,0', '2,0'];
+  h.ctx.data.file_cells = {'/invented/0': '0,0', '/invented/1': '1,0', '/invented/2': '2,0'};
+  h.ctx.data.groups[0].suggestion = {kind: 'google', source: 'google_area',
+    place_id: 'county', name: 'San Diego County', summary: 'San Diego County · California'};
+  h.ctx.data.groups[0].nearby_places = [
+    {place_id: 'lake', name: 'Big Laguna Lake', type: 'natural_feature',
+      distance_m: 574, cells: ['0,0', '1,0']},
+    {place_id: 'coast', name: 'Coast Park', type: 'park',
+      distance_m: 300, cells: ['2,0']}];
+  h.ctx.importPreviewedPaths = ['/invented/0', '/invented/1', '/invented/2'];
+  h.run(`importLocations.data = data;
+    globalThis.row = renderImportLocationGroup(data.groups[0]);
+    globalThis.body = row.children[2];
+    globalThis.input = body.children[1];
+    globalThis.nearby = body.children[4];`);
+  // Default (broad suggestion) still sends every cell in the group.
+  assert.deepEqual(h.choices()[0].cells.slice().sort(), ['0,0', '1,0', '2,0']);
+  // Picking the lake sends only the lake's two cells, not the coast cell.
+  h.run('nearby.children[1].children[0].handlers.click();');
+  const lake = h.choices()[0];
+  assert.equal(lake.place_id, 'lake');
+  assert.deepEqual(lake.cells.slice().sort(), ['0,0', '1,0']);
+  // Picking the coast sends only its one cell.
+  h.run('nearby.children[1].children[1].handlers.click();');
+  const coast = h.choices()[0];
+  assert.equal(coast.place_id, 'coast');
+  assert.deepEqual(coast.cells, ['2,0']);
+});
+
 test('a clicked nearby place wins over a same-named broad suggestion', () => {
   // A county and a park can share a normalized name; the clicked place
   // must still submit its own place_id instead of the broad suggestion's.

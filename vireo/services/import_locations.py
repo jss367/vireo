@@ -527,8 +527,16 @@ class ImportLocationSuggester:
         self._nearby_found[bucket] = _lookup_nearby(bucket, self._api_key, self._language)
 
     def _nearby_places(self, group: JsonDict) -> tuple[list[JsonDict], str | None]:
-        """A broadly named group's nearby places, nearest first, or why there are none."""
+        """A broadly named group's nearby places, nearest first, or why there are none.
+
+        Each entry carries the ``cells`` within ``NEARBY_RADIUS_M`` of its pin
+        (not every cell in the group), so picking one tags only the photos
+        actually near that place: two outings in the same county fall into the
+        same broad group, and a park near one would otherwise be sent with
+        every cell and mis-tag photos many kilometers away.
+        """
         closest: dict[str, JsonDict] = {}
+        cells_by_place: dict[str, list[str]] = {}
         reasons: Counter[str] = Counter()
         exclude = (group["suggestion"] or {}).get("place_id")
         for key in group["broad_cells"]:
@@ -551,12 +559,17 @@ class ImportLocationSuggester:
                 ))
                 if distance > NEARBY_RADIUS_M:
                     continue
+                place_cells = cells_by_place.setdefault(place["place_id"], [])
+                if not place_cells or place_cells[-1] != key:
+                    place_cells.append(key)
                 best = closest.get(place["place_id"])
                 if best is None or distance < best["distance_m"]:
                     closest[place["place_id"]] = {
                         "place_id": place["place_id"], "name": place["name"],
                         "type": place["type"], "distance_m": distance,
                     }
+        for place_id, entry in closest.items():
+            entry["cells"] = cells_by_place[place_id]
         ranked = sorted(closest.values(), key=lambda p: (p["distance_m"], p["name"]))
         if ranked or not reasons:
             return ranked[:MAX_NEARBY_PLACES], None

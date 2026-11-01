@@ -31,7 +31,7 @@ interface ImportDestinationPreview {template_samples: {samples?: Record<string,s
 interface ImportDuplicateFrame {capture_dates?: Record<string,string>; duplicates?: string[]; recovered?: string[]; catalog_recovery?: {checked: number; total: number}; done?: boolean; checked?: number; total?: number; preparing?: number;}
 interface ImportReadiness {error?: string; exiftool?: {available?: boolean; version?: string}; requires_exiftool?: boolean; metadata_repair_count?: number; metadata_repair_available?: boolean; success?: boolean; photo_count?: number;}
 interface ImportLocationSuggestion { kind: 'keyword' | 'google'; source: 'your_photos' | 'your_place' | 'google_park' | 'google_area'; name: string; keyword_id?: number; place_id?: string; parents?: string[]; summary?: string; photo_count?: number; distance_m?: number; }
-interface ImportLocationNearbyPlace { place_id: string; name: string; type: 'park' | 'natural_feature'; distance_m: number; }
+interface ImportLocationNearbyPlace { place_id: string; name: string; type: 'park' | 'natural_feature'; distance_m: number; cells: string[]; }
 interface ImportLocationGroup { key: string; suggestion: ImportLocationSuggestion | null; cells: string[]; file_count: number; latitude: number; longitude: number; sample_paths: string[]; unresolved_reasons?: Record<string, number>; nearby_places?: ImportLocationNearbyPlace[]; nearby_unresolved?: string; }
 interface ImportLocationOption { id: number; name: string; label: string; }
 interface ImportLocationSuggestions { work_limit_error?: string; groups: ImportLocationGroup[]; file_cells: Record<string, string>; no_gps_paths: string[]; location_options: ImportLocationOption[]; }

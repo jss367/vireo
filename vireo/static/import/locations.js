@@ -442,7 +442,17 @@ function importLocationChoices() {
     if (!importLocationGroupCount(group, counts)) return;
     const target = importLocationTarget(group);
     if (target.kind === 'skip') return;
-    choices.push({ ...target, cells: group.cells.slice() });
+    // A picked nearby place scopes the choice to the cells within range of
+    // its pin, not every cell in the broad group: two outings in the same
+    // county share a broad group, so sending `group.cells.slice()` for a
+    // park near one outing would mis-tag the other outing's photos.
+    const picked = target.kind === 'google'
+      ? (group.nearby_places || []).find(p => p.place_id === target.place_id)
+      : null;
+    const cells = picked && Array.isArray(picked.cells)
+      ? picked.cells.slice()
+      : group.cells.slice();
+    choices.push({ ...target, cells });
   });
   return choices;
 }

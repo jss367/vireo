@@ -335,9 +335,16 @@ def test_a_county_only_spot_offers_named_places_nearby_with_their_distance(db, b
     # Nearest first, measured from the closest photo spot to each pin; the
     # state park's pin is out of reach.
     assert [p["place_id"] for p in nearby] == ["lake", "lmra"]
-    assert nearby[0] == {"place_id": "lake", "name": "Big Laguna Lake",
-                         "type": "natural_feature", "distance_m": 574}
+    assert nearby[0]["place_id"] == "lake"
+    assert nearby[0]["name"] == "Big Laguna Lake"
+    assert nearby[0]["type"] == "natural_feature"
+    assert nearby[0]["distance_m"] == 574
     assert nearby[1]["distance_m"] == 2176
+    # Each nearby place names the cells within reach of its own pin, so a
+    # pick scopes to only the photos actually near that place.
+    laguna_cells = {cell_key(*p) for p in LAGUNA}
+    assert set(nearby[0]["cells"]) <= laguna_cells and nearby[0]["cells"]
+    assert set(nearby[1]["cells"]) <= laguna_cells and nearby[1]["cells"]
     assert "nearby_unresolved" not in group
     # One lookup per ~2 km bucket, not per cell.
     buckets = {import_locations._nearby_bucket(*p) for p in LAGUNA}
@@ -449,6 +456,39 @@ def test_an_over_limit_preview_refuses_before_paying_for_any_nearby_lookups(db, 
 
     assert result["groups"] == []
     assert "work_limit_error" in result
+
+
+def test_nearby_place_cells_cover_only_the_photos_within_reach_of_its_pin(db, monkeypatch):
+    """Two outings many kilometers apart fall into the same county's broad
+    group; a park within 5 km of one outing must list only that outing's
+    cells, so picking it tags only those photos, not the far outing's."""
+    nearby_lagoon = (32.8750, -116.4640)   # Laguna Meadow area
+    far_coast = (32.9800, -117.2900)       # 73 km away, still San Diego County
+    pin_lagoon = (32.8810, -116.4560)      # ~1 km from nearby_lagoon
+    pin_coast = (32.9820, -117.2920)       # ~0.3 km from far_coast
+    assert cell_key(*nearby_lagoon) != cell_key(*far_coast)
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+
+    def fake_nearby(lat, lng, api_key, *, language="en"):
+        return [
+            {"place_id": "lagoon-park", "name": "Lagoon Park",
+             "type": "park", "lat": pin_lagoon[0], "lng": pin_lagoon[1]},
+            {"place_id": "coast-park", "name": "Coast Park",
+             "type": "park", "lat": pin_coast[0], "lng": pin_coast[1]},
+        ]
+    monkeypatch.setattr(places, "nearby_named_places", fake_nearby)
+
+    [group] = suggest_import_locations(
+        db, _files([nearby_lagoon, far_coast]), api_key="KEY", language="en")["groups"]
+
+    places_by_id = {p["place_id"]: p for p in group["nearby_places"]}
+    # Each park's cells are only the ones within 5 km of its own pin.
+    assert places_by_id["lagoon-park"]["cells"] == [cell_key(*nearby_lagoon)]
+    assert places_by_id["coast-park"]["cells"] == [cell_key(*far_coast)]
+    # The frontend sends the picked place with these cells, not every cell
+    # in the group, so a user who picks Lagoon Park cannot tag the coast
+    # photos with it.
+    assert cell_key(*far_coast) not in places_by_id["lagoon-park"]["cells"]
 
 
 def test_nearby_distance_is_from_the_closest_photo_in_the_cell(db, monkeypatch):
