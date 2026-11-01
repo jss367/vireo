@@ -59,9 +59,8 @@ What deliberately stays on ``Database``:
   ``upsert_one_keyword`` merges, through ``self._merge_keyword_into``, and ``accept_prediction`` tags through
   ``self.tag_photo``.
 
-``_commit`` flags are carried through unchanged: ``_commit=False`` means the
-caller owns the transaction, and no method here commits unless the
-``Database`` method it backs did.
+No writer here commits: the route, job or service that calls it owns the
+transaction (``with db.transaction():``).
 """
 
 import json
@@ -1792,7 +1791,7 @@ class KeywordProvenanceRepository:
         # including the entry row. Doing it here rather than up front
         # is what keeps an out-of-scope entry row untouched.
         _reject_detection_alternatives(self.conn, ws, this_pred_id)
-        self.update_prediction_status(this_pred_id, "accepted", _commit=False)
+        self.update_prediction_status(this_pred_id, "accepted")
         old_species = []
         already_has_species = photo_id in self.get_photos_with_equivalent_species(
             [photo_id], kid
@@ -1825,7 +1824,6 @@ class KeywordProvenanceRepository:
         replace_species=False,
         photo_ids=None,
         prediction_ids=None,
-        _commit=True,
         species_taxonomy=...,
     ):
         """Accept a prediction: mark as accepted and add species keyword.
@@ -1861,8 +1859,8 @@ class KeywordProvenanceRepository:
         compare this key and record each result's actual ``keyword_id`` for
         undo/redo rather than requiring equivalent aliases to share an ID.
 
-        All database changes are performed atomically in a single transaction
-        unless ``_commit`` is False and the caller owns the transaction.
+        Does not commit: the caller's unit of work (the prediction-decision
+        lock) makes the accept atomic.
         """
         ws = self.workspace_id
         limited_photo_ids = _int_id_set(photo_ids)
@@ -1877,48 +1875,41 @@ class KeywordProvenanceRepository:
             pred, identity,
         )
 
-        try:
-            species = _species_label_to_accept(
-                pred, identity, has_explicit_evidence, source_taxon_id,
-            )
-            targets = _acceptance_targets(
-                self.conn, ws, pred, prediction_id,
-                limited_photo_ids, limited_pred_ids,
-                self.DECIDED_PREDICTION_STATUSES,
-            )
-            if not targets:
-                return _out_of_scope_result(self.conn, species, identity)
+        species = _species_label_to_accept(
+            pred, identity, has_explicit_evidence, source_taxon_id,
+        )
+        targets = _acceptance_targets(
+            self.conn, ws, pred, prediction_id,
+            limited_photo_ids, limited_pred_ids,
+            self.DECIDED_PREDICTION_STATUSES,
+        )
+        if not targets:
+            return _out_of_scope_result(self.conn, species, identity)
 
-            self.db.predictions.require_identifiable_subjects([pred_id for _, pred_id in targets])
-            source_args = {"source_taxon_id": source_taxon_id} if source_taxon_id is not None else {}
-            kid = self.add_keyword(species, is_species=True, **source_args)
-            species = _stored_keyword_name(self.conn, kid, species)
-            # list of {"photo_id", "prediction_id", "old_species"}
-            affected = []
-            # Every row this call flips to accepted, including ones that
-            # produced no ``affected`` entry (a status-only accept under
-            # replace_species). Callers batching over a submitted id list use
-            # it to avoid re-entering rows a grouped accept already covered.
-            accepted_pred_ids = []
+        self.db.predictions.require_identifiable_subjects([pred_id for _, pred_id in targets])
+        source_args = {"source_taxon_id": source_taxon_id} if source_taxon_id is not None else {}
+        kid = self.add_keyword(species, is_species=True, **source_args)
+        species = _stored_keyword_name(self.conn, kid, species)
+        # list of {"photo_id", "prediction_id", "old_species"}
+        affected = []
+        # Every row this call flips to accepted, including ones that
+        # produced no ``affected`` entry (a status-only accept under
+        # replace_species). Callers batching over a submitted id list use
+        # it to avoid re-entering rows a grouped accept already covered.
+        accepted_pred_ids = []
 
-            for target_photo_id, target_pred_id in targets:
-                accepted_pred_ids.append(target_pred_id)
-                entry = self._accept_target_row(
-                    ws, target_photo_id, target_pred_id, kid, species,
-                    replace_species, replace_taxonomy,
-                )
-                if entry is not None:
-                    affected.append(entry)
-
-            if _commit:
-                self.conn.commit()
-            return _accepted_result(
-                species, identity, kid, affected, accepted_pred_ids, targets,
+        for target_photo_id, target_pred_id in targets:
+            accepted_pred_ids.append(target_pred_id)
+            entry = self._accept_target_row(
+                ws, target_photo_id, target_pred_id, kid, species,
+                replace_species, replace_taxonomy,
             )
-        except Exception:
-            if _commit:
-                self.conn.rollback()
-            raise
+            if entry is not None:
+                affected.append(entry)
+
+        return _accepted_result(
+            species, identity, kid, affected, accepted_pred_ids, targets,
+        )
 
 
 # ``accept_prediction``'s steps. Each takes the connection and the bound

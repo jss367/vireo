@@ -69,9 +69,11 @@ What deliberately stays on ``Database``:
   called as ``self.<name>(...)``, so monkeypatches of ``Database`` methods
   keep reaching the moved code.
 
-``_commit`` flags are carried through unchanged: ``_commit=False`` means the
-caller owns the transaction, and no method here commits unless the
-``Database`` method it backs did.
+The review-decision writers (``update_status``, ``update_status_by_photo``,
+``ungroup``, ``accept_subject_species``, ``set_review_status``) never
+commit: the prediction-decision unit of work owns the transaction. The
+classifier-output writers still commit per call until the model-run jobs
+own their batch boundaries.
 """
 
 from collections.abc import Callable
@@ -1036,16 +1038,14 @@ class PredictionRepository:
             (detection_id, self.workspace_id, decision),
         )
 
-    def update_status(self, prediction_id, status, _commit=True):
+    def update_status(self, prediction_id, status):
         """Update per-workspace review status for a prediction.
 
         Review state lives in ``prediction_review`` keyed by
         (prediction_id, workspace_id); we upsert here rather than UPDATE
         so the "first review in a fresh workspace" path still writes a row.
 
-        Args:
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
+        Does not commit.
         """
         ws = self.workspace_id
         self.conn.execute(
@@ -1057,8 +1057,6 @@ class PredictionRepository:
                              reviewed_at = excluded.reviewed_at""",
             (prediction_id, ws, status),
         )
-        if _commit:
-            self.conn.commit()
 
     def get_group(self, group_id):
         """Get all predictions and photo data for a burst group.
@@ -1138,18 +1136,15 @@ class PredictionRepository:
             )
         return rows
 
-    def update_status_by_photo(self, photo_id, status,
-                                           _commit=True):
+    def update_status_by_photo(self, photo_id, status):
         """Upsert review status for every prediction of a photo in the active workspace.
 
         Review state is workspace-scoped (``prediction_review``); detections
         and predictions are global.  We enumerate the prediction ids via the
         detections join and upsert each review row.
 
-        ``_commit=False`` lets a caller that already holds the prediction
-        decision lock (``services.prediction_decisions``'
-        ``under_prediction_decision_lock``) fold these writes into that
-        transaction.
+        Does not commit: the caller holds the prediction decision lock
+        (``services.prediction_decisions``) and owns the transaction.
 
         Deliberately unconditional. The stale-overwrite this method used to
         enable — a group apply flipping an ``accepted`` row to ``rejected``
@@ -1182,10 +1177,8 @@ class PredictionRepository:
                                  reviewed_at = excluded.reviewed_at""",
                 (r["id"], ws, status),
             )
-        if _commit:
-            self.conn.commit()
 
-    def ungroup(self, prediction_id, _commit=True):
+    def ungroup(self, prediction_id):
         """Remove a prediction from its group in the active workspace.
 
         ``group_id`` lives in ``prediction_review``; this only clears the
@@ -1196,8 +1189,6 @@ class PredictionRepository:
                WHERE prediction_id = ? AND workspace_id = ?""",
             (prediction_id, self.workspace_id),
         )
-        if _commit:
-            self.conn.commit()
 
     def get_existing_photo_ids(self, model, labels_fingerprint=None):
         """Return photo_ids with predictions for a (model, fingerprint), scoped to active workspace.
@@ -1625,7 +1616,7 @@ class PredictionRepository:
         )
         self.commit_with_retry(self.conn)
 
-    def accept_subject_species(self, prediction_id, _commit=True):
+    def accept_subject_species(self, prediction_id):
         """Accept agreeing model predictions for one detected subject.
 
         Compare uses this for an additional-species suggestion: the species
@@ -1635,11 +1626,9 @@ class PredictionRepository:
         predictions are explicitly limited to this photo so accepting a
         subject in Compare cannot silently tag the rest of a burst.
 
-        ``_commit=False`` leaves the surrounding transaction open so the
-        caller can bundle the accept with its own writes (edit history,
-        precondition checks) inside one ``BEGIN IMMEDIATE`` — used by
-        ``api_accept_subject_species`` to serialize with the rest of the
-        prediction-decision routes.
+        Does not commit: ``api_accept_subject_species`` bundles the accept
+        with its own writes (edit history, precondition checks) in the
+        prediction-decision unit of work.
         """
         ws = self.workspace_id
         target = self.conn.execute(
@@ -1682,31 +1671,23 @@ class PredictionRepository:
         accepted_ids = []
         affected = []
         result = None
-        try:
-            for row in agreeing:
-                accepted = self.accept_prediction(
-                    row["id"],
-                    photo_ids=[target["photo_id"]],
-                    prediction_ids=[row["id"]],
-                    _commit=False,
-                )
-                # A row whose grouped scope excluded this photo accepts
-                # nothing, so it must not be reported as an accepted id (nor
-                # supply the returned keyword, which is None when the species
-                # keyword does not exist yet).
-                if accepted and accepted["accepted_prediction_ids"]:
-                    result = accepted
-                    accepted_ids.append(row["id"])
-                    # Equivalent legacy labels can return different keyword
-                    # IDs. History must retain the ID each accept touched.
-                    affected.extend({**a, "keyword_id": accepted["keyword_id"]}
-                                    for a in accepted["affected"])
-            if _commit:
-                self.conn.commit()
-        except Exception:
-            if _commit:
-                self.conn.rollback()
-            raise
+        for row in agreeing:
+            accepted = self.accept_prediction(
+                row["id"],
+                photo_ids=[target["photo_id"]],
+                prediction_ids=[row["id"]],
+            )
+            # A row whose grouped scope excluded this photo accepts
+            # nothing, so it must not be reported as an accepted id (nor
+            # supply the returned keyword, which is None when the species
+            # keyword does not exist yet).
+            if accepted and accepted["accepted_prediction_ids"]:
+                result = accepted
+                accepted_ids.append(row["id"])
+                # Equivalent legacy labels can return different keyword
+                # IDs. History must retain the ID each accept touched.
+                affected.extend({**a, "keyword_id": accepted["keyword_id"]}
+                                for a in accepted["affected"])
 
         if result is None:
             return None
@@ -1739,7 +1720,6 @@ class PredictionRepository:
                              group_id    = COALESCE(excluded.group_id,   group_id)""",
             (prediction_id, workspace_id, status, individual, group_id),
         )
-        self.conn.commit()
 
     # -- prediction-decision reads ----------------------------------------------------
     #

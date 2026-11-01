@@ -635,47 +635,52 @@ def test_inspector_predictions_for_photo(db, cat):
     assert db.predictions.inspector_rows_for_photo(cat["p"][1], db.active_workspace_id, 0.0) == []
 
 
-# -- review mutators and their _commit seams ----------------------------------------------
+# -- review mutators leave the commit to the caller ----------------------------------------
 
 
-def test_update_prediction_status_commit_flag(db, cat):
+def test_update_prediction_status_leaves_commit_to_caller(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1")
     pid = _pred_id(db, det, "Robin", fp="legacy")
-    db.update_prediction_status(pid, "rejected", _commit=False)
+    db.update_prediction_status(pid, "rejected")
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM prediction_review") == [(0,)]
     db.conn.commit()
-    db.update_prediction_status(pid, "accepted")
+    with db.transaction():
+        db.update_prediction_status(pid, "accepted")
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT status FROM prediction_review") == [("accepted",)]
 
 
-def test_update_predictions_status_by_photo_commit_flag(db, cat):
+def test_update_predictions_status_by_photo_leaves_commit_to_caller(db, cat):
     p0 = cat["p"][0]
     d0 = _det(db, p0, x=0.1, model="md-a")
     d1 = _det(db, p0, x=0.6, model="md-b")
     db.predictions.add(d0, "Robin", 0.5, "m1")
     db.predictions.add(d1, "Jay", 0.5, "m1", status="accepted")
-    db.update_predictions_status_by_photo(p0, "rejected", _commit=False)
+    db.conn.commit()
+    db.update_predictions_status_by_photo(p0, "rejected")
     assert db.conn.in_transaction
     assert _visible(db, "SELECT status FROM prediction_review") == [("accepted",)]
     db.conn.commit()
-    db.update_predictions_status_by_photo(p0, "reviewed")
+    with db.transaction():
+        db.update_predictions_status_by_photo(p0, "reviewed")
     assert not db.conn.in_transaction
     assert sorted(_visible(db, "SELECT status FROM prediction_review")) == [
         ("reviewed",), ("reviewed",)]
 
 
-def test_ungroup_prediction_commit_flag(db, cat):
+def test_ungroup_prediction_leaves_commit_to_caller(db, cat):
     det = _det(db, cat["p"][0])
     db.predictions.add(det, "Robin", 0.5, "m1", group_id="g1")
     pid = _pred_id(db, det, "Robin", fp="legacy")
-    db.ungroup_prediction(pid, _commit=False)
+    db.conn.commit()
+    db.ungroup_prediction(pid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT group_id FROM prediction_review") == [("g1",)]
     db.conn.rollback()
-    db.ungroup_prediction(pid)
+    with db.transaction():
+        db.ungroup_prediction(pid)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT group_id FROM prediction_review") == [(None,)]
 
@@ -687,7 +692,7 @@ def test_review_status_get_and_set(db, cat):
     other = db.create_workspace("Other")
     assert db.predictions.get_review_status(pid, cat["ws"]) == "pending"
     db.set_review_status(pid, other, "accepted", individual="i", group_id="g")
-    assert not db.conn.in_transaction
+    assert db.conn.in_transaction  # the caller commits
     db.set_review_status(pid, other, "rejected")
     assert db.predictions.get_review_status(pid, other) == "rejected"
     assert _review(db, pid, other) == ("rejected", "i", "g", None, None)
@@ -735,13 +740,13 @@ def test_clear_group_info_never_inserts(db, cat):
 # -- accepts -------------------------------------------------------------------------------
 
 
-def test_accept_prediction_commit_flag_and_rollback(db, cat, monkeypatch):
+def test_accept_prediction_leaves_commit_to_caller_and_rolls_back_with_its_unit(db, cat, monkeypatch):
     p0 = cat["p"][0]
     det = _det(db, p0)
     db.predictions.add(det, "Robin", 0.9, "m1")
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.conn.commit()
-    result = db.accept_prediction(pid, _commit=False)
+    result = db.accept_prediction(pid)
     assert result["accepted_prediction_ids"] == [pid]
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
@@ -751,7 +756,7 @@ def test_accept_prediction_commit_flag_and_rollback(db, cat, monkeypatch):
         raise RuntimeError("tag failed")
 
     monkeypatch.setattr(db, "tag_photo", boom)
-    with pytest.raises(RuntimeError, match="tag failed"):
+    with pytest.raises(RuntimeError, match="tag failed"), db.transaction():
         db.accept_prediction(pid)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM prediction_review") == [(0,)]
@@ -770,10 +775,10 @@ def test_accept_subject_species(db, cat, monkeypatch):
     real = db.accept_prediction
     monkeypatch.setattr(db, "accept_prediction",
                         lambda pid, **kw: calls.append((pid, kw)) or real(pid, **kw))
-    result = db.accept_subject_species(top, _commit=False)
+    result = db.accept_subject_species(top)
     assert db.conn.in_transaction
     assert [kw for _, kw in calls] == [
-        {"photo_ids": [p0], "prediction_ids": [pid], "_commit": False} for pid, _ in calls
+        {"photo_ids": [p0], "prediction_ids": [pid]} for pid, _ in calls
     ]
     assert result["photo_id"] == p0
     assert result["prediction_ids"][0] == top
@@ -797,12 +802,12 @@ def test_accept_subject_species_rolls_back(db, cat, monkeypatch):
         raise RuntimeError("accept failed")
 
     monkeypatch.setattr(db, "accept_prediction", boom)
-    with pytest.raises(RuntimeError, match="accept failed"):
+    with pytest.raises(RuntimeError, match="accept failed"), db.transaction():
         db.accept_subject_species(pid)
     assert not db.conn.in_transaction
     assert db.meta.get("probe") is None
     with pytest.raises(RuntimeError, match="accept failed"):
-        db.accept_subject_species(pid, _commit=False)
+        db.accept_subject_species(pid)
     assert db.conn.in_transaction
     db.conn.rollback()
 
@@ -854,7 +859,8 @@ def test_decision_row_and_status(db, cat):
 
     assert db.predictions.get_decision_row(987_654) is None
     assert db.predictions.current_status(987_654) is None
-    assert not db.conn.in_transaction
+    assert db.conn.in_transaction  # set_review_status leaves the commit to the caller
+    db.conn.rollback()
 
 
 def test_predictions_by_id_keeps_superseded_rows_and_votes(db, cat):
@@ -1268,14 +1274,10 @@ def test_prediction_facade_signatures_unchanged():
         "(self, model=None, collection_photo_ids=None, labels_fingerprint=None, "
         "clear_run_keys=True)"
     )
-    assert sig["update_prediction_status"] == (
-        "(self, prediction_id, status, _commit=True)"
-    )
-    assert sig["update_predictions_status_by_photo"] == (
-        "(self, photo_id, status, _commit=True)"
-    )
-    assert sig["ungroup_prediction"] == "(self, prediction_id, _commit=True)"
-    assert sig["accept_subject_species"] == "(self, prediction_id, _commit=True)"
+    assert sig["update_prediction_status"] == "(self, prediction_id, status)"
+    assert sig["update_predictions_status_by_photo"] == "(self, photo_id, status)"
+    assert sig["ungroup_prediction"] == "(self, prediction_id)"
+    assert sig["accept_subject_species"] == "(self, prediction_id)"
     assert sig["set_review_status"] == (
         "(self, prediction_id, workspace_id, status, individual=None, group_id=None)"
     )

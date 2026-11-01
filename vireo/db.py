@@ -4069,22 +4069,18 @@ class Database:
     DECIDED_PREDICTION_STATUSES = ("accepted", "rejected", "reviewed")
 
     def update_prediction_status(
-        self, prediction_id: int, status: str, _commit: bool = True
+        self, prediction_id: int, status: str
     ) -> None:
-        """Update per-workspace review status for a prediction.
+        """Update per-workspace review status for a prediction (no commit).
 
         Review state lives in ``prediction_review`` keyed by
         (prediction_id, workspace_id); we upsert here rather than UPDATE
         so the "first review in a fresh workspace" path still writes a row.
-
-        Args:
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
         """
-        return self._prediction_repository().update_status(prediction_id, status, _commit=_commit)
+        return self._prediction_repository().update_status(prediction_id, status)
 
     def update_predictions_status_by_photo(
-        self, photo_id: int, status: str, _commit: bool = True
+        self, photo_id: int, status: str
     ) -> None:
         """Upsert review status for every prediction of a photo in the active workspace.
 
@@ -4092,10 +4088,8 @@ class Database:
         and predictions are global.  We enumerate the prediction ids via the
         detections join and upsert each review row.
 
-        ``_commit=False`` lets a caller that already holds the prediction
-        decision lock (``services.prediction_decisions``'
-        ``under_prediction_decision_lock``) fold these writes into that
-        transaction.
+        Does not commit: the caller holds the prediction decision lock
+        (``services.prediction_decisions``) and owns the transaction.
 
         Deliberately unconditional. The stale-overwrite this method used to
         enable — a group apply flipping an ``accepted`` row to ``rejected``
@@ -4112,16 +4106,16 @@ class Database:
         anyway. Guarding here is both too strict and too late.
         """
         return self._prediction_repository().update_status_by_photo(
-            photo_id, status, _commit=_commit,
+            photo_id, status,
         )
 
-    def ungroup_prediction(self, prediction_id: int, _commit: bool = True) -> None:
-        """Remove a prediction from its group in the active workspace.
+    def ungroup_prediction(self, prediction_id: int) -> None:
+        """Remove a prediction from its group in the active workspace (no commit).
 
         ``group_id`` lives in ``prediction_review``; this only clears the
         review row for the current workspace.
         """
-        return self._prediction_repository().ungroup(prediction_id, _commit=_commit)
+        return self._prediction_repository().ungroup(prediction_id)
 
     def accept_prediction(
         self,
@@ -4129,7 +4123,6 @@ class Database:
         replace_species: bool = False,
         photo_ids: Collection[int] | None = None,
         prediction_ids: Collection[int] | None = None,
-        _commit: bool = True,
         species_taxonomy: Any = ...,
     ) -> dict[str, Any] | None:
         """Accept a prediction: mark as accepted and add species keyword.
@@ -4191,17 +4184,17 @@ class Database:
         it raises ValueError before any writes. The caller loads it, so the
         data layer never reads the taxonomy file.
 
-        All database changes are performed atomically in a single transaction
-        unless ``_commit`` is False and the caller owns the transaction.
+        Does not commit: the caller's unit of work (the prediction-decision
+        lock) makes the accept atomic.
         """
         return self._keyword_provenance_repository().accept_prediction(
             prediction_id, replace_species=replace_species, photo_ids=photo_ids,
-            prediction_ids=prediction_ids, _commit=_commit,
+            prediction_ids=prediction_ids,
             species_taxonomy=species_taxonomy,
         )
 
     def accept_subject_species(
-        self, prediction_id: int, _commit: bool = True
+        self, prediction_id: int
     ) -> dict[str, Any] | None:
         """Accept agreeing model predictions for one detected subject.
 
@@ -4212,14 +4205,12 @@ class Database:
         predictions are explicitly limited to this photo so accepting a
         subject in Compare cannot silently tag the rest of a burst.
 
-        ``_commit=False`` leaves the surrounding transaction open so the
-        caller can bundle the accept with its own writes (edit history,
-        precondition checks) inside one ``BEGIN IMMEDIATE`` — used by
-        ``api_accept_subject_species`` to serialize with the rest of the
-        prediction-decision routes.
+        Does not commit: ``api_accept_subject_species`` bundles the accept
+        with its own writes (edit history, precondition checks) in the
+        prediction-decision unit of work.
         """
         return self._prediction_repository().accept_subject_species(
-            prediction_id, _commit=_commit,
+            prediction_id,
         )
 
     # Reads the prediction-decision routes run under ``BEGIN IMMEDIATE``
@@ -4666,7 +4657,7 @@ class Database:
             if current_identity.get('photo_id') != pid:
                 continue
             if current_identity.get('prediction_instance_id') == state['identity']['prediction_instance_id']:
-                self.update_prediction_status(int(pred_id), state['status'], _commit=False)
+                self.update_prediction_status(int(pred_id), state['status'])
 
     # -- rating -----------------------------------------------------------
 
@@ -5041,13 +5032,13 @@ class Database:
         if not pred_id:
             return
         status = meta.get("prediction_status") or "pending"
-        self.update_prediction_status(int(pred_id), status, _commit=False)
+        self.update_prediction_status(int(pred_id), status)
 
     def _reject_edit_prediction(self, meta):
         pred_id = meta.get("prediction_id")
         if not pred_id:
             return
-        self.update_prediction_status(int(pred_id), "rejected", _commit=False)
+        self.update_prediction_status(int(pred_id), "rejected")
 
     def prune_edit_history(self) -> dict[str, int]:
         """Apply the configured history bound after a caller-owned edit transaction commits."""

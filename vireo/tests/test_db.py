@@ -8397,7 +8397,7 @@ def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
 
     monkeypatch.setattr(db, "add_keyword", fail_add_keyword)
     with pytest.raises(RuntimeError, match="simulated accept failure"):
-        db.accept_prediction(pred["id"], _commit=False)
+        db.accept_prediction(pred["id"])
 
     assert db.conn.execute(
         "SELECT 1 FROM keywords WHERE name = 'Outer Marker'"
