@@ -8973,6 +8973,103 @@ def test_extract_masks_stage_masks_full_image_rescued_dropout(tmp_path, monkeypa
     ).fetchone()[0] is not None
 
 
+def _mask_stage_photos(tmp_path, count):
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = workspace_folders.add_folder(db, folder_path)
+    photo_ids = []
+    for index in range(count):
+        filename = f"bird{index}.jpg"
+        photo_id = photo_ingest.add_photo(
+            db, folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        _drop_jpeg(folder_path, filename)
+        detection_store.write_detection_batch(
+            db, photo_id, "megadetector-v6",
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+        )
+        photo_ids.append(photo_id)
+    collection_id = db.collections.add(
+        "Mask stage photos", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+    db.commit()
+    params = PipelineParams(
+        collection_id=collection_id, skip_classify=True,
+        skip_extract_masks=False, skip_regroup=True,
+    )
+    return db_path, db, ws_id, photo_ids, params
+
+
+def test_extract_masks_overlaps_quality_analysis_with_embedding(tmp_path, monkeypatch):
+    """Each photo's quality analysis runs beside its DINOv2 embedding.
+
+    The analysis waits for the embedding to start, so a stage that ran them
+    one after the other would time out here instead of storing the features.
+    The stage result reports the seconds spent in each phase.
+    """
+    import dino_embed
+    import numpy as np
+    import quality
+
+    db_path, db, ws_id, photo_ids, params = _mask_stage_photos(tmp_path, 2)
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    embedding_started = threading.Event()
+    analysis_threads = set()
+
+    def fake_quality(proxy, mask):
+        analysis_threads.add(threading.current_thread().name)
+        assert embedding_started.wait(synchronization_timeout(10))
+        return {"subject_y_median": 42.0}
+
+    def fake_embed_batch(images, variant=None):
+        embedding_started.set()
+        return np.zeros((len(images), 384), dtype=np.float32)
+
+    monkeypatch.setattr(quality, "compute_all_quality_features", fake_quality)
+    monkeypatch.setattr(dino_embed, "embed", lambda p, variant=None: fake_embed_batch([p])[0])
+    monkeypatch.setattr(dino_embed, "embed_batch", fake_embed_batch)
+
+    result = run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    em = result["stages"]["extract_masks"]
+    assert em["masked"] == 2 and em["failed"] == 0
+    stored = db.conn.execute(
+        "SELECT photo_id, subject_y_median FROM photo_masks ORDER BY photo_id",
+    ).fetchall()
+    assert [tuple(row) for row in stored] == [(photo_ids[0], 42.0), (photo_ids[1], 42.0)]
+    assert threading.current_thread().name not in analysis_threads
+    assert set(em["phase_seconds"]) == {"decode", "segment", "analyze", "embed", "store"}
+    assert all(seconds >= 0 for seconds in em["phase_seconds"].values())
+
+
+def test_extract_masks_analysis_failure_fails_only_that_photo(tmp_path, monkeypatch):
+    """An analysis error raised on the helper thread is that photo's failure."""
+    import quality
+
+    db_path, db, ws_id, photo_ids, params = _mask_stage_photos(tmp_path, 2)
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    calls = []
+
+    def fake_quality(proxy, mask):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("bad analysis")
+        return {}
+
+    monkeypatch.setattr(quality, "compute_all_quality_features", fake_quality)
+
+    job = _make_job()
+    with pytest.raises(RuntimeError, match="1 of 2 photos failed mask extraction"):
+        run_pipeline_job(job, FakeRunner(), db_path, ws_id, params)
+
+    em = job["result"]["stages"]["extract_masks"]
+    assert (em["masked"], em["failed"]) == (1, 1)
+    assert em["outcomes"]["counts"] == {"failed": 1, "completed": 1}
+
+
 def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
     tmp_path, monkeypatch,
 ):
