@@ -1,10 +1,14 @@
 """Resumable wildlife inspection shares the catalog's decisions, never replays them."""
 import json
+import threading
 from pathlib import Path
 
 from PIL import Image
 from playwright.sync_api import expect
 from services import photo_ingest, workspace_folders
+from testing.waits import synchronization_timeout
+
+from vireo.tests.wait import wait_for_job_via_runner
 
 
 def seed_queue(live_server, tmp_path):
@@ -118,6 +122,49 @@ def test_review_queue_missing_pixels_and_concurrent_flags_are_preserved(page, li
     page.locator('[data-rq-flag="flagged"]').click()
     expect(page.locator('#rqFlag')).to_contain_text('Current catalog flag: flagged')
     assert live_server['db'].photos.get(pids[0])['flag'] == 'flagged'
+
+
+def test_transfer_blocked_review_choice_survives_reload_until_explicit_save(page, live_server, tmp_path):
+    pids, _, collection = seed_queue(live_server, tmp_path)
+    open_queue(page, live_server, collection)
+    runner = live_server['app']._job_runner
+    release = threading.Event()
+    transfer, _, _ = runner.start_singleton(
+        'send-to-nas', lambda job: release.wait(synchronization_timeout(60)),
+        singleton_key='archive', workspace_id=live_server['db'].active_workspace_id,
+        exclusive_workspace=True,
+    )
+    writes = []
+    page.on('request', lambda request: writes.append(request.url) if request.url.endswith('/flag') else None)
+    try:
+        page.locator('[data-rq-flag="rejected"]').click()
+        expect(page.locator('#rqFlag')).to_contain_text(f'flag edit for photo {pids[0]}')
+        expect(page.locator('#rqFlag')).to_contain_text('NAS transfer')
+        expect(page.locator('#rqPendingFlag')).to_contain_text('Unsaved review choice: Reject photo')
+        expect(page.locator('[data-rq-flag="rejected"]')).to_be_disabled()
+        expect(page.locator('#rqProgress')).to_contain_text('inspected here: 0')
+        page.reload()
+        expect(page.locator('#rqFlag')).to_contain_text('Current catalog flag: flagged')
+        expect(page.locator('#rqPendingFlag')).to_contain_text('Unsaved review choice: Reject photo')
+        expect(page.locator('#rqDiscardPendingFlag')).to_be_visible()
+        assert len(writes) == 1
+        assert live_server['db'].photos.get(pids[0])['flag'] == 'flagged'
+        screenshot = Path(__file__).resolve().parents[2] / '.context' / 'flag-transfer-pending.png'
+        screenshot.parent.mkdir(exist_ok=True)
+        page.locator('#reviewQueue').screenshot(path=str(screenshot))
+    finally:
+        release.set()
+        assert wait_for_job_via_runner(runner, transfer)['status'] == 'completed'
+    page.locator('#rqRefresh').click()
+    expect(page.locator('#rqFlag')).to_contain_text('Current catalog flag: flagged')
+    expect(page.locator('#rqPendingFlag')).to_contain_text('Unsaved review choice: Reject photo')
+    assert len(writes) == 1
+    page.locator('[data-rq-flag="rejected"]').click()
+    expect(page.locator('#rqFlag')).to_contain_text('Current catalog flag: rejected')
+    expect(page.locator('#rqPendingFlag')).to_be_empty()
+    expect(page.locator('#rqDiscardPendingFlag')).to_be_hidden()
+    assert len(writes) == 2
+    assert live_server['db'].photos.get(pids[0])['flag'] == 'rejected'
 
 
 def test_invalid_filter_handoff_keeps_review_closed(page, live_server):

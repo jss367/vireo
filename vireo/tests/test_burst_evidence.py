@@ -1,7 +1,9 @@
 """Burst evidence packs: chaining, coverage, ambiguity, and the routes that serve them."""
 
 import os
+import threading
 
+import pytest
 from burst_evidence import (
     AMBIGUITY_CODES,
     DEFAULT_CLOSE_CALL_MARGIN,
@@ -11,6 +13,8 @@ from burst_evidence import (
 )
 from PIL import Image
 from services import photo_ingest, workspace_folders
+from testing.waits import synchronization_timeout
+from wait import wait_for_job_via_runner
 
 
 def _row(pid, filename, timestamp=None, extension=None, flag="none"):
@@ -347,6 +351,56 @@ def test_burst_evidence_post_uses_the_best_batch_selection_contract(app_and_db):
     assert pack["ranked_candidate_id"] == pids[1]
     assert pack["best_photo_id"] is None
     assert pack["coverage"]["photos"] == 3
+
+
+@pytest.mark.parametrize("prefix", ["/api", "/api/v1"])
+def test_selected_evidence_reads_but_not_analysis_run_during_transfer(app_and_db, monkeypatch, prefix):
+    app, db = app_and_db
+    pids = _seed_burst(db, _folder_id(db), 3069, [10, 80])
+    runner = app._job_runner
+    release = threading.Event()
+    transfer, _, _ = runner.start_singleton(
+        "send-to-nas", lambda job: release.wait(synchronization_timeout(30)),
+        singleton_key="archive", workspace_id=db.active_workspace_id, exclusive_workspace=True,
+    )
+    reservations = []
+    reserve = runner.workspace_mutation
+
+    def spy(*args, **kwargs):
+        reservations.append((args, kwargs))
+        return reserve(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "workspace_mutation", spy)
+    client = app.test_client()
+    headers = {"X-Vireo-Token": app.config["API_TOKEN"]}
+    path = f"{prefix}/photos/burst-evidence"
+    before_jobs = set(runner._jobs)
+    before_photos = db.conn.execute("SELECT * FROM photos").fetchall()
+    before_changes = db.pending_changes.list_all()
+    try:
+        for mode in ({}, {"analyze": False}, {"analyze": False, "requested_species": "Owl"}):
+            response = client.post(path, json={"photo_ids": pids, **mode}, headers=headers)
+            assert response.status_code == 200, response.get_json()
+            assert response.get_json()["scope_method"] == "selected_photos"
+        assert reservations == []
+        assert client.get(f"{prefix}/photos/{pids[0]}/burst-evidence", headers=headers).status_code == 200
+        for analyze in (True, "false", 0, None, []):
+            response = client.post(path, json={"photo_ids": pids, "analyze": analyze,
+                                              "requested_species": "Owl"}, headers=headers)
+            assert response.status_code == 409, (analyze, response.get_json())
+            assert response.get_json()["code"] == "workspace_busy"
+        assert len(reservations) == 5
+        assert set(runner._jobs) == before_jobs
+        assert db.conn.execute("SELECT * FROM photos").fetchall() == before_photos
+        assert db.pending_changes.list_all() == before_changes
+        # Read-only admission does not weaken authentication or validation.
+        if prefix == "/api/v1":
+            assert client.post(path, json={"photo_ids": pids}).status_code == 401
+        assert client.post(path, json={"photo_ids": [pids[0]]}, headers=headers).status_code == 400
+        assert client.post(path, json=[], headers=headers).status_code == 400
+    finally:
+        release.set()
+        assert wait_for_job_via_runner(runner, transfer)["status"] == "completed"
 
 
 def test_burst_evidence_photo_outside_workspace_is_not_found(app_and_db):

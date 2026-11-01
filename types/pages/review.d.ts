@@ -29,7 +29,7 @@ interface DocumentEventMap {'lightbox:renderchanged':CustomEvent<{photoIds?:numb
 
 declare function checkPendingSync():void;
 
-interface ReviewQueueItemState {inspected:boolean;unresolved:boolean;subject:number|null;center:[number,number]|null}
+interface ReviewQueueItemState {inspected:boolean;unresolved:boolean;subject:number|null;center:[number,number]|null;pendingFlag?:'flagged'|'rejected'|'none'|null}
 interface ReviewQueueSession {photoId:number|null;items:Record<string,ReviewQueueItemState>;followUpOnly:boolean}
 interface ReviewQueuePhoto {id:number;flag?:string;flag_note?:{description?:string}|null}
 interface ReviewQueueSubject {id:number;box_x:number;box_y:number;box_w:number;box_h:number;is_primary?:boolean;analysis?:unknown}

@@ -13,10 +13,12 @@
     </div>
     <h2 id="rqFilename"></h2>
     <p id="rqFlag" aria-live="polite"></p>
+    <p id="rqPendingFlag" aria-live="polite"></p>
     <div class="rq-toolbar">
       <button type="button" data-rq-flag="flagged">Keep photo</button>
       <button type="button" data-rq-flag="rejected">Reject photo</button>
       <button type="button" data-rq-flag="none">Clear photo flag</button>
+      <button type="button" id="rqDiscardPendingFlag" hidden>Discard unsaved review choice</button>
       <a id="rqPredictionLink" href="#grid">Review species predictions below</a>
     </div>
     <div class="rq-toolbar">

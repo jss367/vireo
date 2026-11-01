@@ -342,6 +342,13 @@ the same transaction. Switching to another analysis context can require
 reanalysis. No flags, ratings, edit recipes, or primary-subject choices are
 written by comparison analysis.
 
+During a NAS transfer, explicit-selection evidence reads remain available when
+`analyze` is omitted or `false`, as do per-photo GET evidence requests. Requests
+with `"analyze": true` still take a workspace reservation and return HTTP 409
+with code `workspace_busy` while the transfer holds the workspace. This keeps
+analysis and metadata changes from racing the transfer. Invalid `analyze`
+values do not bypass the reservation; outside a transfer they return HTTP 400.
+
 Subject focus and mask URLs carry `detection_id` and `analysis_key`; consumers
 should use the returned URLs together. Their responses refuse stale or foreign
 subject evidence with 404 instead of falling back to the photo's primary bird.

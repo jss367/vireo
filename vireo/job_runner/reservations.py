@@ -140,7 +140,8 @@ class WorkspaceReservations:
         }
         with self._lock:
             self.check_admission_locked(workspace_id, exclusive=exclusive,
-                                        defer_transfer_check=defer_transfer_check)
+                                        defer_transfer_check=defer_transfer_check,
+                                        mutation_label=holder["label"])
             self.mutations.setdefault(workspace_id, []).append(holder)
             if exclusive:
                 self.exclusive[workspace_id] = holder
@@ -204,7 +205,7 @@ class WorkspaceReservations:
                 self._pause_condition.wait(timeout=0.1)
 
     def check_admission_locked(self, workspace_id, blocking=True, exclusive=False,
-                               paths=None, defer_transfer_check=False):
+                               paths=None, defer_transfer_check=False, mutation_label=None):
         """Check both sides of a transfer reservation under the registration lock.
 
         ``paths`` are the realpath'd folder trees a job declared; it runs
@@ -213,6 +214,8 @@ class WorkspaceReservations:
         that cannot touch originals yet: an automatic transfer, which waits in
         ``wait_for_workspace_transfer`` before moving anything, and a request
         whose job is checked when it registers.
+        ``mutation_label`` names a synchronous edit rather than a job launch;
+        it changes only the rejection text, never admission.
 
         A rejection names what holds the workspace: the user cannot see a
         synchronous reservation anywhere else, so "wait for running jobs"
@@ -220,11 +223,14 @@ class WorkspaceReservations:
         """
         if not blocking:
             return
+        # Labels can include user paths containing braces; they are literal text.
+        edit = mutation_label.replace("{", "{{").replace("}", "}}") if mutation_label else None
         exclusive_holder = self.exclusive.get(workspace_id)
         if exclusive_holder is not None:
             self._raise_workspace_busy_locked(
                 workspace_id,
-                "Wait for {blockers} to finish before starting another job or change in this workspace.",
+                (f"Cannot complete {edit} while {{blockers}} holds this workspace. Try again when it finishes."
+                 if edit else "Wait for {blockers} to finish before starting another job or change in this workspace."),
                 [], [exclusive_holder],
             )
         active = [j for j in self._jobs.values()
@@ -235,7 +241,11 @@ class WorkspaceReservations:
         conflict = None if defer_transfer_check else transfer_conflict(transfers, paths)
         if conflict is not None:
             transfer, tree = conflict
-            if tree is None:
+            if edit:
+                template = (f"Cannot complete {edit} while the NAS transfer ({{blockers}}) holds this workspace. "
+                            "Wait for it to finish so metadata synchronization and the file transfer stay consistent, "
+                            "then try the edit again. No changes were saved.")
+            elif tree is None:
                 template = ("Wait for the NAS transfer ({blockers}) to finish before starting "
                             "another job in this workspace.")
             else:
