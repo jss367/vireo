@@ -7244,7 +7244,7 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True)
+    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     root = result["keyword_id"]
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
@@ -7285,7 +7285,7 @@ def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True)
+    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     # Even though no new tag was added (hierarchy leaf already satisfies the
     # target), the stale Sparrow removal must be visible in ``affected`` so
@@ -7372,7 +7372,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True)
+    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Cactus Wren" in names
@@ -7466,7 +7466,7 @@ def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True)
+    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert european in tagged, (
@@ -7538,7 +7538,7 @@ def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
     # becomes the resolved accept target ``kid``. The replace-species
     # branch must recognise that the linked ``robin`` on the photo is a
     # distinct species, not the unlinked target — and untag it.
-    db.accept_prediction(prediction_id, replace_species=True)
+    db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert legacy_target in tagged, (
@@ -7652,7 +7652,7 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
         if r["detection_id"] == d_teal
     )
 
-    result = db.accept_prediction(teal_pred["id"], replace_species=True)
+    result = db.accept_prediction(teal_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names        # this subject's corrected ID
@@ -7719,7 +7719,7 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -7783,7 +7783,7 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -7844,7 +7844,7 @@ def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
         if r["detection_id"] == d_target and r["status"] != "alternative"
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -7902,7 +7902,7 @@ def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -7961,7 +7961,7 @@ def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    db.accept_prediction(target_pred["id"], replace_species=True)
+    db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -24642,7 +24642,7 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
         (detection_id,),
     ).fetchone()["id"]
 
-    db.accept_prediction(pred_id, replace_species=True)
+    db.accept_prediction(pred_id, replace_species=True, species_taxonomy=None)
 
     # Both stale Robin rows must have been detached.
     tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}

@@ -4142,7 +4142,7 @@ class Database:
         photo_ids: Collection[int] | None = None,
         prediction_ids: Collection[int] | None = None,
         _commit: bool = True,
-        species_taxonomy: Any = None,
+        species_taxonomy: Any = ...,
     ) -> dict[str, Any] | None:
         """Accept a prediction: mark as accepted and add species keyword.
 
@@ -4197,8 +4197,10 @@ class Database:
 
         ``species_taxonomy`` is the loaded taxonomy (``load_local_taxonomy()``)
         a ``replace_species`` accept uses to keep keywords a neighbouring
-        subject's prediction supports as broader/same/narrower; without it
-        only exact-name keywords are protected. The caller loads it, so the
+        subject's prediction supports as broader/same/narrower. Replacement
+        requires an explicit choice: pass the loaded taxonomy, or pass None
+        to choose exact-name protection when taxonomy is unavailable. Omitting
+        it raises ValueError before any writes. The caller loads it, so the
         data layer never reads the taxonomy file.
 
         All database changes are performed atomically in a single transaction
