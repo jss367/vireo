@@ -254,7 +254,8 @@ class _FolderCatalogRewrite:
             with db.transaction():
                 db.moves_merge.move_folder_path(self.folder_id, self.target.catalog_path,
                                     new_name=self.landing_name)
-        db.folders.update_counts()
+        with db.transaction():
+            db.folders.update_counts()
 
     def apply_mtime_corrections(self, mtime_updates):
         """Only now that the rows live at the destination.

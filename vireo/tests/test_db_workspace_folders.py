@@ -181,8 +181,10 @@ def test_add_workspace_folder_no_commit_skips_removed_unless_restoring(db, tree)
     workspace_folders.add_workspace_folder(db, ws, p)
     workspace_folders.remove_workspace_folder_tree(db, ws, a)
     workspace_folders.add_workspace_folder_no_commit(db, ws, p)
+    db.commit()
     assert _links(db, ws) == {p: 1}
     workspace_folders.add_workspace_folder_no_commit(db, ws, p, restore_removed=True, is_root=False)
+    db.commit()
     assert _links(db, ws) == {p: 1, a: 0, b: 0}
     db.conn.commit()
 
@@ -426,7 +428,8 @@ def test_materialize_ignores_other_workspaces(db, tree):
 def test_mark_workspace_folder_roots_promotes_linked_folders(db, tree):
     ws, p, a, b, q = tree
     workspace_folders.add_workspace_folder(db, ws, p)
-    assert db.workspace_folders.mark_roots(ws, [a, b, q]) is None
+    with db.transaction():
+        assert db.workspace_folders.mark_roots(ws, [a, b, q]) is None
     assert _links(db, ws) == {p: 1, a: 1, b: 1}
     with _reader(db) as conn:
         assert _links(db, ws, conn) == {p: 1, a: 1, b: 1}
@@ -439,6 +442,7 @@ def test_mark_workspace_folder_roots_empty_is_a_noop(db, tree):
     try:
         db.workspace_folders.mark_roots(ws, [])
         db.workspace_folders.mark_roots(ws, None)
+        db.commit()
     finally:
         db.conn.set_trace_callback(None)
     assert statements == []
@@ -458,6 +462,7 @@ def test_mark_workspace_folder_roots_chunks(db, cache):
     db.conn.set_trace_callback(statements.append)
     try:
         db.workspace_folders.mark_roots(ws, ids)
+        db.commit()
     finally:
         db.conn.set_trace_callback(None)
     assert len({s for s in statements if s.strip().startswith("UPDATE")}) == 2
@@ -533,6 +538,7 @@ def test_get_workspace_root_folder_ids_defaults_to_active_workspace(db, tree):
     workspace_folders.add_workspace_folder(db, ws, q)
     workspace_folders.add_workspace_folder(db, ws, p)
     db.workspace_folders.mark_roots(ws, [b])
+    db.commit()
     assert workspace_folders.get_workspace_root_folder_ids(db) == [p, b, q]
     assert all(isinstance(i, int) for i in workspace_folders.get_workspace_root_folder_ids(db))
     assert workspace_folders.get_workspace_root_folder_ids(db, db.create_workspace("Empty")) == []
@@ -1139,7 +1145,7 @@ def test_get_local_session_folder_ids_reads_one_session(db, tree):
     assert db.workspace_folders.local_session_folder_ids(p) == []
 
 
-def test_unlink_exact_workspace_folders_no_commit_deletes_only_those_rows(db, tree, cache):
+def test_unlink_exact_workspace_folders_deletes_only_those_rows_and_leaves_commit(db, tree, cache):
     ws, p, a, b, q = tree
     for fid, is_root in ((p, 1), (a, 0), (b, 0), (q, 1)):
         _link_raw(db, ws, fid, is_root)
@@ -1148,7 +1154,7 @@ def test_unlink_exact_workspace_folders_no_commit_deletes_only_those_rows(db, tr
         "INSERT INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)", (ws, pid),
     )
     db.conn.commit()
-    db.workspace_folders.unlink_exact_no_commit(ws, [a, b])
+    db.workspace_folders.unlink_exact(ws, [a, b])
     assert _links(db, ws) == {p: 1, q: 1}
     assert db.in_transaction
     with _reader(db) as conn:
@@ -1164,14 +1170,14 @@ def test_unlink_exact_workspace_folders_no_commit_deletes_only_those_rows(db, tr
     assert cache.invalidated == []
 
 
-def test_transfer_exact_workspace_folders_no_commit_moves_links_as_non_roots(db, tree, cache):
+def test_transfer_exact_workspace_folders_moves_links_as_non_roots_and_leaves_commit(db, tree, cache):
     ws, p, a, b, q = tree
     target = db.create_workspace("Target")
     _link_raw(db, ws, a, 1)
     _link_raw(db, ws, b, 0)
     _link_raw(db, target, b, 1)  # already linked there: kept as it is
     cache.invalidated.clear()  # create_workspace's own invalidation
-    db.workspace_folders.transfer_exact_no_commit(ws, target, [a, b])
+    db.workspace_folders.transfer_exact(ws, target, [a, b])
     assert db.in_transaction
     db.commit()
     with _reader(db) as conn:
@@ -1285,7 +1291,8 @@ def test_workspace_folder_workflow_lives_in_the_service(old_name):
         f"workspace_folders.{_MOVED_METHODS[old_name]} touches the connection; "
         "move the SQL to WorkspaceFolderRepository"
     )
-    assert "db.workspace_folders" in source, (
+    # ``add_workspace_folder`` delegates through ``add_workspace_folder_no_commit``.
+    assert "db.workspace_folders" in source or "add_workspace_folder_no_commit(" in source, (
         f"workspace_folders.{_MOVED_METHODS[old_name]} no longer delegates to WorkspaceFolderRepository"
     )
 

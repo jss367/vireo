@@ -12984,6 +12984,7 @@ def test_folder_health_check_runs_at_startup(app_and_db):
     # Folders in test fixture use fake paths that don't exist on disk.
     # The health check should mark them missing.
     changed = db.folders.check_health()
+    db.commit()
     assert changed >= 1  # /photos/2024 and /photos/2024/January don't exist
 
     missing = db.folders.missing()

@@ -713,9 +713,10 @@ def create_workspace_blueprint(
                 with db.transaction():
                     db.collections.create_defaults(workspace_id=ws_id)
                 # Link selected folders if provided
-                for folder_id in folder_ids:
-                    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
-                db.workspace_folders.mark_roots(ws_id, folder_ids)
+                with db.transaction():
+                    for folder_id in folder_ids:
+                        workspace_folders.add_workspace_folder(db, ws_id, folder_id)
+                    db.workspace_folders.mark_roots(ws_id, folder_ids)
                 ws = db.workspaces.get(ws_id)
             # The workspace this request just created.
             return jsonify(dict(cast("Row", ws)))
@@ -986,7 +987,7 @@ def create_workspace_blueprint(
             for descendant_id in descendant_root_ids:
                 mapped_ids = db.workspace_folders.local_session_folder_ids(descendant_id)
                 db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
-                db.workspace_folders.unlink_exact_no_commit(ws_id, mapped_ids)
+                db.workspace_folders.unlink_exact(ws_id, mapped_ids)
             if descendant_root_ids:
                 db.commit()
         # Unlinking a folder tree removes photos from the workspace's scope;
@@ -1061,7 +1062,7 @@ def create_workspace_blueprint(
                     for descendant_id in descendant_ids:
                         mapped_ids = db.workspace_folders.local_session_folder_ids(descendant_id)
                         db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
-                        db.workspace_folders.transfer_exact_no_commit(
+                        db.workspace_folders.transfer_exact(
                             ws_id, target_ws_id, mapped_ids,
                         )
                         if mapped_ids:

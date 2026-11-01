@@ -1107,8 +1107,10 @@ class Database:
             ):
                 raise IncompatibleDatabaseError(self._db_path, str(e)) from e
             raise
-        self.folders.repair_missing_parents()
-        self.repair_stale_folder_parents()
+        with self.transaction():
+            self.folders.repair_missing_parents()
+        with self.transaction(immediate=True):
+            self.repair_stale_folder_parents()
         self.ensure_default_workspace()
         # Idempotent default-keyword seed. Cheap warm-path (single
         # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace

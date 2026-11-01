@@ -443,6 +443,7 @@ def test_identity_merges_preserve_gps_review(db, tmp_path, merge_kind):
         db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (source_folder,))
         db.conn.commit()
         db.folders.relocate(source_folder, str(archive))
+        db.commit()
     else:
         _pair_raw_jpeg_companions(db)
 

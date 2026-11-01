@@ -1,4 +1,5 @@
 """Identity decisions survive each catalog collapse, or reject atomically."""
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     before = db.identity_alternatives.for_photos([losing], include_resolved=True)[losing]
     if path == 'folder':
         db.folders.merge_into_existing(source, target, str(target_path))
+        db.commit()
     else:
         from scanner.companions import _pair_raw_jpeg_companions
         assert _pair_raw_jpeg_companions(db) == {losing: survivor}
@@ -119,6 +121,7 @@ def test_collapse_conflicts_keep_pair_data_and_folder_transaction_untouched(db, 
     if path == 'folder':
         with pytest.raises(IdentityMergeConflict):
             db.folders.merge_into_existing(source, target, str(target_path))
+            db.commit()
     else:
         from scanner.companions import _pair_raw_jpeg_companions
         assert _pair_raw_jpeg_companions(db) == {}
@@ -139,6 +142,7 @@ def test_collapse_keeps_current_tags_for_redo_only_identity_history(db, tmp_path
     undo_last_edit(db)
     if path == 'folder':
         db.folders.merge_into_existing(source, target, str(target_path))
+        db.commit()
     else:
         from scanner.companions import _pair_raw_jpeg_companions
         _pair_raw_jpeg_companions(db)
@@ -213,8 +217,8 @@ def test_staged_identity_intents_cannot_be_acknowledged_by_old_path_writer(db, t
             assert replacement['change_token'] in counts['preserved_off_staging_identities']
 
 
-@pytest.mark.parametrize('commit', [False, True])
-def test_folder_identity_conflict_rolls_back_earlier_duplicate_carries(db, tmp_path, commit):
+@pytest.mark.parametrize('in_unit', [False, True])
+def test_folder_identity_conflict_rolls_back_earlier_duplicate_carries(db, tmp_path, in_unit):
     from repositories.identity_alternatives import IdentityMergeConflict
     source, target, survivor, losing, target_path = _fixture(db, tmp_path, 'folder')
     keyword = db.add_keyword('Earlier embedded note')
@@ -228,8 +232,8 @@ def test_folder_identity_conflict_rolls_back_earlier_duplicate_carries(db, tmp_p
         save_alternatives(db, [later_target], ['Heron', 'Egret'], 'Target evidence', 'Call')
     assert keyword not in {row['id'] for row in db.photo_keywords.get_for_photos([survivor]).get(survivor, [])}
     before = [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords ORDER BY photo_id,keyword_id')]
-    with pytest.raises(IdentityMergeConflict):
-        db.folders.merge_into_existing(source, target, str(target_path), commit=commit)
+    with pytest.raises(IdentityMergeConflict), db.transaction() if in_unit else contextlib.nullcontext():
+        db.folders.merge_into_existing(source, target, str(target_path))
     assert [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords ORDER BY photo_id,keyword_id')] == before
     assert db.photos.get(losing) is not None
     assert db.photos.get(later_source) is not None

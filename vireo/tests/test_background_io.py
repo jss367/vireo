@@ -137,6 +137,7 @@ def test_folder_health_abandons_observations_when_transfer_starts(app_and_db, tm
     try:
         with pytest.raises(missing_originals._FolderHealthDeferred):
             db.folders.check_health(checkpoint=service._folder_health_checkpoint)
+            db.commit()
         assert db.folders.get(first)["status"] == "ok"
         assert db.folders.get(second)["status"] == "ok"
         assert db.conn.execute(

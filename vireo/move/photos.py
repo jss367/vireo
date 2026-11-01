@@ -303,7 +303,8 @@ class _PhotoMove:
         try:
             for i, pid in enumerate(photo_ids):
                 if pause_requested and pause_requested():
-                    db.folders.update_counts()
+                    with db.transaction():
+                        db.folders.update_counts()
                     if pause_callback:
                         pause_callback()
                 if cancel_check and cancel_check():
@@ -321,7 +322,8 @@ class _PhotoMove:
             # Always update folder counts so they stay consistent even if an
             # exception interrupts the move loop after some photos were committed.
             if self.moved > 0:
-                db.folders.update_counts()
+                with db.transaction():
+                    db.folders.update_counts()
 
         return {"moved": self.moved,
                 "already_in_place": preflight.already_in_place,

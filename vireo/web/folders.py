@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from burst_evidence import (
     DEFAULT_CLOSE_CALL_MARGIN,
@@ -36,6 +36,22 @@ if TYPE_CHECKING:
     from services.service_types import JsonError
     from web.background_jobs import JobLaunch
     from web.web_types import BuildScanWork, CleanupCachedFiles, GetDb, GetRunner, InvalidateMissingOriginals
+
+
+def _relocate_in_one_unit(
+    db: Database, folder_id: int, new_path: str,
+) -> tuple[list[dict[str, Any]], ValueError | None]:
+    """Relocate in one unit of work; return ``(cascaded, refusal)``.
+
+    A refused relocate is caught inside the unit, so the status refresh
+    relocate makes when a missing folder's original path came back still
+    commits, as it always did.
+    """
+    with db.transaction():
+        try:
+            return db.folders.relocate(folder_id, new_path), None
+        except ValueError as exc:
+            return [], exc
 
 
 def create_folders_blueprint(
@@ -117,7 +133,7 @@ def create_folders_blueprint(
         # active-workspace transition that still needs to notify Browse
         # (Codex review r3686191131).
         ws_missing_before = {f["id"] for f in db.folders.missing()}
-        changed = db.folders.check_health()
+        changed = workspace_folders.check_folder_health(db)
         # A folder flipping ok→missing turns every one of its photos into a
         # ghost, and missing→ok resurrects them. Either transition would
         # otherwise be masked by a ready /api/photos/missing cache until the
@@ -303,9 +319,9 @@ def create_folders_blueprint(
             old_row = db.folders.get(folder_id)
             old_path = old_row["path"] if old_row else ""
 
-            try:
-                cascaded = db.folders.relocate(folder_id, new_path)
-            except ValueError as e:
+            cascaded, relocate_error = _relocate_in_one_unit(db, folder_id, new_path)
+            if relocate_error is not None:
+                e = relocate_error
                 if old_row and old_row["status"] == "missing":
                     current_row = db.folders.get(folder_id)
                     if current_row and current_row["status"] == "ok":

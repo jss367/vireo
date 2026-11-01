@@ -170,6 +170,7 @@ def test_assessments_are_workspace_local_and_cascade_with_detection(app_and_db):
     db.set_active_workspace(other_ws)
     assert save(app, db, det, observed_workspace_id=other_ws).status_code == 404
     db.workspace_folders.add_exact(other_ws, photo['folder_id'])
+    db.commit()
     assert evidence_rows(app)[0]['evidence']['subject']['decision'] == 'unreviewed'
     assert save(app, db, det, 'subject_valid').status_code == 200
     assert db.conn.execute('SELECT COUNT(*) FROM detection_evidence_reviews').fetchone()[0] == 2

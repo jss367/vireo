@@ -969,22 +969,26 @@ class MovesMergeRepository:
             photo_ids,
         ).fetchall()
 
-    def merge_staged_tree_into_archive(
+    def prepare_staged_tree_merge(
             self, staged_root_id, archive_path, *, workspace_id_fn,
             root_ancestor_exists, root_descendant_exists,
             prune_nonroot_links_outside_roots,
             materialize_workspace_descendants, add_workspace_folder,
             add_workspace_folder_no_commit, case_insensitive_root,
-            move_location_state,
-            invalidate_new_images, update_folder_counts, KEYWORD_SOURCE_CONFLICT_SQL):
-        """Fold a staged folder subtree into a tracked archive; returns counts.
+            move_location_state, KEYWORD_SOURCE_CONFLICT_SQL):
+        """Prepare a staged-tree fold: ``(merge, staged_folders)``, or None.
+
+        None when the staged root is gone. Otherwise the archive base is
+        linked and missing intermediates materialized, each through its own
+        unit of work (``add_workspace_folder`` and friends): partial progress
+        on preparing the archive tree is a valid state a retry can build on.
+        The fold itself (:meth:`fold_staged_tree`) is the caller's one unit.
 
         See ``services.moves_merge.merge_staged_tree_into_archive`` for the
         contract. The keyword arguments are the façade methods, service
         functions and hooks the body composes, passed in so monkeypatches of
-        them, the per-instance new-images cache and
-        ``move._case_insensitive_root`` still apply, and so the workspace is
-        resolved only after the staged-root lookup:
+        them and ``move._case_insensitive_root`` still apply, and so the
+        workspace is resolved only after the staged-root lookup:
 
         * ``workspace_id_fn`` -> ``Database.require_workspace_id``
         * ``root_ancestor_exists`` / ``root_descendant_exists`` ->
@@ -994,23 +998,17 @@ class MovesMergeRepository:
         * ``materialize_workspace_descendants``, ``add_workspace_folder``,
           ``add_workspace_folder_no_commit`` -> the ``services.workspace_folders``
           functions of the same name, bound to the database
-        * ``update_folder_counts`` -> ``db.folders.update_counts``
         * ``case_insensitive_root`` -> ``move._case_insensitive_root``
         * ``move_location_state`` -> ``Database._move_location_state_for_merge``
           (the per-collision keyword-edit, review-state and sibling-link
           transfers are this repository's own methods)
-        * ``invalidate_new_images(workspace_ids)`` -> the new-images cache
         * ``KEYWORD_SOURCE_CONFLICT_SQL`` -> the shared association provenance fold
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
         ).fetchone()
         if not staged_root:
-            return {"new_photos": 0, "new_folders": 0,
-                    "merged_folders": 0, "already_present": 0,
-                    "dropped_photo_ids": [],
-                    "preserved_edit_count": 0,
-                    "preserved_off_staging_identities": []}
+            return None
         staged_root_path = staged_root["path"]
         ws = workspace_id_fn()
         merge = _StagedTreeMerge(
@@ -1032,36 +1030,23 @@ class MovesMergeRepository:
         )
         merge.link_archive_base()
         merge.materialize_missing_intermediates()
-        staged_folders = merge.snapshot_staged_folders()
+        return merge, merge.snapshot_staged_folders()
 
-        # Wrap the reconciliation body in try/except + rollback so a mid-run
-        # exception (unexpected row shape, raised error from the
-        # case-insensitivity probe, etc.) can't leave a partially-applied
-        # merge sitting on the connection — an unrelated later commit would
-        # otherwise persist half-reparented folders/photos. Matches the
-        # convention used by other multi-step mutation methods in this file
-        # (``delete_folder``, ``move_folders_to_workspace``,
-        # ``_merge_duplicate_keywords_pass``). Archive-base linking and
-        # missing-intermediate materialization above each commit through
-        # their own ``add_workspace_folder`` calls, so their success is
-        # persisted independently — that's the desired shape here: partial
-        # progress on preparing the archive tree is a valid state a retry
-        # can build on, but partial photo/folder reparenting is not.
-        try:
-            # Every photo row the fold drops leaves its collections (or
-            # follows its survivor into them) when this block exits.
-            with photo_row_deletion(self.conn) as merge.photo_rows:
-                for sf in staged_folders:
-                    merge.fold_staged_folder(sf)
-                merge.delete_folded_staged_folders()
-                merge.link_survivors_for_sibling_edits()
+    def fold_staged_tree(self, merge, staged_folders):
+        """Reparent the staged folders and photos into the archive; return counts.
 
-            self.conn.commit()
-            invalidate_new_images([ws])
-        except Exception:
-            self.conn.rollback()
-            raise
-        update_folder_counts()
+        No commit: the caller runs this as one unit of work, so a mid-run
+        exception (unexpected row shape, an error from the
+        case-insensitivity probe, ...) rolls the whole fold back instead of
+        leaving half-reparented folders and photos for a later commit.
+        """
+        # Every photo row the fold drops leaves its collections (or
+        # follows its survivor into them) when this block exits.
+        with photo_row_deletion(self.conn) as merge.photo_rows:
+            for sf in staged_folders:
+                merge.fold_staged_folder(sf)
+            merge.delete_folded_staged_folders()
+            merge.link_survivors_for_sibling_edits()
         return merge.counts
 
 

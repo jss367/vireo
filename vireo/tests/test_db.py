@@ -9610,6 +9610,7 @@ def test_check_folder_health_marks_missing(tmp_path):
     fid_gone = workspace_folders.add_folder(db, "/nonexistent/folder", name="gone")
 
     changed = db.folders.check_health()
+    db.commit()
     assert changed == 1
 
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_gone,)).fetchone()
@@ -9633,11 +9634,13 @@ def test_check_folder_health_recovers(tmp_path):
 
     # Folder doesn't exist yet -> stays missing
     db.folders.check_health()
+    db.commit()
     assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "missing"
 
     # Create folder -> recovery
     os.makedirs(folder)
     db.folders.check_health()
+    db.commit()
     assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "ok"
 
 
@@ -9663,6 +9666,7 @@ def test_check_folder_health_preserves_partial_when_path_exists(tmp_path):
     db.conn.commit()
 
     changed = db.folders.check_health()
+    db.commit()
     assert changed == 0, "partial folder on disk should not change status"
     status = db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (fid,)
@@ -9688,6 +9692,7 @@ def test_check_folder_health_partial_becomes_missing_when_path_gone(tmp_path):
     db.conn.commit()
 
     changed = db.folders.check_health()
+    db.commit()
     assert changed == 1
     status = db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (fid,)
@@ -10099,6 +10104,7 @@ def test_relocate_folder(tmp_path):
     new_path = str(tmp_path / "new_location")
     os.makedirs(new_path)
     db.folders.relocate(fid, new_path)
+    db.commit()
 
     row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
     assert row["path"] == new_path
@@ -10121,6 +10127,7 @@ def test_relocate_folder_cascade(tmp_path):
     os.makedirs(os.path.join(new_root, "sub"))
 
     cascaded = db.folders.relocate(parent, new_root)
+    db.commit()
     assert len(cascaded) == 1
     assert cascaded[0]["id"] == child
 
@@ -10168,6 +10175,7 @@ def test_relocate_folder_relinks_parent_by_path(tmp_path):
 
     # User moved it onto the USA volume and re-points Vireo at the new path.
     db.folders.relocate(date, "/vol/USA/2026-05-30")
+    db.commit()
 
     row = db.conn.execute(
         "SELECT parent_id FROM folders WHERE id = ?", (date,)
@@ -10205,6 +10213,7 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     pid_c = photo_ingest.add_photo(db, fid_existing, "photo_c.jpg", ".jpg", 1000, 1.0)
 
     cascaded = db.folders.relocate(fid_missing, existing_path)
+    db.commit()
 
     # Missing folder should be deleted
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
@@ -10247,6 +10256,7 @@ def test_relocate_folder_merge_revalidates_source_path(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="already tracked"):
         db.folders.relocate(fid_source, target_path)
+        db.commit()
 
     # Source should be refreshed to ok, not deleted
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_source,)).fetchone()
@@ -10273,6 +10283,7 @@ def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="already tracked"):
         db.folders.relocate(fid_a, dir_b)
+        db.commit()
 
     # Both folders should remain unchanged
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_a,)).fetchone() is not None
@@ -10301,6 +10312,7 @@ def test_relocate_folder_merge_updates_photo_count(tmp_path):
     photo_ingest.add_photo(db, fid_existing, "photo_b.jpg", ".jpg", 1000, 1.0)
 
     db.folders.relocate(fid_missing, existing_path)
+    db.commit()
 
     row = db.conn.execute("SELECT photo_count FROM folders WHERE id = ?", (fid_existing,)).fetchone()
     assert row["photo_count"] == 2
@@ -10323,6 +10335,7 @@ def test_relocate_folder_merge_marks_target_ok(tmp_path):
     db.conn.commit()
 
     db.folders.relocate(fid_missing, existing_path)
+    db.commit()
 
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_existing,)).fetchone()
     assert row["status"] == "ok"
@@ -10346,6 +10359,7 @@ def test_relocate_folder_merge_reparents_children(tmp_path):
     db.conn.commit()
 
     db.folders.relocate(fid_missing, existing_path)
+    db.commit()
 
     # Source folder should be gone
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
@@ -10386,6 +10400,7 @@ def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
     db.conn.commit()
 
     db.folders.relocate(fid_missing, existing_path)
+    db.commit()
 
     # Target folder should now be visible in BOTH workspaces
     ws_links = db.conn.execute(
@@ -10423,6 +10438,7 @@ def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
     db.conn.commit()
 
     db.folders.relocate(fid_missing, existing_path)
+    db.commit()
 
     row = db.conn.execute(
         """SELECT is_root FROM workspace_folders
@@ -10453,6 +10469,7 @@ def test_relocate_folder_cascade_skips_duplicate(tmp_path):
     workspace_folders.add_folder(db, child_target, name="conflict")
 
     cascaded = db.folders.relocate(parent, new_root)
+    db.commit()
     # Child should NOT be in cascaded list since its target is already taken
     assert len(cascaded) == 0
 
@@ -10484,6 +10501,7 @@ def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
     workspace_folders.add_folder(db, child_target, name="conflict")
 
     cascaded = db.folders.relocate(parent, new_root)
+    db.commit()
     # Neither child nor grandchild should be cascaded
     assert len(cascaded) == 0
 
@@ -10514,6 +10532,7 @@ def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(t
     workspace_folders.add_folder(db, child_target, name="conflict")
 
     cascaded = db.folders.relocate(parent, new_root)
+    db.commit()
     assert cascaded == []
 
     for fid, expected_path in [

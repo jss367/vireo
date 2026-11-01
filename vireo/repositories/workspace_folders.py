@@ -49,10 +49,6 @@ class WorkspaceFolderRepository:
         self.path_for_subtree_match = path_for_subtree_match
         self.chunk_size = chunk_size
 
-    def commit(self) -> None:
-        """Commit the connection's open transaction."""
-        self.conn.commit()
-
     # -- photo visibility ----------------------------------------------------
 
     def photo_in_workspace(self, photo_id: int, workspace_id: int) -> bool:
@@ -67,11 +63,11 @@ class WorkspaceFolderRepository:
 
     # -- linking -------------------------------------------------------------
 
-    def add_no_commit(
+    def add_subtree(
         self, workspace_id: int, folder_id: int, folder_ids: Iterable[int], *,
         is_root: bool = True, restore_removed: bool = False,
     ) -> None:
-        """Link ``folder_ids`` (``folder_id``'s subtree) without committing."""
+        """Link ``folder_ids`` (``folder_id``'s subtree); no commit."""
         self.conn.executemany(
             """INSERT OR IGNORE INTO workspace_folders
                (workspace_id, folder_id, is_root)
@@ -93,7 +89,7 @@ class WorkspaceFolderRepository:
                 )
 
     def add_exact(self, workspace_id: int, folder_id: int, *, is_root: bool = False) -> None:
-        """Link exactly one folder, without its descendants, and commit."""
+        """Link exactly one folder, without its descendants (no commit)."""
         self.conn.execute(
             """INSERT OR IGNORE INTO workspace_folders
                (workspace_id, folder_id, is_root) VALUES (?, ?, ?)""",
@@ -105,10 +101,9 @@ class WorkspaceFolderRepository:
                    WHERE workspace_id = ? AND folder_id = ?""",
                 (workspace_id, folder_id),
             )
-        self.conn.commit()
 
     def mark_roots(self, workspace_id: int, folder_ids: Iterable[int] | None) -> None:
-        """Mark specific linked folders as user-facing roots."""
+        """Mark specific linked folders as user-facing roots (no commit)."""
         if not folder_ids:
             return
         for chunk in self._chunks(folder_ids):
@@ -119,7 +114,6 @@ class WorkspaceFolderRepository:
                     WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
                 [workspace_id] + chunk,
             )
-        self.conn.commit()
 
     # -- removals ------------------------------------------------------------
 
@@ -184,7 +178,6 @@ class WorkspaceFolderRepository:
             "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
             (workspace_id, folder_id),
         )
-        self.conn.commit()
 
     def local_session_folder_ids(self, root_folder_id: int) -> list[int]:
         """Ids of every folder in the local session rooted at ``root_folder_id``.
@@ -199,8 +192,8 @@ class WorkspaceFolderRepository:
         ).fetchall()
         return [int(row["folder_id"]) for row in rows]
 
-    def unlink_exact_no_commit(self, workspace_id: int, folder_ids: Iterable[int]) -> None:
-        """Delete exactly these ``workspace_folders`` rows, without committing.
+    def unlink_exact(self, workspace_id: int, folder_ids: Iterable[int]) -> None:
+        """Delete exactly these ``workspace_folders`` rows (no commit).
 
         No subtree walk and no ``workspace_photos`` cleanup; one statement
         per folder.
@@ -211,10 +204,10 @@ class WorkspaceFolderRepository:
                 (workspace_id, folder_id),
             )
 
-    def transfer_exact_no_commit(
+    def transfer_exact(
         self, source_workspace_id: int, target_workspace_id: int, folder_ids: Iterable[int],
     ) -> None:
-        """Move exactly these folder links to another workspace, without committing.
+        """Move exactly these folder links to another workspace (no commit).
 
         For each folder in turn, its ``source_workspace_id`` row is deleted
         and a non-root ``target_workspace_id`` row inserted unless one is
@@ -233,7 +226,7 @@ class WorkspaceFolderRepository:
             )
 
     def remove_tree(self, workspace_id: int, folder_ids: Sequence[int]) -> None:
-        """Unlink ``folder_ids`` (a folder's subtree) and commit."""
+        """Unlink ``folder_ids`` (a folder's subtree); no commit."""
         for chunk in self._chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
             self.conn.execute(
@@ -245,7 +238,6 @@ class WorkspaceFolderRepository:
                     WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
                 [workspace_id] + chunk,
             )
-        self.conn.commit()
 
     # -- descendant materialization --------------------------------------------
 
@@ -304,7 +296,6 @@ class WorkspaceFolderRepository:
                )""",
             [(workspace_id, fid, workspace_id, fid) for fid in candidate_ids],
         )
-        self.conn.commit()
 
     # -- reads -------------------------------------------------------------------
 
@@ -866,31 +857,25 @@ class WorkspaceFolderRepository:
         self, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
         moved_folder_ids: Sequence[int],
     ) -> tuple[int, int, int]:
-        """Move ``moved_folder_ids`` and their workspace-scoped rows, then commit.
+        """Move ``moved_folder_ids`` and their workspace-scoped rows (no commit).
 
         ``folder_ids`` are the user-selected folders (they become roots in
         the target); ``moved_folder_ids`` are those plus their linked
-        descendants. Rolls back and re-raises on any failure. Returns
+        descendants. The caller's unit of work makes the move atomic. Returns
         ``(pending_changes_moved, photo_preferences_moved,
         species_highlights_moved)``.
         """
-        try:
-            pending_changes_moved = self._move_pending_changes(
-                source_ws_id, target_ws_id, moved_folder_ids,
-            )
-            self._move_prediction_reviews(source_ws_id, target_ws_id, moved_folder_ids)
-            self._move_color_labels(source_ws_id, target_ws_id, moved_folder_ids)
-            photo_preferences_moved, species_highlights_moved = (
-                self._move_preferences_and_highlights(source_ws_id, target_ws_id, moved_folder_ids)
-            )
-            self._move_folder_membership(
-                source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
-            )
-
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        pending_changes_moved = self._move_pending_changes(
+            source_ws_id, target_ws_id, moved_folder_ids,
+        )
+        self._move_prediction_reviews(source_ws_id, target_ws_id, moved_folder_ids)
+        self._move_color_labels(source_ws_id, target_ws_id, moved_folder_ids)
+        photo_preferences_moved, species_highlights_moved = (
+            self._move_preferences_and_highlights(source_ws_id, target_ws_id, moved_folder_ids)
+        )
+        self._move_folder_membership(
+            source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
+        )
 
         return pending_changes_moved, photo_preferences_moved, species_highlights_moved
 
@@ -975,8 +960,6 @@ class WorkspaceFolderRepository:
                     WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
                 [workspace_id] + chunk,
             )
-        if prune_ids:
-            self.conn.commit()
         return prune_ids
 
     def _chunks(self, values):

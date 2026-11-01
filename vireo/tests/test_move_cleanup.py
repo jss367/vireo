@@ -133,6 +133,7 @@ def test_finish_removes_only_empty_selected_folder(cleanup_case):
     assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone() is None
     assert db.conn.execute("SELECT 1 FROM workspace_folders WHERE folder_id = ?", (folder_id,)).fetchone() is None
     db.folders.check_health()
+    db.commit()
     assert str(source) not in [row["path"] for row in db.folders.missing()]
 
 

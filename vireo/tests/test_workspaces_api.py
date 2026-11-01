@@ -105,6 +105,35 @@ def test_create_workspace_with_folders(app_and_db):
     assert linked_ids == set(folder_ids)
 
 
+def test_create_workspace_links_folders_and_marks_roots_together(app_and_db, monkeypatch):
+    """A new workspace's folder links and their root marks are one unit.
+
+    Each link used to commit on its own before the roots were marked, so a
+    failure while marking left the folders linked as non-roots, hidden
+    from the folder list's roots.
+    """
+    import sqlite3
+
+    from repositories.workspace_folders import WorkspaceFolderRepository
+
+    app, db = app_and_db
+    folder_ids = [f["id"] for f in db.conn.execute("SELECT id FROM folders").fetchall()]
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(WorkspaceFolderRepository, "mark_roots", fail)
+    resp = app.test_client().post("/api/workspaces", json={
+        "name": "Half Linked", "folder_ids": folder_ids,
+    })
+    assert resp.status_code >= 400
+    ws = db.conn.execute("SELECT id FROM workspaces WHERE name = 'Half Linked'").fetchone()
+    assert ws is not None  # the workspace itself is created first, as before
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM workspace_folders WHERE workspace_id = ?", (ws["id"],),
+    ).fetchone()[0] == 0
+
+
 def test_create_workspace_seeds_default_collections(app_and_db):
     """POST /api/workspaces seeds the standard smart collections into the new workspace.
 

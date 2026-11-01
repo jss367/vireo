@@ -1986,6 +1986,7 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     reusable_path.rmdir()
 
     db.folders.relocate(original_fid, str(target_path))
+    db.commit()
 
     # The original source folder row must be gone (merged into target).
     assert db.conn.execute(
@@ -2082,6 +2083,7 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
     old_root.rmdir()
 
     cascaded = db.folders.relocate(old_root_id, str(new_root))
+    db.commit()
 
     assert cascaded == [{
         "id": child_id,
@@ -2463,6 +2465,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     )
     db.conn.commit()
     db.folders.relocate(original_fid, str(relocated_path))
+    db.commit()
 
     # The provenance must have been rebased onto the new path, not left
     # pointing at the freed one.
@@ -2559,6 +2562,7 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
     # same card returns.
     shutil.rmtree(reusable_path)
     changed = db.folders.check_health()
+    db.commit()
     assert changed >= 1
     assert db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (original_fid,),
@@ -6042,6 +6046,7 @@ def test_move_folder_updates_counts(move_env):
     env = move_env
     move_folder(db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]))
     env["db"].folders.update_counts()
+    env['db'].commit()
     row = env["db"].conn.execute(
         "SELECT photo_count FROM folders WHERE path = ?",
         (str(env["dst"] / "src"),),

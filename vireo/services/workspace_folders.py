@@ -11,10 +11,13 @@ another workspace.
 
 Every change to a workspace's folder set changes what the new-images walk
 counts, so each one invalidates ``Database``'s process cache for the
-workspaces it touched, through the façade's public invalidators and at the
-same point relative to the commit as before. The no-commit link
-(``add_workspace_folder_no_commit``) leaves both the commit and the
-invalidation to its caller.
+workspaces it touched, through the façade's public invalidators and deferred
+to the outermost durable commit with ``db.after_commit`` so a concurrent
+new-images poll nested inside a larger transaction (``add_folder``,
+workspace creation) cannot snapshot the incremented generation, read the
+pre-commit folder links, and publish that stale result for the full TTL.
+The no-commit link (``add_workspace_folder_no_commit``) leaves both the
+commit and the invalidation to its caller.
 
 The SQL is ``WorkspaceFolderRepository``'s (``db.workspace_folders``);
 ``Database.get_folder_subtree_ids`` stays on the façade because
@@ -27,7 +30,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from db import Database
     from services.service_types import JsonDict
@@ -56,7 +59,7 @@ def add_workspace_folder_no_commit(
         # descendants need their own scan or explicit add to restore
         # them; registering a parent must not resurrect missing rows.
         folder_ids = [fid for fid in folder_ids if fid == folder_id or fid not in removed]
-    repo.add_no_commit(
+    repo.add_subtree(
         workspace_id, folder_id, folder_ids,
         is_root=is_root, restore_removed=restore_removed)
 
@@ -69,13 +72,16 @@ def add_workspace_folder(
     Scanner registration passes ``restore_removed=False``: only the
     directly visited folder restores membership, not removed descendants.
     """
-    add_workspace_folder_no_commit(
-        db, workspace_id, folder_id, is_root=is_root, restore_removed=restore_removed)
-    db.workspace_folders.commit()
-    # The folder's untracked files now count toward this workspace's
-    # new-images backlog. Drop any stale cached payload so the next read
-    # recomputes against the updated folder set.
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+    with db.transaction():
+        add_workspace_folder_no_commit(
+            db, workspace_id, folder_id, is_root=is_root, restore_removed=restore_removed)
+        # The folder's untracked files now count toward this workspace's
+        # new-images backlog. Drop any stale cached payload so the next read
+        # recomputes against the updated folder set. Deferred to the
+        # outermost commit so a nested savepoint release never bumps the
+        # cache generation while a concurrent poller can still read the
+        # pre-commit folder links.
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def add_workspace_folder_exact(
@@ -88,9 +94,10 @@ def add_workspace_folder_exact(
     subtree for user-selected roots; using it here could attach unrelated
     catalog folders that happen to sit below the same filesystem parent.
     """
-    db.workspace_folders.add_exact(
-        workspace_id, folder_id, is_root=is_root)
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+    with db.transaction():
+        db.workspace_folders.add_exact(
+            workspace_id, folder_id, is_root=is_root)
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def remember_workspace_folder_removals(
@@ -105,21 +112,25 @@ def remember_workspace_folder_removals(
 
 def remove_workspace_folder(db: Database, workspace_id: int, folder_id: int) -> None:
     """Unlink a single folder from a workspace."""
-    remember_workspace_folder_removals(db, workspace_id, [folder_id])
-    db.workspace_folders.remove(workspace_id, folder_id)
-    # The folder no longer contributes to this workspace's new-images
-    # backlog. Drop the cached payload so the banner reflects the change.
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+    # The removal record and the unlink land together.
+    with db.transaction():
+        remember_workspace_folder_removals(db, workspace_id, [folder_id])
+        db.workspace_folders.remove(workspace_id, folder_id)
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def remove_workspace_folder_tree(db: Database, workspace_id: int, folder_id: int) -> None:
     """Unlink a folder and its path descendants from a workspace."""
     folder_ids = db.folders.subtree_ids_by_path(folder_id)
-    remember_workspace_folder_removals(db, workspace_id, folder_ids, recursive=True)
-    db.workspace_folders.remove_tree(workspace_id, folder_ids)
-    # The folder no longer contributes to this workspace's new-images
-    # backlog. Drop the cached payload so the banner reflects the change.
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+    # The removal records and the unlinks land together.
+    with db.transaction():
+        remember_workspace_folder_removals(db, workspace_id, folder_ids, recursive=True)
+        db.workspace_folders.remove_tree(workspace_id, folder_ids)
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def materialize_workspace_descendants(db: Database, workspace_id: int) -> None:
@@ -140,8 +151,9 @@ def materialize_workspace_descendants(db: Database, workspace_id: int) -> None:
     candidate_ids -= repo.removed_ids(workspace_id)
     if not candidate_ids:
         return
-    repo.link_descendants(workspace_id, candidate_ids)
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+    with db.transaction():
+        repo.link_descendants(workspace_id, candidate_ids)
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def get_workspace_folders(db: Database, workspace_id: int) -> list[sqlite3.Row]:
@@ -331,13 +343,10 @@ def move_folders_to_workspace(
         pending_changes_moved,
         photo_preferences_moved,
         species_highlights_moved,
-    ) = db.workspace_folders.move_folders(
-        source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
-    )
-
-    # Folders changed membership for BOTH workspaces, so each workspace's
-    # new-images backlog needs to be recomputed on the next read.
-    db.invalidate_new_images_cache_for_workspaces([source_ws_id, target_ws_id])
+    ) = _move_folders_unit(db, source_ws_id, target_ws_id, folder_ids, moved_folder_ids)
+    # (``db.workspace_folders.move_folders`` in one unit of work; folders
+    # changed membership for BOTH workspaces, so each workspace's
+    # new-images backlog is dropped once the move durably commits.)
 
     return {
         "folders_moved": len(folder_ids),
@@ -366,17 +375,52 @@ def add_folder(
 
     Returns the folder id.
     """
-    folder_id = db.folders.add(path, name, parent_id)
-    # Auto-link to active workspace
-    workspace_id = db.active_workspace_id
-    if link_to_workspace and workspace_id is not None:
-        add_workspace_folder(
-            db, workspace_id,
-            folder_id,
-            is_root=workspace_root,
-            restore_removed=False,
-        )
+    # The folder row and its workspace link land together.
+    with db.transaction():
+        folder_id = db.folders.add(path, name, parent_id)
+        # Auto-link to active workspace
+        workspace_id = db.active_workspace_id
+        if link_to_workspace and workspace_id is not None:
+            add_workspace_folder(
+                db, workspace_id,
+                folder_id,
+                is_root=workspace_root,
+                restore_removed=False,
+            )
     return folder_id
+
+
+def check_folder_health(db: Database, *, checkpoint: Callable[[], object] | None = None) -> int:
+    """Refresh every folder's ok/missing status in one unit; return how many changed.
+
+    The filesystem probes run before the unit's first write, so no writer
+    lock is held across them; an interrupted pass (``checkpoint`` raising)
+    rolls the unit back and publishes nothing.
+    """
+    with db.transaction():
+        if checkpoint is None:
+            return db.folders.check_health()
+        return db.folders.check_health(checkpoint=checkpoint)
+
+
+def _move_folders_unit(
+        db: Database, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
+        moved_folder_ids: list[int]) -> tuple[int, int, int]:
+    """Move the folders and their workspace-scoped rows in one unit of work.
+
+    Also schedules the new-images cache invalidation for both workspaces
+    on the outermost commit, so a nested caller cannot bump the cache
+    generation while a concurrent poller is still reading the pre-commit
+    folder links.
+    """
+    with db.transaction():
+        counts = db.workspace_folders.move_folders(
+            source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
+        )
+        db.after_commit(
+            lambda: db.invalidate_new_images_cache_for_workspaces(
+                [source_ws_id, target_ws_id]))
+        return counts
 
 
 def workspace_unlinked_folder_count(db: Database, folder_paths: Iterable[str]) -> int:
