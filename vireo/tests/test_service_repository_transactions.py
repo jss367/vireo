@@ -11,6 +11,7 @@ def test_location_sync_rejects_photo_outside_explicit_workspace(db, tmp_path):
     folder = workspace_folders.add_folder(db, str(tmp_path / "source"))
     photo = photo_ingest.add_photo(db, folder, "synthetic.jpg", ".jpg", 1, 1.0)
     other_workspace = db.create_workspace("Other workspace")
+    db.commit()
     db.queue_change(photo, "location", "existing", workspace_id=other_workspace)
     db.commit()
     before = [tuple(row) for row in db.conn.execute("SELECT * FROM pending_changes")]
@@ -61,6 +62,7 @@ def test_collection_service_reads_resolve_workspace_at_use(db):
     repo = db.collections
     assert repo.get(collection_id)["id"] == collection_id
     second = db.create_workspace("Second workspace")
+    db.commit()
     db.set_active_workspace(second)
     assert repo.get(collection_id) is None
     assert repo.visual_source_row(collection_id) is None
@@ -115,6 +117,7 @@ def test_local_copy_activation_can_be_rolled_back_as_one_transaction(db, tmp_pat
 def test_explicit_local_workspace_ids_do_not_follow_the_active_workspace(db):
     first = db.active_workspace_id
     second = db.create_workspace("Other workspace")
+    db.commit()
     repo = db.local_workspaces
     db.set_active_workspace(second)
     repo.create_staging(first, 1.0)

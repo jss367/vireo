@@ -297,6 +297,7 @@ def db_with_workspace(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     return db, ws_id, tmp_path
 

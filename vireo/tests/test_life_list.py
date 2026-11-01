@@ -32,6 +32,7 @@ def life_app(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos/2024", name="2024")
 
@@ -404,6 +405,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     jan_ws = db.create_workspace("January")
     feb_ws = db.create_workspace("February")
     year_ws = db.create_workspace("Whole Year")
+    db.commit()
     species = "Rollup Cardinal"
     kid = db.add_keyword(species, is_species=True)
     db.commit()
@@ -1452,6 +1454,7 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     taxon_id = db.conn.execute(

@@ -2138,6 +2138,7 @@ def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path):
 
     # Switch to a fresh workspace that has no folders.
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     assert db.folders.tree() == []
 

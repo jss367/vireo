@@ -167,6 +167,7 @@ def test_summary_bulk_loads_visible_recipes_without_full_metadata(app_and_db):
     db.commit()
     original_ws = db._active_workspace_id
     other_ws = db.create_workspace('Other photos')
+    db.commit()
     db.set_active_workspace(other_ws)
     hidden_folder = workspace_folders.add_folder(db, '/hidden-selection')
     hidden_id = photo_ingest.add_photo(db, folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',

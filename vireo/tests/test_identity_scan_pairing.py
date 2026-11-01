@@ -26,6 +26,7 @@ def _catalog(tmp_path, conflict_first, *, conflicting=True):
             save_alternatives(db, [pairs['bad'][0]], ['Heron', 'Egret'], 'RAW evidence', 'Bill')
             save_alternatives(db, [pairs['bad'][1]], ['Heron', 'Egret'], 'JPEG evidence', 'Call')
     sharing = db.create_workspace('Shared pair review')
+    db.commit()
     db.set_active_workspace(1)
     workspace_folders.add_workspace_folder(db, sharing, folder)
     members = sum(pairs.values(), [])

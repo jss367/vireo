@@ -24,6 +24,7 @@ def app_and_db(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path / "library"), name="library")
 

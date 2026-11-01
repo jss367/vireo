@@ -68,6 +68,7 @@ def test_sync_to_xmp_writes_keyword_add(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -103,6 +104,7 @@ def test_sync_to_xmp_keyword_add_canonicalizes_existing_variant(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(
         tmp_path, db, keywords={'‘apapane'},
@@ -138,6 +140,7 @@ def test_sync_to_xmp_keyword_add_preserves_hierarchies_with_matching_segment(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     # Seed the sidecar with a hierarchy whose leaf matches what we're about
@@ -177,6 +180,7 @@ def test_sync_to_xmp_keyword_remove_flat_leaves_matching_hierarchy(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     write_sidecar(
@@ -218,6 +222,7 @@ def test_sync_to_xmp_clears_sibling_workspace_flat_removals(tmp_path, monkeypatc
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
     ws2 = db.create_workspace("sibling")
+    db.commit()
     db.set_active_workspace(ws1)
     pid, xmp_path = _setup_photo_with_xmp(
         tmp_path, db, keywords={"Wildlife"},
@@ -262,6 +267,7 @@ def test_sync_to_xmp_writes_rating(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -287,6 +293,7 @@ def test_sync_to_xmp_writes_edit_recipe(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -316,6 +323,7 @@ def test_sync_to_xmp_writes_rating_after_edit_recipe_creates_sidecar(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     os.remove(xmp_path)
@@ -346,6 +354,7 @@ def test_sync_to_xmp_clears_edit_recipe_marker(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     write_edit_recipe(xmp_path, '{"rotation":90,"version":1}')
@@ -377,6 +386,7 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -433,6 +443,7 @@ def test_sync_to_xmp_limits_sync_to_selected_change_ids(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -465,6 +476,7 @@ def test_sync_to_xmp_handles_missing_file(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/nonexistent', name='gone')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='missing.jpg', extension='.jpg',
@@ -488,6 +500,7 @@ def test_sync_from_xmp_updates_db(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Sparrow'})
 
@@ -548,6 +561,7 @@ def test_sync_from_xmp_locks_before_reading_sidecar(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, _xmp_path = _setup_photo_with_xmp(
         tmp_path, db, keywords={"Wildlife"},
@@ -575,6 +589,7 @@ def test_sync_from_xmp_does_not_restore_keyword_with_pending_removal(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, _xmp_path = _setup_photo_with_xmp(
         tmp_path, db, keywords={"Wildlife"},
@@ -595,6 +610,7 @@ def test_sync_from_xmp_flat_removal_preserves_same_name_hierarchy(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     write_sidecar(
@@ -626,6 +642,7 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'sparrow'})
 
@@ -657,6 +674,7 @@ def test_sync_from_xmp_preserves_tag_when_only_edge_quote_differs(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'apapane'})
 
@@ -688,6 +706,7 @@ def test_sync_from_xmp_skips_xmp_keywords_that_normalize_to_empty(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Sparrow'})
 
@@ -726,6 +745,7 @@ def test_sync_to_xmp_reports_unsupported_flag_changes_when_disabled(tmp_path, mo
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -758,6 +778,7 @@ def test_sync_to_xmp_writes_flag_when_enabled(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -793,6 +814,7 @@ def test_sync_to_xmp_treats_legacy_null_flag_as_none(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -828,6 +850,7 @@ def test_sync_to_xmp_writes_effective_location(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -875,6 +898,7 @@ def test_sync_to_xmp_writes_rating_after_location_creates_sidecar(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     os.remove(xmp_path)
@@ -918,6 +942,7 @@ def test_sync_to_xmp_removes_stale_vireo_location_when_effective_location_missin
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     write_gps_location(xmp_path, 48.8566, 2.3522, source="keyword")
@@ -947,6 +972,7 @@ def test_sync_to_xmp_clears_location_change_without_writing_when_disabled(tmp_pa
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -988,6 +1014,7 @@ def test_sync_to_xmp_disabled_location_change_removes_stale_vireo_gps(tmp_path, 
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     write_gps_location(xmp_path, 48.8566, 2.3522, source="keyword")
@@ -1020,6 +1047,7 @@ def test_sync_to_xmp_location_cleanup_does_not_write_exif_fallback(tmp_path, mon
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     db.conn.execute(
@@ -1065,6 +1093,7 @@ def test_sync_to_xmp_location_lookup_bypasses_workspace_membership(tmp_path, mon
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
@@ -1135,6 +1164,7 @@ def test_sync_to_xmp_add_survives_normalized_remove_for_same_photo(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"‘apapane"})
 
@@ -1172,6 +1202,7 @@ def test_sync_to_xmp_selected_add_pulls_in_paired_legacy_remove(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"‘apapane"})
 
@@ -1211,6 +1242,7 @@ def test_sync_to_xmp_normalized_rename_preserves_unrelated_hierarchy(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     # Sidecar carries the legacy flat variant AND an unrelated hierarchy
@@ -1257,6 +1289,7 @@ def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Robin'})
 

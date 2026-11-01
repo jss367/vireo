@@ -1538,6 +1538,7 @@ def test_compute_review_readiness_eye_target_honors_workspace_pipeline_override(
         "loose-gate",
         config_overrides={"pipeline": {"eye_classifier_conf_gate": 0.2}},
     )
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     # Species confidence 0.3 sits between the global gate (0.5) and the
@@ -2004,6 +2005,7 @@ def test_load_photo_features_filters_to_latest_fingerprint(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     workspace_folders.add_workspace_folder(db, ws, folder_id)

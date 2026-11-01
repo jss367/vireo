@@ -99,6 +99,7 @@ def assert_released(extraction, *photo_ids):
 def test_service_uses_captured_workspace_and_reports_progress(db, tmp_path, extraction):
     first = seed_photo(db, tmp_path, "launch-workspace")
     other_workspace = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_workspace)
     other = seed_photo(db, tmp_path, "other-workspace")
 

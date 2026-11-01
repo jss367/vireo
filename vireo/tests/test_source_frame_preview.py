@@ -156,6 +156,7 @@ def test_source_frame_eviction_and_workspace_scope_apply_to_registered_hits(app_
     assert artifact.is_file()
     active = db._active_workspace_id
     db.set_active_workspace(db.create_workspace('Other inspection workspace'))
+    db.commit()
     with pytest.raises(SourceFrameUnavailable):
         source_frame_bytes(db, pid, 1920, str(root), 90,
                            lambda *a: pytest.fail('cross-workspace decode'))

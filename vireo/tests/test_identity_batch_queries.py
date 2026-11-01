@@ -102,6 +102,7 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
         photo, sidecar = _setup_photo_with_xmp(tmp_path, db, keywords={'Puma', 'Puma concolor', 'Unrelated note'})
         first = db.require_workspace_id()
         second = db.create_workspace('Shared homonym lookup')
+        db.commit()
         db.set_active_workspace(first)
         workspace_folders.add_workspace_folder(db, second, db.photos.get(photo)['folder_id'])
         db.conn.execute('INSERT INTO taxa(id,inat_id,name,rank) VALUES (99001,101,?,?)', ('Puma', rank))

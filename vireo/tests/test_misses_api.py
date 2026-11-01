@@ -32,6 +32,7 @@ def db_with_misses(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos/fake", name="fake")
 
@@ -424,6 +425,7 @@ def test_api_misses_preview_uses_classifier_rescue_override(tmp_path, monkeypatc
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos/birds", name="birds")
     pid = photo_ingest.add_photo(
@@ -576,6 +578,7 @@ def test_api_misses_recompute_can_save_workspace_defaults(tmp_path, monkeypatch)
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos/birds", name="birds")
     pid = photo_ingest.add_photo(

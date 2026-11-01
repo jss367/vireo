@@ -76,6 +76,7 @@ def test_labels_are_scoped_to_the_active_workspace(db):
     pid = _photo(db)
     default_ws = db._ws_id()
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(default_ws)
     db.photo_labels.set(pid, "red")
     db.set_active_workspace(other)
@@ -160,6 +161,7 @@ def test_description_length_cap(db):
 def test_descriptions_are_scoped_to_the_active_workspace(db):
     default_ws = db._ws_id()
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(default_ws)
     db.photo_labels.set_description("red", "keeper")
     db.set_active_workspace(other)
@@ -204,6 +206,7 @@ def test_each_call_reads_the_workspace_active_when_it_runs(db):
     pid = _photo(db)
     home = db.require_workspace_id()
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(home)
     db.photo_labels.set(pid, "red")
     db.set_active_workspace(other)

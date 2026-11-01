@@ -145,6 +145,7 @@ def test_workspace_dropdown_scrolls_long_list(live_server, page):
     """Long lists stay inside the window, with footer actions always reachable."""
     for index in range(40):
         live_server["db"].create_workspace(f"Workspace {index:02d}")
+        live_server["db"].commit()
 
     page.set_viewport_size({"width": 1280, "height": 720})
     page.goto(f"{live_server['url']}/browse")

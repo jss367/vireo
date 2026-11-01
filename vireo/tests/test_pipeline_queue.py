@@ -97,6 +97,7 @@ def test_enqueue_pipeline_persists_queued_row(tmp_path):
     """
     runner, db = _make_runner_with_db(tmp_path)
     workspace_id = db.create_workspace("Queued pipeline")
+    db.commit()
     # Fill every slot with blocking pipelines so the next enqueue
     # lands in 'queued'. Without this the trivial lambda would run
     # to completion before the assertion fires and the status would

@@ -1495,6 +1495,7 @@ def test_stage_cancel_via_begin_commit_cleans_up(local_workspace_env):
 def test_stage_rejects_folders_shared_with_another_workspace(local_workspace_env):
     env = local_workspace_env
     other_workspace = env["db"].create_workspace("Shared")
+    env['db'].commit()
     workspace_folders.add_workspace_folder(env["db"], other_workspace, env["root_id"])
 
     with pytest.raises(LocalWorkspaceError, match="also used by another workspace"):
@@ -1515,6 +1516,7 @@ def test_stage_rejects_folder_covered_by_another_workspace_root(tmp_path):
     nested.mkdir()
     (nested / "bird.jpg").write_bytes(b"bird")
     second_workspace = db.create_workspace("Nested")
+    db.commit()
     db.set_active_workspace(second_workspace)
     nested_id = workspace_folders.add_folder(db, str(nested), name="2026")
 
@@ -1546,6 +1548,7 @@ def test_stage_rejects_source_root_from_active_local_workspace(tmp_path):
     nested.mkdir()
     (nested / "new.jpg").write_bytes(b"new")
     second_workspace = db.create_workspace("Nested")
+    db.commit()
     db.set_active_workspace(second_workspace)
     workspace_folders.add_folder(db, str(nested), name="2026")
 
@@ -1585,6 +1588,7 @@ def test_shared_folder_check_handles_more_than_sqlite_variable_limit(tmp_path):
     workspace_id = db._active_workspace_id
     root_id = workspace_folders.add_folder(db, str(source_root), name="photos")
     other_workspace = db.create_workspace("Shared descendant")
+    db.commit()
 
     rows = [(folder_id, str(source_root / f"folder-{folder_id}"), root_id) for folder_id in range(1000, 2105)]
     db.conn.executemany(

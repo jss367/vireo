@@ -110,6 +110,7 @@ def test_photo_delete_updates_every_workspace_and_invalidates_culling(db, tmp_pa
     photo = photo_ingest.add_photo(db, folder, "bird.jpg", ".jpg", 12, 1)
     keep = photo_ingest.add_photo(db, folder, "keep.jpg", ".jpg", 13, 1)
     other = db.create_workspace("Other")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other, folder)
     for ws in (db.active_workspace_id, other):
         _pipeline(tmp_path / f"pipeline_results_ws{ws}.json", [photo, keep])
@@ -166,6 +167,7 @@ def test_result_pruning_waits_for_workspace_writer_and_keeps_its_new_results(tmp
 def test_workspace_delete_removes_snapshots_history_and_never_reuses_id(app_and_db, tmp_path):
     _app, db = app_and_db
     ws = db.create_workspace("Delete me")
+    db.commit()
     pipeline = tmp_path / f"pipeline_results_ws{ws}.json"
     culling = tmp_path / f"culling_results_ws{ws}.json"
     pipeline.write_text("{}")
@@ -176,6 +178,7 @@ def test_workspace_delete_removes_snapshots_history_and_never_reuses_id(app_and_
     assert not pipeline.exists() and not culling.exists()
     assert db.job_history.get('old-job') is None
     replacement = db.create_workspace("Replacement")
+    db.commit()
     assert replacement > ws
     # A model download may persist its final state after the owner was deleted.
     db.conn.execute("INSERT OR REPLACE INTO job_history (id, workspace_id) VALUES ('late-job', ?)", (ws,))
@@ -189,6 +192,7 @@ def test_workspace_delete_rejects_inactive_workspace_with_result_publisher(app_a
 
     app, db = app_and_db
     workspace = db.create_workspace("Publishing results")
+    db.commit()
     assert workspace != db.active_workspace_id
     started, resume = threading.Event(), threading.Event()
     path = tmp_path / f"culling_results_ws{workspace}.json"
@@ -213,6 +217,7 @@ def test_workspace_delete_rejects_inactive_workspace_with_result_publisher(app_a
 
 def test_locked_workspace_snapshot_does_not_belong_to_new_workspace(db, tmp_path, monkeypatch):
     ws = db.create_workspace("Delete me")
+    db.commit()
     path = tmp_path / f"pipeline_results_ws{ws}.json"
     path.write_text("{}")
     real_unlink = os.unlink
@@ -775,6 +780,7 @@ def test_maintenance_keeps_workspace_created_during_the_pass(app_and_db, tmp_pat
         result = prune(connection)
         if not created:
             workspace = db.create_workspace("Created during maintenance")
+            db.commit()
             path = tmp_path / f"pipeline_results_ws{workspace}.json"
             path.write_text("{}")
             created.append(path)

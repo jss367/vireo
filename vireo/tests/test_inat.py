@@ -15,6 +15,7 @@ from services import photo_ingest, workspace_folders
 def db(tmp_path):
     d = Database(str(tmp_path / "test.db"))
     ws_id = d.ensure_default_workspace()
+    d.commit()
     d.set_active_workspace(ws_id)
     return d
 
@@ -278,6 +279,7 @@ def app_and_db(tmp_path):
 
     d = Database(db_path)
     ws_id = d.ensure_default_workspace()
+    d.commit()
     d.set_active_workspace(ws_id)
 
     # Create a real photo file on disk so submit can read it
@@ -876,6 +878,7 @@ def _add_out_of_workspace_photo(db):
     Image.new('RGB', (100, 100)).save(os.path.join(other_dir, 'outside.jpg'))
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     fid = workspace_folders.add_folder(db, other_dir, name="other-photos")
     pid = photo_ingest.add_photo(

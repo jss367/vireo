@@ -458,6 +458,7 @@ def test_patch_workspace_preserves_active_labels(app_and_db):
 def test_patch_workspace_does_not_affect_other_workspaces(app_and_db):
     app, db = app_and_db
     other_ws = db.create_workspace("other")
+    db.commit()
     client = app.test_client()
     client.patch(
         "/api/settings/workspace",

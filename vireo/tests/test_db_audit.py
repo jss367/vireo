@@ -53,6 +53,7 @@ def library(db):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?",
                     (missing,))
     other_ws = db.create_workspace("Other")
+    db.commit()
     foreign = workspace_folders.add_folder(db, "/lib/foreign", name="foreign",
                             link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, other_ws, foreign)
@@ -128,6 +129,7 @@ def test_audit_runs_are_scoped_to_active_workspace(db):
     db.audit.record_run("verify", 1)
     db.commit()
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     assert db.audit.get_runs() == {}
     db.audit.record_run("verify", 5)

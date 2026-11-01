@@ -256,6 +256,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
     db = Database(str(tmp_path / "m.db"))
     ws_a = db._active_workspace_id
     ws_b = db.create_workspace("Other")
+    db.commit()
 
     # Folder linked to A only — add it while A is active.
     db.set_active_workspace(ws_a)

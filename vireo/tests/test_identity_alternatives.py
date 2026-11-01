@@ -35,6 +35,7 @@ def test_permanently_stale_identity_retires_without_replay_and_unblocks_history(
         assert client.post('/api/undo').status_code == 200
     if conflict == 'workspace':
         second = db.create_workspace('Superseding identity')
+        db.commit()
         db.photo_visibility.grant(second, [1])
         switch = _workspace_switcher(db)
         switch(second)
@@ -105,6 +106,7 @@ def test_shared_keyword_intents_follow_identity_history_and_real_sidecar_sync(
     client = app.test_client()
     first = db.require_workspace_id()
     second = db.create_workspace('Shared sync')
+    db.commit()
     initial = {CANDIDATES[0], 'Unrelated note'} if operation == 'save' else {'Unrelated note'}
     pid, path = _setup_photo_with_xmp(tmp_path, db, keywords=initial)
     workspace_folders.add_workspace_folder(db, second, db.photos.get(pid)['folder_id'])
@@ -168,6 +170,7 @@ def test_shared_intent_reconciliation_rolls_back_with_failed_batch(app_and_db, m
     app, db = app_and_db
     client = app.test_client()
     second = db.create_workspace('Other pending changes')
+    db.commit()
     db.photo_visibility.grant(second, [1, 2])
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
     db.commit()
@@ -207,6 +210,7 @@ def test_identity_decision_repairs_sibling_sync_already_publishing(
     client = app.test_client()
     first = db.require_workspace_id()
     second = db.create_workspace('Captured sibling writer')
+    db.commit()
     initial = {CANDIDATES[0], 'Unrelated note'} if operation == 'resolve' else {'Unrelated note'}
     pid, path = _setup_photo_with_xmp(tmp_path, db, keywords=initial)
     workspace_folders.add_workspace_folder(db, second, db.photos.get(pid)['folder_id'])
@@ -265,6 +269,7 @@ def test_zero_link_save_and_alias_intents_converge_through_resolution_history(ap
     client = app.test_client()
     first = db.require_workspace_id()
     second = db.create_workspace('Alias sync')
+    db.commit()
     scientific = 'Tyrannus melancholicus'
     db.conn.execute(
         "INSERT INTO taxa(id, inat_id, name, common_name, rank) VALUES (90001, 90001, ?, ?, 'species')",
@@ -763,6 +768,7 @@ def test_global_identity_resolution_and_history_are_shared_but_visibility_filter
     client = app.test_client()
     first = db.require_workspace_id()
     second = db.create_workspace('Shared review')
+    db.commit()
     db.photo_visibility.grant(second, [2])
     switch = _workspace_switcher(db)
     switch(first)
@@ -813,6 +819,7 @@ def test_newer_same_species_resolution_blocks_older_undo_across_workspaces(app_a
     client = app.test_client()
     first = db.require_workspace_id()
     second = db.create_workspace('Shared review')
+    db.commit()
     db.photo_visibility.grant(second, [1])
     switch = _workspace_switcher(db)
     switch(first)
@@ -836,6 +843,7 @@ def test_newer_global_resolution_blocks_older_redo_from_another_workspace(app_an
     client = app.test_client()
     first = db.require_workspace_id()
     second = db.create_workspace('Shared review')
+    db.commit()
     db.photo_visibility.grant(second, [1])
     switch = _workspace_switcher(db)
     switch(first)
@@ -869,6 +877,7 @@ def test_redo_rejects_invisible_photo_and_rolls_back_visible_batch_items(app_and
     client = app.test_client()
     first = db.require_workspace_id()
     second = db.create_workspace('Retains both photos')
+    db.commit()
     db.photo_visibility.grant(second, [1, 2])
     db.commit()
     assert save(client, [1, 2]).status_code == 200
@@ -894,6 +903,7 @@ def test_superseded_identity_retires_audit_and_exposes_next_action_without_repla
     client = app.test_client()
     first = db.require_workspace_id()
     second = db.create_workspace('Superseding review')
+    db.commit()
     db.photo_visibility.grant(second, [1])
     switch = _workspace_switcher(db)
     switch(first)
@@ -1150,6 +1160,7 @@ def test_groups_are_durable_and_filtered_by_workspace_visibility(app_and_db, tmp
     with Database(str(tmp_path / 'test.db')) as reopened:
         assert reopened.identity_alternatives.photo_ids() == {1, 2}
         other_ws = reopened.create_workspace('Other')
+        reopened.commit()
         reopened.set_active_workspace(other_ws)
         assert reopened.identity_alternatives.photo_ids() == set()
         reopened.photo_visibility.grant(other_ws, [1])
@@ -1343,6 +1354,7 @@ def test_species_decisions_and_history_refresh_all_shared_workspace_caches(app_a
     active_ws = db.require_workspace_id()
     folder_shared = db.create_workspace('Shared folder')
     photo_shared = db.create_workspace('Shared photo only')
+    db.commit()
     workspace_folders.add_workspace_folder(db, folder_shared, db.photos.get(1)['folder_id'])
     db.photo_visibility.grant(photo_shared, [1])
     db.commit()
@@ -1386,6 +1398,7 @@ def test_shared_cache_failure_still_attempts_other_workspaces_after_commit(app_a
     client = app.test_client()
     second = db.create_workspace('Second')
     third = db.create_workspace('Third')
+    db.commit()
     db.photo_visibility.grant(second, [1])
     db.photo_visibility.grant(third, [1])
     db.commit()
@@ -1442,6 +1455,7 @@ def test_workspace_switch_before_writer_lock_rejects_shared_photo_edits(app_and_
         assert save(client, [1]).status_code == 200
         group = current_group(client)
     other_ws = db.create_workspace('Shared alternate workspace')
+    db.commit()
     workspace_folders.add_workspace_folder(db, other_ws, db.photos.get(1)['folder_id'])
     before_species = db.photo_species.get_species_for_photos([1])
     before_state = db.identity_alternatives.for_photos([1])

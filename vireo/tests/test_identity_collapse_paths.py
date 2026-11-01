@@ -40,6 +40,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     source, target, survivor, losing, target_path = _fixture(db, tmp_path, path)
     ws = db.require_workspace_id()
     sharing = db.create_workspace('Shared collapse')
+    db.commit()
     db.set_active_workspace(ws)
     workspace_folders.add_workspace_folder(db, sharing, source)
     note = db.add_keyword('Unrelated note')

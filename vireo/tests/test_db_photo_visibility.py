@@ -59,6 +59,7 @@ def test_workspace_scoped_methods_raise_before_any_sql_without_a_workspace(db):
 def test_grants_take_their_workspace_explicitly_and_need_none_active(db):
     """The grant and revoke writes never resolve the active workspace."""
     other = db.create_workspace("Other")
+    db.commit()
     _, pid = _photo(db)
     db.set_active_workspace(None)
     db.photo_visibility.grant(other, [pid])
@@ -76,6 +77,7 @@ def test_scoped_methods_read_the_workspace_active_at_the_call(db):
     """A fresh repository per access, and each call reads the current workspace."""
     home = db.require_workspace_id()
     other = db.create_workspace("Other")
+    db.commit()
     folder, pid = _photo(db)
     workspace_folders.add_workspace_folder(db, other, folder)
     db.set_active_workspace(home)
@@ -88,6 +90,7 @@ def test_name_size_matches_reads_the_given_workspace_in_path_order(db):
     """Staging recovery's archive candidates: name and size, visible in the workspace."""
     home = db.require_workspace_id()
     other = db.create_workspace("Other")
+    db.commit()
     _, b_pid = _photo(db, "b/bird.jpg")
     _, a_pid = _photo(db, "a/bird.jpg")
     _, resized = _photo(db, "c/bird.jpg")

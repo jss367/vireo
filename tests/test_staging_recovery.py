@@ -93,6 +93,7 @@ def test_orphaned_staging_missing_archive_copy_blocks_delete(db, tmp_path):
 def test_orphaned_staging_ignores_matching_archive_in_other_workspace(db, tmp_path):
     active_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     vireo_dir = tmp_path / "vireo"
     staged = _write(
         vireo_dir / "staging" / "pipeline-other-ws" / "USA" / "2026" / "a.nef"

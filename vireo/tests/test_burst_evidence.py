@@ -407,6 +407,7 @@ def test_burst_evidence_photo_outside_workspace_is_not_found(app_and_db):
     app, db = app_and_db
     pids = _seed_burst(db, _folder_id(db), 3069, [10, 80])
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     db.conn.execute(
         "UPDATE workspaces SET last_opened_at = datetime('now', '+1 hour') WHERE id = ?", (other,)
@@ -571,6 +572,7 @@ def test_focus_crop_validates_size_and_basis_and_workspace(app_and_db):
     assert client.get("/photos/999999/focus-crop").status_code == 404
 
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     db.conn.execute(
         "UPDATE workspaces SET last_opened_at = datetime('now', '+1 hour') WHERE id = ?", (other,)

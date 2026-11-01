@@ -343,6 +343,7 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
     db.commit()
     original_id = db.conn.execute("SELECT id FROM predictions").fetchone()[0]
     other_workspace = db.create_workspace("Other")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other_workspace, folder)
     db.set_active_workspace(other_workspace)
     db.predictions.add(detection, "Robin", 0.2, "model", status="rejected", labels_fingerprint="labels")

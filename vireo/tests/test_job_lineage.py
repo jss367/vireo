@@ -21,6 +21,7 @@ from wait import wait_for_job_via_runner
 def runner_db(tmp_path):
     db = Database(str(tmp_path / "lineage.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
     yield runner, db, ws_id
@@ -474,6 +475,7 @@ def test_history_api_reads_one_origin_and_rejects_others(tmp_path, monkeypatch):
     db_path = str(tmp_path / "api.db")
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     _insert(db, "users-scan", ws_id=ws_id, started_at="2026-01-01T00:00:00")
     _insert(db, "vireo-check", ws_id=None, started_at="2026-01-02T00:00:00", origin="system")
     db.conn.commit()

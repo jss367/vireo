@@ -259,6 +259,7 @@ def test_release_selection_rejects_other_workspace_photos(client_with_photo):
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo)
     other = db.create_workspace("Unrelated")
+    db.commit()
     client = app.test_client()
     assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
     response = client.post("/api/jobs/release-local-originals", json={"photo_ids": [pid]})

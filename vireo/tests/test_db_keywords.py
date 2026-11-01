@@ -598,6 +598,7 @@ def test_get_keyword_rename_state_reads_name_species_and_type(db, lib):
 def test_get_photo_workspaces_with_keyword_lists_each_visible_workspace(db, lib):
     p0, p1, p2, _ = lib["p"]
     other_ws = db.create_workspace("Other")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other_ws, lib["fid"])
     kid = db.add_keyword("Alpha")
     db.tag_photo(p0, kid)

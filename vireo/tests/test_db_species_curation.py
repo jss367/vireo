@@ -499,6 +499,7 @@ def test_life_list_locations(db, cur):
 def test_photo_preferences_scoped_to_workspace(db, cur):
     p = cur["p"]
     other = db.create_workspace("Other")
+    db.commit()
     db.species_curation.set_photo_preference("life_list", "American Robin", p["robin1"])
     db.set_active_workspace(other)
     db.species_curation.set_photo_preference("life_list", "American Robin", p["robin2"])
@@ -690,6 +691,7 @@ def test_set_global_species_representative_never_commits(db, cur):
 def test_clear_photo_preference(db, cur):
     p = cur["p"]
     other = db.create_workspace("Other")
+    db.commit()
     db.species_curation.set_photo_preference("life_list", "American Robin", p["robin1"])
     db.species_curation.set_photo_preference("custom", "American Robin", p["robin1"])
     db.set_active_workspace(other)
@@ -729,6 +731,7 @@ def test_clear_photo_preference_requires_workspace(db):
 def test_clear_species_representative(db, cur):
     p = cur["p"]
     other = db.create_workspace("Other")
+    db.commit()
     db.set_species_representative("American Robin", p["robin1"])
     db.species_curation.set_photo_preference("life_list", "American Robin", p["robin2"])
     db.species_curation.set_photo_preference("custom", "American Robin", p["robin2"])
@@ -815,6 +818,7 @@ def test_add_species_highlight_canonicalizes_through_facade(db, cur, monkeypatch
 def test_species_highlights_read_shapes(db, cur):
     p = cur["p"]
     other = db.create_workspace("Other")
+    db.commit()
     db.species_curation.add_highlight("American Robin", p["robin2"])
     db.species_curation.add_highlight("American Robin", p["robin1"])
     db.species_curation.add_highlight("Northern Cardinal", p["card1"])
@@ -1155,6 +1159,7 @@ def test_renames_ignore_empty_and_identity(db, cur, old, new):
 def _seed_renames(db, cur):
     p, ws = cur["p"], cur["ws"]
     other = db.create_workspace("Other")
+    db.commit()
     db.conn.executemany(
         "INSERT INTO species_representatives (species, photo_id, selected_order) "
         "VALUES (?, ?, ?)",
@@ -1319,6 +1324,7 @@ def test_rename_species_representatives_leave_commit_to_caller(db, cur, photo_id
 def _seed_highlight_renames(db, cur):
     p, ws = cur["p"], cur["ws"]
     other = db.create_workspace("Other")
+    db.commit()
     for pid in (p["robin1"], p["robin2"], p["card1"]):
         db.species_curation.add_highlight("Old Name", pid)
     db.species_curation.add_highlight("New Name", p["card2"])

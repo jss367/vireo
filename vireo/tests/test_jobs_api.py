@@ -3238,6 +3238,7 @@ def test_cancel_queued_endpoint_leaves_other_workspaces_alone(app_and_db):
     ws_a = db._active_workspace_id
     # Create a second workspace so we have a meaningful "other" id.
     ws_b = db.create_workspace("scoped-other")
+    db.commit()
 
     # Fill every slot in ws_a so subsequent enqueues (in either
     # workspace) stay queued. Slot capacity is global, not per-workspace.
@@ -3834,6 +3835,7 @@ def test_pipeline_folder_ids_unlinked_folder_404(app_and_db):
     app, db = app_and_db
     original_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     foreign_id = workspace_folders.add_folder(db, "/photos/elsewhere", name="elsewhere")
     db.set_active_workspace(original_ws)
@@ -5370,6 +5372,7 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
     app, db = app_and_db
     original_workspace = db._ws_id()
     other_workspace = db.create_workspace("Other photos")
+    db.commit()
     entered, release = threading.Event(), threading.Event()
     existing_release = threading.Event()
     runner = app._job_runner
@@ -5993,6 +5996,7 @@ def test_pending_archive_sync_first_guards_final_verification(app_and_db, tmp_pa
     db.queue_change(photo_id, "keyword_add", "Osprey")
     db.commit()
     sibling = db.create_workspace("Sibling metadata edits")
+    db.commit()
     workspace_folders.add_workspace_folder(db, sibling, workspace_folders.add_folder(db, str(staging)), is_root=True)
     db.queue_change(photo_id, "keyword_add", "Kestrel", workspace_id=sibling)
     db.commit()
@@ -6077,6 +6081,7 @@ def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_a
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     workspace_id = db._ws_id()
     other = db.create_workspace("Other photos")
+    db.commit()
     staging = imported["config"]["managed_staging"]["destination"]
     archive_id = imported["config"]["pending_archive_id"]
     remove = shutil.rmtree
@@ -6124,6 +6129,7 @@ def test_pending_archive_persists_without_job_history_and_scopes_workspace(app_a
         from pending_archives import get_pending_archive
         assert get_pending_archive(reopened, archive_id)["state"] == "pending"
         other = reopened.create_workspace("Another workspace")
+        reopened.commit()
         reopened.set_active_workspace(other)
         assert get_pending_archive(reopened, archive_id) is None
 
@@ -6208,6 +6214,7 @@ def test_pending_archive_separates_this_workspace_from_the_others(app_and_db, tm
     assert item()["unsynced_photos"] == 1
 
     sibling = db.create_workspace("Sibling")
+    db.commit()
     workspace_folders.add_workspace_folder(db, sibling, workspace_folders.add_folder(db, staging), is_root=True)
     db.queue_change(second, "keyword_add", "Kestrel", workspace_id=sibling)
     db.commit()
@@ -6797,6 +6804,7 @@ def test_pending_archive_missing_transfer_can_be_forgotten(app_and_db, tmp_path,
         wait_for_job_via_client(client, job_id)
 
     other = db.create_workspace("Another workspace")
+    db.commit()
     assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
     assert client.post(url, json={"confirmed": True}).status_code == 404
     assert client.post(f"/api/workspaces/{workspace_id}/activate").status_code == 200
@@ -11110,6 +11118,7 @@ def test_import_photos_parent_job_wrong_workspace_rejected(
     app, db = app_and_db
     original_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
 
     # Flask-per-request Database picks the workspace with the newest
     # last_opened_at; nudge each in turn to switch what /api/jobs/*

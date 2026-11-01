@@ -31,6 +31,7 @@ def test_browse_badges_folders_waiting_for_transfer(live_server, page, tmp_path)
     elsewhere.mkdir()
 
     workspace_id = db.create_workspace("Kept Locally")
+    db.commit()
     day_id = workspace_folders.add_folder(db, str(day), name="12", link_to_workspace=False)
     elsewhere_id = workspace_folders.add_folder(
         db, str(elsewhere), name="already-transferred", link_to_workspace=False

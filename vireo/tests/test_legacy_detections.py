@@ -44,6 +44,7 @@ def test_legacy_folders_follow_active_workspace(app_and_db):
     first = db.conn.execute("SELECT id, folder_id FROM photos ORDER BY id LIMIT 1").fetchone()
     _predict(db, first["id"])
     other_ws = db.create_workspace("Separate library")
+    db.commit()
     db.set_active_workspace(other_ws)
     folder = workspace_folders.add_folder(db, "/other/legacy")
     photo = photo_ingest.add_photo(db, folder, "other.jpg", ".jpg", 10, 1.0)
@@ -68,6 +69,7 @@ def test_legacy_scan_keeps_moved_photo_only_grants_without_exposing_siblings(db)
     owner = db.active_workspace_id
     sharing = db.create_workspace("Sharing")
     empty = db.create_workspace("Empty")
+    db.commit()
     db.set_active_workspace(owner)
     archive = workspace_folders.add_folder(db, "/archive")
     sibling = photo_ingest.add_photo(db, archive, "sibling.jpg", ".jpg", 10, 1.0)
@@ -203,6 +205,7 @@ def test_legacy_sentinel_discovery_is_independent_of_workspace_reviews(db, statu
     prediction = db.predictions.id_for_key(anchor, "old-model", "legacy", "Robin")
     db.predictions.set_review_status(prediction, db.active_workspace_id, status)
     other = db.create_workspace("Other reviews")
+    db.commit()
     db.predictions.set_review_status(prediction, other, "rejected" if status != "rejected" else "accepted")
     assert db.predictions.legacy_detection_folders() == [{
         "id": folder, "path": "/photos/legacy", "photo_count": 1,

@@ -41,9 +41,11 @@ def test_service_binds_workspace_and_closes_database(db, tmp_path, monkeypatch, 
         "preview_max_size": 0 if exit_path == "disabled" else 1024,
         "preview_quality": 73,
     })
+    db.commit()
     db.set_active_workspace(workspace)
     selected = _photo(db, tmp_path, "selected")
     other_workspace = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_workspace)
     other = _photo(db, tmp_path, "other")
     opened = []

@@ -451,6 +451,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         pid = self.ids[0]
         self.service.set_flag(pid, "flagged")
         other = self.db.create_workspace("Surviving workspace")
+        self.db.commit()
         workspace_folders.add_workspace_folder(self.db, other, self.db.photos.get(pid)["folder_id"])
         self.db.set_active_workspace(other)
         workspace_lifecycle.delete_workspace(self.db, origin)
@@ -470,6 +471,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         pid = self.ids[0]
         self.service.set_flag(pid, "flagged")
         other = self.db.create_workspace("Surviving workspace")
+        self.db.commit()
         workspace_folders.add_workspace_folder(self.db, other, self.db.photos.get(pid)["folder_id"])
         self.db.set_active_workspace(other)
         self.service.set_flag(pid, "rejected")

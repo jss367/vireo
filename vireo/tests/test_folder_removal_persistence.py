@@ -21,6 +21,7 @@ def shared_tree(tmp_path):
     child = workspace_folders.add_folder(db, str(parent_path / "missing" / "child"), parent_id=missing,
                           workspace_root=False)
     other = db.create_workspace("All")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other, parent)
     db.folders.check_health()
     db.commit()
@@ -256,6 +257,7 @@ def test_missing_folder_delete_survives_background_polls(app_and_db, tmp_path):
     missing = workspace_folders.add_folder(db, str(tmp_path / "missing"), parent_id=parent,
                             workspace_root=False)
     other = db.create_workspace("All")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other, parent)
     client = app.test_client()
 

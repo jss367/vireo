@@ -189,6 +189,7 @@ def _workspace_count(db):
 def test_rename_workspace_to_taken_name_is_409(app_and_db):
     app, db = app_and_db
     other = db.create_workspace("Other")
+    db.commit()
     client = app.test_client()
     resp = client.put(f"/api/workspaces/{other}", json={"name": "Default"})
     assert resp.status_code == 409

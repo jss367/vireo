@@ -95,6 +95,7 @@ def test_cleanup_refuses_cataloged_photos_in_another_workspace(cleanup_case):
     app, db, source, _ = cleanup_case
     review = review_source(db, str(source))
     ws = db.create_workspace("Another workspace")
+    db.commit()
     db.set_active_workspace(ws)
     child = source / "child"
     child.mkdir()
@@ -157,6 +158,7 @@ def test_shared_empty_folder_and_membership_are_retained(cleanup_case):
     _, db, source, folder_id = cleanup_case
     (source / "orphan.xmp").unlink()
     other_workspace = db.create_workspace("Shared folder workspace")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other_workspace, folder_id)
     result = finish_source(db, str(source))
     assert result["state"] == "unavailable"
@@ -292,6 +294,7 @@ def test_cleanup_refuses_job_running_in_another_workspace(cleanup_case, monkeypa
     client = app.test_client()
     review = client.get(URL).json
     other = db.create_workspace("Import workspace")
+    db.commit()
     release = threading.Event()
     app._job_runner.start("scan", lambda job: release.wait(synchronization_timeout(5)), workspace_id=other)
     monkeypatch.setattr("app._trash_paths", lambda paths: pytest.fail("Trash called during another workspace's scan"))
@@ -310,6 +313,7 @@ def test_cleanup_blocks_new_cross_workspace_import_until_trash_finishes(cleanup_
     client = app.test_client()
     review = client.get(URL).json
     other = db.create_workspace("Import workspace")
+    db.commit()
 
     def trash(paths):
         with pytest.raises(WorkspaceBusyError):
@@ -335,6 +339,7 @@ def test_case_alias_catalog_rows_are_protected(cleanup_case, monkeypatch, tracke
         photo_ingest.add_photo(db, folder_id=folder_id, filename="orphan.NEF", extension=".NEF", file_size=1, file_mtime=1)
     else:
         other = db.create_workspace("Alias workspace")
+        db.commit()
         workspace_folders.add_workspace_folder(db, other, folder_id)
     original_exists, original_samefile = os.path.exists, os.path.samefile
 
@@ -410,6 +415,7 @@ def test_recursive_workspace_ownership_respects_explicit_removal(cleanup_case, r
     app, db, source, folder_id = cleanup_case
     parent_id = workspace_folders.add_folder(db, str(source.parent), name="Library root")
     other = db.create_workspace("Recursive library")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other, parent_id)
     # Model a descendant whose inherited membership has not materialized yet.
     db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?", (other, folder_id))

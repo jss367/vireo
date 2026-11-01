@@ -166,6 +166,7 @@ def test_subject_routes_do_not_expose_other_workspaces(app_and_db):
     photo_id = db.photos.list_page()[0]['id']
     client = app.test_client()
     other = db.create_workspace('Empty workspace')
+    db.commit()
     response = client.post(f'/api/workspaces/{other}/activate')
     assert response.status_code == 200
     assert client.get(f'/api/photos/{photo_id}/subjects').status_code == 404
@@ -525,6 +526,7 @@ def test_reviewer_box_api_validates_scope_and_subject(app_and_db):
     assert result.get_json()['subjects'][0]['evidence_basis'] == 'reviewer_box'
     assert client.post(f'/api/photos/{pid}/subjects/analyze', json={'detection_id': True}).status_code == 400
     other = db.create_workspace('Hidden photo')
+    db.commit()
     client.post(f'/api/workspaces/{other}/activate')
     assert client.put(url, json={'box': dict(x=.1, y=.1, w=.1, h=.1)}).status_code == 404
 

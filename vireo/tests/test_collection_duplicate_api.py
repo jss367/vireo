@@ -117,6 +117,7 @@ def test_duplicate_collection_is_workspace_scoped(app_and_db):
 
     # Create a second workspace with no collections, and make it active.
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
 
     # Collection belongs to source_ws — not findable from other_ws.

@@ -393,6 +393,7 @@ def test_review_persists_library_wide_without_changing_photos(app_and_db, tmp_pa
     before = [tuple(row) for row in db.conn.execute("SELECT * FROM photos ORDER BY id")]
     assert client.post("/api/duplicates/same-shot/review", json=review_body(group)).status_code == 200
     other = db.create_workspace("Another review workspace")
+    db.commit()
     db.set_active_workspace(other)
     db.commit()
     restored = client.get("/api/duplicates/last-scan").get_json()["result"]["same_shot_groups"][0]

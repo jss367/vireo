@@ -229,6 +229,7 @@ def test_api_add_keyword_clears_shared_flat_removals(app_and_db):
     db.commit()
     ws1 = db._ws_id()
     ws2 = db.create_workspace("keyword-readd-sibling")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws2, photo["folder_id"])
     for ws_id in (ws1, ws2):
         db.queue_change(
@@ -328,6 +329,7 @@ def test_api_photos_extensions_scoped_to_active_workspace(app_and_db):
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     other_fid = workspace_folders.add_folder(db, '/other/photos', name='other')
     photo_ingest.add_photo(db, folder_id=other_fid, filename='only.cr2', extension='.cr2',
@@ -709,6 +711,7 @@ def test_api_folder_get_rejects_other_workspace(app_and_db):
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     # Folder added while other_ws is active; only linked to other_ws.
     other_fid = workspace_folders.add_folder(db, '/secret/ws', name='secret')
@@ -732,8 +735,10 @@ def test_api_folder_workspaces_lists_inherited_and_direct_memberships(app_and_db
         "SELECT id FROM folders WHERE path = '/photos/2024/January'"
     ).fetchone()
     inherited_ws = db.create_workspace("Inherited Photos")
+    db.commit()
     workspace_folders.add_workspace_folder(db, inherited_ws, root["id"])
     direct_ws = db.create_workspace("Direct Photos")
+    db.commit()
     workspace_folders.add_workspace_folder(db, direct_ws, child["id"])
 
     resp = client.get(f'/api/folders/{child["id"]}/workspaces')
@@ -754,6 +759,7 @@ def test_api_folder_workspaces_rejects_folder_hidden_from_active_workspace(
     app, db = app_and_db
     active_ws = db._active_workspace_id
     other_ws = db.create_workspace("Private Workspace")
+    db.commit()
     db.set_active_workspace(other_ws)
     hidden_id = workspace_folders.add_folder(db, '/private/folder', name='folder')
     db.set_active_workspace(active_ws)
@@ -772,6 +778,7 @@ def test_api_folder_workspaces_does_not_expand_restricted_exact_links(app_and_db
         "SELECT id FROM folders WHERE path = '/photos/2024/January'"
     ).fetchone()
     restricted_ws = db.create_workspace("Restricted Import")
+    db.commit()
     workspace_folders.add_workspace_folder_exact(db, restricted_ws, root["id"], is_root=False)
 
     resp = app.test_client().get(f'/api/folders/{root["id"]}/workspaces')
@@ -794,6 +801,7 @@ def test_api_folder_workspaces_infers_late_recursive_child_without_mutation(
         "SELECT id FROM folders WHERE path = '/photos/2024'"
     ).fetchone()
     recursive_ws = db.create_workspace("Recursive Library")
+    db.commit()
     workspace_folders.add_workspace_folder(db, recursive_ws, root["id"])
     late_child_id = workspace_folders.add_folder(
         db, "/photos/2024/Late Discovery", name="Late Discovery"
@@ -4643,6 +4651,7 @@ def test_api_pipeline_photo_detail_rejects_other_workspace(app_and_db):
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     other_fid = workspace_folders.add_folder(db, '/secret/ws', name='secret')
     other_pid = photo_ingest.add_photo(db, other_fid, 'hidden.jpg', '.jpg', 1000, 0.0)
@@ -8112,6 +8121,7 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
 
     # Create workspace B with its own folder and photo
     ws_b = db.create_workspace("B")
+    db.commit()
     db.set_active_workspace(ws_b)
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
@@ -8221,6 +8231,7 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
 
     # Create workspace B with its own folder, photo, and keyword "Penguin"
     ws_b = db.create_workspace("B")
+    db.commit()
     db.set_active_workspace(ws_b)
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
@@ -8413,6 +8424,7 @@ def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_pat
 
     workspace_config.set_workspace_active_labels(db, [label_path])
     other = db.create_workspace("Other", config_overrides={"active_labels": [label_path]})
+    db.commit()
 
     orig = labels_mod.LABELS_DIR
     labels_mod.LABELS_DIR = str(labels_dir)
@@ -9467,6 +9479,7 @@ def test_rename_keyword_queues_for_all_workspaces(app_and_db):
 
     # Create a second workspace with its own folder and photo
     ws2 = db.create_workspace("Second")
+    db.commit()
     fid2 = workspace_folders.add_folder(db, "/photos/ws2", name="ws2")
     workspace_folders.add_workspace_folder(db, ws2, fid2)
     p_ws2 = photo_ingest.add_photo(db, folder_id=fid2, filename="ws2bird.jpg", extension=".jpg",
@@ -9510,6 +9523,7 @@ def test_delete_keyword_queues_for_all_workspaces(app_and_db):
     client = app.test_client()
 
     ws2 = db.create_workspace("Second")
+    db.commit()
     fid2 = workspace_folders.add_folder(db, "/photos/ws2del", name="ws2del")
     workspace_folders.add_workspace_folder(db, ws2, fid2)
     p_ws2 = photo_ingest.add_photo(db, folder_id=fid2, filename="ws2del.jpg", extension=".jpg",
@@ -9960,6 +9974,7 @@ def test_put_subject_types_persists_valid_values(app_and_db):
     """PUT /api/workspaces/<id>/subject-types persists requested types."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-1")
+    db.commit()
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -9977,6 +9992,7 @@ def test_put_subject_types_drops_unknown_values(app_and_db):
     """Unknown type values are dropped silently (logged)."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-2")
+    db.commit()
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -9994,6 +10010,7 @@ def test_put_subject_types_empty_list_allowed(app_and_db):
     """Empty list is allowed (effectively disables the queue's filter)."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-3")
+    db.commit()
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -10011,6 +10028,7 @@ def test_put_subject_types_rejects_non_list(app_and_db):
     """Non-list 'types' value returns 400."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-4")
+    db.commit()
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -10024,6 +10042,7 @@ def test_put_subject_types_preserves_other_overrides(app_and_db):
     """Setting subject_types must not clobber other config_overrides keys."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-5")
+    db.commit()
     db.workspaces.update(ws_id, config_overrides={"classification_threshold": 0.42})
     db.commit()
     client = app.test_client()
@@ -10065,6 +10084,7 @@ def test_put_subject_types_drops_non_string_entries(app_and_db):
     be dropped, not crash with TypeError on `x in frozenset`."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-malformed")
+    db.commit()
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -10087,6 +10107,7 @@ def test_put_subject_types_normalizes_non_dict_config_overrides(app_and_db):
     The endpoint must coerce it back to {} before assigning subject_types."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-non-dict")
+    db.commit()
     # Plant a list-shaped config_overrides directly via workspaces.update,
     # which json.dumps()es whatever it receives.
     db.workspaces.update(ws_id, config_overrides=["unexpected", "list"])
@@ -10492,6 +10513,7 @@ def test_selection_wildlife_state_ignores_photos_outside_active_workspace(app_an
         ).fetchall()
     ]
     other_ws = db.create_workspace("other")
+    db.commit()
     original_ws = db._active_workspace_id
     db.set_active_workspace(other_ws)
     stray_folder = workspace_folders.add_folder(db, "/other-only", name="other-only")
@@ -10564,6 +10586,7 @@ def test_batch_wildlife_excluded_skips_missing_and_out_of_workspace(app_and_db):
         ).fetchall()
     ]
     other_ws = db.create_workspace("other-batch")
+    db.commit()
     original_ws = db._active_workspace_id
     db.set_active_workspace(other_ws)
     stray_folder = workspace_folders.add_folder(db, "/batch-stray", name="batch-stray")
@@ -12283,6 +12306,7 @@ def test_batch_delete_invalidates_missing_cache_across_workspaces(
 
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
 
     shared_dir = tmp_path / "shared"
     shared_dir.mkdir()
@@ -14460,6 +14484,7 @@ def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
     ).lastrowid
     ws_a = db._active_workspace_id
     ws_b = db.create_workspace("XWSRep Other")
+    db.commit()
     for ws in (ws_a, ws_b):
         db.conn.execute(
             "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
@@ -14533,6 +14558,7 @@ def test_highlights_relabel_ignores_stale_representative_rows(app_and_db):
     ).lastrowid
     ws_a = db._active_workspace_id
     ws_b = db.create_workspace("StaleRep Other")
+    db.commit()
     for ws in (ws_a, ws_b):
         db.conn.execute(
             "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
@@ -16647,6 +16673,7 @@ def test_storage_masks_uses_global_threshold_not_active_workspace(
     strict = db.create_workspace(
         "strict", config_overrides={"detector_confidence": 0.5}
     )
+    db.commit()
     # Activate the strict workspace. Pre-fix this would push stale_count
     # to 1 (and delete-stale would delete the mask) because the endpoint
     # used the active workspace's 0.5 floor.
@@ -16701,6 +16728,7 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     workspace_folders.add_workspace_folder(db, ws_id, fid)
@@ -16804,6 +16832,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     workspace_folders.add_workspace_folder(db, ws_id, fid)
@@ -17799,6 +17828,7 @@ def test_sync_discard_clears_sibling_workspace_flat_removals(app_and_db):
     client = app.test_client()
     ws1 = db._active_workspace_id
     ws2 = db.create_workspace("discard-sibling")
+    db.commit()
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
 
     def queue_in_both():
@@ -18578,6 +18608,7 @@ def test_pipeline_plan_folder_scope_unlinked_404(app_and_db):
     app, db = app_and_db
     original_ws = db._active_workspace_id
     other = db.create_workspace("PlanOther")
+    db.commit()
     db.set_active_workspace(other)
     foreign = workspace_folders.add_folder(db, "/photos/plan-foreign", name="plan-foreign")
     db.set_active_workspace(original_ws)
@@ -18624,6 +18655,7 @@ def test_build_explorer_payload_rollup(db):
     from web.life_list import _build_explorer_payload
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -18654,6 +18686,7 @@ def test_build_explorer_payload_rollup(db):
 def test_build_explorer_payload_not_ready(db):
     from web.life_list import _build_explorer_payload
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     payload = _build_explorer_payload(db)
     assert payload['taxonomy_ready'] is False
@@ -18664,6 +18697,7 @@ def test_build_explorer_payload_rejects_non_class_root(db):
     from web.life_list import _build_explorer_payload
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     # An order-rank taxon is NOT a valid explorer root: reject it.
     payload = _build_explorer_payload(db, root_id=ids['Passeriformes'])
@@ -18683,6 +18717,7 @@ def test_build_explorer_payload_multi_found_species_rollup(db):
     from web.life_list import _build_explorer_payload
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -18726,6 +18761,7 @@ def test_build_explorer_species_leaf(db):
     from web.life_list import _build_explorer_species
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -18778,6 +18814,7 @@ def test_build_explorer_rank_families(db):
     from web.life_list import _build_explorer_rank
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -18810,6 +18847,7 @@ def test_build_explorer_rank_species_has_photo(db):
     from web.life_list import _build_explorer_rank
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -18880,6 +18918,7 @@ def test_explorer_uncounted_identifications_are_class_aware_and_reasoned(db):
         "VALUES ('Tracheophyta', 'tracheophytes', 'phylum', 'Plantae')"
     ).lastrowid
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
 
@@ -18944,6 +18983,7 @@ def test_build_explorer_payload_always_includes_default_aves_class(db):
     ids = _seed_bird_taxonomy(db)
     mammalia_id = _seed_mammal_taxon(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     # User has tagged species — but NONE of them are birds.
     fid = workspace_folders.add_folder(db, '/p', name='p')
@@ -19035,6 +19075,7 @@ def test_predictions_api_photo_ids_rejects_foreign_photo(app_and_db):
     client = app.test_client()
     photo_id, _ = _seed_prediction_photo(db, "eagle-scoped.jpg", "Bald Eagle", 0.9)
     other_ws = db.create_workspace("Other")
+    db.commit()
     assert client.post(f"/api/workspaces/{other_ws}/activate").status_code == 200
 
     resp = client.get(f"/api/predictions?photo_ids={photo_id}")
@@ -19133,6 +19174,7 @@ def test_selection_prediction_suggestions_rejects_foreign_photo(app_and_db):
     client = app.test_client()
     photo_id, _ = _seed_prediction_photo(db, "ws-a.jpg", "Bald Eagle", 0.9)
     other_ws = db.create_workspace("Other")
+    db.commit()
     assert client.post(f"/api/workspaces/{other_ws}/activate").status_code == 200
 
     resp = client.post(
@@ -19329,6 +19371,7 @@ def test_batch_accept_on_all_undo_restores_flat_removals(app_and_db, delete_othe
     photo, _ = _seed_prediction_photo(db, "all-flat-removal.jpg", species, 0.9)
     active_ws = db._ws_id()
     other_ws = db.create_workspace("Shared sidecar")
+    db.commit()
     for ws, value in [(active_ws, "Bald Eagle"), (other_ws, "bald eagle")]:
         db.queue_change(photo, "keyword_remove_flat", value, workspace_id=ws)
         db.commit()
@@ -19380,6 +19423,7 @@ def test_batch_accept_on_all_validates_scope_before_writing(app_and_db, invalid)
         payload["photo_ids"] = [other]
     else:
         workspace = db.create_workspace("Other")
+        db.commit()
         assert client.post(f"/api/workspaces/{workspace}/activate").status_code == 200
     response = client.post("/api/predictions/batch-accept", json=payload)
     assert response.status_code == (403 if invalid == "foreign_photo" else 400)
@@ -19436,6 +19480,7 @@ def test_batch_accept_rejects_foreign_prediction(app_and_db):
     photo_id, _ = _seed_prediction_photo(db, "acc-ws.jpg", "Bald Eagle", 0.9)
     pred_id = _prediction_id(db, photo_id, "Bald Eagle")
     other_ws = db.create_workspace("Other")
+    db.commit()
     assert client.post(f"/api/workspaces/{other_ws}/activate").status_code == 200
 
     resp = client.post(
@@ -19608,6 +19653,7 @@ def test_batch_reject_rejects_foreign_prediction(app_and_db):
     photo_id, _ = _seed_prediction_photo(db, "rej-ws.jpg", "Bald Eagle", 0.9)
     pred_id = _prediction_id(db, photo_id, "Bald Eagle")
     other_ws = db.create_workspace("Other")
+    db.commit()
     assert client.post(f"/api/workspaces/{other_ws}/activate").status_code == 200
 
     resp = client.post(

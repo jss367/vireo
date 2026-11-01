@@ -824,6 +824,7 @@ def test_list_misses_is_scoped_to_the_active_workspace(db):
     mine = _photo(db, "mine.jpg", fid)
     _miss(db, mine, miss_clipped=1)
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     assert miss_flags.list_misses(db) == []
     assert miss_flags.bulk_reject_miss_category(db, "clipped") == []
@@ -1176,6 +1177,7 @@ def test_workspace_miss_rows_read_visible_photos_with_their_best_scores(db):
     high = {r["id"]: r for r in db.detections.workspace_miss_rows(db.active_workspace_id, 0.8)}
     assert high[pid]["detection_conf"] is None
     other = db.create_workspace("Other")
+    db.commit()
     assert db.detections.workspace_miss_rows(other, 0.5) == []
 
 

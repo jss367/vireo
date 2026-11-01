@@ -51,6 +51,7 @@ def test_update_rating_writes_the_value(db):
 def test_update_rating_rejects_photo_outside_workspace(db):
     pid = _photo(db)
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     with pytest.raises(ValueError, match="does not belong"):
         db.photo_review.set_rating(pid, 2)
@@ -60,6 +61,7 @@ def test_update_rating_rejects_photo_outside_workspace(db):
 def test_update_rating_skips_workspace_check_when_disabled(db):
     pid = _photo(db)
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     db.photo_review.set_rating(pid, 2, verify_workspace=False)
     db.commit()
@@ -79,6 +81,7 @@ def test_update_flag_writes_the_value(db):
 def test_update_flag_rejects_photo_outside_workspace(db):
     pid = _photo(db)
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     with pytest.raises(ValueError, match="does not belong"):
         db.photo_review.set_flag(pid, "flagged")
@@ -114,6 +117,7 @@ def test_batch_update_empty_input_is_a_no_op(db):
 def test_batch_update_rating_rejects_photo_outside_workspace(db):
     a = _photo(db, "a.jpg")
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     with pytest.raises(ValueError, match="does not belong"):
         db.photo_review.set_ratings([a], 2)
@@ -181,6 +185,7 @@ def test_photo_review_follows_a_workspace_switch_between_accesses(db):
     a = _photo(db, "a.jpg")
     home = db.require_workspace_id()
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     assert db.photo_review.workspace_id == other
     with pytest.raises(ValueError, match="does not belong"):

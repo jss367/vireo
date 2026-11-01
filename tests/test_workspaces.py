@@ -42,6 +42,7 @@ def test_pending_changes_has_workspace_id(db):
 
 def test_create_workspace(db):
     ws_id = db.create_workspace("Kenya 2025")
+    db.commit()
     assert ws_id is not None
     ws = db.workspaces.get(ws_id)
     assert ws["name"] == "Kenya 2025"
@@ -49,13 +50,16 @@ def test_create_workspace(db):
 
 def test_create_workspace_duplicate_name_raises(db):
     db.create_workspace("Kenya")
+    db.commit()
     with pytest.raises(Exception):
         db.create_workspace("Kenya")
+        db.commit()
 
 
 def test_get_workspaces(db):
     db.create_workspace("A")
     db.create_workspace("B")
+    db.commit()
     workspaces = db.workspaces.list_all()
     names = [w["name"] for w in workspaces]
     assert "A" in names
@@ -64,6 +68,7 @@ def test_get_workspaces(db):
 
 def test_update_workspace(db):
     ws_id = db.create_workspace("Old Name")
+    db.commit()
     db.workspaces.update(ws_id, name="New Name")
     db.commit()
     ws = db.workspaces.get(ws_id)
@@ -72,12 +77,14 @@ def test_update_workspace(db):
 
 def test_delete_workspace(db):
     ws_id = db.create_workspace("Temp")
+    db.commit()
     workspace_lifecycle.delete_workspace(db, ws_id)
     assert db.workspaces.get(ws_id) is None
 
 
 def test_workspace_folders(db):
     ws_id = db.create_workspace("Test")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
     workspace_folders.add_workspace_folder(db, ws_id, folder_id)
     folders = workspace_folders.get_workspace_folders(db, ws_id)
@@ -256,6 +263,7 @@ def test_workspace_root_count_is_scoped_to_its_workspace(db):
 
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
+    db.commit()
     db.set_active_workspace(ws_a)
     workspace_folders.add_workspace_folder(db, ws_a, root_id)
 
@@ -324,6 +332,7 @@ def test_workspace_large_recursive_root_operations_chunk_sql_params(db):
     assert [f["id"] for f in workspace_folders.get_workspace_folder_roots(db, ws_id)] == [root_id]
 
     target_ws_id = db.create_workspace("Target")
+    db.commit()
     result = workspace_folders.move_folders_to_workspace(db, ws_id, target_ws_id, [root_id])
 
     assert result["folders_moved"] == 1
@@ -338,6 +347,7 @@ def test_workspace_large_recursive_root_operations_chunk_sql_params(db):
 
 def test_materializing_workspace_descendants_invalidates_new_images_cache(db):
     ws_id = db.create_workspace("USA 2026")
+    db.commit()
     root_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026")
     child_id = workspace_folders.add_folder(db, "/photos/usa/2026/day-1", name="day-1")
 
@@ -359,6 +369,7 @@ def test_materializing_workspace_descendants_invalidates_new_images_cache(db):
 
 def test_remove_workspace_folder(db):
     ws_id = db.create_workspace("Test")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
     workspace_folders.add_workspace_folder(db, ws_id, folder_id)
     workspace_folders.remove_workspace_folder(db, ws_id, folder_id)
@@ -383,12 +394,14 @@ def test_remove_workspace_root_unlinks_descendants(db):
 
 def test_set_active_workspace(db):
     ws_id = db.create_workspace("Active")
+    db.commit()
     db.set_active_workspace(ws_id)
     assert db._active_workspace_id == ws_id
 
 
 def test_ensure_default_workspace(db):
     ws_id = db.ensure_default_workspace()
+    db.commit()
     ws = db.workspaces.get(ws_id)
     assert ws["name"] == "Default"
     # Calling again returns same id
@@ -402,6 +415,7 @@ def test_ensure_default_workspace(db):
 def db_with_workspace(db):
     """DB with a workspace, folder, and a photo ready for predictions."""
     ws_id = db.create_workspace("Test WS")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws_id, folder_id)
     photo_id = photo_ingest.add_photo(db, folder_id, "bird.jpg", ".jpg", 1000, 1.0)
@@ -422,6 +436,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
 
     # Second workspace with a different folder + photo.
     ws2 = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws2)
     folder2 = workspace_folders.add_folder(db, "/photos2", name="photos2")
     workspace_folders.add_workspace_folder(db, ws2, folder2)
@@ -460,6 +475,7 @@ def test_get_collections_scoped(db_with_workspace):
     db.collections.add("WS1 Collection", "[]")
     db.commit()
     ws2 = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws2)
     db.collections.add("WS2 Collection", "[]")
     db.commit()
@@ -477,6 +493,7 @@ def test_create_default_collections_per_workspace(db_with_workspace):
     db.commit()
     count_ws1 = len(db.collections.list_all())
     ws2 = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws2)
     db.collections.create_defaults()
     db.commit()
@@ -512,6 +529,7 @@ def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
     assert len(photos) == 1
     # Switch workspace — same collection rule should find nothing
     ws2 = db.create_workspace("Empty")
+    db.commit()
     db.set_active_workspace(ws2)
     cid2 = db.collections.add("Passerines", rules)
     db.commit()
@@ -537,6 +555,7 @@ def test_get_pending_changes_scoped(db_with_workspace):
     db.queue_change(photo_id, "keyword_add", "Robin")
     db.commit()
     ws2 = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws2)
     assert len(db.pending_changes.list_all()) == 0
     db.set_active_workspace(ws_id)
@@ -549,6 +568,7 @@ def test_count_pending_changes_scoped(db_with_workspace):
     db.commit()
     assert db.pending_changes.count() == 1
     ws2 = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws2)
     assert db.pending_changes.count() == 0
 
@@ -620,6 +640,7 @@ def test_job_history_filtered_by_workspace(db_with_workspace):
 
     db, ws_id, _, _ = db_with_workspace
     ws2_id = db.create_workspace("Other WS")
+    db.commit()
     runner = JobRunner(db=db)
 
     def noop(job):
@@ -761,6 +782,7 @@ def test_api_workspace_folders(client):
 def test_get_photos_scoped_to_workspace(db):
     """Photos from folders not in workspace are not returned."""
     ws = db.create_workspace("Test")
+    db.commit()
     f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
     f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
     workspace_folders.add_workspace_folder(db, ws, f1)
@@ -775,6 +797,7 @@ def test_get_photos_scoped_to_workspace(db):
 
 def test_count_photos_scoped_to_workspace(db):
     ws = db.create_workspace("Test")
+    db.commit()
     f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
     f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
     workspace_folders.add_workspace_folder(db, ws, f1)
@@ -786,6 +809,7 @@ def test_count_photos_scoped_to_workspace(db):
 
 def test_count_folders_scoped_to_workspace(db):
     ws = db.create_workspace("Test")
+    db.commit()
     f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
     f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
     workspace_folders.add_workspace_folder(db, ws, f1)
@@ -795,6 +819,7 @@ def test_count_folders_scoped_to_workspace(db):
 
 def test_get_folder_tree_scoped_to_workspace(db):
     ws = db.create_workspace("Test")
+    db.commit()
     f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
     f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
     workspace_folders.add_workspace_folder(db, ws, f1)
@@ -808,6 +833,7 @@ def test_count_keywords_scoped_by_workspace(db):
     """count_keywords only counts keywords used by photos in the active workspace."""
     # Workspace A with a folder and photo
     ws_a = db.create_workspace("A")
+    db.commit()
     fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
@@ -820,6 +846,7 @@ def test_count_keywords_scoped_by_workspace(db):
 
     # Workspace B with a different folder and photo
     ws_b = db.create_workspace("B")
+    db.commit()
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
@@ -838,6 +865,7 @@ def test_count_keywords_scoped_by_workspace(db):
 def test_count_keywords_empty_workspace(db):
     """A workspace with no photos returns 0 keywords."""
     ws = db.create_workspace("Empty")
+    db.commit()
     db.add_keyword("Robin")  # global keyword, no photos in this workspace
     db.commit()
     db.set_active_workspace(ws)
@@ -847,6 +875,7 @@ def test_count_keywords_empty_workspace(db):
 def test_dashboard_top_keywords_scoped_by_workspace(db):
     """get_dashboard_stats top_keywords only includes current workspace's keywords."""
     ws_a = db.create_workspace("A")
+    db.commit()
     fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
@@ -856,6 +885,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     db.commit()
 
     ws_b = db.create_workspace("B")
+    db.commit()
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
@@ -880,6 +910,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
 def test_keyword_tree_scoped_by_workspace(db):
     """get_keyword_tree returns only keywords used by photos in the active workspace."""
     ws_a = db.create_workspace("A")
+    db.commit()
     fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
@@ -891,6 +922,7 @@ def test_keyword_tree_scoped_by_workspace(db):
     db.commit()
 
     ws_b = db.create_workspace("B")
+    db.commit()
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
@@ -917,6 +949,7 @@ def test_keyword_tree_scoped_by_workspace(db):
 def test_keyword_tree_empty_workspace(db):
     """Empty workspace returns no keywords even if keywords exist globally."""
     ws = db.create_workspace("Empty")
+    db.commit()
     db.add_keyword("Robin")
     db.commit()
     db.set_active_workspace(ws)
@@ -927,6 +960,7 @@ def test_keyword_tree_empty_workspace(db):
 def test_get_collection_photos_scoped_to_workspace_folders(db):
     """Collection should only return photos from workspace folders."""
     ws = db.create_workspace("Test")
+    db.commit()
     f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
     f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
     workspace_folders.add_workspace_folder(db, ws, f1)
@@ -950,6 +984,7 @@ def test_get_collection_photos_scoped_to_workspace_folders(db):
 def test_get_workspace_active_labels_default_empty(db):
     """Workspace with no active_labels in config_overrides returns None."""
     ws = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws)
     assert workspace_config.get_workspace_active_labels(db) is None
 
@@ -957,6 +992,7 @@ def test_get_workspace_active_labels_default_empty(db):
 def test_set_and_get_workspace_active_labels(db):
     """set/get workspace active labels round-trips through config_overrides."""
     ws = db.create_workspace("Labeled")
+    db.commit()
     db.set_active_workspace(ws)
     paths = ["/home/user/.vireo/labels/ca-birds.txt", "/home/user/.vireo/labels/ca-reptiles.txt"]
     workspace_config.set_workspace_active_labels(db, paths)
@@ -966,6 +1002,7 @@ def test_set_and_get_workspace_active_labels(db):
 def test_set_workspace_active_labels_preserves_other_overrides(db):
     """Setting active labels doesn't clobber other config_overrides."""
     ws = db.create_workspace("WithConfig", config_overrides={"threshold": 0.5})
+    db.commit()
     db.set_active_workspace(ws)
     workspace_config.set_workspace_active_labels(db, ["/path/to/labels.txt"])
     result = workspace_config.get_workspace_active_labels(db)
@@ -978,12 +1015,14 @@ def test_set_workspace_active_labels_preserves_other_overrides(db):
 def test_merge_duplicate_keywords_scoped_by_workspace(db):
     """merge_duplicate_keywords only merges duplicates used in the active workspace."""
     ws_a = db.create_workspace("A")
+    db.commit()
     fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
 
     ws_b = db.create_workspace("B")
+    db.commit()
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
@@ -1172,6 +1211,7 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     next XMP sync writes/removes the canonical text instead of leaking the
     stray-quote spelling back into the sidecar."""
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1240,6 +1280,7 @@ def test_add_keyword_rejects_name_that_normalizes_to_empty(db):
 def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     """Cleanup should collapse existing edge-quote variants to a clean spelling."""
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1288,6 +1329,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     even though the tag itself was retained.
     """
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1384,6 +1426,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     even though the tag was retained.
     """
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid_survivor = photo_ingest.add_photo(db, folder_id=fid, filename="s.jpg", extension=".jpg",
@@ -1499,6 +1542,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     """
     # Workspace A owns folder A with the duplicate keyword rows to clean up.
     ws_a = db.create_workspace("A")
+    db.commit()
     fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
@@ -1506,6 +1550,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     # Workspace B owns a separate folder and has its own legacy keyword row
     # that is NOT part of workspace A's cleanup scope.
     ws_b = db.create_workspace("B")
+    db.commit()
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
@@ -1632,6 +1677,7 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     them as separate keywords.
     """
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1679,6 +1725,7 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
     of two distinct keywords that ``add_keyword()`` kept separate.
     """
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos/a", name="a")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1721,6 +1768,7 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
     with different types are distinct by design and must NOT merge; only
     case-variants in the same (parent, type) slot are duplicates."""
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1764,6 +1812,7 @@ def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
     them and spread the species flag to photos carrying the ordinary tag.
     """
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid_species = photo_ingest.add_photo(
@@ -1811,6 +1860,7 @@ def test_merge_duplicate_keywords_reparents_children(db):
     so the untagged Birds/birds parents must still be found via the
     descendant walk."""
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1858,6 +1908,7 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
     duplicate of the survivor's sibling — it must merge into it (keeping
     its photo associations), not get renamed to 'Heron (id-N)'."""
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1907,6 +1958,7 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     group's keep_id still exists, the loop would UPDATE photo_keywords
     toward a non-existent FK target and trip an IntegrityError."""
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -1978,6 +2030,7 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     name), not silently merged into a different-type sibling — that would
     retag photos across the type boundary and drop one typed keyword."""
     ws = db.create_workspace("A")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid_general = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -2051,6 +2104,7 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
 def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")
+    db.commit()
     db.set_active_workspace(ws)
     workspace_config.set_workspace_active_labels(db, [])  # explicitly no labels
 
@@ -2065,6 +2119,7 @@ def test_empty_workspace_labels_does_not_fallback_to_global(db):
 def test_keyword_tree_includes_ancestors(db):
     """get_keyword_tree includes untagged ancestor keywords so hierarchy is navigable."""
     ws = db.create_workspace("Hier")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/photos/h", name="h")
     workspace_folders.add_workspace_folder(db, ws, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="h.jpg", extension=".jpg",
@@ -2106,6 +2161,7 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
     db.commit()
 
     ws2 = db.create_workspace("Target")
+    db.commit()
 
     result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [folder_id])
     assert result["folders_moved"] == 1
@@ -2145,6 +2201,7 @@ def test_move_folders_bumps_source_pending_changes_version(db_with_workspace):
     db.queue_change(photo_id, "rating", "5")
     db.commit()
     ws2 = db.create_workspace("Target")
+    db.commit()
 
     def version(ws):
         row = db.conn.execute(
@@ -2171,6 +2228,7 @@ def test_move_folders_moves_photo_preferences(db_with_workspace):
     db.species_curation.add_highlight("Robin", photo_id)
 
     ws2 = db.create_workspace("Target")
+    db.commit()
     result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [folder_id])
 
     assert result["photo_preferences_moved"] == 2
@@ -2192,6 +2250,7 @@ def test_move_folders_reranks_species_highlights_on_collision(db):
     keeps the target's curated order first."""
     ws1 = db.create_workspace("Source")
     ws2 = db.create_workspace("Target")
+    db.commit()
 
     src_folder = workspace_folders.add_folder(db, "/src", name="src")
     tgt_folder = workspace_folders.add_folder(db, "/tgt", name="tgt")
@@ -2226,6 +2285,7 @@ def test_move_folders_collections_stay_behind(db_with_workspace):
     db.commit()
 
     ws2 = db.create_workspace("Target")
+    db.commit()
     workspace_folders.move_folders_to_workspace(db, ws1, ws2, [folder_id])
 
     db.set_active_workspace(ws1)
@@ -2237,6 +2297,7 @@ def test_move_folders_collections_stay_behind(db_with_workspace):
 def test_move_folders_blocks_descendant_when_source_root_remains(db):
     ws1 = db.create_workspace("Source")
     ws2 = db.create_workspace("Target")
+    db.commit()
     root_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026")
     child_id = workspace_folders.add_folder(
         db, "/photos/usa/2026/day-1",
@@ -2255,6 +2316,7 @@ def test_move_folders_blocks_descendant_when_source_root_remains(db):
 def test_archive_merge_preserves_narrower_workspace_root(db):
     """Merging into a broad archive must not widen an already-scoped workspace."""
     ws_id = db.create_workspace("USA2026")
+    db.commit()
 
     # Existing archive rows are globally known from another workspace/history,
     # but this workspace is intentionally rooted only at the 2026 subtree.
@@ -2384,6 +2446,7 @@ def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
     files as "new" until the TTL expired.
     """
     ws_id = db.create_workspace("USA2026")
+    db.commit()
 
     db.set_active_workspace(None)
     archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
@@ -2423,6 +2486,7 @@ def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
 def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
     """Merging to a new archive path must not root a broader known ancestor."""
     ws_id = db.create_workspace("USA2026")
+    db.commit()
 
     db.set_active_workspace(None)
     archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
@@ -2493,6 +2557,7 @@ def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(d
     pull the merged ``/archive/USA/2027/Trip`` subtree into the workspace.
     """
     ws_id = db.create_workspace("USA2026")
+    db.commit()
 
     db.set_active_workspace(None)
     archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
@@ -2571,6 +2636,7 @@ def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
     prune uncovered non-root links matching the existing-row cleanup.
     """
     ws_id = db.create_workspace("USA2026")
+    db.commit()
 
     db.set_active_workspace(None)
     archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
@@ -2656,6 +2722,7 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
     remove uncovered non-root ancestors of the merge target.
     """
     ws_id = db.create_workspace("USA2026")
+    db.commit()
 
     db.set_active_workspace(None)
     archive_base_id = workspace_folders.add_folder(db, "/archive", name="archive")
@@ -2766,6 +2833,7 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
 def test_move_folders_validates_source_workspace(db):
     """Raises ValueError if source workspace doesn't exist."""
     ws = db.create_workspace("A")
+    db.commit()
     with pytest.raises(ValueError, match="Source workspace"):
         workspace_folders.move_folders_to_workspace(db, 9999, ws, [1])
 
@@ -2773,6 +2841,7 @@ def test_move_folders_validates_source_workspace(db):
 def test_move_folders_validates_target_workspace(db):
     """Raises ValueError if target workspace doesn't exist."""
     ws = db.create_workspace("A")
+    db.commit()
     with pytest.raises(ValueError, match="Target workspace"):
         workspace_folders.move_folders_to_workspace(db, ws, 9999, [1])
 
@@ -2780,6 +2849,7 @@ def test_move_folders_validates_target_workspace(db):
 def test_move_folders_validates_same_workspace(db):
     """Raises ValueError when source == target."""
     ws = db.create_workspace("A")
+    db.commit()
     with pytest.raises(ValueError, match="same"):
         workspace_folders.move_folders_to_workspace(db, ws, ws, [1])
 
@@ -2788,6 +2858,7 @@ def test_move_folders_validates_folder_belongs_to_source(db):
     """Raises ValueError if a folder doesn't belong to source workspace."""
     ws1 = db.create_workspace("Source")
     ws2 = db.create_workspace("Target")
+    db.commit()
     db.set_active_workspace(ws1)
     fid = workspace_folders.add_folder(db, "/photos/a", name="a")
     with pytest.raises(ValueError, match="does not belong"):
@@ -2798,6 +2869,7 @@ def test_move_folders_empty_list(db):
     """Moving an empty list returns zeros without error."""
     ws1 = db.create_workspace("A")
     ws2 = db.create_workspace("B")
+    db.commit()
     result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [])
     assert result["folders_moved"] == 0
 
@@ -2812,6 +2884,7 @@ def test_new_workspace_gets_default_tabs(db):
 
     from db import DEFAULT_TABS
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     row = db.conn.execute("SELECT tabs FROM workspaces WHERE id = ?", (ws_id,)).fetchone()
     assert row["tabs"] is not None
     assert _json.loads(row["tabs"]) == DEFAULT_TABS
@@ -2820,6 +2893,7 @@ def test_new_workspace_gets_default_tabs(db):
 def test_get_tabs_returns_default_for_new_workspace(db):
     from db import DEFAULT_TABS
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     assert db.workspaces.get_tabs() == DEFAULT_TABS
 
@@ -2829,6 +2903,7 @@ def test_get_tabs_upgrades_legacy_compare_nav_id(db):
     "id_conflicts" on read instead of being dropped as unknown."""
     import json
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.conn.execute(
         "UPDATE workspaces SET tabs=? WHERE id=?",
@@ -2843,6 +2918,7 @@ def test_get_tabs_dedupes_when_alias_collides(db):
     single "id_conflicts" entry preserving first-seen order."""
     import json
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.conn.execute(
         "UPDATE workspaces SET tabs=? WHERE id=?",
@@ -2855,6 +2931,7 @@ def test_get_tabs_dedupes_when_alias_collides(db):
 def test_pin_tab_appends(db):
     from db import DEFAULT_TABS
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     result = db.workspaces.pin_tab("logs")
     db.commit()
@@ -2864,6 +2941,7 @@ def test_pin_tab_appends(db):
 
 def test_pin_tab_idempotent(db):
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.pin_tab("logs")
     db.commit()
@@ -2875,6 +2953,7 @@ def test_pin_tab_idempotent(db):
 def test_pin_tab_rejects_unknown_id(db):
     import pytest
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
         db.workspaces.pin_tab("not_a_real_page")
@@ -2891,6 +2970,7 @@ def test_all_registered_pages_are_valid_tab_ids():
 
 def test_unpin_tab_removes(db):
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.unpin_tab("settings")
     db.commit()
@@ -2899,6 +2979,7 @@ def test_unpin_tab_removes(db):
 
 def test_unpin_tab_idempotent_when_not_pinned(db):
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.unpin_tab("logs")  # not in defaults
     db.commit()
@@ -2909,6 +2990,7 @@ def test_unpin_tab_idempotent_when_not_pinned(db):
 
 def test_set_tabs_replaces_full_list(db):
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     new_order = ["cull", "review", "browse"]
     result = db.workspaces.set_tabs(new_order)
@@ -2920,6 +3002,7 @@ def test_set_tabs_replaces_full_list(db):
 def test_set_tabs_rejects_unknown_id(db):
     import pytest
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
         db.workspaces.set_tabs(["browse", "not_a_real_page"])
@@ -2929,6 +3012,7 @@ def test_set_tabs_rejects_unknown_id(db):
 def test_set_tabs_rejects_duplicates(db):
     import pytest
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
         db.workspaces.set_tabs(["browse", "browse", "review"])
@@ -2939,6 +3023,7 @@ def test_tabs_are_per_workspace(db):
     from db import DEFAULT_TABS
     ws1 = db.create_workspace("WS1")
     ws2 = db.create_workspace("WS2")
+    db.commit()
     db.set_active_workspace(ws1)
     db.workspaces.pin_tab("logs")
     db.commit()

@@ -88,6 +88,7 @@ def outsider(db):
     """A photo in a folder the active workspace does not see."""
     active = db._ws_id()
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     folder_id = workspace_folders.add_folder(db, "/elsewhere", name="elsewhere")
     (photo_id,) = _add_photos(db, folder_id, 1, prefix="out")
@@ -359,6 +360,7 @@ def test_color_labels_are_workspace_scoped(db, photos):
     db.photo_labels.set(photos[0], "green")
     db.commit()
     second = db.create_workspace("Second")
+    db.commit()
     db.set_active_workspace(second)
     assert db.photo_labels.get(photos[0]) is None
     assert db.photo_labels.get_for_photos(photos) == {}
@@ -434,6 +436,7 @@ def test_batch_set_color_label_clear_leaves_other_workspaces(db, photos):
     db.photo_labels.set_many(photos, "blue")
     db.commit()
     second = db.create_workspace("Second")
+    db.commit()
     db.set_active_workspace(second)
     db.photo_labels.set_many(photos, None)
     db.commit()
@@ -494,6 +497,7 @@ def test_get_color_label_descriptions_filters_and_strips(db):
 
 def test_get_color_label_descriptions_missing_workspace_row(db):
     ghost = db.create_workspace("Ghost")
+    db.commit()
     db.set_active_workspace(ghost)
     db.conn.execute("DELETE FROM workspaces WHERE id = ?", (ghost,))
     db.conn.commit()

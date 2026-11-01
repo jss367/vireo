@@ -711,6 +711,7 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid = photo_ingest.add_photo(
@@ -1567,6 +1568,7 @@ def test_serve_thumbnail_does_not_unlink_cross_workspace_cache(
 
     # Switch to a workspace that doesn't have the photo's folder linked.
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.workspaces.update(other_ws, last_opened_at="2030-01-01T00:00:00Z")
     db.commit()
     db.set_active_workspace(other_ws)
@@ -1584,6 +1586,7 @@ def test_serve_thumbnail_does_not_unlink_cross_workspace_cache(
 
 def _switch_to_workspace_without_photo(db):
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.workspaces.update(other_ws, last_opened_at="2030-01-01T00:00:00Z")
     db.commit()
     db.set_active_workspace(other_ws)
@@ -1716,6 +1719,7 @@ def test_serve_thumbnail_404s_for_photo_outside_active_workspace(tmp_path, monke
     # uses to pick the active workspace on init, so the route inherits
     # the switch.
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.workspaces.update(other_ws, last_opened_at="2030-01-01T00:00:00Z")
     db.commit()
     db.set_active_workspace(other_ws)

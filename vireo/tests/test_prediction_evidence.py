@@ -166,6 +166,7 @@ def test_assessments_are_workspace_local_and_cascade_with_detection(app_and_db):
     add(db, det, 'Common Poorwill', .99)
     assert save(app, db, det).status_code == 200
     other_ws = db.create_workspace('Other review')
+    db.commit()
     assert app.test_client().post(f'/api/workspaces/{other_ws}/activate').status_code == 200
     db.set_active_workspace(other_ws)
     assert save(app, db, det, observed_workspace_id=other_ws).status_code == 404

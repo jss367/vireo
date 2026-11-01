@@ -319,6 +319,7 @@ def test_delete_workspace_protects_pending_nas_originals(app_and_db, state):
     app, db = app_and_db
     client = app.test_client()
     workspace_id = db.create_workspace("Awaiting NAS transfer")
+    db.commit()
     db.conn.execute(
         "INSERT INTO pending_archives (id, workspace_id, destination, staging_destination, target_json, state) "
         "VALUES ('archive', ?, '/NAS/trip', '/local/trip', '{}', ?)", (workspace_id, state),
@@ -341,6 +342,7 @@ def test_pending_archive_cannot_register_after_workspace_deletion(app_and_db):
 
     _, db = app_and_db
     workspace_id = db.create_workspace("Deleted before import starts")
+    db.commit()
     workspace_lifecycle.delete_workspace(db, workspace_id)
     with pytest.raises(sqlite3.IntegrityError, match="workspace no longer exists"):
         db.conn.execute(
@@ -409,9 +411,11 @@ def test_delete_workspace_shared_local_folder(tmp_path, monkeypatch):
     db = Database(db_path)
     # Keep Default active so First/Second are safe to delete under the guard.
     default_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(default_id)
     first = db.create_workspace("First")
     second = db.create_workspace("Second")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, first, folder_id)
     workspace_folders.add_workspace_folder(db, second, folder_id)

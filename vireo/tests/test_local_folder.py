@@ -31,6 +31,7 @@ def _shared_environment(tmp_path):
     db = Database(str(vireo_dir / "vireo.db"))
     first = db.create_workspace("First")
     second = db.create_workspace("Second")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, first, folder_id)
     workspace_folders.add_workspace_folder(db, second, folder_id)
@@ -342,6 +343,7 @@ def test_local_copy_preflight_aggregates_folders_on_the_same_disk(
 
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.create_workspace("Trip")
+    db.commit()
     first = tmp_path / "nas" / "first"
     second = tmp_path / "nas" / "second"
     first.mkdir(parents=True)
@@ -449,6 +451,7 @@ def test_custom_local_destination_refuses_session_metadata_directory(tmp_path):
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "vireo.db"))
     workspace_id = db.create_workspace("Numeric folder")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="1", link_to_workspace=False)
     assert folder_id == 1
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
@@ -539,6 +542,7 @@ def test_catalog_restore_failure_keeps_local_copy_and_session(
 def test_workspace_status_is_derived_from_independent_root_folders(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.create_workspace("Mixed")
+    db.commit()
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
@@ -631,6 +635,7 @@ def test_discard_restores_every_workspace_without_touching_source(tmp_path):
 def test_folder_can_be_linked_to_another_workspace_while_local(tmp_path):
     db, vireo_dir, _source, first, second, folder_id = _shared_environment(tmp_path)
     third = db.create_workspace("Third")
+    db.commit()
     try:
         # Remove the fixture's second link so the stage begins unshared, then
         # link it elsewhere after activation. The new workspace should reuse
@@ -659,6 +664,7 @@ def test_folder_scoped_http_cycle_and_shared_status(tmp_path, monkeypatch):
     db = Database(db_path)
     first = db.create_workspace("First")
     second = db.create_workspace("Second")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, first, folder_id)
     workspace_folders.add_workspace_folder(db, second, folder_id)
@@ -716,6 +722,7 @@ def test_folder_stage_endpoint_accepts_destination_and_uses_folder_name_in_job(t
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Trip")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="104NCZ_8", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -791,6 +798,7 @@ def test_stage_endpoint_rejects_case_folded_destination_collisions(
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Case collision")
+    db.commit()
     first_id = workspace_folders.add_folder(db, str(first), name="Photos", link_to_workspace=False)
     second_id = workspace_folders.add_folder(db, str(second), name="PHOTOS", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, first_id)
@@ -838,6 +846,7 @@ def test_preflight_endpoint_returns_destination_probe_error(tmp_path, monkeypatc
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Probe failure")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="Photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -881,6 +890,7 @@ def _cancellable_preflight_app(tmp_path, monkeypatch, fake_preflight):
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Cancellable preflight")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="Photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -1144,6 +1154,7 @@ def test_preflight_cancel_stops_destination_probing(tmp_path, monkeypatch):
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Cancellable destination probe")
+    db.commit()
     folder_a = workspace_folders.add_folder(db, str(source_a), name="PhotosA", link_to_workspace=False)
     folder_b = workspace_folders.add_folder(db, str(source_b), name="PhotosB", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_a)
@@ -1257,6 +1268,7 @@ def test_preflight_cancel_after_workspace_switch_stops_scan(tmp_path, monkeypatc
     db = Database(db_path)
     first_workspace = db.create_workspace("First")
     second_workspace = db.create_workspace("Second")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="Photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, first_workspace, folder_id)
     db.close()
@@ -1733,6 +1745,7 @@ def test_reloaded_page_supersedes_obsolete_scan_under_same_client_id(
 def test_local_root_under_folder_finds_descendant_session(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.create_workspace("Ancestor")
+    db.commit()
     parent = tmp_path / "nas" / "parent"
     child = parent / "child"
     child.mkdir(parents=True)
@@ -1767,6 +1780,7 @@ def test_delete_ancestor_of_local_folder_refuses_with_409(tmp_path, monkeypatch)
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Ancestor")
+    db.commit()
     parent_id = workspace_folders.add_folder(db, str(parent), name="parent", link_to_workspace=False)
     child_id = workspace_folders.add_folder(db, str(child), name="child", parent_id=parent_id, link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, parent_id)
@@ -1808,6 +1822,7 @@ def _stage_child_under_parent(tmp_path):
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Ancestor")
+    db.commit()
     parent_id = workspace_folders.add_folder(db, str(parent), name="parent", link_to_workspace=False)
     child_id = workspace_folders.add_folder(
         db, str(child), name="child", parent_id=parent_id, link_to_workspace=False,
@@ -1866,6 +1881,7 @@ def test_local_roots_under_folder_enumerates_every_descendant_session(tmp_path):
     and the workspace status aggregator can surface all of them at once."""
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.create_workspace("Ancestor")
+    db.commit()
     parent = tmp_path / "nas" / "parent"
     child_a = parent / "childA"
     child_b = parent / "childB"
@@ -1897,6 +1913,7 @@ def test_workspace_status_surfaces_descendant_local_session(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     parent_ws = db.create_workspace("Parent")
     child_ws = db.create_workspace("Child")
+    db.commit()
     parent = tmp_path / "nas" / "parent"
     child = parent / "child"
     child.mkdir(parents=True)
@@ -1941,6 +1958,7 @@ def test_ancestor_workspace_materialized_before_stage_rebase(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     parent_ws = db.create_workspace("Parent")
     child_ws = db.create_workspace("Child")
+    db.commit()
     parent = tmp_path / "nas" / "parent"
     child = parent / "child"
     child.mkdir(parents=True)
@@ -1983,6 +2001,7 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
         parent_ws = db.create_workspace("Parent")
         child_ws = db.create_workspace("Child")
         observer_ws = db.create_workspace("Observer")
+        db.commit()
         parent = tmp_path / "nas" / "parent"
         child = parent / "child"
         descendant = child / "descendant"
@@ -2035,6 +2054,7 @@ def test_workspace_status_exposes_visible_ancestor_for_missing_local_root(tmp_pa
     when the local copy needs recovery (Codex review r3791982618)."""
     db = Database(str(tmp_path / "vireo.db"))
     ws = db.create_workspace("Reviewer")
+    db.commit()
     parent = tmp_path / "nas" / "parent"
     child = parent / "child"
     child.mkdir(parents=True)
@@ -2079,6 +2099,7 @@ def test_workspace_status_ancestor_is_none_for_top_level_missing_root(tmp_path):
     and can fall back to whatever it likes (global banner, workspace panel)."""
     db = Database(str(tmp_path / "vireo.db"))
     ws = db.create_workspace("Reviewer")
+    db.commit()
     source = tmp_path / "nas" / "photos"
     source.mkdir(parents=True)
     (source / "bird.jpg").write_bytes(b"original")
@@ -2114,6 +2135,7 @@ def test_workspace_status_counts_unanchored_descendant_session(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     parent_ws = db.create_workspace("Parent")
     child_ws = db.create_workspace("Child")
+    db.commit()
     parent = tmp_path / "nas" / "parent"
     child = parent / "child"
     child.mkdir(parents=True)
@@ -2167,6 +2189,7 @@ def test_future_ancestor_link_materializes_local_descendants(tmp_path):
 
     db = Database(str(tmp_path / "vireo.db"))
     staging_ws = db.create_workspace("Staging")
+    db.commit()
     parent = tmp_path / "nas" / "parent"
     child = parent / "child"
     child.mkdir(parents=True)
@@ -2182,6 +2205,7 @@ def test_future_ancestor_link_materializes_local_descendants(tmp_path):
         # add_workspace_folder walked only folders.path under /parent (empty
         # for the rebased child) and never materialized a link to child_id.
         late_ws = db.create_workspace("Late")
+        db.commit()
         workspace_folders.add_workspace_folder(db, late_ws, parent_id)
 
         link = db.conn.execute(
@@ -2219,6 +2243,7 @@ def test_ancestor_workspace_can_sync_descendant_local_session(tmp_path, monkeypa
     db = Database(db_path)
     parent_ws = db.create_workspace("Parent")
     child_ws = db.create_workspace("Child")
+    db.commit()
     parent_id = workspace_folders.add_folder(db, str(parent), name="parent", link_to_workspace=False)
     child_id = workspace_folders.add_folder(db, str(child), name="child", parent_id=parent_id, link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, parent_ws, parent_id)
@@ -2270,6 +2295,7 @@ def test_ancestor_workspace_photo_count_survives_descendant_rebase(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     parent_ws = db.create_workspace("Parent")
     child_ws = db.create_workspace("Child")
+    db.commit()
     parent = tmp_path / "nas" / "parent"
     child = parent / "child"
     child.mkdir(parents=True)
@@ -2337,6 +2363,7 @@ def test_unlink_ancestor_of_shared_local_session_cleans_phantom_rows(tmp_path):
     setup = Database(db_path)
     parent_ws = setup.create_workspace("Parent")
     child_ws = setup.create_workspace("Child")
+    setup.commit()
     parent_id = workspace_folders.add_folder(setup, str(parent), name="parent", link_to_workspace=False)
     child_id = workspace_folders.add_folder(setup, str(child), name="child", parent_id=parent_id, link_to_workspace=False)
     workspace_folders.add_workspace_folder(setup, parent_ws, parent_id)
@@ -2397,6 +2424,7 @@ def test_unlink_ancestor_refuses_when_last_link_to_descendant_session(tmp_path):
 
     setup = Database(db_path)
     workspace_id = setup.create_workspace("Only")
+    setup.commit()
     parent_id = workspace_folders.add_folder(setup, str(parent), name="parent", link_to_workspace=False)
     child_id = workspace_folders.add_folder(setup, str(child), name="child", parent_id=parent_id, link_to_workspace=False)
     workspace_folders.add_workspace_folder(setup, workspace_id, parent_id)
@@ -2465,6 +2493,7 @@ def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path, folder_lin
     parent_ws = setup.create_workspace("Parent")
     child_ws = setup.create_workspace("Child")
     target_ws = setup.create_workspace("Target")
+    setup.commit()
     parent_id = workspace_folders.add_folder(setup, str(parent), name="parent", link_to_workspace=False)
     child_id = workspace_folders.add_folder(setup, str(child), name="child", parent_id=parent_id, link_to_workspace=False)
     workspace_folders.add_workspace_folder(setup, parent_ws, parent_id)
@@ -2539,6 +2568,7 @@ def test_move_folders_ancestor_refuses_when_last_link_to_descendant(tmp_path):
     setup = Database(db_path)
     only_ws = setup.create_workspace("Only")
     target_ws = setup.create_workspace("Target")
+    setup.commit()
     parent_id = workspace_folders.add_folder(setup, str(parent), name="parent", link_to_workspace=False)
     child_id = workspace_folders.add_folder(setup, str(child), name="child", parent_id=parent_id, link_to_workspace=False)
     workspace_folders.add_workspace_folder(setup, only_ws, parent_id)
@@ -2574,6 +2604,7 @@ def test_workspace_ids_for_folder_tree_includes_ancestor_linked_workspaces(tmp_p
     try:
         parent_ws = db.create_workspace("Parent")
         child_ws = db.create_workspace("Child")
+        db.commit()
         parent_id = workspace_folders.add_folder(db, str(parent), name="parent", link_to_workspace=False)
         child_id = workspace_folders.add_folder(db, str(child), name="child", parent_id=parent_id, link_to_workspace=False)
         workspace_folders.add_workspace_folder(db, parent_ws, parent_id)
@@ -2611,6 +2642,7 @@ def test_bulk_stage_skips_ancestor_of_descendant_local_session(tmp_path):
 
     setup = Database(db_path)
     workspace_id = setup.create_workspace("Mixed")
+    setup.commit()
     parent_id = workspace_folders.add_folder(setup, str(parent), name="parent", link_to_workspace=False)
     child_id = workspace_folders.add_folder(
         setup, str(child), name="child", parent_id=parent_id, link_to_workspace=False,
@@ -2622,6 +2654,7 @@ def test_bulk_stage_skips_ancestor_of_descendant_local_session(tmp_path):
     # Stage the child from a second workspace so this workspace reaches the
     # local session through its ancestor root.
     other_ws = setup.create_workspace("Staging")
+    setup.commit()
     workspace_folders.add_workspace_folder(setup, other_ws, child_id)
     stage_folder(setup, child_id, str(tmp_path / "vireo"))
     setup.close()
@@ -2687,6 +2720,7 @@ def test_folder_stage_endpoint_refuses_while_scan_is_paused(tmp_path, monkeypatc
 
     db = Database(db_path)
     workspace_id = db.create_workspace("Owner")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -2752,6 +2786,7 @@ def test_local_folder_status_exposes_blocking_job_and_preflight_stops_early(
 
     db = Database(db_path)
     workspace_id = db.create_workspace("Owner")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -2824,6 +2859,7 @@ def test_local_folder_blocker_endpoint_avoids_source_walk(tmp_path, monkeypatch)
 
     db = Database(db_path)
     workspace_id = db.create_workspace("Owner")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -2930,6 +2966,7 @@ def test_local_folder_blockers_are_scoped_to_affected_roots(tmp_path, monkeypatc
     db = Database(db_path)
     first_workspace = db.create_workspace("First")
     second_workspace = db.create_workspace("Second")
+    db.commit()
     shared_id = workspace_folders.add_folder(
         db, str(shared_source), name="shared", link_to_workspace=False
     )
@@ -3000,6 +3037,7 @@ def test_local_folder_blockers_include_descendant_sessions(tmp_path, monkeypatch
     db = Database(db_path)
     parent_workspace = db.create_workspace("Parent")
     child_workspace = db.create_workspace("Child")
+    db.commit()
     parent_id = workspace_folders.add_folder(
         db, str(parent_source), name="parent", link_to_workspace=False
     )
@@ -3068,6 +3106,7 @@ def test_folder_sync_proceeds_while_observational_job_runs(tmp_path, monkeypatch
 
     db = Database(db_path)
     workspace_id = db.create_workspace("Owner")
+    db.commit()
     folder_id = workspace_folders.add_folder(
         db, str(source), name="photos", link_to_workspace=False,
     )
@@ -3141,6 +3180,7 @@ def test_local_folder_blocker_fingerprint_tracks_residency_transitions(tmp_path,
 
     db = Database(db_path)
     workspace_id = db.create_workspace("Owner")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.close()
@@ -3220,6 +3260,7 @@ def test_catalog_independent_job_does_not_block_work_locally(tmp_path, monkeypat
 
     db = Database(db_path)
     workspace_id = db.create_workspace("Only")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.close()
@@ -3343,6 +3384,7 @@ def test_sync_job_shows_the_source_check_as_its_own_step(tmp_path, monkeypatch):
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Trip")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="09", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -3404,6 +3446,7 @@ def test_sync_conflict_marks_the_check_step_not_the_publish_step(tmp_path, monke
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     workspace_id = db.create_workspace("Trip")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="09", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -3490,6 +3533,7 @@ def test_discard_invalidates_new_images_for_ancestor_workspace_without_link(tmp_
     with Database(str(tmp_path / "vireo.db")) as db:
         parent_ws = db.create_workspace("Parent")
         child_ws = db.create_workspace("Child")
+        db.commit()
         parent = tmp_path / "nas" / "parent"
         child = parent / "child"
         child.mkdir(parents=True)
@@ -3537,6 +3581,7 @@ def _destination_blocker_app(tmp_path, monkeypatch, scan_root_for):
 
     db = Database(db_path)
     workspace_id = db.create_workspace("Owner")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="photos", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
@@ -3665,6 +3710,7 @@ def test_cache_invalidation_does_not_probe_offline_originals(tmp_path, monkeypat
 
     with Database(str(tmp_path / "vireo.db")) as db:
         ws = db.ensure_default_workspace()
+        db.commit()
         db.set_active_workspace(ws)
         workspace_folders.add_folder(db, "/Volumes/offline/photos")
         db._new_images_cache.set(db._db_path, ws, {"new_count": 0})

@@ -38,6 +38,7 @@ def app_and_db(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
@@ -1233,6 +1234,7 @@ def test_get_snapshot_cross_workspace_returns_404(app_and_db):
     snap_id = db.workspaces.create_new_images_snapshot(["/tmp/a.jpg"])
     db.commit()
     other = db.create_workspace("Other")
+    db.commit()
     # Persist the switch so per-request Database instances restore "Other" as
     # the active workspace (Database.__init__ picks the workspace with the most
     # recent last_opened_at).
@@ -1349,6 +1351,7 @@ def test_new_images_preview_scopes_roots_to_active_workspace(app_and_db):
     # not filtered by workspace, would steal the subfolder label. Switch
     # active workspace before creating so add_folder auto-links to B only.
     ws_b = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws_b)
     inner = shoot_a / "inner"
     inner.mkdir()

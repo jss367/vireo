@@ -13,6 +13,7 @@ def test_work_locally_full_cycle(live_server, page, tmp_path):
     (source / "bird.jpg").write_bytes(b"original-bytes")
 
     ws_id = db.create_workspace("Local Cycle")
+    db.commit()
     db.set_active_workspace(ws_id)
     folder_id = workspace_folders.add_folder(db, str(source), name="nas-src")
 
@@ -62,6 +63,7 @@ def test_sync_back_replaces_folder_actions_with_live_progress(
     source.mkdir()
     (source / "bird.jpg").write_bytes(b"original")
     workspace_id = db.create_workspace("Inline Sync Progress")
+    db.commit()
     db.set_active_workspace(workspace_id)
     folder_id = workspace_folders.add_folder(db, str(source), name="inline-progress-source")
     assert page.request.post(
@@ -158,6 +160,7 @@ def test_bulk_sync_snapshot_marks_an_already_completed_folder(
 
     db = live_server["db"]
     workspace_id = db.create_workspace("Bulk Sync Progress")
+    db.commit()
     db.set_active_workspace(workspace_id)
     folder_ids = []
     for name in ("first-source", "second-source"):
@@ -246,6 +249,7 @@ def test_work_locally_explains_processing_blocker(live_server, page, tmp_path):
     recovery_source.mkdir()
     (recovery_source / "fox.jpg").write_bytes(b"original-bytes")
     workspace_id = db.create_workspace("Processing")
+    db.commit()
     db.set_active_workspace(workspace_id)
     workspace_folders.add_folder(db, str(source), name="nas-blocked")
     recovery_folder_id = workspace_folders.add_folder(
@@ -308,6 +312,7 @@ def test_open_work_locally_dialog_disables_when_processing_starts(
     source.mkdir()
     (source / "bird.jpg").write_bytes(b"original-bytes")
     workspace_id = db.create_workspace("Late Processing")
+    db.commit()
     db.set_active_workspace(workspace_id)
     workspace_folders.add_folder(db, str(source), name="nas-late-blocker")
     assert page.request.post(
@@ -371,6 +376,7 @@ def test_shared_folder_local_status_follows_workspace_switch(live_server, page, 
     (source / "bird.jpg").write_bytes(b"original")
     first = db.create_workspace("Shared First")
     second = db.create_workspace("Shared Second")
+    db.commit()
     folder_id = workspace_folders.add_folder(db, str(source), name="shared-source", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, first, folder_id)
     workspace_folders.add_workspace_folder(db, second, folder_id)

@@ -302,6 +302,7 @@ def test_reveal_photo_outside_active_workspace_returns_404(app_and_db):
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     other_fid = workspace_folders.add_folder(db, '/secret/ws-photos', name='secret')
     pid = photo_ingest.add_photo(
@@ -319,6 +320,7 @@ def test_reveal_folder_outside_active_workspace_returns_404(app_and_db):
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     other_fid = workspace_folders.add_folder(db, '/secret/ws-dir', name='secret')
     db.set_active_workspace(default_ws)

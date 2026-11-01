@@ -82,6 +82,7 @@ def test_restore_prefers_most_recently_opened_then_lowest_id(tmp_path):
         default_id = first._ws_id()
         a = first.create_workspace("A")
         b = first.create_workspace("B")
+        first.commit()
         first.workspaces.update(a, last_opened_at="2026-01-01T00:00:00")
         first.commit()
         first.workspaces.update(b, last_opened_at="2026-02-01T00:00:00")
@@ -112,6 +113,7 @@ def test_create_workspace_encodes_json_and_default_tabs(db, cache):
     ws_id = db.create_workspace(
         "Kenya", config_overrides={"a": 1}, ui_state={"panel": "open"}
     )
+    db.commit()
     with _reader(db) as other:
         row = other.execute(
             "SELECT * FROM workspaces WHERE id = ?", (ws_id,)
@@ -125,6 +127,7 @@ def test_create_workspace_encodes_json_and_default_tabs(db, cache):
 
 def test_create_workspace_stores_falsy_json_fields_as_null(db):
     ws_id = db.create_workspace("Empty", config_overrides={}, ui_state={})
+    db.commit()
     row = db.workspaces.get(ws_id)
     assert row["config_overrides"] is None
     assert row["ui_state"] is None
@@ -132,8 +135,10 @@ def test_create_workspace_stores_falsy_json_fields_as_null(db):
 
 def test_create_workspace_duplicate_name_raises_integrity_error(db):
     db.create_workspace("Same")
+    db.commit()
     with pytest.raises(sqlite3.IntegrityError):
         db.create_workspace("Same")
+        db.commit()
 
 
 def test_get_workspace_missing_returns_none(db):
@@ -145,6 +150,7 @@ def test_get_workspaces_orders_pinned_first_then_case_insensitive_name(db):
     alpha = db.create_workspace("Alpha")
     db.create_workspace("gamma")
     zulu = db.create_workspace("Zulu")
+    db.commit()
     db.workspaces.update(zulu, pinned_at="2026-01-01T00:00:00")
     db.commit()
     names = [row["name"] for row in db.workspaces.list_all()]
@@ -156,6 +162,7 @@ def test_get_workspaces_orders_pinned_first_then_case_insensitive_name(db):
 
 def test_update_workspace_sets_and_clears_fields(db):
     ws_id = db.create_workspace("Old", config_overrides={"x": 1}, ui_state={"y": 2})
+    db.commit()
     db.workspaces.update(
         ws_id,
         name="New",
@@ -186,8 +193,26 @@ def test_update_workspace_sets_and_clears_fields(db):
     assert row["last_opened_at"] == "2026-03-03T00:00:00"
 
 
+def test_create_workspace_leaves_commit_to_caller_and_invalidates_after_it(db, cache):
+    with db.transaction():
+        ws_id = db.create_workspace("Pending")
+        # Nothing is visible to another connection, and the new-images
+        # cache is not invalidated, until the caller's unit commits.
+        with _reader(db) as other:
+            assert other.execute(
+                "SELECT 1 FROM workspaces WHERE id = ?", (ws_id,)
+            ).fetchone() is None
+        assert cache.invalidated == []
+    assert cache.invalidated == [(db._db_path, {ws_id})]
+    with _reader(db) as other:
+        assert other.execute(
+            "SELECT 1 FROM workspaces WHERE id = ?", (ws_id,)
+        ).fetchone() is not None
+
+
 def test_update_workspace_without_fields_is_a_noop(db):
     ws_id = db.create_workspace("Keep", config_overrides={"k": 1})
+    db.commit()
     assert db.workspaces.update(ws_id) is None
     assert not db.conn.in_transaction
     row = db.workspaces.get(ws_id)
@@ -197,6 +222,7 @@ def test_update_workspace_without_fields_is_a_noop(db):
 
 def test_delete_workspace_commits_and_invalidates_cache(db, cache):
     ws_id = db.create_workspace("Gone")
+    db.commit()
     cache.invalidated.clear()
     workspace_lifecycle.delete_workspace(db, ws_id)
     with _reader(db) as other:
@@ -208,6 +234,7 @@ def test_delete_workspace_commits_and_invalidates_cache(db, cache):
 
 def test_delete_workspace_translates_pending_nas_error(db, cache):
     ws_id = db.create_workspace("Guarded")
+    db.commit()
     db.conn.execute(
         "CREATE TEMP TRIGGER guard BEFORE DELETE ON workspaces BEGIN "
         "SELECT RAISE(ABORT, 'Send pending photos to NAS before deleting this workspace'); "
@@ -222,6 +249,7 @@ def test_delete_workspace_translates_pending_nas_error(db, cache):
 
 def test_delete_workspace_reraises_other_integrity_errors(db, cache):
     ws_id = db.create_workspace("Guarded")
+    db.commit()
     db.conn.execute(
         "CREATE TEMP TRIGGER guard BEFORE DELETE ON workspaces BEGIN "
         "SELECT RAISE(ABORT, 'some other constraint'); END"
@@ -247,6 +275,7 @@ def test_ensure_default_workspace_returns_existing_or_creates(db):
 
 def test_set_workspace_group_state_commits(db):
     ws_id = db.create_workspace("Grouped")
+    db.commit()
     db.workspaces.set_group_state(ws_id, "fp-1", "2026-04-01T00:00:00")
     db.commit()
     with _reader(db) as other:
@@ -292,6 +321,7 @@ def test_browse_stack_settings_applies_workspace_override(db):
 def test_min_detector_confidence_takes_minimum_across_workspaces(db):
     low = db.create_workspace("Low", config_overrides={"detector_confidence": 0.05})
     db.create_workspace("High", config_overrides={"detector_confidence": 0.6})
+    db.commit()
     assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.3}) == 0.05
     workspace_lifecycle.delete_workspace(db, low)
     assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.3}) == 0.3
@@ -305,6 +335,7 @@ def test_min_detector_confidence_invalid_global_defaults_to_point_two(db):
 def test_min_detector_confidence_ignores_malformed_overrides(db):
     for name, raw in [("bad-json", "{"), ("list", "[1]"), ("bad-value", '{"detector_confidence": "nope"}')]:
         ws_id = db.create_workspace(name)
+        db.commit()
         _raw_overrides(db, ws_id, raw)
     assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.4}) == 0.4
 
@@ -353,6 +384,7 @@ def test_set_workspace_active_labels_replaces_malformed_overrides(db, raw):
 def test_forget_label_file_removes_from_every_workspace(db):
     keep = db.create_workspace("Keep", config_overrides={"active_labels": ["b.txt"], "x": 1})
     drop = db.create_workspace("Drop", config_overrides={"active_labels": ["a.txt", "b.txt"], "x": 2})
+    db.commit()
     for name, raw in [("bad-json", "{"), ("list", "[1]"), ("not-list", '{"active_labels": "a.txt"}')]:
         _raw_overrides(db, db.create_workspace(name), raw)
 
@@ -373,6 +405,7 @@ def test_forget_label_file_removes_from_every_workspace(db):
 
 def test_forget_label_file_unknown_file_changes_nothing(db):
     db.create_workspace("Keep", config_overrides={"active_labels": ["b.txt"]})
+    db.commit()
     assert db.workspaces.forget_label_file("missing.txt") == 0
 
 
@@ -469,6 +502,7 @@ def test_new_images_snapshot_is_workspace_scoped(db):
     snap_id = db.workspaces.create_new_images_snapshot(["/a.jpg"])
     db.commit()
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     assert db.workspaces.get_new_images_snapshot(snap_id) is None
     assert db.workspaces.get_new_images_snapshot(snap_id + 1000) is None
@@ -500,6 +534,7 @@ def test_invalidate_new_images_cache_for_folders_chunks_and_scopes(db, cache):
     ws_a = db._ws_id()
     ws_b = db.create_workspace("B")
     db.create_workspace("Unlinked")
+    db.commit()
     folder_ids = [workspace_folders.add_folder(db, f"/root/f{i}") for i in range(3)]
     db.conn.execute(
         "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
@@ -543,6 +578,7 @@ def test_get_new_images_for_workspace_uses_cache(db, monkeypatch):
 
 def test_get_workspace_id_by_name_matches_the_exact_name(db):
     ws_id = db.create_workspace("Shorebirds")
+    db.commit()
     assert db.workspaces.id_for_name("Shorebirds") == ws_id
     # ``workspaces.name`` has no NOCASE collation: the lookup is exact.
     assert db.workspaces.id_for_name("shorebirds") is None
@@ -685,6 +721,7 @@ def test_active_workspace_methods_raise_before_anything_without_a_workspace(db):
 def test_catalog_wide_methods_work_without_a_workspace(db):
     """The row methods take an id or span every workspace; none needs one active."""
     other = db.create_workspace("Other")
+    db.commit()
     folder = workspace_folders.add_folder(db, "/ws/linked", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, other, folder)
     db.set_active_workspace(None)
@@ -707,6 +744,7 @@ def test_active_workspace_methods_follow_the_workspace_active_at_each_call(db):
     repository) reads and writes the new workspace."""
     ws = db.require_workspace_id()
     other = db.create_workspace("Other")
+    db.commit()
     held = db.workspaces
     db.workspaces.set_tabs(["browse"])
     db.commit()

@@ -521,6 +521,7 @@ def test_analyze_for_culling_empty(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     result = analyze_for_culling(db)
@@ -536,6 +537,7 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     folder_path = str(tmp_path / "photos")
@@ -720,6 +722,7 @@ def test_analyze_for_culling_backfills_phash_from_working_copy(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     vireo_dir = tmp_path
@@ -763,6 +766,7 @@ def test_analyze_for_culling_reports_missing_phash_count(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     folder_path = str(tmp_path / "raws")
@@ -804,6 +808,7 @@ def test_analyze_for_culling_falls_back_to_source_when_working_copy_corrupt(tmp_
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     vireo_dir = tmp_path
@@ -856,6 +861,7 @@ def test_phash_backfill_commits_per_photo(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     folder_path = str(tmp_path / "photos")
@@ -933,6 +939,7 @@ def test_phash_backfill_does_not_swallow_commit_errors(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     folder_path = str(tmp_path / "photos")

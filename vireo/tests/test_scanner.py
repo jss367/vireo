@@ -1392,6 +1392,7 @@ def test_incremental_index_reads_only_requested_photos(tmp_path, requested_count
         )
         db.conn.commit()
         new_ws = db.create_workspace("Empty workspace")
+        db.commit()
         db.set_active_workspace(new_ws)
 
         operations = 0
@@ -5082,6 +5083,7 @@ def test_restricted_scan_links_only_exact_target_folder(tmp_path, monkeypatch):
     root_id = workspace_folders.add_folder(db, str(root), name=root.name)
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     unrelated_id = workspace_folders.add_folder(
         db, str(unrelated), name=unrelated.name, parent_id=root_id,
@@ -8989,6 +8991,7 @@ def test_pair_raw_jpeg_batches_collection_remap(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
 

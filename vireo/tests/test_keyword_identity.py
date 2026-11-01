@@ -19,6 +19,7 @@ from services import dashboard_stats, photo_ingest, photo_locations, workspace_f
 def catalog(tmp_path):
     db = Database(str(tmp_path / 'identity.db'))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'), name='Photos')
     workspace_folders.add_workspace_folder(db, ws, folder)
@@ -117,6 +118,7 @@ def test_dashboard_does_not_borrow_species_labels_from_other_workspaces(catalog)
     db.tag_photo(photos[0], leaf)
     db.commit()
     other = db.create_workspace('Another vocabulary')
+    db.commit()
     db.set_active_workspace(other)
     folder = workspace_folders.add_folder(db, '/other-vocabulary', name='Other')
     workspace_folders.add_workspace_folder(db, other, folder)
@@ -172,6 +174,7 @@ def test_reconciliation_rejects_changed_or_out_of_workspace_candidates(catalog):
     db.conn.execute('DELETE FROM keywords WHERE id = ?', (child,))
     db.conn.commit()
     other = db.create_workspace('Other')
+    db.commit()
     db.set_active_workspace(other)
     with pytest.raises(ValueError):
         reconcile_location(db, source, target)
@@ -542,6 +545,7 @@ def test_manual_merge_preview_and_cross_workspace_sidecar_updates(catalog):
     db.commit()
     ws = db._ws_id()
     other = db.create_workspace('Shared photos')
+    db.commit()
     folder = db.conn.execute('SELECT folder_id FROM photos WHERE id = ?', (photos[0],)).fetchone()[0]
     workspace_folders.add_workspace_folder(db, other, folder)
     selection = [source, target]
@@ -1924,6 +1928,7 @@ def test_manual_merge_count_includes_retained_children_and_other_workspaces(cata
     db.commit()
     ws = db._ws_id()
     other = db.create_workspace('Other workspace')
+    db.commit()
     db.set_active_workspace(other)
     folder = workspace_folders.add_folder(db, '/other-merge-photos', name='Other photos')
     workspace_folders.add_workspace_folder(db, other, folder)
@@ -2101,6 +2106,7 @@ def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp
     db.commit()
     ws = db._ws_id()
     other = db.create_workspace('Shared sidecar')
+    db.commit()
     folder = db.conn.execute('SELECT folder_id FROM photos WHERE id = ?', (photos[1],)).fetchone()[0]
     workspace_folders.add_workspace_folder(db, other, folder)
     for workspace in (ws, other):

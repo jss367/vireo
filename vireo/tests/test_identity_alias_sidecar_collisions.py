@@ -74,6 +74,7 @@ def test_drained_alias_confirmation_survives_collision_sync_reimport_and_history
             write_sidecar(str(path.with_suffix('.xmp')), flat_keywords={'Unrelated note', 'Higher family'}, hierarchical_keywords=set())
         second = db.create_workspace('Shared alias repair')
         hidden = db.create_workspace('Unrelated hidden scope')
+        db.commit()
         db.set_active_workspace(first)
         db.photo_visibility.grant(first, [losing, survivor])
         db.photo_visibility.grant(second, [losing, survivor])

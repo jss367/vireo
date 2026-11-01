@@ -187,6 +187,7 @@ def test_coverage_endpoint_rejects_cross_workspace_and_visual_scope(app_and_db):
     assert client.get("/api/collections/999999/coverage").status_code == 404
     assert client.get("/api/collections/9223372036854775808/coverage").status_code == 400
     workspace = db.create_workspace("Other")
+    db.commit()
     assert client.post(f"/api/workspaces/{workspace}/activate").status_code == 200
     assert client.get(f"/api/collections/{cid}/coverage").status_code == 404
 

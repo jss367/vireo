@@ -48,6 +48,7 @@ def test_concurrent_runs_keep_their_created_collections(tmp_path, monkeypatch):
     db_path = str(tmp_path / "catalog.db")
     db = Database(db_path)
     workspaces = [db._active_workspace_id, db.create_workspace("Second run")]
+    db.commit()
     folders = []
     for index in range(2):
         folder = tmp_path / f"photos-{index}"

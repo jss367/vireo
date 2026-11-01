@@ -49,6 +49,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     database = Database(str(tmp_path / "test.db"))
     ws = database.ensure_default_workspace()
+    database.commit()
     database.set_active_workspace(ws)
     database.folder_id = workspace_folders.add_folder(database, str(tmp_path), name="p")
     return database
