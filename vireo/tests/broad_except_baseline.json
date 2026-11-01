@@ -131,7 +131,6 @@
   "volume_reachability.py": 4,
   "web/audit.py": 1,
   "web/duplicates.py": 1,
-  "web/highlights.py": 1,
   "web/history.py": 1,
   "web/imports.py": 5,
   "web/inat.py": 1,

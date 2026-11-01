@@ -374,12 +374,10 @@ def _retarget_species_curation(
             rename_species_highlights_species(
                 src_name, dst_name,
                 photo_workspace_pairs=photo_workspace_pairs,
-                _commit=False,
             )
             rename_photo_preferences_species(
                 src_name, dst_name,
                 photo_workspace_pairs=photo_workspace_pairs,
-                _commit=False,
             )
 
 
@@ -2539,11 +2537,9 @@ def _migrate_replaced_species_curation(
     for source_name in curation_sources:
         rename_species_highlights_species(
             source_name, species, [(photo_id, ws)],
-            _commit=False,
         )
         rename_photo_preferences_species(
             source_name, species, [(photo_id, ws)],
-            _commit=False,
         )
 
 

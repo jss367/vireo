@@ -1258,11 +1258,11 @@ def test_rename_keyword_dependents(db, lib, monkeypatch):
     db.conn.commit()
     calls = []
     monkeypatch.setattr(db, "rename_species_highlights_species",
-                        lambda o, n, photo_workspace_pairs=None, _commit=True:
-                        calls.append(("hl", o, n, photo_workspace_pairs, _commit)))
+                        lambda o, n, photo_workspace_pairs=None:
+                        calls.append(("hl", o, n, photo_workspace_pairs)))
     monkeypatch.setattr(db, "rename_photo_preferences_species",
-                        lambda o, n, photo_workspace_pairs=None, _commit=True:
-                        calls.append(("pref", o, n, photo_workspace_pairs, _commit)))
+                        lambda o, n, photo_workspace_pairs=None:
+                        calls.append(("pref", o, n, photo_workspace_pairs)))
     statements = _trace(db)
     db._rename_keyword_dependents(kid, "'Verdin'", "'Verdin'")
     db._rename_keyword_dependents(kid, "", "Verdin")
@@ -1270,8 +1270,8 @@ def test_rename_keyword_dependents(db, lib, monkeypatch):
     assert statements == []
     db._rename_keyword_dependents(kid, "'Verdin'", "Verdin")
     assert calls == [
-        ("hl", "'Verdin'", "Verdin", [(p0, ws)], False),
-        ("pref", "'Verdin'", "Verdin", [(p0, ws)], False),
+        ("hl", "'Verdin'", "Verdin", [(p0, ws)]),
+        ("pref", "'Verdin'", "Verdin", [(p0, ws)]),
     ]
     rows = sorted(
         tuple(r) for r in db.conn.execute(

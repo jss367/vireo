@@ -437,21 +437,18 @@ class _HighlightsRelabel:
                 old_species_name,
                 species,
                 [(pid, ws_id) for pid in pids],
-                _commit=False,
             )
         for old_species_name, pids in self.preference_renames.items():
             db.rename_photo_preferences_species(
                 old_species_name,
                 species,
                 [(pid, ws_id) for pid in pids],
-                _commit=False,
             )
         for old_species_name, pids in self.representative_renames.items():
             db.species_curation.rename_representatives(
                 old_species_name,
                 species,
                 photo_ids=pids,
-                _commit=False,
             )
 
     def record_relabel_edit(self, kid: int) -> None:
@@ -812,17 +809,15 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         # table so a cached Highlights page or older client doesn't silently
         # overwrite the species representative instead.
         if parsed["purpose"] == "highlights":
-            rank = db.species_curation.add_highlight(
-                parsed["species"], parsed["photo_id"]
-            )
+            with db.transaction():
+                rank = db.species_curation.add_highlight(
+                    parsed["species"], parsed["photo_id"]
+                )
             return jsonify({"ok": True, **parsed, "rank": rank})
-        # The representative write stays uncommitted until the promotion
-        # below succeeds; roll it back if anything in between raises so the
-        # half-done write is not left open on the request connection (where
-        # a later commit on it would persist it).
-        try:
+        # The representative write and its promotion land together.
+        with db.transaction():
             db.set_species_representative(
-                parsed["species"], parsed["photo_id"], _commit=False
+                parsed["species"], parsed["photo_id"]
             )
             # Only promote to `species_highlights` when the photo is actually
             # a Highlights candidate. Otherwise the row is invisible on the
@@ -833,12 +828,8 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
                 db, parsed["species"], parsed["photo_id"]
             ):
                 rank = db.species_curation.promote_highlight(
-                    parsed["species"], parsed["photo_id"], _commit=False
+                    parsed["species"], parsed["photo_id"]
                 )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
         return jsonify({"ok": True, **parsed, "highlight_rank": rank})
 
     @blueprint.route("/api/photo-preferences", methods=["DELETE"])
@@ -853,9 +844,10 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         # _parse_photo_preference_body) and routes to species_curation.remove_highlight
         # rather than clearing all representative rows for the species.
         if parsed["purpose"] == "highlights":
-            removed = db.species_curation.remove_highlight(
-                parsed["species"], parsed["photo_id"]
-            )
+            with db.transaction():
+                removed = db.species_curation.remove_highlight(
+                    parsed["species"], parsed["photo_id"]
+                )
             return jsonify({
                 "ok": True,
                 "purpose": parsed["canonical_purpose"],
@@ -863,7 +855,8 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
                 "photo_id": parsed["photo_id"],
                 "removed": removed,
             })
-        db.species_curation.clear_representative(parsed["species"])
+        with db.transaction():
+            db.species_curation.clear_representative(parsed["species"])
         return jsonify({
             "ok": True,
             "purpose": parsed["canonical_purpose"],
@@ -912,7 +905,8 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             return json_error(
                 "photo_id is not eligible as a highlight for that species", 400,
             )
-        rank = db.species_curation.add_highlight(parsed["species"], parsed["photo_id"])
+        with db.transaction():
+            rank = db.species_curation.add_highlight(parsed["species"], parsed["photo_id"])
         return jsonify({"ok": True, **parsed, "rank": rank})
 
     @blueprint.route("/api/species-highlights", methods=["DELETE"])
@@ -925,7 +919,8 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if invalid:
             return json_error(*invalid)
-        removed = db.species_curation.remove_highlight(parsed["species"], parsed["photo_id"])
+        with db.transaction():
+            removed = db.species_curation.remove_highlight(parsed["species"], parsed["photo_id"])
         return jsonify({"ok": True, **parsed, "removed": removed})
 
     @blueprint.route("/api/species-highlights/order", methods=["PATCH", "POST"])
@@ -938,9 +933,10 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if invalid:
             return json_error(*invalid)
-        ok = db.species_curation.move_highlight(
-            parsed["species"], parsed["photo_id"], parsed["direction"]
-        )
+        with db.transaction():
+            ok = db.species_curation.move_highlight(
+                parsed["species"], parsed["photo_id"], parsed["direction"]
+            )
         if not ok:
             return json_error("highlight not found", 404)
         return jsonify({"ok": True, **parsed})

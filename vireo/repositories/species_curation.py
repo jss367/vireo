@@ -42,9 +42,8 @@ What deliberately stays on ``Database``:
 - The methods with no SQL of their own: ``get_life_list_unmatched_species``,
   ``get_species_representatives`` and ``set_species_representative``.
 
-``_commit`` flags are carried through unchanged: ``_commit=False`` means the
-caller owns the transaction, and no method here commits unless the
-``Database`` method it backs did.
+No method here commits: the route or service that calls it owns the
+transaction (``with db.transaction():``).
 """
 
 import json
@@ -1177,7 +1176,7 @@ class SpeciesCurationRepository:
             (species, photo_id, order),
         )
 
-    def set_photo_preference(self, purpose, species, photo_id, _commit=True):
+    def set_photo_preference(self, purpose, species, photo_id):
         """Set the preferred photo for a species/purpose in this workspace.
 
         ``species`` is canonicalized to the spelling ``add_keyword`` would
@@ -1201,10 +1200,8 @@ class SpeciesCurationRepository:
         )
         if purpose in {"species_representative", "life_list", "highlights"}:
             self.set_global_representative(species, photo_id)
-        if _commit:
-            self.conn.commit()
 
-    def clear_photo_preference(self, purpose, species, _commit=True):
+    def clear_photo_preference(self, purpose, species):
         """Clear the preferred photo for a species/purpose in this workspace."""
         species = self.resolve_species_display_name(species)
         ws = self.workspace_id
@@ -1213,10 +1210,8 @@ class SpeciesCurationRepository:
                WHERE workspace_id = ? AND purpose = ? AND species = ?""",
             (ws, purpose, species),
         )
-        if _commit:
-            self.conn.commit()
 
-    def clear_representative(self, species, _commit=True):
+    def clear_representative(self, species):
         """Clear all representative photos for a species globally."""
         species = self.resolve_species_display_name(species)
         ws = self.workspace_id
@@ -1231,8 +1226,6 @@ class SpeciesCurationRepository:
                  AND purpose IN ('species_representative', 'life_list', 'highlights')""",
             (ws, species),
         )
-        if _commit:
-            self.conn.commit()
 
     def get_highlights(self, species=None, eligible_only=False):
         """Return ordered highlighted photo ids for the active workspace.
@@ -1319,7 +1312,7 @@ class SpeciesCurationRepository:
                 kept.append(r)
         return kept
 
-    def add_highlight(self, species, photo_id, _commit=True):
+    def add_highlight(self, species, photo_id):
         """Add a photo to a species' ordered highlights, appending if new.
 
         ``species`` is canonicalized to the spelling ``add_keyword`` would
@@ -1341,8 +1334,6 @@ class SpeciesCurationRepository:
                    WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
                 (ws, species, photo_id),
             )
-            if _commit:
-                self.conn.commit()
             return row["rank"]
         max_rank = self.conn.execute(
             """SELECT COALESCE(MAX(rank), 0) AS max_rank
@@ -1357,11 +1348,9 @@ class SpeciesCurationRepository:
                VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
             (ws, species, photo_id, rank),
         )
-        if _commit:
-            self.conn.commit()
         return rank
 
-    def promote_highlight(self, species, photo_id, _commit=True):
+    def promote_highlight(self, species, photo_id):
         """Add a photo to a species' ordered highlights at rank 1."""
         species = self.resolve_species_display_name(species)
         ws = self.workspace_id
@@ -1391,11 +1380,9 @@ class SpeciesCurationRepository:
                    WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
                 (rank, ws, species, pid),
             )
-        if _commit:
-            self.conn.commit()
         return 1
 
-    def remove_highlight(self, species, photo_id, _commit=True):
+    def remove_highlight(self, species, photo_id):
         """Remove a photo from a species' ordered highlights."""
         species = self.resolve_species_display_name(species)
         ws = self.workspace_id
@@ -1404,11 +1391,9 @@ class SpeciesCurationRepository:
                WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
             (ws, species, photo_id),
         )
-        if _commit:
-            self.conn.commit()
         return cur.rowcount
 
-    def move_highlight(self, species, photo_id, direction, _commit=True):
+    def move_highlight(self, species, photo_id, direction):
         """Move a highlighted photo one step up/down within its species."""
         species = self.resolve_species_display_name(species)
         ws = self.workspace_id
@@ -1439,12 +1424,10 @@ class SpeciesCurationRepository:
                    WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
                 (rank, ws, species, pid),
             )
-        if _commit:
-            self.conn.commit()
         return True
 
     def rename_photo_preferences(
-        self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
+        self, old_species, new_species, photo_workspace_pairs=None,
     ):
         """Rename stored representative-photo preferences across workspaces."""
         if not old_species or not new_species or old_species == new_species:
@@ -1455,7 +1438,7 @@ class SpeciesCurationRepository:
                 photo_id for photo_id, _workspace_id in photo_workspace_pairs
             })
         self.rename_representatives(
-            old_species, new_species, photo_ids=global_photo_ids, _commit=False
+            old_species, new_species, photo_ids=global_photo_ids
         )
         if photo_workspace_pairs is not None:
             moved = 0
@@ -1485,8 +1468,6 @@ class SpeciesCurationRepository:
                          AND photo_id = ?""",
                     (workspace_id, old_species, photo_id),
                 )
-            if _commit:
-                self.conn.commit()
             return moved
 
         cur = self.conn.execute(
@@ -1503,12 +1484,10 @@ class SpeciesCurationRepository:
             "DELETE FROM photo_preferences WHERE species = ?",
             (old_species,),
         )
-        if _commit:
-            self.conn.commit()
         return cur.rowcount
 
     def rename_representatives(
-        self, old_species, new_species, photo_ids=None, _commit=True,
+        self, old_species, new_species, photo_ids=None,
     ):
         """Rename global representative rows for a species.
 
@@ -1531,8 +1510,6 @@ class SpeciesCurationRepository:
                 "DELETE FROM species_representatives WHERE species = ?",
                 (old_species,),
             )
-            if _commit:
-                self.conn.commit()
             return moved
         ids = [int(pid) for pid in photo_ids]
         if not ids:
@@ -1561,8 +1538,6 @@ class SpeciesCurationRepository:
                       AND photo_id IN ({placeholders})""",
                 [old_species, *chunk],
             )
-        if _commit:
-            self.conn.commit()
         return moved
 
     def _highlight_rename_scopes(self, old_species, photo_workspace_pairs):
@@ -1623,7 +1598,7 @@ class SpeciesCurationRepository:
         return src_rows
 
     def rename_highlights(
-        self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
+        self, old_species, new_species, photo_workspace_pairs=None,
     ):
         """Rename ordered species-highlight rows to a new species bucket.
 
@@ -1690,8 +1665,6 @@ class SpeciesCurationRepository:
                 )
                 next_rank += 1
                 moved += 1
-        if _commit:
-            self.conn.commit()
         return moved
 
     # -- relabel and eligibility reads ---------------------------------------------------

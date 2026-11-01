@@ -4508,6 +4508,7 @@ def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
     db.commit()
     db.species_curation.add_highlight("Old Species", photo_id)
     db.set_species_representative("Old Species", photo_id)
+    db.commit()
 
     det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
@@ -8815,6 +8816,7 @@ def test_rename_keyword_updates_photo_preferences(app_and_db):
     db.commit()
     db.species_curation.set_photo_preference("life_list", "OldBird", p1)
     db.species_curation.set_photo_preference("highlights", "OldBird", p1)
+    db.commit()
 
     resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
     assert resp.status_code == 200
@@ -8833,6 +8835,7 @@ def test_rename_keyword_updates_species_representative(app_and_db):
     db.tag_photo(p1, kid)
     db.commit()
     db.species_curation.set_photo_preference("species_representative", "OldBird", p1)
+    db.commit()
 
     resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
     assert resp.status_code == 200
@@ -8853,6 +8856,7 @@ def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
     db.commit()
     db.species_curation.set_photo_preference("life_list", "OldBird", p_old)
     db.species_curation.set_photo_preference("life_list", "NewBird", p_new)
+    db.commit()
 
     resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
     assert resp.status_code == 200
@@ -8873,6 +8877,7 @@ def test_rename_keyword_updates_species_highlights(app_and_db):
     db.commit()
     db.species_curation.add_highlight("OldBird", p1)
     db.species_curation.add_highlight("OldBird", p2)
+    db.commit()
 
     resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
     assert resp.status_code == 200
@@ -8900,6 +8905,7 @@ def test_rename_keyword_species_highlights_merge_into_existing_target(app_and_db
     db.species_curation.add_highlight("NewBird", p_target)
     db.species_curation.add_highlight("OldBird", p_moving_a)
     db.species_curation.add_highlight("OldBird", p_moving_b)
+    db.commit()
 
     resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
     assert resp.status_code == 200
@@ -8927,6 +8933,7 @@ def test_rename_keyword_species_highlights_dedupe_existing_photo(app_and_db):
     db.species_curation.add_highlight("NewBird", p_target)
     db.species_curation.add_highlight("NewBird", p_shared)
     db.species_curation.add_highlight("OldBird", p_shared)
+    db.commit()
 
     resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
     assert resp.status_code == 200
@@ -8966,10 +8973,12 @@ def test_rename_species_highlights_species_chunks_scoped_photo_ids(
         db.tag_photo(pid, kid_old)
         db.commit()
         db.species_curation.add_highlight("OldBird", pid)
+        db.commit()
         photo_ids.append(pid)
 
     pairs = [(pid, ws) for pid in photo_ids]
     moved = db.rename_species_highlights_species("OldBird", "NewBird", pairs)
+    db.commit()
 
     assert moved == len(photo_ids)
     assert db.species_curation.get_highlights("OldBird") == {}
@@ -9312,6 +9321,7 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
     # to just unscored_tail — anything else would place the divider above
     # analyzed content.
     db.set_species_representative("Iiwi", unscored_rep)
+    db.commit()
 
     candidates = db.species_curation.get_highlights_candidates(fid, min_quality=0.0)
     buckets, _unid = collect_highlight_buckets(candidates, 0.70)
@@ -9370,6 +9380,7 @@ def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_d
     db.tag_photo(place_photo, place_kid)
     db.commit()
     db.species_curation.set_photo_preference("life_list", "Robin", species_photo)
+    db.commit()
 
     resp = client.put(f"/api/keywords/{place_kid}", json={"name": "Backyard Robin"})
     assert resp.status_code == 200
@@ -13366,6 +13377,7 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     db.set_species_representative("Beta Bird", photo_ids["Beta Bird"])
     db.species_curation.add_highlight("Gamma Bird", photo_ids["Gamma Bird"])
     db.set_species_representative("Gamma Bird", photo_ids["Gamma Bird"])
+    db.commit()
 
     def species_for(**filters):
         response = client.get(
@@ -13460,6 +13472,7 @@ def test_highlights_curation_filter_ignores_rejected_selected_prediction(app_and
         prediction_ids.append(prediction_id)
     db.conn.commit()
     db.species_curation.add_highlight("Prediction Bird", photo_ids[0])
+    db.commit()
 
     response = client.get(
         "/api/highlights",
@@ -13968,6 +13981,7 @@ def test_highlights_relabel_moves_species_highlights_to_new_bucket(app_and_db):
     db.commit()
     db.species_curation.add_highlight("Bald Eagle", p1)
     db.species_curation.add_highlight("Bald Eagle", p2)
+    db.commit()
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -14010,6 +14024,7 @@ def test_highlights_relabel_merges_into_existing_new_species_bucket(app_and_db):
     db.commit()
     db.species_curation.add_highlight("Golden Eagle", p_dest)
     db.species_curation.add_highlight("Bald Eagle", p_moving)
+    db.commit()
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -14047,6 +14062,7 @@ def test_highlights_relabel_migrates_species_representative(app_and_db):
     db.tag_photo(pid, old_kid)
     db.commit()
     db.set_species_representative("Bald Eagle", pid)
+    db.commit()
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -14085,6 +14101,7 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
     db.commit()
     db.set_species_representative("Bald Eagle", pid)
     db.species_curation.add_highlight("Bald Eagle", pid)
+    db.commit()
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -14148,6 +14165,7 @@ def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
     db.commit()
     db.species_curation.add_highlight("Old Rank Bird", p1)
     db.species_curation.add_highlight("Old Rank Bird", p2)
+    db.commit()
 
     # Sanity: original ranks are 1 (p1) and 2 (p2).
     assert db.species_curation.get_highlights("Old Rank Bird") == {
@@ -14197,6 +14215,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
     # `species_replace`.
     db.set_species_representative("Predicted Bird", pid)
     db.species_curation.add_highlight("Predicted Bird", pid)
+    db.commit()
     det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
@@ -14264,6 +14283,7 @@ def test_highlights_relabel_undo_preserves_existing_destination_highlight(app_an
     # Highlighted under both species before the relabel.
     db.species_curation.add_highlight("Both Bird A", pid)
     db.species_curation.add_highlight("Both Bird B", pid)
+    db.commit()
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -14317,6 +14337,7 @@ def test_highlights_relabel_undo_restores_representative_over_collision(app_and_
     db.commit()
     db.set_species_representative("Rep Old", p_moving)
     db.set_species_representative("Rep New", p_incumbent)
+    db.commit()
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -14368,6 +14389,7 @@ def test_highlights_relabel_undo_preserves_preexisting_target_representative(
     db.commit()
     db.set_species_representative("Rep Both A", pid)
     db.set_species_representative("Rep Both B", pid)
+    db.commit()
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -14424,6 +14446,7 @@ def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
     # independent and stays.
     db.set_active_workspace(ws_b)
     db.set_species_representative("Bald Eagle", pid)
+    db.commit()
     db.set_active_workspace(ws_a)
 
     # Sanity: no local photo_preferences row for this photo in ws_a.
@@ -14498,11 +14521,13 @@ def test_highlights_relabel_ignores_stale_representative_rows(app_and_db):
     # only pass could pick it up, which is the code path under test.
     db.set_active_workspace(ws_b)
     db.set_species_representative("Bald Eagle", pid)
+    db.commit()
     db.set_active_workspace(ws_a)
     # The current-species rep is set from the active workspace and has
     # a local pref row, so its migration goes through the preference
     # pass and is unrelated to the rep-only filter.
     db.set_species_representative("Osprey", pid)
+    db.commit()
     # Untag Bald Eagle from the photo. The global species_representatives
     # row remains, so the photo now carries only Osprey as a taxonomy
     # keyword but still has a stale (Bald Eagle, pid) rep row.
@@ -14573,6 +14598,7 @@ def test_highlights_relabel_ignores_stale_representative_with_local_pref(app_and
     # the pref-covered pass rather than the rep-only pass.
     db.set_species_representative("Bald Eagle", pid)
     db.set_species_representative("Osprey", pid)
+    db.commit()
     # Untag Bald Eagle. The pref row and global rep row for Bald Eagle
     # both remain (untag_photo does not clear either), so the photo now
     # carries only Osprey as a taxonomy keyword but retains stale
@@ -14647,6 +14673,7 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     db.commit()
     db.set_species_representative("Old Bird", pid)
     db.species_curation.add_highlight("Old Bird", pid)
+    db.commit()
     db.untag_photo(pid, stale_kid)
     db.commit()
     # Prediction added AFTER untag so the "predicted-only" relabel path
@@ -14726,6 +14753,7 @@ def test_highlights_relabel_preserves_higher_rank_taxonomy_curation(app_and_db):
     # because the keyword itself is not being removed.
     db.species_curation.add_highlight("Corvids", pid)
     db.set_species_representative("Corvids", pid)
+    db.commit()
     db.conn.commit()
 
     resp = client.post(
@@ -14828,6 +14856,7 @@ def test_highlights_relabel_canonicalizes_hierarchy_leaf_source(app_and_db):
     # existing highlight/representative rows survive duplicate repair.
     db.species_curation.add_highlight("Verdin", pid)
     db.set_species_representative("Verdin", pid)
+    db.commit()
     db.conn.commit()
 
     resp = client.post(
@@ -14928,6 +14957,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     # would show for this photo.
     db.species_curation.add_highlight("Desert Verdin", pid)
     db.set_species_representative("Desert Verdin", pid)
+    db.commit()
     hl_before = db.species_curation.get_highlights()
     assert pid in (hl_before.get("Verdin") or {}), (
         "sanity: species_curation.add_highlight should canonicalize to the root "
@@ -15139,6 +15169,7 @@ def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
     # Select secondary first so primary ends up newest and lists first.
     db.set_species_representative("Order Bird", p_secondary)
     db.set_species_representative("Order Bird", p_primary)
+    db.commit()
     assert db.species_curation.get_representative_lists()["Order Bird"] == [
         p_primary, p_secondary,
     ]
@@ -15198,6 +15229,7 @@ def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
     # p_source in at its lower captured order.
     db.set_species_representative("Redo Order Bird", p_source)
     db.set_species_representative("Redo Other Bird", p_target_primary)
+    db.commit()
     assert db.species_curation.get_representative_lists()["Redo Other Bird"] == [
         p_target_primary,
     ]
@@ -15272,6 +15304,7 @@ def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_pat
     moved = db.species_curation.rename_representatives(
         "Old Species", "New Species", photo_ids=photo_ids,
     )
+    db.commit()
     assert moved == len(photo_ids)
 
     remaining_old = db.conn.execute(
@@ -15535,6 +15568,7 @@ def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
     db.tag_photo(pid, old_kid)
     db.commit()
     db.species_curation.add_highlight("Legacy Species", pid)
+    db.commit()
     # Pre-existing destination highlight, keyed on the taxonomy spelling
     # (which is what add_keyword would store for a "Robin" request).
     db.conn.execute(

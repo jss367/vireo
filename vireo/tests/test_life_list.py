@@ -285,6 +285,7 @@ def test_representative_preference_promotes_existing_highlight_to_top(life_app):
     app, db, ids = life_app
     db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
     db.species_curation.add_highlight("Northern Cardinal", ids["p2"])
+    db.commit()
 
     resp = app.test_client().post("/api/photo-preferences", json={
         "purpose": "species_representative",
@@ -416,6 +417,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     db.tag_photo(jan_pid, kid)
     db.commit()
     db.set_species_representative(species, jan_pid)
+    db.commit()
 
     db.set_active_workspace(feb_ws)
     feb_fid = workspace_folders.add_folder(db, "/photos/february", name="february")
@@ -426,6 +428,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     db.tag_photo(feb_pid, kid)
     db.commit()
     db.set_species_representative(species, feb_pid)
+    db.commit()
 
     workspace_folders.add_workspace_folder(db, year_ws, jan_fid)
     workspace_folders.add_workspace_folder(db, year_ws, feb_fid)
@@ -454,11 +457,13 @@ def test_reselecting_representative_promotes_it(life_app):
     app, db, ids = life_app
     db.set_species_representative("Northern Cardinal", ids["p1"])
     db.set_species_representative("Northern Cardinal", ids["p2"])
+    db.commit()
     assert db.species_curation.get_representative_lists()["Northern Cardinal"] == [
         ids["p2"], ids["p1"],
     ]
 
     db.set_species_representative("Northern Cardinal", ids["p1"])
+    db.commit()
     assert db.species_curation.get_representative_lists()["Northern Cardinal"] == [
         ids["p1"], ids["p2"],
     ]
@@ -483,6 +488,7 @@ def test_clearing_representative_removes_legacy_fallbacks(life_app):
     app, db, ids = life_app
     db.species_curation.set_photo_preference("life_list", "Northern Cardinal", ids["p1"])
     db.species_curation.set_photo_preference("highlights", "Northern Cardinal", ids["p2"])
+    db.commit()
 
     resp = app.test_client().delete("/api/photo-preferences", json={
         "purpose": "species_representative",
@@ -532,6 +538,7 @@ def test_photo_preferences_highlights_delete_removes_ordered_highlight(life_app)
     app, db, ids = life_app
     db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
     db.set_species_representative("Northern Cardinal", ids["p2"])
+    db.commit()
 
     resp = app.test_client().delete("/api/photo-preferences", json={
         "purpose": "highlights",
@@ -552,6 +559,7 @@ def test_photo_preferences_highlights_delete_requires_photo_id(life_app):
     all highlights for the species."""
     app, db, ids = life_app
     db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
+    db.commit()
 
     resp = app.test_client().delete("/api/photo-preferences", json={
         "purpose": "highlights",
@@ -582,6 +590,7 @@ def test_photo_preferences_highlights_rejects_predicted_only_photo(life_app):
 def test_ordered_highlight_is_life_list_fallback(life_app):
     app, db, ids = life_app
     db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
+    db.commit()
 
     data = _get_life_list(app)
     cardinal = _entry(data, "Northern Cardinal")
@@ -594,6 +603,7 @@ def test_species_representative_beats_ordered_highlight_for_life_list(life_app):
     app, db, ids = life_app
     db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
     db.set_species_representative("Northern Cardinal", ids["p2"])
+    db.commit()
 
     data = _get_life_list(app)
     cardinal = _entry(data, "Northern Cardinal")
@@ -1068,6 +1078,7 @@ def test_species_representative_lists_suppress_ancestor_with_descendant(life_app
     # suppression on the EXISTS this photo would remain eligible for
     # ``Aves`` even though the Life List query hides that bucket.
     db.set_species_representative("Aves", seed["photo"])
+    db.commit()
     db.conn.commit()
 
     eligible = db.species_curation.get_representative_lists(eligible_only=True)
