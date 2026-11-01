@@ -1141,7 +1141,9 @@ def test_floors_read_config_through_the_facade(fn):
 @pytest.mark.parametrize("fn", [miss_flags.list_misses, miss_flags.bulk_reject_miss_category])
 def test_misses_scope_through_the_facade(fn):
     attrs = _db_attrs(fn)
-    assert {"require_workspace_id", "stats"} <= attrs
+    assert "require_workspace_id" in attrs
+    # The scope is staged from ``db.stats`` through the joined-unit helper.
+    assert "staged_scope_clause" in inspect.getsource(fn)
 
 
 def test_repository_imports_no_db_code():
