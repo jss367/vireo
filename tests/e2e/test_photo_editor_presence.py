@@ -55,7 +55,7 @@ def test_presence_preview_save_reload_and_history(live_server, page, presence_ph
         expect(slider).to_have_attribute('max', '100')
         _set_range(page, key, value)
         expect(page.locator(f'#{key}Value')).to_have_text(str(value))
-    with page.expect_response('**/edit-preview?*') as preview:
+    with page.expect_response('**/edit-preview?*preview_session=*') as preview:
         page.evaluate('updatePreview()')
     assert preview.value.ok
     query = parse_qs(urlparse(preview.value.url).query)

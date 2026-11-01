@@ -77,7 +77,7 @@ def test_background_smoothing_save_reload_undo_and_off(live_server, page, masked
     with page.expect_response('**/edit-mask-preview?*') as overlay:
         page.locator('#maskOverlayBtn').click()
     assert overlay.value.ok
-    with page.expect_response('**/edit-preview?*') as preview:
+    with page.expect_response('**/edit-preview?*preview_session=*') as preview:
         page.evaluate('updatePreview()')
     assert preview.value.ok
     assert page.evaluate('saveRecipe()') is True
