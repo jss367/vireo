@@ -172,6 +172,8 @@ def _retained_cache(result: dict, config: dict) -> tuple[str, list[str]]:
     if kept := _int(result, "kept_unverified_sources"):
         summary += f"; kept {_n(kept, 'generated file')} with unverified sources"
         details.append(f"Kept {_n(kept, 'generated file')}: independent sources could not be verified as readable and unchanged.")
+    if unsafe := _int(result, "kept_unsafe_paths"):
+        summary += f"; left {_n(unsafe, 'file')} whose path led outside its storage folder"
     if errors := _int(result, "errors_total"):
         summary += f"; {_n(errors, 'cleanup error')} (see Jobs for details)"
     return summary, details + _error_details(result)

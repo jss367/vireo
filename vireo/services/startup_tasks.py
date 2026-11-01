@@ -541,17 +541,33 @@ class StartupTasks:
             log.exception("Failed to start EXIF search backfill job")
 
 
+# Maintenance result fields that describe ordinary cache use rather than
+# anything the pass did or could not do: what is left, and files kept
+# because they were opened or rewritten since the walk.
+_MAINTENANCE_CONTEXT_FIELDS = frozenset({
+    "remaining_bytes", "kept_accessed_files", "kept_changed_files", "ok", "noop",
+})
+
+
 def retained_maintenance_noop(result: JsonDict, retired: Mapping[str, int]) -> bool:
     """Whether a storage-maintenance pass removed, retired and reported nothing.
 
-    Every kind of removal counts: generated files, grouping undo snapshots
-    (``retired``) and the result files of deleted workspaces. So does any
-    error, which must stay visible.
+    Fails safe: any nonzero count or nonempty list in the result counts as
+    something to report unless it is ordinary-use context
+    (``_MAINTENANCE_CONTEXT_FIELDS``). Removals, retired grouping snapshots,
+    orphaned result files and errors count; so do files kept because their
+    source could not be verified and paths rejected as outside their root,
+    which the Jobs summary warns about. A counter added later is kept by
+    default instead of silently dropping the run.
     """
-    return not (
-        result.get("deleted") or result.get("orphan_results_removed")
-        or result.get("errors_total") or any(retired.values())
-    )
+    if result.get("ok") is False or any(retired.values()):
+        return False
+    for key, value in result.items():
+        if key in _MAINTENANCE_CONTEXT_FIELDS or isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float, str, list, dict)) and value:
+            return False
+    return True
 
 
 def utc_iso_now() -> str:

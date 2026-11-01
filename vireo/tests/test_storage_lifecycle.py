@@ -927,3 +927,63 @@ def test_maintenance_orphan_unlink_error_stays_visible(app_and_db, tmp_path, mon
     assert result["orphan_results_removed"] == 0
     assert result["errors_total"] == 1 and "locked by another process" in result["errors"][0]
     assert result["noop"] is False and result["ok"] is False
+
+
+def test_maintenance_that_kept_an_unverifiable_render_is_kept_in_history(app_and_db, tmp_path, monkeypatch):
+    """A render kept because its original is offline is a caveat worth a history row."""
+    import hashlib
+
+    from jobs import JobLineage
+    from services.startup_tasks import StartupTasks
+
+    app, db = app_and_db
+    monkeypatch.setattr(app._job_runner, "is_cancelled", lambda _id: False)
+    source = _payload(tmp_path / "photos" / "bird.jpg")
+    info = source.stat()
+    folder = workspace_folders.add_folder(db, str(source.parent))
+    photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?",
+                    (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
+    db.commit()
+    render = _payload(Path(app.config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
+    source.unlink()  # the original's volume is offline
+    # A year on, the render is past the age limit (cleanup ages by ctime,
+    # which a test cannot backdate).
+    later = time.time() + 365 * 86400
+    real_cleanup = retained_cache.cleanup
+    monkeypatch.setattr(retained_cache, "cleanup",
+                        lambda *args, **kwargs: real_cleanup(*args, now=later, **kwargs))
+    tasks = StartupTasks(app, db._db_path, db)
+    job_id = app._job_runner.start(
+        "retained-cache-maintenance", tasks._maintain_retained_caches,
+        lineage=JobLineage.system("Hourly cleanup"),
+    )
+    job = wait_for_job_via_client(app.test_client(), job_id, wait_for_history=True)
+    assert job["status"] == "completed", job
+    assert render.exists()
+    assert job["result"]["kept_unverified_sources"] == 1, job["result"]
+    assert job["result"]["deleted"] == 0
+    assert job["result"]["noop"] is False
+    row = db.conn.execute("SELECT summary FROM job_history WHERE id = ?", (job_id,)).fetchone()
+    assert row is not None and "unverified sources" in row["summary"]
+
+
+@pytest.mark.parametrize(("extra", "noop"), [
+    ({}, True),
+    ({"kept_accessed_files": 3, "kept_changed_files": 1}, True),
+    ({"kept_unverified_sources": 1}, False),
+    ({"kept_unsafe_paths": 1}, False),
+    ({"deleted": 2, "freed_bytes": 10}, False),
+    ({"orphan_results_removed": 1}, False),
+    ({"errors": ["x"], "errors_total": 1, "ok": False}, False),
+    ({"some_future_counter": 4}, False),
+])
+def test_maintenance_noop_counts_everything_but_ordinary_cache_use(extra, noop):
+    from services.startup_tasks import retained_maintenance_noop
+
+    empty = {"deleted": 0, "freed_bytes": 0, "remaining_bytes": 4096,
+             "kept_unverified_sources": 0, "kept_changed_files": 0,
+             "kept_accessed_files": 0, "kept_unsafe_paths": 0,
+             "errors": [], "errors_total": 0, "ok": True, "orphan_results_removed": 0}
+    assert retained_maintenance_noop({**empty, **extra}, {}) is noop
+    assert retained_maintenance_noop(empty, {"grouping_snapshots_retired": 1}) is False
