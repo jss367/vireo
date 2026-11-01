@@ -2,7 +2,7 @@
 // payloads it renders and the shared globals its shared.js reads.
 interface DuplicatePhoto {id:number;filename?:string;path?:string;exists?:boolean;volume_offline?:boolean;workspaces?:string[];rating?:number;file_size?:number;rejected?:boolean;reason?:string}
 interface DuplicateKeepResponse {file_hash:string;winner_id:number;loser_ids:number[];rating:number;flag:string}
-interface DuplicateProposal {file_hash:string;winner:DuplicatePhoto;other_kept?:DuplicatePhoto[];losers:DuplicatePhoto[];status:string;empty_file_group?:boolean;all_missing?:boolean;all_offline?:boolean;_gi?:number}
+interface DuplicateProposal {file_hash:string;winner:DuplicatePhoto;other_kept?:DuplicatePhoto[];losers:DuplicatePhoto[];status:string;empty_file_group?:boolean;all_missing?:boolean;all_offline?:boolean;_gi?:number;_cardOrder?:number[]}
 interface DuplicateBucket {file_hashes:string[];folders:string[];group_count:number;total_size?:number;example_filenames?:string[]}
 interface SameShotPhoto extends DuplicatePhoto {file_hash:string;timestamp?:string|null;phash?:string|null}
 interface SameShotGroup {identity:[string,string,string,number];camera:string;serial_number:string;shutter_count:number;visual_evidence:'matching'|'different'|'unavailable';photos:SameShotPhoto[];group_key:string;review_key:string;review_decision:'reviewed'|'keep_all'|null;reviewed_at:string|null}

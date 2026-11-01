@@ -133,12 +133,18 @@ export function renderResolvedGroup(group) {
   html += '</div>';
   html += renderGroupWarning(group);
   html += '<div class="dup-row">';
-  html += renderCard(winner, true, undefined, false);
-  (group.other_kept || []).forEach(function(kept) {
-    html += renderCard(kept, true, undefined, false);
-  });
-  losers.forEach(function(loser) {
-    html += renderCard(loser, false, loser.reason, true, winnerProtected, winnerOffline);
+  var kept = [winner].concat(group.other_kept || []);
+  var keptIds = new Set(kept.map(function(photo) { return photo.id; }));
+  var members = kept.concat(losers);
+  // Keep photos in their original slots when the choice changes. Moving the
+  // chosen photo left would leave KEEP stationary and another Keep button
+  // under the pointer, making a second click undo the choice.
+  if (!group._cardOrder) group._cardOrder = members.map(function(photo) { return photo.id; });
+  var order = new Map(group._cardOrder.map(function(id, index) { return [id, index]; }));
+  members.sort(function(a, b) { return (order.get(a.id) ?? -1) - (order.get(b.id) ?? -1); });
+  members.forEach(function(photo) {
+    var isKept = keptIds.has(photo.id);
+    html += renderCard(photo, isKept, isKept ? undefined : photo.reason, !isKept, winnerProtected, winnerOffline);
   });
   html += '</div></div>';
   return html;
