@@ -43,6 +43,13 @@ modules and require no bundler.
 
 Keep the lifecycle boundaries intact when changing this code:
 
+- Recovery checks send every selected source root with the destination to
+  `/api/import/check-duplicates`, including when duplicate skipping is off.
+  This lets the shared import collision policy verify off-card symlinks and
+  reject links into any selected source. Older clients without roots retain
+  conservative recovery checks. Destination listings retain occupied names,
+  are read once per planned folder, and yield during long scans so closing a
+  preview stops further work.
 - `preview.js` owns request generations and cancellation. Source counts,
   destination previews, duplicate results, and thumbnails must reject stale
   work when the form or source list changes.

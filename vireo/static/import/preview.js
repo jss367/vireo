@@ -96,6 +96,25 @@ function endImportPreviewFlight(requestSeq) {
   updateStartGate();
 }
 
+/**
+ * @param {ImportPreviewFile[]} files
+ * @param {string} destination
+ * @param {boolean} [skipDuplicates]
+ */
+function importDuplicateCheckBody(files, destination, skipDuplicates = true) {
+  return JSON.stringify({
+    paths: files.map(file => file.path),
+    verify_by_hash: /** @type {HTMLInputElement} */ (document.getElementById('chkVerifyByHash')).checked,
+    skip_duplicates: skipDuplicates,
+    include_capture_dates: true,
+    ...(destination ? {
+      sources: sources.slice(),
+      destination,
+      folder_template: selectedFolderTemplate(),
+    } : {}),
+  });
+}
+
 /** @param {{automatic?: boolean} | undefined} [opts] */
 async function previewImport(opts) {
   // Abort before advancing the sequence. abort() only schedules the rejected
@@ -301,14 +320,7 @@ async function previewImport(opts) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: previewAbort.signal,
-        body: JSON.stringify({
-          paths: files.map(f => f.path),
-          verify_by_hash: /** @type {HTMLInputElement} */ (document.getElementById('chkVerifyByHash')).checked,
-          skip_duplicates: false,
-          include_capture_dates: true,
-          destination: recoveryDestNoDedup,
-          folder_template: selectedFolderTemplate(),
-        }),
+        body: importDuplicateCheckBody(files, recoveryDestNoDedup, false),
       });
       if (!recResp.ok) throw new Error('recovery check failed');
       const recReader = /** @type {ReadableStream<Uint8Array>} */ (recResp.body).getReader();
@@ -387,15 +399,7 @@ async function previewImport(opts) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: previewAbort.signal,
-      body: JSON.stringify({
-        paths: files.map(f => f.path),
-        verify_by_hash: /** @type {HTMLInputElement} */ (document.getElementById('chkVerifyByHash')).checked,
-        include_capture_dates: true,
-        ...(recoveryDestination ? {
-          destination: recoveryDestination,
-          folder_template: selectedFolderTemplate(),
-        } : {}),
-      }),
+      body: importDuplicateCheckBody(files, recoveryDestination),
     });
     if (!dupResp.ok) throw new Error('duplicate check failed');
     const reader = /** @type {ReadableStream<Uint8Array>} */ (dupResp.body).getReader();

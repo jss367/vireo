@@ -12,7 +12,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +25,8 @@ from config import config_value
 from db import Database
 from file_identity import catalog_file_paths, catalog_scan_root
 from flask import Blueprint, Response, abort, jsonify, make_response, request
+from import_job.collision import candidate_adoption, collision_candidates
+from import_job.destination import _build_source_root_guard, _is_source_backed_path
 from job_runner.work_control import SerializedWork, WorkControl
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
@@ -280,55 +282,38 @@ def _residual_staged_changes(db: Database, photo_ids: list[int], undeliverable: 
         return None
 
 
+@dataclass(frozen=True)
+class _RecoveryPlan:
+    """The destination and complete source-root context for recovery checks."""
+
+    destination: str
+    folder_template: str
+    sources: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
+class _RecoveryEntry:
+    """Keep every occupied name, even when it has no readable regular bytes."""
+
+    metadata: os.stat_result | None
+    symlink: bool
+
+
 @dataclass
 class _RecoverySource:
-    """One source file checked against its planned destination's
-    candidates by ``_DuplicateCheckStream._recovery_candidate``."""
+    """Memoize the source hash only when an occupied candidate needs it."""
 
     source_file: Path
-    compute_file_hash: Callable
-    src_hash_cache: list = field(default_factory=list)
+    compute_file_hash: Callable[[str], str]
+    src_hash_cache: list[str | None] = field(default_factory=list)
 
     def _src_hash(self) -> str | None:
         if not self.src_hash_cache:
             try:
-                self.src_hash_cache.append(self.compute_file_hash(
-                    str(self.source_file)))
+                self.src_hash_cache.append(self.compute_file_hash(str(self.source_file)))
             except OSError:
                 self.src_hash_cache.append(None)
         return self.src_hash_cache[0]
-
-    def _is_source(self, cand_path: str) -> bool:
-        """Reject destination candidates that ARE the source file itself
-        — the run rejects that self-copy overlap (destination is an
-        ancestor of the source AND the folder template renders back onto
-        the source folder, e.g. importing /archive/2026/2026-07-03/IMG.jpg
-        into /archive with %Y/%Y-%m-%d) rather than adopting it, so the
-        preview must not promise "verified & adopted, not re-copied" and
-        subtract it from "to copy" for a file the run will fail. Mirrors
-        import_job's samefile guard with the same normalized-path fallback
-        for paths that can't be stat'd."""
-        try:
-            return (
-                os.path.exists(cand_path)
-                and os.path.samefile(str(self.source_file), cand_path)
-            )
-        except OSError:
-            return (
-                os.path.normpath(str(self.source_file))
-                == os.path.normpath(cand_path)
-            )
-
-    def _bytes_match(self, cand_path: str) -> bool:
-        if self._is_source(cand_path):
-            return False
-        sh = self._src_hash()
-        if sh is None:
-            return False
-        try:
-            return self.compute_file_hash(cand_path) == sh
-        except OSError:
-            return False
 
 
 class _DuplicateCheckStream:
@@ -349,8 +334,7 @@ class _DuplicateCheckStream:
         verify_by_hash: bool,
         include_capture_dates: bool,
         skip_duplicates: bool,
-        recovery_base: str,
-        folder_template: str,
+        recovery_plan: _RecoveryPlan,
         catalog_index: type[CatalogIndex],
         duplicate_checker: type[DuplicateChecker],
         recover_companion_identities: Callable[[Database], Iterable[tuple[int, int]]],
@@ -363,8 +347,11 @@ class _DuplicateCheckStream:
         self.verify_by_hash = verify_by_hash
         self.include_capture_dates = include_capture_dates
         self.skip_duplicates = skip_duplicates
-        self.recovery_base = recovery_base
-        self.folder_template = folder_template
+        self.recovery_base = recovery_plan.destination
+        self.folder_template = recovery_plan.folder_template
+        self.source_roots = recovery_plan.sources
+        self.path_under_any_source: Callable[[str | Path], bool] | None = None
+        self.last_recovery_flush = time.monotonic()
         self.catalog_index = catalog_index
         self.duplicate_checker = duplicate_checker
         self.recover_companion_identities = recover_companion_identities
@@ -387,10 +374,10 @@ class _DuplicateCheckStream:
         # verify_by_hash disables the checker's own EXIF batching.
         self.recovery_times: dict[str, datetime] = {}
 
-        # name -> size per planned destination folder, one scandir each —
+        # Include every occupied name, one scandir per planned folder —
         # the destination may be a network mount, so listings are batched
         # rather than stat'ing per candidate file (count round trips).
-        self.dir_listings: dict[str, dict[str, int]] = {}
+        self.dir_listings: dict[str, dict[str, _RecoveryEntry]] = {}
 
         self.duplicate_count = 0
         self.recovered_count = 0
@@ -497,7 +484,7 @@ class _DuplicateCheckStream:
                         Path(path)):
                     batch_duplicates.append(path)
                     self.duplicate_count += 1
-                elif self._recovery_candidate(path):
+                elif (yield from self._recovery_candidate(path)):
                     # Duplicate gate first, recovery second — same
                     # order as the import run, so a cataloged twin
                     # that also sits at the destination stays a
@@ -527,52 +514,32 @@ class _DuplicateCheckStream:
                 batch_recovered = []
                 last_flush = now
 
-    def _planned_folder_listing(self, folder: str) -> dict[str, int]:
-        if folder not in self.dir_listings:
-            entries = {}
-            try:
-                with os.scandir(folder) as it:
-                    for entry in it:
-                        try:
-                            # Symlinks are deliberately EXCLUDED, and
-                            # this is a considered trade, not an
-                            # oversight. The import walk follows them
-                            # (os.stat) and adopts a symlink to an
-                            # off-card regular file whose bytes match,
-                            # so excluding them makes the preview
-                            # UNDER-report recovery for that geometry
-                            # — it says "will copy" for a file the run
-                            # adopts. That is the safe direction to be
-                            # wrong in.
-                            #
-                            # Following them was tried (PR 7b) and
-                            # reverted: the walk refuses a candidate
-                            # resolving under ANY source root, while
-                            # this endpoint's ``_is_source`` can only
-                            # compare ``samefile`` against the CURRENT
-                            # source file. A symlink to a *different*
-                            # card file with identical bytes therefore
-                            # slipped through and was reported as
-                            # recovered — an OVER-claim, promising
-                            # "already safe at the destination" for
-                            # bytes that live only on the card. This
-                            # endpoint receives ``paths``, not the
-                            # import's source roots, so it cannot
-                            # reconstruct that guard; doing this right
-                            # needs the shared walk, i.e. the PR 8
-                            # de-mirror. Trading a safe under-report
-                            # for an unsafe over-report is not worth
-                            # it in the meantime.
-                            # Codex review of PR #1450, rounds 4-5.
-                            if entry.is_file(follow_symlinks=False):
-                                entries[entry.name] = entry.stat(
-                                    follow_symlinks=False).st_size
-                        except OSError:
-                            continue
-            except OSError:
-                pass  # missing/unreadable folder -> nothing to adopt
-            self.dir_listings[folder] = entries
-        return self.dir_listings[folder]
+    def _recovery_checkpoint(self) -> Iterator[str]:
+        """Let WSGI observe disconnects during a long listing or suffix walk."""
+        now = time.monotonic()
+        if now - self.last_recovery_flush >= DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS:
+            self.last_recovery_flush = now
+            yield ": checking recovery candidates\n\n"
+
+    def _planned_folder_listing(self, folder: str) -> Iterator[str]:
+        if folder in self.dir_listings:
+            return
+        entries: dict[str, _RecoveryEntry] = {}
+        try:
+            with os.scandir(folder) as it:
+                for entry in it:
+                    metadata = None
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            metadata = entry.stat(follow_symlinks=False)
+                        symlink = entry.is_symlink()
+                    except OSError:
+                        symlink = False
+                    entries[entry.name] = _RecoveryEntry(metadata, symlink)
+                    yield from self._recovery_checkpoint()
+        except OSError:
+            pass  # An unreadable or missing folder cannot prove recovery.
+        self.dir_listings[folder] = entries
 
     def _planned_folder(self, source_file: Path) -> str | None:
         """Folder planning mirrors ingest._source_file_timestamps: EXIF
@@ -598,15 +565,12 @@ class _DuplicateCheckStream:
             else os.path.join(self.recovery_base, rel_folder)
         )
 
-    def _recovery_candidate(self, path: str) -> bool:
-        """True when the planned destination already holds a byte-
-        identical file at the primary name OR at any suffix slot the
-        run would adopt — mirrors ``import_job``'s adopt precondition
-        (size match then byte-verify). A size-matching candidate whose
-        bytes disagree advances the walk the same way a hash mismatch
-        does in the run: otherwise the preview would subtract the
-        file from "to copy" and promise "not re-copied" for a file
-        the run will suffix-copy under a numbered name."""
+    def _recovery_candidate(self, path: str) -> Generator[str, None, bool]:
+        """Use the importer's read-only traversal and adoption policy.
+
+        Directory metadata is batched. Only colliding symlinks need a fresh
+        stat, and only equal-sized regular files need byte verification.
+        """
         if not self.recovery_base:
             return False
         source_file = Path(path)
@@ -614,81 +578,51 @@ class _DuplicateCheckStream:
             size = source_file.stat().st_size
         except OSError:
             return False
-        # NOTE: zero-byte sources are NOT special-cased here. They
-        # used to return False on the reasoning that "the duplicate
-        # checker gives them no identity either" — but that conflates
-        # duplicate identity with crash-recovery adoption, which is
-        # what this preview is about. ``_resolve_dest_collision``
-        # adopts an empty candidate for an empty source at every
-        # candidate position on both transports (spec PR 7b flip A;
-        # the local primary-name case predates it), so returning
-        # False here left the preview counting those files as
-        # transfers the run would never perform. The generic path
-        # below gets this right on its own: ``_src_hash`` uses
-        # ``compute_file_hash``, so an empty source hashes to
-        # EMPTY_FILE_SHA256 rather than the checker's None, and it
-        # matches an empty candidate. Non-regular entries (FIFOs,
-        # device nodes) stay excluded because
-        # ``_planned_folder_listing`` only records
-        # ``is_file(follow_symlinks=False)`` entries — which is also
-        # what the run's own S_ISREG guard does. Codex review of
-        # PR #1450.
         folder = self._planned_folder(source_file)
         if folder is None:
             return False
-        listing = self._planned_folder_listing(folder)
-        primary_name = source_file.name
-
-        # Lazy source-hash: only computed once, and only if we hit a
-        # size-matching candidate that needs verifying. A typical
-        # fresh import has no size collisions and skips hashing
-        # entirely.
+        yield from self._planned_folder_listing(folder)
+        listing = self.dir_listings[folder]
+        if self.path_under_any_source is None:
+            # Legacy clients lack complete root context. Keep their regular-file
+            # recovery checks, but stop at the first candidate symlink rather
+            # than silently advancing past one the importer may reject.
+            self.path_under_any_source = _build_source_root_guard(self.source_roots or ())
+        source_guard = self.path_under_any_source
+        if self.source_roots and not source_guard(source_file):
+            return False  # Incomplete/mismatched roots cannot establish recovery.
+        primary = os.path.join(folder, source_file.name)
+        if source_file.name in listing and _is_source_backed_path(source_file, primary, source_guard):
+            # The import's preflight rejects a source-backed PRIMARY outright;
+            # only source-backed suffixes may be advanced past.
+            return False
         source = _RecoverySource(source_file, self.compute_file_hash)
-
-        primary_size = listing.get(primary_name)
-        primary_path = os.path.join(folder, primary_name)
-        if primary_size == size and source._is_source(primary_path):
-            # Destination candidate at the primary slot IS the
-            # source file. The run fails this file entirely rather
-            # than walking suffixes; report as not recovered instead
-            # of falling through to the suffix walk (which could
-            # find a coincidental byte-identical sibling in the
-            # source folder and wrongly claim adoption).
-            return False
-        if primary_size == size:
-            if source._bytes_match(primary_path):
+        for candidate in collision_candidates(source_file, folder):
+            yield from self._recovery_checkpoint()
+            if candidate.name not in listing:
+                return False
+            entry = listing[candidate.name]
+            metadata = entry.metadata
+            if entry.symlink:
+                if not self.source_roots:
+                    # Without complete source roots we cannot tell whether this
+                    # link resolves to the source card. The importer's per-file
+                    # guard would reject such a primary, so a later suffix
+                    # cannot prove recovery either. Stop the walk conservatively.
+                    return False
+                try:
+                    metadata = os.stat(candidate.path)
+                except OSError:
+                    continue  # Dangling/unreadable is occupied, never free.
+            if metadata is None:
+                continue
+            if candidate_adoption(
+                source_file, candidate.path, metadata, source_size=size,
+                source_hash=source._src_hash, path_under_any_source=source_guard,
+                hash_candidate=self.compute_file_hash,
+            ) is not None:
                 return True
-            # Same size, different bytes at the primary slot: the run
-            # will hash-mismatch and advance to the suffix walk.
-        elif primary_size is None:
-            # No collision on the primary name — the run copies to the
-            # primary slot without walking suffixes.
-            return False
-        return _suffix_slot_recovered(
-            source, folder, listing, primary_name, size)
-
-
-def _suffix_slot_recovered(
-    source: _RecoverySource, folder: str, listing: dict[str, int], primary_name: str, size: int,
-) -> bool:
-    """Primary slot is taken by a different-sized (or same-sized-
-    different-bytes) file. Mirror import_job's collision walk
-    (``name_1.ext``, ``name_2.ext``, ...): stop at the first free slot
-    (the run would land a fresh copy there — not recovered), or claim
-    recovery at the first byte-identical candidate (the run would adopt
-    it). Size-mismatched slots advance the counter; same-size-different-
-    bytes slots also advance, mirroring the run's hash-mismatch skip."""
-    stem, suffix_ext = os.path.splitext(primary_name)
-    counter = 1
-    while True:
-        candidate = f"{stem}_{counter}{suffix_ext}"
-        cand_size = listing.get(candidate)
-        if cand_size is None:
-            return False
-        if cand_size == size and source._bytes_match(
-                os.path.join(folder, candidate)):
-            return True
-        counter += 1
+        raise AssertionError("collision candidate traversal must not end")
 
 
 @dataclass
@@ -1773,23 +1707,22 @@ def create_imports_blueprint(
         preview's DUPLICATE badges and count are exactly the files the
         import step will skip.
 
-        Optional {"destination": abs path, "folder_template": str} turns on
+        Optional {"destination": abs path, "folder_template": str,
+        "sources": [absolute source roots]} turns on
         destination-recovery detection: non-duplicate files whose planned
         destination folder already holds a byte-identical file at the
         primary name — or at a numeric-suffix slot the run would adopt
         (``name_1.ext``, ``name_2.ext``, ...) — are streamed as
         ``recovered`` (with a final ``recovered_count``). Those are the
-        files a cancelled/crashed prior run left at the destination —
-        the import adopts them via crash recovery (verify + catalog, no
+        files a cancelled/crashed prior run left at the destination.
+        Complete source roots let this check follow off-card candidate
+        symlinks while refusing links into any selected source. Legacy
+        clients without roots still check regular entries conservatively.
+        The import adopts them via crash recovery (verify + catalog, no
         re-copy), so counting them "to copy" overstates the transfer.
 
-        A size match is the cheap gate: same-size candidates are the only
-        ones the run would even byte-verify, so hashing is scoped to that
-        subset (rare in a fresh import; proportional to actual collisions
-        in a retry). A same-size candidate whose bytes disagree advances
-        the walk the same way ``import_job`` does on a hash mismatch —
-        otherwise the preview would tell the user "not re-copied" for a
-        file the run is about to suffix-copy under a numbered name.
+        The shared import policy hashes only size-matching regular files
+        and advances past occupied candidates whose bytes do not match.
 
         Optional {"skip_duplicates": false} matches the import job's own
         gate: when the run has duplicate skipping off, the library-dedup
@@ -1824,6 +1757,12 @@ def create_imports_blueprint(
         from ingest import _is_unsafe_path, build_destination_path
         from scanner import compute_file_hash
 
+        sources = body.get("sources")
+        if sources is not None and (
+            not isinstance(sources, list) or not sources
+            or any(not isinstance(root, str) or not os.path.isabs(root) for root in sources)
+        ):
+            return json_error("sources must be a nonempty list of absolute directory paths", 400)
         recovery_base = (body.get("destination") or "").strip()
         folder_template = config_value(body, "folder_template", section="ingest")
         if recovery_base and not os.path.isabs(recovery_base):
@@ -1840,8 +1779,9 @@ def create_imports_blueprint(
             verify_by_hash=verify_by_hash,
             include_capture_dates=include_capture_dates,
             skip_duplicates=skip_duplicates,
-            recovery_base=recovery_base,
-            folder_template=folder_template,
+            recovery_plan=_RecoveryPlan(
+                recovery_base, folder_template, tuple(sources) if sources is not None else None,
+            ),
             catalog_index=CatalogIndex,
             duplicate_checker=DuplicateChecker,
             recover_companion_identities=recover_companion_identities,
