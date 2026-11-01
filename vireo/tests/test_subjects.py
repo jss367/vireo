@@ -460,7 +460,8 @@ def test_reviewer_region_keeps_fallback_separate_and_retries_only_that_box(db, s
 
 @pytest.mark.parametrize('box', [None, {}, dict(x=True, y=0, w=.1, h=.1),
     dict(x=0, y=0, w=float('nan'), h=.1), dict(x=.9, y=0, w=.2, h=.1),
-    dict(x=0, y=0, w=0, h=.1), dict(x=-.1, y=0, w=.2, h=.1)])
+    dict(x=0, y=0, w=0, h=.1), dict(x=-.1, y=0, w=.2, h=.1),
+    dict(x=10**400, y=0, w=.1, h=.1), dict(x=0, y=0, w=-(10**400), h=.1)])
 def test_invalid_reviewer_box_preserves_previous_analysis(db, subject_photo, box):
     from subjects import select_reviewer_box
     photo_id, ids, path = subject_photo
@@ -495,6 +496,11 @@ def test_reviewer_box_api_validates_scope_and_subject(app_and_db):
     client = app.test_client()
     url = f'/api/photos/{pid}/subjects/reviewer-box'
     assert client.put(url, json={'box': dict(x=0, y=0, w=2, h=1)}).status_code == 400
+    for coordinate in 'xywh':
+        for huge in [10**400, -(10**400)]:
+            box = dict(x=.1, y=.1, w=.1, h=.1)
+            box[coordinate] = huge
+            assert client.put(url, json={'box': box}).status_code == 400
     result = client.put(url, json={'box': dict(x=.1, y=.1, w=.1, h=.1)})
     assert result.status_code == 200
     assert result.get_json()['subjects'][0]['evidence_basis'] == 'reviewer_box'

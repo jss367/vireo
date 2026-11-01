@@ -215,8 +215,13 @@ def select_reviewer_box(db, photo_id, box):
     """
     if not isinstance(box, dict) or set(box) != set("xywh"):
         raise ValueError("box must contain x, y, w and h")
-    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-           for v in box.values()):
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in box.values()):
+        raise ValueError("Box coordinates must be finite numbers")
+    try:
+        finite = all(math.isfinite(v) for v in box.values())
+    except OverflowError:
+        finite = False
+    if not finite:
         raise ValueError("Box coordinates must be finite numbers")
     x, y, w, h = (box[k] for k in "xywh")
     if min(x, y) < 0 or min(w, h) <= 0 or x + w > 1 or y + h > 1:
