@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from app_paths import media_root
 from config import config_value
+from source_reader import open_source
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -119,7 +120,7 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
         # can expose ChangeTime. Keep every identity field, including the
         # change-time guard, by querying the named path through fstat too.
         if os.name == "nt":
-            with open(path, "rb") as handle:
+            with open_source(path) as handle:
                 return _identity(os.fstat(handle.fileno()))
         return _identity(os.stat(path))
 
@@ -149,7 +150,7 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
                 resolved = os.path.normcase(os.path.realpath(original))
                 if any(_within(resolved, root) for root in excluded):
                     return reject("managed-source-path")
-                with open(original, "rb") as handle:
+                with open_source(original) as handle:
                     before = os.fstat(handle.fileno())
                     if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
                         return reject("nonempty-regular-source-required", mode=before.st_mode, size=before.st_size)
@@ -185,7 +186,7 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
                 resolved = os.path.normcase(os.path.realpath(original))
                 if any(_within(resolved, root) for root in excluded):
                     return False
-                with open(original, "rb") as handle:
+                with open_source(original) as handle:
                     if (_identity(os.fstat(handle.fileno())) != _identity(expected)
                             or not handle.read(1)
                             or path_identity(original) != _identity(expected)):

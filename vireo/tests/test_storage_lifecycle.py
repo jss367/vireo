@@ -33,11 +33,11 @@ def test_source_verification_never_waits_with_original_handle_open(db, tmp_path,
     db.commit()
     render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
     handles, cancellations, transfer_waits = [], [], []
-    real_open = open
+    real_open = retained_cache.open_source
     transfer_started = threading.Event()
 
-    def tracked_open(path, *args, **kwargs):
-        handle = real_open(path, *args, **kwargs)
+    def tracked_open(path):
+        handle = real_open(path)
         if os.fspath(path) == str(source):
             handles.append(handle)
         return handle
@@ -53,7 +53,7 @@ def test_source_verification_never_waits_with_original_handle_open(db, tmp_path,
         assert all(handle.closed for handle in handles), "transfer wait retained an original handle"
         transfer_waits.append(transfer_started.is_set())
 
-    monkeypatch.setattr(retained_cache, "open", tracked_open, raising=False)
+    monkeypatch.setattr(retained_cache, "open_source", tracked_open)
     probe = retained_cache.source_verifier(
         db, config, checkpoint, read_checkpoint=wait_for_transfer,
     )
@@ -66,6 +66,36 @@ def test_source_verification_never_waits_with_original_handle_open(db, tmp_path,
     assert transfer_waits == [False]  # No transfer wait under the reader guard.
     wait_for_transfer()  # The next cleanup checkpoint can yield safely.
     assert transfer_waits == [False, True]
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_source_verification_rejects_an_original_moved_during_hashing(db, tmp_path, replace):
+    import hashlib
+
+    config = _cache_config(tmp_path)
+    source = _payload(tmp_path / "source" / "bird.jpg", b"original" * 300_000)
+    info = source.stat()
+    folder = workspace_folders.add_folder(db, str(source.parent))
+    photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?",
+                    (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
+    db.commit()
+    render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
+    moved = source.with_name("moved.jpg")
+
+    def checkpoint():
+        if not moved.exists():
+            source.rename(moved)  # Arrives after the transfer gate, with the read handle open.
+            if replace:
+                source.write_bytes(moved.read_bytes())
+                os.utime(source, (info.st_atime, info.st_mtime))
+
+    probe = retained_cache.source_verifier(db, config, checkpoint, read_checkpoint=lambda: None)
+    assert not probe(str(render))
+    assert probe.verification_failure
+    assert not probe.recheck(str(render))
+    assert render.exists()
+    assert moved.read_bytes() == b"original" * 300_000
 
 
 def _pipeline(path, ids):
