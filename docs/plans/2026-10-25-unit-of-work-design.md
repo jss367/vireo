@@ -59,7 +59,9 @@ risk three independent reviews found.
 ```python
 class Database:
     @contextlib.contextmanager
-    def transaction(self, *, retry_busy: bool = False) -> Iterator[None]: ...
+    def transaction(
+        self, *, immediate: bool = False, retry_busy: bool = False,
+    ) -> Iterator[None]: ...
 
     def after_commit(self, callback: Callable[[], object]) -> None: ...
 
@@ -71,33 +73,46 @@ class Database:
 
 Outermost use (no unit of work is open on this `Database`):
 
-- Issues `BEGIN IMMEDIATE`, so the block holds SQLite's single writer lock
-  from its first statement. Every unit of work is check-then-write safe by
-  construction: the reads at the top of the block see the state the writes
-  will land on. This is the discipline the codebase already applies by hand
-  in 40 `begin_immediate()` call sites; making it the only shape removes the
-  `begin_immediate()` / `with db.transaction()` pairing (written both ways
-  round today) and removes the question of whether a nested block may ask for
-  the lock its owner did not take.
-- A deferred `BEGIN` is deliberately not offered. Under WAL, a deferred
-  transaction that reads and then writes fails at once with `SQLITE_BUSY`
-  (no busy wait) if another connection committed in between, which a scan
-  committing per file makes routine. Python's legacy implicit transactions
-  avoid that today only by beginning at the first DML, which is exactly what
-  leaves the preceding reads outside the transaction.
+- By default the transaction begins at the block's first write, exactly
+  as sqlite3's own implicit transactions do: reads, file I/O and network
+  calls before that write hold no lock.
+- `immediate=True` issues `BEGIN IMMEDIATE` at once, so the block holds
+  SQLite's single writer lock from its first statement and the reads that
+  decide its writes cannot go stale. This is the check-then-write shape the
+  codebase applies by hand at 40 `begin_immediate()` call sites (the
+  prediction-decision lock among them), and it replaces both orders of the
+  `begin_immediate()` / `with db.transaction()` pairing. Like `BEGIN`, it
+  raises if a transaction is already open.
+- **Why not `BEGIN IMMEDIATE` for every unit.** It would make every unit
+  check-then-write safe by construction, but it would also hold the writer
+  lock across whatever precedes the first write. Routes and services do slow
+  work there: the location routes call Google Places, the EXIF-location
+  batch reverse-geocodes a selection, previews and scans stat files. Under an
+  eager lock each of those stalls every other writer (a scan committing per
+  file) for its duration. Beginning at the first write keeps today's lock
+  footprint, and it never meets WAL's `SQLITE_BUSY_SNAPSHOT` (a deferred
+  transaction that read before another connection committed cannot then
+  write), because no read happens inside the transaction before its first
+  write. Units whose reads decide their writes say so with
+  `immediate=True`; a plain `BEGIN` (deferred, began before the first
+  read) is deliberately not offered, since it is the shape that does meet
+  `SQLITE_BUSY_SNAPSHOT`.
 - On normal exit commits through the existing busy/locked retry
   (`commit_with_retry`), then runs `after_commit` callbacks in registration
   order. On an exception rolls back, discards the callbacks, resets the
   Python-side transaction state (`_species_provenance_before`) and re-raises.
-- `retry_busy=True` (jobs) retries `BEGIN IMMEDIATE` with the same bounded
-  backoff `execute_with_retry` uses after `busy_timeout` (30 s) expires.
+- `retry_busy=True` (jobs) retries a `BEGIN IMMEDIATE` with the same
+  bounded backoff `execute_with_retry` uses after `busy_timeout` (30 s)
+  expires.
   Routes keep the plain wait and surface a 503 or 500, as the decision lock
   does today: a request thread should not sit for minutes behind a scan.
 
 Nested use (a unit of work is open):
 
 - Issues `SAVEPOINT uow_<depth>`; `RELEASE` on normal exit, `ROLLBACK TO` +
-  `RELEASE` on an exception, which then propagates. `after_commit` callbacks
+  `RELEASE` on an exception, which then propagates. If the owner has not
+  written yet it first issues `BEGIN IMMEDIATE` for the owner (a `SAVEPOINT`
+  outside a transaction begins one that its own `RELEASE` would commit). `after_commit` callbacks
   registered inside a rolled-back savepoint are dropped; the
   `_species_provenance_before` snapshot is restored to its value at the
   savepoint (it records "state before first touch", and a savepoint rollback
@@ -135,8 +150,8 @@ commits per batch) assert it is false.
 
 | Today | Target |
 |---|---|
-| `db.begin_immediate()` + `db.commit()`/`db.rollback()` | `with db.transaction():` |
-| `with db.transaction(): db.begin_immediate()` and the reverse order | `with db.transaction():` |
+| `db.begin_immediate()` + `db.commit()`/`db.rollback()` | `with db.transaction(immediate=True):` |
+| `with db.transaction(): db.begin_immediate()` and the reverse order | `with db.transaction(immediate=True):` |
 | `db._commits_held()` | `with db.transaction():` |
 | repository `commit()` methods, savepoint helpers | deleted; callers use `db.transaction()` |
 | `db.commit_with_retry()` in jobs | `with db.transaction(retry_busy=True):` per batch |
@@ -161,27 +176,31 @@ intermediate state atomic:
   never splits it, even before its callees are converted.
 - **An inner legacy rollback dooms the unit.** If an unconverted callee calls
   `rollback()` inside an open unit, the earlier work is gone; the unit
-  records that, and its exit raises `TransactionOwnershipError` instead of
-  committing whatever was written after the rollback. Today the same
-  sequence commits a partial unit.
+  records that, and if anything was written after the rollback its exit
+  rolls that back too and raises `TransactionOwnershipError` instead of
+  committing half a unit. Today the same sequence commits the later writes.
+  A rollback with nothing written after it (a refused plan's `db.rollback();
+  return`) just ends the unit rolled back, as it does today.
 
 `_commits_held()` becomes an alias of `transaction()` in the first
 foundation PR and is removed with its last caller; `_Connection` and the
 hold are deleted in the last PR, when the ratchet's data-layer count is zero
 and no callee commits.
 
-Adopting an already open transaction: when the outermost `transaction()` is
-entered while sqlite3 already has a transaction open (an unconverted caller's
-implicit transaction from a `_commit=False` write, or a legacy
-`begin_immediate()`), it adopts it instead of issuing `BEGIN IMMEDIATE`, as
-`with conn:` does today. This is a migration rule only; in the end state an
-open transaction outside a unit of work is a bug the close-time check below
-reports.
+Adopting an already open transaction: when an outermost plain
+`transaction()` is entered while sqlite3 already has a transaction open (an
+unconverted caller's implicit transaction from a `_commit=False` write, or a
+legacy `begin_immediate()`), it adopts it, as `with conn:` and
+`_commits_held()` do today. An outermost `immediate=True` block raises
+instead, as the `begin_immediate()` it replaces does. Adoption is a
+migration rule only; in the end state an open transaction outside a unit of
+work is a bug the close-time report below catches.
 
-**Close-time check.** `Database.close()` logs an error, with the path, when
-it discards an open transaction: that is a write some caller passed
-`_commit=False` for and then never committed (it is silently lost today).
-The test suite turns that log into a failure for converted domains, so a
+**Close-time report.** `Database.close()` logs a warning, with the path,
+when it discards an open transaction: that is a write some caller passed
+`_commit=False` for and then never committed (it is silently lost today),
+or a transaction an error path left open. `unit_of_work` calls any
+registered listeners as well, and the test suite registers one, so a
 conversion that forgets its owner fails in CI rather than losing writes.
 
 ## Durable boundaries in jobs
@@ -297,7 +316,7 @@ def decision(db, *, json_error, prediction_ids=()) -> Iterator[None]:
     lock_err = begin_prediction_decision(db, json_error=json_error)  # the contract name
     if lock_err is not None:
         raise DecisionRefused(lock_err)
-    with db.transaction():                  # adopts the locked transaction
+    with db.transaction():                  # adopts the BEGIN IMMEDIATE above
         if prediction_ids and out_of_workspace_prediction_ids(db, prediction_ids):
             raise DecisionRefused(json_error("Prediction does not belong to the active workspace", 404))
         yield
@@ -312,11 +331,35 @@ keeps working because `decision` reaches `begin_prediction_decision` in the
 call graph; a new unit test pins that `decision` rolls back on a refused
 check and on an exception and commits otherwise.
 
+A context manager cannot see the response its block returns, and several
+decision helpers *return* an error response after writing (a group apply
+that finds a member gone, an accept whose keyword vanished). A returned 409
+inside `with decision(...)` would commit those writes. So the routes go
+through one wrapper built on the context manager, which judges the response
+the way `services.edit_history.atomic_edit` already does:
+
+```python
+def decide(db, work, *, json_error, prediction_ids=()):
+    try:
+        with decision(db, json_error=json_error, prediction_ids=prediction_ids):
+            response = work()
+            if status_of(response) >= 400:
+                raise DecisionRefused(response)   # rolls the unit back
+    except DecisionRefused as refused:
+        return refused.response
+    return response
+```
+
+A body that returns an error response therefore never commits, without each
+early exit having to remember a rollback.
+
 ## Write locks and busy handling
 
-- `BEGIN IMMEDIATE` at the outermost `transaction()` replaces every explicit
+- `transaction(immediate=True)` replaces every explicit
   `begin_immediate()`. Its wait is the connection's `busy_timeout` (30 s), as
   today. The decision lock keeps reporting a 503 when it cannot be taken.
+  A plain unit takes the lock at its first write, as sqlite3 does today, and
+  waits the same `busy_timeout` there.
 - The commit at the end of a unit goes through `commit_with_retry`. Holding
   the writer lock from `BEGIN IMMEDIATE` makes a busy commit rare, but the
   retry costs nothing when it does not fire.
@@ -324,9 +367,10 @@ check and on an exception and commits otherwise.
   scan writes). Inside a unit it never sees "locked": the lock is already held.
 - Jobs use `retry_busy=True` so a long UI write does not abort a scan's next
   batch, which is the case `execute_with_retry` was added for.
-- A unit must not span slow work, because it now holds the writer lock from
-  its first statement rather than from its first write. Conversions keep
-  preparation (file reads, hashing, model calls, network) before the block.
+- An `immediate=True` unit must not span slow work: it holds the writer
+  lock from its first statement. Conversions keep preparation (file reads,
+  hashing, model calls, network) before the block, or use a plain unit,
+  which takes the lock at its first write.
 
 ## Migration order
 
@@ -337,11 +381,11 @@ which replays almost all of them.
 1. **Design and ratchet** (this PR): this document and
    `test_transaction_ownership.py`, capping commit flags (335) and data-layer
    transaction control (234) per module, both ways.
-2. **Foundation**: the `transaction()` semantics above (BEGIN IMMEDIATE,
-   savepoint nesting, legacy-commit hold, doomed-on-inner-rollback,
-   `after_commit`, `retry_busy`), `_commits_held` callers and the
-   `begin_immediate`/`transaction` pairings converted to it, the close-time
-   check. Transaction tests for each rule.
+2. **Foundation**: the `transaction()` semantics above (first-write or
+   `immediate` begin, savepoint nesting, legacy-commit hold,
+   doomed-on-inner-rollback, `after_commit`, `retry_busy`), `_commits_held`
+   deleted and its callers and the `begin_immediate`/`transaction` pairings
+   converted, the close-time report. Transaction tests for each rule.
 3. **Prediction decisions**: the `decision` context manager and the twelve
    routes in `PREDICTION_DECISION_ROUTES`.
 4. **Leaf domains** with plain committing writes and few callers: meta,
@@ -388,9 +432,11 @@ The end state is both dictionaries empty.
 
 ## Risks
 
-- **Lock held longer.** A unit holds the writer lock from its first
-  statement. A conversion that wraps slow reads would stall other writers;
-  reviewers check that each block is the write phase only.
+- **Lock held longer.** An `immediate=True` unit holds the writer lock
+  from its first statement, and any unit holds it from its first write to
+  its end. A conversion that moves slow work inside that span stalls other
+  writers; reviewers check that each block's locked span is the write phase
+  only.
 - **Lost writes from a missing owner.** A converted callee called with no
   unit open writes into an implicit transaction nobody commits. The
   close-time check reports it, and the converted domain's tests run with it
