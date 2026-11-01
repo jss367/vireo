@@ -274,3 +274,17 @@ test('a broadly named group says why it has no nearby places', () => {
   const backend = readFileSync('vireo/services/import_locations.py', 'utf8');
   assert.match(backend, /NEARBY_RADIUS_M = 5000\b/);
 });
+
+test('a list from partly failed lookups says it may be missing places', () => {
+  const h = harness();
+  h.ctx.data.groups[0].nearby_places = [
+    {place_id: 'lake', name: 'Big Laguna Lake', type: 'natural_feature', distance_m: 574, farthest_m: 900}];
+  h.ctx.data.groups[0].nearby_unresolved = 'transient_error';
+  h.run(`importLocations.data = data;
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.equal(h.run('nearby.children[1].children.length'), 1);
+  assert.match(h.run('nearby.children[2].textContent'), /may be missing nearby places.*Preview again/);
+  h.run(`delete data.groups[0].nearby_unresolved;
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.equal(h.run('nearby.children.length'), 2, 'a complete list carries no warning');
+});

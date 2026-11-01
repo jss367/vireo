@@ -346,6 +346,14 @@ function renderImportLocationNearby(group, onPick) {
     list.appendChild(btn);
   });
   box.append(note, list);
+  if (group.nearby_unresolved) {
+    // Some lookups answered and some didn't: say the list may be short.
+    const partial = document.createElement('div');
+    partial.className = 'hint';
+    partial.textContent = 'Google Maps didn’t answer for some of these spots, so this list may be'
+      + ' missing nearby places. Preview again to retry.';
+    box.appendChild(partial);
+  }
   return box;
 }
 

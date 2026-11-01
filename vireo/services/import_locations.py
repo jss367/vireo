@@ -268,7 +268,9 @@ def _wrap_lng(lng: float) -> float:
 
 
 def _nearby_bucket(lat: float, lng: float) -> _NearbyKey:
-    return math.floor(lat / _NEARBY_BUCKET_DEG), math.floor(_wrap_lng(lng) / _NEARBY_BUCKET_DEG)
+    # At a pole every longitude is the same point: one lookup, whatever EXIF says.
+    lng = 0.0 if abs(lat) >= 90.0 else _wrap_lng(lng)
+    return math.floor(lat / _NEARBY_BUCKET_DEG), math.floor(lng / _NEARBY_BUCKET_DEG)
 
 
 def _nearby_center(bucket: _NearbyKey) -> tuple[float, float]:
@@ -734,7 +736,9 @@ class ImportLocationSuggester:
 
         A place is offered only when its pin is within ``NEARBY_RADIUS_M`` of
         every photo in the group, so choosing it, which tags the whole group,
-        never names a photo taken far from it. Each entry carries
+        never names a photo taken far from it. The reason is set whenever a
+        lookup for the group failed, even beside places from the lookups that
+        answered. Each entry carries
         ``distance_m`` and ``farthest_m``: the closest and farthest of the
         group's measured photo points from the pin.
         """
@@ -763,9 +767,10 @@ class ImportLocationSuggester:
                     "type": place["type"], "distance_m": closest, "farthest_m": farthest,
                 })
         offered.sort(key=lambda p: (p["distance_m"], p["name"]))
-        if offered or not reasons:
-            return offered[:MAX_NEARBY_PLACES], None
-        return [], reasons.most_common(1)[0][0]
+        # A failed lookup is reported even beside places from the lookups
+        # that answered: the list may be missing the nearest place.
+        reason = reasons.most_common(1)[0][0] if reasons else None
+        return offered[:MAX_NEARBY_PLACES], reason
 
     def result(self) -> JsonDict:
         self._split_outings()
@@ -826,9 +831,9 @@ def suggest_import_locations(
     :data:`NEARBY_RADIUS_M` of every photo in it (``place_id``, ``name``,
     ``type``, and ``distance_m`` / ``farthest_m``, the closest and farthest
     photo from the pin), nearest first, plus ``nearby_unresolved``
-    (``no_api_key``, ``transient_error`` or ``spread_out``) when the list is
-    empty because the lookup could not run or no pin could reach the whole
-    outing.
+    (``no_api_key``, ``transient_error`` or ``spread_out``) when a lookup
+    could not run, so the list is empty or may be incomplete, or no pin could
+    reach the whole outing.
     Over-budget previews return empty groups and ``work_limit_error``;
     callers must require fewer files or explicit GPS opt-out before import.
     """

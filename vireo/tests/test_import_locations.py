@@ -676,6 +676,64 @@ def test_a_streamed_preview_at_the_pole_reports_its_nearby_places(db, monkeypatc
     assert frames[-1]["groups"][0]["nearby_places"][0]["name"] == "Pole Park"
 
 
+@pytest.mark.parametrize("pole", [90.0, -90.0])
+def test_every_longitude_at_a_pole_is_one_nearby_lookup(db, monkeypatch, pole):
+    """At latitude ±90 the EXIF longitude says nothing: 1,500 longitudes are one
+    point, one lookup, and not an over-limit preview."""
+    asked = []
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda lat, lng, *a, **k: asked.append((lat, lng)) or [])
+    points = [(pole, -180 + i * 0.24) for i in range(1500)]
+    assert len({cell_key(*p) for p in points}) == 1500
+
+    result = suggest_import_locations(db, _files(points), api_key="KEY", language="en")
+
+    assert "work_limit_error" not in result
+    [group] = result["groups"]
+    assert len(group["cells"]) == 1500
+    assert len(asked) == 1
+
+
+def test_a_streamed_preview_at_a_pole_makes_one_nearby_lookup(db, monkeypatch, exiftool_present):
+    points = [(-90.0, -180 + i * 0.24) for i in range(1500)]
+    paths = [f"/card/{i}.NEF" for i in range(len(points))]
+    gps = dict(zip(paths, points, strict=True))
+    # GPS is read in chunks; answer each chunk's paths.
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda chunk: {path: gps[path] for path in chunk})
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [])
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    assert [f for f in frames if "nearby" in f] == [{"nearby": 1, "total": 1}]
+    assert "work_limit_error" not in frames[-1]
+
+
+def test_a_partly_failed_lookup_is_reported_beside_the_places_found(db, monkeypatch):
+    """One bucket answers and one fails: the places found are offered, and the
+    group still says the list may be missing places."""
+    walk = [(32.8790, -116.4640), (32.8810, -116.4640)]  # 220 m apart, across a bucket edge
+    assert len({import_locations._nearby_bucket(*p) for p in walk}) == 2
+    lake = {"place_id": "lake", "name": "Big Laguna Lake", "type": "natural_feature",
+            "lat": 32.8810, "lng": -116.4560}
+
+    def half_failing(lat, lng, *a, **k):
+        if lat < 32.88:
+            raise places.PlacesTransientError("OVER_QUERY_LIMIT")
+        return [lake]
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", half_failing)
+
+    [group] = suggest_import_locations(db, _files(walk), api_key="KEY", language="en")["groups"]
+
+    assert [p["place_id"] for p in group["nearby_places"]] == ["lake"]
+    assert group["nearby_unresolved"] == "transient_error"
+
+
 def test_an_outing_across_the_antimeridian_is_offered_places_not_called_spread_out(db, monkeypatch):
     """Longitudes 179.99 and -179.99 are 1.1 km apart, not half the planet."""
     walk = [(-16.5, 179.995), (-16.5, -179.995)]
