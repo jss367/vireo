@@ -11,10 +11,13 @@ another workspace.
 
 Every change to a workspace's folder set changes what the new-images walk
 counts, so each one invalidates ``Database``'s process cache for the
-workspaces it touched, through the façade's public invalidators and at the
-same point relative to the commit as before. The no-commit link
-(``add_workspace_folder_no_commit``) leaves both the commit and the
-invalidation to its caller.
+workspaces it touched, through the façade's public invalidators and deferred
+to the outermost durable commit with ``db.after_commit`` so a concurrent
+new-images poll nested inside a larger transaction (``add_folder``,
+workspace creation) cannot snapshot the incremented generation, read the
+pre-commit folder links, and publish that stale result for the full TTL.
+The no-commit link (``add_workspace_folder_no_commit``) leaves both the
+commit and the invalidation to its caller.
 
 The SQL is ``WorkspaceFolderRepository``'s (``db.workspace_folders``);
 ``Database.get_folder_subtree_ids`` stays on the façade because
@@ -72,10 +75,13 @@ def add_workspace_folder(
     with db.transaction():
         add_workspace_folder_no_commit(
             db, workspace_id, folder_id, is_root=is_root, restore_removed=restore_removed)
-    # The folder's untracked files now count toward this workspace's
-    # new-images backlog. Drop any stale cached payload so the next read
-    # recomputes against the updated folder set.
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+        # The folder's untracked files now count toward this workspace's
+        # new-images backlog. Drop any stale cached payload so the next read
+        # recomputes against the updated folder set. Deferred to the
+        # outermost commit so a nested savepoint release never bumps the
+        # cache generation while a concurrent poller can still read the
+        # pre-commit folder links.
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def add_workspace_folder_exact(
@@ -91,7 +97,7 @@ def add_workspace_folder_exact(
     with db.transaction():
         db.workspace_folders.add_exact(
             workspace_id, folder_id, is_root=is_root)
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def remember_workspace_folder_removals(
@@ -110,9 +116,9 @@ def remove_workspace_folder(db: Database, workspace_id: int, folder_id: int) -> 
     with db.transaction():
         remember_workspace_folder_removals(db, workspace_id, [folder_id])
         db.workspace_folders.remove(workspace_id, folder_id)
-    # The folder no longer contributes to this workspace's new-images
-    # backlog. Drop the cached payload so the banner reflects the change.
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def remove_workspace_folder_tree(db: Database, workspace_id: int, folder_id: int) -> None:
@@ -122,9 +128,9 @@ def remove_workspace_folder_tree(db: Database, workspace_id: int, folder_id: int
     with db.transaction():
         remember_workspace_folder_removals(db, workspace_id, folder_ids, recursive=True)
         db.workspace_folders.remove_tree(workspace_id, folder_ids)
-    # The folder no longer contributes to this workspace's new-images
-    # backlog. Drop the cached payload so the banner reflects the change.
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def materialize_workspace_descendants(db: Database, workspace_id: int) -> None:
@@ -147,7 +153,7 @@ def materialize_workspace_descendants(db: Database, workspace_id: int) -> None:
         return
     with db.transaction():
         repo.link_descendants(workspace_id, candidate_ids)
-    db.invalidate_new_images_cache_for_workspace(workspace_id)
+        db.after_commit(lambda: db.invalidate_new_images_cache_for_workspace(workspace_id))
 
 
 def get_workspace_folders(db: Database, workspace_id: int) -> list[sqlite3.Row]:
@@ -338,11 +344,9 @@ def move_folders_to_workspace(
         photo_preferences_moved,
         species_highlights_moved,
     ) = _move_folders_unit(db, source_ws_id, target_ws_id, folder_ids, moved_folder_ids)
-    # (``db.workspace_folders.move_folders`` in one unit of work.)
-
-    # Folders changed membership for BOTH workspaces, so each workspace's
-    # new-images backlog needs to be recomputed on the next read.
-    db.invalidate_new_images_cache_for_workspaces([source_ws_id, target_ws_id])
+    # (``db.workspace_folders.move_folders`` in one unit of work; folders
+    # changed membership for BOTH workspaces, so each workspace's
+    # new-images backlog is dropped once the move durably commits.)
 
     return {
         "folders_moved": len(folder_ids),
@@ -402,11 +406,21 @@ def check_folder_health(db: Database, *, checkpoint: Callable[[], object] | None
 def _move_folders_unit(
         db: Database, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
         moved_folder_ids: list[int]) -> tuple[int, int, int]:
-    """Move the folders and their workspace-scoped rows in one unit of work."""
+    """Move the folders and their workspace-scoped rows in one unit of work.
+
+    Also schedules the new-images cache invalidation for both workspaces
+    on the outermost commit, so a nested caller cannot bump the cache
+    generation while a concurrent poller is still reading the pre-commit
+    folder links.
+    """
     with db.transaction():
-        return db.workspace_folders.move_folders(
+        counts = db.workspace_folders.move_folders(
             source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
         )
+        db.after_commit(
+            lambda: db.invalidate_new_images_cache_for_workspaces(
+                [source_ws_id, target_ws_id]))
+        return counts
 
 
 def workspace_unlinked_folder_count(db: Database, folder_paths: Iterable[str]) -> int:
