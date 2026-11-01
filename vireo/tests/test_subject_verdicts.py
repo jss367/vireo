@@ -223,6 +223,59 @@ def test_every_verdict_write_refuses_at_once_while_analysis_holds_the_photo(db, 
     assert _verdict(db, stump) == "not_animal"
 
 
+def test_verdict_reads_the_region_only_under_the_writer_lock(db, scene):
+    """``BEGIN IMMEDIATE`` precedes the detection, visibility and prior-verdict reads.
+
+    Two overlapping rejections that both read the prior verdict before
+    taking the writer lock would both record ``old_value`` null, and undoing
+    the second would restore the region while the first stays applied; a
+    detach committed between the visibility check and the lock would let a
+    catalog-wide verdict through on a photo the workspace no longer shows.
+    Reading under the lock closes both windows, and an unchanged verdict
+    still writes nothing.
+    """
+    photo_id, stump, _, _ = scene
+    for verdict in ("not_animal", "not_animal"):
+        statements = []
+        db.conn.set_trace_callback(statements.append)
+        try:
+            result = subject_verdicts.set_subject_verdict(db, stump, verdict)
+        finally:
+            db.conn.set_trace_callback(None)
+        begin = next(i for i, sql in enumerate(statements) if sql.startswith("BEGIN IMMEDIATE"))
+        detection_reads = [i for i, sql in enumerate(statements) if "FROM detections" in sql]
+        visibility_reads = [i for i, sql in enumerate(statements) if "photo_workspace_visibility" in sql]
+        assert detection_reads and visibility_reads, statements
+        assert begin < min(detection_reads + visibility_reads), statements
+        assert result["previous_verdict"] == (None if result["changed"] else "not_animal")
+    assert not db.in_transaction
+    # The second, unchanged verdict took the lock, read, and wrote nothing.
+    writes = [sql for sql in statements if sql.startswith(("UPDATE", "INSERT", "DELETE"))]
+    assert writes == [], writes
+    assert _verdict(db, stump) == "not_animal"
+
+
+def test_sequential_verdicts_record_the_state_each_one_replaces(db, scene):
+    """Reject, restore, reject: each history row's old value is the verdict it replaced.
+
+    Pins the shape the race would break: a second rejection that read its
+    prior state before the first committed would record null twice.
+    """
+    photo_id, stump, _, _ = scene
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    subject_verdicts.set_subject_verdict(db, stump, None)
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    # Newest first: each step's old value is the verdict the step before it wrote.
+    for expected_old, expected_new in ((None, "not_animal"), ("not_animal", None), (None, "not_animal")):
+        entry, items = db.edit_history.next_undo()
+        assert entry["action_type"] == "subject_verdict" and len(items) == 1
+        assert json.loads(items[0]["old_value"])["verdict"] == expected_old
+        assert json.loads(items[0]["new_value"])["verdict"] == expected_new
+        assert _verdict(db, stump) == expected_new
+        undo_last_edit(db)
+        assert _verdict(db, stump) == expected_old
+
+
 def test_cache_refresh_recomputes_only_the_photos_evidence(db, scene, tmp_path):
     photo_id, stump, bird, _ = scene
     sibling = photo_ingest.add_photo(db, folder_id=db.photos.get(photo_id)["folder_id"],

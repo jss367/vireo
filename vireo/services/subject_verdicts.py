@@ -124,6 +124,25 @@ def _apply(db: Database, photo_id: int, detection_id: int, verdict: str | None) 
         sync_primary(db, photo_id)
 
 
+def _locked_region(db: Database, detection_id: int) -> tuple[int, str | None]:
+    """The region's photo id and current verdict, read under the writer lock.
+
+    Called inside ``set_subject_verdict``'s immediate transaction, so the
+    row, its workspace visibility and the prior verdict are the state the
+    write is serialized after: two overlapping requests cannot both read the
+    same prior verdict, and a detach committed after this check cannot slip
+    in before the write. Raises ``SubjectVerdictError`` (404) when the
+    detection is not in the active workspace and (400) for a full-image
+    classification, which has no region to reject.
+    """
+    row = db.detections.row(detection_id)
+    if row is None or db.photos.get(row["photo_id"], verify_workspace=True) is None:
+        raise SubjectVerdictError("Detection not found in the active workspace", 404)
+    if row["detector_model"] == "full-image":
+        raise SubjectVerdictError("A full-image classification has no region to reject")
+    return int(row["photo_id"]), row["subject_verdict"]
+
+
 def set_subject_verdict(
     db: Database, detection_id: int, verdict: str | None, *,
     source: str | None = None, reason: str | None = None,
@@ -135,23 +154,22 @@ def set_subject_verdict(
     region to reject, and (409) while subject analysis holds the photo.
     An unchanged verdict writes nothing and reports ``changed: False``.
     """
-    row = db.detections.row(detection_id)
-    if row is None or db.photos.get(row["photo_id"], verify_workspace=True) is None:
-        raise SubjectVerdictError("Detection not found in the active workspace", 404)
-    if row["detector_model"] == "full-image":
-        raise SubjectVerdictError("A full-image classification has no region to reject")
-    photo_id = int(row["photo_id"])
-    previous = row["subject_verdict"]
-    result: JsonDict = {"photo_id": photo_id, "detection_id": detection_id,
-                        "verdict": verdict, "previous_verdict": previous, "changed": previous != verdict}
-    if previous == verdict:
-        return result
-    # One unit of work: the verdict, the primary re-projection and the
-    # history row commit together (record_edit's own commit and prune run
-    # inside the unit, where a legacy commit is a no-op). The writer lock
-    # comes first and the photo lock inside ``_apply`` second, the one order
-    # every verdict writer uses; the 409 raised there rolls the unit back.
+    # One unit of work, taken before anything is read: the detection row,
+    # its workspace visibility and the prior verdict are read under the
+    # writer lock (``_locked_region``), so the history row's old value is
+    # the verdict this write actually replaces, and the verdict, the primary
+    # re-projection and the history row commit together (record_edit's own
+    # commit and prune run inside the unit, where a legacy commit is a
+    # no-op). The writer lock comes first and the photo lock inside
+    # ``_apply`` second, the one order every verdict writer uses; every
+    # ``SubjectVerdictError`` raised inside rolls the unit back.
     with db.transaction(immediate=True):
+        photo_id, previous = _locked_region(db, detection_id)
+        result: JsonDict = {"photo_id": photo_id, "detection_id": detection_id,
+                            "verdict": verdict, "previous_verdict": previous,
+                            "changed": previous != verdict}
+        if previous == verdict:
+            return result
         _apply(db, photo_id, detection_id, verdict)
         result["edit_id"] = db.record_edit(
             ACTION_TYPE, _description(verdict, source, reason), _state(detection_id, verdict),
