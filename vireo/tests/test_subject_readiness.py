@@ -150,6 +150,7 @@ def readiness_photo(db, tmp_path):
     db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path=str(mask_path), **{k: v for k, v in quality.items() if k != "subject_size"}))
     db.commit()
     db.photos.update_quality(pid, subject_size=quality["subject_size"])
+    db.commit()
     return pid, mask_path, MaskQuality(**quality)
 
 

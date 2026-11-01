@@ -564,7 +564,8 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
             # report "Already done" even though the next run would
             # regenerate every thumbnail.
             db = get_db()
-            db.photos.clear_all_thumb_paths()
+            with db.transaction():
+                db.photos.clear_all_thumb_paths()
             return jsonify({"ok": True})
         elif cache_type == "embeddings":
             from classifier import CACHE_DIR
@@ -765,7 +766,8 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
             # one bind per id would raise OperationalError after the files
             # have already been removed, leaving photos.thumb_path out of
             # sync with disk.
-            db.photos.clear_thumb_paths(thumb_ids_cleared)
+            with db.transaction():
+                db.photos.clear_thumb_paths(thumb_ids_cleared)
             log.info(
                 "Cleared photos.thumb_path for %d photos alongside files",
                 len(thumb_ids_cleared),

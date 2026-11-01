@@ -170,7 +170,6 @@ class PhotoRepository:
                 file_hash,
             ),
         )
-        self.commit_with_retry(self.conn)
         if cur.rowcount > 0:
             return cur.lastrowid, True
         row = self.conn.execute(
@@ -1043,10 +1042,10 @@ class PhotoRepository:
         # Every aggregate below describes the same filtered set, and a
         # metadata search is by far the costliest part of computing it, so
         # the matching ids are materialized once. The TEMP table lives on
-        # this request's connection and is dropped before returning; the
-        # SAVEPOINT reads all four aggregates from one snapshot without
-        # committing a caller's open transaction (as ``stage_scope_ids``).
-        self.conn.execute("SAVEPOINT browse_summary")
+        # this request's connection and is dropped before returning. The
+        # caller runs this inside ``with db.transaction(join=True):`` so all
+        # four aggregates read one snapshot without committing a caller's
+        # open transaction (as the pipeline's scope staging does).
         try:
             self.conn.execute("DROP TABLE IF EXISTS temp._browse_summary_ids")
             self.conn.execute(
@@ -1058,16 +1057,8 @@ class PhotoRepository:
                 params,
             )
             summary = self._browse_summary_aggregates(ws, detector_confidence)
-        except BaseException:
-            # An interrupted INSERT (a superseded search) makes SQLite roll
-            # back the whole transaction itself, savepoint included.
-            if self.conn.in_transaction:
-                self.conn.execute("ROLLBACK TO browse_summary")
-            raise
         finally:
             self.conn.execute("DROP TABLE IF EXISTS temp._browse_summary_ids")
-            if self.conn.in_transaction:
-                self.conn.execute("RELEASE browse_summary")
         return {"total": total, **summary}
 
     def _browse_summary_aggregates(self, ws, detector_confidence):
@@ -1315,13 +1306,12 @@ class PhotoRepository:
         deleted_stems_by_folder,
         folder_paths,
         *,
-        commit,
         workspace_id_fn,
     ):
         """Delete the resolved photos, their dependents and stale provenance.
 
-        With ``commit`` the work commits here and rolls back on error;
-        without it, the caller's transaction owns both. ``workspace_id_fn``
+        Does not commit: the caller's unit of work owns the transaction, so
+        a failure part-way rolls every chunk back. ``workspace_id_fn``
         resolves the active workspace mid-transaction, where the façade used
         to call ``_ws_id()``, so a missing workspace still rolls back.
         """
@@ -1332,52 +1322,43 @@ class PhotoRepository:
         # share the same transaction, so partial-failure rollback still works.
         id_chunks = list(self._chunks(all_ids))
 
-        try:
-            # Delete associated data (non-cascading FKs)
-            for chunk in id_chunks:
-                ph = ",".join("?" for _ in chunk)
-                self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", chunk)
-                self.conn.execute(
-                    f"DELETE FROM photo_embedded_keyword_offered WHERE photo_id IN ({ph})",
-                    chunk,
-                )
-                self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", chunk)
-                # Deleting detections cascades to predictions via ON DELETE CASCADE
-                self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", chunk)
+        # Delete associated data (non-cascading FKs)
+        for chunk in id_chunks:
+            ph = ",".join("?" for _ in chunk)
+            self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", chunk)
+            self.conn.execute(
+                f"DELETE FROM photo_embedded_keyword_offered WHERE photo_id IN ({ph})",
+                chunk,
+            )
+            self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", chunk)
+            # Deleting detections cascades to predictions via ON DELETE CASCADE
+            self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", chunk)
 
-            # The active workspace is still resolved here so a delete
-            # without one rolls back.
-            workspace_id_fn()
+        # The active workspace is still resolved here so a delete
+        # without one rolls back.
+        workspace_id_fn()
 
-            # Delete photos (cascades to edit_history_items, inat_submissions)
-            # and take them out of every workspace's static collections.
-            with photo_row_deletion(self.conn) as photo_rows:
-                photo_rows.delete(dict.fromkeys(all_ids))
+        # Delete photos (cascades to edit_history_items, inat_submissions)
+        # and take them out of every workspace's static collections.
+        with photo_row_deletion(self.conn) as photo_rows:
+            photo_rows.delete(dict.fromkeys(all_ids))
 
-            self._expire_drained_move_provenance(deleted_stems_by_folder, folder_paths)
+        self._expire_drained_move_provenance(deleted_stems_by_folder, folder_paths)
 
-            # Update folder counts
-            for fid, count in folder_counts.items():
-                self.conn.execute(
-                    "UPDATE folders SET photo_count = photo_count - ? WHERE id = ?",
-                    (count, fid),
-                )
-
-            if commit:
-                self.conn.commit()
-        except Exception:
-            if commit:
-                self.conn.rollback()
-            raise
+        # Update folder counts
+        for fid, count in folder_counts.items():
+            self.conn.execute(
+                "UPDATE folders SET photo_count = photo_count - ? WHERE id = ?",
+                (count, fid),
+            )
 
     # -- quality scores ------------------------------------------------------
 
     def update_sharpness(self, photo_id, sharpness):
-        """Set photo sharpness score."""
+        """Set photo sharpness score (no commit)."""
         self.conn.execute(
             "UPDATE photos SET sharpness = ? WHERE id = ?", (sharpness, photo_id)
         )
-        self.commit_with_retry(self.conn)
 
     def update_quality(
         self,
@@ -1387,7 +1368,7 @@ class PhotoRepository:
         quality_score=None,
         sharpness=None,
     ):
-        """Update all quality-related scores for a photo."""
+        """Update all quality-related scores for a photo (no commit)."""
         self.conn.execute(
             """UPDATE photos SET
                subject_sharpness=?, subject_size=?, quality_score=?, sharpness=?
@@ -1400,7 +1381,6 @@ class PhotoRepository:
                 photo_id,
             ),
         )
-        self.commit_with_retry(self.conn)
 
     # -- working copy and thumbnail columns ----------------------------------
 
@@ -1414,7 +1394,7 @@ class PhotoRepository:
 
     def record_generated_original(self, photo_id, working_copy_path, *,
                                   tracked, dimensions=None):
-        """Record an on-demand full-resolution render on the photo row and commit.
+        """Record an on-demand full-resolution render on the photo row (no commit).
 
         ``tracked`` stores ``working_copy_path`` and clears the eviction
         marker; untracked clears the path and marks it evicted at the source
@@ -1441,15 +1421,14 @@ class PhotoRepository:
             f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
             params,
         )
-        self.conn.commit()
 
     def clear_working_copy_evictions(self):
-        """Make every evicted working copy eligible for backfill again, and commit.
+        """Make every evicted working copy eligible for backfill again (no commit).
 
         Clears ``working_copy_evicted_mtime`` on every evicted row, and the
         ``working_copy_failed_*`` marker on those rows where it was recorded
         against the RAW source (``'source'``) of a photo with a companion
-        JPEG. The commit retries while SQLite reports locked or busy.
+        JPEG.
         """
         self.conn.execute(
             "UPDATE photos SET working_copy_evicted_mtime=NULL, "
@@ -1467,26 +1446,23 @@ class PhotoRepository:
             "ELSE working_copy_failed_source END "
             "WHERE working_copy_evicted_mtime IS NOT NULL"
         )
-        self.commit_with_retry(self.conn)
 
     def set_thumb_path(self, photo_id, thumb_path):
-        """Store the photo's thumbnail filename and commit."""
+        """Store the photo's thumbnail filename (no commit)."""
         self.conn.execute(
             "UPDATE photos SET thumb_path=? WHERE id=?",
             (thumb_path, photo_id),
         )
-        self.conn.commit()
 
     def clear_all_thumb_paths(self):
-        """Set every photo's ``thumb_path`` to NULL and commit."""
+        """Set every photo's ``thumb_path`` to NULL (no commit)."""
         self.conn.execute(
             "UPDATE photos SET thumb_path = NULL "
             "WHERE thumb_path IS NOT NULL"
         )
-        self.conn.commit()
 
     def clear_thumb_paths(self, photo_ids):
-        """Set ``thumb_path`` to NULL for ``photo_ids`` and commit once.
+        """Set ``thumb_path`` to NULL for ``photo_ids`` (no commit).
 
         Chunked with ``sql_chunks.chunked`` (900 ids per statement).
         """
@@ -1497,4 +1473,3 @@ class PhotoRepository:
                 f"WHERE id IN ({placeholders})",
                 chunk,
             )
-        self.conn.commit()

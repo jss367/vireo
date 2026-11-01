@@ -57,6 +57,7 @@ def _setup_db(tmp_path):
             pid,
             subject_size=0.1,
         )
+        db.commit()
         det_ids = db.detections.save(pid, [
             {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9, "category": "animal"},
         ], detector_model="megadetector-v6")

@@ -140,7 +140,7 @@ def test_add_photo_duplicate_hash_rejects_loser(db):
     assert sorted(v or "none" for v in flags.values()) == ["none", "rejected"]
 
 
-def test_add_photo_uses_retry_helpers(db, monkeypatch):
+def test_add_photo_inserts_with_retry_and_leaves_commit_to_its_unit(db, monkeypatch):
     import db as db_module
 
     seen = []
@@ -159,7 +159,9 @@ def test_add_photo_uses_retry_helpers(db, monkeypatch):
     monkeypatch.setattr(db_module, "execute_with_retry", exec_spy)
     monkeypatch.setattr(db_module, "commit_with_retry", commit_spy)
     _photo(db, fid, "x.jpg")
-    assert seen == [("exec", "INSERT"), ("commit",)]
+    # The insert retries while busy; the repository never commits (the
+    # ingest service's unit of work does, with its own busy retry).
+    assert seen == [("exec", "INSERT")]
 
 
 # -- get_photo -----------------------------------------------------------------
@@ -1197,6 +1199,7 @@ def test_prune_pipeline_cache_for_ids_swallows_errors_but_not_interrupts(db, mon
 
 def test_update_photo_sharpness_commits(db, lib):
     db.photos.update_sharpness(lib["a"], 12.5)
+    db.commit()
     assert not db.conn.in_transaction
     with _reader(db) as r:
         assert r.execute(
@@ -1207,6 +1210,7 @@ def test_update_photo_sharpness_commits(db, lib):
 def test_update_photo_quality_commits_and_overwrites_all_fields(db, lib):
     db.photos.update_quality(lib["a"], subject_sharpness=1.0, subject_size=2.0,
                             quality_score=3.0, sharpness=4.0)
+    db.commit()
     with _reader(db) as r:
         row = r.execute(
             "SELECT subject_sharpness, subject_size, quality_score, sharpness "
@@ -1214,6 +1218,7 @@ def test_update_photo_quality_commits_and_overwrites_all_fields(db, lib):
         ).fetchone()
     assert tuple(row) == (1.0, 2.0, 3.0, 4.0)
     db.photos.update_quality(lib["a"], quality_score=9.0)
+    db.commit()
     row = db.conn.execute(
         "SELECT subject_sharpness, subject_size, quality_score, sharpness "
         "FROM photos WHERE id = ?", (lib["a"],),
@@ -1222,7 +1227,7 @@ def test_update_photo_quality_commits_and_overwrites_all_fields(db, lib):
     assert not db.conn.in_transaction
 
 
-def test_quality_writers_use_commit_with_retry(db, lib, monkeypatch):
+def test_quality_writers_never_commit(db, lib, monkeypatch):
     import db as db_module
 
     commits = []
@@ -1233,7 +1238,9 @@ def test_quality_writers_use_commit_with_retry(db, lib, monkeypatch):
     )
     db.photos.update_sharpness(lib["a"], 1.0)
     db.photos.update_quality(lib["a"], sharpness=2.0)
-    assert commits == [1, 1]
+    assert commits == []
+    assert db.in_transaction
+    db.commit()
 
 
 # -- working copy and thumbnail columns ------------------------------------------
@@ -1250,6 +1257,7 @@ def _working_copy_state(db, pid):
 def test_get_photo_working_copy_path(db, lib):
     assert db.photos.working_copy_path(lib["a"]) is None
     db.photos.record_generated_original(lib["a"], "working/1.jpg", tracked=True)
+    db.commit()
     assert db.photos.working_copy_path(lib["a"]) == "working/1.jpg"
     assert db.photos.working_copy_path(99999) is None
 
@@ -1261,6 +1269,7 @@ def test_record_generated_original_tracked_stores_path_and_clears_eviction(db, l
     )
     db.conn.commit()
     db.photos.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
+    db.commit()
     assert not db.conn.in_transaction
     assert _working_copy_state(db, lib["a"]) == ("working/a.jpg", None, 5, 6)
 
@@ -1269,19 +1278,21 @@ def test_record_generated_original_untracked_marks_evicted_at_source_mtime(db, l
     db.photos.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
     db.photos.record_generated_original(lib["a"], "ignored", tracked=False,
                                  dimensions=(40, 30))
+    db.commit()
     assert _working_copy_state(db, lib["a"]) == (None, 1.0, 40, 30)
     db.conn.execute("UPDATE photos SET file_mtime = NULL WHERE id = ?", (lib["b"],))
     db.conn.commit()
     db.photos.record_generated_original(lib["b"], None, tracked=False)
+    db.commit()
     assert _working_copy_state(db, lib["b"])[:2] == (None, -1)
 
 
-def test_record_generated_original_commits_the_callers_transaction(db, lib):
-    # A plain commit, like the ``db.conn.commit()`` it replaced: it ends a
-    # transaction the caller opened, and defers to an open unit of work.
+def test_record_generated_original_leaves_commit_to_caller(db, lib):
+    # Neither ends a transaction the caller opened nor commits an open unit.
     db.begin_immediate()
     db.photos.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
-    assert not db.in_transaction
+    assert db.in_transaction
+    db.commit()
     with db.transaction():
         db.photos.record_generated_original(lib["b"], "working/b.jpg", tracked=True)
         assert db.in_transaction
@@ -1290,6 +1301,7 @@ def test_record_generated_original_commits_the_callers_transaction(db, lib):
 
 def test_set_photo_thumb_path_commits(db, lib):
     db.photos.set_thumb_path(lib["a"], f"{lib['a']}.jpg")
+    db.commit()
     assert not db.conn.in_transaction
     with _reader(db) as r:
         assert r.execute(
@@ -1308,7 +1320,9 @@ def _thumb_paths(db):
 def test_clear_all_photo_thumb_paths_commits(db, lib):
     for pid in (lib["a"], lib["f"]):
         db.photos.set_thumb_path(pid, f"{pid}.jpg")
+        db.commit()
     db.photos.clear_all_thumb_paths()
+    db.commit()
     assert not db.conn.in_transaction
     assert set(_thumb_paths(db).values()) == {None}
 
@@ -1316,8 +1330,10 @@ def test_clear_all_photo_thumb_paths_commits(db, lib):
 def test_clear_photo_thumb_paths_clears_only_named_photos_in_chunks_of_900(db, lib):
     for pid in (lib["a"], lib["b"], lib["f"]):
         db.photos.set_thumb_path(pid, f"{pid}.jpg")
+        db.commit()
     statements = _trace(db)
     db.photos.clear_thumb_paths([lib["a"]] + list(range(100_000, 100_899)) + [lib["f"]])
+    db.commit()
     db.conn.set_trace_callback(None)
     assert not db.conn.in_transaction
     assert len(_sql(statements, "SET thumb_path = NULL")) == 2
@@ -1367,8 +1383,9 @@ def test_clear_working_copy_evictions_resets_evicted_rows(db, lib, monkeypatch):
     )
 
     db.photos.clear_working_copy_evictions()
+    assert commits == []  # the repository never commits
+    db.commit()
 
-    assert commits == [db.conn]
     assert not db.in_transaction
     # Evicted RAW-source failure on a photo with a companion: all cleared.
     assert _failure_state(db, lib["a"]) == (None, None, None, None)

@@ -480,7 +480,8 @@ class _ThumbnailRequest:
         if self.pair_source or self.served_from_regen_sidecar:
             return
         try:
-            self.db.photos.set_thumb_path(self.photo_id, f"{self.photo_id}.jpg")
+            with self.db.transaction():
+                self.db.photos.set_thumb_path(self.photo_id, f"{self.photo_id}.jpg")
         except sqlite3.Error:
             # Coverage column drift is recoverable via the backfill job;
             # don't fail the request if the UPDATE racks up a transient

@@ -77,7 +77,6 @@
   "repositories/imports.py": 1,
   "repositories/moves_merge.py": 1,
   "repositories/photo_row_deletion.py": 2,
-  "repositories/photos.py": 2,
   "repositories/stats.py": 1,
   "repositories/working_copies.py": 1,
   "repositories/workspace_folders.py": 1,
