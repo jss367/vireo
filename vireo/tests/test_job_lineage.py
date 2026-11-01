@@ -330,3 +330,86 @@ def test_migration_31_backfills_parent_and_origin(tmp_path):
         "maint-1": ("system", None, 1),
         "junk-1": ("user", None, 1),
     }
+
+
+# -- checkpoints never resurrect a finished row ------------------------------
+
+
+@pytest.mark.parametrize("outcome", ["noop-drop", "failure-collapse"])
+def test_stale_checkpoint_cannot_resurrect_a_finished_system_row(runner_db, outcome):
+    """A checkpoint that snapshotted the job while it ran must not re-create its row.
+
+    Barrier: the checkpoint captures the running job and parks before
+    writing; the job then finishes. Its final write must wait for the
+    checkpoint, so no stale ``running`` row survives to be failed as
+    "interrupted" at the next start.
+    """
+    runner, db, ws_id = runner_db
+    if outcome == "failure-collapse":
+        _run(runner, "check", RuntimeError("offline"), ws_id=ws_id, lineage=SYSTEM)
+    started, finish = threading.Event(), threading.Event()
+    captured, release = threading.Event(), threading.Event()
+
+    def work(job):
+        started.set()
+        finish.wait(synchronization_timeout(5))
+        if outcome == "failure-collapse":
+            raise RuntimeError("offline")
+        return {"noop": True}
+
+    job_id = runner.start("check", work, workspace_id=ws_id, lineage=SYSTEM)
+    assert started.wait(synchronization_timeout(5))
+    write = runner._history.write_checkpoints
+
+    def parked_write(snapshots):
+        captured.set()
+        release.wait(synchronization_timeout(5))
+        return write(snapshots)
+
+    runner._history.write_checkpoints = parked_write
+    checkpoint = threading.Thread(target=runner.checkpoint_live_jobs)
+    checkpoint.start()
+    try:
+        assert captured.wait(synchronization_timeout(5))
+        finish.set()
+        live = runner._jobs[job_id]
+        for _ in range(200):
+            if live["status"] != "running":
+                break
+            release.wait(0.01)
+        assert live["status"] in ("completed", "failed")
+        # The final write waits for the parked checkpoint.
+        release.wait(0.3)
+        assert not live["_persisted"]
+    finally:
+        release.set()
+        checkpoint.join(synchronization_timeout(5))
+        runner._history.write_checkpoints = write
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    rows = _rows(db, "check")
+    assert all(r["status"] != "running" for r in rows), rows
+    if outcome == "noop-drop":
+        assert rows == []
+    else:
+        [row] = rows
+        assert (row["id"], row["status"], row["repeat_count"]) == (job_id, "failed", 2)
+
+
+# -- reading history -----------------------------------------------------------
+
+
+def test_newer_system_rows_do_not_hide_older_user_operations(runner_db):
+    runner, db, ws_id = runner_db
+    _insert(db, "users-import", ws_id=ws_id, started_at="2026-01-01T00:00:00")
+    _insert(db, "users-process", ws_id=ws_id, started_at="2026-01-01T00:05:00",
+            parent="users-import")
+    for i in range(150):
+        _insert(db, f"check-{i}", ws_id=ws_id if i % 2 else None,
+                started_at=f"2026-02-01T00:{i // 60:02d}:{i % 60:02d}", origin="system")
+    db.conn.commit()
+    rows = runner.get_history(db, limit=100)
+    ids = [r["id"] for r in rows]
+    assert {"users-import", "users-process"} <= set(ids)
+    assert sum(1 for r in rows if r["origin"] == "system") == 100
+    assert any(r["workspace_id"] is None for r in rows)
+    assert ids == [r["id"] for r in sorted(rows, key=lambda r: r["started_at"], reverse=True)]

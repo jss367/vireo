@@ -459,7 +459,7 @@ class JobRunner:
             "errors": [],
         })
         if self._history.db_path:
-            self._history.persist_job(job, 0.0)
+            self._persist_final(job, 0.0)
         job["_persisted"] = True
 
     def _record_terminal_queued_pipeline(self, job_id, ctx, status="cancelled"):
@@ -847,7 +847,7 @@ class JobRunner:
             job["id"], job["type"], job["status"], elapsed, phase or "-",
         )
         if self._history.db_path and not job.get("ephemeral"):
-            self._history.persist_job(job, elapsed)
+            self._persist_final(job, elapsed)
         # Mark the in-memory job dict as fully persisted so test code
         # can synchronize with `job_history` reads. Ephemeral jobs are
         # also flagged so callers waiting on this don't hang.
@@ -858,6 +858,25 @@ class JobRunner:
         # method is a no-op when nothing is queued.
         if job["type"] == "pipeline":
             self._try_promote_queued()
+
+    def _persist_final(self, job, duration):
+        """Write a finished job's row; a system job's under ``write_lock``.
+
+        A checkpoint snapshots the live jobs and writes them later, with
+        ``INSERT OR IGNORE`` for a row that is missing. A system job's final
+        write may delete its own row (a no-op run); between those two steps
+        that would let the stale snapshot re-create it as ``running``, and
+        the next startup would fail a run that succeeded. Holding
+        ``write_lock`` makes the two serial: a checkpoint either finishes
+        before the final write, or snapshots after the job has left the live
+        statuses. The user's jobs always keep their row, so their final
+        writes stay off the lock and never queue behind one another.
+        """
+        if job.get("origin") != "system":
+            self._history.persist_job(job, duration)
+            return
+        with self._checkpoints.write_lock:
+            self._history.persist_job(job, duration)
 
     def get(self, job_id):
         """Get a job by id. Returns a copy so callers don't mutate (or race
