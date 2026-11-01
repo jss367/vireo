@@ -218,8 +218,7 @@ class _ScanTally:
         # with a callback that updates an import's in-memory membership.
         companion_identities = getattr(merged, "companions", {})
         reported_identities = self.reported_identities
-        with db._commits_held():
-            db.begin_immediate()
+        with db.transaction(immediate=True):
             for old_id, new_id in merged.items():
                 row = db.companion_pairing.owner_row(new_id)
                 expected = getattr(merged, "owners", {}).get(new_id)

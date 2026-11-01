@@ -10,7 +10,7 @@ export function bindLifeListLightboxEvents() {
   // lightbox list. If navigation reaches the boundary first, the boundary
   // listener waits for that same request and advances as soon as it arrives.
   document.addEventListener('lightbox:photochanged', function(event) {
-    const entry = lifeListEntry(state.lifeListLightboxSpecies);
+    const entry = lifeListEntry(state.lifeListLightboxSpecies, state.lifeListLightboxTaxonId);
     if (!entry || !entry.has_more) return;
     var photoId = event && event.detail && event.detail.photoId;
     var index = (entry.photos || []).findIndex(function(photo) { return photo.id === photoId; });
@@ -20,7 +20,7 @@ export function bindLifeListLightboxEvents() {
   document.addEventListener('lightbox:navigationboundary', function(event) {
     var detail = event && event.detail || {};
     if (detail.delta !== 1) return;
-    const entry = lifeListEntry(state.lifeListLightboxSpecies);
+    const entry = lifeListEntry(state.lifeListLightboxSpecies, state.lifeListLightboxTaxonId);
     if (!entry || !entry.has_more) return;
     var currentId = detail.photoId;
     loadMoreLifeListPhotos(entry).then(function() {
@@ -48,5 +48,6 @@ export function bindLifeListLightboxEvents() {
 
   document.addEventListener('lightbox:closed', function() {
     state.lifeListLightboxSpecies = null;
+    state.lifeListLightboxTaxonId = null;
   });
 }

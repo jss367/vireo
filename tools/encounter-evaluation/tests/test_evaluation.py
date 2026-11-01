@@ -122,6 +122,47 @@ def test_reader_is_read_only_and_hides_labels_before_feature_preparation(library
     assert bundle["photos"][0]["evidence"][0]["sources"][0]["predictions"][0]["taxon"] == "inat:101"
 
 
+@pytest.mark.parametrize("flag", ["flagged", "picked", "rejected", "none"])
+def test_real_loader_blinds_confirmed_flags_without_reading_attribution(library, flag):
+    from canonical_schema import create_current_flag_attribution
+    from pipeline import load_photo_features, run_triage
+
+    with sqlite3.connect(library) as writer:
+        create_current_flag_attribution(writer)
+        writer.execute("UPDATE photos SET flag=? WHERE id=1", (flag,))
+        writer.execute("""INSERT INTO current_flag_attribution
+            (photo_id, workspace_id, flag, description) VALUES(1, 1, ?, 'Photographer decision')""", (flag,))
+    before = library.read_bytes()
+    conn = open_library(library)
+    forbidden = {"current_flag_attribution", "flag_attribution_history", "edit_history", "edit_history_items",
+                 "keywords", "photo_keywords"}
+    reads = set()
+
+    def authorize(action, table, _column, _database, _trigger):
+        if action == sqlite3.SQLITE_READ:
+            reads.add(table)
+            if table in forbidden:
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    try:
+        conn.set_authorizer(authorize)
+        photos = load_photo_features(FeatureReader(conn, 1), photo_ids=[1], effective_config={})
+        assert photos[0]["flag"] == "none"
+        assert photos[0]["flag_confirmation_status"] == "unverified"
+        assert photos[0]["confirmed_species"] is None
+        run_triage([{"photos": photos}])
+        assert photos[0]["label"] == "REVIEW"
+        assert not reads.intersection(forbidden)
+        assert conn.in_transaction
+        conn.set_authorizer(None)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("UPDATE main.photos SET flag='none' WHERE id=1")
+    finally:
+        conn.close()
+    assert library.read_bytes() == before
+
+
 def test_new_run_picks_up_label_change_but_retained_inputs_remain_consistent(library, tmp_path):
     first = prepare(library, tmp_path / "first")
     bundle = read_bundle(tmp_path / "first", first["sessions"][0])

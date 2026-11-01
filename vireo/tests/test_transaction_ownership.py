@@ -22,7 +22,7 @@ progress sticks (delete an entry at zero).
 the data layer itself, ``vireo/db.py`` and ``vireo/repositories/*.py``:
 
 - a call to ``commit``, ``rollback``, ``commit_with_retry``, ``begin``,
-  ``begin_immediate``, ``transaction`` or ``_commits_held`` on any receiver
+  ``begin_immediate`` or ``transaction`` on any receiver
   (``self.conn.commit()``, ``self.commit_with_retry(self.conn)``,
   ``history.commit()``, ``with repo.transaction():``);
 - ``execute``/``executescript``/``execute_with_retry`` of a constant
@@ -36,9 +36,9 @@ the data layer itself, ``vireo/db.py`` and ``vireo/repositories/*.py``:
 The bodies of ``Database``'s transaction-control methods are the one place
 transaction control belongs, so they are not counted: ``commit``,
 ``rollback``, ``commit_with_retry``, ``begin``, ``begin_immediate``,
-``transaction``, ``close``, the commit hold ``_commits_held`` and the
-``_Connection`` subclass behind it, and the module-level
-``commit_with_retry`` helper.
+``transaction`` and ``close``, and the module-level ``commit_with_retry``
+helper. (The unit of work's machinery, ``vireo/unit_of_work.py``, is not part
+of the data layer.)
 
 Run ``python vireo/tests/test_transaction_ownership.py`` to print the current
 counts in the form the limits below use.
@@ -56,7 +56,7 @@ SKIPPED_DIRS = {"tests", "testing"}
 COMMIT_FLAG_NAMES = {"_commit", "commit"}
 CONTROL_CALLS = {
     "commit", "rollback", "commit_with_retry", "_commit_with_retry",
-    "begin", "begin_immediate", "transaction", "_commits_held",
+    "begin", "begin_immediate", "transaction",
 }
 EXECUTE_CALLS = {"execute", "executescript", "execute_with_retry"}
 ENDING_SQL = re.compile(
@@ -65,7 +65,6 @@ ENDING_SQL = re.compile(
 )
 EXEMPT_DATA_LAYER_QUALNAMES = {
     "vireo/db.py": {
-        "_Connection",
         "commit_with_retry",
         "Database.commit",
         "Database.rollback",
@@ -74,7 +73,6 @@ EXEMPT_DATA_LAYER_QUALNAMES = {
         "Database.begin_immediate",
         "Database.transaction",
         "Database.close",
-        "Database._commits_held",
     },
 }
 

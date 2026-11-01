@@ -97,8 +97,7 @@ class _SourceFrame:
             if self.db.in_transaction:
                 write()
             else:
-                with self.db.transaction():
-                    self.db.begin_immediate()
+                with self.db.transaction(immediate=True):
                     write()
             evict_if_over_quota(self.db, self.root)
         except (OSError, sqlite3.Error):

@@ -50,7 +50,7 @@ def test_folder_merge_keeps_resolved_tags_provenance_pending_and_history(catalog
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(survivor, unrelated, source='manual')
     db.photo_review.set_flag(survivor, 'rejected')
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [losing], CANDIDATES, 'Uncertain calls', 'Audio')
         edit = resolve_alternatives(db, [losing], CANDIDATES[0])
     before = db.identity_alternatives.for_photos([losing], include_resolved=True)[losing]
@@ -84,7 +84,7 @@ def test_folder_merge_conflict_rolls_back_earlier_duplicate_and_all_pending(cata
     source, target, losing, survivor, path = folder_twins(db, tmp_path)
     losing2 = photo(db, source, 'other.raf')
     survivor2 = photo(db, target, 'other.raf')
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [losing], CANDIDATES, 'First evidence', 'Audio')
         resolve_alternatives(db, [losing], CANDIDATES[0])
         save_alternatives(db, [losing2], CANDIDATES, 'Other evidence', 'Audio')
@@ -104,7 +104,7 @@ def test_companion_pairing_keeps_identity_tags_and_normal_history(catalog, tmp_p
     primary, companion = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(primary, unrelated)
-    with db._commits_held():
+    with db.transaction():
         edit = save_alternatives(db, [companion], CANDIDATES, 'Uncertain call', 'Audio')
         if resolved:
             edit = resolve_alternatives(db, [companion], CANDIDATES[0])
@@ -124,7 +124,7 @@ def test_companion_identity_conflict_keeps_pair_and_commits_earlier_pair(catalog
     folder = workspace_folders.add_folder(db, str(tmp_path))
     raw, jpeg = photo(db, folder, 'first.raf'), photo(db, folder, 'first.jpg')
     raw2, jpeg2 = photo(db, folder, 'second.raf'), photo(db, folder, 'second.jpg')
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [jpeg], CANDIDATES, 'First review', 'Audio')
         resolve_alternatives(db, [jpeg], CANDIDATES[0])
         save_alternatives(db, [raw2], CANDIDATES, 'RAW evidence', 'Audio')
@@ -154,7 +154,7 @@ def test_collapse_does_not_reintroduce_candidate_outvoted_by_newer_visible_revie
     db.queue_change(losing, 'keyword_add', CANDIDATES[0])
     db.conn.execute("UPDATE pending_changes SET created_at='2020-01-01' WHERE photo_id=?", (losing,))
     db.commit()
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [survivor], CANDIDATES, 'Newer uncertain review', 'Audio')
     if kind == 'folder':
         db.folders.merge_into_existing(source, target, path)
@@ -178,7 +178,7 @@ def test_folder_collapse_repairs_alias_intents_in_both_visible_workspaces(catalo
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (93001,99999,'Tyrannus melancholicus','Tropical Kingbird','species')")
     scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
     scientific_name = db.keywords.name_of(scientific)
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [losing], CANDIDATES, 'Uncertain', 'Audio')
         db.tag_photo(losing, scientific, source='manual', _commit=False)
         resolve_alternatives(db, [losing], CANDIDATES[0])

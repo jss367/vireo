@@ -111,6 +111,19 @@ class FeatureReader:
         return self.get_species_for_photos(photo_ids, include_identities=include_identities)
 
     @property
+    def photo_review(self):
+        """Read-only, label-blind flag interface required by the production loader."""
+        return self
+
+    def culling_flag_states(self, photo_ids):
+        """Hide photographer decisions before inference, just like species labels.
+
+        Do not query attribution or history, even when the source catalog has
+        them. An empty result makes the loader clear flags and cached approval.
+        """
+        return {}
+
+    @property
     def meta(self):
         """``db.meta`` as the current loader reads it: ``meta.get(key)``."""
         return _MetaReader(self.conn)

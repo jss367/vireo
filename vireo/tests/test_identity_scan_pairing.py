@@ -22,7 +22,7 @@ def _catalog(tmp_path, conflict_first, *, conflicting=True):
         pair = [photo_ingest.add_photo(db, folder_id=folder, filename=stem + extension, extension=extension, file_size=1, file_mtime=1) for extension in ('.raf', '.jpg')]
         pairs[key] = pair
     if conflicting:
-        with db._commits_held():
+        with db.transaction():
             save_alternatives(db, [pairs['bad'][0]], ['Heron', 'Egret'], 'RAW evidence', 'Bill')
             save_alternatives(db, [pairs['bad'][1]], ['Heron', 'Egret'], 'JPEG evidence', 'Call')
     sharing = db.create_workspace('Shared pair review')
@@ -74,7 +74,7 @@ def test_unrelated_scan_completes_keeps_conflicting_pair_and_merges_other_pairs(
 def test_late_pair_failure_restores_collection_state_and_discards_deferred_actions(tmp_path, monkeypatch, domain_error):
     import scanner.companions as companions
     db, pairs, _, collection, root = _catalog(tmp_path, False, conflicting=False)
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [pairs['bad'][1]], ['Heron', 'Egret'], 'Retain late-failure evidence', 'Call')
         resolve_alternatives(db, [pairs['bad'][1]], 'Heron')
         db.conn.execute('UPDATE pending_changes SET sync_started=1 WHERE photo_id=?', (pairs['bad'][1],))

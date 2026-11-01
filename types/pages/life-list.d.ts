@@ -1,6 +1,6 @@
 // Life List API models and contracts of shared scripts loaded by this page.
 interface LifePhoto {id:number;filename:string;flag?:string;is_species_representative?:boolean}
-interface LifeSpecies {species:string;scientific_name?:string;common_name?:string;photo_count:number;number:number;first_seen?:string;last_seen?:string;locations?:string[];photos:LifePhoto[];best?:LifePhoto;has_more?:boolean;loading_more?:boolean;loaded_count?:number;taxonomic_class?:LifeTaxon;taxon_rank?:string}
+interface LifeSpecies {species:string;taxon_id?:number|null;scientific_name?:string;common_name?:string;photo_count:number;number:number;first_seen?:string;last_seen?:string;locations?:string[];photos:LifePhoto[];best?:LifePhoto;has_more?:boolean;loading_more?:boolean;loaded_count?:number;taxonomic_class?:LifeTaxon;taxon_rank?:string}
 interface LifeData {species:LifeSpecies[];meta:{species_count:number;photo_count:number}}
 interface LifeTaxon {id:number;name:string;common_name?:string}
 interface LifeNode extends LifeTaxon {rank:string;child_rank?:string;found_children?:number;total_children?:number;children?:LifeNode[];found_species:number;total_species:number;found?:boolean;order?:string;photo?:LifePhoto}

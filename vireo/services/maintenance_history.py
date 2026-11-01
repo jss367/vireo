@@ -20,8 +20,7 @@ def resolve_drift_with_history(db: Database, photo_id: int, direction: str) -> N
     """Audit one completed repair; bulk callers retain earlier successes on failure."""
     from audit import resolve_drift
 
-    with db._commits_held():
-        db.begin_immediate()
+    with db.transaction(immediate=True):
         before = db.audit.drift_history_state(photo_id)
         photo = db.audit.photo_location(photo_id)
         if photo is None:
@@ -42,8 +41,7 @@ def remove_orphans_with_history(db: Database, photo_ids: list[int]) -> JsonDict:
     """Keep deletion and its durable audit together; defer cache work until commit."""
     from audit import confirmed_orphan_ids
 
-    with db._commits_held():
-        db.begin_immediate()
+    with db.transaction(immediate=True):
         confirmed = confirmed_orphan_ids(db, photo_ids)
         result = catalog_deletion.delete_photos(db, confirmed, commit=False)
         if result['deleted']:
@@ -62,8 +60,7 @@ def remove_orphans_with_history(db: Database, photo_ids: list[int]) -> JsonDict:
 
 def clean_keywords_with_history(db: Database) -> int:
     """Record successful duplicate merges in the same transaction as the merge."""
-    with db._commits_held():
-        db.begin_immediate()
+    with db.transaction(immediate=True):
         merged = db.keyword_tree.merge_duplicates()
         if merged:
             db.record_edit(

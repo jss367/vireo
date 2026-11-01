@@ -226,6 +226,8 @@ def load_photo_features(db, collection_id=None, config=None,
     Returns:
         list of photo dicts
     """
+    from subject_readiness import attach_flag_confirmations
+
     ws_id = db.require_workspace_id()
 
     # Resolve optional scopes to a single ID set.
@@ -247,6 +249,7 @@ def load_photo_features(db, collection_id=None, config=None,
     load.load_analysis_provenance()
     photos = load.build_photos()
     photos = load.apply_encounter_continuity(photos)
+    attach_flag_confirmations(photos, db.photo_review.culling_flag_states([p["id"] for p in photos]))
 
     log.info("Loaded %d photos with pipeline features", len(photos))
     if load.variant_mismatches:

@@ -149,6 +149,29 @@ def test_conflicting_override_is_review_and_foreign_detection_is_rejected(compar
     assert response.status_code == 400
 
 
+@pytest.mark.parametrize("analyzed", [False, True])
+def test_selected_subject_cards_preserve_only_confirmed_decisions(comparison_library, analyzed):
+    from services.photo_review import PhotoReviewService
+
+    app, db, pids, _ = comparison_library
+    if analyzed:
+        import config as cfg
+        _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    db.photo_review.flag_ranked_candidate(pids[0])
+    service = PhotoReviewService(db)
+    service.set_flag(pids[1], "flagged")
+    service.set_flag(pids[2], "rejected")
+    pack = _pack(app, pids, requested_species=TARGET)
+    cards = {c["id"]: c for c in pack["cards"]}
+    assert [cards[pid]["label"] for pid in pids] == ["REVIEW", "KEEP", "REJECT"]
+    assert [cards[pid]["flag_confirmation_status"] for pid in pids] == ["unverified", "confirmed", "confirmed"]
+    service.set_flag(pids[1], "none")
+    pack = _pack(app, pids, requested_species=TARGET)
+    cards = {c["id"]: c for c in pack["cards"]}
+    assert cards[pids[1]]["label"] == "REVIEW"
+    assert cards[pids[1]]["role"] == "review"
+
+
 def test_single_subject_frames_and_existing_decisions(comparison_library):
     app, db, pids, ids = comparison_library
     for pid in pids:

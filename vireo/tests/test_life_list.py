@@ -1576,3 +1576,207 @@ def test_life_list_numbering_places_okina_species_under_a(life_app):
         f"ʻApapane (#{apapane['number']}) must sort under A ahead of "
         f"Hutton's Vireo (#{hutton['number']})"
     )
+
+
+@pytest.mark.parametrize("names,scientific", [
+    (("Western cattle-egret", "Western cattle egret"), "Ardea ibis"),
+    (("Northern Flicker", "Colaptes auratus"), "Colaptes auratus"),
+])
+@pytest.mark.parametrize("hierarchy_only", [False, True])
+def test_life_list_groups_taxon_aliases_with_paging_and_curation(
+    life_app, names, scientific, hierarchy_only,
+):
+    """Spelling and common/scientific aliases share one lifer and its selections."""
+    app, db, ids = life_app
+    parents = [None, None]
+    if hierarchy_only:
+        parents = [db.add_keyword("First hierarchy"), db.add_keyword("Second hierarchy")]
+    keywords = [
+        db.add_keyword(name, parent_id=parent, is_species=True)
+        for name, parent in zip(names, parents, strict=True)
+    ]
+    taxon_id = db.conn.execute(
+        "INSERT INTO taxa (name, rank) VALUES (?, 'species')", (scientific,),
+    ).lastrowid
+    db.conn.executemany(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        [(taxon_id, keyword) for keyword in keywords],
+    )
+    stored_names = [db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword,),
+    ).fetchone()["name"] for keyword in keywords]
+    photos = []
+    for i in range(3):
+        photo = photo_ingest.add_photo(
+            db, folder_id=ids["folder"], filename=f"alias-{i}.jpg", extension=".jpg",
+            file_size=1000, file_mtime=500.0 + i,
+            timestamp=f"2026-05-0{i + 1}T09:00:00",
+        )
+        db.tag_photo(photo, keywords[i % 2])
+        photos.append(photo)
+    # Carry both aliases on one photo: count it once and dedupe locations.
+    db.tag_photo(photos[2], keywords[1])
+    for photo, name in zip(photos, ("France", "Hawaii", "France"), strict=True):
+        db.tag_photo(photo, db.add_keyword(name, kw_type="location"))
+    # The most recent representative was selected under the second alias.
+    db.species_curation.set_global_representative(stored_names[0], photos[0])
+    db.species_curation.set_global_representative(stored_names[1], photos[1])
+    db.species_curation.add_highlight(stored_names[0], photos[0])
+    db.species_curation.add_highlight(stored_names[1], photos[2])
+    db.commit()
+
+    data = _get_life_list(app)
+    matches = [entry for entry in data["species"] if entry["taxon_id"] == taxon_id]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry["species"] == stored_names[0]
+    assert entry["photo_count"] == 3
+    assert entry["first_seen"] == "2026-05-01T09:00:00"
+    assert entry["last_seen"] == "2026-05-03T09:00:00"
+    assert set(entry["locations"]) == {"France", "Hawaii"}
+    assert len(entry["locations"]) == 2
+    assert entry["preferred_photo_id"] == photos[1]
+    assert entry["best"]["id"] == photos[1]
+    by_id = {photo["id"]: photo for photo in entry["photos"]}
+    assert by_id[photos[0]]["is_species_representative"] is True
+    assert by_id[photos[1]]["is_species_representative"] is True
+    assert by_id[photos[0]]["is_highlighted"] is True
+    assert by_id[photos[2]]["is_highlighted"] is True
+    assert data["meta"]["species_count"] == 3
+
+    client = app.test_client()
+    for alias in stored_names:
+        pages = [client.get("/api/life-list/species", query_string={
+            "species": alias, "offset": offset, "limit": 1,
+        }).get_json() for offset in range(3)]
+        assert all(page["species"] == stored_names[0] for page in pages)
+        assert all(page["photo_count"] == 3 for page in pages)
+        assert [page["photos"][0]["id"] for page in pages] == [
+            photo["id"] for photo in entry["photos"]
+        ]
+        assert pages[-1]["has_more"] is False
+
+    response = client.get(
+        "/api/life-list/export?format=csv&detail=species&include_locations=1",
+    )
+    exported = list(csv.DictReader(io.StringIO(response.get_data(as_text=True))))
+    assert len([row for row in exported if row["species"] == stored_names[0]]) == 1
+    assert not any(row["species"] == stored_names[1] for row in exported)
+    # Rendering never renames keywords or rewrites the saved selections.
+    assert set(db.species_curation.get_representative_lists()) == set(stored_names)
+
+
+def test_life_list_keeps_different_taxa_with_the_same_name_separate(life_app):
+    app, db, ids = life_app
+    for i, photo in enumerate((ids["p1"], ids["p2"])):
+        parent = db.add_keyword(f"Parent {i}")
+        keyword = db.add_keyword("Shared Bird", parent_id=parent, is_species=True)
+        taxon = db.conn.execute(
+            "INSERT INTO taxa (name, rank) VALUES (?, 'species')",
+            (f"Distinctus species{i}",),
+        ).lastrowid
+        db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
+        db.tag_photo(photo, keyword)
+        db.tag_photo(photo, db.add_keyword(f"Place {i}", kw_type="location"))
+    db.species_curation.set_global_representative("Shared Bird", ids["p1"])
+    db.commit()
+
+    entries = [entry for entry in _get_life_list(app)["species"]
+               if entry["species"] == "Shared Bird"]
+    assert len(entries) == 2
+    assert len({entry["taxon_id"] for entry in entries}) == 2
+    by_photo = {entry["photos"][0]["id"]: entry for entry in entries}
+    assert "Place 0" in by_photo[ids["p1"]]["locations"]
+    assert "Place 1" not in by_photo[ids["p1"]]["locations"]
+    assert "Place 1" in by_photo[ids["p2"]]["locations"]
+    assert "Place 0" not in by_photo[ids["p2"]]["locations"]
+    assert by_photo[ids["p2"]]["best"]["is_species_representative"] is False
+
+
+def test_life_list_does_not_guess_identity_from_similar_unlinked_names(life_app):
+    app, db, ids = life_app
+    for photo, name in zip((ids["p1"], ids["p2"]), ("Unlinked bird", "Unlinked-bird"), strict=True):
+        db.tag_photo(photo, db.add_keyword(name, is_species=True))
+    entries = [entry for entry in _get_life_list(app)["species"]
+               if entry["species"].startswith("Unlinked")]
+    assert len(entries) == 2
+    assert all(entry["taxon_id"] is None for entry in entries)
+
+
+def test_life_list_pages_same_named_taxa_by_identity(life_app):
+    app, db, ids = life_app
+    taxa = []
+    for i, photo in enumerate((ids["p1"], ids["p2"])):
+        keyword = db.add_keyword(
+            "Shared Bird", parent_id=db.add_keyword(f"Taxon parent {i}"), is_species=True,
+        )
+        taxon = db.conn.execute(
+            "INSERT INTO taxa (name, rank) VALUES (?, 'species')",
+            (f"Differentus species{i}",),
+        ).lastrowid
+        taxa.append(taxon)
+        db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
+        db.tag_photo(photo, keyword)
+    for taxon, photo in zip(taxa, (ids["p1"], ids["p2"]), strict=True):
+        response = app.test_client().get("/api/life-list/species", query_string={
+            "species": "Shared Bird", "taxon_id": taxon, "limit": 1,
+        })
+        assert response.status_code == 200
+        page = response.get_json()
+        assert page["photo_count"] == 1
+        assert [item["id"] for item in page["photos"]] == [photo]
+
+
+
+def test_life_list_pages_unlinked_homonym_without_appending_linked_photos(life_app):
+    """The linked bucket sorts first, but offset 100 stays in the unlinked one."""
+    app, db, ids = life_app
+    linked = db.add_keyword("Shared Bird", parent_id=db.add_keyword("Linked parent"), is_species=True)
+    unlinked = db.add_keyword("Shared Bird", parent_id=db.add_keyword("Unlinked parent"), is_species=True)
+    taxon = db.conn.execute(
+        "INSERT INTO taxa (name, rank) VALUES ('Linkedus bird', 'species')",
+    ).lastrowid
+    db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, linked))
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (unlinked,))
+    expected = {}
+    for keyword, count, year in ((linked, 103, 2024), (unlinked, 102, 2025)):
+        expected[keyword] = set()
+        for i in range(count):
+            photo = photo_ingest.add_photo(
+                db, folder_id=ids["folder"], filename=f"identity-{keyword}-{i}.jpg", extension=".jpg",
+                file_size=1000, file_mtime=1000.0 + keyword * 200 + i,
+                timestamp=f"{year}-01-01T08:{i // 60:02d}:{i % 60:02d}",
+            )
+            db.tag_photo(photo, keyword)
+            expected[keyword].add(photo)
+    entries = [entry for entry in _get_life_list(app)["species"] if entry["species"] == "Shared Bird"]
+    assert [entry["taxon_id"] for entry in entries] == [taxon, None]
+    client = app.test_client()
+    for discriminator, keyword in (("none", unlinked), (str(taxon), linked)):
+        response = client.get("/api/life-list/species", query_string={
+            "species": "Shared Bird", "taxon_id": discriminator, "offset": 100,
+        })
+        assert response.status_code == 200
+        page = response.get_json()
+        assert page["photo_count"] == len(expected[keyword])
+        assert page["loaded_count"] == len(expected[keyword])
+        assert page["has_more"] is False
+        first_page = next(entry for entry in entries if entry["taxon_id"] == (
+            None if discriminator == "none" else taxon
+        ))
+        loaded = {photo["id"] for photo in first_page["photos"] + page["photos"]}
+        assert loaded == expected[keyword]
+        assert loaded.isdisjoint(expected[linked if keyword == unlinked else unlinked])
+    # Existing callers without an identity discriminator keep their name-only behavior.
+    legacy = client.get("/api/life-list/species", query_string={"species": "Shared Bird"})
+    assert legacy.status_code == 200
+    assert legacy.get_json()["photo_count"] == 103
+
+
+@pytest.mark.parametrize("taxon_id", ["", "invalid", "1.5"])
+def test_life_list_species_page_rejects_invalid_taxon_discriminator(life_app, taxon_id):
+    app, _, _ = life_app
+    response = app.test_client().get("/api/life-list/species", query_string={
+        "species": "Northern Cardinal", "taxon_id": taxon_id,
+    })
+    assert response.status_code == 400

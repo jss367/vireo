@@ -797,7 +797,7 @@ def test_attach_companion_commits_before_firing_callback(tmp_path):
     by the time the attach callback fires: the thumbnail stage keys queue
     entries on the owner's canonical path or its companion path, and the
     pre-generation ``_still_owns`` check runs against committed state.
-    When the callback fired inside ``_commits_held``, the fresh-connection
+    When the callback fired inside the unit of work, the fresh-connection
     read saw ``companion_path`` IS NULL and the queue entry was dropped.
     """
     from db import Database
@@ -815,7 +815,7 @@ def test_attach_companion_commits_before_firing_callback(tmp_path):
             return
         # Open a separate SQLite connection — a thumbnail worker runs on
         # its own connection and only sees committed state. If the attach
-        # fired its callback inside the ``_commits_held`` guard, the
+        # fired its callback inside the unit of work, the
         # ``companion_path`` UPDATE would not yet be visible here.
         with sqlite3.connect(db_path) as other:
             other.row_factory = sqlite3.Row
@@ -1048,7 +1048,7 @@ def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
     tmp_path, monkeypatch,
 ):
     """``_attach_companion`` publishes the RAW's id to ``photo_callback``
-    AFTER ``_commits_held`` releases, so the thumbnail worker on another
+    AFTER the unit of work commits, so the thumbnail worker on another
     connection sees ``companion_path``. In that window another connection
     can delete the RAW and SQLite can reuse its rowid for an unrelated
     photo; without ownership revalidation, the callback would publish
@@ -1072,7 +1072,7 @@ def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
 
     def racing_fs_actions(actions):
         real_fs_actions(actions)
-        # The attach commit (and its ``_commits_held``) have landed; the
+        # The attach commit (and its unit of work) have landed; the
         # callback has not fired yet. Replay the exact deletion-then-reuse
         # race on a separate real connection.
         with sqlite3.connect(db_path) as other:

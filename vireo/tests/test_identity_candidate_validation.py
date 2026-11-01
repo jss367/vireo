@@ -46,7 +46,7 @@ def test_equivalent_species_candidates_rejected_before_any_domain_write(app_and_
         assert response.status_code == 400
         assert 'same species' in response.get_json()['error']
     else:
-        with pytest.raises(ValueError, match='same species'), db._commits_held():
+        with pytest.raises(ValueError, match='same species'), db.transaction():
             save_alternatives(db, [photo], names, 'Do not lose evidence', 'Call')
     assert _snapshot(db) == before
     assert Path(sidecar).read_bytes() == original_xmp
@@ -73,7 +73,7 @@ def test_genuinely_distinct_or_unknown_candidates_remain_valid(app_and_db, entry
     if entry == 'api':
         assert save(client, [1], candidates=names).status_code == 200
     else:
-        with db._commits_held():
+        with db.transaction():
             save_alternatives(db, [1], names, 'Distinct alternatives', 'Call')
     assert db.identity_alternatives.for_photos([1])[1]['candidates'] == names
 
@@ -90,7 +90,7 @@ def test_maintenance_collapsed_single_candidate_stays_editable_and_unconfirmed(a
     if entry == 'api':
         assert save(client, [1], candidates=['Uncataloged alpha'], group_id=group['group_id']).status_code == 200
     else:
-        with db._commits_held():
+        with db.transaction():
             save_alternatives(db, [1], ['Uncataloged alpha'], 'Still needs confirmation', 'Call')
     assert db.identity_alternatives.for_photos([1])[1]['status'] == 'unresolved'
     assert not db.identity_alternatives.candidate_links([1], ['Uncataloged alpha'])
@@ -107,6 +107,6 @@ def test_fresh_input_validation_matches_api_and_service_without_domain_writes(ap
     if entry == 'api':
         assert save(client, [1], candidates=names).status_code == 400
     else:
-        with pytest.raises(ValueError), db._commits_held():
+        with pytest.raises(ValueError), db.transaction():
             save_alternatives(db, [1], names, 'Invalid alternatives', 'Call')
     assert _snapshot(db) == before

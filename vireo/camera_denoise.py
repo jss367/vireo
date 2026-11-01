@@ -133,9 +133,18 @@ def resolve_profile(photo=None, exif_data=None):
     return result
 
 
+def uses_camera_profile(recipe):
+    """Both global camera denoising and protected background smoothing use EXIF."""
+    recipe = recipe or {}
+    return (
+        (recipe.get("adjustments") or {}).get("denoise_mode") == "camera"
+        or bool((recipe.get("local") or {}).get("background_denoise"))
+    )
+
+
 def render_cache_key(photo, recipe):
     """Fingerprint the camera-dependent inputs outside the reusable recipe."""
-    if ((recipe or {}).get("adjustments") or {}).get("denoise_mode") != "camera":
+    if not uses_camera_profile(recipe):
         return None
     profile = json.dumps(resolve_profile(photo), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(profile.encode("utf-8")).hexdigest()

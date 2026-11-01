@@ -834,7 +834,7 @@ def create_pipeline_blueprint(
             run_selected_batch_review(photos, config=effective_cfg)
         )
         attach_edit_recipes(db, results.get("photos", []))
-        _attach_live_flag_confirmations(db, results.get("photos", []))
+        _attach_live_flag_confirmations(db, results)
         results["source"] = "browse-selection"
         results["workspace_id"] = db.active_workspace_id
         return jsonify(results)
@@ -918,7 +918,7 @@ def create_pipeline_blueprint(
             # so a stale one would keep showing a removed second species
             # and mis-derive "Mixed species" after an edit, undo, or redo.
             photo["confirmed_species_list"] = list(names)
-        _attach_live_flag_confirmations(db, results.get("photos", []))
+        _attach_live_flag_confirmations(db, results)
         from pipeline import attach_species_identities
         from species_identity import SpeciesResolver
         attach_species_identities(results, SpeciesResolver(db=db))
@@ -1071,7 +1071,7 @@ def create_pipeline_blueprint(
 
         serialized = serialize_results(results, prior_results=existing)
         attach_nested_edit_recipes(db, serialized)
-        _attach_live_flag_confirmations(db, serialized.get("photos", []))
+        _attach_live_flag_confirmations(db, serialized)
         return jsonify(serialized)
 
     @blueprint.route("/api/pipeline/regroup-live", methods=["POST"])
@@ -1161,7 +1161,7 @@ def create_pipeline_blueprint(
 
         serialized = serialize_results(results, prior_results=existing)
         attach_nested_edit_recipes(db, serialized)
-        _attach_live_flag_confirmations(db, serialized.get("photos", []))
+        _attach_live_flag_confirmations(db, serialized)
         return jsonify(serialized)
 
     @blueprint.route("/api/pipeline/detach-burst", methods=["POST"])
@@ -1883,16 +1883,28 @@ def _shrink_source_encounter(
         b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
 
 
-def _attach_live_flag_confirmations(db: Database, photos: list[JsonDict]) -> None:
-    """Only current persisted photographer attribution confirms a Cull flag."""
-    states = db.photo_review.culling_flag_states([p["id"] for p in photos])
+def _attach_live_flag_confirmations(db: Database, results: JsonDict) -> None:
+    """Refresh cached decisions from live attribution, never from a bare flag."""
+    from pipeline import refresh_serialized_summary
+    from subject_readiness import (
+        attach_flag_confirmations,
+        automatic_keep_assessment,
+        explicit_decision,
+    )
+
+    photos = results.get("photos", [])
+    attach_flag_confirmations(photos, db.photo_review.culling_flag_states([p["id"] for p in photos]))
     for photo in photos:
-        state = states.get(photo["id"], {})
-        flag = state.get("flag") or "none"
-        photo["flag"] = flag
-        photo["flag_confirmation_status"] = (
-            "confirmed" if state.get("confirmed_flag") == flag else "unverified"
+        # Species-only reviews do not carry triage labels.
+        if "label" not in photo:
+            continue
+        assessment = automatic_keep_assessment(photo)
+        photo.update(automatic_keep_eligible=assessment["eligible"], keep_status=assessment["status"],
+                     keep_reasons=assessment["reasons"])
+        photo["label"] = explicit_decision(photo) or (
+            "REJECT" if photo.get("label") == "REJECT" and photo.get("reject_reasons") else "REVIEW"
         )
+    refresh_serialized_summary(results)
 
 
 def _overlay_live_photo_state(db: Database, results: JsonDict) -> None:
@@ -1925,7 +1937,7 @@ def _overlay_live_photo_state(db: Database, results: JsonDict) -> None:
     # live overlay above is what makes this call correct — the shared
     # attacher short-circuits rejected photos, and the overlay
     # ensures p["flag"] reflects the live DB, not a stale cache.
-    _attach_live_flag_confirmations(db, results["photos"])
+    _attach_live_flag_confirmations(db, results)
     attach_species_representatives(db, results["photos"])
 
 

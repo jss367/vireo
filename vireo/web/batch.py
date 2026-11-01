@@ -362,10 +362,9 @@ def create_batch_blueprint(
 
         # Ranking and legacy writes can set raw flags without manual approval.
         states = db.photo_review.culling_flag_states(photo_ids)
-        gate_rows = {
-            pid: {**dict(photos_map[pid]), "flag": states.get(pid, {}).get("confirmed_flag") or "none"}
-            for pid in photo_ids
-        }
+        from subject_readiness import attach_flag_confirmations
+        gate_rows = {pid: dict(photos_map[pid]) for pid in photo_ids}
+        attach_flag_confirmations(gate_rows.values(), states)
         safety_error = best_batch_application_error(gate_rows, best_photo_id, normalized_reject_ids)
         if safety_error:
             return json_error(safety_error, 409)

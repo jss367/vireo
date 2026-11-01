@@ -14,6 +14,8 @@
  * @property {ReturnType<typeof setTimeout>|null} debounceTimer
  * @property {string|null} lifeListLightboxSpecies
  *   The species whose photos the lightbox is paging through.
+ * @property {number|null} lifeListLightboxTaxonId
+ *   The taxon identity, so shared common names page independently.
  * @property {Record<string,Promise<LifePhoto[]>>} lifeListLoadPromises
  *   One in-flight "more photos" page per species.
  * @property {Record<'species'|'photos',Record<string,boolean>|null>} lifeListExportColumnSelections
@@ -50,6 +52,7 @@ export const state = {
   lifeListLoadSeq: 0,
   debounceTimer: null,
   lifeListLightboxSpecies: null,
+  lifeListLightboxTaxonId: null,
   lifeListLoadPromises: {},
   lifeListExportColumnSelections: {species: null, photos: null},
   publishPreflightTimer: null,

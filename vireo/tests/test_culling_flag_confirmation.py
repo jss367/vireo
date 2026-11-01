@@ -658,12 +658,24 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.service.set_flag(self.ids[0], "flagged")
         self.service.set_flag(self.ids[1], "rejected")
         self.db.photo_review.flag_ranked_candidate(self.ids[2])
-        photos = [{"id": pid, "flag": "flagged", "flag_confirmation_status": "confirmed"}
+        photos = [{"id": pid, "flag": "flagged", "flag_confirmation_status": "confirmed", "label": "KEEP",
+                   "automatic_keep_eligible": True, "keep_status": "validated"}
                   for pid in self.ids + [999999]]
-        _attach_live_flag_confirmations(self.db, photos)
+        results = {"photos": photos, "summary": {"keep_count": 4}}
+        _attach_live_flag_confirmations(self.db, results)
         self.assertEqual([p["flag_confirmation_status"] for p in photos],
                          ["confirmed", "confirmed", "unverified", "unverified"])
         self.assertEqual([p["flag"] for p in photos], ["flagged", "rejected", "flagged", "none"])
+        self.assertEqual([p["label"] for p in photos], ["KEEP", "REJECT", "REVIEW", "REVIEW"])
+        self.assertTrue(all(p["automatic_keep_eligible"] is False for p in photos))
+        self.assertEqual(results["summary"]["keep_count"], 1)
+        self.assertEqual(results["summary"]["review_count"], 2)
+        self.assertEqual(results["summary"]["reject_count"], 1)
+
+        self.service.set_flag(self.ids[0], "none")
+        _attach_live_flag_confirmations(self.db, results)
+        self.assertEqual(photos[0]["label"], "REVIEW")
+        self.assertEqual(results["summary"]["keep_count"], 0)
 
     def test_fresh_culling_uses_confirmations_at_completion(self):
         from culling import analyze_for_culling

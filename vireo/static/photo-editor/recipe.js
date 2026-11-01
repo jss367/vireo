@@ -172,6 +172,7 @@ function updateRecipeSummary() {
     });
   }
   if (r.local && r.local.regions) {
+    if (r.local.background_denoise) parts.push('smooth background');
     r.local.regions.forEach(function(entry) {
       parts.push('local ' + entry.region);
     });

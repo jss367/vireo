@@ -54,11 +54,13 @@ def _old_review(ids):
 
 
 def test_reopening_reloads_analysis_and_current_decisions_without_writes(db, tmp_path):
+    from services.photo_review import PhotoReviewService
+
     ids = [_photo(db, tmp_path, f"duck{i}.jpg") for i in range(4)]
     old = _old_review(ids)
     save_results_raw(old, str(tmp_path), db.active_workspace_id)
-    db.photo_review.set_flag(ids[1], "flagged")
-    db.photo_review.set_flag(ids[2], "rejected")
+    PhotoReviewService(db).set_flag(ids[1], "flagged")
+    PhotoReviewService(db).set_flag(ids[2], "rejected")
     db.photo_review.set_rating(ids[1], 5)
     _analyze(db, tmp_path, ids[3])
     db.commit()
@@ -90,9 +92,8 @@ def test_reopening_reloads_analysis_and_current_decisions_without_writes(db, tmp
     assert load_results(str(tmp_path), db.active_workspace_id, db=db) == result
     assert (tmp_path / f"pipeline_results_ws{db.active_workspace_id}.json").read_bytes() == persisted
     assert list(db.conn.iterdump()) == before
-    # A later unflag is authoritative too; the recovered KEEP is still only
-    # a derived cache entry, not a newly persisted photographer decision.
-    db.photo_review.set_flag(ids[1], "none")
+    # A later confirmed clear is authoritative too.
+    PhotoReviewService(db).set_flag(ids[1], "none")
     cleared = load_results(str(tmp_path), db.active_workspace_id, db=db)
     assert next(p for p in cleared["photos"] if p["id"] == ids[1])["label"] == "REVIEW"
 
@@ -201,9 +202,10 @@ def test_saved_view_entry_points_recover_exact_reported_membership(db, tmp_path,
         rows = {p["id"]: p for p in result["photos"]}
         assert set(rows) == set(fixture["encounters"][0]["photo_ids"])
         assert all(rows[pid]["label"] == "REVIEW" for pid in original_rejects)
-        assert rows[216716]["label"] == "KEEP" and rows[216716]["flag"] == "flagged"
-        assert result["summary"]["keep_count"] == 1
-        assert result["summary"]["review_count"] == 70
+        assert rows[216716]["label"] == "REVIEW" and rows[216716]["flag"] == "flagged"
+        assert rows[216716]["flag_confirmation_status"] == "unverified"
+        assert result["summary"]["keep_count"] == 0
+        assert result["summary"]["review_count"] == 71
         assert result["summary"]["reject_count"] == 0
         assert client.get(endpoint, headers={"X-Vireo-Token": "recovery-test"}).get_json() == payload
     # Application startup can maintain its own bookkeeping, so compare photo decisions directly.

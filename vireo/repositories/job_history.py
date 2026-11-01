@@ -132,7 +132,7 @@ class JobHistoryRepository:
         """Replace the stored ``result`` JSON of ``job_id`` and commit.
 
         The commit goes through the connection's own ``commit``, so it stays
-        a no-op while ``Database._commits_held`` holds commits (undo/redo
+        a no-op inside a unit of work (``Database.transaction()``; undo/redo
         replay), like every other repository write.
         """
         self.conn.execute(

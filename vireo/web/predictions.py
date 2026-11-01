@@ -1704,10 +1704,10 @@ def create_predictions_blueprint(
         except ReviewCardConflict as exc:
             db.rollback()
             return json_error(str(exc), 409)
-        # Legacy setters still commit internally. Hold those commits under
+        # Legacy setters still commit internally; a unit of work holds them under
         # the decision's existing writer lock until every member and its
         # history have succeeded; a partial failure rolls everything back.
-        with db._commits_held():
+        with db.transaction():
             result = accept_review_card(db, rows) if decision == 'accept' else reject_review_card(db, rows)
         return jsonify(result)
 

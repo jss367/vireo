@@ -74,11 +74,10 @@ def _flow():
             setattr(scanning, name, MethodType(_selected("repositories/scanning.py", name, scan_ns, "ScanningRepository"), scanning))
         db.scanning = scanning
         db.commit_with_retry = conn.commit
-        db._commits_held = contextlib.nullcontext
         db._duplicates_repository = lambda: repo
         db.duplicates = repo
         db.begin_immediate = lambda: conn.execute("BEGIN IMMEDIATE")
-        db.transaction = lambda: conn
+        db.transaction = lambda **_options: conn
         db.rollback = conn.rollback
         trace = []
         def merge(winner, losers):

@@ -978,7 +978,7 @@ def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_p
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(survivor, unrelated)
     db.photo_review.set_flag(survivor, 'rejected')
-    with db._commits_held():
+    with db.transaction():
         edit_id = save_alternatives(db, [losing], ['Tropical Kingbird', "Couch's Kingbird"], 'Uncertain call', 'Audio')
         if status == 'resolved':
             edit_id = resolve_alternatives(db, [losing], 'Tropical Kingbird')
@@ -1083,7 +1083,7 @@ def test_survivor_uncertainty_keeps_unrelated_synced_source_species_and_provenan
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
     losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
     db.photo_visibility.grant(db.require_workspace_id(), [survivor])
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [survivor], ['Tropical Kingbird', "Couch's Kingbird"], 'Need calls', 'Audio')
     keyword = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(losing, keyword, source='manual')
@@ -1101,7 +1101,7 @@ def test_identity_merge_carry_respects_newer_unrelated_species_removal(db, tmp_p
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
     losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
     db.photo_visibility.grant(db.require_workspace_id(), [survivor])
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [survivor], ['Tropical Kingbird', "Couch's Kingbird"], 'Need calls', 'Audio')
     keyword = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(losing, keyword)
@@ -1124,7 +1124,7 @@ def test_identity_merge_preserves_higher_rank_taxonomy_without_confirming_candid
     db.conn.execute('UPDATE keywords SET taxon_id=92001 WHERE id=?', (keyword,))
     photo = losing if metadata_owner == 'losing' else survivor
     db.tag_photo(photo, keyword, source='manual')
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [losing], ['Tropical Kingbird', "Couch's Kingbird"], 'Need species evidence', 'A clearer view')
     assert keyword in _kw_ids(db, photo)
     moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
@@ -1145,7 +1145,7 @@ def test_identity_merge_rejects_candidate_removal_that_would_erase_same_named_hi
     keyword = db.add_keyword('Puma', kw_type='taxonomy')
     db.conn.execute('UPDATE keywords SET taxon_id=92001 WHERE id=?', (keyword,))
     db.tag_photo(survivor, keyword)
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [losing], ['Puma', 'Bobcat'], 'Uncertain species', 'A clearer view')
         if edited_candidates:
             save_alternatives(db, [losing], ['Heron', 'Egret'], 'Updated alternatives', 'A call recording')
@@ -2183,7 +2183,7 @@ def test_collision_preserves_identity_decision_history_and_sharing(db, tmp_path,
     workspace_folders.add_workspace_folder(db, sharing, t["stage_root"])
     loser, survivor = ((t["staged"], t["survivor"]) if same_hash
                        else (t["survivor"], t["staged"]))
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [loser], ["Heron", "Egret"], "Distant silhouette", "Bill shape")
         if resolved:
             resolve_alternatives(db, [loser], "Heron")
@@ -2219,7 +2219,7 @@ def test_collision_refuses_conflicting_identity_without_losing_evidence(db, tmp_
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, t["stage_root"])
     loser, survivor = ((t["staged"], t["survivor"]) if same_hash
                        else (t["survivor"], t["staged"]))
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [loser], ["Heron", "Egret"], "Original evidence", "Bill")
         if conflict == "decision":
             save_alternatives(db, [survivor], ["Heron", "Ibis"], "Other evidence", "Wings")
@@ -2247,7 +2247,7 @@ def test_collision_deduplicates_batch_identity_history_and_preserves_redo(db, tm
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, t["stage_root"])
     loser, survivor = ((t["staged"], t["survivor"]) if same_hash
                        else (t["survivor"], t["staged"]))
-    with db._commits_held():
+    with db.transaction():
         edit = save_alternatives(db, [loser, survivor], ["Heron", "Egret"], "Shared evidence", "Bill")
         if resolved:
             edit = resolve_alternatives(db, [loser, survivor], "Heron")
@@ -2274,7 +2274,7 @@ def test_intra_staged_collision_preserves_identity_evidence(db, tmp_path, monkey
     stage = _folder(db, str(tmp_path / "stage"), root=True)
     first = _photo(db, stage, "A.raf")
     second = _photo(db, stage, "a.raf")
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [second], ["Heron", "Egret"], "Case alias evidence", "Bill")
     import move
     monkeypatch.setattr(move, "_case_insensitive_root", lambda path: True)
@@ -2296,7 +2296,7 @@ def test_collision_rolls_back_when_pending_edit_conflicts_with_identity(db, tmp_
     loser, survivor = ((t["staged"], t["survivor"]) if same_hash
                        else (t["survivor"], t["staged"]))
     db.add_keyword("Heron", is_species=True)
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [loser], ["Heron", "Egret"], "Uncertain", "Bill")
     _queue(db, survivor, "keyword_add", "Heron", "2099-01-01 00:00:00")
     before = db.identity_alternatives.for_photos()
@@ -2315,7 +2315,7 @@ def test_collision_preserves_incompatible_batch_history_by_rolling_back(db, tmp_
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, t["stage_root"])
     kid = db.add_keyword("Heron", is_species=True)
     db.tag_photo(t["staged"], kid, source="manual")
-    with db._commits_held():
+    with db.transaction():
         edit = save_alternatives(db, [t["staged"], t["survivor"]], ["Heron", "Egret"], "Same evidence", "Bill")
     before = db.identity_alternatives.for_photos()
     with pytest.raises(ValueError, match="conflicting identity history"):
@@ -2338,7 +2338,7 @@ def test_same_resolution_batch_collapses_with_deduplicated_replay(db, tmp_path, 
     workspace_folders.add_workspace_folder(db, db.require_workspace_id(), t['stage_root'])
     ids = [t['staged'], t['survivor']]
     survivor = t['survivor'] if same_hash else t['staged']
-    with db._commits_held():
+    with db.transaction():
         saved = save_alternatives(db, ids, ['Heron', 'Egret'], 'Same silhouette', 'Bill')
         resolved = resolve_alternatives(db, ids, 'Heron')
     if undone:
@@ -2373,7 +2373,7 @@ def test_collision_keeps_higher_rank_taxonomy_outside_species_decision(db, tmp_p
     keyword = db.add_keyword('Ardea', kw_type='taxonomy')
     db.conn.execute('UPDATE keywords SET taxon_id=? WHERE id=?', (91002, keyword))
     db.tag_photo(tagged, keyword, source='manual')
-    with db._commits_held():
+    with db.transaction():
         edit = save_alternatives(db, [identity_photo], ['Heron', 'Egret'], 'Uncertain species', 'Bill')
     assert keyword in _kw_ids(db, tagged)
     moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
@@ -2416,7 +2416,7 @@ def test_higher_rank_homonym_collision_rollback_survives_sync_and_history(db, tm
     for pid in paths:
         db.tag_photo(pid, note, source='manual')
     db.tag_photo(metadata_photo, higher, source='manual')
-    with db._commits_held():
+    with db.transaction():
         edit = save_alternatives(db, [identity_photo], ['Ardea', 'Egret'], 'Uncertain silhouette', 'Bill')
         if edited_away:
             edit = save_alternatives(db, [identity_photo], ['Heron', 'Ibis'], 'Uncertain silhouette', 'Bill')
