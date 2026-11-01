@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -2403,9 +2404,23 @@ def test_store_grouped_predictions_two_member_burst_reads_outside_tx_and_rolls_b
     db.commit()
 
     in_tx_during_reads: list[bool] = []
+    writer_lock_free_during_reads: list[bool] = []
+
+    def writer_lock_is_free():
+        # Another connection can take SQLite's writer lock right now.
+        other = sqlite3.connect(db._db_path, timeout=0, isolation_level=None)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("ROLLBACK")
+            return True
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            other.close()
 
     def spy_read_keywords(path):
         in_tx_during_reads.append(db.conn.in_transaction)
+        writer_lock_free_during_reads.append(writer_lock_is_free())
         return []
 
     monkeypatch.setattr(xmp, "read_keywords", spy_read_keywords)
@@ -2464,8 +2479,10 @@ def test_store_grouped_predictions_two_member_burst_reads_outside_tx_and_rolls_b
             grouping_window=0, similarity_threshold=0.99, tax=Tax(), db=db,
             labels_fingerprint="fp-active",
         )
-    # Both members' sidecars were read before the writer transaction opened.
+    # Both members' sidecars were read before the writer transaction opened,
+    # with SQLite's writer lock free for other connections.
     assert in_tx_during_reads == [False, False]
+    assert writer_lock_free_during_reads == [True, True]
     # And the whole group rolls back: no row from the first member survives.
     assert not db.conn.in_transaction
     assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
