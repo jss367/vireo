@@ -61,12 +61,14 @@ def candidate_adoption(
     past it. Destination cancellation propagates before any source hash read;
     an ordinary unreadable destination is simply not adoptable.
     """
+    # Rule out impossible matches from the caller's batched metadata before
+    # issuing any further stat/realpath probes against a network destination.
+    candidate_size = candidate_stat.st_size
+    if not stat.S_ISREG(candidate_stat.st_mode) or candidate_size != source_size:
+        return None
     if _is_source_backed_path(source_file, candidate_path, path_under_any_source):
         log.warning("Destination candidate %s resolves to source media; skipping it", candidate_path)
         return None
-    if not stat.S_ISREG(candidate_stat.st_mode):
-        return None
-    candidate_size = candidate_stat.st_size
     if source_size == 0 and candidate_size == 0:
         # The source may have grown since its opening stat. This branch reads
         # no bytes, so recheck before attesting that an empty archive is enough.
@@ -76,8 +78,6 @@ def candidate_adoption(
         except OSError:
             return None
         return candidate_path, EMPTY_FILE_SHA256, EMPTY_FILE_SHA256
-    if candidate_size != source_size:
-        return None
     try:
         candidate_hash = hash_candidate(candidate_path)
     except DestReadCancelled:

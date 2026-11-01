@@ -1538,6 +1538,7 @@ def test_closed_recovery_preview_stops_long_walks(
 def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
         app_and_db, tmp_path, monkeypatch):
     import scanner
+    from import_job import collision
     from web import imports
 
     app, _, _ = app_and_db
@@ -1547,7 +1548,8 @@ def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
     for source in sources:
         (folder / source.name).write_bytes(b"wrong size")
         (folder / f"{source.stem}_1.jpg").write_bytes(source.read_bytes())
-    listings, hashes = [], []
+    listings, hashes, guard_probes = [], [], []
+    real_guard = collision._is_source_backed_path
     real_scandir, real_hash = os.scandir, scanner.compute_file_hash
 
     def scandir(path):
@@ -1559,6 +1561,11 @@ def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
         hashes.append(str(path))
         return real_hash(path)
 
+    def guard(source, candidate, under_source):
+        guard_probes.append(candidate)
+        return real_guard(source, candidate, under_source)
+
+    monkeypatch.setattr(collision, "_is_source_backed_path", guard)
     monkeypatch.setattr(imports.os, "scandir", scandir)
     monkeypatch.setattr(scanner, "compute_file_hash", file_hash)
     response = app.test_client().post("/api/import/check-duplicates", json={
@@ -1569,3 +1576,4 @@ def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
     assert len(listings) == 1
     assert len(hashes) == 6  # One matching candidate and one source per file.
     assert all(path not in hashes for path in [str(folder / s.name) for s in sources])
+    assert guard_probes == [str(folder / f"{s.stem}_1.jpg") for s in sources]
