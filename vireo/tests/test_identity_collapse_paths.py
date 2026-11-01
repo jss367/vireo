@@ -43,7 +43,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     note = db.add_keyword('Unrelated note')
     db.tag_photo(survivor, note, source='manual')
     db.photo_review.set_flag(survivor, 'rejected')
-    with db._commits_held():
+    with db.transaction():
         saved = save_alternatives(db, [losing], ['Heron', 'Egret'], 'Distant frame', 'Bill')
         edited = resolve_alternatives(db, [losing], 'Heron') if status == 'resolved' else saved
     if drained:
@@ -101,7 +101,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
 def test_collapse_conflicts_keep_pair_data_and_folder_transaction_untouched(db, tmp_path, path, conflict):
     from repositories.identity_alternatives import IdentityMergeConflict
     source, target, survivor, losing, target_path = _fixture(db, tmp_path, path)
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [losing], ['Heron', 'Egret'], 'Original evidence', 'Bill')
         if conflict == 'decision':
             save_alternatives(db, [survivor], ['Heron', 'Egret'], 'Other evidence', 'Call')
@@ -129,7 +129,7 @@ def test_collapse_keeps_current_tags_for_redo_only_identity_history(db, tmp_path
     source, target, survivor, losing, target_path = _fixture(db, tmp_path, path)
     keyword = db.add_keyword('Heron', is_species=True)
     db.tag_photo(losing, keyword, source='accept')
-    with db._commits_held():
+    with db.transaction():
         saved = save_alternatives(db, [losing], ['Heron', 'Egret'], 'Redo evidence', 'Bill')
     db.undo_last_edit()
     if path == 'folder':
@@ -147,7 +147,7 @@ def test_collapse_keeps_current_tags_for_redo_only_identity_history(db, tmp_path
 @pytest.mark.parametrize('path', ['delete', 'audit'])
 def test_real_deletion_cascades_identity_and_history_only_for_deleted_photos(db, tmp_path, path):
     _, _, survivor, losing, _ = _fixture(db, tmp_path, 'folder')
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [losing, survivor], ['Heron', 'Egret'], 'Independent evidence', 'Bill')
         resolve_alternatives(db, [losing, survivor], 'Heron')
     if path == 'delete':
@@ -189,7 +189,7 @@ def test_staged_identity_intents_cannot_be_acknowledged_by_old_path_writer(db, t
     tree = _collision_tree(db, tmp_path, same_hash=same_hash)
     workspace_folders.add_workspace_folder(db, db.require_workspace_id(), tree['stage_root'])
     losing, survivor = (tree['staged'], tree['survivor']) if same_hash else (tree['survivor'], tree['staged'])
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [losing], ['Heron', 'Egret'], 'Moved decision', 'Bill')
         resolve_alternatives(db, [losing], 'Heron')
     before = [dict(row) for row in db.conn.execute('SELECT * FROM pending_changes WHERE photo_id=?', (losing,))]
@@ -216,7 +216,7 @@ def test_folder_identity_conflict_rolls_back_earlier_duplicate_carries(db, tmp_p
     db.photo_keywords.record_embedded_offered_keys(losing, ['earlier embedded note'])
     later_target = _photo(db, target, 'later.jpg')
     later_source = _photo(db, source, 'later.jpg')
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, [later_source], ['Heron', 'Egret'], 'Source evidence', 'Bill')
         save_alternatives(db, [later_target], ['Heron', 'Egret'], 'Target evidence', 'Call')
     assert keyword not in {row['id'] for row in db.photo_keywords.get_for_photos([survivor]).get(survivor, [])}

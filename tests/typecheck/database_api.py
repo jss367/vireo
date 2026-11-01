@@ -42,7 +42,7 @@ def check_database_api(db: Database) -> None:
     db.set_progress_handler(None, 0)
     with db.transaction() as result:
         assert_type(result, None)
-    with db._commits_held() as result:
+    with db.transaction() as result:
         assert_type(result, None)
     with db as opened:
         assert_type(opened, Database)

@@ -14,20 +14,20 @@ def test_identity_batch_bounds_full_keyword_scans(tmp_path, operation):
         db.conn.executemany("INSERT INTO keywords(name,type,is_species) VALUES (?,'taxonomy',1)", [(f'Catalog species {i}',) for i in range(2000)])
         db.commit()
         if operation != 'save':
-            with db._commits_held():
+            with db.transaction():
                 save_alternatives(db, photos, ['Heron', 'Egret'], 'Distant frames', 'Bill')
         if operation in ('undo', 'redo'):
-            with db._commits_held():
+            with db.transaction():
                 resolve_alternatives(db, photos, 'Heron')
         if operation == 'redo':
             db.undo_last_edit()
         scans = []
         db.conn.set_trace_callback(lambda sql: scans.append(sql) if "FROM keywords k " in sql and "k.is_species=1 OR k.type='taxonomy'" in sql else None)
         if operation == 'save':
-            with db._commits_held():
+            with db.transaction():
                 save_alternatives(db, photos, ['Heron', 'Egret'], 'Distant frames', 'Bill')
         elif operation == 'resolve':
-            with db._commits_held():
+            with db.transaction():
                 resolve_alternatives(db, photos, 'Heron')
         elif operation == 'undo':
             db.undo_last_edit()
@@ -47,7 +47,7 @@ def test_resolution_refreshes_identity_after_keyword_creation_in_same_transactio
         common = db.add_keyword('Choice')  # promoted by resolution, not a species yet
         alias = db.add_keyword('Scientific alias', is_species=True, source_taxon_id=99001)
         db.tag_photo(photo, alias, source='accept')
-        with db._commits_held():
+        with db.transaction():
             # Warm name resolution before either the taxonomy or promoted keyword exists.
             save_alternatives(db, [photo], ['Choice', 'Other'], 'Distant frame', 'Bill')
             db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (99001,99001,'Scientific alias','Choice','species')")
@@ -80,7 +80,7 @@ def test_batch_identity_reuse_keeps_each_photo_association_check_live(tmp_path, 
                 db.tag_photo(photos[1], keyword, source='manual', _commit=False)
 
         monkeypatch.setattr(IdentityAlternativesRepository, 'set_state', change_next_photo)
-        with pytest.raises(IdentityHistoryStale), db._commits_held():
+        with pytest.raises(IdentityHistoryStale), db.transaction():
             save_alternatives(db, photos, ['Heron', 'Egret'], 'Distant frames', 'Bill')
         assert db.identity_alternatives.for_photos(photos) == {}
         assert not db.conn.execute('SELECT 1 FROM photo_keywords WHERE photo_id IN (?, ?)', photos).fetchone()
@@ -111,7 +111,7 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
         db.tag_photo(photo, scientific, source='accept')
         db.tag_photo(photo, note, source='manual')
         db.photo_review.set_flag(photo, 'rejected')
-        with db._commits_held():
+        with db.transaction():
             saved = save_alternatives(db, [photo], ['Puma', 'Bobcat'], 'Ambiguous silhouette', 'Bill')
         assert not db.conn.execute('SELECT 1 FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (photo, scientific)).fetchone()
         for action in (None, 'undo', 'redo'):

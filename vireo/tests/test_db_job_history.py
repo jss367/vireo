@@ -126,7 +126,7 @@ def test_set_result_for_unknown_id_writes_nothing(history_db):
 def test_set_result_commit_is_held_with_other_commits(history_db):
     db = history_db
     _insert(db, "job-e", result="{}")
-    with db._commits_held():
+    with db.transaction():
         db.job_history.set_result("job-e", '{"x": 1}')
         assert db.in_transaction
         assert _committed_result(db, "job-e") == "{}"

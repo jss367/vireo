@@ -884,8 +884,7 @@ def reconcile_preview_cache(db, vireo_dir):
             try:
                 # Another app may publish after the startup snapshot. Use
                 # the publisher's writer lock and recheck before unlinking.
-                with db.transaction():
-                    db.begin_immediate()
+                with db.transaction(immediate=True):
                     if db.caches.paired_preview_get(os.path.basename(path)) is None:
                         os.remove(path)
             except OSError:

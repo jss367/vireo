@@ -188,7 +188,7 @@ class _CompanionGroups:
         owner_id = owner["id"]
         ownership = (owner["folder_id"], owner["filename"], name)
         try:
-            with db._commits_held():
+            with db.transaction():
                 # The guarded write takes the writer lock before anything
                 # else, so neither check below can go stale before commit.
                 if not db.companion_pairing.claim_companion(
@@ -225,9 +225,8 @@ class _CompanionGroups:
                 )
                 self.tally.credit_merged_companion()
         except _CompanionAttachRefused:
-            # ``_commits_held`` rolled back already, unless the connection
-            # cannot hold commits; the refusals precede every other write.
-            db.rollback()
+            # The unit of work rolled back already; the refusals precede
+            # every other write.
             return False
         self._publish_attached_companion(image_path, owner, ownership)
         self.tally.report_progress()
@@ -265,7 +264,7 @@ class _CompanionGroups:
         owner_id = owner["id"]
         photo_callback = self.tally.photo_callback
         reported_identities = self.tally.reported_identities
-        # Report AFTER ``_commits_held`` releases: the thumbnail worker runs
+        # Report AFTER the unit of work commits: the thumbnail worker runs
         # on a separate connection and only sees committed data. If the
         # callback fired inside the guard, a queue entry whose canonical
         # path falls back to the companion (missing RAW) would be checked
@@ -298,7 +297,7 @@ class _CompanionGroups:
             # cataloged RAW would publish the stale id to the pipeline
             # or import collection — and no end-of-scan merge callback
             # would correct it because the JPEG never had a row of its
-            # own. Taking the writer lock under ``_commits_held`` makes
+            # own. Taking the writer lock inside a unit of work makes
             # the check-then-publish atomic against concurrent deletes.
             prepare = getattr(photo_callback, "prepare_publication", None)
             publication = (
@@ -311,7 +310,7 @@ class _CompanionGroups:
             # the writer lock, then publishes through a nonblocking callback.
             # Ownership is revalidated AFTER that wait, keeping rowid reuse
             # protection without preventing the consumer's thumbnail commits.
-            with publication as publish, self.db._commits_held():
+            with publication as publish, self.db.transaction():
                 owner_still_valid = _lock_companion_owner(
                     self.db, owner_id, ownership,
                 )

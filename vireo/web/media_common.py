@@ -176,8 +176,7 @@ def _preparation_publication(
         check_source()
         yield
     else:
-        with db.transaction():
-            db.begin_immediate()
+        with db.transaction(immediate=True):
             check_source()
             yield
 

@@ -7,7 +7,7 @@ use separate types so replay never guesses at those old entries' before-state.
 from __future__ import annotations
 
 from functools import wraps
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from services.pending_changes import queue_location_sync_if_enabled
 
@@ -25,20 +25,35 @@ class HistoryItem(TypedDict):
     new_value: str
 
 
+class _RefusedEdit(Exception):
+    """Carries an error response out of the unit so the unit rolls back."""
+
+    def __init__(self, result: object) -> None:
+        super().__init__()
+        self.result = result
+
+
 def atomic_edit[**P, R](
     get_db: Callable[[], Database],
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Keep setters, sidecar work and history in one writer transaction."""
+    """Keep setters, sidecar work and history in one unit of work.
+
+    An error response (status 400 or above) rolls the unit back, whatever it
+    had written before deciding to refuse.
+    """
     def decorate(fn: Callable[P, R]) -> Callable[P, R]:
         @wraps(fn)
         def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
             db = get_db()
-            with db._commits_held():
-                result = fn(*args, **kwargs)
-                status = result[1] if isinstance(result, tuple) else getattr(result, 'status_code', 200)
-                if status >= 400:
-                    db.rollback()
-                return result
+            try:
+                with db.transaction():
+                    result = fn(*args, **kwargs)
+                    status = result[1] if isinstance(result, tuple) else getattr(result, 'status_code', 200)
+                    if status >= 400:
+                        raise _RefusedEdit(result)
+            except _RefusedEdit as refused:
+                return cast('R', refused.result)
+            return result
         return wrapped
     return decorate
 

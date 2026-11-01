@@ -182,7 +182,7 @@ class _KnownCompanionKeeper:
         ownership = (
             known["folder_id"], known["owner_filename"], image_path.name,
         )
-        with self.db._commits_held():
+        with self.db.transaction():
             if not _lock_companion_owner(self.db, known["owner_id"], ownership):
                 return False
             self.import_companion_sidecar(image_path, known)
@@ -242,7 +242,7 @@ class _KnownCompanionKeeper:
         if known is None:
             return False
         ownership = (folder_id, known["owner_filename"], image_path.name)
-        with self.db._commits_held():
+        with self.db.transaction():
             if not _lock_companion_owner(self.db, known["owner_id"], ownership):
                 return False
             return self._keep_locked_companion(

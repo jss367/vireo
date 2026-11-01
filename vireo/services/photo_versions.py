@@ -28,8 +28,7 @@ def change_version(
     *, delete: bool = False,
 ) -> dict[str, Any] | None:
     """Serialize writers, reject stale tabs, and commit data, history and sync together."""
-    db.begin_immediate()
-    with db.transaction(), db._commits_held():
+    with db.transaction(immediate=True):
         if not db.photos.get(photo_id, verify_workspace=True):
             raise LookupError("Photo not found")
         repo = db.photo_versions

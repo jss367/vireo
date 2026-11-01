@@ -194,7 +194,7 @@ def test_later_location_group_conflict_preserves_successful_assignments(app_and_
     country = db.get_or_create_text_location('Conflict country')
     db.conn.execute("INSERT INTO keywords(name, type, parent_id) VALUES ('Conflict state', 'general', ?)", (country,))
     db.commit()
-    with db._commits_held():
+    with db.transaction():
         item = change_photo_location(db, pids[0], good)
         db.record_edit('photo_location', 'Assigned good place', str(good), [item], _commit=False)
         with pytest.raises(RuntimeError):

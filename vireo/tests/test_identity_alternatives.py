@@ -902,7 +902,7 @@ def test_identity_retirement_keeps_writer_lock_against_concurrent_rowid_reuse(ap
         def competing_retirement(repository, entry_id):
             assert entry_id == stale_id
             with pytest.raises(sqlite3.OperationalError, match='locked'):
-                with other._commits_held():
+                with other.transaction():
                     save_alternatives(other, [2], CANDIDATES, 'Independent newer edit', '')
             attempts.append(entry_id)
             original(repository, entry_id)
@@ -910,7 +910,7 @@ def test_identity_retirement_keeps_writer_lock_against_concurrent_rowid_reuse(ap
         monkeypatch.setattr(EditHistoryRepository, 'retire_superseded_identity_entry', competing_retirement)
         assert client.post('/api/redo').status_code == 409
         assert attempts == [stale_id]
-        with other._commits_held():
+        with other.transaction():
             new_id = save_alternatives(other, [2], CANDIDATES, 'Independent newer edit', '')
         assert new_id != stale_id
         assert other.edit_history.latest_undoable()['id'] == new_id

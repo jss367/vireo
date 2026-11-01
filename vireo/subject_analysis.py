@@ -79,10 +79,8 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
             raise ValueError("Required subject measurements are still incomplete")
         if defer_publication:
             return analysis
-        with db.transaction():
-            db.begin_immediate()
+        with db.transaction(immediate=True):
             publish_analysis(db, photo, detection, analysis, effective_cfg)
-            db.commit_with_retry()
     finally:
         image.close()
     return True

@@ -595,7 +595,7 @@ def _apply_choice(
     """
     from services.edit_history import change_photo_location
 
-    with db._commits_held():
+    with db.transaction():
         if not db.in_transaction:
             db.begin_immediate()
         leaf_id, name = _choice_leaf(db, choice, details)

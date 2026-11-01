@@ -277,7 +277,7 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
         assert list(bindings) == []
 
     db._fake_add_photo = add_photo
-    db._commits_held = contextlib.nullcontext
+    db.transaction = contextlib.nullcontext
     db.commit_with_retry = lambda: events.append("commit")
     def defer(photo_id, *, clear_mtime=False):
         row["xmp_import_pending"] = 1

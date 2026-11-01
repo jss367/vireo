@@ -13,6 +13,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from unit_of_work import UnitOfWork
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -127,6 +129,8 @@ def setup():
     ns["KeywordRepository"].taxonomy_root_twins = ns["KeywordTreeRepository"].taxonomy_root_twins
     db = ns["Database"]()
     db.conn = conn
+    db._unit = UnitOfWork()
+    db._species_provenance_before = {}
     repo = ns["KeywordRepository"]()
     repo.conn = conn
     db.keywords = repo
