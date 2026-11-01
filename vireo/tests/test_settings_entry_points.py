@@ -80,16 +80,14 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
         for node in nodes:
             if not _opens_database(node):
                 continue
-            # Any enclosing function may have imported config before this call.
+            # Any enclosing function may have bootstrapped before this call,
+            # but only a statement at the top level of that function's body
+            # is guaranteed to execute before entering a nested scope: an
+            # ``import config`` inside ``if cond:`` runs only when ``cond``
+            # is true, so it is not a reliable bootstrap for a static check.
             enclosing = [s for s in scopes if s.lineno <= node.lineno <= (s.end_lineno or s.lineno)]
-            # A bootstrap inside a nested helper (one not on the path to the
-            # call) does not run before it; only consider nodes reached from an
-            # enclosing scope without crossing another FunctionDef.
-            enclosing_ids = {id(s) for s in enclosing}
             if not any(
-                _bootstraps(n) and n.lineno <= node.lineno
-                for s in enclosing
-                for n in _walk_within_scope(s, enclosing_ids)
+                _bootstraps_in_body(s, node.lineno) for s in enclosing
             ):
                 offenders.append(node.lineno)
     # Module-level opens outside any function.
@@ -99,18 +97,21 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
     return sorted(set(offenders))
 
 
-def _walk_within_scope(root: ast.AST, allowed_scope_ids: set[int]):
-    """Yield ``root`` and descendants, skipping any nested ``FunctionDef`` /
-    ``AsyncFunctionDef`` whose body is not itself an enclosing scope of the
-    call being checked."""
-    yield root
-    for child in ast.iter_child_nodes(root):
-        if (
-            isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and id(child) not in allowed_scope_ids
-        ):
-            continue
-        yield from _walk_within_scope(child, allowed_scope_ids)
+def _bootstraps_in_body(scope: ast.AST, max_lineno: int) -> bool:
+    """A bootstrap sits as a top-level statement of ``scope.body`` whose line
+    is at or before ``max_lineno``. Statements nested in ``if`` / ``try`` /
+    ``with`` / loops are not accepted: static analysis can't prove they run."""
+    body = getattr(scope, "body", None)
+    if not isinstance(body, list):
+        return False
+    for stmt in body:
+        if stmt.lineno > max_lineno:
+            return False
+        if _bootstraps(stmt):
+            return True
+        if isinstance(stmt, ast.Expr) and _bootstraps(stmt.value):
+            return True
+    return False
 
 
 def test_entry_points_import_config_before_opening_a_database():
@@ -141,6 +142,17 @@ def test_entry_points_import_config_before_opening_a_database():
     ("def f(p):\n    def g():\n        import config\n    return Database(p)\n", [4]),
     # An import in a sibling helper is not a bootstrap either.
     ("def f(p):\n    def g():\n        pass\n    def h():\n        import config\n    return Database(p)\n", [6]),
+    # An ``import config`` inside ``if cond:`` runs only when ``cond`` is
+    # true, so it isn't a reliable bootstrap; the Database(p) at line 4 is
+    # unbootstrapped.
+    ("def f(p, enabled):\n    if enabled:\n        import config\n    return Database(p)\n", [4]),
+    # ``try: import config`` isn't guaranteed either (the import itself can
+    # raise) — the except branch continues on to Database with no provider.
+    ("def f(p):\n    try:\n        import config\n    except ImportError:\n        pass\n    return Database(p)\n", [6]),
+    # Imports inside loops and ``with`` blocks are likewise not top-level
+    # body statements.
+    ("def f(p, items):\n    for _ in items:\n        import config\n    return Database(p)\n", [4]),
+    ("def f(p, ctx):\n    with ctx:\n        import config\n    return Database(p)\n", [4]),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines
