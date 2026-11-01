@@ -144,10 +144,11 @@ def test_save_detections_requires_a_detector_model(db):
     pid = _photo(db)
     with pytest.raises(ValueError, match="detector_model is required"):
         db.detections.save(pid, [_d()], None)
+        db.commit()
     assert _det_rows(db, pid) == []
 
 
-def test_save_detections_writes_content_addressed_rows_and_commits(db, monkeypatch):
+def test_save_detections_writes_content_addressed_rows_and_leaves_commit_to_caller(db, monkeypatch):
     pid = _photo(db)
     commits = _commit_recorder(monkeypatch)
     ids = db.detections.save(
@@ -156,12 +157,14 @@ def test_save_detections_writes_content_addressed_rows_and_commits(db, monkeypat
         MODEL,
         runtime_fingerprint="rt-1",
     )
+    db.commit()
     assert ids == [
         detection_id(pid, MODEL, (0.1, 0.1, 0.2, 0.2), "animal"),
         detection_id(pid, MODEL, (0.5, 0.1, 0.2, 0.2), "animal"),
         detection_id(pid, MODEL, (0.7, 0.1, 0.2, 0.2), "person"),
     ]
-    assert commits == [db.conn]
+    # The repository never commits; the caller's ``db.commit()`` did.
+    assert commits == []
     assert not db.conn.in_transaction
     with _reader(db) as reader:
         rows = reader.execute(
@@ -211,6 +214,7 @@ def test_runtime_fingerprints_for_photos_are_distinct_over_the_given_photos(db):
 def test_save_detections_defaults_runtime_fingerprint_to_legacy(db):
     pid = _photo(db)
     db.detections.save(pid, [_d()], MODEL)
+    db.commit()
     assert [r["runtime_fingerprint"] for r in _det_rows(db, pid)] == ["legacy"]
 
 
@@ -227,6 +231,7 @@ def test_duplicate_boxes_keep_highest_confidence_then_latest(db):
         ],
         MODEL,
     )
+    db.commit()
     a = detection_id(pid, MODEL, (0.1, 0.1, 0.2, 0.2), "animal")
     b = detection_id(pid, MODEL, (0.4, 0.1, 0.2, 0.2), "animal")
     assert ids == [a, b]
@@ -238,6 +243,7 @@ def test_resave_upserts_in_place_and_keeps_predictions(db):
     pid = _photo(db)
     (det_id,) = db.detections.save(pid, [_d(0.5)], MODEL)
     db.predictions.add(det_id, species="Robin", confidence=0.9, model="clf")
+    db.commit()
     statements = _trace(db)
     assert db.detections.save(pid, [_d(0.75)], MODEL) == [det_id]
     db.conn.set_trace_callback(None)
@@ -253,6 +259,7 @@ def test_resave_retires_only_same_model_same_runtime_stale_rows(db):
     keep, stale = db.detections.save(
         pid, [_d(0.9, x=0.1), _d(0.8, x=0.3)], MODEL, runtime_fingerprint="rt",
     )
+    db.commit()
     other_runtime = _raw_det(db, pid, runtime_fingerprint="other", x=0.9)
     other_model = _raw_det(db, pid, model="other-det", runtime_fingerprint="rt")
 
@@ -267,6 +274,7 @@ def test_resave_retires_only_same_model_same_runtime_stale_rows(db):
 def test_save_empty_list_clears_same_runtime_rows(db):
     pid = _photo(db)
     db.detections.save(pid, [_d(x=0.1), _d(x=0.2)], MODEL)
+    db.commit()
     assert db.detections.save(pid, [], MODEL) == []
     assert _det_rows(db, pid) == []
 
@@ -290,6 +298,7 @@ def test_stale_sweep_deletes_in_chunks_of_500(db):
         _raw_det(db, pid, x=i / 10000)
     statements = _trace(db)
     db.detections.save(pid, [], MODEL)
+    db.commit()
     db.conn.set_trace_callback(None)
     # Cascade sub-programs re-report the statement; count distinct ones.
     deletes = list(dict.fromkeys(
@@ -307,14 +316,15 @@ def test_write_detection_batch_requires_a_detector_model(db):
         detection_store.write_detection_batch(db, pid, None, [_d()])
 
 
-def test_write_detection_batch_records_run_and_commits_once(db, monkeypatch):
+def test_write_detection_batch_records_run_in_one_unit(db, monkeypatch):
     pid = _photo(db)
     commits = _commit_recorder(monkeypatch)
     ids = detection_store.write_detection_batch(
         db, pid, MODEL, [_d(0.9, x=0.1), _d(0.8, x=0.2)],
         runtime_fingerprint="rt", input_fingerprint="in",
     )
-    assert commits == [db.conn]
+    # The service's unit of work commits, not the repository.
+    assert commits == []
     assert not db.conn.in_transaction
     with _reader(db) as reader:
         run = reader.execute(
@@ -396,6 +406,7 @@ def test_real_manual_review_pins_the_detector_run(db):
     (det_id,) = detection_store.write_detection_batch(db, pid, MODEL, [_d()],
                                          runtime_fingerprint="rt")
     db.predictions.add(det_id, species="Robin", confidence=0.9, model="clf")
+    db.commit()
     pred_id = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_id,),
     ).fetchone()["id"]
@@ -578,6 +589,7 @@ def test_get_detections_for_photos_dedups_across_chunks(db):
 def test_get_predictions_for_detection_filters_and_orders(db, monkeypatch):
     pid = _photo(db)
     (det_id,) = db.detections.save(pid, [_d()], MODEL)
+    db.commit()
     for species, conf, model, fp in [
         ("Robin", 0.4, "clf-a", "fp1"),
         ("Wren", 0.9, "clf-a", "fp1"),
@@ -586,6 +598,7 @@ def test_get_predictions_for_detection_filters_and_orders(db, monkeypatch):
     ]:
         db.predictions.add(det_id, species=species, confidence=conf,
                           model=model, labels_fingerprint=fp)
+        db.commit()
 
     def species(rows):
         return [r["species"] for r in rows]
@@ -616,6 +629,7 @@ def test_clear_detections_for_every_model(db):
     detection_store.write_detection_batch(db, pid, "other-det", [_d()])
     detection_store.write_detection_batch(db, other, MODEL, [_d()])
     db.detections.clear(pid)
+    db.commit()
     assert not db.conn.in_transaction
     with _reader(db) as reader:
         assert reader.execute(
@@ -633,6 +647,7 @@ def test_clear_detections_for_one_model(db):
     detection_store.write_detection_batch(db, pid, MODEL, [_d()])
     (kept,) = detection_store.write_detection_batch(db, pid, "other-det", [_d()])
     db.detections.clear(pid, detector_model=MODEL)
+    db.commit()
     assert not db.conn.in_transaction
     assert [r["id"] for r in _det_rows(db, pid)] == [kept]
     assert _run_row(db, pid) is None
@@ -693,6 +708,7 @@ def test_delete_detections_by_ids_cascades_and_commits(db):
     pid = _photo(db)
     a, b = db.detections.save(pid, [_d(x=0.1), _d(x=0.2)], MODEL)
     db.predictions.add(a, species="Robin", confidence=0.9, model="clf")
+    db.commit()
     detection_store.delete_detections_by_ids(db, {a})
     assert not db.conn.in_transaction
     with _reader(db) as reader:

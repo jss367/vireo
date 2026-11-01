@@ -234,6 +234,7 @@ def test_metadata_search_uses_current_visible_predictions(catalog):
     det = db.detections.save(ids["empty"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
     ], detector_model="test")[0]
+    db.commit()
     for fingerprint, species, timestamp in [("old", "Old species", "2025-01-01"),
                                             ("new", "New species", "2026-01-01")]:
         db.conn.execute(
@@ -270,6 +271,7 @@ def test_metadata_search_ignores_guessed_binomials_on_custom_labels(catalog):
                       taxonomy={"scientific_name": "Amazona rhodocorytha", "genus": "Amazona"})
     db.predictions.add(det, "Red-crowned Parrot", 0.8, "iNat21 (EVA-02 Large)", labels_fingerprint="tol",
                       taxonomy={"scientific_name": "Amazona viridigenalis"})
+    db.commit()
 
     def search(value):
         return db.collections.query_photo_ids([{"field": "metadata", "op": "contains", "value": value}])
@@ -296,6 +298,7 @@ def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
         det = db.detections.save(ids[name], [
             {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
         ], detector_model="test")[0]
+        db.commit()
         db.conn.execute(
             "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, species, "
             "scientific_name, confidence) VALUES (?, 'test', 'tol', 'Least Grebe', "

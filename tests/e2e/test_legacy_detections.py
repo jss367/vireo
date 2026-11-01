@@ -95,6 +95,7 @@ def test_legacy_nudge_includes_unclassified_detector_outputs(live_server, page):
         "confidence": 0.01, "category": "animal",
     }], "megadetector-v6")
     db.model_runs.record_detector_run(photos[3], "megadetector-v6", 0)
+    db.commit()
     page.goto(f'{live_server["url"]}/pipeline')
     card = page.locator("#legacyDetectionsCard")
     expect(card).to_be_visible()

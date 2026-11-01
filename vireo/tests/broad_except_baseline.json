@@ -71,7 +71,6 @@
   "raw_analysis.py": 2,
   "remote_setup.py": 1,
   "render_source.py": 3,
-  "repositories/detections.py": 1,
   "repositories/edit_history.py": 1,
   "repositories/edits.py": 3,
   "repositories/folders.py": 1,

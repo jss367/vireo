@@ -14,6 +14,7 @@ def _write_predictionless_pipeline_cache(live_server, photo_ids):
     # Undo rebuilds species from the catalog too; keep the fixture truly
     # predictionless there as well as in the saved snapshot.
     db.predictions.clear(collection_photo_ids=photo_ids)
+    db.commit()
     placeholders = ",".join("?" for _ in photo_ids)
     rows = db.conn.execute(
         f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",

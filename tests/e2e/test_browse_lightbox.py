@@ -852,6 +852,7 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
         "confidence": 0.95,
         "category": "animal",
     }], detector_model="test-detector")
+    db.commit()
     db.conn.commit()
 
     jpeg = _png_bytes((200, 100), "green")

@@ -17,6 +17,7 @@ def detection(db, photo_id, score=0.9):
 
 def add(db, det, species, score, model='BioCLIP-2.5', **kwargs):
     db.predictions.add(det, species, score, model, **kwargs)
+    db.commit()
 
 
 def evidence_rows(app, **params):
@@ -69,6 +70,7 @@ def test_disagreement_is_per_region_and_survives_row_filters(app_and_db):
     second = db.detections.save(photo_id, [{
         'box': {'x': .6, 'y': .2, 'w': .2, 'h': .3}, 'confidence': .8, 'category': 'animal',
     }], detector_model='other-detector')[0]
+    db.commit()
     add(db, first, 'Herring Gull', .8, 'one')
     add(db, second, 'Ring-billed Gull', .9, 'two')
     assert all(not p['evidence']['disagreement'] for p in evidence_rows(app))
@@ -85,8 +87,10 @@ def test_raw_match_uses_exact_run_and_model_scale(app_and_db):
     det = detection(db, db.photos.list_page()[0]['id'])
     add(db, det, 'Old species', .9999, labels_fingerprint='old', match_score=.9)
     db.model_runs.record_classifier_match_score(det, 'BioCLIP-2.5', 'old', .9, score_kind='cosine')
+    db.commit()
     add(db, det, 'Current species', .99, labels_fingerprint='new', match_score=.12)
     db.model_runs.record_classifier_match_score(det, 'BioCLIP-2.5', 'new', .12, label_count=100, score_kind='cosine')
+    db.commit()
     db.workspaces.update(db.require_workspace_id(), config_overrides={
         'match_thresholds': {'BioCLIP-2.5': {'threshold': .3, 'score_kind': 'cosine'}},
     })

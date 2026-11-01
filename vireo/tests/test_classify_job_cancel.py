@@ -136,6 +136,7 @@ def test_cancelled_reclassify_keeps_unreached_photos_predictions(db, tmp_path):
                           model="BioCLIP", labels_fingerprint="legacy")
         db.predictions.add(det, species="Robin", confidence=0.8,
                           model="OtherModel", labels_fingerprint="other")
+        db.commit()
 
     folders = {db.folder_id: str(tmp_path)}
     job = _job()
@@ -198,6 +199,7 @@ def test_summary_counts_match_score_skips_without_going_negative(db, tmp_path):
             det, "BioCLIP", "legacy", max_match_score=0.1, match_margin=None,
             top_species="x", label_count=10, score_kind="cosine",
         )
+        db.commit()
         detection_map[photo["id"]] = [{"id": det}]
 
     raw, failed, skipped = _classify_photos(
@@ -455,6 +457,7 @@ def test_failed_redetection_reclassifies_stored_boxes(db, tmp_path):
                           model="BioCLIP", labels_fingerprint="legacy")
         db.predictions.add(det, species="Robin", confidence=0.8,
                           model="BioCLIP", labels_fingerprint="other-ws")
+        db.commit()
         stored[photo["id"]] = det
 
     def detect(path):
@@ -550,6 +553,7 @@ def test_classify_photos_stops_cleanly_on_cancel_during_flush(db, tmp_path):
             [{"box": BOX, "confidence": 0.9, "category": "animal"}],
             detector_model="megadetector-v6",
         )[0]
+        db.commit()
         detection_map[photo["id"]] = [{"id": det}]
 
     clf = MagicMock()
@@ -608,6 +612,7 @@ def test_non_animal_skip_retires_stale_full_image_prediction(db, tmp_path):
     db.model_runs.record_detector_run(photo["id"], "full-image", box_count=1)
     db.predictions.add(full_det, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
+    db.commit()
 
     folders = {db.folder_id: str(tmp_path)}
     job = _job()

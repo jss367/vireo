@@ -1127,6 +1127,58 @@ def test_top_species_filters_predictions_and_preserves_scope(live_server, page, 
     expect(page.locator(".vf-chips")).to_contain_text("Top predicted species is Red-tailed Hawk")
 
 
+@pytest.mark.parametrize("extra_count", [0, 3, 5])
+def test_top_species_show_more(live_server, page, extra_count):
+    """Expand past five, collapse by keyboard, and filter by an expanded row."""
+    db = live_server["db"]
+    extra_species = [
+        "Brewer's Blackbird", "Dark-eyed Junco", "Pinyon Jay",
+        "Ruby-crowned Kinglet", "Steller's Jay",
+    ][:extra_count]
+    for index, species in enumerate(extra_species):
+        pid = photo_ingest.add_photo(
+            db, folder_id=live_server["data"]["folders"][0],
+            filename=f"extra-{index}.jpg", extension=".jpg", file_size=1000, file_mtime=1.0,
+        )
+        det_id = db.detections.save(pid, [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.95, "category": "animal"},
+        ], detector_model="test-detector")[0]
+        db.predictions.add(
+            detection_id=det_id, species=species, confidence=0.92, model="BioCLIP-2",
+        )
+    db.commit()
+    _open_browse(page, live_server)
+    summary = page.request.get(live_server["url"] + "/api/browse/summary").json()
+    assert [s["species"] for s in summary["top_species"]] == [
+        "Red-tailed Hawk", "American Robin", *extra_species,
+    ]
+    assert [s["count"] for s in summary["top_species"]] == [3, 2, *([1] * extra_count)]
+    rows = page.locator("#summarySpeciesList .summary-species-row:visible")
+    expect(rows).to_have_count(min(5, 2 + extra_count))
+    toggle = page.locator("#summarySpeciesList .summary-species-toggle")
+    if extra_count <= 3:
+        expect(toggle).to_have_count(0)
+        return
+
+    expect(toggle).to_have_text("Show more")
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+    toggle.click()
+    expect(rows).to_have_count(7)
+    expect(toggle).to_have_text("Show less")
+    expect(toggle).to_have_attribute("aria-expanded", "true")
+    toggle.press("Enter")
+    expect(rows).to_have_count(5)
+    expect(toggle).to_be_focused()
+    toggle.press("Space")
+    expect(rows).to_have_count(7)
+    rows.filter(has_text="Steller's Jay").click()
+    expect(page.locator("#grid .grid-card")).to_have_count(1)
+    expect(page.locator(".vf-chips")).to_contain_text("Top predicted species is Steller's Jay")
+    expect(rows).to_have_count(1)
+    expect(toggle).to_have_count(0)
+
+
 def test_top_species_narrows_match_any_collection(live_server, page):
     cid = live_server["db"].collections.add("Hawks or robins", json.dumps({
         "mode": "any", "rules": [

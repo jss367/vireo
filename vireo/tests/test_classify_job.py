@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -1067,6 +1068,7 @@ def test_detect_batch_stores_all_detections(tmp_path):
         {"box": {"x": 0.3, "y": 0.5, "w": 0.15, "h": 0.2}, "confidence": 0.60, "category": "animal"},
     ]
     det_ids = db.detections.save(pid, detections_list, detector_model="MDV6")
+    db.commit()
     assert len(det_ids) == 3
     stored = detection_store.get_detections(db, pid)
     assert len(stored) == 3
@@ -1641,6 +1643,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
     ], detector_model="megadetector-v6")[0]
     db.predictions.add(det_id, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
+    db.commit()
 
     # Seed a collection the classify path can consume.
     coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
@@ -1722,6 +1725,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     ], detector_model="megadetector-v6")[0]
     db.predictions.add(det_id, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
+    db.commit()
 
     coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
     db.commit()
@@ -1847,6 +1851,7 @@ def test_reclassify_finalizes_steps_on_resource_wait_cancel_during_load(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="legacy",
     )
+    db.commit()
 
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
@@ -1956,6 +1961,7 @@ def test_classify_factory_cancel_check_uses_pure_cancel_probe(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
+    db.commit()
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
@@ -2209,6 +2215,7 @@ def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypa
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0, "category": "animal"}],
         detector_model="full-image",
     )
+    db.commit()
     original_det_id = det_ids[0]
 
     # Sanity check the helper used by the reuse path — must use min_conf=0
@@ -2264,6 +2271,7 @@ def test_store_grouped_predictions_writes_active_fingerprint(tmp_path):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )
+    db.commit()
 
     import classify_job
     raw_results = [{
@@ -2302,6 +2310,208 @@ def test_store_grouped_predictions_writes_active_fingerprint(tmp_path):
     assert hits == {photo_id}
 
 
+def _one_detection_catalog(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    db.commit()
+    return db, folder_id, photo_id
+
+
+def test_store_grouped_predictions_keeps_a_photos_predictions_together(tmp_path, monkeypatch):
+    """One photo's top prediction and its alternatives are one unit of work.
+
+    Each ``add`` used to commit on its own, so a failure storing an
+    alternative left the top prediction (and any refreshed candidates)
+    committed without the rest of the photo's output.
+    """
+    import classify_job
+    from repositories.predictions import PredictionRepository
+
+    db, folder_id, photo_id = _one_detection_catalog(tmp_path)
+    det_ids = db.detections.save(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    db.commit()
+    real_add = PredictionRepository.add
+
+    def fail_on_alternative(self, *args, **kwargs):
+        if kwargs.get("status") == "alternative":
+            raise RuntimeError("disk full")
+        return real_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(PredictionRepository, "add", fail_on_alternative)
+    raw_results = [{
+        "photo": {
+            "id": photo_id, "filename": "a.jpg",
+            "folder_id": folder_id, "timestamp": None, "burst_id": None,
+        },
+        "folder_path": "/tmp/p",
+        "detection_id": det_ids[0],
+        "prediction": "Robin",
+        "confidence": 0.88,
+        "alternatives": [{"species": "Jay", "confidence": 0.1}],
+        "taxonomy": {},
+        "timestamp": None,
+    }]
+    with pytest.raises(RuntimeError, match="disk full"):
+        classify_job._store_grouped_predictions(
+            raw_results, job_id="job-abc", model_name="bioclip-2",
+            grouping_window=0, similarity_threshold=0.99, tax=None, db=db,
+            labels_fingerprint="fp-active",
+        )
+    assert not db.conn.in_transaction
+    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+
+
+def test_store_grouped_predictions_two_member_burst_reads_outside_tx_and_rolls_back(
+    tmp_path, monkeypatch,
+):
+    """A multi-member burst reads sidecars before the write transaction opens
+    and rolls back the whole group when a later member's write fails.
+
+    Together these guard the burst unit's two separable invariants that a
+    single-photo rollback test cannot cover: that the second member's XMP
+    read is not held under SQLite's writer lock, and that a later member's
+    write failure also rolls back the first member's writes.
+    """
+    import classify_job
+    import xmp
+    from repositories.predictions import PredictionRepository
+
+    db, folder_id, photo_id_a = _one_detection_catalog(tmp_path)
+    photo_id_b = photo_ingest.add_photo(
+        db, folder_id, "b.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
+    )
+    det_a = db.detections.save(
+        photo_id_a,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    det_b = db.detections.save(
+        photo_id_b,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.commit()
+
+    in_tx_during_reads: list[bool] = []
+    writer_lock_free_during_reads: list[bool] = []
+
+    def writer_lock_is_free():
+        # Another connection can take SQLite's writer lock right now.
+        other = sqlite3.connect(db._db_path, timeout=0, isolation_level=None)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("ROLLBACK")
+            return True
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            other.close()
+
+    def spy_read_keywords(path):
+        in_tx_during_reads.append(db.conn.in_transaction)
+        writer_lock_free_during_reads.append(writer_lock_is_free())
+        return []
+
+    monkeypatch.setattr(xmp, "read_keywords", spy_read_keywords)
+    # A truthy taxonomy forces ``_xmp_review_category`` to actually read the
+    # sidecar; the categorize stub keeps every member on the pending-review
+    # path so each one writes through ``predictions.add``.
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_kw: "new")
+
+    real_add = PredictionRepository.add
+
+    def fail_on_second_member(self, *args, **kwargs):
+        if kwargs.get("species") == "Jay":
+            raise RuntimeError("disk full")
+        return real_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(PredictionRepository, "add", fail_on_second_member)
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    from datetime import datetime
+
+    ts = datetime(2026, 1, 1, 12, 0, 0)
+    raw_results = [
+        {
+            "photo": {
+                "id": photo_id_a, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": ts, "burst_id": None,
+            },
+            "folder_path": "/tmp/p",
+            "detection_id": det_a,
+            "prediction": "Robin",
+            "confidence": 0.88,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": ts,
+        },
+        {
+            "photo": {
+                "id": photo_id_b, "filename": "b.jpg",
+                "folder_id": folder_id, "timestamp": ts, "burst_id": None,
+            },
+            "folder_path": "/tmp/p",
+            "detection_id": det_b,
+            "prediction": "Jay",
+            "confidence": 0.80,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": ts,
+        },
+    ]
+    with pytest.raises(RuntimeError, match="disk full"):
+        classify_job._store_grouped_predictions(
+            raw_results, job_id="job-abc", model_name="bioclip-2",
+            grouping_window=0, similarity_threshold=0.99, tax=Tax(), db=db,
+            labels_fingerprint="fp-active",
+        )
+    # Both members' sidecars were read before the writer transaction opened,
+    # with SQLite's writer lock free for other connections.
+    assert in_tx_during_reads == [False, False]
+    assert writer_lock_free_during_reads == [True, True]
+    # And the whole group rolls back: no row from the first member survives.
+    assert not db.conn.in_transaction
+    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+
+
+def test_full_image_anchor_keeps_detection_and_run_together(tmp_path, monkeypatch):
+    """The full-image detection and its detector run are one unit of work.
+
+    They used to commit separately, so a failure recording the run left a
+    detection row without its ``detector_runs`` row, which the
+    runtime-aware reuse gates read as never detected.
+    """
+    from classify_job.job_run import _ClassifyJobRun
+    from repositories.model_runs import ModelRunsRepository
+
+    db, _folder_id, photo_id = _one_detection_catalog(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(ModelRunsRepository, "record_detector_run", fail)
+    with pytest.raises(RuntimeError, match="disk full"):
+        _ClassifyJobRun._store_full_image_detection(db, photo_id, "rt-full", None)
+    assert not db.conn.in_transaction
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE photo_id = ?", (photo_id,),
+    ).fetchone()[0] == 0
+
+
 def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatch):
     """Already-labeled matches should not be pending review, but they still
     need prediction rows so the next run can reuse the classifier output.
@@ -2322,6 +2532,7 @@ def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatc
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )[0]
+    db.commit()
 
     monkeypatch.setattr("compare.categorize", lambda *_args, **_kwargs: "match")
 
@@ -2571,6 +2782,7 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )[0]
+    db.commit()
 
     class Tax:
         def get_hierarchy(self, _species):
@@ -2652,6 +2864,7 @@ def test_match_becoming_multispecies_clears_stale_auto_accept(tmp_path, monkeypa
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )[0]
+    db.commit()
 
     class Tax:
         def is_taxon(self, name):
@@ -2724,6 +2937,7 @@ def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )[0]
+    db.commit()
     write_sidecar(
         tmp_path / "a.xmp",
         {"Robin", "Sparrow"},
@@ -2801,6 +3015,7 @@ def test_hierarchy_keyword_still_auto_accepts_single_species_match(
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )[0]
+    db.commit()
     write_sidecar(tmp_path / "a.xmp", {"Robin", "Aves"}, set())
 
     class Tax:
@@ -2877,6 +3092,7 @@ def test_multiple_distinct_descendants_stay_pending(tmp_path, monkeypatch):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )[0]
+    db.commit()
     write_sidecar(
         tmp_path / "a.xmp",
         {"White-crowned Sparrow", "Golden-crowned Sparrow"},
@@ -2973,6 +3189,7 @@ def test_single_descendant_still_auto_accepts_match(tmp_path, monkeypatch):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )[0]
+    db.commit()
     write_sidecar(tmp_path / "a.xmp", {"White-crowned Sparrow"}, set())
 
     class Tax:
@@ -3041,6 +3258,7 @@ def test_match_flip_preserves_manual_review_on_reuse(
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )[0]
+    db.commit()
 
     class Tax:
         def get_hierarchy(self, _species):
@@ -3570,6 +3788,7 @@ def test_stored_prediction_species_folds_curly_apostrophe(tmp_path):
               "category": "animal"}],
             detector_model="megadetector-v6",
         )[0]
+        db.commit()
 
         stored = classify_job.gating._run_classifier_on_detection(
             db=db, detection_id=det_id, classifier_model="bioclip-2",
@@ -3614,6 +3833,7 @@ def test_stored_prediction_species_preserves_okina(tmp_path):
               "category": "animal"}],
             detector_model="megadetector-v6",
         )[0]
+        db.commit()
 
         classify_job.gating._run_classifier_on_detection(
             db=db, detection_id=det_id, classifier_model="bioclip-2",
@@ -3648,10 +3868,12 @@ def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
     det_id = det_ids[0]
 
     # Pre-seed a classifier run — any subsequent invocation should bail
     db.model_runs.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=0)
+    db.commit()
 
     calls = {"n": 0}
     def fake_classify(*a, **kw):
@@ -3693,6 +3915,7 @@ def test_classify_detection_gated_does_not_cache_zero_count(tmp_path, monkeypatc
           "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
     det_id = det_ids[0]
 
     import classify_job.gating
@@ -3731,6 +3954,7 @@ def test_record_batch_classifier_runs_skips_zero_count(tmp_path):
         ],
         detector_model="megadetector-v6",
     )
+    db.commit()
 
     batch = [
         {"detection_id": det_ok, "img": object()},
@@ -3807,6 +4031,7 @@ def test_publish_classifier_runs_promotes_after_predictions_persist(tmp_path):
     db.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
+    db.commit()
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -3863,6 +4088,7 @@ def test_publish_classifier_runs_promotes_after_predictions_persist(tmp_path):
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint=labels_short,
     )
+    db.commit()
     classify_job._publish_classifier_runs_for_raw_results(
         db, raw_results, "BioCLIP", labels_short,
         labels_fingerprint_full=labels_full, model_identity=identity,
@@ -3942,6 +4168,7 @@ def test_all_photos_cache_satisfied_requires_matching_predictions_row(tmp_path):
     # Torn write: classifier_runs exists, predictions do not.
     db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                              prediction_count=1)
+    db.commit()
 
     # Coverage query must refuse — with either the fully-specified
     # (model + fp) form and the fresh-install (both-unspecified) form.
@@ -3957,6 +4184,7 @@ def test_all_photos_cache_satisfied_requires_matching_predictions_row(tmp_path):
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint="fp-cached",
     )
+    db.commit()
     assert _all_photos_cache_satisfied(
         db, [pid], classifier_model="BioCLIP",
         labels_fingerprint="fp-cached",
@@ -3980,6 +4208,7 @@ def test_classifier_fingerprint_upserted(tmp_path, monkeypatch):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
 
     from labels_fingerprint import compute_fingerprint
     labels = ["Robin", "Sparrow"]
@@ -4337,6 +4566,7 @@ def test_flush_batch_writes_per_detection_embedding(tmp_path):
         ],
         detector_model="MegaDetector",
     )
+    db.commit()
 
     emb_a = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     emb_b = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
@@ -4469,6 +4699,7 @@ def test_store_grouped_predictions_saves_alternatives(tmp_path):
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
+    db.commit()
 
     raw_results = [{
         "photo": {"id": pid, "filename": "bird.jpg", "timestamp": "2024-01-15T10:00:00"},
@@ -5520,6 +5751,7 @@ def test_run_classifier_retries_on_database_is_locked(tmp_path):
           "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
     det_id = det_ids[0]
 
     locked = sqlite3.OperationalError("database is locked")
@@ -5668,6 +5900,7 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
                       model="BioCLIP", labels_fingerprint="legacy")
     db.predictions.add(det_second, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
+    db.commit()
 
     class FlipRunner(FakeRunner):
         """Cancel flips on right after the first photo has been processed."""
@@ -5768,6 +6001,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
     ], detector_model="megadetector-v6")[0]
     db.predictions.add(det, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
+    db.commit()
 
     runner = FakeRunner()
     job = _make_job()
@@ -6111,6 +6345,7 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
                       model="BioCLIP", labels_fingerprint="legacy")
     db.predictions.add(det_second, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
+    db.commit()
 
     class FlipRunner(FakeRunner):
         """Cancel flips on right after the first photo enters the loop."""
@@ -6221,6 +6456,7 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     ], detector_model="megadetector-v6")[0]
     db.predictions.add(stale_det, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
+    db.commit()
 
     runner = FakeRunner()
     job = _make_job()
@@ -6319,6 +6555,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
                       model="BioCLIP", labels_fingerprint="fp-old")
     db.model_runs.record_classifier_run(stale_det, "BioCLIP", "fp-old",
                              prediction_count=1)
+    db.commit()
 
     runner = FakeRunner()
     job = _make_job()
@@ -6420,6 +6657,7 @@ def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
                       model="BioCLIP", labels_fingerprint="legacy")
     db.predictions.add(det_b, species="OldB", confidence=0.5,
                       model="BioCLIP", labels_fingerprint="legacy")
+    db.commit()
 
     class FlipRunner(FakeRunner):
         """Cancel flips on after the second photo enters the loop."""
@@ -7405,6 +7643,7 @@ def test_store_pending_alt_that_folds_to_primary_does_not_hide_top1(tmp_path):
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
+    db.commit()
 
     raw_results = [{
         "photo": {"id": pid, "filename": "bird.jpg",
@@ -7471,6 +7710,7 @@ def test_store_match_alt_that_folds_to_primary_preserves_auto_accept(tmp_path):
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
+    db.commit()
 
     item = {
         "detection_id": det_ids[0],
@@ -7525,6 +7765,7 @@ def test_store_match_alt_that_only_differs_in_case_preserves_auto_accept(
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
+    db.commit()
 
     item = {
         "detection_id": det_ids[0],
@@ -7574,6 +7815,7 @@ def test_store_match_alt_non_ascii_case_preserves_both_predictions(tmp_path):
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
+    db.commit()
 
     item = {
         "detection_id": det_ids[0],
@@ -7694,6 +7936,7 @@ def test_all_photos_cache_satisfied_requires_every_photo_covered(tmp_path):
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint="abc123",
     )
+    db.commit()
 
     assert _all_photos_cache_satisfied(db, [covered]) is True
     assert _all_photos_cache_satisfied(db, [covered, uncovered]) is False
@@ -7741,6 +7984,7 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
         det_ids[1], species="Sparrow", confidence=0.9, model="BioCLIP",
         labels_fingerprint="fp-b",
     )
+    db.commit()
 
     # Model known, fingerprint unresolved: the identity gate must refuse
     # this because the cached rows disagree on the unbound fingerprint.
@@ -7772,17 +8016,20 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
         {"box": {"x": 6, "y": 6, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")
+    db.commit()
     for det_id in det2:
         db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-a", prediction_count=1)
         db.predictions.add(
             det_id, species="Robin", confidence=0.9, model="BioCLIP",
             labels_fingerprint="fp-a",
         )
+        db.commit()
     db.model_runs.record_classifier_run(det2[0], "Other", "fp-x", prediction_count=1)
     db.predictions.add(
         det2[0], species="Other bird", confidence=0.8, model="Other",
         labels_fingerprint="fp-x",
     )
+    db.commit()
     assert _all_photos_cache_satisfied(
         db, [pid2], classifier_model="BioCLIP", labels_fingerprint=None,
     ) is True
@@ -7864,6 +8111,7 @@ def test_all_photos_cache_satisfied_rejects_stale_classifier_runtime(tmp_path):
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint=labels_short,
     )
+    db.commit()
     db.conn.commit()
 
     # Without runtime constraint, historic behavior would treat this as
@@ -8007,6 +8255,7 @@ def test_all_photos_cache_satisfied_rejects_pre_synonym_classifier_runtime(
         det_id, species="Bubulcus ibis", confidence=0.9, model="BioCLIP",
         labels_fingerprint=labels_short,
     )
+    db.commit()
     db.conn.commit()
 
     # The pre-synonym row must NOT satisfy the cache now that the map is
@@ -8074,6 +8323,7 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
                       model="BioCLIP", labels_fingerprint="fp-cached")
     db.model_runs.record_classifier_run(det_ids[0], "BioCLIP", "fp-cached",
                              prediction_count=1)
+    db.commit()
 
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
@@ -8144,6 +8394,7 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
     db.model_runs.record_classifier_run(
         det_id, "timm-inat21", "fp-cached", prediction_count=1,
     )
+    db.commit()
     coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -8260,6 +8511,7 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
     db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
+    db.commit()
     collection_id = db.collections.add(
         "empty", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -8306,6 +8558,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
         "confidence": 0.9,
         "category": "animal",
     }], detector_model="megadetector-v6")[0]
+    db.commit()
     db.conn.execute(
         "UPDATE detections SET category = NULL WHERE id = ?",
         (detection_id,),
@@ -8317,6 +8570,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
     db.model_runs.record_classifier_run(
         detection_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
+    db.commit()
     db.conn.commit()
     collection_id = db.collections.add(
         "legacy", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -8383,6 +8637,7 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
     db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
+    db.commit()
     coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -8505,6 +8760,7 @@ def test_cached_only_path_publishes_source_when_peek_fails(
         sources=["/imported/california.txt"],
         label_count=1327,
     )
+    db.commit()
     coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -8594,6 +8850,7 @@ def test_cached_only_path_names_source_of_a_run_that_matched_nothing(
         sources=["/imported/california.txt"],
         label_count=1327,
     )
+    db.commit()
     coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -8680,6 +8937,7 @@ def test_describe_cached_label_source_ignores_runs_coverage_ignores(tmp_path):
         fingerprint="fp-recipe", display_name="Recipe",
         sources=["/imported/recipe-only.txt"], label_count=34,
     )
+    db.commit()
 
     assert _all_photos_cache_satisfied(
         db, [pid], classifier_model="BioCLIP", detector_confidence=0.2,
@@ -8727,6 +8985,7 @@ def test_describe_cached_label_source_falls_back_when_no_sidecar(
     db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-orphan", prediction_count=1,
     )
+    db.commit()
     # Deliberately NO upsert_labels_fingerprint call — the sidecar is empty.
 
     text = _describe_cached_label_source(db, [pid])
@@ -8766,6 +9025,7 @@ def test_describe_cached_label_source_skips_ineligible_runs(
         {"box": {"x": 2, "y": 2, "w": 1, "h": 1},
          "confidence": 0.05, "category": "animal"},
     ], detector_model="megadetector-v6")
+    db.commit()
     eligible_det = dets[0]
     ineligible_det = dets[1]
 
@@ -8816,6 +9076,7 @@ def test_describe_cached_label_source_skips_ineligible_runs(
         sources=["/imported/also-should-not-appear.txt"],
         label_count=7,
     )
+    db.commit()
 
     text = _describe_cached_label_source(
         db, [pid], classifier_model="BioCLIP",
@@ -8858,6 +9119,7 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
                       model="BioCLIP", labels_fingerprint="fp-cached")
     db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                              prediction_count=1)
+    db.commit()
 
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
@@ -8931,6 +9193,7 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
                       model="SomeOtherModel", labels_fingerprint="fp-x")
     db.model_runs.record_classifier_run(det_id, "SomeOtherModel", "fp-x",
                              prediction_count=1)
+    db.commit()
 
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
@@ -9000,11 +9263,13 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")[0]
+    db.commit()
     for det_id in (det_a, det_b):
         db.predictions.add(det_id, species="Robin", confidence=0.9,
                           model="BioCLIP", labels_fingerprint="fp-cached")
         db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                                  prediction_count=1)
+        db.commit()
 
     coll_id = db.collections.add(
         "c",
@@ -9143,6 +9408,7 @@ def test_pre_heal_classifier_run_does_not_satisfy_cache(tmp_path):
         det_id, species="Bubulcus ibis", confidence=0.9, model="timm-inat21",
         labels_fingerprint=labels_short,
     )
+    db.commit()
     db.conn.commit()
 
     assert _all_photos_cache_satisfied(
@@ -9245,6 +9511,7 @@ def test_all_photos_cache_satisfied_excludes_unreviewed_legacy_timm_after_heal(
         det_id, species="Bubulcus ibis", confidence=0.9,
         model="timm-inat21", labels_fingerprint=labels_short,
     )
+    db.commit()
     db.conn.commit()
 
     pre_heal_identity = classifier_model_identity(active_model)
@@ -9370,6 +9637,7 @@ def test_all_photos_cache_satisfied_still_grandfathers_legacy_bioclip(tmp_path):
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint=labels_short,
     )
+    db.commit()
     db.conn.commit()
     assert _all_photos_cache_satisfied(
         db, [pid], classifier_model="BioCLIP",
@@ -9462,6 +9730,7 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
+    db.commit()
     coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )

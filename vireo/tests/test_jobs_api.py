@@ -2730,6 +2730,7 @@ def _seed_photo_with_detection(db, tmp_path, filename, box, model):
           "confidence": 0.9, "category": "animal"}],
         detector_model=model,
     )
+    db.commit()
     return pid
 
 

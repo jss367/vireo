@@ -99,6 +99,7 @@ def _predictions(db, pid, group=None):
     db.predictions.add(did, 'Robin', .7, 'test', labels_fingerprint='other')
     db.predictions.add(did, 'Bald Eagle', .9, 'test', group_id=group)
     db.predictions.add(did, 'Golden Eagle', .8, 'test', status='alternative')
+    db.commit()
     rows = db.conn.execute('SELECT id, species FROM predictions WHERE detection_id = ?', (did,)).fetchall()
     return tuple(next(row['id'] for row in rows if row['species'] == species)
                  for species in ('Bald Eagle', 'Golden Eagle', 'Robin'))
@@ -262,16 +263,19 @@ def test_prediction_status_history_does_not_change_reused_id(app_and_db, directi
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')[0]
     db.predictions.add(did, 'Bald Eagle', .9, 'test')
+    db.commit()
     original_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     original_time = db.conn.execute('SELECT created_at FROM predictions WHERE id = ?', (original_id,)).fetchone()[0]
     assert client.post(f'/api/predictions/{original_id}/reject').status_code == 200
     if direction == 'redo':
         assert client.post('/api/undo').status_code == 200
     db.predictions.clear(model='test')
+    db.commit()
     if changed == 'detection':
         did = db.detections.save(pids[0], [
             {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
         ], detector_model='replacement')[0]
+        db.commit()
     elif changed == 'photo':
         db.conn.execute('UPDATE detections SET photo_id = ? WHERE id = ?', (pids[1], did))
         db.commit()
@@ -284,6 +288,7 @@ def test_prediction_status_history_does_not_change_reused_id(app_and_db, directi
         'other-model' if changed == 'model' else 'test', status='reviewed',
         labels_fingerprint='other' if changed == 'fingerprint' else 'legacy',
     )
+    db.commit()
     replacement_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     assert replacement_id == original_id, 'The regression must exercise SQLite ID reuse'
     replacement_time = '2000-01-01 00:00:00' if changed == 'created_at' else original_time
@@ -331,6 +336,7 @@ def test_identical_prediction_recreated_in_same_second_cannot_receive_old_histor
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')[0]
     db.predictions.add(did, 'Bald Eagle', .9, 'test')
+    db.commit()
     pred_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     assert client.post(f'/api/predictions/{pred_id}/reviewed').status_code == 200
     original_row = dict(db.conn.execute('SELECT * FROM predictions WHERE id = ?', (pred_id,)).fetchone())
@@ -338,8 +344,10 @@ def test_identical_prediction_recreated_in_same_second_cannot_receive_old_histor
     if direction == 'redo':
         assert client.post('/api/undo').status_code == 200
     db.predictions.clear(model='test')
+    db.commit()
     assert db.conn.execute('SELECT COUNT(*) FROM prediction_history_instances').fetchone()[0] == 0
     db.predictions.add(did, 'Bald Eagle', .9, 'test', status='accepted')
+    db.commit()
     replacement_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     assert replacement_id == pred_id
     db.conn.execute('UPDATE predictions SET created_at = ? WHERE id = ?', (original_row['created_at'], pred_id))
@@ -394,6 +402,7 @@ def test_same_prediction_instance_remains_undoable_after_metadata_enrichment(app
             pred['detection_id'], pred['species'], .8, pred['model'],
             taxonomy={'taxon_id': 987654}, refresh_output=True, preserve_manual_review=True,
         )
+        db.commit()
     assert db.conn.execute('SELECT instance_id FROM prediction_history_instances WHERE prediction_id = ?', (pred_id,)).fetchone()[0] == instance_id
     assert db.predictions.current_status(pred_id) == ('rejected' if direction == 'undo' else 'pending')
     assert client.post('/api/' + direction).status_code == 200

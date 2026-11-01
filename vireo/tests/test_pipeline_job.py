@@ -3273,6 +3273,7 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
         label_count=1255,
         score_kind="cosine",
     )
+    check.commit()
     check.close()
 
     # Second run: no cached predictions, but the measured match-score row
@@ -3936,6 +3937,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     # Static collection containing exactly that one photo.
     col_id = db.collections.add(
         "Test",
@@ -4187,6 +4189,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
     }], detector_model="megadetector-v6")[0]
     db.predictions.add(detection, "Robin", 0.2, "BioCLIP", status="accepted")
     db.model_runs.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
+    db.commit()
     collection = db.collections.add("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
     db.commit()
     model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -4345,6 +4348,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
         ],
         detector_model="MegaDetector",
     )
+    db.commit()
     assert prior_det_ids, "setup sanity: prior detection was inserted"
 
     chosen = None
@@ -4453,6 +4457,7 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
         [{"box": box, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
     prior_id = prior[0]
 
     col_id = db.collections.add(
@@ -4547,6 +4552,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     # scan so the next pipeline pass can skip re-invoking the detector.
     db.detections.save(photo_id, [], detector_model="megadetector-v6")
     db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=0)
+    db.commit()
 
     col_id = db.collections.add(
         "Test",
@@ -4668,6 +4674,7 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
           "confidence": 0.8, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     assert prior_det1 and prior_det2, "setup sanity: prior detections inserted"
 
     col_id = db.collections.add(
@@ -4790,6 +4797,7 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
           "confidence": 0.8, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     assert prior_det1 and prior_det2, "setup sanity: prior detections inserted"
 
     col_id = db.collections.add(
@@ -4880,6 +4888,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -5060,6 +5069,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
         detection_ids.append(det_ids[0])
 
@@ -5074,6 +5084,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
             model="BioCLIP",
             labels_fingerprint="legacy",
         )
+        db.commit()
 
     col_id = db.collections.add(
         "Test",
@@ -5209,6 +5220,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
         detection_ids.append(det_ids[0])
 
@@ -5375,6 +5387,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -5520,6 +5533,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
@@ -6010,6 +6024,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
           "confidence": 0.95, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     real_det_id = real_det_ids[0]
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
@@ -6169,6 +6184,7 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
           "confidence": 0, "category": "animal"}],
         detector_model="full-image",
     )
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6276,6 +6292,7 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
     # Mark the photo as already detected so the detect stage reuses the
     # cached row instead of re-running MegaDetector against the stub jpeg.
     db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6360,6 +6377,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
         detector_model="megadetector-v6",
     )
     db.model_runs.record_detector_run(masked_id, "megadetector-v6", box_count=1)
+    db.commit()
     db.masks_features.update_pipeline_features(
         masked_id, PipelineFeatures(mask_path=str(tmp_path / "mask_a.png")),
     )
@@ -6374,6 +6392,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
         detector_model="megadetector-v6",
     )
     db.model_runs.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
+    db.commit()
 
     col_id = db.collections.add(
         "Test",
@@ -6461,6 +6480,7 @@ def test_extract_masks_with_only_subthreshold_detections_keeps_process_green(
         detector_model="megadetector-v6",
     )
     db.model_runs.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [lowconf_id]}]),
     )
@@ -6558,6 +6578,7 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
               "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )[0]
+    db.commit()
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6824,6 +6845,7 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
                   "confidence": 0.9, "category": "animal"}],
                 detector_model="megadetector-v6",
             )[0]
+            db_.commit()
             det_map[p["id"]] = [{
                 "id": det_id,
                 "box_x": 0.1,
@@ -7068,6 +7090,7 @@ def test_pipeline_reclassify_purge_deferred_until_a_model_succeeds(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -7786,6 +7809,7 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
                   "confidence": 0.95, "category": "animal"}],
                 detector_model="MegaDetector",
             )
+            db_.commit()
             det_map[p["id"]] = [{
                 "id": det_ids[0],
                 "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
@@ -8917,6 +8941,7 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
     db.predictions.add(
         detection_ids[-1], right_species, 0.9, "inat21",
     )
+    db.commit()
 
     collection_id = db.collections.add(
         "Weak mask bridge",
@@ -8979,6 +9004,7 @@ def test_extract_masks_stage_masks_full_image_rescued_dropout(tmp_path, monkeypa
                 [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0, "category": "animal"}],
             )[0]
         db.predictions.add(detection_id, "Great-tailed Grackle", 0.9, "inat21")
+        db.commit()
 
     collection_id = db.collections.add(
         "Full-image mask bridge",
@@ -9035,6 +9061,7 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -9142,6 +9169,7 @@ def _add_photo_with_detection(db, folder_id, folder_path, filename):
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     return photo_id
 
 
@@ -9706,6 +9734,7 @@ def _run_extract_masks_for_test(
               "confidence": 0.9, "category": "animal"}],
             detector_model=spec["model"],
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -10757,6 +10786,7 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -10864,6 +10894,7 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -10940,6 +10971,7 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11008,6 +11040,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11081,6 +11114,7 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11189,6 +11223,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11254,6 +11289,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11322,6 +11358,7 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11407,6 +11444,7 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11519,6 +11557,7 @@ def _run_eye_keypoints_download_failure_through_runner(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11637,6 +11676,7 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11758,6 +11798,7 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11840,6 +11881,7 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -11929,6 +11971,7 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -14057,6 +14100,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
     col_id = db.collections.add(
         "Resume test",
@@ -14996,6 +15040,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -15164,6 +15209,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -15356,6 +15402,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -15533,6 +15580,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -15631,6 +15679,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -15779,6 +15828,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -15977,6 +16027,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
         gone_photo_ids.add(pid)
     for i in range(3):
@@ -15991,6 +16042,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
         healthy_photo_ids.append(pid)
 
@@ -16173,6 +16225,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -16297,6 +16350,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
         ],
         detector_model="MegaDetector",
     )
+    db.commit()
 
     col_id = db.collections.add(
         "Test",
@@ -16413,6 +16467,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -16580,6 +16635,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
         gone_photo_ids.add(pid)
         gone_detection_ids.append(det_ids[0])
@@ -16595,6 +16651,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
         healthy_photo_ids.append(pid)
 
@@ -16622,6 +16679,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
             model="clip",
             labels_fingerprint="fp",
         )
+        db.commit()
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
@@ -16770,6 +16828,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )[0]
+    db.commit()
 
     healthy_photo_id = photo_ingest.add_photo(
         db, healthy_folder_id, "healthy.jpg", ".jpg", 5000, 5_000_000.0,
@@ -16781,6 +16840,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
 
     col_id = db.collections.add(
         "Test",
@@ -16817,6 +16877,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
         model="BioCLIP-2",
         labels_fingerprint="fp",
     )
+    db.commit()
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
@@ -16998,6 +17059,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )[0]
+    db.commit()
     OLD_SPECIES = "PreservedPriorSpecies"
     db.predictions.add(
         detection_id=old_gone_det_id,
@@ -17006,6 +17068,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
         model="BioCLIP-2",
         labels_fingerprint="fp",
     )
+    db.commit()
 
     # Healthy photo is here to drive ``models_succeeded == 1`` so the
     # purge fires. Its pre-run boxes are the same as fresh, so it does
@@ -17020,6 +17083,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
 
     col_id = db.collections.add(
         "Test",
@@ -17208,6 +17272,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -17390,6 +17455,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
+    db.commit()
     photo_ids = [pid]
 
     col_id = db.collections.add(
@@ -17582,6 +17648,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
         gone_photo_ids.add(pid)
     for i in range(3):
@@ -17596,6 +17663,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
         healthy_photo_ids.add(pid)
 
@@ -17770,6 +17838,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -17891,6 +17960,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -18015,6 +18085,7 @@ def test_pipeline_extract_masks_offline_survives_finalizer_override(
               "confidence": 0.9, "category": "animal"}],
             detector_model="MegaDetector",
         )
+        db.commit()
         photo_ids.append(pid)
 
     col_id = db.collections.add(
@@ -18833,6 +18904,7 @@ def test_extract_masks_preflight_counts_rescued_weak_detections(
     db.predictions.add(
         detection_ids[-1], "Great-tailed Grackle", 0.9, "inat21",
     )
+    db.commit()
 
     collection_id = db.collections.add(
         "Rescued weak burst",
@@ -18900,6 +18972,7 @@ def test_extract_masks_preflight_ignores_isolated_weak_detections(
           "confidence": 0.15, "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
     collection_id = db.collections.add(
         "Isolated weak frame",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
@@ -19215,6 +19288,7 @@ def test_extract_masks_records_person_only_skip_without_claiming_sam_ran(tmp_pat
         "box": {"x": .18, "y": .35, "w": .53, "h": .39},
         "confidence": .69, "category": "person",
     }], detector_model="megadetector-v6")
+    db.commit()
     collection_id = db.collections.add("Portrait", json.dumps([
         {"field": "photo_ids", "value": [photo_id]},
     ]))
@@ -19279,6 +19353,7 @@ def test_extract_masks_distinguishes_zero_boxes_from_missing_execution(
     folder_id = workspace_folders.add_folder(db, folder_path)
     photo_id = _add_photo_with_detection(db, folder_id, folder_path, "duck.jpg")
     db.detections.clear(photo_id)
+    db.commit()
     if box_count is not None:
         db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count)
         db.commit()

@@ -94,8 +94,10 @@ def test_mixed_subject_matrix_add_preserves_species_and_membership(app_and_db):
         {'box': {'x': .1, 'y': .1, 'w': .2, 'h': .3}, 'confidence': .9, 'category': 'animal'},
         {'box': {'x': .6, 'y': .1, 'w': .2, 'h': .3}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')
+    db.commit()
     for did, name in zip(detections, ['American Wigeon', 'Blue-winged Teal'], strict=True):
         db.predictions.add(detection_id=did, species=name, confidence=.95, model='test')
+        db.commit()
     body = {'species': 'Blue-winged Teal', 'photo_ids': ids[:1], 'source_photo_ids': ids, 'add': True}
     preview = request_preview(client, body)
     subjects = preview['photos'][0]['subjects']
@@ -136,6 +138,7 @@ def test_stale_preview_fails_without_species_writes(app_and_db, change):
             {'box': {'x': .1, 'y': .1, 'w': .2, 'h': .3}, 'confidence': .9, 'category': 'animal'},
         ], detector_model='test')[0]
         db.predictions.add(detection_id=did, species='Eared Grebe', confidence=.99, model='test')
+        db.commit()
     before = copy.deepcopy(db.photo_species.get_species_for_photos(ids))
     response = apply(client, body, preview)
     assert response.status_code == 409
@@ -165,6 +168,7 @@ def test_preview_identifies_historical_labels_and_low_confidence_subjects(app_an
     ], detector_model='test')[0]
     old = db.predictions.add(detection_id=did, species='Old suggestion', confidence=.99, model='test', labels_fingerprint='old-labels')
     new = db.predictions.add(detection_id=did, species='Current suggestion', confidence=.6, model='test', labels_fingerprint='new-labels')
+    db.commit()
     db.conn.execute("UPDATE predictions SET created_at='2026-01-01' WHERE id=?", (old,))
     db.conn.execute("UPDATE predictions SET created_at='2026-01-02' WHERE id=?", (new,))
     db.commit()
@@ -1007,6 +1011,7 @@ def test_burst_preview_ignores_live_changes_outside_species_refresh_read_set(app
         did = db.detections.save(ids[1], [{'box': {'x': .1, 'y': .1, 'w': .2, 'h': .3},
                                           'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
         db.predictions.add(detection_id=did, species='Herring Gull', confidence=.9, model='test')
+        db.commit()
     else:
         db.tag_photo(ids[1], db.add_keyword('Favorite location'))
     db.commit()

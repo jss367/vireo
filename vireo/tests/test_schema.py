@@ -497,6 +497,7 @@ def test_version_15_catalog_gains_prediction_history_instances_without_changing_
             {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
         ], detector_model='test')[0]
         db.predictions.add(did, 'Bald Eagle', .9, 'test')
+        db.commit()
         original = [tuple(row) for row in db.conn.execute('SELECT * FROM predictions')]
         db.conn.execute('DROP TABLE prediction_history_instances')
         db.conn.execute('PRAGMA user_version = 15')

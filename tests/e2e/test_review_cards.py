@@ -21,6 +21,7 @@ def _blue_tit_cards(db, photo_ids):
                 taxonomy={'taxon_id': 138690, 'scientific_name': 'Cyanistes caeruleus'},
                 vote_count=2, total_votes=2,
             )
+            db.commit()
             ids.append(db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0])
     db.commit()
     return ids

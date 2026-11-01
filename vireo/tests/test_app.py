@@ -1969,6 +1969,7 @@ def test_detection_cache_stats_endpoint(app_and_db):
     db.model_runs.record_detector_run(p1, "megadetector-v6", box_count=2)
     db.model_runs.record_detector_run(p2, "megadetector-v6", box_count=0)
     db.model_runs.record_detector_run(p1, "megadetector-v5", box_count=1)
+    db.commit()
 
     resp = client.get('/api/detection-cache/stats')
     assert resp.status_code == 200
@@ -2180,6 +2181,7 @@ def test_encounter_species_tags_sub_threshold_photos_with_warning(app_and_db):
           "confidence": 0.02, "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
     # p_undetected has no detection rows at all.
 
     resp = client.post(
@@ -2233,6 +2235,7 @@ def test_encounter_species_all_sub_threshold_still_confirms_cache(app_and_db):
           "confidence": 0.02, "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    db.commit()
 
     cache_dir = os.path.dirname(app.config["DB_PATH"])
     ws_id = db._active_workspace_id
@@ -2681,6 +2684,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
         detector_model="MDV6",
     )[0]
     db.predictions.add(detection_id, "Verdin", 0.95, "bioclip")
+    db.commit()
     prediction_id = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?",
         (detection_id,),
@@ -2776,6 +2780,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
         detector_model="MDV6",
     )[0]
     db.predictions.add(detection_id, "Verdin", 0.95, "bioclip")
+    db.commit()
     prediction_id = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?",
         (detection_id,),
@@ -2866,6 +2871,7 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
     db.predictions.add(
         detection_id, "Other", 0.4, "inat", labels_fingerprint="fp2",
     )
+    db.commit()
     target_pred = next(
         row for row in db.predictions.get_rows()
         if row["classifier_model"] == "bioclip" and row["species"] == "Verdin"
@@ -2958,6 +2964,7 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
     db.predictions.add(
         detection_id, "Other", 0.4, "inat", labels_fingerprint="fp2",
     )
+    db.commit()
     target_pred = next(
         row for row in db.predictions.get_rows()
         if row["classifier_model"] == "bioclip" and row["species"] == "Verdin"
@@ -4087,6 +4094,7 @@ def test_compare_predictions_api(app_and_db):
     db.predictions.add(det_ids_0[0], "Blue Jay", 0.80, "model-b")
     db.predictions.add(det_ids_1[0], "Sparrow", 0.90, "model-a")
     db.predictions.add(det_ids_1[0], "Sparrow", 0.88, "model-b")
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/api/predictions/compare?collection_id={cid}")
@@ -4216,6 +4224,7 @@ def test_compare_predictions_api_preserves_unclassified_subject(app_and_db):
         }],
         detector_model="MDV6",
     )[0]
+    db.commit()
     cid = db.collections.add(
         "Unclassified Subject",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -4285,6 +4294,7 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     db.predictions.add(
         det_ids[1], "Cardinal", 0.92, "model-b", status="accepted",
     )
+    db.commit()
 
     resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
 
@@ -4325,6 +4335,7 @@ def test_compare_flags_pending_match_as_needs_review(app_and_db):
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Cardinal", 0.92, "model-a")
+    db.commit()
 
     resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
 
@@ -4354,6 +4365,7 @@ def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Cardinal", 0.95, "model-a", status="accepted")
     db.predictions.add(det_ids[0], "Cardinal", 0.93, "model-b", status="accepted")
+    db.commit()
 
     resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
 
@@ -4418,6 +4430,7 @@ def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
         detector_model="MDV6",
     )[0]
     db.predictions.add(det_id, "Desert Verdin", 0.95, "model-a")
+    db.commit()
 
     resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
 
@@ -4457,6 +4470,7 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
     db.predictions.add(
         second_det, "New Species", 0.92, "model-a", group_id="group-1",
     )
+    db.commit()
     pred = db.conn.execute(
         """SELECT id FROM predictions
            WHERE detection_id = ? AND classifier_model = ?""",
@@ -4515,6 +4529,7 @@ def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
     db.predictions.add(det_id, "New Species", 0.95, "model-a")
+    db.commit()
     pred = db.conn.execute(
         """SELECT id FROM predictions
            WHERE detection_id = ? AND classifier_model = ?""",
@@ -4553,6 +4568,7 @@ def test_api_predictions_include_bounding_box(app_and_db):
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+    db.commit()
 
     client = app.test_client()
     resp = client.get("/api/predictions")
@@ -4576,6 +4592,7 @@ def test_api_predictions_multiple_detections(app_and_db):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Elk", confidence=0.92, model="bioclip")
     db.predictions.add(det_ids[1], species="Magpie", confidence=0.85, model="bioclip")
+    db.commit()
 
     client = app.test_client()
     resp = client.get("/api/predictions")
@@ -4594,6 +4611,7 @@ def test_api_detections_endpoint(app_and_db):
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.1}, "confidence": 0.7, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/api/detections/{pid}")
@@ -4643,6 +4661,7 @@ def test_api_photo_pipeline_detections(app_and_db):
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Robin", confidence=0.88, model="bioclip")
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/api/photos/{pid}/pipeline")
@@ -4694,6 +4713,7 @@ def test_api_photo_pipeline_predictions_honor_threshold_and_fingerprint(app_and_
         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
          "confidence": 0.05, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
     # Stale and current fingerprints on the high-conf detection.
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
@@ -4755,6 +4775,7 @@ def test_api_photo_pipeline_diagnoses_threshold_hidden_predictions(app_and_db):
         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
          "confidence": 0.05, "category": "animal"},
     ], detector_model="MDV6")[0]
+    db.commit()
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
         "labels_fingerprint, species, confidence, created_at) "
@@ -4798,6 +4819,7 @@ def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0, "category": "animal"},
     ], detector_model="full-image")[0]
+    db.commit()
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
         "labels_fingerprint, species, confidence, created_at) "
@@ -7193,6 +7215,7 @@ def test_text_search_returns_ranked_enriched_results(app_and_db, monkeypatch):
           "confidence": 0.91, "category": "bird"}],
         detector_model="test-detector",
     )
+    db.commit()
     species_id = db.add_keyword("Search Cardinal", is_species=True)
     db.tag_photo(p1, species_id)
     db.commit()
@@ -13574,6 +13597,7 @@ def test_highlights_confirm_accepts_current_prediction(app_and_db):
     )[0]
     db.predictions.add(det, "Bald Eagle", 0.91, "m")
     db.predictions.add(det, "House Sparrow", 0.42, "m")
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, "Bald Eagle"),
@@ -13615,6 +13639,7 @@ def test_highlights_confirm_accepts_reviewed_prediction(app_and_db):
         detector_model="MDV6",
     )[0]
     db.predictions.add(det, "Bald Eagle", 0.91, "m", status="reviewed")
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, "Bald Eagle"),
@@ -13662,6 +13687,7 @@ def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
         detector_model="MDV6",
     )[0]
     db.predictions.add(det, "Bald Eagle", 0.91, "m")
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, "Bald Eagle"),
@@ -13712,6 +13738,7 @@ def test_highlights_confirm_ignores_higher_rank_taxonomy_keyword(app_and_db):
         detector_model="MDV6",
     )[0]
     db.predictions.add(det, "Bald Eagle", 0.91, "m")
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, "Bald Eagle"),
@@ -13764,6 +13791,7 @@ def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
     )[0]
     db.predictions.add(det1, "Bald Eagle", 0.91, "m", group_id="group-1")
     db.predictions.add(det2, "Bald Eagle", 0.89, "m", group_id="group-1")
+    db.commit()
     pred1 = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det1, "Bald Eagle"),
@@ -13811,6 +13839,7 @@ def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
         detector_model="MDV6",
     )[0]
     db.predictions.add(det, "Bald Eagle", 0.88, "m")
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, "Bald Eagle"),
@@ -13858,6 +13887,7 @@ def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
         detector_model="MDV6",
     )[0]
     db.predictions.add(det, "Bald Eagle", 0.88, "m")
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, "Bald Eagle"),
@@ -13909,6 +13939,7 @@ def test_highlights_relabel_prediction_only_undo_restores_prediction(app_and_db)
         detector_model="MDV6",
     )[0]
     db.predictions.add(det, "Bald Eagle", 0.88, "m")
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, "Bald Eagle"),
@@ -14223,6 +14254,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
         detector_model="MDV6",
     )[0]
     db.predictions.add(det, "Predicted Bird", 0.88, "m")
+    db.commit()
     db.conn.commit()
 
     resp = client.post(
@@ -14687,6 +14719,7 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
         detector_model="MDV6",
     )[0]
     db.predictions.add(det, "Predicted Bird", 0.88, "m")
+    db.commit()
     db.conn.commit()
 
     resp = client.post(
@@ -14952,6 +14985,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     )[0]
     # Raw prediction label uses the hierarchy alias.
     db.predictions.add(det, "Desert Verdin", 0.88, "m")
+    db.commit()
     # Curation was saved against the alias but ``species_curation.add_highlight``
     # /``set_species_representative`` canonicalize to the root spelling —
     # matching what ``collect_highlight_buckets`` and the buckets UI
@@ -16703,8 +16737,10 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
             det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
+            db.commit()
             species = "robin" if enc_idx == 0 else "eagle"
             db.predictions.add(det_ids[0], species, 0.9 - i * 0.05, "bioclip", category="match")
+            db.commit()
     db.close()
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
@@ -16803,8 +16839,10 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
             det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
+            db.commit()
             species = "robin" if enc_idx == 0 else "eagle"
             db.predictions.add(det_ids[0], species, 0.9 - i * 0.05, "bioclip", category="match")
+            db.commit()
             (collection_pids if enc_idx == 0 else other_pids).append(pid)
     db.set_photo_edit_recipe(collection_pids[0], {"rotation": 90})
     db.commit()
@@ -18944,6 +18982,7 @@ def _seed_prediction_photo(db, filename, species, confidence,
         detection_id, species, confidence, model,
         status=status, labels_fingerprint=labels_fingerprint,
     )
+    db.commit()
     return photo_id, detection_id
 
 
@@ -19058,6 +19097,7 @@ def test_selection_prediction_suggestions_marks_ambiguous(app_and_db):
         det_a, "Golden Eagle", 0.45, "bioclip",
         status="alternative", labels_fingerprint="fp1",
     )
+    db.commit()
     photo_b, _ = _seed_prediction_photo(db, "amb-b.jpg", "Bald Eagle", 0.95)
 
     resp = client.post(
@@ -19359,6 +19399,7 @@ def test_batch_accept_chunks_oversized_id_payloads(app_and_db):
                 det_id, "Bald Eagle", 0.9, extra_model,
                 labels_fingerprint="fp1",
             )
+            db.commit()
         pred_ids.extend(
             row["id"] for row in db.predictions.get_rows(photo_ids=[photo_id])
         )
@@ -19592,6 +19633,7 @@ def test_batch_accept_grouped_stays_scoped_to_submitted_photos(app_and_db):
             det_id, "Bald Eagle", 0.9, "bioclip",
             group_id="burst-1",
         )
+        db.commit()
         return photo_id
 
     photo_selected_a = _seed_grouped("grp-a.jpg")
@@ -19671,6 +19713,7 @@ def test_prediction_states_distinguish_empty_reasons(app_and_db):
           "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
     )
+    db.commit()
 
     states = db.predictions.get_states([untouched, detected_only])
     assert states[untouched]["detector_ran"] is False
@@ -19705,6 +19748,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
           "confidence": 1.0, "category": "animal"}],
         detector_model="full-image",
     )
+    db.commit()
 
     noise_only = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="state-noise.jpg", extension=".jpg",
@@ -19717,6 +19761,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
           "confidence": 0.01, "category": "animal"}],
         detector_model="MDV6",
     )
+    db.commit()
 
     states = db.predictions.get_states([fallback_only, noise_only])
     assert states[fallback_only]["detector_ran"] is True
@@ -19782,6 +19827,7 @@ def test_batch_accept_skips_rejected_predictions(app_and_db):
         det_id, "Golden Eagle", 0.3, "bioclip",
         status="alternative", labels_fingerprint="fp1",
     )
+    db.commit()
     stale_pred = _prediction_id(db, photo_id, "Bald Eagle")
     winner_pred = _prediction_id(db, photo_id, "Golden Eagle")
 
@@ -19888,6 +19934,7 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
     )
     db.predictions.add(det_ids[0], "Cape Cormorant", 0.95, "bioclip")
     db.predictions.add(det_ids[1], "Cape Cormorant", 0.65, "bioclip")
+    db.commit()
 
     # Photo B: same species predicted by two classifier models on one detection.
     photo_multi_model = photo_ingest.add_photo(
@@ -19902,6 +19949,7 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
     )[0]
     db.predictions.add(det_b, "Cape Cormorant", 0.9, "bioclip")
     db.predictions.add(det_b, "Cape Cormorant", 0.7, "inat21")
+    db.commit()
 
     resp = client.post(
         "/api/selection/prediction-suggestions",
@@ -19976,6 +20024,7 @@ def test_selection_prediction_suggestions_marks_photo_ambiguous_across_siblings(
         det_ids[1], "Bushtit", 0.45, "bioclip",
         status="alternative", labels_fingerprint="fp1",
     )
+    db.commit()
 
     resp = client.post(
         "/api/selection/prediction-suggestions",
@@ -20031,6 +20080,7 @@ def test_selection_prediction_suggestions_uses_burst_consensus_species(app_and_d
             group_id="burst-consensus-1",
             individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
         )
+        db.commit()
         return photo_id
 
     robin_a = _seed_burst_photo("burst-robin-a.jpg", "Robin")
@@ -20103,6 +20153,7 @@ def test_selection_prediction_suggestions_ignores_minority_frame_confidence(
             group_id="burst-mixed-conf",
             individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
         )
+        db.commit()
         return photo_id
 
     robin_a = _seed_burst_photo("burst-robin-a.jpg", "Robin", 0.40)
@@ -20163,6 +20214,7 @@ def test_selection_prediction_suggestions_confidence_unknown_without_consensus_r
         group_id="burst-consensus-only-minority",
         individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
     )
+    db.commit()
 
     resp = client.post(
         "/api/selection/prediction-suggestions",
@@ -20218,6 +20270,7 @@ def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_t
             group_id="burst-mixed-above-threshold",
             individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
         )
+        db.commit()
         return photo_id
 
     robin_frame = _seed_burst_photo("burst-robin-above.jpg", "Robin", 0.90)
@@ -20270,6 +20323,7 @@ def test_predictions_api_exposes_consensus_species_for_burst(app_and_db):
         group_id="burst-consensus-2",
         individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
     )
+    db.commit()
 
     resp = client.get(f"/api/predictions?photo_ids={photo_id}")
     assert resp.status_code == 200, resp.get_data(as_text=True)
@@ -20442,6 +20496,7 @@ def test_batch_accept_admits_payload_larger_than_1000(app_and_db):
         )[0]
         db.predictions.add(det_id, "Bald Eagle", 0.9, "bioclip")
         db.predictions.add(det_id, "Bald Eagle", 0.7, "inat21")
+        db.commit()
         photos.append(photo_id)
 
     all_ids = [
@@ -20504,6 +20559,7 @@ def test_batch_accept_grouped_scopes_photos_per_model_bucket(app_and_db):
             det_id, "Bald Eagle", 0.8, "inat21",
             group_id="burst-mm",
         )
+        db.commit()
         return photo_id
 
     photo_a = _seed_grouped_two_models("mm-a.jpg")
@@ -20583,6 +20639,7 @@ def test_batch_accept_rejects_selection_beyond_photo_cap(app_and_db):
             detector_model="MDV6",
         )[0]
         db.predictions.add(det_id, "Bald Eagle", 0.9, "bioclip")
+        db.commit()
         pred_ids.append(
             _prediction_id(db, photo_id, "Bald Eagle")
         )
@@ -20756,6 +20813,7 @@ def _reclassify(db, detection_id, species, confidence,
         detection_id, species, confidence, model,
         status="pending", labels_fingerprint=labels_fingerprint,
     )
+    db.commit()
 
 
 def test_batch_accept_skips_superseded_label_set_rows(app_and_db):
@@ -20982,6 +21040,7 @@ def test_batch_accept_skips_ambiguous_rows_with_alternatives(app_and_db):
         det_id, "TestZanclusdelta", 0.3, "bioclip",
         status="alternative", labels_fingerprint="fp1",
     )
+    db.commit()
     pred_id = _prediction_id(db, photo_id, "TestZanclusgamma")
     alt_id = _prediction_id(db, photo_id, "TestZanclusdelta")
     edits_before = len(db.edit_history.list_recent(limit=50))
@@ -21031,6 +21090,7 @@ def test_batch_reject_resolves_alternative_rows(app_and_db):
         swept_det, "TestZanclusdelta", 0.3, "bioclip",
         status="alternative", labels_fingerprint="fp1",
     )
+    db.commit()
     direct_photo, direct_det = _seed_prediction_photo(
         db, "reject-alt-direct.jpg", "TestZanclusgamma", 0.7,
     )
@@ -21038,6 +21098,7 @@ def test_batch_reject_resolves_alternative_rows(app_and_db):
         direct_det, "TestZanclusdelta", 0.3, "bioclip",
         status="alternative", labels_fingerprint="fp1",
     )
+    db.commit()
 
     def _status(photo_id, species):
         return db.conn.execute(
@@ -21288,6 +21349,7 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch)
         group_id="drift-burst-1",
         individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
     )
+    db.commit()
     pred_id = _prediction_id(db, photo_id, "Sparrow")
     ws_id = db._ws_id()
     db_file = _db_file(db)
@@ -21382,6 +21444,7 @@ def test_batch_accept_without_expected_species_still_accepts(app_and_db):
         group_id="no-expected-burst",
         individual=_json.dumps({"Warbler": 3}),
     )
+    db.commit()
     pred_id = _prediction_id(db, photo_id, "Warbler")
     resp = client.post(
         "/api/predictions/batch-accept",
@@ -21481,6 +21544,7 @@ def test_batch_accept_dedupes_grouped_prediction_expansion(app_and_db):
             det_id, "Bald Eagle", 0.9, "bioclip",
             group_id="dedup-burst-1", labels_fingerprint="fp1",
         )
+        db.commit()
         return photo_id
 
     photos = [_seed_burst_member(f"dedup-{i}.jpg") for i in range(5)]
@@ -21556,6 +21620,7 @@ def test_batch_accept_dedup_still_rejects_skipped_detection_alternatives(
             det_id, "Golden Eagle", 0.3, "bioclip",
             status="alternative", labels_fingerprint="fp1",
         )
+        db.commit()
         return photo_id, det_id
 
     a_photo, a_det = _seed_grouped_with_alternative("alt-a.jpg")
@@ -21643,8 +21708,10 @@ def test_batch_accept_takes_any_payload_the_suggestions_endpoint_emits(app_and_d
               "confidence": 0.9, "category": "animal"}],
             detector_model="MDV6",
         )[0]
+        db.commit()
         for model, conf in (("bioclip", 0.9), ("inat21", 0.8), ("merlin", 0.7)):
             db.predictions.add(det_id, "Bald Eagle", conf, model)
+            db.commit()
         photos.append(photo_id)
 
     suggestions = client.post(
@@ -21723,6 +21790,7 @@ def test_batch_prediction_payload_shares_the_selection_photo_cap(app_and_db):
             detector_model="MDV6",
         )[0]
         db.predictions.add(det_id, "Bald Eagle", 0.9, "bioclip")
+        db.commit()
         pred_ids.append(db.conn.execute(
             "SELECT id FROM predictions WHERE detection_id = ?", (det_id,),
         ).fetchone()["id"])
@@ -21781,11 +21849,13 @@ def test_batch_accept_scopes_grouped_accept_to_the_submitted_rows(app_and_db):
               "confidence": 0.9, "category": "animal"}],
             detector_model="MDV6",
         )[0]
+        db.commit()
         for model, conf in (("bioclip", 0.9), ("inat21", 0.4)):
             db.predictions.add(
                 det_id, "Bald Eagle", conf, model,
                 group_id="burst-1", labels_fingerprint="fp1",
             )
+            db.commit()
         rows = {
             row["classifier_model"]: row["id"] for row in db.conn.execute(
                 "SELECT id, classifier_model FROM predictions "
@@ -21856,6 +21926,7 @@ def test_batch_accept_does_not_re_enter_rows_a_grouped_accept_covered(app_and_db
             det_id, "Bald Eagle", 0.9, "bioclip",
             group_id="burst-2", labels_fingerprint="fp1",
         )
+        db.commit()
         pred_ids.append(db.conn.execute(
             "SELECT id FROM predictions WHERE detection_id = ?", (det_id,),
         ).fetchone()["id"])
@@ -21988,6 +22059,7 @@ def _seed_two_subject_photo(db, filename, first_species, second_species):
                       labels_fingerprint="fp1")
     db.predictions.add(det_ids[1], second_species, 0.9, "bioclip",
                       labels_fingerprint="fp1")
+    db.commit()
     return photo_id, det_ids
 
 
@@ -22074,6 +22146,7 @@ def test_same_subject_disagreement_stays_ambiguous(app_and_db):
     )
     db.predictions.add(det_ids[0], "Common Redshank", 0.8, "inat21",
                       labels_fingerprint="fp2")
+    db.commit()
     common = _prediction_id(db, photo_id, "Common Redshank")
     db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
     db.commit()
@@ -22121,6 +22194,7 @@ def test_burst_consensus_attributes_species_to_its_detection(app_and_db):
         det_ids[1], "Little Egret", 0.9, "bioclip",
         labels_fingerprint="fp1",
     )
+    db.commit()
 
     sparrow_pred = _prediction_id(db, photo_id, "Sparrow")
     egret = _prediction_id(db, photo_id, "Little Egret")
@@ -22173,6 +22247,7 @@ def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_d
             det_id, "Bald Eagle", 0.9, "bioclip",
             group_id="burst-skip-scope",
         )
+        db.commit()
         return photo_id
 
     photo_a = _seed_grouped_photo("skip-a.jpg")
@@ -24961,6 +25036,7 @@ def test_grouped_accept_expansion_skips_reviewed_group_member(app_and_db):
             status="pending", labels_fingerprint="fp1",
             group_id=group_id, individual='{"Common Loon": 2}',
         )
+        db.commit()
         photo_ids.append(pid)
         pred_ids.append(_prediction_id(db, pid, "Common Loon"))
 
@@ -25235,6 +25311,7 @@ def test_compare_canonical_key_collapses_hierarchy_aliases(app_and_db, tmp_path)
     ], detector_model="MDV6")[0]
     db.predictions.add(det_id, "Desert Verdin", 1.0, "model-a")
     db.predictions.add(det_id, "Verdin", 0.9, "model-b")
+    db.commit()
     cid = db.collections.add(
         "Aliases", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -25281,6 +25358,7 @@ def test_compare_payload_carries_canonical_species(app_and_db, tmp_path):
     db.predictions.add(det_id, "Western Cattle-Egret", 1.0, "model-a")
     db.predictions.add(det_id, "Bubulcus ibis", 0.9, "model-b")
     db.predictions.add(det_id, "Mystery Beast", 0.5, "model-c")
+    db.commit()
     cid = db.collections.add(
         "Canonical", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -25386,6 +25464,7 @@ def test_compare_canonical_display_prefers_db_canonical_for_aliases(
     # a label that flips case with model sort order is the same
     # order-dependence in miniature.
     db.predictions.add(det_id, "verdin", 0.8, "model-c")
+    db.commit()
     cid = db.collections.add(
         "AliasDisplay",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -25458,6 +25537,7 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
     db.predictions.add(det_id, "Bubulcus ibis", 1.0, "model-a")
+    db.commit()
     cid = db.collections.add(
         "CaseFallback",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -26671,10 +26751,12 @@ def test_compare_keeps_native_scientific_identities_with_shared_common_name(app_
     det_id = db.detections.save(photo_id, [
         {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9},
     ], detector_model="MDV6")[0]
+    db.commit()
     entries = []
     for model, tid, sci in [("BioCLIP", 10, "First species"), ("iNat21", 20, "Second species")]:
         db.predictions.add(det_id, "Shared name", .9, model, labels_fingerprint="tol",
                           taxonomy={"scientific_name": sci})
+        db.commit()
         entries.append({"taxon_id": tid, "scientific_name": sci, "common_name": "Shared name", "rank": "species"})
     path = tmp_path / "taxonomy.json"
     path.write_text(json.dumps({"taxa_by_common": {}, "ambiguous_common_names": ["shared name"],
@@ -26706,11 +26788,13 @@ def test_compare_preserves_exact_keyword_match_with_incomplete_taxonomy(
     det_id = db.detections.save(photo_id, [
         {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9},
     ], detector_model="MDV6")[0]
+    db.commit()
     evidence = {"scientific_name": "Test species"}
     if source_backed:
         evidence["taxon_id"] = 123
     db.predictions.add(det_id, "Test Parrot", .9, "BioCLIP", taxonomy=evidence,
                       labels_fingerprint="custom" if source_backed else "tol")
+    db.commit()
     tax = None
     if taxonomy_state != "absent":
         path = tmp_path / "taxonomy.json"
@@ -26762,6 +26846,7 @@ def test_selection_prediction_species_identity_merges_names_and_accepts(
             taxonomy={"scientific_name": scientific}, group_id="towhee-burst",
             individual=json.dumps({qualified: 2}),
         )
+        db.commit()
         prediction_ids.append(_prediction_id(db, photo, scientific))
     third, _ = _seed_prediction_photo(db, "no-pending-towhee.jpg", common, .8, status="rejected")
     photos.append(third)
@@ -26832,6 +26917,7 @@ def test_batch_accept_prefers_named_keyword_among_same_taxon_aliases(
             detection, "Pond Slider", .96, "iNat21", labels_fingerprint="tol",
             taxonomy={"scientific_name": "Trachemys scripta"},
         )
+        db.commit()
         native_id = next(row["id"] for row in db.predictions.get_rows(photo_ids=[photo]) if row["model"] == "iNat21")
         prediction_ids.extend([native_id, legacy_id] if inat_first else [legacy_id, native_id])
     if already_tagged:
@@ -27140,6 +27226,7 @@ def test_browse_detail_prediction_species_identity_credits_scientific_alias(app_
         taxonomy={"scientific_name": "Melozone crissalis"},
         group_id="detail-burst", individual=json.dumps({"California Towhee (Melozone crissalis)": 1}),
     )
+    db.commit()
     db.conn.commit()
     data = client.get(f"/api/predictions?photo_ids={photo}").get_json()
     assert len(data["predictions"]) == 2

@@ -120,11 +120,13 @@ def test_visible_predictions_filters_floor_rejection_and_stale_labels(db, photo)
     photo_id, ids = photo
     ws = db.require_workspace_id()
     db.predictions.add(ids[0], "Old Label", 0.95, "m", labels_fingerprint="old")
+    db.commit()
     db.conn.execute("UPDATE predictions SET created_at='2000-01-01'")
     db.predictions.add(ids[0], "Robin", 0.9, "m", labels_fingerprint="new")
     db.predictions.add(ids[0], "Wren", 0.2, "m", labels_fingerprint="new")
     db.predictions.add(ids[1], "Jay", 0.7, "m", labels_fingerprint="new")
     db.predictions.add(ids[1], "Crow", 0.8, "m", labels_fingerprint="new")
+    db.commit()
     crow = db.conn.execute("SELECT id FROM predictions WHERE species='Crow'").fetchone()["id"]
     db.update_prediction_status(crow, "rejected")
 

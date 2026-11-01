@@ -293,6 +293,7 @@ def test_set_active_mask_variant_accepts_pre_detection_migration_row(db):
 def test_set_active_mask_variant_rejects_when_only_detector_run_exists(db):
     pid = _photo(db, "a.jpg")
     db.model_runs.record_detector_run(pid, "megadetector-v6", 0)
+    db.commit()
     _mask(db, pid)
     with pytest.raises(ValueError, match="another subject"):
         subject_masks.set_active_mask_variant(db, pid, "sam2-small")
@@ -894,6 +895,7 @@ def _eye_ready(db, name, fid, conf=0.9, box=BOX, taxonomy=None, species="Robin",
     det = _det(db, pid, conf=conf, box=box)
     db.predictions.add(det, species=species, confidence=species_conf,
                       model=model, taxonomy=taxonomy)
+    db.commit()
     _mask(db, pid, box=box, path=f"/m/{pid}.png")
     subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     return pid, det
@@ -931,6 +933,7 @@ def test_list_photos_for_eye_keypoint_stage_filters(db):
     unmasked = _photo(db, "unmasked.jpg", fid)
     det = _det(db, unmasked)
     db.predictions.add(det, species="Robin", confidence=0.5, model="BioCLIP")
+    db.commit()
     no_pred = _photo(db, "nopred.jpg", fid)
     _det(db, no_pred)
     _mask(db, no_pred)
@@ -951,6 +954,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_predictions(db):
     pid, det = _eye_ready(db, "a.jpg", fid, species="Bird", species_conf=0.95)
     db.predictions.add(det, species="Robin", confidence=0.4, model="BioCLIP",
                       taxonomy={"scientific_name": "Turdus migratorius"})
+    db.commit()
     rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert len(rows) == 1
     assert rows[0]["species"] == "Robin"
@@ -967,6 +971,7 @@ def test_list_photos_for_eye_keypoint_stage_uses_latest_label_set(db):
     db.conn.commit()
     db.predictions.add(det, species="New", confidence=0.1, model="BioCLIP",
                       labels_fingerprint="fp-new")
+    db.commit()
     rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert [r["species"] for r in rows] == ["New"]
 

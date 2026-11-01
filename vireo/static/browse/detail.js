@@ -1,7 +1,7 @@
 /* Browse: single-photo detail panel, metadata, summary panel, undo/redo. ES module (see
    browse/README.md). */
 import { selection } from './selection-state.js';
-import {renderSpeciesProvenance} from './species-provenance.js';
+import {renderSpeciesProvenance, speciesDisplayLabel} from './species-provenance.js';
 import { searchLaneSeq, state } from './state.js';
 import {
   VireoFilter, VireoTime, doRedo, doUndo, escapeHtml, safeFetch, searchLaneHeaders, showToast,
@@ -107,7 +107,7 @@ function renderDetailKeywords(/** @type {BrowsePhoto} */ photo) {
     dropdownHtml += '</div>';
     kwHtml += '<span class="keyword-tag">' +
       '<span class="keyword-type-indicator" data-kw-id="' + k.id + '" data-browse-on="click:toggleTypeDropdown" title="Type: ' + kwTypeLabels[ktype] + '">' + icon + dropdownHtml + '</span>' +
-      escapeHtml(k.name) +
+      escapeHtml(speciesDisplayLabel(k, k.name)) +
       '<span class="remove-kw" data-photo-id="' + photo.id + '" data-kw-id="' + k.id + '" data-browse-on="click:removeKeyword">&times;</span></span>';
   });
   var keywordsEl = /** @type {HTMLElement} */ (document.getElementById('detailKeywords'));
@@ -549,16 +549,19 @@ function renderSummary(/** @type {BrowseSummary} */ data) {
   /** @type {HTMLElement} */ (document.getElementById('summaryUnclassified')).textContent = data.unclassified.toLocaleString() + ' unclassified';
   /** @type {HTMLElement} */ (document.getElementById('summaryAnalysis')).textContent = analysisCoverageText(data);
 
-  // Top species
+  renderSummarySpecies(data.top_species || []);
+}
+
+function renderSummarySpecies(/** @type {NonNullable<BrowseSummary['top_species']>} */ species) {
   var speciesSection = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesSection'));
   var speciesList = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesList'));
   speciesList.replaceChildren();
-  var species = data.top_species || [];
   speciesSection.style.display = species.length ? '' : 'none';
-  species.forEach(function(s) {
+  var rows = species.map(function(s, index) {
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'summary-species-row';
+    row.hidden = index >= 5;
     row.title = 'Filter by top predicted species: ' + s.species;
     var name = document.createElement('span');
     name.className = 'summary-species-name';
@@ -573,7 +576,26 @@ function renderSummary(/** @type {BrowseSummary} */ data) {
       if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
     });
     speciesList.appendChild(row);
+    return row;
   });
+  if (species.length <= 5) return;
+
+  var expanded = false;
+  var toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'summary-species-toggle';
+  toggle.textContent = 'Show more';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.addEventListener('click', function() {
+    expanded = !expanded;
+    rows.forEach(function(row, index) { row.hidden = !expanded && index >= 5; });
+    toggle.textContent = expanded ? 'Show less' : 'Show more';
+    toggle.setAttribute('aria-expanded', String(expanded));
+  });
+  toggle.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+  });
+  speciesList.appendChild(toggle);
 }
 
 async function filterByTopSpecies(/** @type {string} */ species) {
