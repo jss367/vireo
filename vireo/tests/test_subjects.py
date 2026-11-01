@@ -472,8 +472,9 @@ def test_invalid_reviewer_box_preserves_previous_analysis(db, subject_photo, box
     assert payload(db, photo_id) == before
 
 
+@pytest.mark.parametrize('scoped', [False, True])
 @pytest.mark.parametrize('replacement_x', [.7, .10001])
-def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monkeypatch, replacement_x):
+def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monkeypatch, replacement_x, scoped):
     import subjects
     photo_id, ids, path = subject_photo
     chosen = subjects.select_reviewer_box(db, photo_id, dict(x=.1, y=.1, w=.1, h=.1))
@@ -485,9 +486,14 @@ def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monk
             assert replacement == chosen
         return results
     monkeypatch.setattr(subjects, 'analyze_image', replace)
-    with pytest.raises(ValueError, match='changed during analysis'):
-        analyze_photo(db, photo_id, path, detection_id=chosen)
+    if scoped:
+        with pytest.raises(ValueError, match='changed during analysis'):
+            analyze_photo(db, photo_id, path, detection_id=chosen)
+    else:
+        assert analyze_photo(db, photo_id, path) == 2
+        assert all(s['analysis'] is not None for s in payload(db, photo_id)['subjects'][1:])
     assert payload(db, photo_id)['subjects'][0]['analysis'] is None
+    assert db.photos.get(photo_id)['quality_score'] is None
 
 
 def test_reviewer_box_api_validates_scope_and_subject(app_and_db):

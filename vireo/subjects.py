@@ -121,16 +121,23 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
     with acquire_photo_mask(photo_id):
         if checkpoint:
             checkpoint()
-        # The detector may have been replaced while the image was decoded.
-        if detection_id is not None:
-            current = next((d for d in retained(db, photo_id, min_conf) if d["id"] == detection_id), None)
-            # Detection IDs quantize coordinates; an exact box edit may reuse an ID.
-            if current is None or any(current["box_" + k] != detections[0]["box_" + k] for k in "xywh"):
-                raise ValueError("Chosen subject changed during analysis; select it again")
-        db.subjects.save_analyses(source_key, results)
-        sync_primary(db, photo_id, min_conf=min_conf)
-        db.commit_with_retry()
+        with db.transaction(immediate=True):
+            results = _current_analysis_results(db, photo_id, pending, results, detection_id, min_conf)
+            db.subjects.save_analyses(source_key, results)
+            sync_primary(db, photo_id, min_conf=min_conf)
     return len(results)
+
+
+def _current_analysis_results(db, photo_id, pending, results, detection_id, min_conf):
+    """Recheck every measured box under the publication writer transaction."""
+    current = {d["id"]: d for d in retained(db, photo_id, min_conf)}
+    # IDs quantize coordinates: both scoped and unscoped work must compare
+    # the exact geometry, including edits that retain the same detection ID.
+    valid = {d["id"] for d in pending if d["id"] in current
+             and all(current[d["id"]]["box_" + k] == d["box_" + k] for k in "xywh")}
+    if detection_id is not None and detection_id not in valid:
+        raise ValueError("Chosen subject changed during analysis; select it again")
+    return [r for r in results if r["detection_id"] in valid]
 
 
 def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
