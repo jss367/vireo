@@ -81,6 +81,7 @@ def get_target_triple():
 
 
 def main():
+    """Bundle and sign the server with the synchronized release manifest."""
     parser = argparse.ArgumentParser(description="Build sidecar binary")
     parser.add_argument(
         "--ci", action="store_true",
@@ -112,6 +113,9 @@ def main():
         # Offline experiments have a separate environment/package. Exclude them
         # for local and release builds even if installed in the build environment.
         "--exclude-module", "encounter_eval",
+        # Release metadata is synchronized with the desktop manifests before
+        # building. Frozen servers cannot rely on installed Python metadata.
+        "--add-data", f"{os.path.join(repo_root, 'pyproject.toml')}{sep}.",
         # Bundle Flask templates and static assets — destinations are
         # relative to _MEIPASS, and Flask resolves them relative to
         # os.path.dirname(__file__) which is _MEIPASS for the entry script.

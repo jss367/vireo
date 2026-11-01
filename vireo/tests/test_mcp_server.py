@@ -123,6 +123,28 @@ def test_status_reports_version_workspace_and_count(mcp, monkeypatch):
     assert "db_path" not in status
 
 
+def test_frozen_status_and_api_versions_match_release_manifest(mcp, monkeypatch, tmp_path):
+    """API and connector versions must identify the same packaged desktop release."""
+    server, _, transport = mcp
+    # A sidecar extracts this synchronized manifest at its PyInstaller root.
+    # Distribution metadata from the build environment can be stale.
+    manifest = tomllib.loads((REPO / "pyproject.toml").read_text())
+    desktop = json.loads((REPO / "src-tauri/tauri.conf.json").read_text())
+    expected = desktop["version"]
+    assert manifest["project"]["version"] == expected
+    (tmp_path / "pyproject.toml").write_bytes((REPO / "pyproject.toml").read_bytes())
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    from web import system
+
+    monkeypatch.setattr(system, "package_version", lambda _: "0.0.0")
+    assert call(server, "vireo_status")["version"] == expected
+    for route in ("/api/version", "/api/v1/version"):
+        response = transport._client.get(route, headers={"X-Vireo-Token": TOKEN})
+        assert response.status_code == 200
+        assert response.get_json() == {"version": expected}
+
+
 def test_status_omits_db_path_when_an_override_targets_another_instance(mcp, monkeypatch):
     # With VIREO_URL in play the local runtime.json names a different
     # instance's catalog; mixing it into the status misnames the target.

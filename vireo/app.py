@@ -2566,6 +2566,7 @@ def _open_browser_when_ready(port):
 
 
 def main():
+    """Start the selected server mode and publish its runtime identity."""
     args = _parse_main_args()
     if args.migrate_storage:
         from services.storage_migration import run_cli
@@ -2617,7 +2618,7 @@ def main():
         _open_browser_when_ready(port)
 
     # Look up the running version with the helper /api/version uses:
-    # package metadata, then pyproject.toml, then "0.0.0".
+    # bundled release manifest when frozen; package metadata in source installs.
     # In source/dev runs where importlib.metadata is missing but
     # pyproject.toml is present, runtime.json must agree with
     # /api/v1/version — external callers use it to make compatibility
