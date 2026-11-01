@@ -115,7 +115,10 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
             _require_destination_directory(dest_path, target_dir)
             src_file = os.path.join(root, fn)
             dst_file = os.path.join(target_dir, fn)
-            if not _copy_tree_file(src_file, dst_file, skip_existing or (control and control.generation)):
+            if not _copy_tree_file(
+                    src_file, dst_file,
+                    is_merge=skip_existing,
+                    skip_existing=skip_existing or (control and control.generation)):
                 continue
             copied += 1
             if progress_cb:
@@ -142,11 +145,20 @@ def _require_destination_directory(root, directory, *, allow_missing=False):
         raise OSError(f"Destination directory is missing, linked, or unsafe: {unsafe}")
 
 
-def _copy_tree_file(source, destination, skip_existing):
-    """Copy one opaque entry, preserving links and existing merge entries."""
+def _copy_tree_file(source, destination, is_merge, skip_existing):
+    """Copy one opaque entry, preserving links and existing merge entries.
+
+    ``is_merge`` discards regular Finder metadata; fresh moves copy them.
+    ``skip_existing`` keeps whatever is already at the destination — true
+    for merges AND for resumed fresh moves, so a Resume preserves anything
+    that landed before the Pause without overwriting it. The two flags are
+    separate: on a resumed fresh move ``skip_existing`` is true but
+    ``is_merge`` is false, so a ``.DS_Store`` that had not yet copied is
+    still carried across and the fresh verifier does not see it missing.
+    """
     # Only regular Finder metadata is discarded; source symlinks with the
     # same name still need to be copied and verified as opaque entries.
-    if (skip_existing and os.path.basename(source) in FINDER_METADATA_FILES
+    if (is_merge and os.path.basename(source) in FINDER_METADATA_FILES
             and not os.path.islink(source) and os.path.isfile(source)):
         return False
     # lexists includes broken links so a merge never writes through them.

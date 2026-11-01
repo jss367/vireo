@@ -606,3 +606,54 @@ def test_fallback_merge_preserves_finder_named_file_symlinks(transfer_env, broke
     assert not result["errors"], result
     assert not source.exists()
     assert os.readlink(destination / source.name / ".DS_Store") == expected_target
+
+
+def test_resumed_fresh_fallback_copies_finder_metadata(tmp_path):
+    """A fresh move resumed after Pause must still carry ``.DS_Store`` files.
+
+    Only merges discard Finder metadata; the fresh verifier walks the
+    source and checks each file reaches the destination, so a fresh
+    resume that silently skipped ``.DS_Store`` would fail verification
+    for a genuinely valid destination.
+    """
+    from move.transfer import _copy_tree_with_progress
+
+    class _ResumedControl:
+        """Minimal WorkControl stand-in: resumed fresh copy, no cancel."""
+
+        generation = 1
+
+        def checkpoint(self):
+            return None
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "photo.jpg").write_bytes(b"photo bytes")
+    (source / ".DS_Store").write_bytes(b"window layout")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    total_files = sum(1 for _, _, files in os.walk(source) for _ in files)
+    _copy_tree_with_progress(
+        str(source), str(destination), False, total_files, None,
+        control=_ResumedControl(),
+    )
+    assert (destination / "photo.jpg").read_bytes() == b"photo bytes"
+    assert (destination / ".DS_Store").read_bytes() == b"window layout"
+
+
+def test_merge_fallback_still_discards_regular_finder_metadata(tmp_path):
+    """The merge path keeps discarding regular ``.DS_Store`` after the split."""
+    from move.transfer import _copy_tree_with_progress
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "photo.jpg").write_bytes(b"photo bytes")
+    (source / ".DS_Store").write_bytes(b"source window layout")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    total_files = sum(1 for _, _, files in os.walk(source) for _ in files)
+    _copy_tree_with_progress(
+        str(source), str(destination), True, total_files, None,
+    )
+    assert (destination / "photo.jpg").read_bytes() == b"photo bytes"
+    assert not (destination / ".DS_Store").exists()
