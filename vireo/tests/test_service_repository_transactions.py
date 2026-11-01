@@ -137,7 +137,7 @@ def test_staging_rebase_detects_a_changed_catalog_path(db, tmp_path):
 
 
 def test_grouping_payload_and_history_change_share_the_service_transaction(db):
-    edit_id = db.record_edit("photo_flag", "Edit", "{}", [], _commit=False)
+    edit_id = db.record_edit("photo_flag", "Edit", "{}", [])
     db.commit()
     db.edit_history.store_grouping_payload(edit_id, '{"before": [], "after": []}')
     db.edit_history.convert_to_grouping(edit_id, '{"label_edit": true}')

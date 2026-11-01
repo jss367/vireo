@@ -134,7 +134,7 @@ def durable_fixture():
         def queue_flag_change_if_enabled(self, pid, flag):
             conn.execute("INSERT INTO invented_queue VALUES(?,?)", (pid, flag))
         def record_edit(self, *a, **kw):
-            assert kw["_commit"] is False
+            assert "_commit" not in kw
             if self.failed:
                 raise ValueError("invented history failure")
             return history_repo.record(*a, **kw)

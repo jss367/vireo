@@ -84,33 +84,16 @@ EXEMPT_DATA_LAYER_QUALNAMES = {
 # listed may have none. Lower an entry (delete it at zero) when a domain's
 # data methods stop committing and lose their flag; never raise one.
 COMMIT_FLAG_LIMITS: dict[str, int] = {
-    "vireo/db.py": 2,
-    "vireo/repositories/edit_history.py": 1,
     "vireo/repositories/folders.py": 1,
     "vireo/services/catalog_deletion.py": 1,
-    "vireo/services/grouping_history.py": 3,
-    "vireo/services/identity_alternatives.py": 2,
-    "vireo/services/import_locations.py": 1,
-    "vireo/services/imports.py": 1,
     "vireo/services/maintenance_history.py": 1,
     "vireo/services/photo_deletion.py": 1,
-    "vireo/services/photo_review.py": 3,
     "vireo/services/workspace_folders.py": 1,
-    "vireo/web/batch.py": 5,
-    "vireo/web/encounters.py": 2,
-    "vireo/web/highlights.py": 2,
-    "vireo/web/locations.py": 1,
-    "vireo/web/photo_edit_recipes.py": 1,
-    "vireo/web/pipeline.py": 1,
-    "vireo/web/predictions.py": 9,
-    "vireo/web/species.py": 1,
-    "vireo/web/sync.py": 2,
 }
 
 # Transaction control inside the data layer, per module. Same rules.
 DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {
-    "vireo/db.py": 2,
-    "vireo/repositories/edit_history.py": 15,
+    "vireo/db.py": 1,
     "vireo/repositories/identity_alternatives.py": 4,
 }
 

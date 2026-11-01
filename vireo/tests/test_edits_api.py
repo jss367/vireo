@@ -2072,6 +2072,7 @@ def test_undo_skips_non_undoable_entries(app_and_db, action):
     db.record_edit(action, 'Legacy audit action', '', [
         {'photo_id': pid, 'old_value': '', 'new_value': ''},
     ])
+    db.commit()
 
     # The legacy audit entry is newer than the rating.
     history = db.edit_history.list_recent()
@@ -2103,6 +2104,7 @@ def test_undo_status_skips_non_undoable(app_and_db, action):
     db.record_edit(action, 'Legacy audit action', '', [
         {'photo_id': pid, 'old_value': '', 'new_value': ''},
     ])
+    db.commit()
 
     # Undo status should show the rating edit, not the reject
     resp = client.get('/api/undo/status')
@@ -2124,6 +2126,7 @@ def test_undo_nothing_when_only_non_undoable(app_and_db, action):
     db.record_edit(action, 'Legacy audit action', '', [
         {'photo_id': pid, 'old_value': '', 'new_value': ''},
     ])
+    db.commit()
 
     resp = client.post('/api/undo')
     assert resp.status_code == 400  # "nothing to undo"

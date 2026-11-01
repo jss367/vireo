@@ -139,6 +139,7 @@ def test_legacy_incomplete_audit_rows_stay_excluded(app_and_db):
     pid = db.photos.list_page()[0]['id']
     for action in ('location_set', 'location_clear', 'prediction_reject', 'prediction_reviewed'):
         db.record_edit(action, 'Legacy edit', '', [{'photo_id': pid, 'old_value': '', 'new_value': ''}])
+        db.commit()
     assert app.test_client().get('/api/undo/status').json['available'] is False
 
 
@@ -202,7 +203,7 @@ def test_later_location_group_conflict_preserves_successful_assignments(app_and_
     db.commit()
     with db.transaction():
         item = change_photo_location(db, pids[0], good)
-        db.record_edit('photo_location', 'Assigned good place', str(good), [item], _commit=False)
+        db.record_edit('photo_location', 'Assigned good place', str(good), [item])
         with pytest.raises(RuntimeError):
             db.upsert_place_chain({
                 'place_id': 'bad-place', 'name': 'Bad place',
@@ -308,6 +309,7 @@ def test_id_only_prediction_status_history_cannot_change_a_current_prediction(ap
         'photo_id': pid, 'old_value': json.dumps({str(pred_id): 'rejected'}),
         'new_value': json.dumps({str(pred_id): 'pending'}),
     }])
+    db.commit()
     assert app.test_client().post('/api/undo').status_code == 200
     assert db.predictions.current_status(pred_id) == 'pending'
 

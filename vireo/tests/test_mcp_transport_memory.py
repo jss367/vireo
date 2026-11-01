@@ -237,7 +237,7 @@ def test_keyword_write_returns_the_actual_identity_without_name_rediscovery():
         ),
         transaction=contextlib.nullcontext,
         tag_photo=lambda pid, kid, **kw: tagged.append((pid, kid)),
-        record_edit=lambda *a, **kw: None, _prune_edit_history=lambda: None)
+        record_edit=lambda *a, **kw: None)
     ns = {"get_db": lambda: db, "request": types.SimpleNamespace(get_json=lambda **kw: body),
           "parse_selection_photo_ids": lambda db, value, **kw: (value["photo_ids"], None),
           "json_error": forbidden, "KEYWORD_TYPES": {"general", "taxonomy", "location"},

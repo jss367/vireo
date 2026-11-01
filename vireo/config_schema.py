@@ -140,7 +140,7 @@ SCHEMA = {
         "desc": "Cosine-similarity threshold above which two photos are visual duplicates.",
     },
     "max_edit_history": {
-        # scope=global: Database._prune_edit_history reads cfg.get(...) so a
+        # scope=global: Database.prune_edit_history reads cfg.get(...) so a
         # workspace override would not change actual pruning behavior.
         "type": "int", "min": 0, "max": 100000,
         "category": "Behavior", "scope": "global",

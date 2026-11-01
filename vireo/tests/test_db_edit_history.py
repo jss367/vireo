@@ -50,10 +50,11 @@ def pids(db):
 
 
 def _rating_edit(db, pid, old, new, desc=None):
-    return db.record_edit(
-        "rating", desc or f"rating {old}->{new}", str(new),
-        [{"photo_id": pid, "old_value": str(old), "new_value": str(new)}],
-    )
+    with db.transaction():
+        return db.record_edit(
+            "rating", desc or f"rating {old}->{new}", str(new),
+            [{"photo_id": pid, "old_value": str(old), "new_value": str(new)}],
+        )
 
 
 def _history_rows(db, where="1=1", params=()):
@@ -88,13 +89,15 @@ def _raw_edit(db, action_type, new_value=None, *, workspace_id=None,
 # -- record_edit ----------------------------------------------------------
 
 
-def test_record_edit_returns_id_stores_items_and_commits(db, pids):
-    edit_id = db.record_edit(
-        "rating", "Set rating", "5",
-        [{"photo_id": pids[0], "old_value": "0", "new_value": "5"},
-         {"photo_id": pids[1], "old_value": None, "new_value": "5"}],
-        is_batch=True,
-    )
+def test_record_edit_returns_id_and_stores_items_in_the_callers_unit(db, pids):
+    with db.transaction():
+        edit_id = db.record_edit(
+            "rating", "Set rating", "5",
+            [{"photo_id": pids[0], "old_value": "0", "new_value": "5"},
+             {"photo_id": pids[1], "old_value": None, "new_value": "5"}],
+            is_batch=True,
+        )
+        assert _history_rows(db, "id = ?", (edit_id,)) == []
     assert isinstance(edit_id, int)
     assert not db.conn.in_transaction
     with _reader(db) as conn:
@@ -140,25 +143,47 @@ def test_record_edit_clears_only_this_workspaces_redo_stack(db, pids):
     assert _history_rows(db, "id = ?", (foreign_undone,))[0]["undone"] == 1
 
 
-def test_record_edit_without_commit_skips_commit_and_prune(db, pids, monkeypatch):
+def test_record_edit_never_commits_and_prunes_once_after_its_units_commit(db, pids, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        db, "_prune_edit_history",
-        lambda: calls.append(db.conn.in_transaction),
+        db, "prune_edit_history",
+        lambda: calls.append((db.in_unit_of_work, _history_rows(db, "description = 'second'") != [])),
     )
+    with db.transaction():
+        _rating_edit(db, pids[0], 0, 1)
+        second = db.record_edit(
+            "rating", "second", "2",
+            [{"photo_id": pids[0], "old_value": "1", "new_value": "2"}],
+        )
+        assert _history_rows(db, "id = ?", (second,)) == []
+        assert calls == []
+    # One prune for the unit, in a unit of its own, after the edits committed.
+    assert calls == [(True, True)]
+    assert not db.conn.in_transaction
+
+
+def test_record_edit_prune_is_dropped_with_a_rolled_back_savepoint(db, pids, monkeypatch):
+    calls = []
+    monkeypatch.setattr(db, "prune_edit_history", lambda: calls.append(1))
+    with db.transaction():
+        with pytest.raises(RuntimeError), db.transaction():
+            _rating_edit(db, pids[0], 0, 1)
+            raise RuntimeError("refused")
+    assert calls == []
+    assert _history_rows(db) == []
+
+
+def test_record_edit_outside_a_unit_neither_commits_nor_prunes(db, pids, monkeypatch):
+    calls = []
+    monkeypatch.setattr(db, "prune_edit_history", lambda: calls.append(1))
     edit_id = db.record_edit(
         "rating", "uncommitted", "1",
         [{"photo_id": pids[0], "old_value": "0", "new_value": "1"}],
-        _commit=False,
     )
     assert db.conn.in_transaction
-    assert calls == []
     assert _history_rows(db, "id = ?", (edit_id,)) == []
-    db.conn.commit()
-
-    _rating_edit(db, pids[0], 1, 2)
-    # Prune runs once, after the commit.
-    assert calls == [False]
+    db.conn.rollback()
+    assert calls == []
 
 
 def test_record_edit_requires_active_workspace(db, pids):
@@ -448,6 +473,7 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
         "keyword_add", "Added Robin", str(kid),
         [{"photo_id": pid, "old_value": old_value, "new_value": str(kid)}],
     )
+    db.commit()
 
     undo_last_edit(db)
     assert _status(db, p["a_top"]) == "alternative"
@@ -468,6 +494,7 @@ def test_keyword_remove_redo_untags_again(db, pids):
         "keyword_remove", "Removed Hawk", str(kid),
         [{"photo_id": pids[0], "old_value": str(kid), "new_value": ""}],
     )
+    db.commit()
     undo_last_edit(db)
     assert any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
     redo_last_undo(db)
@@ -521,9 +548,11 @@ def test_grouping_entry_success_flips_cursor_inside_restore(
     method = (lambda: undo_last_edit(db)) if direction == "undo" else (lambda: redo_last_undo(db))
     entry = method()
     assert entry["id"] == edit_id
+    # The photo half replays inside the replay's savepoint, which holds the
+    # writer lock until the unit commits.
     assert calls == [
         ("restore", edit_id, direction == "undo"),
-        ("apply", edit_id, 1, direction == "undo", False),
+        ("apply", edit_id, 1, direction == "undo", True),
     ]
     assert not db.conn.in_transaction
     assert _history_rows(db, "id = ?", (edit_id,))[0]["undone"] == 1 - undone
@@ -608,6 +637,53 @@ def test_stale_cache_entry_without_photo_half_is_deleted(
     assert _history_rows(db, "id = ?", (edit_id,)) == []
 
 
+@pytest.mark.parametrize("direction", ["undo", "redo"])
+def test_a_grouping_replay_that_fails_partway_leaves_nothing_applied(db, pids, monkeypatch, direction):
+    """A replay is one savepoint: a caller that catches its failure and goes
+    on keeps its own writes and none of the replay's.
+
+    The entry is a retired grouping edit whose photo half (two flag changes)
+    still replays; the second photo's flag write fails. Before the replay
+    was a savepoint, the first photo's flag survived into the caller's
+    commit: half the edit reversed, with the history cursor unmoved.
+    """
+    undone = 0 if direction == "undo" else 1
+    old, new = "flagged", "rejected"
+    start = new if direction == "undo" else old
+    with db.transaction():
+        for pid in pids[:2]:
+            db.photo_review.set_flag(pid, start)
+    payload = {"photo_edit": {"action_type": "flag"}, "photo_only": True}
+    edit_id = _raw_edit(
+        db, "pipeline_grouping", json.dumps(payload), undone=undone,
+        items=[(pids[0], old, new), (pids[1], old, new)],
+    )
+    real_set_flag = PhotoReviewRepository.set_flag
+
+    def fail_second(self, photo_id, flag, *args, **kwargs):
+        if photo_id == pids[1]:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real_set_flag(self, photo_id, flag, *args, **kwargs)
+
+    monkeypatch.setattr(PhotoReviewRepository, "set_flag", fail_second)
+    replay = undo_last_edit if direction == "undo" else redo_last_undo
+    with db.transaction():
+        db.photo_review.set_rating(pids[2], 4)
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+            replay(db)
+    monkeypatch.undo()
+
+    with _reader(db) as conn:
+        flags = dict(conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?)", pids[:2],
+        ).fetchall())
+        rating = conn.execute("SELECT rating FROM photos WHERE id = ?", (pids[2],)).fetchone()[0]
+    # Neither photo moved toward ``target``: the replay left nothing applied.
+    assert flags == {pids[0]: start, pids[1]: start}
+    assert rating == 4
+    assert _history_rows(db, "id = ?", (edit_id,))[0]["undone"] == undone
+
+
 def test_retire_stale_grouping_entry_on_missing_row_is_noop(db):
     keep = _raw_edit(db, "rating", "1")
     db.edit_history.retire_stale_grouping_entry(keep + 100)
@@ -641,6 +717,7 @@ def test_undo_keyword_remove_of_deleted_keyword_is_noop(db, pids):
         "keyword_remove", "Removed", "987654",
         [{"photo_id": pids[0], "old_value": "987654", "new_value": ""}],
     )
+    db.commit()
     assert undo_last_edit(db)["id"] == edit_id
     assert db.photo_keywords.get_for_photo(pids[0]) == []
 
@@ -676,6 +753,7 @@ def test_prediction_accept_flat_removals_restore_only_live_workspaces(db, pids):
         "prediction_accept", "Accepted", str(kid),
         [{"photo_id": pids[0], "old_value": old_value, "new_value": str(kid)}],
     )
+    db.commit()
     workspace_lifecycle.delete_workspace(db, gone)
     db.set_active_workspace(ws)
 
@@ -748,7 +826,8 @@ def test_undo_prediction_accept_resets_only_matching_fingerprint(db, pids):
     _set_status(db, p["b_top"], "accepted")
     _set_status(db, p["a_mid"], "accepted", ws=other)
 
-    db._undo_prediction_accept_statuses({}, str(p["a_mid"]))
+    with db.transaction():
+        db._undo_prediction_accept_statuses({}, str(p["a_mid"]))
 
     assert not db.conn.in_transaction
     assert _status(db, p["a_top"]) == "pending"  # highest confidence sibling
@@ -766,7 +845,8 @@ def test_undo_prediction_accept_dedupes_scopes(db, pids):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db._undo_prediction_accept_statuses(meta, None)
+        with db.transaction():
+            db._undo_prediction_accept_statuses(meta, None)
     finally:
         db.conn.set_trace_callback(None)
     updates = [s for s in statements if s.strip().startswith("UPDATE prediction_review")]
@@ -775,7 +855,7 @@ def test_undo_prediction_accept_dedupes_scopes(db, pids):
     assert _status(db, p["m2_top"]) == "pending"
 
 
-def test_undo_prediction_accept_commits_only_when_a_scope_matched(db, pids):
+def test_undo_prediction_accept_never_commits(db, pids):
     db.conn.execute("UPDATE photos SET rating = 3 WHERE id = ?", (pids[0],))
     db._undo_prediction_accept_statuses({"prediction_ids": [999999]}, None)
     assert db.conn.in_transaction
@@ -801,7 +881,8 @@ def test_redo_prediction_accept_reaccepts_and_rejects_open_siblings(db, pids):
     _set_status(db, p["b_top"], "pending")
 
     meta = {"prediction_ids": [p["a_mid"], 999999]}
-    db._redo_prediction_accept_statuses(meta, None)
+    with db.transaction():
+        db._redo_prediction_accept_statuses(meta, None)
 
     assert not db.conn.in_transaction
     assert _status(db, p["a_mid"]) == "accepted"
@@ -814,9 +895,10 @@ def test_redo_prediction_accept_reaccepts_and_rejects_open_siblings(db, pids):
 
 def test_redo_prediction_accept_excludes_every_batch_id(db, pids):
     p = _predictions(db, pids[0])
-    db._redo_prediction_accept_statuses(
-        {"prediction_ids": [p["a_mid"], p["a_top"]]}, None,
-    )
+    with db.transaction():
+        db._redo_prediction_accept_statuses(
+            {"prediction_ids": [p["a_mid"], p["a_top"]]}, None,
+        )
     assert _status(db, p["a_mid"]) == "accepted"
     assert _status(db, p["a_top"]) == "accepted"
     assert _status(db, p["a_low"]) == "rejected"
@@ -838,7 +920,7 @@ def test_redo_prediction_accept_routes_through_update_prediction_status(
     assert calls == [(p["a_low"], "accepted", (), {})]
 
 
-def test_redo_prediction_accept_missing_scope_does_not_commit(db, pids):
+def test_redo_prediction_accept_never_commits(db, pids):
     db.conn.execute("UPDATE photos SET rating = 3 WHERE id = ?", (pids[0],))
     db._redo_prediction_accept_statuses({"prediction_id": 999999}, None)
     assert db.conn.in_transaction
@@ -872,6 +954,7 @@ def test_prediction_accept_undo_redo_round_trip(db, pids):
         "prediction_accept", "Accepted Finch", str(kid),
         [{"photo_id": pids[0], "old_value": str(p["a_mid"]), "new_value": str(kid)}],
     )
+    db.commit()
     undo_last_edit(db)
     assert _status(db, p["a_top"]) == "pending"
     assert _status(db, p["a_mid"]) == "alternative"
@@ -1119,6 +1202,7 @@ def test_species_replace_undo_redo_moves_curation(db, pids):
         "species_replace", "Relabel", str(new_kid),
         [{"photo_id": p0, "old_value": old_value, "new_value": str(new_kid)}],
     )
+    db.commit()
 
     undo_last_edit(db)
     hl, _, _ = _curation_state(db, ws)
@@ -1160,7 +1244,8 @@ def test_prune_keeps_newest_and_undone_and_other_workspaces(db, pids, max_histor
     foreign = _raw_edit(db, "rating", "6", workspace_id=other,
                         created_at="2020-01-01 00:00:00")
 
-    db._prune_edit_history()
+    with db.transaction():
+        db.prune_edit_history()
 
     assert not db.conn.in_transaction
     remaining = {r["id"] for r in _history_rows(db)}
@@ -1171,14 +1256,15 @@ def test_prune_keeps_newest_and_undone_and_other_workspaces(db, pids, max_histor
 def test_prune_defaults_to_1000_when_unset(db, max_history):
     max_history["value"] = 0
     ids = [_raw_edit(db, "rating", str(i)) for i in range(3)]
-    db._prune_edit_history()
+    with db.transaction():
+        db.prune_edit_history()
     assert [r["id"] for r in _history_rows(db)] == ids
 
 
 def test_prune_requires_active_workspace(db, max_history):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db._prune_edit_history()
+        db.prune_edit_history()
 
 
 def test_record_edit_prunes_after_commit(db, pids, max_history):
@@ -1186,6 +1272,16 @@ def test_record_edit_prunes_after_commit(db, pids, max_history):
     _raw_edit(db, "rating", "1", created_at="2020-01-01 00:00:00")
     newest = _rating_edit(db, pids[0], 0, 1)
     assert [r["id"] for r in _history_rows(db)] == [newest]
+
+
+def test_prune_never_commits(db, pids, max_history):
+    max_history["value"] = 1
+    _raw_edit(db, "rating", "1", created_at="2020-01-01 00:00:00")
+    _raw_edit(db, "rating", "2", created_at="2020-01-02 00:00:00")
+    db.prune_edit_history()
+    assert db.conn.in_transaction
+    assert len(_history_rows(db)) == 2
+    db.conn.rollback()
 
 
 # -- pure parsers ---------------------------------------------------------
@@ -1372,7 +1468,7 @@ _DELEGATING = (
     "record_edit",
     "_undo_keyword_add", "_redo_keyword_add", "_undo_species_replace",
     "_redo_species_replace", "_undo_prediction_accept_statuses",
-    "_redo_prediction_accept_statuses", "_prune_edit_history",
+    "_redo_prediction_accept_statuses", "prune_edit_history",
 )
 
 _DOMAIN = _DELEGATING + (
@@ -1481,9 +1577,9 @@ def test_edit_history_facade_signatures_are_unchanged():
     assert params("record_edit") == [
         ("self", empty), ("action_type", empty), ("description", empty),
         ("new_value", empty), ("items", empty), ("is_batch", False),
-        ("_commit", True), ("source", None), ("reason", None),
+        ("source", None), ("reason", None),
     ]
-    assert params("_prune_edit_history") == [("self", empty)]
+    assert params("prune_edit_history") == [("self", empty)]
 
 
 def test_history_replay_services_accept_outer_cache_restoration():

@@ -28,6 +28,7 @@ machinery so ``db.py`` keeps only the façade method:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import logging
 import sqlite3
 import time
@@ -196,6 +197,25 @@ def _run_callbacks(callbacks: list[Callable[[], object]]) -> None:
             log.exception("after_commit callback %r failed", callback)
 
 
+@dataclasses.dataclass(frozen=True)
+class InOwnUnit:
+    """An ``after_commit`` callback that writes, run as its own unit of work.
+
+    Callbacks run once the owning unit has committed, when no transaction is
+    open, so one that writes needs an owner of its own: ``unit`` is the
+    ``Database.transaction`` that owns it. Equal callbacks compare equal, so
+    ``after_commit(..., once=True)`` keeps one of them per unit.
+    """
+
+    callback: Callable[[], object]
+    unit: Callable[..., contextlib.AbstractContextManager[None]]
+    immediate: bool = False
+
+    def __call__(self) -> None:
+        with self.unit(immediate=self.immediate):
+            self.callback()
+
+
 def _hold(conn: sqlite3.Connection, delta: int) -> None:
     if isinstance(conn, HoldingConnection):
         conn.commit_holds += delta
@@ -234,8 +254,17 @@ class UnitOfWork:
         if keep:
             self._callbacks[-1].extend(inner)
 
-    def after_commit(self, callback: Callable[[], object]) -> None:
-        """Run ``callback`` once the outermost unit commits (now, if none is open)."""
+    @property
+    def joined(self) -> bool:
+        """True while the open units sit inside a transaction they do not own."""
+        return self._in_joined
+
+    def after_commit(self, callback: Callable[[], object], *, once: bool = False) -> None:
+        """Run ``callback`` once the outermost unit commits (now, if none is open).
+
+        With ``once``, a callback equal to one already waiting in this unit
+        is not added again.
+        """
         if self._in_joined:
             # A joined unit is a savepoint inside a transaction an
             # unconverted caller began and will end. Releasing the savepoint
@@ -250,6 +279,8 @@ class UnitOfWork:
             )
         if not self.depth:
             callback()
+            return
+        if once and any(callback == waiting for frame in self._callbacks for waiting in frame):
             return
         self._callbacks[-1].append(callback)
 

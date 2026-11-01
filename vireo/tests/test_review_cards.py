@@ -334,6 +334,7 @@ def test_mid_card_failure_rolls_back_keywords_statuses_and_history(app_and_db, m
     edit_id = db.record_edit('rating', 'prior edit', '1', [
         {'photo_id': photos[0], 'old_value': '0', 'new_value': '1'},
     ])
+    db.commit()
     db.conn.execute('UPDATE edit_history SET undone=1 WHERE id=?', (edit_id,))
     db.commit()
 

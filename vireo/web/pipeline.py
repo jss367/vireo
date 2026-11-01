@@ -1561,7 +1561,7 @@ def create_pipeline_blueprint(
             return
         if flag_items:
             edit_id = db.record_edit("flag", desc, "pipeline_group_apply", flag_items,
-                                     is_batch=len(flag_items) > 1, _commit=False)
+                                     is_batch=len(flag_items) > 1)
             record_attribution(edit_id)
         saved = False
         try:
@@ -1574,7 +1574,10 @@ def create_pipeline_blueprint(
             if saved:
                 save_results_raw(before, os.path.dirname(db._db_path), db.require_workspace_id())
             raise
-        db._prune_edit_history()
+        # Committed above outside any unit of work (``grouping_edit``'s
+        # ``begin_immediate``), so ``record_edit`` scheduled no prune.
+        with db.transaction(immediate=True):
+            db.prune_edit_history()
 
     def _group_apply_photo_states(db: Database, photo_ids: list[int]) -> dict[int, JsonDict]:
         """Each photo's flag after a group apply, for the client's card update."""

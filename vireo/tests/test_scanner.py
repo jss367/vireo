@@ -3374,6 +3374,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
         recipe_json,
         [{"photo_id": jpeg_id, "old_value": "", "new_value": recipe_json}],
     )
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET thumb_path = ? WHERE id = ?",
         ("thumbnails/raw.jpg", raw_id),

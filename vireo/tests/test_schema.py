@@ -518,6 +518,7 @@ def test_version_16_catalog_backfills_grouping_snapshot_byte_counts(tmp_path):
     payload = '{"before": "caf\u00e9 \U0001f985", "after": []}'
     with Database(db_path, initialize_schema=False) as db:
         edit = db.record_edit('pipeline_grouping', 'Legacy grouping', '{}', [])
+        db.commit()
         db.conn.execute('ALTER TABLE edit_history_payloads DROP COLUMN bytes')
         db.conn.execute('INSERT INTO edit_history_payloads(edit_id, payload) VALUES (?, ?)', (edit, payload))
         db.conn.execute('PRAGMA user_version = 16')

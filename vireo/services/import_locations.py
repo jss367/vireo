@@ -1034,7 +1034,7 @@ def _apply_choice(
             db.record_edit(
                 "photo_location",
                 f'Added location "{name}" during import to {len(items)} photos',
-                str(leaf_id), items, is_batch=True, _commit=False,
+                str(leaf_id), items, is_batch=True,
             )
     return len(items), len(located)
 

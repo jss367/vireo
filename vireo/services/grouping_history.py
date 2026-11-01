@@ -241,21 +241,18 @@ def store_grouping_snapshot(db: Database, edit_id: int, snapshot: JsonDict) -> N
 
 def record_grouping_edit(
     db: Database, description: str, change: JsonDict,
-    items: Sequence[Mapping[str, object]] = (), *, _commit: bool = False,
+    items: Sequence[Mapping[str, object]] = (),
 ) -> int:
     """Record a ``pipeline_grouping`` edit, snapshot in the payload table.
 
-    Same transaction contract as ``Database.record_edit``: with
-    ``_commit=False`` the caller owns the commit and the later prune.
+    Same transaction contract as ``Database.record_edit``: the caller's unit
+    of work owns the commit, and the prune follows it.
     """
     meta, snapshot = split_grouping_change(change)
     edit_id = db.record_edit(
-        "pipeline_grouping", description, json.dumps(meta), items, _commit=False,
+        "pipeline_grouping", description, json.dumps(meta), items,
     )
     store_grouping_snapshot(db, edit_id, snapshot)
-    if _commit:
-        db.commit()
-        db._prune_edit_history()
     return edit_id
 
 
@@ -320,7 +317,10 @@ def save_grouping_edit(
         if saved:
             save_results_raw(before, cache_dir, db.require_workspace_id())
         raise
-    db._prune_edit_history()
+    # The edit committed above, outside any unit of work (the caller's
+    # ``begin_immediate``), so ``record_edit`` scheduled no prune.
+    with db.transaction(immediate=True):
+        db.prune_edit_history()
 
 
 def record_species_confirm_cache(
@@ -344,7 +344,7 @@ def record_species_confirm_cache(
     edit runs against pristine species state.
 
     Called from ``api_encounter_species`` *before* the cache mutation, inside
-    the same transaction as the DB writes, with ``_commit=False``.
+    the same unit of work as the DB writes.
     """
     if not target_enc:
         return
@@ -394,7 +394,7 @@ def record_species_confirm_cache(
             )
     return db.record_edit(
         "species_confirm_cache", description, new_value, [],
-        is_batch=False, _commit=False,
+        is_batch=False,
     )
 
 
@@ -489,8 +489,7 @@ def _restore_encounter_confirmation(enc: JsonDict, change: JsonDict, *, undo: bo
 
 @contextmanager
 def restore_species_confirm_cache_edit(
-    db: Database, entry: HistoryEntry, *, undo: bool,
-    cache_restore: CacheRestore | None = None,
+    db: Database, entry: HistoryEntry, *, undo: bool, cache_restore: CacheRestore,
 ) -> Iterator[None]:
     """Undo (or redo) a cache-only ``/api/encounters/species`` confirmation.
 
@@ -503,12 +502,10 @@ def restore_species_confirm_cache_edit(
     resurrecting a stale confirmation on the wrong photos.
 
     Uses ``restore_grouping_edit``'s ``current`` → mutate → save pattern so
-    ``yield`` runs inside the workspace regroup lock and any DB failure
-    inside the caller's transaction rolls back before the cache is put back.
-    When ``cache_restore`` is passed, the put-back callback is registered on
-    it so the restoration scope extends through the caller's outer unit of
-    work commit — a commit failure then rolls back the DB and puts the
-    cache back together.
+    ``yield`` runs inside the workspace regroup lock. The put-back callback
+    and the lock are handed to ``cache_restore``, so the restoration scope
+    extends through the caller's unit of work commit: a failure there rolls
+    back the DB and then puts the cache back.
     """
     from pipeline import load_results_raw, save_results_raw
     from pipeline_locks import acquire_workspace_regroup
@@ -544,25 +541,16 @@ def restore_species_confirm_cache_edit(
         else:
             _restore_encounter_confirmation(enc, change, undo=undo)
         save_results_raw(restored, cache_dir, ws_id)
-        if cache_restore is not None:
-            # Extend restoration through the caller's outer commit: the unit
-            # of work rolls back the DB and then ``cache_restore.__exit__``
-            # puts the cache back. Hand the regroup lock to ``cache_restore``
-            # too, so no competing writer can slip in between the lock
-            # release in our ``finally`` and the restoration; the lock stays
-            # held through the whole restoration lifecycle.
-            cache_restore.restore = lambda: save_results_raw(current, cache_dir, ws_id)
-            cache_restore.add_cleanup(lock.release)
-            lock_transferred = True
-            yield
-            return
-        try:
-            yield
-        except Exception:
-            if db.in_transaction:
-                db.rollback()
-            save_results_raw(current, cache_dir, ws_id)
-            raise
+        # Extend restoration through the caller's outer commit: the unit of
+        # work rolls back the DB and then ``cache_restore.__exit__`` puts the
+        # cache back. Hand the regroup lock to ``cache_restore`` too, so no
+        # competing writer can slip in between the lock release in our
+        # ``finally`` and the restoration; the lock stays held through the
+        # whole restoration lifecycle.
+        cache_restore.restore = lambda: save_results_raw(current, cache_dir, ws_id)
+        cache_restore.add_cleanup(lock.release)
+        lock_transferred = True
+        yield
     finally:
         if not lock_transferred:
             lock.release()
@@ -570,8 +558,7 @@ def restore_species_confirm_cache_edit(
 
 @contextmanager
 def restore_grouping_edit(
-    db: Database, entry: HistoryEntry, *, undo: bool,
-    cache_restore: CacheRestore | None = None,
+    db: Database, entry: HistoryEntry, *, undo: bool, cache_restore: CacheRestore,
 ) -> Iterator[None]:
     """Restore structure, retaining history if the write/commit fails.
 
@@ -581,10 +568,10 @@ def restore_grouping_edit(
     conflict — undo is strict LIFO, so any species entry newer than this
     grouping entry has already been undone by the time we get here.
 
-    When ``cache_restore`` is passed, the put-back callback is registered on
-    it so the restoration scope extends through the caller's outer unit of
-    work commit — a commit failure then rolls back the DB and puts the
-    cache back together.
+    The put-back callback and the regroup lock are handed to
+    ``cache_restore``, so the restoration scope extends through the caller's
+    unit of work commit: a failure there rolls back the DB and then puts the
+    cache back.
     """
     from pipeline import load_results_raw, save_results_raw
     from pipeline_locks import acquire_workspace_regroup
@@ -633,30 +620,16 @@ def restore_grouping_edit(
             if photo["id"] in flags:
                 photo["flag"] = flags[photo["id"]]
         save_results_raw(restored, cache_dir, ws_id)
-        if cache_restore is not None:
-            # Extend restoration through the caller's outer commit: the unit
-            # of work rolls back the DB and then ``cache_restore.__exit__``
-            # puts the cache back. Hand the regroup lock to ``cache_restore``
-            # too, so no competing writer can slip in between the lock
-            # release in our ``finally`` and the restoration; the lock stays
-            # held through the whole restoration lifecycle.
-            cache_restore.restore = lambda: save_results_raw(current, cache_dir, ws_id)
-            cache_restore.add_cleanup(lock.release)
-            lock_transferred = True
-            yield
-            return
-        try:
-            yield
-        except Exception:
-            # Roll back any pending DB writes (typically the caller's
-            # ``UPDATE edit_history SET undone = ...`` or its commit) before
-            # putting the cache back — otherwise a later commit on this
-            # connection could flush the undone flag without the matching
-            # grouping state on disk and leave history desynchronized.
-            if db.in_transaction:
-                db.rollback()
-            save_results_raw(current, cache_dir, ws_id)
-            raise
+        # Extend restoration through the caller's outer commit: the unit of
+        # work rolls back the DB and then ``cache_restore.__exit__`` puts the
+        # cache back. Hand the regroup lock to ``cache_restore`` too, so no
+        # competing writer can slip in between the lock release in our
+        # ``finally`` and the restoration; the lock stays held through the
+        # whole restoration lifecycle.
+        cache_restore.restore = lambda: save_results_raw(current, cache_dir, ws_id)
+        cache_restore.add_cleanup(lock.release)
+        lock_transferred = True
+        yield
     finally:
         if not lock_transferred:
             lock.release()

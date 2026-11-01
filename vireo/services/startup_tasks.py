@@ -154,7 +154,8 @@ class StartupTasks:
             for workspace in workspaces:
                 io_checkpoint()
                 db.set_active_workspace(workspace["id"])
-                retired = db._prune_edit_history()
+                with db.transaction(immediate=True):
+                    retired = db.prune_edit_history()
                 for key, count in retired.items():
                     result[key] = result.get(key, 0) + count
                     retired_total[key] = retired_total.get(key, 0) + count

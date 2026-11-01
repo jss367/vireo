@@ -473,7 +473,6 @@ class _HighlightsRelabel:
             str(kid),
             self.items,
             is_batch=len(self.items) > 1,
-            _commit=False,
         )
 
 
@@ -658,7 +657,6 @@ def _accept_confirm_targets(
             str(result["keyword_id"]),
             items,
             is_batch=len(items) > 1,
-            _commit=False,
         )
         affected.extend(items)
     return affected, skipped
@@ -1008,7 +1006,6 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         affected, skipped = _accept_confirm_targets(
             db, photo_ids, targets, skips, exact_rows=species is not None,
         )
-        db.after_commit(db._prune_edit_history)
         return jsonify({"ok": True, "affected": affected, "skipped": skipped})
 
     @blueprint.route("/api/highlights/relabel", methods=["POST"])
@@ -1086,7 +1083,6 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         relabel.retag_photos(kid)
         relabel.rename_curation()
         relabel.record_relabel_edit(kid)
-        db.after_commit(db._prune_edit_history)
         return jsonify({
             "ok": True,
             "keyword_id": kid,

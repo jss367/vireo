@@ -106,7 +106,7 @@ def create_photo_location_keywords_blueprint(
         if already_tagged:
             return jsonify({"ok": True, "keyword_id": kid})
         # source='manual': a person clicked Add. Stamping the association
-        # itself keeps authorship recoverable after _prune_edit_history()
+        # itself keeps authorship recoverable after prune_edit_history()
         # drops the keyword_add entry recorded just below.
         with db.transaction():
             db.tag_photo(photo_id, kid, source='manual')

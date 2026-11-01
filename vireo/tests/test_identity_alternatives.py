@@ -21,9 +21,10 @@ def test_permanently_stale_identity_retires_without_replay_and_unblocks_history(
     def rating_edit():
         db.photo_review.set_rating(2, 4)
         db.commit()
-        return db.record_edit('rating', 'Independent rating', '4', [
-            {'photo_id': 2, 'old_value': str(old_rating), 'new_value': '4'},
-        ])
+        with db.transaction():
+            return db.record_edit('rating', 'Independent rating', '4', [
+                {'photo_id': 2, 'old_value': str(old_rating), 'new_value': '4'},
+            ])
 
     if direction == 'undo':
         rating_id = rating_edit()

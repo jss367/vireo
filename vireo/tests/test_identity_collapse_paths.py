@@ -175,21 +175,24 @@ def test_real_deletion_cascades_identity_and_history_only_for_deleted_photos(db,
 
 @pytest.mark.parametrize('failure', [RuntimeError, KeyboardInterrupt, GeneratorExit])
 def test_identity_replay_cleanup_rolls_back_and_keeps_writer_lock(db, tmp_path, failure):
+    """A replay is a savepoint in its owner's unit: a failure, even a
+    ``BaseException``, undoes exactly the replay and keeps the writer lock."""
     import sqlite3
     _, _, survivor, _, _ = _fixture(db, tmp_path, 'folder')
     original = db.photos.get(survivor)['rating']
-    with pytest.raises(failure), db._edit_history_repository().identity_replay():
-        db.conn.execute('UPDATE photos SET rating=5 WHERE id=?', (survivor,))
-        raise failure('Replay interrupted')
-    assert db.photos.get(survivor)['rating'] == original
-    assert db.conn.in_transaction
-    other = sqlite3.connect(db._db_path, timeout=0)
-    try:
-        with pytest.raises(sqlite3.OperationalError, match='locked'):
-            other.execute('UPDATE photos SET rating=1 WHERE id=?', (survivor,))
-    finally:
-        other.close()
-    db.conn.rollback()
+    with pytest.raises(RuntimeError, match='owner'), db.transaction():
+        with pytest.raises(failure), db.transaction():
+            db.conn.execute('UPDATE photos SET rating=5 WHERE id=?', (survivor,))
+            raise failure('Replay interrupted')
+        assert db.photos.get(survivor)['rating'] == original
+        assert db.conn.in_transaction
+        other = sqlite3.connect(db._db_path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                other.execute('UPDATE photos SET rating=1 WHERE id=?', (survivor,))
+        finally:
+            other.close()
+        raise RuntimeError('owner rolls back')
 
 
 @pytest.mark.parametrize('same_hash', [True, False])

@@ -79,7 +79,8 @@ def test_snapshot_budget_keeps_a_replayable_newest_chain(app_and_db):
     db.edit_history.store_grouping_payload(middle, json.dumps(payload))
     db.commit()
     budget = db.conn.execute('SELECT bytes FROM edit_history_payloads WHERE edit_id=?', (newest,)).fetchone()[0] + 100
-    db.edit_history.prune(1000, max_payload_bytes=budget)
+    with db.transaction():
+        db.edit_history.prune(1000, max_payload_bytes=budget)
     assert db.edit_history.grouping_payload(newest)
     assert not db.edit_history.grouping_payload(middle)
     assert not db.edit_history.grouping_payload(oldest)

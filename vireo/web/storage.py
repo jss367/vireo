@@ -118,7 +118,8 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
                 for workspace in db.workspaces.list_all():
                     ctx.checkpoint(job)
                     db.set_active_workspace(workspace["id"])
-                    retired = db._prune_edit_history()
+                    with db.transaction(immediate=True):
+                        retired = db.prune_edit_history()
                     for key, count in retired.items():
                         result[key] = result.get(key, 0) + count
                 return result

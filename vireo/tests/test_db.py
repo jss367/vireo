@@ -6485,6 +6485,7 @@ def test_record_edit_single(tmp_path):
         new_value='5',
         items=[{'photo_id': pid, 'old_value': '0', 'new_value': '5'}],
     )
+    db.commit()
 
     history = db.edit_history.list_recent()
     assert len(history) == 1
@@ -6509,6 +6510,7 @@ def test_record_edit_batch(tmp_path):
         items=items,
         is_batch=True,
     )
+    db.commit()
 
     history = db.edit_history.list_recent()
     assert len(history) == 1
@@ -6523,8 +6525,10 @@ def test_get_edit_history_order(tmp_path):
 
     db.record_edit('rating', 'First edit', '1',
                    [{'photo_id': pid, 'old_value': '0', 'new_value': '1'}])
+    db.commit()
     db.record_edit('rating', 'Second edit', '2',
                    [{'photo_id': pid, 'old_value': '1', 'new_value': '2'}])
+    db.commit()
 
     history = db.edit_history.list_recent()
     assert history[0]['description'] == 'Second edit'
@@ -6539,6 +6543,7 @@ def test_get_edit_history_pagination(tmp_path):
     for i in range(5):
         db.record_edit('rating', f'Edit {i}', str(i),
                        [{'photo_id': pid, 'old_value': str(i), 'new_value': str(i+1)}])
+        db.commit()
 
     page1 = db.edit_history.list_recent(limit=2, offset=0)
     page2 = db.edit_history.list_recent(limit=2, offset=2)
@@ -6558,6 +6563,7 @@ def test_undo_last_edit_rating(tmp_path):
     db.commit()
     db.record_edit('rating', 'Set rating to 5', '5',
                    [{'photo_id': pid, 'old_value': str(original_rating), 'new_value': '5'}])
+    db.commit()
 
     result = undo_last_edit(db)
     assert result is not None
@@ -6575,6 +6581,7 @@ def test_undo_last_edit_flag(tmp_path):
     db.commit()
     db.record_edit('flag', 'Set flag to flagged', 'flagged',
                    [{'photo_id': pid, 'old_value': 'none', 'new_value': 'flagged'}])
+    db.commit()
 
     result = undo_last_edit(db)
     assert db.photos.get(pid)['flag'] == 'none'
@@ -6589,6 +6596,7 @@ def test_undo_last_edit_keyword_add(tmp_path):
     db.commit()
     db.record_edit('keyword_add', 'Added keyword "Eagle"', str(kid),
                    [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}])
+    db.commit()
 
     undo_last_edit(db)
     keywords = db.photo_keywords.get_for_photo(pid)
@@ -6613,6 +6621,7 @@ def test_undo_last_edit_keyword_remove(tmp_path):
     db.commit()
     db.record_edit('keyword_remove', 'Removed keyword "Hawk"', str(kid),
                    [{'photo_id': pid, 'old_value': str(kid), 'new_value': ''}])
+    db.commit()
 
     undo_last_edit(db)
     keywords = db.photo_keywords.get_for_photo(pid)
@@ -6637,6 +6646,7 @@ def test_undo_last_edit_batch(tmp_path):
         db.commit()
         items.append({'photo_id': pid, 'old_value': str(old_r), 'new_value': '5'})
     db.record_edit('rating', 'Set rating to 5 on 2 photos', '5', items, is_batch=True)
+    db.commit()
 
     undo_last_edit(db)
     for pid, old_r in original_ratings.items():
@@ -16252,6 +16262,7 @@ def test_undo_color_label(tmp_path):
     db.photo_labels.set(pid, 'red')
     db.record_edit('color_label', 'Set color to red', 'red',
                    [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
+    db.commit()
 
     result = undo_last_edit(db)
     assert result is not None
@@ -16267,6 +16278,7 @@ def test_redo_color_label(tmp_path):
     db.photo_labels.set(pid, 'red')
     db.record_edit('color_label', 'Set color to red', 'red',
                    [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
+    db.commit()
 
     undo_last_edit(db)
     assert db.photo_labels.get(pid) is None
@@ -18929,13 +18941,17 @@ def test_location_edits_are_non_undoable(db):
     pid = _make_photo(db)
     db.record_edit('rating', 'First edit', '1',
                    [{'photo_id': pid, 'old_value': '0', 'new_value': '1'}])
+    db.commit()
 
     # Now record location_set / clear / link audit entries (newest = link).
     db.record_edit('location_set', 'set location: Test', '1',
                    [{'photo_id': pid, 'old_value': '', 'new_value': '1'}])
+    db.commit()
     db.record_edit('location_clear', 'cleared location', '',
                    [{'photo_id': pid, 'old_value': '', 'new_value': ''}])
+    db.commit()
     db.record_edit('location_link', 'linked', '1', [])
+    db.commit()
 
     # Undo MUST step over the three location_* entries straight to the
     # rating edit, even though they're newer.
@@ -20561,6 +20577,7 @@ def test_merge_keyword_into_retargets_edit_history(tmp_path):
             "keyword_add", "Added keyword", str(merge_id),
             [{"photo_id": pid, "old_value": "", "new_value": str(merge_id)}],
         )
+        db.commit()
         # 2) A keyword_remove edit whose item.old_value carries the bare id.
         db.tag_photo(pid, merge_id)  # ensure tagged before recording remove
         db.commit()
@@ -20568,6 +20585,7 @@ def test_merge_keyword_into_retargets_edit_history(tmp_path):
             "keyword_remove", "Removed keyword", str(merge_id),
             [{"photo_id": pid, "old_value": str(merge_id), "new_value": ""}],
         )
+        db.commit()
         # 3) A species_replace edit with JSON metadata carrying keyword_id +
         #    keyword_ids that reference merge_id.
         payload = _json.dumps(
@@ -20582,6 +20600,7 @@ def test_merge_keyword_into_retargets_edit_history(tmp_path):
                 "new_value": str(merge_id),
             }],
         )
+        db.commit()
 
         # Merge merge_id into keep_id (mirrors the migration's convergence
         # loop, and update_keyword's retype-into-peer path).
@@ -20656,6 +20675,7 @@ def test_merge_keyword_into_dedupes_keyword_ids_after_retarget(tmp_path):
                 "new_value": str(merge_id),
             }],
         )
+        db.commit()
 
         db._merge_keyword_into(merge_id, keep_id)
         db.conn.commit()
@@ -20708,6 +20728,7 @@ def test_merge_keyword_into_preserves_prediction_accept_old_value(tmp_path):
                 "new_value": str(merge_id),
             }],
         )
+        db.commit()
 
         db.tag_photo(pid, merge_id)
         db.commit()
@@ -20776,6 +20797,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
             ],
             is_batch=True,
         )
+        db.commit()
 
         db._merge_keyword_into(merge_id, keep_id)
         db.conn.commit()
@@ -20857,6 +20879,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tm
             ],
             is_batch=True,
         )
+        db.commit()
         # Simulate the untag the original edit performed.
         db.untag_photo(pid_had_both, merge_id)
         db.untag_photo(pid_only_src, merge_id)
@@ -20936,6 +20959,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept
             ],
             is_batch=True,
         )
+        db.commit()
 
         db._merge_keyword_into(merge_id, keep_id)
         db.conn.commit()

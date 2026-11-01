@@ -21,6 +21,7 @@ import location_review
 import places
 from flask import Blueprint, current_app, g, jsonify, request
 from services import gps_locations
+from services.edit_history import run_atomic_edit
 from services.gps_locations import (
     decode_cached_reverse_geocode,
     encode_cached_reverse_geocode,
@@ -413,25 +414,21 @@ def create_locations_blueprint(
         location_review.gps_discrepancies(
             db, photo_ids, 0, include_reviewed=True, sidecar_reader=capture_sidecar,
         )
-        # Serialize validation and queueing with concurrent assignment edits.
-        db.begin_immediate()
-        try:
+
+        def resolve() -> ResponseReturnValue:
             for photo_id in photo_ids:
                 error = location_errors.photo_location_edit_error(db, photo_id)
                 if error is not None:
-                    db.rollback()
                     return error
             photos = location_review.gps_discrepancies(
                 db, photo_ids, 0, include_reviewed=True, sidecar_reader=sidecars.get,
             )
             current = {photo["id"]: photo for photo in photos}
             if any(pid not in current or fingerprints.get(str(pid)) != current[pid]["fingerprint"] for pid in photo_ids):
-                db.rollback()
                 return json_error("Location data changed. Reload this review before applying a decision.", 409)
             if body["action"] == "assigned":
                 import config as cfg
                 if not db.get_effective_config(cfg.load()).get("write_assigned_location_to_xmp", False):
-                    db.rollback()
                     return json_error("Enable Write assigned locations to XMP in Settings before queueing corrections.", 409)
                 for photo_id in photo_ids:
                     queue_location_sync_if_enabled(db, photo_id)
@@ -439,7 +436,6 @@ def create_locations_blueprint(
             else:
                 for photo_id in photo_ids:
                     if db.locations.has_pending_change(photo_id):
-                        db.rollback()
                         return json_error("A selected photo has a pending location change. Review that change before keeping its GPS.", 409)
                 db.locations.save_gps_reviews(
                     [(pid, current[pid]["fingerprint"]) for pid in photo_ids],
@@ -450,14 +446,13 @@ def create_locations_blueprint(
                 body["action"],
                 [{'photo_id': pid, 'old_value': current[pid]["fingerprint"], 'new_value': body["action"]}
                  for pid in photo_ids],
-                is_batch=len(photo_ids) > 1, _commit=False,
+                is_batch=len(photo_ids) > 1,
             )
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        db._prune_edit_history()
-        return jsonify({"reviewed": len(photo_ids), "queued": len(photo_ids) if body["action"] == "assigned" else 0})
+            return jsonify({"reviewed": len(photo_ids), "queued": len(photo_ids) if body["action"] == "assigned" else 0})
+
+        # Serialize validation and queueing with concurrent assignment edits;
+        # a refusal rolls back whatever the checks had written.
+        return run_atomic_edit(db, resolve, immediate=True)
 
     @blueprint.route("/api/location-review/saved-suggestions")
     def api_location_review_saved_suggestions() -> ResponseReturnValue:

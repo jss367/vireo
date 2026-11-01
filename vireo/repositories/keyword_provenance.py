@@ -1089,7 +1089,7 @@ class KeywordProvenanceRepository:
 
         Args:
             source: Durable provenance for the association. The stamp lives on
-                    the row, so authorship survives ``_prune_edit_history``
+                    the row, so authorship survives ``prune_edit_history``
                     discarding the ``keyword_add`` entry.
 
                     Defaults to ``KEYWORD_SOURCE_MANUAL`` because that is the

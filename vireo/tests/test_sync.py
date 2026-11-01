@@ -3518,6 +3518,7 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
     db.commit()
     db.record_edit('keyword_add', 'Added Osprey', str(keyword),
                    [{'photo_id': pid, 'old_value': '', 'new_value': str(keyword)}])
+    db.commit()
     with monkeypatch.context() as patch:
         if first_sync == 'offline':
             patch.setattr(sync.os.path, 'isdir', lambda _path: False)

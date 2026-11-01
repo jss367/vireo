@@ -252,7 +252,7 @@ def save_alternatives(
         items.append({'photo_id': pid, 'old_value': old, 'new_value': new})
     return db.record_edit(
         'identity_alternatives', f'Saved unresolved species alternatives on {len(photo_ids)} photos',
-        None, items, is_batch=len(photo_ids) > 1, _commit=False,
+        None, items, is_batch=len(photo_ids) > 1,
     )
 
 
@@ -284,7 +284,7 @@ def resolve_alternatives(db: Database, photo_ids: Sequence[int], species: str) -
         items.append({'photo_id': pid, 'old_value': old, 'new_value': new})
     return db.record_edit(
         'identity_alternatives', f'Resolved species as "{species}" on {len(photo_ids)} photos',
-        None, items, is_batch=len(photo_ids) > 1, _commit=False,
+        None, items, is_batch=len(photo_ids) > 1,
     )
 
 

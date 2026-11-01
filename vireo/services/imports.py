@@ -962,7 +962,7 @@ class ImportService:
                         "keyword_add",
                         f'Added "{keyword_name}" during import to '
                         f"{len(items)} photos",
-                        str(keyword_id), items, is_batch=True, _commit=False,
+                        str(keyword_id), items, is_batch=True,
                     )
                 thread_db.commit()
                 tagged_photo_ids.update(item["photo_id"] for item in items)

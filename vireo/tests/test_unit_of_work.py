@@ -493,7 +493,6 @@ def test_a_failed_joined_set_flag_preserves_history_and_undo_for_caller_species_
     db.record_edit(
         "keyword_remove", "Removed Robin", str(kid),
         [{"photo_id": photo_id, "old_value": "", "new_value": str(kid)}],
-        _commit=False,
     )
     db.commit()
 
