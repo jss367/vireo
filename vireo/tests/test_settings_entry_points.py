@@ -72,17 +72,32 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
     tree = ast.parse(source)
     scopes = [node for node in ast.walk(tree)
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    # Only ``FunctionDef``/``AsyncFunctionDef``/``Lambda`` *body* subtrees
-    # defer until the function is called. Argument defaults, decorators,
-    # parameter annotations and the return annotation execute while the
-    # ``def``/``lambda`` statement itself runs, so a ``Database(...)`` sitting
-    # in a default of a module-level ``def`` is a module-init open, not a
-    # deferred one.
+    # ``FunctionDef``/``AsyncFunctionDef``/``Lambda`` *body* subtrees defer
+    # until the function is called -- plus parameter and return annotations,
+    # which under PEP 649 (Python 3.14+, which this project requires) compile
+    # into a separate ``__annotate__`` descriptor that only runs when
+    # ``__annotations__`` is accessed. Argument defaults and decorators still
+    # execute while the ``def``/``lambda`` statement itself runs, so a
+    # ``Database(...)`` sitting in a default of a module-level ``def`` is a
+    # module-init open, not a deferred one.
     in_function_body: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for stmt in node.body:
                 for n in ast.walk(stmt):
+                    in_function_body.add(id(n))
+            args = node.args
+            annotations: list[ast.AST] = []
+            for arg in (args.posonlyargs + args.args + args.kwonlyargs):
+                if arg.annotation is not None:
+                    annotations.append(arg.annotation)
+            for extra in (args.vararg, args.kwarg):
+                if extra is not None and extra.annotation is not None:
+                    annotations.append(extra.annotation)
+            if node.returns is not None:
+                annotations.append(node.returns)
+            for ann in annotations:
+                for n in ast.walk(ann):
                     in_function_body.add(id(n))
         elif isinstance(node, ast.Lambda):
             for n in ast.walk(node.body):
@@ -342,7 +357,13 @@ def test_entry_points_import_config_before_opening_a_database():
     ("def f(db=Database(':memory:')):\n    pass\nimport config\n", [1]),
     ("import config\ndef f(db=Database(':memory:')):\n    pass\n", []),
     ("@Database(':memory:')\ndef f():\n    pass\nimport config\n", [1]),
-    ("def f(x: Database(p) = None) -> None:\n    pass\nimport config\n", [1]),
+    # Under PEP 649 (Python 3.14+), parameter and return annotations are
+    # deferred: a ``Database(...)`` inside one compiles into the function's
+    # ``__annotate__`` descriptor and runs only when ``__annotations__`` is
+    # accessed, so a late ``import config`` still bootstraps it.
+    ("def f(x: Database(p) = None) -> None:\n    pass\nimport config\n", []),
+    ("def f() -> Database(p):\n    pass\nimport config\n", []),
+    ("def f(*args: Database(p), **kw: Database(p)) -> None:\n    pass\nimport config\n", []),
     # The default of a *nested* ``def`` runs when its enclosing function
     # runs, which is deferred until that function is called. The outer
     # function is never invoked at init, so the later import bootstraps it.
