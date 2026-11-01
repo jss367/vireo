@@ -227,7 +227,7 @@ def test_api_new_images_defers_walk_during_folder_move(app_and_db, query, job_ty
 
 
 @pytest.mark.parametrize("action", ["resume", "cancel"])
-@pytest.mark.parametrize("pause_at", ["root", "entry"])
+@pytest.mark.parametrize("pause_at", ["root", "entry", "publish"])
 def test_inflight_discovery_yields_to_a_new_nas_transfer(app_and_db, monkeypatch, action, pause_at):
     import os
     import threading
@@ -251,7 +251,11 @@ def test_inflight_discovery_yields_to_a_new_nas_transfer(app_and_db, monkeypatch
         if pause_at == "root" and not entered.is_set():
             entered.set()
             assert next_entry.wait(synchronization_timeout(5))
-        return original_count_root(*args, **kwargs)
+        result = original_count_root(*args, **kwargs)
+        if pause_at == "publish" and not entered.is_set():
+            entered.set()
+            assert next_entry.wait(synchronization_timeout(5))
+        return result
 
     def walk(top, **kwargs):
         closed.clear()
@@ -294,6 +298,7 @@ def test_inflight_discovery_yields_to_a_new_nas_transfer(app_and_db, monkeypatch
             "send-to-nas", transfer_work,
             singleton_key="transfer", workspace_id=ws_id, exclusive_workspace=True,
         )
+        reading.clear()
         next_entry.set()
         assert waiting.wait(synchronization_timeout(5))
         assert not reading.is_set()

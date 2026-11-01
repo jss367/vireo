@@ -1739,6 +1739,26 @@ def test_count_abandons_stalled_walk_and_reports_root_offline(db_with_workspace,
     new_images_module._STALLED_WALKS[str(wedged)].join(2)
 
 
+def test_discovery_rechecks_transfer_priority_after_an_empty_final_root(db_with_workspace, monkeypatch):
+    import new_images as module
+
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "empty"
+    root.mkdir()
+    workspace_folders.add_folder(db, str(root))
+    transfer_started = [False]
+    original = module._count_root_new_images
+
+    def finish_root(*args, **kwargs):
+        result = original(*args, **kwargs)
+        transfer_started[0] = True  # No entry callback remains to observe it.
+        return result
+
+    monkeypatch.setattr(module, "_count_root_new_images", finish_root)
+    with pytest.raises(module.DiscoveryDeferred):
+        module.count_new_images_for_workspace(db, ws_id, should_yield=lambda: transfer_started[0])
+
+
 def test_transfer_wait_is_not_mistaken_for_an_offline_root(tmp_path, monkeypatch):
     import threading
 

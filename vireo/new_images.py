@@ -515,7 +515,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 
     volume_reachability.record_known_mount_roots(
         db, {root: True for root in tally.live_mount_roots}
     )
-
+    if should_yield is not None and should_yield():
+        raise DiscoveryDeferred()
     return tally.result(sample_limit)
 
 
