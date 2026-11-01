@@ -82,6 +82,10 @@ class SubjectsRepository:
                  result["exposure_ev"], json.dumps(result["features"]), result["detection_id"]),
             )
 
+    def clear_analysis(self, detection_id: int) -> None:
+        """Retire this region's box measurements; caller owns the transaction."""
+        self.conn.execute("DELETE FROM detection_subjects WHERE detection_id=?", (detection_id,))
+
     def analysis(self, detection_id: int) -> sqlite3.Row | None:
         """The ``detection_subjects`` row of ``detection_id``, or None."""
         return self.conn.execute(

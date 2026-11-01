@@ -223,6 +223,9 @@ def select_reviewer_box(db, photo_id, box):
         db.subjects.clear_primary_features(photo_id)
         ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [
             {"box": box, "confidence": 1.0, "category": "animal"}], "reviewer-v1")
+        # Re-saving an identical or quantization-equivalent box reuses its ID.
+        # Retire that ID's cached box analysis before sync_primary can project it.
+        db.subjects.clear_analysis(ids[0])
         db.subjects.set_choice(photo_id, ids[0])
         sync_primary(db, photo_id)
     return ids[0]

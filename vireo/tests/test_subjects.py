@@ -492,3 +492,63 @@ def test_reviewer_box_api_validates_scope_and_subject(app_and_db):
     other = db.create_workspace('Hidden photo')
     client.post(f'/api/workspaces/{other}/activate')
     assert client.put(url, json={'box': dict(x=.1, y=.1, w=.1, h=.1)}).status_code == 404
+
+
+@pytest.mark.parametrize('coordinate_delta', [0, .00001])
+@pytest.mark.parametrize('source_changed', [False, True])
+def test_resaving_reviewer_box_invalidates_only_its_cached_measurements(
+        db, subject_photo, coordinate_delta, source_changed):
+    from subjects import select_reviewer_box
+    photo_id, ids, path = subject_photo
+    analyze_photo(db, photo_id, path)
+    sibling = dict(db.subjects.analysis(ids[0]))
+    box = dict(x=.1, y=.2, w=.1, h=.2)
+    chosen = select_reviewer_box(db, photo_id, box)
+    assert analyze_photo(db, photo_id, path, detection_id=chosen) == 1
+    old_source_key = db.subjects.analysis(chosen)['source_key']
+    db.predictions.add(chosen, 'Ruby-crowned Kinglet', .9, 'bioclip', status='accepted')
+    recipe = db.set_photo_edit_recipe(photo_id, {'adjustments': {'exposure': .5}})
+    db.commit()
+    predictions = payload(db, photo_id)['subjects'][0]['predictions']
+    if source_changed:
+        Image.new('RGB', (320, 160), (240, 240, 240)).save(path)
+    # Content-addressed IDs quantize boxes to four decimals. Both an exact
+    # re-save and a sub-quantization adjustment must retire the old analysis.
+    box['x'] += coordinate_delta
+    assert select_reviewer_box(db, photo_id, box) == chosen
+    result = payload(db, photo_id)
+    assert result['primary_detection_id'] == chosen
+    assert result['subjects'][0]['analysis'] is None
+    assert db.subjects.analysis(chosen) is None
+    photo = db.conn.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
+    for field in ('quality_score', 'subject_sharpness', 'subject_size',
+                  'subject_clip_high', 'subject_clip_low', 'subject_y_median', 'eye_x'):
+        assert photo[field] is None
+    assert dict(db.subjects.analysis(ids[0])) == sibling
+    assert result['subjects'][0]['predictions'] == predictions
+    assert db.get_photo_edit_recipe(photo_id) == recipe
+    assert analyze_photo(db, photo_id, path, detection_id=chosen) == 1
+    assert payload(db, photo_id)['subjects'][0]['analysis'] is not None
+    if source_changed:
+        assert db.subjects.analysis(chosen)['source_key'] != old_source_key
+
+
+def test_reviewer_box_resave_response_has_no_cached_analysis(app_and_db):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    client = app.test_client()
+    url = f'/api/photos/{pid}/subjects/reviewer-box'
+    box = dict(x=.1, y=.1, w=.2, h=.2)
+    chosen = client.put(url, json={'box': box}).get_json()['primary_detection_id']
+    db.subjects.save_analyses('stale-source', [{
+        'detection_id': chosen, 'crop': box, 'quality_score': .99, 'exposure_ev': 1,
+        'features': dict(subject_sharpness=999, subject_size=.04,
+                         subject_clip_high=0, subject_clip_low=0, subject_y_median=100),
+    }])
+    db.commit()
+    response = client.put(url, json={'box': box})
+    assert response.status_code == 200
+    assert response.get_json()['primary_detection_id'] == chosen
+    assert response.get_json()['subjects'][0]['analysis'] is None
+    assert db.photos.get(pid)['quality_score'] is None
+    assert db.photos.get(pid)['subject_sharpness'] is None
