@@ -10,7 +10,39 @@ above a destination.
 
 import contextlib
 import os
+import stat
 import tempfile
+
+
+def _unsafe_destination_directory(destination_root, directory, *, allow_missing=False):
+    """Find a missing, linked, or non-directory component inside a transfer.
+
+    Check lexical parents without following links or Windows junctions.
+    Explicitly configured aliases above the destination root remain valid;
+    links inside the tree cannot redirect writes or verification elsewhere.
+    """
+    root = os.path.abspath(destination_root)
+    current = os.path.abspath(directory)
+    try:
+        if os.path.normcase(os.path.commonpath([root, current])) != os.path.normcase(root):
+            return current
+    except ValueError:
+        return current
+    is_junction = getattr(os.path, "isjunction", None)
+    while True:
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            if not allow_missing:
+                return current
+        except OSError:
+            return current
+        else:
+            if not stat.S_ISDIR(mode) or (is_junction and is_junction(current)):
+                return current
+        if os.path.normcase(current) == os.path.normcase(root):
+            return None
+        current = os.path.dirname(current)
 
 
 def normalize_destination_name(destination_name):
