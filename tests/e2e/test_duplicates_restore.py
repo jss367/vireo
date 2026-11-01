@@ -5,6 +5,7 @@ in-memory proposals and forces a fresh scan. The page now hydrates from
 the most recent completed ``duplicate-scan`` row in ``job_history``.
 """
 import json
+import re
 
 import pytest
 from playwright.sync_api import expect
@@ -384,7 +385,8 @@ def test_distant_duplicate_thumbnails_wait_until_scrolled_into_view(live_server,
         pageModules.card.renderCard({id: 999999, filename: 'distant.jpg'}, true, null, false);
     }""")
     distant = page.locator('img[alt="distant.jpg"]')
-    expect(distant).to_have_attribute("loading", "lazy")
+    expect(distant).to_have_attribute("data-thumbnail-src", "/thumbnails/duplicate/999999.jpg")
+    expect(distant).not_to_have_attribute("src", re.compile(".+"))
     assert not any("/thumbnails/duplicate/999999.jpg" in url for url in requests)
     with page.expect_request("**/thumbnails/duplicate/999999.jpg"):
         distant.scroll_into_view_if_needed()

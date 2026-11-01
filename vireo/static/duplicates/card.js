@@ -27,7 +27,7 @@ export function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissi
              (photo.id != null ? photo.id : '') + '">';
   if (thumbUrl) {
     html += '<div class="thumb-wrap"><div class="thumb-placeholder">Loading thumbnail…</div>' +
-            '<img class="thumb" loading="lazy" decoding="async" width="180" height="135" src="' + escapeHtml(thumbUrl) +
+            '<img class="thumb" decoding="async" width="180" height="135" data-thumbnail-src="' + escapeHtml(thumbUrl) +
             '" alt="' + escapeHtml(photo.filename || '') +
             '" data-dup-thumb></div>';
   } else {

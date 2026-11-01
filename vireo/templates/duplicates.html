@@ -386,16 +386,18 @@
 
   <div id="summary" style="display:none;"></div>
 
-  <div id="duplicateBucketOperations" hidden>
-    <h2 style="font-size:15px;">Folder decisions and cleanup</h2>
-    <p class="section-sub">These operations keep the groups confirmed when they started.</p>
-    <div id="duplicateBucketOperationList"></div>
+  <div id="duplicateThumbnailGrid">
+    <div id="duplicateBucketOperations" hidden>
+      <h2 style="font-size:15px;">Folder decisions and cleanup</h2>
+      <p class="section-sub">These operations keep the groups confirmed when they started.</p>
+      <div id="duplicateBucketOperationList"></div>
+    </div>
+
+    <div class="trash-progress" id="trashAllProgress" hidden aria-live="polite"></div>
+
+    <div id="results"></div>
+    <section id="sameShotResults" aria-label="Possible same-shot copies"></section>
   </div>
-
-  <div class="trash-progress" id="trashAllProgress" hidden aria-live="polite"></div>
-
-  <div id="results"></div>
-  <section id="sameShotResults" aria-label="Possible same-shot copies"></section>
   <dialog id="sameShotCompare" aria-labelledby="sameShotCompareTitle">
     <h2 id="sameShotCompareTitle">Compare possible same-shot copies</h2>
     <p class="section-sub">These are cached thumbnails, which may show edits. They cannot establish identical original image data.
@@ -418,6 +420,7 @@
 
 </div>
 
+<script defer src="/static/vireo-thumbnail-queue.js"></script>
 <script type="module" src="/static/duplicates/boot.js"></script>
 </body>
 </html>

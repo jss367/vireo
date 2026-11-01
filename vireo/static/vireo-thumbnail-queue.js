@@ -1,4 +1,4 @@
-/* Browse thumbnails share the browser's connections with interactive API calls.
+/* Browse and Duplicate Files thumbnails share connections with interactive APIs.
  * Keep only two downloads in flight, and discard work outside a small runway.
  * Aborting a fetch frees the client connection; it cannot undo generation that
  * the server has already started. Normal HTTP caching still applies to fetch.
@@ -6,8 +6,9 @@
 (function() {
   'use strict';
   const rootElement = document.getElementById('gridContainer');
-  const gridElement = document.getElementById('grid');
-  if (!rootElement || !gridElement) return;
+  const gridElement = rootElement ? document.getElementById('grid')
+    : document.getElementById('duplicateThumbnailGrid');
+  if (!gridElement) return;
   const root = rootElement;
   const grid = gridElement;
 
@@ -118,7 +119,7 @@
 
   function pump() {
     frame = null;
-    var bounds = root.getBoundingClientRect();
+    var bounds = root ? root.getBoundingClientRect() : {top: 0, bottom: window.innerHeight};
     /** @type {{state: ThumbnailRequestState, distance: number, visible: boolean}[]} */
     var candidates = [];
     nearby.forEach(function(state) {
@@ -179,6 +180,6 @@
     attributes: true, attributeFilter: ['data-thumbnail-src']
   });
   visit(grid);
-  root.addEventListener('scroll', schedule, {passive: true});
+  (root || window).addEventListener('scroll', schedule, {passive: true});
   window.addEventListener('resize', schedule);
 })();
