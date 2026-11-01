@@ -100,9 +100,6 @@ _NEARBY_CACHE_MAX = 4096
 
 _SOURCE_STRENGTH = ("your_photos", "your_place", "google_park", "google_area")
 _CELL_RE = re.compile(r"^-?\d{1,6},-?\d{1,6}$")
-# Bucket size for the spatial index of your places, in degrees of latitude
-# (about 550 m, larger than either radius).
-_BUCKET_DEG = 0.005
 _M_PER_DEG_LAT = 111_320.0
 
 
@@ -165,15 +162,37 @@ def read_source_gps(
 
 # Spatial bucket -> [(lat, lng, keyword_id, photo_id)]; photo_id is None for
 # a keyword's own map point.
-type _PointIndex = dict[tuple[int, int], list[tuple[float, float, int, int | None]]]
+type _PointIndex = dict[tuple[int, int, int], list[tuple[float, float, int, int | None]]]
 type _NearbyKey = tuple[int, int]
 
 _nearby_cache: dict[tuple[int, int, str | None], tuple[float, list[JsonDict]]] = {}
 _nearby_cache_lock = threading.Lock()
 
 
+def _box_lng_ranges(min_lng: float, max_lng: float, pad: float) -> list[tuple[float, float]]:
+    """The longitude ranges a box padded by ``pad`` degrees covers on the globe.
+
+    Past the antimeridian the box continues on the other side, as a second
+    range; a pad that wraps all the way round (near a pole) is every longitude.
+    """
+    low, high = min_lng - pad, max_lng + pad
+    if high - low >= 360.0:
+        return [(-180.0, 180.0)]
+    ranges = [(max(low, -180.0), min(high, 180.0))]
+    if low < -180.0:
+        ranges.append((low + 360.0, 180.0))
+    if high > 180.0:
+        ranges.append((-180.0, high - 360.0))
+    return ranges
+
+
 class _NearbyPlaces:
-    """Your tagged photos and located keywords around the import's cells."""
+    """Your tagged photos and located keywords around the import's cells.
+
+    Points are indexed in reach-sized cubes of Earth-centered space
+    (:func:`_earth_point`), so the 27 cubes around a spot hold everything
+    within reach of it, at the poles and across the antimeridian alike.
+    """
 
     def __init__(self, db: Database, points: Iterable[tuple[float, float]]) -> None:
         points = list(points)
@@ -182,46 +201,52 @@ class _NearbyPlaces:
         if not points:
             return
         reach = max(FOOTPRINT_RADIUS_M, PLACE_RADIUS_M)
-        max_abs_lat = min(89.0, max(abs(lat) for lat, _ in points))
         lat_pad = reach / _M_PER_DEG_LAT
-        lng_pad = lat_pad / max(0.01, math.cos(math.radians(max_abs_lat)))
-        box = (
-            min(lat for lat, _ in points) - lat_pad,
-            max(lat for lat, _ in points) + lat_pad,
-            min(lng for _, lng in points) - lng_pad,
-            max(lng for _, lng in points) + lng_pad,
-        )
-        for row in db.locations.tagged_location_points(*box):
-            self._add(self._photos, row["latitude"], row["longitude"],
-                      row["keyword_id"], row["photo_id"])
-        for row in db.locations.located_keyword_points(*box):
-            self._add(self._keywords, row["latitude"], row["longitude"], row["id"], None)
+        min_lat = max(-90.0, min(lat for lat, _ in points) - lat_pad)
+        max_lat = min(90.0, max(lat for lat, _ in points) + lat_pad)
+        widest = max(abs(min_lat), abs(max_lat))
+        # A degree of longitude is shortest at the box's poleward edge; a box
+        # reaching a pole covers every longitude.
+        cos_widest = math.cos(math.radians(widest))
+        lng_pad = 360.0 if widest >= 90.0 or cos_widest <= 0 else lat_pad / cos_widest
+        lngs = [lng for _, lng in points]
+        for min_lng, max_lng in _box_lng_ranges(min(lngs), max(lngs), lng_pad):
+            box = (min_lat, max_lat, min_lng, max_lng)
+            for row in db.locations.tagged_location_points(*box):
+                self._add(self._photos, row["latitude"], row["longitude"],
+                          row["keyword_id"], row["photo_id"])
+            for row in db.locations.located_keyword_points(*box):
+                self._add(self._keywords, row["latitude"], row["longitude"], row["id"], None)
 
     @staticmethod
-    def _bucket(lat: float, lng: float) -> tuple[int, int]:
-        return math.floor(lat / _BUCKET_DEG), math.floor(lng / _BUCKET_DEG)
+    def _cube(lat: float, lng: float) -> tuple[int, int, int]:
+        side = max(FOOTPRINT_RADIUS_M, PLACE_RADIUS_M)
+        x, y, z = _earth_point(lat, lng)
+        return math.floor(x / side), math.floor(y / side), math.floor(z / side)
 
     def _add(self, index: _PointIndex, lat: object, lng: object,
              keyword_id: int, photo_id: int | None) -> None:
         point = _finite_point(lat, lng)
         if point is not None:
-            index.setdefault(self._bucket(*point), []).append((*point, keyword_id, photo_id))
+            index.setdefault(self._cube(*point), []).append((*point, keyword_id, photo_id))
 
     def _within(
         self, index: _PointIndex, lat: float, lng: float, radius_m: float,
     ) -> Iterator[tuple[float, int, int | None]]:
-        """Yield ``(distance_m, keyword_id, photo_id)`` for points within reach."""
-        lat_span = math.ceil(radius_m / (_BUCKET_DEG * _M_PER_DEG_LAT))
-        lng_m = _BUCKET_DEG * _M_PER_DEG_LAT * max(0.01, math.cos(math.radians(lat)))
-        lng_span = math.ceil(radius_m / lng_m)
-        lat_b, lng_b = self._bucket(lat, lng)
+        """Yield ``(distance_m, keyword_id, photo_id)`` for points within reach.
+
+        Straight-line distance never exceeds map distance, so a point within
+        ``radius_m`` (at most a cube side) is in this cube or a neighbor.
+        """
+        cx, cy, cz = self._cube(lat, lng)
         here = {"latitude": lat, "longitude": lng}
-        for dlat in range(-lat_span, lat_span + 1):
-            for dlng in range(-lng_span, lng_span + 1):
-                for p_lat, p_lng, keyword_id, photo_id in index.get((lat_b + dlat, lng_b + dlng), ()):
-                    distance = distance_meters(here, {"latitude": p_lat, "longitude": p_lng})
-                    if distance <= radius_m:
-                        yield distance, keyword_id, photo_id
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for p_lat, p_lng, keyword_id, photo_id in index.get((cx + dx, cy + dy, cz + dz), ()):
+                        distance = distance_meters(here, {"latitude": p_lat, "longitude": p_lng})
+                        if distance <= radius_m:
+                            yield distance, keyword_id, photo_id
 
     def suggest(self, lat: float, lng: float) -> JsonDict | None:
         voters: dict[int, set[int | None]] = {}

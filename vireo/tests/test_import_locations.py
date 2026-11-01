@@ -157,6 +157,51 @@ def test_your_saved_place_point_names_a_spot_with_no_tagged_photos(db, no_google
     assert 0 < suggestion["distance_m"] <= import_locations.PLACE_RADIUS_M
 
 
+@pytest.mark.parametrize("tagged, new", [
+    ((89.999, 0.0), (89.999, 170.0)),          # ~220 m apart across the North Pole
+    ((-89.9995, -60.0), (-89.9995, 120.0)),    # ~110 m apart across the South Pole
+    ((-16.5, -179.9995), (-16.5, 179.9995)),   # ~107 m apart across the antimeridian
+    ((-16.5, 179.9995), (-16.5, -179.9995)),
+])
+def test_photos_you_tagged_name_a_spot_at_the_poles_and_across_the_antimeridian(
+        db, fid, no_google, tagged, new):
+    """Within reach on the map is within reach in degrees too: a tagged photo
+    a few hundred meters away is found whatever its longitude."""
+    from location_review import distance_meters
+    assert distance_meters({"latitude": tagged[0], "longitude": tagged[1]},
+                           {"latitude": new[0], "longitude": new[1]}) < 250
+    place = _kw(db, "Edge of the World")
+    _tag(db, _photo(db, fid, "old.jpg", tagged), place)
+
+    [group] = suggest_import_locations(db, _files([new]), api_key="KEY", language="en")["groups"]
+
+    assert group["suggestion"]["keyword_id"] == place
+    assert group["suggestion"]["source"] == "your_photos"
+
+
+def test_your_saved_place_across_the_antimeridian_names_a_spot(db, no_google):
+    camp = _kw(db, "Taveuni Camp", point=(-16.8000, -179.9990))
+
+    [group] = suggest_import_locations(
+        db, _files([(-16.8000, 179.9990)]), api_key="KEY", language="en")["groups"]
+
+    assert group["suggestion"]["keyword_id"] == camp
+    assert group["suggestion"]["source"] == "your_place"
+    assert group["suggestion"]["distance_m"] < 250
+
+
+@pytest.mark.parametrize("bounds, pad, ranges", [
+    ((-117.3, -117.2), 0.01, [(-117.31, -117.19)]),
+    ((179.99, 179.995), 0.01, [(179.98, 180.0), (-180.0, -179.995)]),
+    ((-179.995, -179.99), 0.01, [(-180.0, -179.98), (179.995, 180.0)]),
+    ((0.0, 10.0), 360.0, [(-180.0, 180.0)]),
+])
+def test_box_longitude_ranges_wrap_at_the_antimeridian(bounds, pad, ranges):
+    got = import_locations._box_lng_ranges(*bounds, pad)
+
+    assert got == [pytest.approx(r) for r in ranges]
+
+
 def test_google_names_new_spots_and_the_answer_is_cached(db, monkeypatch):
     calls = []
 
