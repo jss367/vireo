@@ -437,6 +437,7 @@ def test_activate_saves_and_restores_path(app_and_db):
 
     # Set ui_state on WS-B with a last_path
     db.workspaces.update(ws_b_id, ui_state={"last_path": "/browse?folder=5"})
+    db.commit()
 
     # Activate WS-B while sending current_path for the old workspace
     resp = client.post(

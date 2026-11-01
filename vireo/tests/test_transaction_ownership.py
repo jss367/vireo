@@ -168,7 +168,7 @@ DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {
     "vireo/repositories/sync.py": 5,
     "vireo/repositories/working_copies.py": 2,
     "vireo/repositories/workspace_folders.py": 9,
-    "vireo/repositories/workspaces.py": 7,
+    "vireo/repositories/workspaces.py": 2,
 }
 
 

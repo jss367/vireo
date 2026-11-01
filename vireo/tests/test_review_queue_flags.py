@@ -97,6 +97,7 @@ def test_workspace_activation_after_request_db_opens_cannot_write(client_with_ph
         assert service.db.active_workspace_id == observed_workspace
         with Database(db._db_path) as concurrent:
             concurrent.workspaces.update(other_workspace, last_opened_at='2999-01-01T00:00:00')
+            concurrent.commit()
         service.db.conn.set_trace_callback(statements.append)
         return original(service, *args, **kwargs)
 

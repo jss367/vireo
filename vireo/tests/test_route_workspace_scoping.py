@@ -504,6 +504,7 @@ def test_snapshot_import_refuses_paths_inside_staged_source(staged):
     workspace_folders.add_folder(db, staged["archive"], name="archive")
     frozen = os.path.join(staged["source"], "a.jpg")
     snap_id = db.workspaces.create_new_images_snapshot([frozen])
+    db.commit()
 
     resp = staged["client"].post(
         "/api/jobs/import-in-place",

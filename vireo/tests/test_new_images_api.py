@@ -1231,12 +1231,14 @@ def test_get_snapshot_oversized_id_returns_404_not_500(app_and_db):
 def test_get_snapshot_cross_workspace_returns_404(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     snap_id = db.workspaces.create_new_images_snapshot(["/tmp/a.jpg"])
+    db.commit()
     other = db.create_workspace("Other")
     # Persist the switch so per-request Database instances restore "Other" as
     # the active workspace (Database.__init__ picks the workspace with the most
     # recent last_opened_at).
     from datetime import datetime
     db.workspaces.update(other, last_opened_at=datetime.now().isoformat())
+    db.commit()
     db.set_active_workspace(other)
     with app.test_client() as client:
         resp = client.get(f"/api/workspaces/active/new-images/snapshot/{snap_id}")
@@ -1313,6 +1315,7 @@ def test_new_images_preview_leaves_out_excluded_folders(app_and_db):
     snap_id = db.workspaces.create_new_images_snapshot([
         str(root / "parent.jpg"), str(child / "child.jpg"),
     ])
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/import/new-images-preview", json={
@@ -1357,6 +1360,7 @@ def test_new_images_preview_scopes_roots_to_active_workspace(app_and_db):
         str(shoot_a / "pic.jpg"),
         str(inner / "deep.jpg"),
     ])
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post(
@@ -1395,6 +1399,7 @@ def test_new_images_preview_groups_by_top_level_root_not_scanned_descendants(app
         str(root / "edge.jpg"),
         str(root / "trip1" / "bird.jpg"),
     ])
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post(
@@ -1434,6 +1439,7 @@ def test_new_images_preview_disambiguates_duplicate_basenames(app_and_db):
         str(card_a / "a.jpg"),
         str(card_b / "b.jpg"),
     ])
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post(
@@ -1465,6 +1471,7 @@ def test_new_images_preview_reports_missing_files(app_and_db):
         str(folder / "here.jpg"),
         str(folder / "gone.jpg"),
     ])
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post(

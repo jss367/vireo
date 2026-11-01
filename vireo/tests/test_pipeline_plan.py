@@ -2654,6 +2654,7 @@ def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path
         fingerprint=compute_group_fingerprint(effective),
         when_ts=1714579200,
     )
+    db.commit()
 
     import labels as labels_mod
     import models as models_mod
@@ -2718,6 +2719,7 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
         fingerprint="old-fingerprint-from-prior-settings",
         when_ts=1714579200,
     )
+    db.commit()
 
     import labels as labels_mod
     import models as models_mod
@@ -2773,6 +2775,7 @@ def test_regroup_plan_will_run_when_eye_detect_override_differs_from_workspace(
         fingerprint=compute_group_fingerprint(effective),
         when_ts=1714579200,
     )
+    db.commit()
 
     import labels as labels_mod
     import models as models_mod

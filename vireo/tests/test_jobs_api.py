@@ -4358,6 +4358,7 @@ def test_jobs_regroup_collection_scope_clears_group_fingerprint(app_and_db, monk
     app, db = app_and_db
     ws_id = db._active_workspace_id
     db.workspaces.set_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
+    db.commit()
     first = db.conn.execute("SELECT MIN(id) FROM photos").fetchone()[0]
     col_id = db.collections.add(
         "Subset", json.dumps([{"field": "photo_ids", "value": [first]}]),
@@ -4550,6 +4551,7 @@ def test_jobs_regroup_coverage_uses_photo_snapshot(app_and_db, monkeypatch):
     app, db = app_and_db
     ws_id = db._active_workspace_id
     db.workspaces.set_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
+    db.commit()
     all_ids = [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos ORDER BY id"
@@ -6496,6 +6498,7 @@ def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
     db.workspaces.update(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
+    db.commit()
     db.queue_change(imported["result"]["photo_ids"][0], "flag", "flagged")
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
@@ -9775,6 +9778,7 @@ def test_import_in_place_snapshot_rejects_replaced_restricted_directory(
     snap_id = db.workspaces.create_new_images_snapshot([
         str(first_raw), str(second_raw),
     ])
+    db.commit()
     first_identity_calls = 0
 
     def changing_identity(path):
@@ -9925,6 +9929,7 @@ def test_import_in_place_snapshot_admits_only_frozen_files(
         )
     }
     snap_id = db.workspaces.create_new_images_snapshot([str(captured)])
+    db.commit()
     # Arrived after discovery: it belongs to the next snapshot, not this one.
     Image.new("RGB", (16, 16), "blue").save(late)
 
@@ -9997,6 +10002,7 @@ def test_import_in_place_snapshot_leaves_out_excluded_folders(
     snap_id = db.workspaces.create_new_images_snapshot(
         [str(kept), str(left_out)],
     )
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/import-in-place", json={
@@ -10032,6 +10038,7 @@ def test_import_in_place_snapshot_rejects_bad_exclusions(app_and_db, tmp_path):
     Image.new("RGB", (16, 16), "red").save(photo)
     workspace_folders.add_folder(db, str(root), name="registered")
     snap_id = db.workspaces.create_new_images_snapshot([str(photo)])
+    db.commit()
     photos_before = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
 
     bad_bodies = [
@@ -10066,6 +10073,7 @@ def test_import_in_place_snapshot_reports_missing_without_processing(
     vanished = root / "vanished.jpg"
     Image.new("RGB", (16, 16), "red").save(vanished)
     snap_id = db.workspaces.create_new_images_snapshot([str(vanished)])
+    db.commit()
     quick_look_id = _process_id(db, "Quick look")
     vanished.unlink()
     db.conn.execute(
@@ -10106,6 +10114,7 @@ def test_import_in_place_snapshot_normalizes_raw_companion_and_replay(
         db, root_id, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime,
     )
     snap_id = db.workspaces.create_new_images_snapshot([str(companion)])
+    db.commit()
 
     with app.test_client() as client:
         first = client.post("/api/jobs/import-in-place", json={
@@ -10158,6 +10167,7 @@ def test_import_in_place_snapshot_rejects_path_outside_registered_roots(
     path = outside / "bird.jpg"
     Image.new("RGB", (16, 16), "red").save(path)
     snap_id = db.workspaces.create_new_images_snapshot([str(path)])
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/import-in-place", json={
@@ -10185,6 +10195,7 @@ def test_import_in_place_snapshot_preserves_registered_root_spelling(
         "SELECT parent_id FROM folders WHERE id = ?", (root_id,),
     ).fetchone()["parent_id"]
     snap_id = db.workspaces.create_new_images_snapshot([captured])
+    db.commit()
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/import-in-place", json={
@@ -10228,6 +10239,7 @@ def test_concurrent_snapshot_imports_serialize_and_report_one_replay(
     Image.new("RGB", (16, 16), "red").save(captured)
     workspace_folders.add_folder(db, str(root), name="registered")
     snap_id = db.workspaces.create_new_images_snapshot([str(captured)])
+    db.commit()
     quick_look_id = _process_id(db, "Quick look")
 
     original_scan = scanner.scan
@@ -10392,6 +10404,7 @@ def test_import_photos_after_import_defaults_from_workspace(
     db.workspaces.update(ws_id, config_overrides={
         "pipeline": {"default_process_id": pid},
     })
+    db.commit()
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),
@@ -10414,6 +10427,7 @@ def test_import_photos_new_workspace_ignores_old_default_process(
     db.workspaces.update(old_ws, config_overrides={
         "pipeline": {"default_process_id": pid},
     })
+    db.commit()
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),
@@ -11078,6 +11092,7 @@ def test_import_photos_parent_job_wrong_workspace_rejected(
     now = datetime.now()
     db.workspaces.update(
         other_ws, last_opened_at=(now + timedelta(seconds=10)).isoformat())
+    db.commit()
     with app.test_client() as client:
         parent_id = _post_import(client, _import_card(tmp_path),
                                  tmp_path / "archive-other", None)
@@ -11086,6 +11101,7 @@ def test_import_photos_parent_job_wrong_workspace_rejected(
         assert parent_photo_ids
     db.workspaces.update(
         original_ws, last_opened_at=(now + timedelta(seconds=20)).isoformat())
+    db.commit()
     with app.test_client() as client:
         resp = client.post("/api/jobs/import-photos", json={
             "sources": [_import_card(tmp_path)],
@@ -11214,6 +11230,7 @@ def test_import_in_place_new_workspace_ignores_old_default_process(
     db.workspaces.update(old_ws, config_overrides={
         "pipeline": {"default_process_id": pid},
     })
+    db.commit()
     resp = client.post("/api/jobs/import-in-place", json={
         "sources": [_import_card(tmp_path)],
         "new_workspace_name": "Fresh In-Place",

@@ -109,6 +109,7 @@ def test_get_values_workspace_reflects_overrides(app_and_db):
         db._active_workspace_id,
         config_overrides={"classification_threshold": 0.9},
     )
+    db.commit()
     client = app.test_client()
     values = client.get("/api/settings/values").get_json()
     assert values["workspace"].get("classification_threshold") == 0.9
@@ -135,6 +136,7 @@ def test_get_values_effective_falls_through_layers(app_and_db):
         db._active_workspace_id,
         config_overrides={"similarity_threshold": 0.95},
     )
+    db.commit()
     values = client_get(app, "/api/settings/values")
     assert values["effective"]["similarity_threshold"] == 0.95
 
@@ -168,6 +170,7 @@ def test_get_values_workspace_layer_filters_global_only_keys(app_and_db):
             "classification_threshold": 0.55,               # scope=both — keep
         },
     )
+    db.commit()
     client = app.test_client()
     values = client.get("/api/settings/values").get_json()
     assert "hf_token" not in values["workspace"]
@@ -185,6 +188,7 @@ def test_get_values_workspace_excludes_non_schema_keys(app_and_db):
         db._active_workspace_id,
         config_overrides={"active_labels": ["birds.txt"], "classification_threshold": 0.6},
     )
+    db.commit()
     client = app.test_client()
     values = client.get("/api/settings/values").get_json()
     assert "active_labels" not in values["workspace"]
@@ -440,6 +444,7 @@ def test_patch_workspace_preserves_active_labels(app_and_db):
         db._active_workspace_id,
         config_overrides={"active_labels": ["birds.txt"]},
     )
+    db.commit()
     client = app.test_client()
     client.patch(
         "/api/settings/workspace",
@@ -900,6 +905,7 @@ def test_import_preserves_workspace_overrides(app_and_db):
         db._active_workspace_id,
         config_overrides={"classification_threshold": 0.9},
     )
+    db.commit()
     client = app.test_client()
     resp = client.post(
         "/api/settings/import",
@@ -1218,6 +1224,7 @@ def test_delete_workspace_preserves_active_labels(app_and_db):
             "classification_threshold": 0.55,
         },
     )
+    db.commit()
     client = app.test_client()
     resp = client.delete("/api/settings/workspace/classification_threshold")
     assert resp.status_code == 200
@@ -1237,6 +1244,7 @@ def test_patch_workspace_recovers_from_non_dict_overrides(app_and_db):
     # Simulate a malformed override row (e.g. from a hand-edited DB or a
     # legacy code path) by writing a non-object JSON value.
     db.workspaces.update(db._active_workspace_id, config_overrides=5)
+    db.commit()
     client = app.test_client()
     resp = client.patch(
         "/api/settings/workspace",
@@ -1251,6 +1259,7 @@ def test_delete_workspace_recovers_from_non_dict_overrides(app_and_db):
     """A list payload in config_overrides must not crash the schema DELETE."""
     app, db = app_and_db
     db.workspaces.update(db._active_workspace_id, config_overrides=["junk"])
+    db.commit()
     client = app.test_client()
     resp = client.delete("/api/settings/workspace/classification_threshold")
     assert resp.status_code == 200

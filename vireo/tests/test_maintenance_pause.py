@@ -1046,6 +1046,7 @@ def test_snapshot_backed_import_in_place_is_not_pausable(app_and_db, tmp_path):
     Image.new("RGB", (8, 8), "red").save(frozen)
     workspace_folders.add_folder(db, str(snap_root), name="snap")
     snap_id = db.workspaces.create_new_images_snapshot([str(frozen)])
+    db.commit()
     snap_resp = client.post("/api/jobs/import-in-place", json={
         "source_snapshot_id": snap_id,
         "after_import": None,

@@ -320,6 +320,7 @@ def test_apply_rejects_photo_outside_workspace(app_and_db):
     # so the request-scoped Database picks it as the active workspace.
     other_ws = db.create_workspace('Other')
     db.workspaces.update(other_ws, last_opened_at='2099-01-01T00:00:00')
+    db.commit()
 
     client = app.test_client()
     resp = client.post('/api/pipeline/group/apply', json={
@@ -382,6 +383,7 @@ def test_state_endpoint_scopes_to_active_workspace(app_and_db):
 
     other_ws = db.create_workspace('Other')
     db.workspaces.update(other_ws, last_opened_at='2099-01-01T00:00:00')
+    db.commit()
 
     client = app.test_client()
     resp = client.post('/api/pipeline/group/state', json={

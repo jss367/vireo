@@ -959,6 +959,7 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
     seed_db.workspaces.set_group_state(
         ws_id, fingerprint="stale-group-fingerprint", when_ts=1714579200,
     )
+    seed_db.commit()
     seed_db.close()
     cache_path = _results_cache_path(os.path.dirname(db_path), ws_id)
     with open(cache_path, "w") as f:
@@ -3059,6 +3060,7 @@ def test_pipeline_rejects_source_snapshot_id(setup, tmp_path):
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     workspace_folders.add_folder(db, str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
+    db.commit()
     db.close()
 
     with app.test_client() as c:
@@ -3144,6 +3146,7 @@ def test_pipeline_rejects_snapshot_combined_with_stale_sources(setup, tmp_path):
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     workspace_folders.add_folder(db, str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
+    db.commit()
     db.close()
 
     with app.test_client() as c:
@@ -3175,6 +3178,7 @@ def test_pipeline_rejects_destination_with_snapshot(setup, tmp_path):
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     workspace_folders.add_folder(db, str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
+    db.commit()
     db.close()
 
     dest = tmp_path / "dest"
@@ -3606,7 +3610,9 @@ def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
         # Mark ws_a as the most-recently-opened so a fresh Database()
         # inside _get_db() picks it as the active workspace.
         db.workspaces.update(ws_b, last_opened_at="2026-01-01T00:00:00")
+        db.commit()
         db.workspaces.update(ws_a, last_opened_at="2026-05-01T00:00:00")
+        db.commit()
     finally:
         db.close()
 
@@ -3657,6 +3663,7 @@ def test_live_burst_gap_preserves_encounter_continuity(setup, tmp_path, endpoint
             "pipeline": {"burst_time_gap": saved_gap, "weak_detection_confidence": 0.12,
                          "weak_detection_rescue_enabled": True},
         })
+        db.commit()
         folder = workspace_folders.add_folder(db, str(tmp_path / "sequence"))
         ids = []
         for i in range(3):

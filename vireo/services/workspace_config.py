@@ -115,7 +115,8 @@ def set_workspace_active_labels(db: Database, labels_files: list[str]) -> None:
         if not isinstance(overrides, dict):
             overrides = {}
     overrides["active_labels"] = labels_files
-    db.workspaces.update(db.require_workspace_id(), config_overrides=overrides)
+    with db.transaction():
+        db.workspaces.update(db.require_workspace_id(), config_overrides=overrides)
 
 
 def create_default_collections_for_all_workspaces(db: Database) -> None:

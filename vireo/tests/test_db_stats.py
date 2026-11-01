@@ -258,6 +258,7 @@ def test_coverage_stats_counts_label_embeddings_and_honors_the_floor(db, lib):
     stats = dashboard_stats.get_coverage_stats(db)
     assert stats["label_embedding"] == 1
     db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.95})
+    db.commit()
     stats = dashboard_stats.get_coverage_stats(db)
     # Only full-image anchors (confidence 1.0) clear 0.95.
     assert (stats["detected"], stats["classified"]) == (3, 0)
@@ -430,6 +431,7 @@ def test_dashboard_stats_whole_workspace(db, lib):
 
 def test_dashboard_stats_with_previews_disabled(db, lib):
     db.workspaces.update(lib["ws"], config_overrides={"preview_max_size": 0})
+    db.commit()
     statements = _trace(db)
     attention = dashboard_stats.get_dashboard_stats(db)["attention"]
     assert attention["missing_previews"] == 0
@@ -476,6 +478,7 @@ def test_detection_counts(db, lib):
         "photos_with_dets": 0, "total_dets": 0,
     }
     db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.6})
+    db.commit()
     assert stage_counts.count_real_detections_in_scope(db)["total_dets"] == 2
 
 
@@ -566,6 +569,7 @@ def test_extract_stale(db, lib):
     assert stage_counts.count_extract_stale(db, "sam2-small", detector_confidence=0.85) == 0
     assert stage_counts.count_extract_stale(db, "sam2-small", photo_ids=[lib["p1"]]) == 0
     db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.85})
+    db.commit()
     assert stage_counts.count_extract_stale(db, "sam2-small") == 0
 
 
@@ -583,6 +587,7 @@ def test_eye_keypoint_counts(db, lib):
     db.conn.commit()
     assert stage_counts.count_eye_keypoint_stale(db) == 1
     db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.95})
+    db.commit()
     assert stage_counts.count_eye_keypoint_eligible(db) == 0
     assert stage_counts.count_eye_keypoint_stale(db) == 0
     assert stage_counts.count_eye_keypoint_attemptable(db, 0.0) == 0
@@ -636,6 +641,7 @@ def test_classification_inventory_pair_without_predictions(db, lib):
 
 def test_classification_inventory_reads_the_target_workspace_floor(db, lib):
     db.workspaces.update(lib["other_ws"], config_overrides={"detector_confidence": 0.95})
+    db.commit()
     db.set_active_workspace(None)
     other = stage_counts.get_classification_inventory(db, lib["other_ws"])
     assert other["total_real_detections"] == 0

@@ -149,11 +149,13 @@ def test_reopening_updates_settings_source_and_comparison_cohort(db, tmp_path):
     assert single["photos"][0]["focus_score"] != first["photos"][0]["focus_score"]
     assert single["encounters"][0]["photo_count"] == 1
     db.workspaces.update(db.active_workspace_id, config_overrides={"pipeline": {"sam2_variant": "sam2-large"}})
+    db.commit()
     changed = load_results(str(tmp_path), db.active_workspace_id, db=db)
     assert changed["photos"][0]["label"] == "REVIEW"
     assert changed["photos"][0]["analysis_reasons"] == ["segmentation_stale"]
     # Reverting settings recovers the complete current input, then source changes invalidate it.
     db.workspaces.update(db.active_workspace_id, config_overrides=None)
+    db.commit()
     assert load_results(str(tmp_path), db.active_workspace_id, db=db)["photos"][0]["analysis_status"] == "complete"
     from computation_cache import source_input
     db.model_runs.record_detector_run(ids[0], "megadetector-v6", 1, "r", source_input(

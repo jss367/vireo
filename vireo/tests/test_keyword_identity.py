@@ -2455,6 +2455,7 @@ def test_location_merge_rename_preserves_sidecar_ownership(
         db.workspaces.update(db._ws_id(), config_overrides={
             'write_location_keywords_to_xmp': workspace_override,
         })
+        db.commit()
     folder = tmp_path / 'photos'
     folder.mkdir(exist_ok=True)
     parent = db.add_keyword('County', kw_type='location')

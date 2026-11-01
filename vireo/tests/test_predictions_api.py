@@ -87,6 +87,7 @@ def test_prediction_lists_honor_detector_floor_and_current_labels(app_and_db):
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     db.workspaces.update(db.require_workspace_id(), config_overrides={"detector_confidence": 0.8})
+    db.commit()
     detections = {}
     for name, confidence, model in [
         ("high", 0.9, "md-high"),

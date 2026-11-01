@@ -758,6 +758,7 @@ def test_api_photos_detections_honor_workspace_threshold(app_and_db):
     # no detection rows are rewritten, only the read-time filter changes.
     db.workspaces.update(db._active_workspace_id,
                         config_overrides={"detector_confidence": 0.01})
+    db.commit()
 
     resp = client.get('/api/photos')
     bird1 = [p for p in resp.get_json()['photos'] if p['filename'] == 'bird1.jpg'][0]
@@ -1055,6 +1056,7 @@ def test_api_photo_detail_reports_full_resolution_preview_mode(app_and_db):
         db._active_workspace_id,
         config_overrides={"preview_max_size": 0},
     )
+    db.commit()
     pid = db.photos.list_page()[0]['id']
 
     resp = app.test_client().get(f'/api/photos/{pid}')
@@ -1069,6 +1071,7 @@ def test_api_photo_detail_reports_workspace_preview_size(app_and_db, preview_siz
     """The lightbox receives the workspace override rather than the global cap."""
     app, db = app_and_db
     db.workspaces.update(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
+    db.commit()
     pid = db.photos.list_page()[0]['id']
 
     data = app.test_client().get(f'/api/photos/{pid}').get_json()
@@ -5810,6 +5813,7 @@ def test_full_redirect_forwards_prefetch_flag_to_original(client_with_photo):
         db._active_workspace_id,
         config_overrides={"preview_max_size": 0},
     )
+    db.commit()
     client = app.test_client()
 
     resp = client.get(f"/photos/{photo_id}/full?prefetch=1")
@@ -9124,6 +9128,7 @@ def test_full_respects_workspace_preview_max_size_override(client_with_photo):
         db._active_workspace_id,
         config_overrides={"preview_max_size": 2560},
     )
+    db.commit()
     client = app.test_client()
     full = client.get(f"/photos/{photo_id}/full")
     preview = client.get(f"/photos/{photo_id}/preview?size=2560")
@@ -9148,6 +9153,7 @@ def test_preview_precompute_respects_workspace_preview_max_size_override(client_
         db._active_workspace_id,
         config_overrides={"preview_max_size": 2560},
     )
+    db.commit()
     client = app.test_client()
     resp = client.post("/api/jobs/previews")
     assert resp.status_code == 200
@@ -13793,6 +13799,7 @@ def test_api_browse_summary_analysis_honors_workspace_threshold(app_and_db):
 
     db.workspaces.update(db._active_workspace_id,
                          config_overrides={"detector_confidence": 0.01})
+    db.commit()
 
     assert client.get('/api/browse/summary').get_json()["analysis"]["with_detection"] == 2
 

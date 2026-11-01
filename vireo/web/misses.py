@@ -227,7 +227,8 @@ def create_misses_blueprint(
                 existing_pipeline[key] = pipeline[key]
             overrides["pipeline"] = existing_pipeline
             overrides["detector_confidence"] = values["detector_confidence"]
-            db.workspaces.update(ws_id, config_overrides=overrides)
+            with db.transaction():
+                db.workspaces.update(ws_id, config_overrides=overrides)
 
     @blueprint.route("/api/misses/config")
     def api_misses_config() -> ResponseReturnValue:
