@@ -52,7 +52,9 @@ def fill(route):
 def test_quick_preview_then_native_refinement(page, live_server, preview_photo, record_property):
     open_photo(page, live_server, preview_photo)
     requests = []
-    page.on('request', lambda request: requests.append(request.url) if '/edit-preview?' in request.url else None)
+    # Version-card thumbnails share this endpoint but are not editor renders.
+    page.on('request', lambda request: requests.append(request.url)
+            if '/edit-preview?' in request.url and 'preview_session' in query(request.url) else None)
     page.evaluate("editorState.zoomMode='custom'; editorState.zoomPercent=100; setAdjustment('exposure', 0.8)")
     page.wait_for_function('editorState.previewTimings.some(t => t.interactive)')
     page.wait_for_function('editorState.previewTimings.some(t => !t.interactive && t.requestedSize === 3072)')
@@ -82,7 +84,7 @@ def test_quick_preview_then_native_refinement(page, live_server, preview_photo, 
 
 def test_continuous_input_delivers_intermediate_frames(page, live_server, preview_photo):
     open_photo(page, live_server, preview_photo)
-    page.route('**/edit-preview?*', fill)
+    page.route('**/edit-preview?*preview_session=*', fill)
     page.evaluate('''() => new Promise(resolve => {
       let n=0;
       const timer=setInterval(() => {
@@ -99,7 +101,7 @@ def test_slow_request_is_superseded_and_never_displays_old_recipe(page, live_ser
     open_photo(page, live_server, preview_photo)
     original = page.locator('#editorImg').get_attribute('src')
     held = []
-    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.route('**/edit-preview?*preview_session=*', lambda route: held.append(route))
     page.evaluate("setAdjustment('exposure', 0.5)")
     page.wait_for_function('editorPreviewQueue.active !== null')
     page.wait_for_timeout(100)
@@ -123,11 +125,11 @@ def test_slow_request_is_superseded_and_never_displays_old_recipe(page, live_ser
 def test_failed_render_keeps_last_image_and_queue_recovers(page, live_server, preview_photo):
     open_photo(page, live_server, preview_photo)
     original = page.locator('#editorImg').get_attribute('src')
-    page.route('**/edit-preview?*', lambda route: route.fulfill(status=500, body='render failed'))
+    page.route('**/edit-preview?*preview_session=*', lambda route: route.fulfill(status=500, body='render failed'))
     page.evaluate("setAdjustment('exposure', 0.5)")
     expect(page.locator('#previewStatus')).to_contain_text('Could not render preview')
     assert page.locator('#editorImg').get_attribute('src') == original
-    page.unroute('**/edit-preview?*')
+    page.unroute('**/edit-preview?*preview_session=*')
     page.evaluate("setAdjustment('exposure', 1)")
     page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
 
@@ -137,7 +139,7 @@ def test_stalled_preview_releases_slot_for_latest_edit(page, live_server, previe
     open_photo(page, live_server, preview_photo)
     original = page.locator('#editorImg').get_attribute('src')
     held = []
-    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.route('**/edit-preview?*preview_session=*', lambda route: held.append(route))
     page.evaluate("EDITOR_PREVIEW_TIMEOUT = 1200; setAdjustment('exposure', 0.5)")
     page.wait_for_function('editorPreviewQueue.active !== null')
     # An active Image does not mean Chromium has dispatched its request yet.
@@ -165,7 +167,7 @@ def test_stalled_preview_offers_manual_retry_without_retry_loop(page, live_serve
     open_photo(page, live_server, preview_photo)
     original = page.locator('#editorImg').get_attribute('src')
     held = []
-    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.route('**/edit-preview?*preview_session=*', lambda route: held.append(route))
     page.evaluate("EDITOR_PREVIEW_TIMEOUT = 500; editorState.recipe.adjustments = {exposure: 1}; updatePreview()")
     expect(page.locator('#previewStatus')).to_contain_text('Preview timed out')
     expect(page.locator('#previewRetryBtn')).to_be_visible()
@@ -173,8 +175,8 @@ def test_stalled_preview_offers_manual_retry_without_retry_loop(page, live_serve
     page.wait_for_timeout(700)
     assert len(held) == 1
     held.pop().abort()
-    page.unroute('**/edit-preview?*')
-    page.route('**/edit-preview?*', fill)
+    page.unroute('**/edit-preview?*preview_session=*')
+    page.route('**/edit-preview?*preview_session=*', fill)
     page.locator('#previewRetryBtn').click()
     page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
     expect(page.locator('#previewRetryBtn')).to_be_hidden()
@@ -185,7 +187,7 @@ def test_reusing_detailed_preview_invalidates_slow_quick_render(page, live_serve
     original = page.locator('#editorImg').get_attribute('src')
     original_width = page.locator('#editorImg').evaluate('img => img.naturalWidth')
     held = []
-    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.route('**/edit-preview?*preview_session=*', lambda route: held.append(route))
     # A resize within the same render-size bucket schedules the same recipe.
     page.evaluate('schedulePreview()')
     page.wait_for_function('editorState.previewTimings.some(t => !t.interactive)')
@@ -202,12 +204,12 @@ def test_reusing_detailed_preview_invalidates_slow_quick_render(page, live_serve
 def test_photo_switch_invalidates_pending_render(page, live_server, preview_photo):
     open_photo(page, live_server, preview_photo)
     held = []
-    page.route(f'**/photos/{preview_photo}/edit-preview?*', lambda route: held.append(route))
+    page.route(f'**/photos/{preview_photo}/edit-preview?*preview_session=*', lambda route: held.append(route))
     page.evaluate("setAdjustment('exposure', 0.5)")
     page.wait_for_timeout(200)
     assert len(held) == 1
     other = live_server['data']['photos'][0]
-    page.route(f'**/photos/{other}/edit-preview?*', fill)
+    page.route(f'**/photos/{other}/edit-preview?*preview_session=*', fill)
     page.evaluate('(id) => { loadPhoto(id); }', other)
     page.wait_for_function('(id) => editorState.photoId === id && !editorState.loading', arg=other)
     # The new photo must display without waiting for the obsolete request.
@@ -230,12 +232,12 @@ def test_hung_render_does_not_block_the_next_photo_preview(page, live_server, pr
     # can start without waiting for the stalled one to resolve.
     open_photo(page, live_server, preview_photo)
     held = []
-    page.route(f'**/photos/{preview_photo}/edit-preview?*', lambda route: held.append(route))
+    page.route(f'**/photos/{preview_photo}/edit-preview?*preview_session=*', lambda route: held.append(route))
     page.evaluate("setAdjustment('exposure', 0.5)")
     page.wait_for_function('editorPreviewQueue.active !== null')
     assert len(held) == 1
     other = live_server['data']['photos'][0]
-    page.route(f'**/photos/{other}/edit-preview?*', fill)
+    page.route(f'**/photos/{other}/edit-preview?*preview_session=*', fill)
     page.evaluate('(id) => { loadPhoto(id); }', other)
     page.wait_for_function('(id) => editorState.photoId === id && !editorState.loading', arg=other)
     # Without unblocking the previous photo's held request, the new photo's
@@ -257,7 +259,7 @@ def test_hung_render_does_not_block_the_next_photo_preview(page, live_server, pr
 def test_slow_quick_preview_still_displays_before_queued_refinement(page, live_server, preview_photo):
     open_photo(page, live_server, preview_photo)
     held = []
-    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.route('**/edit-preview?*preview_session=*', lambda route: held.append(route))
     page.evaluate("setAdjustment('exposure', 0.5)")
     page.wait_for_timeout(450)
     assert len(held) == 1
@@ -282,7 +284,7 @@ def test_tabs_use_independent_sessions_and_navigation_fences_old_requests(page, 
         assert first_session != second_session
         held = []
         cancelled = []
-        page.route('**/edit-preview?*', lambda route: held.append(route))
+        page.route('**/edit-preview?*preview_session=*', lambda route: held.append(route))
         page.on('request', lambda request: cancelled.append(request.post_data_json)
                 if request.url.endswith('/api/edit-preview/cancel') else None)
         page.evaluate("setAdjustment('exposure', 0.5)")
@@ -310,7 +312,7 @@ def test_tabs_use_independent_sessions_and_navigation_fences_old_requests(page, 
 def test_obsolete_preview_callback_cannot_release_new_photo_request(page, live_server, preview_photo, event):
     open_photo(page, live_server, preview_photo)
     held = []
-    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.route('**/edit-preview?*preview_session=*', lambda route: held.append(route))
     page.evaluate("setAdjustment('exposure', 0.5)")
     page.wait_for_function('editorPreviewQueue.active !== null')
     page.evaluate('event => { window.obsoletePreviewCallback = editorPreviewQueue.active.image[event]; }', event)

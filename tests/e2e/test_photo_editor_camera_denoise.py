@@ -46,7 +46,7 @@ def test_camera_denoise_save_reload_history_reset(live_server, page, denoise_pho
     expect(page.locator('#denoiseProfileStatus')).to_contain_text('NIKON Z 8 · ISO 3200')
     expect(page.locator('#denoiseProfileStatus')).to_contain_text('Camera profile + image noise estimate')
     page.evaluate("setAdjustment('noise_reduction', 70)")
-    with page.expect_response('**/edit-preview?*') as preview:
+    with page.expect_response('**/edit-preview?*preview_session=*') as preview:
         page.evaluate('updatePreview()')
     assert preview.value.ok
     assert page.evaluate('saveRecipe()') is True
