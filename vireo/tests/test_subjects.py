@@ -619,9 +619,10 @@ def test_reviewer_redraw_invalidates_classifier_embeddings(db, subject_photo, re
     from subjects import select_reviewer_box
     pid, automatic_ids, _ = subject_photo
     chosen = select_reviewer_box(db, pid, dict(x=.1, y=.1, w=.2, h=.2))
-    for variant in ('', f'det:{chosen}', f'det:{automatic_ids[0]}'):
-        db.masks_features.upsert_embedding(pid, 'BioCLIP', b'old-crop', variant)
-    db.masks_features.upsert_embedding(pid, 'Unrelated model', b'other')
+    with db.transaction():
+        for variant in ('', f'det:{chosen}', f'det:{automatic_ids[0]}'):
+            db.masks_features.upsert_embedding(pid, 'BioCLIP', b'old-crop', variant)
+        db.masks_features.upsert_embedding(pid, 'Unrelated model', b'other')
     select_reviewer_box(db, pid, dict(x=replacement_x, y=.1, w=.2, h=.2))
     assert db.masks_features.get_embedding(pid, 'BioCLIP') is None
     assert db.masks_features.get_embedding(pid, 'BioCLIP', f'det:{chosen}') is None
