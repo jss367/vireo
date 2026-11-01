@@ -47,9 +47,9 @@ PIPELINE_PHOTO_COLS = """
 _SCOPE_SQL = " AND p.id IN (SELECT id FROM pipeline_scope_ids)"
 
 _WEAK_DETECTION_FLOOR_SQL = """AND (
-              d.detector_confidence >= ?
+              d.detector_confidence >= ? AND d.subject_verdict IS NULL
               OR (
-                  d.detector_confidence >= ?
+                  d.detector_confidence >= ? AND d.subject_verdict IS NULL
                   AND d.detector_model = 'megadetector-v6'
                   AND d.category = 'animal'
                   AND d.photo_id IN (
@@ -153,7 +153,7 @@ class PipelineFeaturesRepository:
         ``min_conf``, which stays index-friendly for the rest of the workspace.
         """
         if weak_confidence is None:
-            return "AND d.detector_confidence >= ?", (min_conf,)
+            return "AND d.detector_confidence >= ? AND d.subject_verdict IS NULL", (min_conf,)
         return _WEAK_DETECTION_FLOOR_SQL, (min_conf, weak_confidence)
 
     def subject_detection_rows(
@@ -317,7 +317,7 @@ class PipelineFeaturesRepository:
                              AND f.status IN ('ok', 'partial')
                JOIN detections d ON d.photo_id = p.id
                                 AND d.detector_model != 'full-image'
-                                AND d.detector_confidence >= ?
+                                AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                WHERE wf.workspace_id = ?""",
             (min_conf, workspace_id),
         ).fetchone()
@@ -339,7 +339,7 @@ class PipelineFeaturesRepository:
             join_detection = (
                 "JOIN detections d ON d.photo_id = p.id "
                 "AND d.detector_model != 'full-image' "
-                "AND d.detector_confidence >= ?"
+                "AND d.detector_confidence >= ? AND d.subject_verdict IS NULL"
             )
             params_prefix.append(detection_min_conf)
 
@@ -403,7 +403,7 @@ class PipelineFeaturesRepository:
                JOIN detections d
                  ON d.photo_id = p.id
                 AND d.detector_model != 'full-image'
-                AND d.detector_confidence >= ?
+                AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
                  AND (p.eye_kp_fingerprint = ? OR p.eye_x IS NOT NULL)""",
@@ -430,7 +430,7 @@ class PipelineFeaturesRepository:
             f"""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h
                   FROM detections d
                  WHERE d.photo_id = ?
-                   AND d.detector_confidence >= ?
+                   AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                    AND d.detector_model != 'full-image'
                  ORDER BY {primary_order_sql("d")}
                  LIMIT 1""",

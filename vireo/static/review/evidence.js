@@ -1,5 +1,7 @@
 // Subject evidence and saved uncertainty are independent of species tags and photo flags.
 var reviewEvidenceFilter = 'all';
+/** The action that rejects the region itself (a subject verdict), not an evidence assessment. */
+var REVIEW_REJECT_REGION = 'reject_region';
 /** @type {Set<number>} */ var reviewEvidenceSaving = new Set();
 
 /** @param {number|null|undefined} score */
@@ -48,7 +50,7 @@ function reviewEvidenceHtml(pred) {
       escapeAttr(e.geography.observations_url) + '">Nearby observations (50 km)</a>';
   }
   var decisions = [
-    ['not_enough_evidence', 'Not enough evidence'], ['invalid_subject', 'Not an identifiable animal'],
+    ['not_enough_evidence', 'Not enough evidence'], [REVIEW_REJECT_REGION, 'Not an animal: reject region'],
     ['subject_valid', 'Animal visible'], ['unreviewed', 'Clear assessment / revisit'],
   ];
   return '<div class="species-evidence">' +
@@ -68,7 +70,34 @@ function reviewEvidenceHtml(pred) {
     '<div class="evidence-actions">' + decisions.map(function(pair) {
       return '<button type="button" data-evidence-prediction="' + pred.id + '" data-evidence-decision="' + pair[0] + '"' +
         (subject.decision === pair[0] || reviewEvidenceSaving.has(pred.detection_id || 0) ? ' disabled' : '') + '>' + pair[1] + '</button>';
-    }).join('') + '</div><small>Saved in this workspace. These assessments do not tag species or change keep/reject flags. Deferred regions cannot be accepted until you clear the assessment to revisit.</small></div>';
+    }).join('') + '</div><small>Assessments are saved in this workspace and do not tag species or change keep/reject flags; deferred regions cannot be accepted until you clear the assessment to revisit. Rejecting the region drops it from every workspace’s review, evidence and grouping (one Undo step; the lightbox’s Subjects panel can restore it).</small></div>';
+}
+
+/** Reject the region behind a prediction as background: it is no longer a subject anywhere.
+ * @param {number} predictionId */
+async function rejectReviewRegion(predictionId) {
+  if (_predictionsReloading) return;
+  var pred = predictions.find(function(p) { return p.id === predictionId; });
+  if (!pred?.evidence || !pred.detection_id || reviewEvidenceSaving.has(pred.detection_id)) return;
+  var epoch = _loadPredictionsEpoch;
+  var detectionId = pred.detection_id;
+  reviewEvidenceSaving.add(detectionId);
+  renderAll();
+  try {
+    /** @type {{ok?:boolean;changed?:boolean;warning?:string}} */ var saved = await safeFetch('/api/detections/' + detectionId + '/subject-verdict', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({verdict: 'not_animal'}),
+    });
+    if (!saved || saved.ok !== true) throw new Error('The server did not confirm the rejection.');
+    showToast(saved.warning || 'Region rejected as not an animal. Undo restores it.', saved.warning ? 'warning' : 'success');
+    if (_predictionEpochStale(epoch)) return;
+    await loadPredictions();
+  } catch (error) {
+    showToast('Region was not rejected: ' + reviewErrorMessage(error, 'Reload before retrying.'), 'error');
+  } finally {
+    reviewEvidenceSaving.delete(detectionId);
+    renderAll();
+  }
 }
 
 /** @param {number} predictionId @param {string} decision */
@@ -107,6 +136,8 @@ function bindReviewEvidence() {
   document.getElementById('grid')?.addEventListener('click', function(event) {
     if (!(event.target instanceof Element)) return;
     var button = event.target.closest(/** @type {'button'} */ ('button[data-evidence-prediction]'));
-    if (button) saveReviewEvidence(Number(button.dataset.evidencePrediction), button.dataset.evidenceDecision || '');
+    if (!button) return;
+    if (button.dataset.evidenceDecision === REVIEW_REJECT_REGION) rejectReviewRegion(Number(button.dataset.evidencePrediction));
+    else saveReviewEvidence(Number(button.dataset.evidencePrediction), button.dataset.evidenceDecision || '');
   });
 }

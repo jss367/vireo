@@ -240,7 +240,7 @@ class MasksFeaturesRepository:
             f"d.box_w AS primary_w, d.box_h AS primary_h "
             f"FROM photo_masks pm LEFT JOIN detections d ON d.id=("
             f"SELECT id FROM detections WHERE photo_id=pm.photo_id "
-            f"AND detector_confidence>=? AND detector_model!='full-image' "
+            f"AND detector_confidence>=? AND subject_verdict IS NULL AND detector_model!='full-image' "
             f"AND category='animal' {detector_filter} "
             f"ORDER BY {primary_order_sql()} LIMIT 1) "
             f"WHERE pm.photo_id=? AND pm.variant=?",
@@ -346,7 +346,7 @@ class MasksFeaturesRepository:
             conf_pred = ""
             params = ()
         else:
-            conf_pred = " AND d2.detector_confidence >= ?"
+            conf_pred = " AND d2.detector_confidence >= ? AND d2.subject_verdict IS NULL"
             params = (detector_confidence,)
         rows = self.conn.execute(
             f"""
@@ -456,7 +456,7 @@ class MasksFeaturesRepository:
                   JOIN detections d
                     ON d.photo_id = p.id
                    AND d.detector_model != 'full-image'
-                   AND d.detector_confidence >= ?
+                   AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  WHERE 1=1{scope_sql}""",
             (ws, min_conf, *scope_params),
         ).fetchone()
@@ -473,7 +473,7 @@ class MasksFeaturesRepository:
                   JOIN detections d
                     ON d.photo_id = p.id
                    AND d.detector_model != 'full-image'
-                   AND d.detector_confidence >= ?
+                   AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  WHERE pm.variant != 'unknown'
                    AND pm.path IS NOT NULL
                    AND pm.path != ''
@@ -689,7 +689,7 @@ class MasksFeaturesRepository:
                  JOIN detections d ON d.photo_id = p.id
                 WHERE wf.workspace_id = ?
                   AND d.detector_model != 'full-image'
-                  AND d.detector_confidence >= ?
+                  AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                 ORDER BY p.id, {primary_order_sql("d")}""",
             (self.workspace_id, min_conf),
         ).fetchall()
@@ -717,7 +717,7 @@ class MasksFeaturesRepository:
                     JOIN detections d ON d.photo_id = p.id
                     WHERE p.folder_id IN ({placeholders})
                       AND p.mask_path IS NULL
-                      AND d.detector_confidence >= ?
+                      AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                     ORDER BY p.id, {primary_order_sql("d")}""",
                 [ws_id, *folder_ids, min_conf],
             ).fetchall()
@@ -731,7 +731,7 @@ class MasksFeaturesRepository:
                    JOIN detections d ON d.photo_id = p.id
                    WHERE wf.workspace_id = ?
                      AND p.mask_path IS NULL
-                     AND d.detector_confidence >= ?
+                     AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                    ORDER BY p.id, {primary_order_sql("d")}""",
                 (ws_id, min_conf),
             ).fetchall()
@@ -809,7 +809,7 @@ class MasksFeaturesRepository:
                JOIN detections d
                  ON d.photo_id = p.id
                 AND d.detector_model != 'full-image'
-                AND d.detector_confidence >= ?
+                AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                JOIN predictions pr ON pr.detection_id = d.id
                JOIN photo_masks pm
                  ON pm.photo_id = p.id
@@ -824,7 +824,7 @@ class MasksFeaturesRepository:
                  AND d.id = (
                     SELECT d2.id FROM detections d2
                     WHERE d2.photo_id = p.id
-                      AND d2.detector_confidence >= ?
+                      AND d2.detector_confidence >= ? AND d2.subject_verdict IS NULL
                       AND d2.detector_model != 'full-image'
                     ORDER BY {primary_order_sql("d2")}
                     LIMIT 1

@@ -9,6 +9,7 @@ from __future__ import annotations
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
+from services import subject_verdicts
 from services.pending_changes import queue_location_sync_if_enabled
 
 if TYPE_CHECKING:
@@ -94,9 +95,10 @@ def prediction_status_item(
 # -- Undo / redo ----------------------------------------------------------
 #
 # The dispatch lives here, not on ``Database``: the cache-linked actions
-# (``pipeline_grouping``, ``species_confirm_cache``) and the
-# ``identity_alternatives`` replay belong to services the data layer may not
-# import. Plain per-photo actions still replay through
+# (``pipeline_grouping``, ``species_confirm_cache``), the
+# ``identity_alternatives`` replay and the ``subject_verdict`` replay (which
+# re-projects the photo's primary subject) belong to services the data layer
+# may not import. Plain per-photo actions still replay through
 # ``Database._apply_undo`` / ``_apply_redo``.
 
 
@@ -156,6 +158,10 @@ def undo_last_edit(db: Database, *, cache_restore: CacheRestore | None = None) -
             ) from None
     elif entry['action_type'] == 'identity_alternatives':
         _replay_identity_history(db, entry, items, undo=True)
+    elif entry['action_type'] == subject_verdicts.ACTION_TYPE:
+        with db.transaction():
+            subject_verdicts.replay_history(db, items, undo=True)
+            history.mark_undone(entry['id'])
     else:
         with db.transaction():
             db._apply_undo(entry, items)
@@ -214,6 +220,10 @@ def redo_last_undo(db: Database, *, cache_restore: CacheRestore | None = None) -
             ) from None
     elif entry['action_type'] == 'identity_alternatives':
         _replay_identity_history(db, entry, items, undo=False)
+    elif entry['action_type'] == subject_verdicts.ACTION_TYPE:
+        with db.transaction():
+            subject_verdicts.replay_history(db, items, undo=False)
+            history.mark_redone(entry['id'])
     else:
         with db.transaction():
             db._apply_redo(entry, items)

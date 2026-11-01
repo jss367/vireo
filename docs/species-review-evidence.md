@@ -66,6 +66,44 @@ rewrite stored predictions. The packet exposes the stored combined-list source
 and its mismatch with the new current selection. Requesting fresh classification
 is a separate action, and reclassification does not repair confirmed keywords.
 
+## Reject a region that holds no animal
+
+The detector proposes boxes and the classifier ranks species inside every one
+of them, so a stump, a pine branch or a rock can carry a strong "Mule Deer"
+with no animal in it. A high score cannot tell that case from a real
+identification; only looking can. Once you have viewed the region
+(`view_photo(view="subject", detection_id=...)`) and the frame and found no
+animal, record a subject verdict:
+
+- MCP: `reject_region(detection_id, reason, source?)`; `restore_region` reverses it.
+- HTTP: `POST /api/detections/<detection_id>/subject-verdict` with
+  `{"verdict": "not_animal", "reason": "...", "source": "..."}`, or
+  `{"verdict": null}` to retain the region again. The response carries the
+  photo's subject panel (`subjects`, `rejected`, `primary_detection_id`).
+- Vireo: the Review card's "Not an animal: reject region" button, or the
+  lightbox Subjects panel's "Not an animal" next to each region, where rejected
+  regions stay listed with a Restore button.
+
+The verdict is a fact about the pixels, so it is catalog-wide rather than
+per workspace, and it is one Undo step with your `source` and `reason` in the
+Undo panel. From then on the region is not retained anywhere: its predictions
+leave Review, `get_species_evidence` (the subject reports `retained: false`
+with the reason "The reviewer rejected this region as not an animal"), the
+pipeline's encounter species label and burst candidates, and primary-subject
+selection, so the photo's next box becomes its primary and burst ranking
+stops scoring the stump. Nothing is deleted: the predictions, masks and
+review rows wait, so a restore brings them back without reclassifying.
+Process Review's saved results are refreshed for that photo only; the
+encounter label is recomputed from the remaining regions and no species is
+applied to any other frame. A detector rerun that finds the same box keeps the
+verdict (detection ids are content-addressed); a rerun that no longer proposes
+the box retires it together with the verdict.
+
+This does not draw a missing box. A frame whose real subject the detector
+never localized (a bird behind foliage with the box on the branches below)
+still needs a region before it can be identified; rejecting the wrong box
+only stops it from standing in as evidence.
+
 ## Confirm only reviewed photo IDs
 
 1. Read the evidence and inspect the full frame and specific subject. Review

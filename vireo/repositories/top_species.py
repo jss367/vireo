@@ -12,7 +12,7 @@ SELECT det.photo_id, pred.species,
 FROM predictions pred
 JOIN detections det ON det.id = pred.detection_id
 {prediction_review_join('pred')}
-WHERE det.detector_confidence >= ?
+WHERE det.detector_confidence >= ? AND det.subject_verdict IS NULL
   AND {prediction_review_status()} != 'rejected'
   AND pred.labels_fingerprint = (
       SELECT pr2.labels_fingerprint FROM predictions pr2

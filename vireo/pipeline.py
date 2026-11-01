@@ -2005,6 +2005,93 @@ def refresh_cache_species_for_photos(
     return True
 
 
+#: The per-photo cache fields that follow from the photo's retained
+#: detections and their predictions. ``refresh_cache_predictions_for_photos``
+#: rewrites exactly these from a fresh feature load.
+_PHOTO_EVIDENCE_FIELDS = (
+    "species_top5", "subjects", "detection_box", "detection_conf",
+    "subject_absent", "subject_present", "subject_uncertain",
+    "weak_detection_context", "analysis_provenance",
+)
+_PHOTO_CONTINUITY_FIELDS = ("grouping_species_top5", "isolated_species_context")
+
+
+def refresh_cache_predictions_for_photos(db, cache_dir, workspace_id, photo_ids):
+    """Rewrite the cached evidence of ``photo_ids`` from the catalog, in place.
+
+    A subject verdict changes which of a photo's regions are retained, and
+    with them the species evidence Process Review and Rapid Review read
+    from the on-disk cache: the photo's ``species_top5`` and ``subjects``,
+    its primary box, and the species label and vote breakdown of the
+    encounter and burst it sits in. Reload those photos' features the way a
+    regroup would and put only their fields back, so the rest of the cache
+    (grouping, scores, confirmed species, review decisions) is untouched and
+    no species is applied to any other frame.
+
+    An unconfirmed burst candidate is re-derived from the burst's remaining
+    evidence; a confirmed override is the user's and stays.
+
+    Returns True when the cache changed on disk, False otherwise (no cache,
+    or none of the photos are in it).
+    """
+    from encounters import encounter_species_label
+    from pipeline_results import candidate_species_override
+
+    path = _results_cache_path(cache_dir, workspace_id)
+    data = _load_results_json(path)
+    if data is None:
+        return False
+    photos_by_id = {p.get("id"): p for p in data.get("photos", [])}
+    touched = [pid for pid in dict.fromkeys(photo_ids) if pid in photos_by_id]
+    if not touched:
+        return False
+    fresh = {p["id"]: _clean_serialized_photo(p)
+             for p in load_photo_features(db, photo_ids=touched)}
+    for pid in touched:
+        cached = photos_by_id[pid]
+        source = fresh.get(pid)
+        if source is None:
+            # The photo left the workspace since the cache was written; its
+            # evidence is no longer readable, which the review pages show
+            # as a photo without subjects.
+            source = {"species_top5": [], "subjects": [], "detection_box": None,
+                      "detection_conf": None, "subject_absent": False,
+                      "subject_present": False, "subject_uncertain": True,
+                      "weak_detection_context": None, "analysis_provenance": None}
+        for key in _PHOTO_EVIDENCE_FIELDS:
+            cached[key] = source.get(key)
+        for key in _PHOTO_CONTINUITY_FIELDS:
+            if key in source:
+                cached[key] = source[key]
+            else:
+                cached.pop(key, None)
+    touched_set = set(touched)
+    for enc in data.get("encounters", []):
+        enc_ids = enc.get("photo_ids") or []
+        if not any(pid in touched_set for pid in enc_ids):
+            continue
+        enc_photos = [photos_by_id[pid] for pid in enc_ids if pid in photos_by_id]
+        enc["species"] = list(encounter_species_label(enc_photos))
+        enc["species_predictions"] = _build_species_predictions(enc_photos)
+        for burst in enc.get("bursts") or []:
+            if not isinstance(burst, dict):
+                continue
+            burst_ids = burst.get("photo_ids") or []
+            if not any(pid in touched_set for pid in burst_ids):
+                continue
+            burst_photos = [photos_by_id[pid] for pid in burst_ids if pid in photos_by_id]
+            burst["species_predictions"] = _build_species_predictions(burst_photos)
+            override = burst.get("species_override")
+            if override and not override.get("confirmed") and "species_list" not in override:
+                burst["species_override"] = candidate_species_override(
+                    encounter_species_label(burst_photos)
+                )
+    refresh_serialized_summary(data)
+    _atomic_json_dump(data, path)
+    log.info("Pipeline cache evidence refreshed at %s: %d photo(s)", path, len(touched))
+    return True
+
+
 def _count_stage_targets(db):
     """Return detection-aware target counts for review readiness.
 

@@ -153,14 +153,17 @@ interface NavSubject {
   is_primary?: boolean;
   box_x: number;
   box_y: number;
+  subject_verdict?: 'not_animal' | null;
   predictions: {species: string; confidence: number}[];
-  analysis?: {source_key?: string; crop: NavBox; quality_score: number; exposure_ev: number;};
+  analysis?: {source_key?: string; crop: NavBox; quality_score: number; exposure_ev: number;} | null;
 }
 interface NavSubjectData {
   full_image_predictions?: {species: string; confidence: number}[];
   primary_detection_id?: number | null;
   photo_id: number;
   subjects: NavSubject[];
+  /** Regions the user rejected as background: not retained, restorable. */
+  rejected: NavSubject[];
   selection: string;
   choice_unavailable?: boolean;
 }

@@ -198,6 +198,15 @@ class SubjectsRepository:
         """Return ``photo_id`` to automatic primary selection."""
         self.conn.execute("DELETE FROM photo_subject_choices WHERE photo_id=?", (photo_id,))
 
+    def rejected_regions(self, photo_id: int) -> list[sqlite3.Row]:
+        """``photo_id``'s regions the user rejected as background, by position."""
+        return self.conn.execute(
+            """SELECT * FROM detections
+                WHERE photo_id = ? AND subject_verdict IS NOT NULL
+                ORDER BY box_x, box_y, id""",
+            (photo_id,),
+        ).fetchall()
+
     # -- payload ----------------------------------------------------------------
 
     def visible_predictions(self, workspace_id: int, photo_id: int, floor: float) -> list[sqlite3.Row]:

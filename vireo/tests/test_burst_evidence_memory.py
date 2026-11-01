@@ -372,11 +372,11 @@ def rows_checks():
     )
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
-    c.executescript("""CREATE TABLE folders(id,status);CREATE TABLE photos(id,folder_id,filename,extension,timestamp,flag,rating,quality_score,sharpness,mask_path,subject_tenengrad,eye_tenengrad,crop_complete,subject_size);CREATE TABLE photo_workspace_visibility(photo_id,workspace_id);CREATE TABLE detections(photo_id,category,detector_model,detector_confidence);
+    c.executescript("""CREATE TABLE folders(id,status);CREATE TABLE photos(id,folder_id,filename,extension,timestamp,flag,rating,quality_score,sharpness,mask_path,subject_tenengrad,eye_tenengrad,crop_complete,subject_size);CREATE TABLE photo_workspace_visibility(photo_id,workspace_id);CREATE TABLE detections(photo_id,category,detector_model,detector_confidence,subject_verdict);
     INSERT INTO folders VALUES(1,'ok'),(2,'offline'),(3,'partial');
     INSERT INTO photos VALUES(1,1,'DSC_01.jpg','.jpg',NULL,'none',0,0,0,'mask',10,20,1,.1),(2,1,'DSC_02.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL),(3,2,'DSC_03.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL),(4,3,'DSC_04.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL);
     INSERT INTO photo_workspace_visibility VALUES(1,1),(2,2),(3,1),(4,1);
-    INSERT INTO detections VALUES(1,'animal','detector',.9),(1,'animal','detector',.1),(1,'animal','full-image',1),(1,'person','detector',.9);""")
+    INSERT INTO detections(photo_id,category,detector_model,detector_confidence) VALUES(1,'animal','detector',.9),(1,'animal','detector',.1),(1,'animal','full-image',1),(1,'person','detector',.9);""")
     c.executescript("""ALTER TABLE photos ADD COLUMN active_mask_variant;
     CREATE TABLE photo_masks(photo_id,variant,path);
     UPDATE photos SET active_mask_variant='invented-v1' WHERE id=1;
@@ -609,10 +609,10 @@ def test_active_prompt_requires_current_variant_path_model_and_geometry():
         c.executescript("""
         CREATE TABLE photos(id,active_mask_variant,mask_path);
         CREATE TABLE photo_masks(photo_id,variant,path,detector_model,prompt_x,prompt_y,prompt_w,prompt_h);
-        CREATE TABLE detections(id,photo_id,detector_model,category,detector_confidence,box_x,box_y,box_w,box_h);
+        CREATE TABLE detections(id,photo_id,detector_model,category,detector_confidence,box_x,box_y,box_w,box_h,subject_verdict);
         INSERT INTO photos VALUES(1,'v1','/invented/mask');
         INSERT INTO photo_masks VALUES(1,'v1','/invented/mask','megadetector-v6',.6,.3,.2,.2);
-        INSERT INTO detections VALUES(7,1,'megadetector-v6','animal',.15,.6,.3,.2,.2),
+        INSERT INTO detections(id,photo_id,detector_model,category,detector_confidence,box_x,box_y,box_w,box_h) VALUES(7,1,'megadetector-v6','animal',.15,.6,.3,.2,.2),
             (8,1,'other-model','animal',.9,.6,.3,.2,.2);
         """)
         repo = ns["MasksFeaturesRepository"]()

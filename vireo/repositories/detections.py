@@ -15,7 +15,10 @@ Callers reach the pass-through operations as ``db.detections`` (a fresh
 repository per access, see ``Database.detections``): ``save``,
 ``upsert_rows``, ``clear``, ``get_ids_for_photos``,
 ``runtime_fingerprints_for_photos``, ``confidence_summary``,
-``subject_exposure_ev`` and ``promote_full_image_runtime`` (the classify job's
+``subject_exposure_ev``, the subject-verdict read and write (``row``,
+``set_subject_verdict``; the workflow around them is
+``services/subject_verdicts.py``, and the subject panel lists rejected regions
+through ``db.subjects.rejected_regions``) and ``promote_full_image_runtime`` (the classify job's
 and the detect stage's legacy full-image anchor promotion, SQL unchanged from
 ``classify_job``). The rest stay behind the service functions that add the
 steps above (``write_detection_batch``, ``get_detections``,
@@ -235,7 +238,22 @@ class DetectionsRepository:
             ).fetchall()
             return [row["id"] for row in rows]
 
+        preserved_verdicts: dict[int, str] = {}
         if identity_changed or no_run_replace:
+            # Preserve the reviewer's subject verdicts across runtime
+            # replacement: the id is content-addressed on (photo, model, box,
+            # category) and does not change with the detector runtime, so a
+            # region the new run reproduces by the same id is the same pixels
+            # and must keep its verdict rather than silently re-enter review.
+            preserved_verdicts = {
+                row["id"]: row["subject_verdict"]
+                for row in self.conn.execute(
+                    """SELECT id, subject_verdict FROM detections
+                       WHERE photo_id = ? AND detector_model = ?
+                         AND subject_verdict IS NOT NULL""",
+                    (photo_id, detector_model),
+                )
+            }
             # Runtime ownership changes are an explicit retirement event.
             # Deleting first prevents old-runtime rows from surviving the
             # new run's same-runtime stale-row sweep.
@@ -248,6 +266,11 @@ class DetectionsRepository:
         ids = self.upsert_rows(
             photo_id, detector_model, detections, runtime_fingerprint,
         )
+        for det_id in set(ids) & preserved_verdicts.keys():
+            self.conn.execute(
+                "UPDATE detections SET subject_verdict = ? WHERE id = ?",
+                (preserved_verdicts[det_id], det_id),
+            )
         self.conn.execute(
             """INSERT INTO detector_runs
                  (photo_id, detector_model, runtime_fingerprint,
@@ -340,10 +363,18 @@ class DetectionsRepository:
 
     def get(
         self, photo_id: int, min_conf: float, detector_model: str | None = None,
+        *, include_rejected: bool = False,
     ) -> list[sqlite3.Row]:
-        """Return a photo's detections at or above ``min_conf``, primary first."""
+        """Return a photo's detections at or above ``min_conf``, primary first.
+
+        A region the user rejected as background (``subject_verdict``) is
+        not retained and is left out unless ``include_rejected`` is set,
+        which only the readers that show the user what they rejected use.
+        """
         q = ("SELECT * FROM detections WHERE photo_id = ? "
              "AND detector_confidence >= ?")
+        if not include_rejected:
+            q += " AND subject_verdict IS NULL"
         params = [photo_id, min_conf]
         if detector_model is not None:
             q += " AND detector_model = ?"
@@ -356,8 +387,13 @@ class DetectionsRepository:
 
     def get_for_photos(
         self, photo_ids: Iterable[int], min_conf: float, detector_model: str | None = None,
+        *, include_rejected: bool = False,
     ) -> dict[int, list[dict[str, Any]]]:
-        """Return ``{photo_id: [det_dict, ...]}``; see ``Database.get_detections_for_photos``."""
+        """Return ``{photo_id: [det_dict, ...]}``; see ``Database.get_detections_for_photos``.
+
+        Rejected regions (``subject_verdict``) are left out unless
+        ``include_rejected`` is set; see :meth:`get`.
+        """
         # Dedup-preserving-order: same id appearing in two chunks would
         # cause setdefault(...).append(...) below to emit each row twice.
         photo_ids = list(dict.fromkeys(photo_ids))
@@ -371,6 +407,8 @@ class DetectionsRepository:
                 f"WHERE photo_id IN ({placeholders}) "
                 f"  AND detector_confidence >= ?"
             )
+            if not include_rejected:
+                q += " AND subject_verdict IS NULL"
             params = [*chunk, min_conf]
             if detector_model is not None:
                 q += " AND detector_model = ?"
@@ -479,6 +517,26 @@ class DetectionsRepository:
             ).fetchall())
         return rows
 
+    # -- subject verdicts ---------------------------------------------------
+
+    def row(self, detection_id: int) -> sqlite3.Row | None:
+        """One detection by id, rejected or not; None when it does not exist."""
+        return self.conn.execute(
+            "SELECT * FROM detections WHERE id = ?", (detection_id,)
+        ).fetchone()
+
+    def set_subject_verdict(self, detection_id: int, verdict: str | None) -> None:
+        """Record the reviewer's verdict on a region (no commit).
+
+        ``verdict`` is ``'not_animal'`` to reject the box as background, or
+        None to retain it again. The column is the reviewer's, not the
+        detector's: the content-addressed upsert never writes it.
+        """
+        self.conn.execute(
+            "UPDATE detections SET subject_verdict = ? WHERE id = ?",
+            (verdict, detection_id),
+        )
+
     def subject_exposure_ev(self, detection_id: int) -> float | None:
         """The subject analysis's ``exposure_ev`` for one detection, or None if unanalysed."""
         row = self.conn.execute(
@@ -559,7 +617,7 @@ class DetectionsRepository:
             "          AND (d.detector_model IS NULL "
             "               OR d.detector_model != 'full-image') "
             "          AND COALESCE(d.category, 'animal') = 'animal' "
-            "          AND d.detector_confidence >= ?) "
+            "          AND d.detector_confidence >= ? AND d.subject_verdict IS NULL) "
             "         AS detection_conf, "
             "       (SELECT MAX(pr.confidence) FROM predictions pr "
             "        JOIN detections d2 ON d2.id = pr.detection_id "

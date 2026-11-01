@@ -1190,7 +1190,7 @@ def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
         "category": "animal",
         "detector_model": "megadetector-v6",
     }]
-    mock_db.detections.get.assert_called_once_with(1, 0, "megadetector-v6")
+    mock_db.detections.get.assert_called_once_with(1, 0, "megadetector-v6", include_rejected=False)
 
 
 def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
@@ -2096,9 +2096,13 @@ def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     mock_clf = MagicMock()
     mock_db = MagicMock()
     # No real detections → full-image path. Existing full-image
-    # detection is cached.
-    mock_db.detections.get.side_effect = lambda photo_id, floor, detector_model: (
-        [] if detector_model == "reviewer-selected" else [{"id": 999}]
+    # detection is cached. The lambda mirrors db.detections.get's
+    # keyword-only ``include_rejected`` so production's default-filtered
+    # reads (which pass include_rejected=False) do not trip the double.
+    mock_db.detections.get.side_effect = (
+        lambda photo_id, floor, detector_model, *, include_rejected=False: (
+            [] if detector_model == "reviewer-selected" else [{"id": 999}]
+        )
     )
     mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
     mock_db.detections.get_predictions.return_value = [
@@ -2159,9 +2163,13 @@ def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path)
     # No real detections → full-image path. Existing full-image detection
     # is reused; its (model, fingerprint) run key exists; no cached
     # predictions; but a measured match-score row records the run as a
-    # zero-candidate no-match.
-    mock_db.detections.get.side_effect = lambda photo_id, floor, detector_model: (
-        [] if detector_model == "reviewer-selected" else [{"id": 999}]
+    # zero-candidate no-match. The lambda mirrors db.detections.get's
+    # keyword-only ``include_rejected`` so production's default-filtered
+    # reads (which pass include_rejected=False) do not trip the double.
+    mock_db.detections.get.side_effect = (
+        lambda photo_id, floor, detector_model, *, include_rejected=False: (
+            [] if detector_model == "reviewer-selected" else [{"id": 999}]
+        )
     )
     mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
     mock_db.detections.get_predictions.return_value = []

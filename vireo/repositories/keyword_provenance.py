@@ -2360,7 +2360,7 @@ def _live_neighbour_species(conn, ws, photo_id, this_pred_id, *, effective_confi
                  AND pr.detection_id IS NOT ?
                  AND {prediction_review_status()}
                      NOT IN ('rejected', 'alternative')
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  AND pr.labels_fingerprint = (
                      SELECT pr2.labels_fingerprint
                      FROM predictions pr2

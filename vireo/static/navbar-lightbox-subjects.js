@@ -21,6 +21,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
   const panel = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjects'));
   if (!panel) return;
   const list = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectList'));
+  const rejectedList = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectRejected'));
   const details = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectDetails'));
   const status = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectStatus'));
   const corrected = /** @type {HTMLInputElement} */ (document.getElementById('lightboxSubjectCorrected'));
@@ -37,9 +38,68 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     return '/photos/' + data?.photo_id + '/crop?detection_id=' + subject.id
       + (correction ? '&suggested=1' : '') + '&v=' + encodeURIComponent(subject.analysis?.source_key || 'pending');
   }
+  /** @param {NavSubject} subject @param {number} index @param {boolean} readOnly @param {string | null} readOnlyTitle */
+  function subjectCard(subject, index, readOnly, readOnlyTitle) {
+    const item = document.createElement('div');
+    item.className = 'lb-subject-item';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'lb-subject-card';
+    button.setAttribute('aria-pressed', String(subject.is_primary));
+    button.disabled = busy || readOnly;
+    const img = document.createElement('img');
+    img.src = previewUrl(subject, false);
+    img.alt = 'Subject ' + (index + 1);
+    const caption = document.createElement('span');
+    caption.textContent = subject.predictions[0]?.species || 'Subject ' + (index + 1);
+    button.append(img, caption);
+    button.title = readOnlyTitle
+      || (subject.is_primary ? 'Primary: ' : 'Make primary: ') + caption.textContent;
+    button.onclick = () => choose(subject.id);
+    // Rejecting says the box holds no animal: it leaves review, species
+    // evidence and grouping everywhere, and the next box becomes primary.
+    const reject = document.createElement('button');
+    reject.type = 'button';
+    reject.className = 'lb-subject-reject';
+    reject.textContent = 'Not an animal';
+    reject.title = readOnlyTitle || 'Reject this region as background (one Undo step)';
+    reject.disabled = busy || readOnly;
+    reject.onclick = () => setVerdict(subject.id, 'not_animal');
+    item.append(button, reject);
+    return item;
+  }
+  /** @param {NavSubject} region @param {number} index @param {boolean} readOnly @param {string | null} readOnlyTitle */
+  function rejectedCard(region, index, readOnly, readOnlyTitle) {
+    const item = document.createElement('div');
+    item.className = 'lb-subject-item';
+    const img = document.createElement('img');
+    img.src = previewUrl(region, false);
+    img.alt = 'Rejected region ' + (index + 1);
+    const caption = document.createElement('span');
+    caption.textContent = region.predictions[0]?.species ? 'was ' + region.predictions[0].species : 'Rejected region ' + (index + 1);
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'lb-subject-restore';
+    restore.textContent = 'Restore';
+    restore.title = readOnlyTitle || 'Retain this region as a subject again';
+    restore.disabled = busy || readOnly;
+    restore.onclick = () => setVerdict(region.id, null);
+    item.append(img, caption, restore);
+    return item;
+  }
+  /** Disable every primary-subject control while the photo has no retained subject. */
+  function renderWithoutPrimary() {
+    status.textContent = data?.rejected.length ? 'Every detected region was rejected as not an animal. Restore one to review it again.' : '';
+    analyzeButton.hidden = true;
+    automatic.disabled = true;
+    corrected.disabled = true;
+    cropButton.disabled = true;
+    exposureButton.disabled = true;
+  }
   function render() {
     list.replaceChildren();
     details.replaceChildren();
+    rejectedList.replaceChildren();
     panel.hidden = !data;
     if (panel.hidden || !data) return;
     // Scoped Pipeline Review views open the lightbox with _lbReadOnly to
@@ -51,38 +111,36 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     // recipe — so they all must honor _lbReadOnly (Codex r4056621185).
     const readOnly = typeof lbState.readOnly !== 'undefined' && lbState.readOnly;
     const readOnlyTitle = readOnly && typeof lbState.readOnlyMessage === 'string' ? lbState.readOnlyMessage : null;
-    /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectSummary')).textContent = 'Subjects (' + data.subjects.length + ')';
+    /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectSummary')).textContent = 'Subjects (' + data.subjects.length + ')'
+      + (data.rejected.length ? ' · ' + data.rejected.length + ' rejected' : '');
     drawButton.disabled = busy || readOnly;
     retryButton.disabled = busy || readOnly || !primary();
+    if (data.rejected.length) {
+      const heading = document.createElement('p');
+      heading.className = 'lb-subject-rejected-heading';
+      heading.textContent = 'Rejected as not an animal (not used as evidence):';
+      rejectedList.append(heading);
+      data.rejected.forEach((region, index) => rejectedList.append(rejectedCard(region, index, readOnly, readOnlyTitle)));
+    }
     if (!data.subjects.length) {
       analyzeButton.hidden = true;
       automatic.disabled = corrected.disabled = cropButton.disabled = exposureButton.disabled = true;
       const names = (data.full_image_predictions || []).map(p => p.species).join(', ');
-      status.textContent = 'No localized subject region. This does not establish animal absence. '
+      status.textContent = (data.rejected.length ? 'Every detected region was rejected as not an animal. Restore one to review it again. ' : '')
+        + 'No localized subject region. This does not establish animal absence. '
         + (names ? 'Full-image classification only: ' + names + '. ' : '')
         + 'Draw a subject box to measure the visible animal.';
       return;
     }
     // Stable spatial order keeps thumbnails from jumping when primary changes.
     data.subjects.slice().sort((a, b) => a.box_x - b.box_x || a.box_y - b.box_y || a.id - b.id).forEach((subject, index) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'lb-subject-card';
-      button.setAttribute('aria-pressed', String(subject.is_primary));
-      button.disabled = busy || readOnly;
-      const img = document.createElement('img');
-      img.src = previewUrl(subject, false);
-      img.alt = 'Subject ' + (index + 1);
-      const caption = document.createElement('span');
-      caption.textContent = subject.predictions[0]?.species || 'Subject ' + (index + 1);
-      button.append(img, caption);
-      button.title = readOnlyTitle
-        || (subject.is_primary ? 'Primary: ' : 'Make primary: ') + caption.textContent;
-      button.onclick = () => choose(subject.id);
-      list.append(button);
+      list.append(subjectCard(subject, index, readOnly, readOnlyTitle));
     });
     const subject = primary();
-    if (!subject) return;
+    if (!subject) {
+      renderWithoutPrimary();
+      return;
+    }
     const img = document.createElement('img');
     img.className = 'lb-subject-preview';
     img.src = previewUrl(subject, corrected.checked);
@@ -179,6 +237,44 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
       // stale-request checks.
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       showToast((error instanceof Error ? error.message : '') || 'Could not change primary subject', 'error');
+    } finally {
+      busy = false;
+      if (data?.photo_id === vireoLightboxSession.requestedPhotoId()) render();
+    }
+  }
+  /** @param {number} detectionId @param {'not_animal' | null} verdict */
+  async function setVerdict(detectionId, verdict) {
+    if (!data || busy || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
+    // A verdict re-projects the primary subject (sync_primary), which clears
+    // mask, embedding and eye state, so it is blocked in a read-only lightbox.
+    if (typeof _lbGuardReadOnly === 'function' && _lbGuardReadOnly()) return;
+    const photoId = data.photo_id;
+    const seq = generation;
+    busy = true;
+    render();
+    try {
+      /** @type {{ok: boolean; changed: boolean; warning?: string; subjects: NavSubjectData}} */ const result = await safeFetch('/api/detections/' + detectionId + '/subject-verdict', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({verdict})
+      }, {toast: false});
+      if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
+      if (data?.primary_detection_id !== result.subjects.primary_detection_id) {
+        const photo = _lbPhotoDataByPhoto[photoId];
+        if (photo) {
+          /** @type {const} */ (['eye_x', 'eye_y', 'eye_conf', 'eye_tenengrad']).forEach(key => { photo[key] = null; });
+          _lbRenderEyeCrosshair(photo);
+        }
+        _lbResetMaskOverlay();
+      }
+      data = result.subjects;
+      _lbLoadDetections(photoId);
+      _lbLoadMaskVariants(photoId);
+      document.dispatchEvent(new CustomEvent('vireo:primary-subject-changed', {detail: {photoId}}));
+      document.dispatchEvent(new CustomEvent('vireo:subject-verdict-changed', {detail: {photoId, detectionId, verdict}}));
+      showToast(result.warning || (verdict ? 'Region rejected as not an animal. Undo restores it.' : 'Region restored as a subject.'),
+        result.warning ? 'warning' : 'success');
+    } catch (error) {
+      if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
+      showToast((error instanceof Error ? error.message : '') || 'Could not save the subject verdict', 'error');
     } finally {
       busy = false;
       if (data?.photo_id === vireoLightboxSession.requestedPhotoId()) render();

@@ -427,6 +427,7 @@ def build_server(client: VireoClient):
     _register_search_tools(server, client)
     _register_photo_tools(server, client)
     _register_species_tools(server, client)
+    _register_region_tools(server, client)
     _register_write_tools(server, client)
     return server
 
@@ -710,6 +711,51 @@ def _register_species_tools(server, client):
             raise VireoError("preview_token from preview_species_assignment is required")
         body = _species_assignment_payload(photo_ids, species, provenance)
         return client.post_json("/api/encounters/species", {**body, "preview_token": preview_token})
+
+
+def _register_region_tools(server, client):
+    """Subject verdicts: reject a detector box as background, or retain it again."""
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False))
+    def reject_region(detection_id: int, reason: str, source: str | None = None) -> dict:
+        """Reject one detected region as not an animal, after viewing it.
+
+        Only for a region you inspected with view_photo(view="subject",
+        detection_id=...) and the frame and found to hold no animal (a
+        stump, branch or rock the detector boxed and the classifier then
+        ranked species inside). The region's predictions stop counting as
+        evidence in every workspace, review and grouping; nothing is
+        deleted, the photo's next box becomes primary, and Vireo records
+        one Undo step with your ``reason`` (required) and ``source``.
+        This neither tags a species nor touches any other photo.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise VireoError("reason must say what the region actually shows")
+        body = {"verdict": "not_animal", "reason": reason}
+        if source:
+            body["source"] = source
+        return _verdict_result(client.post_json(f"/api/detections/{detection_id}/subject-verdict", body))
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False))
+    def restore_region(detection_id: int, reason: str | None = None, source: str | None = None) -> dict:
+        """Retain a previously rejected region as a subject again (one Undo step)."""
+        body = {"verdict": None}
+        if reason:
+            body["reason"] = reason
+        if source:
+            body["source"] = source
+        return _verdict_result(client.post_json(f"/api/detections/{detection_id}/subject-verdict", body))
+
+
+def _verdict_result(data):
+    """Say what changed, with the photo's remaining and rejected regions."""
+    subjects = data.get("subjects") or {}
+    return {
+        **_pick(data, ("photo_id", "detection_id", "verdict", "previous_verdict", "changed", "warning")),
+        "primary_detection_id": subjects.get("primary_detection_id"),
+        "retained_detection_ids": [s["id"] for s in subjects.get("subjects", [])],
+        "rejected_detection_ids": [s["id"] for s in subjects.get("rejected", [])],
+    }
 
 
 def _register_write_tools(server, client):

@@ -741,7 +741,7 @@ _TOP_PREDICTION_CONFIDENCE_EXPR = f"""(
             JOIN predictions conf_pr ON conf_pr.detection_id = conf_d.id
             {prediction_review_join('conf_pr', review_alias='conf_prv')}
             WHERE conf_d.photo_id = p.id
-              AND conf_d.detector_confidence >= ?
+              AND conf_d.detector_confidence >= ? AND conf_d.subject_verdict IS NULL
               AND conf_pr.species IS NOT NULL
               AND {prediction_review_status('conf_prv')}
                   NOT IN ('rejected', 'alternative')

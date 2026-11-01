@@ -204,12 +204,21 @@ def payload(db, photo_id):
         detection["predictions"] = grouped.get(detection["id"], [])
         detection["is_primary"] = detection is detections[0]
     primary_id = detections[0]["id"] if detections else None
+    rejected = []
+    for row in db.subjects.rejected_regions(photo_id):
+        region = dict(row)
+        region["predictions"] = grouped.get(region["id"], [])
+        rejected.append(region)
     full_image_ids = {d["id"] for d in detection_store.get_detections(db, photo_id, min_conf=0)
                       if d["detector_model"] == "full-image"}
     return {"photo_id": photo_id, "subjects": detections,
-            "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])], "primary_detection_id": primary_id,
+            "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])],
+            "primary_detection_id": primary_id,
             "selection": "manual" if choice else "automatic",
-            "choice_unavailable": bool(choice and choice["detection_id"] != primary_id)}
+            "choice_unavailable": bool(choice and choice["detection_id"] != primary_id),
+            # Regions the user rejected as background: not retained, shown
+            # with their crops so the rejection is visible and reversible.
+            "rejected": rejected}
 
 
 def select_reviewer_box(db, photo_id, box):

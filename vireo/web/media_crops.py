@@ -198,7 +198,12 @@ class CropRoutes:
         # Get primary detection box — global detections table, threshold
         # resolved from workspace-effective config in get_detections.
         requested_detection = request.args.get("detection_id")
-        dets = detection_store.get_detections(db, photo_id, min_conf=0 if requested_detection is not None else None)
+        # An explicit detection_id may name a region the user rejected as
+        # background: the subject panel shows its crop next to Restore.
+        dets = detection_store.get_detections(
+            db, photo_id, min_conf=0 if requested_detection is not None else None,
+            include_rejected=requested_detection is not None,
+        )
         if requested_detection is not None:
             from focus_crop import valid_subject_box
             try:

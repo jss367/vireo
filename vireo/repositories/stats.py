@@ -105,7 +105,7 @@ class StatsRepository:
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}""",
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}""",
             (ws, min_conf, *scope_params),
         ).fetchone()[0] or 0
         classified = self.conn.execute(
@@ -116,7 +116,7 @@ class StatsRepository:
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}""",
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}""",
             (ws, min_conf, *scope_params),
         ).fetchone()[0] or 0
         result = {"total": photo_row["total"] or 0}
@@ -163,7 +163,7 @@ class StatsRepository:
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}
                GROUP BY p.folder_id""",
             (ws, min_conf, *scope_params),
         ).fetchall()
@@ -176,7 +176,7 @@ class StatsRepository:
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}
                GROUP BY p.folder_id""",
             (ws, min_conf, *scope_params),
         ).fetchall()
@@ -228,7 +228,7 @@ class StatsRepository:
                 JOIN photo_workspace_visibility wf
                   ON wf.photo_id = p.id AND wf.workspace_id = ?
                 WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
-                  AND d.detector_confidence >= ?{scope_sql}""",
+                  AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}""",
             (ws, min_conf, *scope_params),
         ).fetchone()
         return {
@@ -252,7 +252,7 @@ class StatsRepository:
                         ON wf.photo_id = p.id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
                        AND COALESCE(d.category, 'animal') = 'animal'
-                       AND d.detector_confidence >= ?{scope_sql}
+                       AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}
                 )
                 SELECT COUNT(*) AS primary_dets,
                        COUNT(DISTINCT photo_id) AS photos_with_dets
@@ -283,7 +283,7 @@ class StatsRepository:
                  AND cr.labels_fingerprint = ?
                    AND cr.input_recipe IS NULL AND cr.runtime_fingerprint != 'incomplete'
                 WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
-                  AND d.detector_confidence >= ?
+                  AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                   AND cr.detection_id IS NULL{scope_sql}""",
             (ws, classifier_model, labels_fingerprint, min_conf, *scope_params),
         ).fetchone()
@@ -308,7 +308,7 @@ class StatsRepository:
                         ON wf.photo_id = p.id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
                        AND COALESCE(d.category, 'animal') = 'animal'
-                       AND d.detector_confidence >= ?{scope_sql}
+                       AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}
                 )
                 SELECT COUNT(*) AS pending
                   FROM ranked d
@@ -336,7 +336,7 @@ class StatsRepository:
                 JOIN photo_workspace_visibility wf
                   ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  AND EXISTS (
                     SELECT 1 FROM classifier_runs cr_stale
                      WHERE cr_stale.detection_id = d.id
@@ -373,7 +373,7 @@ class StatsRepository:
                         ON wf.photo_id = p.id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
                        AND COALESCE(d.category, 'animal') = 'animal'
-                       AND d.detector_confidence >= ?{scope_sql}
+                       AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}
                 )
                 SELECT COUNT(*) AS n
                   FROM ranked d
@@ -417,7 +417,7 @@ class StatsRepository:
                          SELECT 1 FROM detections d
                           WHERE d.photo_id = p.id
                             AND d.detector_model != 'full-image'
-                            AND d.detector_confidence >= ?
+                            AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                        ){scope_sql}""",
             (ws, detector_model, min_conf, *scope_params),
         ).fetchone()
@@ -454,7 +454,7 @@ class StatsRepository:
                              SELECT 1 FROM detections d
                               WHERE d.photo_id = p.id
                                 AND d.detector_model != 'full-image'
-                                AND d.detector_confidence >= ?
+                                AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                            ){scope_sql}
                   )
                 SELECT COUNT(*) AS pending
@@ -504,7 +504,7 @@ class StatsRepository:
                              SELECT 1 FROM detections d
                               WHERE d.photo_id = p.id
                                 AND d.detector_model != 'full-image'
-                                AND d.detector_confidence >= ?
+                                AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                            ){scope_sql}
                   )
                 SELECT COUNT(*) AS n
@@ -544,7 +544,7 @@ class StatsRepository:
                JOIN photo_workspace_visibility wf
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?""",
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL""",
             (workspace_id, min_conf),
         ).fetchone()
         total_real_detections = total_row["n"] or 0
@@ -562,7 +562,7 @@ class StatsRepository:
                JOIN photo_workspace_visibility wf
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                GROUP BY cr.classifier_model, cr.labels_fingerprint""",
             (workspace_id, min_conf),
         ).fetchall()
@@ -578,7 +578,7 @@ class StatsRepository:
                JOIN photo_workspace_visibility wf
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                GROUP BY pr.classifier_model, pr.labels_fingerprint""",
             (workspace_id, min_conf),
         ).fetchall()
@@ -629,7 +629,7 @@ class StatsRepository:
                      ON wf.photo_id = p.id
                     AND wf.workspace_id = ?
                    WHERE d.detector_model != 'full-image'
-                     AND d.detector_confidence >= ?
+                     AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                      AND pr.confidence IS NOT NULL
                    GROUP BY pr.classifier_model, pr.labels_fingerprint,
                             pr.detection_id
@@ -676,7 +676,7 @@ class StatsRepository:
         A separate temp table keeps large rescue sets off SQLite's parameter
         limit and does not overwrite the caller's staged photo scope.
         """
-        ordinary = f"{alias}.detector_model != 'full-image' AND {alias}.detector_confidence >= ?"
+        ordinary = f"{alias}.detector_model != 'full-image' AND {alias}.detector_confidence >= ? AND {alias}.subject_verdict IS NULL"
         if not rescue_floors:
             return ordinary
         self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS mask_rescue_floors "
@@ -687,6 +687,7 @@ class StatsRepository:
             (NOT EXISTS (SELECT 1 FROM mask_rescue_floors r WHERE r.photo_id = {alias}.photo_id)
              AND {ordinary})
             OR ({alias}.detector_model = 'megadetector-v6' AND {alias}.category = 'animal'
+                AND {alias}.subject_verdict IS NULL
                 AND EXISTS (SELECT 1 FROM mask_rescue_floors r
                             WHERE r.photo_id = {alias}.photo_id
                               AND {alias}.detector_confidence >= r.min_conf))
@@ -866,7 +867,7 @@ class StatsRepository:
                 JOIN detections d
                   ON d.photo_id = p.id
                  AND d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                 JOIN predictions pr ON pr.detection_id = d.id
                 JOIN photo_masks pm
                   ON pm.photo_id = p.id
@@ -881,7 +882,7 @@ class StatsRepository:
                   AND d.id = (
                       SELECT d2.id FROM detections d2
                       WHERE d2.photo_id = p.id
-                        AND d2.detector_confidence >= ?
+                        AND d2.detector_confidence >= ? AND d2.subject_verdict IS NULL
                         AND d2.detector_model != 'full-image'
                       ORDER BY {primary_order_sql("d2")}
                       LIMIT 1
@@ -903,7 +904,7 @@ class StatsRepository:
                 JOIN detections d
                   ON d.photo_id = p.id
                  AND d.detector_model != 'full-image'
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                 JOIN predictions pr ON pr.detection_id = d.id
                 JOIN photo_masks pm
                   ON pm.photo_id = p.id
@@ -921,7 +922,7 @@ class StatsRepository:
                   AND d.id = (
                       SELECT d2.id FROM detections d2
                       WHERE d2.photo_id = p.id
-                        AND d2.detector_confidence >= ?
+                        AND d2.detector_confidence >= ? AND d2.subject_verdict IS NULL
                         AND d2.detector_model != 'full-image'
                       ORDER BY {primary_order_sql("d2")}
                       LIMIT 1
@@ -970,7 +971,7 @@ class StatsRepository:
                     JOIN detections d
                       ON d.photo_id = p.id
                      AND d.detector_model != 'full-image'
-                     AND d.detector_confidence >= ?
+                     AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                     JOIN predictions pr ON pr.detection_id = d.id
                     JOIN photo_masks pm
                       ON pm.photo_id = p.id
@@ -985,7 +986,7 @@ class StatsRepository:
                       AND d.id = (
                           SELECT d2.id FROM detections d2
                           WHERE d2.photo_id = p.id
-                            AND d2.detector_confidence >= ?
+                            AND d2.detector_confidence >= ? AND d2.subject_verdict IS NULL
                             AND d2.detector_model != 'full-image'
                           ORDER BY {primary_order_sql("d2")}
                           LIMIT 1
@@ -1116,7 +1117,7 @@ class StatsRepository:
                JOIN photo_workspace_visibility wf
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                {prediction_review_join('pr')}
-               WHERE d.detector_confidence >= ?
+               WHERE d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id
@@ -1138,7 +1139,7 @@ class StatsRepository:
                JOIN photos p ON p.id = d.photo_id
                JOIN photo_workspace_visibility wf
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
-               WHERE d.detector_confidence >= ?
+               WHERE d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id
@@ -1161,7 +1162,7 @@ class StatsRepository:
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                JOIN folders f
                  ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE d.detector_confidence >= ?
+               WHERE d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id
@@ -1224,7 +1225,7 @@ class StatsRepository:
                JOIN photos p ON p.id = d.photo_id
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?{scope_sql}""",
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL{scope_sql}""",
             (ws, min_conf, *scope_params),
         ).fetchone()[0]
 

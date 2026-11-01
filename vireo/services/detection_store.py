@@ -70,7 +70,7 @@ def write_detection_batch(
 
 def get_detections(
     db: Database, photo_id: int, min_conf: float | None = None,
-    detector_model: str | None = None,
+    detector_model: str | None = None, *, include_rejected: bool = False,
 ) -> list[sqlite3.Row]:
     """Return all boxes for a photo above `min_conf`, globally.
 
@@ -81,14 +81,17 @@ def get_detections(
         photo_id: the photo
         min_conf: confidence floor. ``None`` pulls ``detector_confidence``
             from the active workspace's effective config (default 0.2).
-            ``0`` returns raw rows with no filtering.
+            ``0`` returns raw rows with no confidence filtering.
         detector_model: optional — filter to a single detector model.
+        include_rejected: also return regions the user rejected as
+            background (``subject_verdict``); by default they are not
+            retained, whatever the floor.
     """
     floor: float = (
         min_conf if min_conf is not None
         else config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     )
-    return db.detections.get(photo_id, floor, detector_model)
+    return db.detections.get(photo_id, floor, detector_model, include_rejected=include_rejected)
 
 
 def with_reviewer_regions(
@@ -153,11 +156,12 @@ def get_detections_for_photos(
 ) -> dict[int, list[dict[str, Any]]]:
     """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
-    Each det_dict has keys: id, x, y, w, h, confidence, category, and
-    detector_model. Lists put the chosen primary first, then quality and
-    detector confidence. The detections
-    table is global — threshold filtering happens at read time. Photos
-    with no detections above ``min_conf`` are omitted from the result.
+    Each det_dict has keys: id, x, y, w, h, confidence, category and
+    detector_model. Lists put the chosen primary first,
+    then quality and detector confidence. The detections table is global —
+    threshold filtering happens at read time. Photos with no retained
+    detections above ``min_conf`` are omitted from the result; regions the
+    user rejected as background are not retained (see ``get_detections``).
 
     Args:
         photo_ids: iterable of photo ids

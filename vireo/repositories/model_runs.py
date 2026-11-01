@@ -80,7 +80,7 @@ CACHE_CLASSIFIABLE_DETECTION_SQL = (
     "(d.detector_model = 'full-image' OR "
     "(d.detector_model != 'full-image' "
     "AND COALESCE(d.category, 'animal') = 'animal' "
-    "AND d.detector_confidence >= ?))"
+    "AND d.detector_confidence >= ? AND d.subject_verdict IS NULL))"
 )
 
 # The classifier_runs filter ``classifier_cache_run_filter`` builds:
@@ -724,14 +724,14 @@ class ModelRunsRepository:
                           FROM detections d
                          WHERE d.detector_model != 'full-image'
                            AND d.category != 'animal'
-                           AND d.detector_confidence >= ?
+                           AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                            AND d.photo_id IN ({placeholders})
                            AND NOT EXISTS (
                                  SELECT 1 FROM detections d2
                                   WHERE d2.photo_id = d.photo_id
                                     AND {animal_model_predicate}
                                     AND d2.category = 'animal'
-                                    AND d2.detector_confidence >= ?
+                                    AND d2.detector_confidence >= ? AND d2.subject_verdict IS NULL
                                )""",
                 [min_conf, *chunk, floor],
             ).fetchall()
@@ -953,7 +953,7 @@ class ModelRunsRepository:
                 WHERE (detector_model = 'full-image' OR
                        (detector_model != 'full-image'
                         AND COALESCE(category, 'animal') = 'animal'
-                        AND detector_confidence >= ?))
+                        AND detector_confidence >= ? AND subject_verdict IS NULL))
                   AND photo_id IN ({placeholders})""",
             [detector_confidence] + list(photo_ids),
         ).fetchone()
@@ -1333,14 +1333,14 @@ class _CacheHitQuery:
                 f"FROM detections d "
                 f"WHERE d.detector_model != 'full-image' "
                 f"  AND d.category = 'animal' "
-                f"  AND d.detector_confidence >= ? "
+                f"  AND d.detector_confidence >= ? AND d.subject_verdict IS NULL "
                 f"  AND d.photo_id IN ({placeholders}) "
                 f"  AND NOT EXISTS ( "
                 f"    SELECT 1 FROM detections d2 "
                 f"    WHERE d2.photo_id = d.photo_id "
                 f"      AND d2.detector_model != 'full-image' "
                 f"      AND d2.category = 'animal' "
-                f"      AND d2.detector_confidence >= ? "
+                f"      AND d2.detector_confidence >= ? AND d2.subject_verdict IS NULL "
                 f"      AND NOT EXISTS ( "
                 f"        SELECT 1 FROM classifier_runs cr "
                 f"        WHERE cr.detection_id = d2.id "
@@ -1395,7 +1395,7 @@ class _CacheHitQuery:
                           FROM detections
                          WHERE detector_model = 'megadetector-v6'
                            AND category = 'animal'
-                           AND detector_confidence >= ?
+                           AND detector_confidence >= ? AND subject_verdict IS NULL
                            AND photo_id IN ({placeholders})
                       )
                     SELECT DISTINCT td.photo_id
@@ -1447,7 +1447,7 @@ class _CacheHitQuery:
                              SELECT 1 FROM detections d
                               WHERE d.photo_id = fa.photo_id
                                 AND d.detector_model != 'full-image'
-                                AND d.detector_confidence >= ?
+                                AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                            )
                        AND {_CACHE_HIT_OUTPUT_SQL}""" + self.rt_predicate_sql,
                 [*chunk, self.classifier_model, self.labels_fingerprint,

@@ -2453,7 +2453,7 @@ class _RuleQueryBuilder:
         # prediction_confidence, classifier_model, and taxonomy_* rules,
         # so the universal filter would include a photo the Browse view
         # shows with no visible detection context.
-        conf_filter = " AND det.detector_confidence >= ?"
+        conf_filter = " AND det.detector_confidence >= ? AND det.subject_verdict IS NULL"
         params = (
             [self._repo.workspace_id]
             + [self._min_detector_conf()]

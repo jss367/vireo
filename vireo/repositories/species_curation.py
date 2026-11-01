@@ -152,7 +152,7 @@ _HIGHLIGHT_PREDICTION_MATCH = f"""
                          JOIN predictions pr ON pr.detection_id = d.id
                          {prediction_review_join('pr', workspace='sh.workspace_id')}
                          WHERE d.photo_id = sh.photo_id
-                           AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                           AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
                            AND pr.species IS NOT NULL
                            AND {prediction_review_status()} != 'rejected'
                            AND pr.labels_fingerprint = (
@@ -471,7 +471,7 @@ class SpeciesCurationRepository:
                    JOIN predictions pr ON pr.detection_id = d.id
                    {prediction_review_join('pr')}
                    WHERE d.photo_id IN (SELECT id FROM scope)
-                     AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                     AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
                      AND pr.species IS NOT NULL
                      AND {prediction_review_status()} != 'rejected'
                      AND pr.labels_fingerprint = (

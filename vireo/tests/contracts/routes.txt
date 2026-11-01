@@ -267,6 +267,7 @@ POST         /api/computation-cache/import
 POST         /api/config
 POST         /api/culling/apply
 POST         /api/detections/<int:detection_id>/evidence-review
+POST         /api/detections/<int:detection_id>/subject-verdict
 POST         /api/duplicates/apply
 POST         /api/duplicates/bulk-resolve
 POST         /api/duplicates/delete-loser-files

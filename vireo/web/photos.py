@@ -1628,6 +1628,41 @@ def create_photos_blueprint(
             lock.release()
         return jsonify(payload(db, photo_id))
 
+    @blueprint.route("/api/detections/<int:detection_id>/subject-verdict", methods=["POST"])
+    def api_detection_subject_verdict(detection_id: int) -> ResponseReturnValue:
+        """Reject a detector region as background, or retain it again.
+
+        Body: ``{"verdict": "not_animal" | null, "source"?: str, "reason"?: str}``.
+        One Undo step; the photo's primary subject and its cached evidence
+        in Process Review follow. Answers with the photo's subject panel
+        payload plus the verdict, so the panel can re-render from it.
+        """
+        from services import subject_verdicts
+        from subjects import payload
+
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or "verdict" not in body:
+            return json_error("verdict is required: 'not_animal' to reject the region, null to retain it")
+        db = get_db()
+        try:
+            verdict = subject_verdicts.validate_verdict(body["verdict"])
+            source, reason = subject_verdicts.validate_provenance(body)
+            result = subject_verdicts.set_subject_verdict(
+                db, detection_id, verdict, source=source, reason=reason,
+            )
+        except subject_verdicts.SubjectVerdictError as exc:
+            return json_error(str(exc), exc.status)
+        response: JsonDict = {"ok": True, **result, "subjects": payload(db, result["photo_id"])}
+        if result["changed"] and not subject_verdicts.refresh_pipeline_cache(
+            db, db_path, [result["photo_id"]],
+        ):
+            response["pipeline_cache_stale"] = True
+            response["warning"] = (
+                "Saved, but Vireo could not update Process Review's saved results "
+                "to match, so they may still list this region's species."
+            )
+        return jsonify(response)
+
     @blueprint.route("/api/photos/open-external", methods=["POST"])
     def api_photos_open_external() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}

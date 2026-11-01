@@ -279,6 +279,22 @@ def _validate_job_history_lineage(conn):
         raise RuntimeError(f"job_history is missing {', '.join(missing)}")
 
 
+def _add_detection_subject_verdict(conn):
+    """Let a reviewer reject a detector box as background, catalog-wide."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(detections)")}
+    if "subject_verdict" not in columns:
+        conn.execute(
+            "ALTER TABLE detections ADD COLUMN subject_verdict TEXT "
+            "CHECK (subject_verdict IN ('not_animal'))"
+        )
+
+
+def _validate_detection_subject_verdict(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(detections)")}
+    if "subject_verdict" not in columns:
+        raise RuntimeError("detections is missing subject_verdict")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -316,6 +332,10 @@ MIGRATIONS = (
     Migration(
         31, "job_history_lineage",
         _add_job_history_lineage, _validate_job_history_lineage,
+    ),
+    Migration(
+        32, "detection_subject_verdict",
+        _add_detection_subject_verdict, _validate_detection_subject_verdict,
     ),
 )
 

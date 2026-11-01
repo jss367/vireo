@@ -249,7 +249,7 @@ class MovesMergeRepository:
                     "EXISTS (SELECT 1 FROM predictions pr "
                     "JOIN detections d ON d.id = pr.detection_id "
                     "WHERE d.photo_id = p.id "
-                    "  AND d.detector_confidence >= ?)"
+                    "  AND d.detector_confidence >= ? AND d.subject_verdict IS NULL)"
                 )
                 params.append(move_min_conf)
             else:
@@ -257,7 +257,7 @@ class MovesMergeRepository:
                     "NOT EXISTS (SELECT 1 FROM predictions pr "
                     "JOIN detections d ON d.id = pr.detection_id "
                     "WHERE d.photo_id = p.id "
-                    "  AND d.detector_confidence >= ?)"
+                    "  AND d.detector_confidence >= ? AND d.subject_verdict IS NULL)"
                 )
                 params.append(move_min_conf)
         if "imported_before" in criteria:

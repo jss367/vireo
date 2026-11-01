@@ -314,6 +314,7 @@
   <details id="lightboxSubjects" class="lb-subject-panel" hidden data-navbar-on="click:stopPropagation mousedown:stopPropagation keydown:stopPropagation">
     <summary id="lightboxSubjectSummary">Subjects</summary>
     <div id="lightboxSubjectList" class="lb-subject-list" aria-label="Choose primary subject"></div>
+    <div id="lightboxSubjectRejected" class="lb-subject-rejected" aria-label="Rejected regions"></div>
     <div id="lightboxSubjectDetails"></div>
     <label><input id="lightboxSubjectCorrected" type="checkbox" checked> Preview suggested exposure</label>
     <div class="lb-subject-controls">
@@ -635,6 +636,14 @@
 .lb-subject-card { flex: 0 0 92px; min-width: 0; background: #263039; border: 2px solid transparent; border-radius: 6px; padding: 4px; color: inherit; cursor: pointer; }
 .lb-subject-card[aria-pressed="true"] { border-color: #e1ca5b; }
 .lb-subject-card img { width: 80px; height: 64px; object-fit: contain; }
+.lb-subject-item { display: flex; flex-direction: column; align-items: stretch; gap: 4px; flex: 0 0 auto; }
+.lb-subject-reject, .lb-subject-restore { font-size: 11px; padding: 2px 6px; background: #3a2f2f; color: inherit; border: 1px solid #5a4646; border-radius: 4px; cursor: pointer; }
+.lb-subject-restore { background: #2f3a33; border-color: #46594c; }
+.lb-subject-rejected { display: flex; gap: 8px; overflow-x: auto; align-items: flex-end; margin: 0 0 12px; }
+.lb-subject-rejected:empty { display: none; }
+.lb-subject-rejected-heading { flex: 1 0 100%; margin: 0; font-size: 12px; opacity: .8; }
+.lb-subject-rejected img { width: 80px; height: 64px; object-fit: contain; opacity: .55; filter: grayscale(.6); }
+.lb-subject-rejected span { font-size: 11px; opacity: .8; }
 .lb-subject-card span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lb-subject-preview { width: 100%; height: 145px; object-fit: contain; margin-bottom: 8px; }
 .lb-subject-panel p { line-height: 1.5; margin: 8px 0; }

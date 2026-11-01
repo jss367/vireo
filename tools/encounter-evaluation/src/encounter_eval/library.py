@@ -173,11 +173,19 @@ class FeatureReader:
         return self.get_detections_for_photos(photo_ids, min_conf, detector_model)
 
     def get_detections_for_photos(self, photo_ids, min_conf, detector_model=None):
+        """Retained detections at the floor, as ``detection_store.get_detections_for_photos`` reads them.
+
+        A region the reviewer rejected as background (``subject_verdict``
+        set) is not retained anywhere in production, so it must not set a
+        photo's detection box, rescue a weak detection or carry its
+        predictions into the evidence here either.
+        """
         result = defaultdict(list)
         ids = list(dict.fromkeys(photo_ids))
         for start in range(0, len(ids), 400):
             chunk = ids[start:start + 400]
-            sql = f"SELECT * FROM detections WHERE photo_id IN ({','.join('?' for _ in chunk)}) AND detector_confidence >= ?"
+            sql = (f"SELECT * FROM detections WHERE photo_id IN ({','.join('?' for _ in chunk)})"
+                   " AND detector_confidence >= ? AND subject_verdict IS NULL")
             params = [*chunk, min_conf]
             if detector_model is not None:
                 sql += " AND detector_model = ?"
@@ -307,13 +315,17 @@ def open_library(path):
     conn = sqlite3.connect(Path(path).expanduser().resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("BEGIN")
-    # New production loaders use source identities. Overlay legacy tables with
-    # connection-local views rather than migrating the photographer's library.
+    # New production loaders use source identities, and the detection floor
+    # requires a NULL ``subject_verdict`` (a region the reviewer rejected as
+    # background). Overlay legacy tables with connection-local views rather
+    # than migrating the photographer's library: a catalog that predates the
+    # verdict column has no rejected regions, so NULL retains every box.
     for table, optional in {
         "predictions": ("source_taxon_id",),
         "keywords": ("source_taxon_id",),
         "photos": ("companion_path", "active_mask_variant", "quality_input_recipe"),
         "detector_runs": ("input_fingerprint",),
+        "detections": ("subject_verdict",),
     }.items():
         columns = {r["name"] for r in conn.execute(f"PRAGMA main.table_info({table})")}
         missing = [column for column in optional if column not in columns]
@@ -350,20 +362,25 @@ def _raw_evidence(reader, taxonomy):
 
     conn = reader.conn
     resolver = SpeciesResolver(db=reader)
+    # A region the reviewer rejected as background is not retained in
+    # production, so its predictions are not evidence either; every read
+    # below keeps the same ``subject_verdict IS NULL`` rule.
     subjects = {}
-    for row in conn.execute("SELECT d.* FROM detections d JOIN pipeline_scope_ids s ON s.id = d.photo_id ORDER BY d.id"):
+    for row in conn.execute("""SELECT d.* FROM detections d JOIN pipeline_scope_ids s ON s.id = d.photo_id
+                            WHERE d.subject_verdict IS NULL ORDER BY d.id"""):
         d = dict(row)
         d["sources"] = {}
         subjects[d["id"]] = d
     runs = {}
     for row in conn.execute("""SELECT cr.* FROM classifier_runs cr JOIN detections d ON d.id = cr.detection_id
-                            JOIN pipeline_scope_ids s ON s.id = d.photo_id"""):
+                            JOIN pipeline_scope_ids s ON s.id = d.photo_id WHERE d.subject_verdict IS NULL"""):
         runs[(row["detection_id"], row["classifier_model"], row["labels_fingerprint"])] = dict(row)
     # Same most-recent fingerprint policy as production; retain every candidate
     # per detection/source instead of capping across otherwise distinct models.
     sql = """SELECT pr.* FROM predictions pr JOIN detections d ON d.id = pr.detection_id
         JOIN pipeline_scope_ids s ON s.id = d.photo_id
-        WHERE pr.labels_fingerprint = (SELECT pr2.labels_fingerprint FROM predictions pr2
+        WHERE d.subject_verdict IS NULL
+        AND pr.labels_fingerprint = (SELECT pr2.labels_fingerprint FROM predictions pr2
             WHERE pr2.detection_id = pr.detection_id AND pr2.classifier_model = pr.classifier_model
             ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)
         ORDER BY pr.detection_id, pr.classifier_model, pr.confidence DESC, pr.id"""
