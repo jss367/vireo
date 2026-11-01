@@ -32,7 +32,7 @@ def create_identity_alternatives_blueprint(get_db: GetDb, json_error: JsonError,
         return jsonify(groups=groups, photo_count=sum(len(group['photo_ids']) for group in groups),
                        workspace_id=db.require_workspace_id())
 
-    def _write(resolve: bool) -> ErrorResponse | Response:
+    def _write(resolve: bool) -> ErrorResponse | JsonDict:
         db = get_db()
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -62,21 +62,19 @@ def create_identity_alternatives_blueprint(get_db: GetDb, json_error: JsonError,
         ):
             return json_error('Unresolved alternatives changed; reload the group before saving', 409)
         try:
-            with db.transaction():
-                if resolve:
-                    species = identities.uncertainty_text(body.get('species'), 'species', required=True)
-                    entry_id = identities.resolve_alternatives(db, ids, species)
-                else:
-                    candidates = identities.normalize_candidates(body.get('candidates'), minimum=1 if observed else 2)
-                    reason = identities.uncertainty_text(body.get('reason'), 'reason', required=True)
-                    evidence = identities.uncertainty_text(body.get('missing_evidence', ''), 'missing_evidence')
-                    entry_id = identities.save_alternatives(db, ids, candidates, reason, evidence)
+            if resolve:
+                species = identities.uncertainty_text(body.get('species'), 'species', required=True)
+                entry_id = identities.resolve_alternatives(db, ids, species)
+            else:
+                candidates = identities.normalize_candidates(body.get('candidates'), minimum=1 if observed else 2)
+                reason = identities.uncertainty_text(body.get('reason'), 'reason', required=True)
+                evidence = identities.uncertainty_text(body.get('missing_evidence', ''), 'missing_evidence')
+                entry_id = identities.save_alternatives(db, ids, candidates, reason, evidence)
         except ValueError as exc:
+            # The 400 rolls the decision's unit back, writes included.
             return json_error(str(exc))
-        db.prune_edit_history()
-        response: JsonDict = {'ok': True, 'entry_id': entry_id, 'photo_ids': ids, 'flags_changed': False}
-        _refresh_species(db, ids, response)
-        return jsonify(response)
+        db.after_commit(db.prune_edit_history)
+        return {'ok': True, 'entry_id': entry_id, 'photo_ids': ids, 'flags_changed': False}
 
     def _refresh_species(db: Database, ids: list[int], response: JsonDict) -> None:
         # Persisted Process groups must not retain the candidates as confirmed.
@@ -91,7 +89,12 @@ def create_identity_alternatives_blueprint(get_db: GetDb, json_error: JsonError,
 
     def _locked_write(resolve: bool) -> ErrorResponse | Response:
         db = get_db()
-        return prediction_decisions.under_prediction_decision_lock(db, lambda: _write(resolve), json_error=json_error)
+        result = prediction_decisions.under_prediction_decision_lock(db, lambda: _write(resolve), json_error=json_error)
+        if not isinstance(result, dict):
+            return result
+        # Once the edit is committed, as undo's cache refresh does.
+        _refresh_species(db, result['photo_ids'], result)
+        return jsonify(result)
 
     @blueprint.route('/api/identity-alternatives', methods=['POST'])
     def api_save_identity_alternatives() -> ResponseReturnValue:

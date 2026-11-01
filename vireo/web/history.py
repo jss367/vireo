@@ -194,6 +194,10 @@ def create_history_blueprint(
         """
         db = get_db()
         undone = []
+        stale: list[Exception] = []
+
+        from services.grouping_history import GroupingHistoryConflict, GroupingHistoryStale
+        from services.identity_alternatives import IdentityHistoryConflict, IdentityHistoryStale
 
         def _apply() -> ErrorResponse | None:
             body = request.get_json(silent=True) or {}
@@ -205,14 +209,17 @@ def create_history_blueprint(
                 latest = db.edit_history.latest_undoable()
                 if latest is None or latest["id"] != body["edit_id"]:
                     return json_error("This edit is no longer the latest undoable edit", 409)
-            entry = db.undo_last_edit()
+            try:
+                entry = db.undo_last_edit()
+            except (GroupingHistoryStale, IdentityHistoryStale) as exc:
+                # The stale entry was retired: that retirement commits with
+                # the decision, and the caller reports the 409 afterwards.
+                stale.append(exc)
+                return None
             if entry is None:
                 return json_error("nothing to undo")
             undone.append(entry)
             return None
-
-        from services.grouping_history import GroupingHistoryConflict
-        from services.identity_alternatives import IdentityHistoryConflict
 
         try:
             early = prediction_decisions.under_prediction_decision_lock(
@@ -222,6 +229,8 @@ def create_history_blueprint(
             return json_error(str(exc), 409)
         if early is not None:
             return early
+        if stale:
+            return json_error(str(stale[0]), 409)
         result = undone[0]
         edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":
@@ -253,16 +262,22 @@ def create_history_blueprint(
         """
         db = get_db()
         redone = []
+        stale: list[Exception] = []
+
+        from services.grouping_history import GroupingHistoryConflict, GroupingHistoryStale
+        from services.identity_alternatives import IdentityHistoryConflict, IdentityHistoryStale
 
         def _apply() -> ErrorResponse | None:
-            entry = db.redo_last_undo()
+            try:
+                entry = db.redo_last_undo()
+            except (GroupingHistoryStale, IdentityHistoryStale) as exc:
+                # Retired with the decision; reported after it, as in undo.
+                stale.append(exc)
+                return None
             if entry is None:
                 return json_error("nothing to redo")
             redone.append(entry)
             return None
-
-        from services.grouping_history import GroupingHistoryConflict
-        from services.identity_alternatives import IdentityHistoryConflict
 
         try:
             early = prediction_decisions.under_prediction_decision_lock(
@@ -272,6 +287,8 @@ def create_history_blueprint(
             return json_error(str(exc), 409)
         if early is not None:
             return early
+        if stale:
+            return json_error(str(stale[0]), 409)
         result = redone[0]
         edit_recipe_updates = None
         if result.get("action_type") == "edit_recipe":

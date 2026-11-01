@@ -595,6 +595,8 @@ def test_species_confirmation_restores_cache_when_rollback_also_fails(
     app_and_db, monkeypatch, caplog,
 ):
     """A failed rollback still restores the cache and surfaces the commit error."""
+    import sqlite3
+
     from db import Database
 
     app, db = app_and_db
@@ -614,7 +616,7 @@ def test_species_confirmation_restores_cache_when_rollback_also_fails(
             raise OSError('Commit failed')
 
         def rollback(self):
-            raise RuntimeError('Rollback failed')
+            raise sqlite3.OperationalError('Rollback failed')
 
     with monkeypatch.context() as patch:
         def failing_init(self, *args, **kwargs):
@@ -627,7 +629,7 @@ def test_species_confirmation_restores_cache_when_rollback_also_fails(
         })
         assert response.status_code == 500
     assert _load(db) == before
-    assert 'Rollback failed after species confirmation failed' in caplog.text
+    assert 'Rollback failed after a unit of work failed' in caplog.text
     assert 'Commit failed' in caplog.text
 
 

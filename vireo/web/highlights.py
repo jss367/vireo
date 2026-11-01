@@ -1005,19 +1005,14 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         )
 
     def _highlights_confirm_under_lock(db: Database, photo_ids: list[int], species: str | None) -> Response:
-        try:
-            if species is None:
-                targets, skips = _top_prediction_confirm_targets(db, photo_ids)
-            else:
-                targets, skips = _species_confirm_targets(db, photo_ids, species)
-            affected, skipped = _accept_confirm_targets(
-                db, photo_ids, targets, skips, exact_rows=species is not None,
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        db._prune_edit_history()
+        if species is None:
+            targets, skips = _top_prediction_confirm_targets(db, photo_ids)
+        else:
+            targets, skips = _species_confirm_targets(db, photo_ids, species)
+        affected, skipped = _accept_confirm_targets(
+            db, photo_ids, targets, skips, exact_rows=species is not None,
+        )
+        db.after_commit(db._prune_edit_history)
         return jsonify({"ok": True, "affected": affected, "skipped": skipped})
 
     @blueprint.route("/api/highlights/relabel", methods=["POST"])
@@ -1090,17 +1085,12 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             from_species=from_species,
         )
         relabel.snapshot_curation()
-        try:
-            kid = db.add_keyword(species, is_species=True, _commit=False)
-            relabel.adopt_stored_spelling(kid)
-            relabel.retag_photos(kid)
-            relabel.rename_curation()
-            relabel.record_relabel_edit(kid)
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        db._prune_edit_history()
+        kid = db.add_keyword(species, is_species=True, _commit=False)
+        relabel.adopt_stored_spelling(kid)
+        relabel.retag_photos(kid)
+        relabel.rename_curation()
+        relabel.record_relabel_edit(kid)
+        db.after_commit(db._prune_edit_history)
         return jsonify({
             "ok": True,
             "keyword_id": kid,

@@ -176,6 +176,18 @@ class HoldingConnection(sqlite3.Connection):
         return False
 
 
+def _roll_back_after_failure(conn: sqlite3.Connection) -> None:
+    """Roll back a failed unit without hiding the failure that ended it."""
+    if not conn.in_transaction:
+        return
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        # The error already propagating is the one the caller must see;
+        # SQLite discards the transaction when the connection closes.
+        log.exception("Rollback failed after a unit of work failed")
+
+
 def _hold(conn: sqlite3.Connection, delta: int) -> None:
     if isinstance(conn, HoldingConnection):
         conn.commit_holds += delta
@@ -240,8 +252,8 @@ class UnitOfWork:
             callbacks = self._callbacks[0]
             doomed_at = getattr(conn, "doomed_at", None)
             self._leave(conn)
-            if not finished and conn.in_transaction:
-                conn.rollback()
+            if not finished:
+                _roll_back_after_failure(conn)
         if doomed_at is not None:
             # An unconverted data method rolled the unit back part-way. If
             # nothing was written since, the unit simply ends rolled back, as
@@ -261,8 +273,8 @@ class UnitOfWork:
             _commit(conn)
             committed = True
         finally:
-            if not committed and conn.in_transaction:
-                conn.rollback()
+            if not committed:
+                _roll_back_after_failure(conn)
         for callback in callbacks:
             try:
                 callback()

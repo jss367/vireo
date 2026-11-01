@@ -392,7 +392,7 @@ def test_combined_apply_failure_rolls_back_every_effect(app_and_db, monkeypatch,
     before_history = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
     before_pending = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
     import pipeline
-    from db import Database
+    import unit_of_work
     from repositories.photo_review import PhotoReviewRepository
     from services import grouping_history, review_group_changes
 
@@ -430,7 +430,8 @@ def test_combined_apply_failure_rolls_back_every_effect(app_and_db, monkeypatch,
         elif failure == 'save':
             patch.setattr(pipeline, 'save_results_raw', fail)
         else:
-            patch.setattr(Database, 'commit', fail)
+            # The decision's unit of work is the commit point.
+            patch.setattr(unit_of_work, '_commit', fail)
         assert apply(client, body, preview).status_code == 500
     assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
     assert db.photo_species.get_species_for_photos(ids) == before_species

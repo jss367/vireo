@@ -336,10 +336,12 @@ decision helpers *return* an error response after writing (a group apply
 that finds a member gone, an accept whose keyword vanished). A returned 409
 inside `with decision(...)` would commit those writes. So the routes go
 through one wrapper built on the context manager, which judges the response
-the way `services.edit_history.atomic_edit` already does:
+the way `services.edit_history.atomic_edit` already does. It keeps the
+existing name, `under_prediction_decision_lock`, so the route-contract
+analysis and the tests that patch the lock keep finding it:
 
 ```python
-def decide(db, work, *, json_error, prediction_ids=()):
+def under_prediction_decision_lock(db, work, *, json_error, prediction_ids=()):
     try:
         with decision(db, json_error=json_error, prediction_ids=prediction_ids):
             response = work()

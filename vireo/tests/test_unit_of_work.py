@@ -343,3 +343,19 @@ def test_any_ordinary_after_commit_failure_is_contained(db, caplog, error):
     assert _committed(db) == ["durable"]
     assert seen == ["later"]
     assert "after_commit callback" in caplog.text
+
+def test_a_failed_rollback_does_not_hide_the_failure(db, monkeypatch, caplog):
+    real_rollback = db.conn.rollback
+
+    def failing_rollback():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(db.conn, "rollback", failing_rollback)
+    with caplog.at_level(logging.ERROR, logger="unit_of_work"):
+        with pytest.raises(ValueError, match="original"), db.transaction():
+            _write(db, "a")
+            raise ValueError("original")
+    assert "Rollback failed after a unit of work failed" in caplog.text
+    monkeypatch.setattr(db.conn, "rollback", real_rollback)
+    db.rollback()
+    assert _committed(db) == []

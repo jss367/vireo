@@ -20832,8 +20832,9 @@ def _patch_begin_prediction_decision(monkeypatch, app, view_name, replacement):
     live handler (and ``under_prediction_decision_lock``). ``replacement``
     takes the request's ``Database`` and returns what the real function
     would: ``None`` to proceed, or an error response. Returns True when
-    ``view_name``'s own code calls the lock, so tests assert on the rewire
-    rather than on the hook silently missing.
+    ``view_name``'s own code calls the lock (directly or through
+    ``under_prediction_decision_lock``), so tests assert on the rewire rather
+    than on the hook silently missing.
     """
     from services import prediction_decisions
 
@@ -20843,7 +20844,10 @@ def _patch_begin_prediction_decision(monkeypatch, app, view_name, replacement):
         lambda db, *, json_error: replacement(db),
     )
     view = app.view_functions[view_name]
-    return "begin_prediction_decision" in view.__code__.co_names
+    return bool(
+        {"begin_prediction_decision", "under_prediction_decision_lock"}
+        & set(view.__code__.co_names)
+    )
 
 
 def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db, monkeypatch):

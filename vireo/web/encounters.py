@@ -76,13 +76,14 @@ def create_encounters_blueprint(get_db: GetDb, json_error: JsonError, db_path: s
         from pipeline_locks import acquire_workspace_regroup
 
         db = get_db()
-        with acquire_workspace_regroup(db.require_workspace_id()):
+        cache_restore = _CacheRestore()
+        with acquire_workspace_regroup(db.require_workspace_id()), cache_restore:
             return prediction_decisions.under_prediction_decision_lock(
-                db, lambda: _confirm_encounter_species(db),
+                db, lambda: _confirm_encounter_species(db, cache_restore),
                 json_error=json_error,
             )
 
-    def _confirm_encounter_species(db: Database) -> ErrorResponse | Response:
+    def _confirm_encounter_species(db: Database, cache_restore: _CacheRestore) -> ErrorResponse | Response:
         """Confirm species while holding the grouping and database writer locks."""
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -153,6 +154,7 @@ def create_encounters_blueprint(get_db: GetDb, json_error: JsonError, db_path: s
         return _commit_species_edit(
             db, confirmation.before_cached, confirmation.cache_dir,
             lambda: _apply_confirmation(confirmation, low_confidence_photo_ids, body.get("response_mode", "full")),
+            cache_restore,
         )
 
     @blueprint.route("/api/encounters/species/bulk", methods=["POST"])
@@ -160,9 +162,10 @@ def create_encounters_blueprint(get_db: GetDb, json_error: JsonError, db_path: s
         """Add distinct species selections atomically, with one compact result."""
         from pipeline_locks import acquire_workspace_regroup
         db = get_db()
-        with acquire_workspace_regroup(db.require_workspace_id()):
+        cache_restore = _CacheRestore()
+        with acquire_workspace_regroup(db.require_workspace_id()), cache_restore:
             return prediction_decisions.under_prediction_decision_lock(
-                db, lambda: _bulk_species(db, request.get_json(silent=True), db_path, json_error),
+                db, lambda: _bulk_species(db, request.get_json(silent=True), db_path, json_error, cache_restore),
                 json_error=json_error,
             )
 
@@ -191,37 +194,50 @@ def _apply_confirmation(
     return confirmation.response(low_confidence_photo_ids, response_mode), confirmation.cached
 
 
+class _CacheRestore:
+    """Puts the pipeline cache back if the decision it was saved in fails.
+
+    The confirmation writes the catalog and the Process results cache
+    together: the cache file is saved inside the decision's unit of work,
+    before the unit commits. Used as a context manager around the whole
+    decision, so a failure anywhere after the save, including the unit's own
+    commit, restores the cache the catalog still matches.
+    """
+
+    def __init__(self) -> None:
+        self.restore: Callable[[], object] | None = None
+
+    def __enter__(self) -> _CacheRestore:
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, *_exc: object) -> None:
+        if exc_type is None or self.restore is None:
+            return
+        try:
+            self.restore()
+        except (OSError, TypeError, ValueError):
+            log.exception("Failed to restore pipeline cache after species confirmation failed")
+
+
 def _commit_species_edit(
     db: Database, before_cached: JsonDict | None, cache_dir: str,
-    work: Callable[[], tuple[JsonDict, JsonDict | None]],
+    work: Callable[[], tuple[JsonDict, JsonDict | None]], cache_restore: _CacheRestore,
 ) -> Response:
-    """Commit catalog and cache together, restoring both after a failed write."""
+    """Write catalog and cache in the decision's unit; ``cache_restore`` undoes the cache."""
     from pipeline import save_results_raw
-    attempted_save = False
-    try:
-        result, cached = work()
-        if cached and cached != before_cached:
-            attempted_save = True
-            save_results_raw(cached, cache_dir, db.active_workspace_id)
-        if cached:
-            result["summary"] = cached.get("summary", {})
-        db.commit()
-    except Exception:  # broad: rollback and restore the saved cache before re-raising the confirmation failure
-        try:
-            db.rollback()
-        except Exception:  # broad: any rollback failure still restores the cache and re-raises below
-            log.exception("Rollback failed after species confirmation failed")
-        if attempted_save:
-            try:
-                save_results_raw(before_cached, cache_dir, db.active_workspace_id)
-            except Exception:  # broad: restoring the cache is best-effort; the original error re-raises below
-                log.exception("Failed to restore pipeline cache after species confirmation failed")
-        raise
-    db._prune_edit_history()
+    result, cached = work()
+    if cached and cached != before_cached:
+        cache_restore.restore = lambda: save_results_raw(before_cached, cache_dir, db.active_workspace_id)
+        save_results_raw(cached, cache_dir, db.active_workspace_id)
+    if cached:
+        result["summary"] = cached.get("summary", {})
+    db.after_commit(db._prune_edit_history)
     return jsonify(result)
 
 
-def _bulk_species(db: Database, body: object, db_path: str, json_error: JsonError) -> ErrorResponse | Response:
+def _bulk_species(
+    db: Database, body: object, db_path: str, json_error: JsonError, cache_restore: _CacheRestore,
+) -> ErrorResponse | Response:
     """Validate every target before starting an all-or-nothing additive batch."""
     if not isinstance(body, dict) or set(body) - {"assignments", "response_mode"}:
         return json_error("Expected assignments and optional response_mode")
@@ -256,6 +272,7 @@ def _bulk_species(db: Database, body: object, db_path: str, json_error: JsonErro
     before = copy.deepcopy(cached)
     return _commit_species_edit(
         db, before, cache_dir, lambda: (apply_assignments(db, cached, validated, before=before), cached),
+        cache_restore,
     )
 
 
