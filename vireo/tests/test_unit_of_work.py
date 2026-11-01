@@ -451,3 +451,61 @@ def test_after_commit_still_runs_for_a_joined_unit_with_no_owner(db):
         db.after_commit(lambda: seen.append(_committed(db)))
         assert seen == []
     assert seen == [["own"]]
+
+
+def test_a_failed_joined_set_flag_preserves_history_and_undo_for_caller_species_removal(db, tmp_path):
+    # End-to-end regression for the in-memory survival pinned above. A real
+    # attributed species removal snapshots its before-state; a joined
+    # ``PhotoReviewService.set_flag`` whose ``observed_flag`` is stale
+    # raises ``FlagConflict`` and its savepoint rolls back. The caller
+    # catches it, finishes the pending ``keyword_remove`` through
+    # ``record_edit`` and commits. The persisted history row must carry the
+    # original attribution, and Undo must restore it on the real
+    # association.
+    import json
+
+    from services import photo_ingest, workspace_folders
+    from services.edit_history import undo_last_edit
+    from services.photo_review import FlagConflict, PhotoReviewService
+
+    fid = workspace_folders.add_folder(db, str(tmp_path / "photos"))
+    photo_id = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
+    kid = db.add_keyword("Robin", is_species=True)
+    db.tag_photo(photo_id, kid, source="accept", provenance={
+        "method": "direct_visual", "reviewer": "Original reviewer",
+        "reason": "Clear plumage markings",
+    })
+    before = db.species_provenance.state(photo_id, kid)
+    assert before is not None and before["species_provenance"]
+    db.commit()
+
+    db.begin_immediate()
+    db.untag_photo(photo_id, kid, _commit=False, _record_history=True)
+    assert db.species_provenance.state(photo_id, kid) is None
+    assert (photo_id, kid) in db._species_provenance_before
+    with pytest.raises(FlagConflict):
+        PhotoReviewService(db).set_flag(photo_id, "rejected", observed_flag="flagged")
+    # The joined savepoint rolled back, but the caller's open transaction
+    # and the snapshot that describes its earlier untag survive.
+    assert db.in_transaction
+    assert (photo_id, kid) in db._species_provenance_before
+
+    db.record_edit(
+        "keyword_remove", "Removed Robin", str(kid),
+        [{"photo_id": photo_id, "old_value": "", "new_value": str(kid)}],
+        _commit=False,
+    )
+    db.commit()
+
+    with contextlib.closing(sqlite3.connect(db._db_path)) as other:
+        row = other.execute(
+            "SELECT species_provenance FROM edit_history_items ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert row is not None and row[0], "persisted history row is missing provenance"
+    saved = json.loads(row[0])[str(kid)]["before"]
+    assert saved is not None
+    assert "direct_visual" in saved["species_provenance"]
+    assert "Original reviewer" in saved["species_provenance"]
+
+    undo_last_edit(db)
+    assert db.species_provenance.state(photo_id, kid) == before
