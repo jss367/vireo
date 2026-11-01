@@ -3723,24 +3723,13 @@ def test_preview_merge_counts_directory_symlinks(move_env, tmp_path):
     assert preview["source_total"] == 4
 
 
-def test_preview_merge_blocks_source_file_symlinks_with_missing_dest(move_env, tmp_path):
-    """A source file that is itself a symlink, with nothing yet at the
-    destination, must surface as ``will_block`` — not ``will_copy``.
-
-    rsync -a (and the shutil fallback's os.symlink) recreate it as a
-    symlink at the destination rather than materializing a regular file,
-    and ``_first_missing_source_file`` then rejects the freshly-created
-    symlink via its islink check. The merge aborts at the verify step
-    after creating the link. Reporting it as "will be copied" would be a
-    false promise: the dialog must warn instead so the user can choose
-    not to commit to a merge that deterministically fails.
-    """
+def test_preview_merge_copies_source_file_symlinks_with_missing_dest(move_env, tmp_path):
+    """Missing source-file symlinks are recreated and accepted by verification."""
     from move import preview_merge
 
     env = move_env
     # Source file symlink pointing outside the source tree. The link target
-    # itself doesn't matter — the merge would create a symlink at the
-    # destination either way, and the verifier rejects on islink alone.
+    # itself doesn't matter — the merge preserves the link's literal target.
     link_target = tmp_path / "real_bird3.jpg"
     link_target.write_bytes(b"x")
     os.symlink(str(link_target), str(env["src"] / "bird3.jpg"))
@@ -3749,10 +3738,9 @@ def test_preview_merge_blocks_source_file_symlinks_with_missing_dest(move_env, t
     landing.mkdir()
     preview = preview_merge(str(env["src"]), str(landing))
     # 3 plain source files (bird1.jpg, bird1.xmp, bird2.jpg) are missing
-    # at the destination — those are honest copies. bird3.jpg is a source
-    # symlink with no destination entry — would-fail-verify after copy.
-    assert preview["will_copy"] == 3
-    assert preview["will_block"] == 1
+    # at the destination, as is the source-file symlink bird3.jpg.
+    assert preview["will_copy"] == 4
+    assert preview["will_block"] == 0
     assert preview["will_skip"] == 0
     assert preview["source_total"] == 4
 
@@ -3849,7 +3837,7 @@ def test_move_folder_merge_ignores_differing_finder_metadata(move_env):
 def test_preview_merge_surfaces_ds_store_symlink(tmp_path):
     """A source ``.DS_Store`` that is a symlink is NOT excluded by
     ``_rsync_finder_metadata_excludes`` — rsync copies it and the verifier
-    then rejects any destination symlink. A basename-only skip in
+    checks its target. A basename-only skip in
     ``preview_merge`` would report zero copy/skip/block for that entry,
     silently promising the confirm dialog a no-op while the actual job
     still transfers (or fails verifying) the symlink. The predicate must
@@ -3870,11 +3858,11 @@ def test_preview_merge_surfaces_ds_store_symlink(tmp_path):
     landing = tmp_path / "dst"
     landing.mkdir()
     # No destination entry for the symlinked .DS_Store: rsync -a would
-    # recreate it as a symlink at the destination, which the verifier
-    # then rejects. Surface it as blocked instead of a silent skip.
+    # recreate a matching symlink. Count it as a copy, not a discarded
+    # Finder metadata file or an unverifiable entry.
     preview = preview_merge(str(src), str(landing))
-    assert preview["will_block"] == 1, preview
-    assert preview["will_copy"] == 1, preview  # photo.jpg
+    assert preview["will_block"] == 0, preview
+    assert preview["will_copy"] == 2, preview  # photo.jpg and the symlink
     assert preview["will_skip"] == 0, preview
 
 

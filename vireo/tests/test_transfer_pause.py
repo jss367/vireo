@@ -409,7 +409,7 @@ def test_resume_verifies_skipped_symlinks(transfer_env, monkeypatch, entry, link
 @pytest.mark.parametrize("entry", ["matching", "missing", "wrong_target", "file", "directory", "source_alias"])
 @pytest.mark.parametrize("link_kind", ["directory", "file", "broken"])
 def test_both_folder_verifiers_check_symlinks(tmp_path, entry, link_kind):
-    from move.verify import _first_missing_source_file, _fresh_copy_mismatch
+    from move.verify import _first_missing_source_file, _fresh_copy_mismatch, preview_merge
 
     source, destination, external = (tmp_path / name for name in ("source", "destination", "external"))
     for path in (source, destination, external):
@@ -439,3 +439,9 @@ def test_both_folder_verifiers_check_symlinks(tmp_path, entry, link_kind):
     for verify in (_first_missing_source_file, _fresh_copy_mismatch):
         result = verify(str(source), str(destination))
         assert (result is None) == (entry == "matching"), (verify.__name__, result)
+    assert preview_merge(str(source), str(destination)) == {
+        "will_copy": int(entry == "missing"),
+        "will_skip": int(entry == "matching"),
+        "will_block": int(entry not in ("missing", "matching")),
+        "source_total": 1,
+    }

@@ -379,8 +379,10 @@ def _verifier_would_accept_skip(src_file, dst_file):
     already-present by ``_first_missing_source_file`` (the post-copy
     verifier the merge gates the source delete on). Mirrors that
     verifier's structural predicates — destination must exist, must NOT be
-    a symlink, must NOT resolve to the same inode as the source, and must
-    be a regular file. The size check the verifier also performs is
+    a symlink for regular source files, must NOT resolve to the same inode
+    as the source, and must be a regular file. Source symlinks require an
+    independent destination link with the same literal target. The size
+    check the verifier also performs is
     deliberately omitted: this backs ``preview_merge``, which is name-only
     by design and must not stat the destination tree's bytes. Same-size
     content collisions are caught separately by ``_find_content_conflict``
@@ -389,6 +391,8 @@ def _verifier_would_accept_skip(src_file, dst_file):
     rsync ``--ignore-existing`` skips the copy but the verifier then
     refuses to delete the originals with ``Verification failed``.
     """
+    if os.path.islink(src_file):
+        return _matching_independent_symlink(src_file, dst_file)
     if not os.path.lexists(dst_file) or os.path.islink(dst_file):
         return False
     try:
@@ -428,23 +432,15 @@ def preview_merge(src_path, dest_path):
     untouched". Surfaced separately so the confirm dialog can warn that
     the merge would not complete instead of implying a no-op resume.
 
-    It also covers source files that are themselves symlinks with no
-    destination entry yet. ``rsync -a`` (and the shutil fallback's
-    ``os.symlink``) recreate them as symlinks at the destination rather
-    than materializing a regular file — and the verifier then rejects the
-    freshly-created symlink and aborts the merge. Telling the user the
-    file will be copied when the job deterministically fails at verify
-    after creating it is the same false promise as the destination-entry
-    case, so it's classified as blocked too.
-
     Directory symlinks under ``src_path`` count as one transfer item each:
     the rsync ``-a`` path and the shutil fallback (see
     ``_copy_tree_with_progress``) both recreate them as symlinks at the
     destination without descending, so omitting them would let the confirm
     dialog say "All 0 files are already present" for a source that is
     actually just a directory symlink, undercounting what the move
-    transfers. The verifier does not check directory entries, so they stay
-    name-only (skip iff anything exists at the destination name).
+    transfers. File and directory symlinks are copied when absent, skipped
+    only for independent links with identical target strings, and blocked
+    for mismatched destination entries, just like the post-copy verifier.
     """
     will_copy = 0
     will_skip = 0
@@ -455,13 +451,17 @@ def preview_merge(src_path, dest_path):
     for root, dirs, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for d in dirs:
-            if not os.path.islink(os.path.join(root, d)):
+            src_sub = os.path.join(root, d)
+            if not os.path.islink(src_sub):
                 continue
             rel_name = d if rel == "." else os.path.join(rel, d)
-            if os.path.lexists(os.path.join(dest_path, rel_name)):
+            dst_sub = os.path.join(dest_path, rel_name)
+            if not os.path.lexists(dst_sub):
+                will_copy += 1
+            elif _matching_independent_symlink(src_sub, dst_sub):
                 will_skip += 1
             else:
-                will_copy += 1
+                will_block += 1
         for fn in files:
             src_file = os.path.join(root, fn)
             # Merges discard Finder-managed regular ``.DS_Store`` files, so
@@ -479,16 +479,7 @@ def preview_merge(src_path, dest_path):
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if not os.path.lexists(dst_file):
-                # A source-file symlink gets recreated as a symlink at the
-                # destination by rsync -a / the shutil fallback's os.symlink;
-                # the verifier then rejects that symlink via its islink check
-                # and the merge aborts with "Verification failed". Surface it
-                # as blocked so the dialog never promises a copy that won't
-                # survive verification.
-                if os.path.islink(src_file):
-                    will_block += 1
-                else:
-                    will_copy += 1
+                will_copy += 1
             elif _verifier_would_accept_skip(src_file, dst_file):
                 will_skip += 1
             else:
