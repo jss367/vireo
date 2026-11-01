@@ -9,7 +9,6 @@ Catalog-wide, so it takes no workspace id. Callers reach it as
 """
 
 import sqlite3
-from collections.abc import Callable
 
 from metadata_search import EXIF_SEARCH_TEXT_TABLE, exif_search_text
 
@@ -20,13 +19,8 @@ _UNINDEXED = (
 
 
 class ExifSearchRepository:
-    def __init__(
-        self,
-        conn: sqlite3.Connection,
-        commit_with_retry: Callable[[sqlite3.Connection], None],
-    ) -> None:
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
-        self._commit_with_retry = commit_with_retry
 
     def count_unindexed(self) -> int:
         """Photos with no search text row yet (metadata search cannot prefilter them by EXIF)."""
@@ -38,8 +32,8 @@ class ExifSearchRepository:
         """Index up to ``limit`` unindexed photos with ids above ``after_id``.
 
         Returns ``(last_id, indexed)``, or ``None`` once no photo is left.
-        Each batch commits on its own so scans writing EXIF are never held
-        behind the whole pass. A row a trigger wrote in the meantime is newer
+        No commit: the caller commits each batch on its own so scans writing
+        EXIF are never held behind the whole pass. A row a trigger wrote in the meantime is newer
         than this read, so it is kept.
         """
         ids = [row[0] for row in self.conn.execute(
@@ -55,5 +49,4 @@ class ExifSearchRepository:
             "WHERE p.id BETWEEN ? AND ?",
             (ids[0], ids[-1]),
         )
-        self._commit_with_retry(self.conn)
         return ids[-1], cursor.rowcount

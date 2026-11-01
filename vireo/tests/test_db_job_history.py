@@ -107,11 +107,14 @@ def test_get_is_exact_and_unscoped(history_db):
     assert db.job_history.get("missing") is None
 
 
-def test_set_result_rewrites_one_row_and_commits(history_db):
+def test_set_result_rewrites_one_row_and_leaves_the_commit_to_its_unit(history_db):
     db = history_db
     _insert(db, "job-c", result='{"moved": 1}')
     _insert(db, "job-d", result='{"moved": 9}')
-    assert db.job_history.set_result("job-c", '{"moved": 1, "cleanup": true}') is None
+    with db.transaction():
+        assert db.job_history.set_result("job-c", '{"moved": 1, "cleanup": true}') is None
+        assert db.in_transaction
+        assert _committed_result(db, "job-c") == '{"moved": 1}'
     assert not db.in_transaction
     assert _committed_result(db, "job-c") == '{"moved": 1, "cleanup": true}'
     assert _committed_result(db, "job-d") == '{"moved": 9}'
@@ -120,6 +123,7 @@ def test_set_result_rewrites_one_row_and_commits(history_db):
 def test_set_result_for_unknown_id_writes_nothing(history_db):
     db = history_db
     db.job_history.set_result("missing", "{}")
+    db.commit()
     assert db.job_history.get("missing") is None
 
 

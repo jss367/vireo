@@ -311,7 +311,8 @@ def backfill_embedded_keywords(db: Database) -> int:
         if offered and _photo_keyword_count(db, row["id"]) > before:
             imported += 1
     if complete:
-        db.meta.set(EMBEDDED_KEYWORDS_BACKFILL_KEY, "1")
+        with db.transaction():
+            db.meta.set(EMBEDDED_KEYWORDS_BACKFILL_KEY, "1")
     return imported
 
 

@@ -44,6 +44,7 @@ def test_pending_import_originals_cannot_be_staged_again(tmp_path, operation, re
     try:
         db.set_active_workspace(first)
         db.pending_archives.register("retained-import", "/nas/archive", str(source), {})
+        db.commit()
         # The catalog and files are shared even when the transfer belongs to
         # another workspace. Staging here would break that transfer's paths.
         db.set_active_workspace(second)
@@ -94,6 +95,7 @@ def test_local_destination_cannot_enter_a_pending_import(tmp_path, operation, re
         db.set_active_workspace(first)
         workspace_folders.add_folder(db, str(pending_day))
         db.pending_archives.register("retained-import", "/nas/archive", str(pending_root), {})
+        db.commit()
         db.set_active_workspace(second)
         local_base = pending_root / "working-copies"
         if relation == "symlink":
@@ -159,6 +161,7 @@ def test_pending_destination_overlap_respects_volume_names(
     try:
         db.set_active_workspace(first)
         db.pending_archives.register("retained-import", "/nas/archive", str(pending_root), {})
+        db.commit()
         db.set_active_workspace(second)
 
         def copy_locally():
@@ -217,6 +220,7 @@ def test_pending_destination_uses_mount_point_identity(tmp_path, monkeypatch, op
         db.set_active_workspace(first)
         workspace_folders.add_folder(db, str(day))
         db.pending_archives.register("retained-import", "/nas/archive", str(pending_root), {})
+        db.commit()
         db.set_active_workspace(second)
         local_base = alias / "staging" / "working-copies"
         with pytest.raises(LocalWorkspaceError, match="destination.*awaiting NAS transfer"):
@@ -238,7 +242,9 @@ def test_completed_import_does_not_block_working_locally(tmp_path):
     try:
         db.set_active_workspace(first)
         db.pending_archives.register("completed-import", "/nas/archive", str(source), {})
+        db.commit()
         db.pending_archives.set_state("completed-import", "complete")
+        db.commit()
         assert local_copy_preflight(db, [folder_id], str(vireo_dir))["can_copy"]
         stage_folder(db, folder_id, str(vireo_dir))
         assert folder_status(db, folder_id, str(vireo_dir))["state"] == "active"

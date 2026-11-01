@@ -78,13 +78,14 @@ def test_get_issues_one_parameterized_select(db):
 
 
 def test_get_does_not_open_a_transaction(db):
-    db.meta.set("meta_test_tx", "1")
+    with db.transaction():
+        db.meta.set("meta_test_tx", "1")
     db.meta.get("meta_test_tx")
     assert not db.conn.in_transaction
 
 
 def test_get_sees_uncommitted_write_on_same_connection(db):
-    db.meta.set("meta_test_pending", "x", _commit=False)
+    db.meta.set("meta_test_pending", "x")
     assert db.meta.get("meta_test_pending") == "x"
     db.conn.rollback()
     assert db.meta.get("meta_test_pending") is None
@@ -99,8 +100,11 @@ def test_get_needs_no_active_workspace(db):
 # -- meta.set -----------------------------------------------------------------
 
 
-def test_set_returns_none_and_commits(db):
-    assert db.meta.set("meta_test_commit", "yes") is None
+def test_set_returns_none_and_leaves_the_commit_to_its_unit(db):
+    with db.transaction():
+        assert db.meta.set("meta_test_commit", "yes") is None
+        assert db.conn.in_transaction
+        assert _read_other(db, "meta_test_commit") is None
     assert not db.conn.in_transaction
     assert _read_other(db, "meta_test_commit") == "yes"
 
@@ -148,7 +152,7 @@ def test_set_coerces_value_with_str(db, value, stored):
     assert type(got) is str
 
 
-def test_set_binds_key_and_str_value_as_parameters(db):
+def test_set_binds_key_and_str_value_as_parameters_and_never_commits(db):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
@@ -159,54 +163,33 @@ def test_set_binds_key_and_str_value_as_parameters(db):
         "BEGIN",
         "INSERT INTO db_meta (key, value) VALUES ('meta_test_sql', '7') "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        "COMMIT",
     ]
-
-
-def test_set_without_commit_leaves_transaction_open(db):
-    db.meta.set("meta_test_nocommit", "1", _commit=False)
     assert db.conn.in_transaction
-    assert _read_other(db, "meta_test_nocommit") is None
-    db.conn.commit()
-    assert _read_other(db, "meta_test_nocommit") == "1"
-
-
-def test_set_without_commit_rolls_back_with_caller(db):
-    db.meta.set("meta_test_rb", "old")
-    db.meta.set("meta_test_rb", "new", _commit=False)
     db.conn.rollback()
+
+
+def test_set_rolls_back_with_its_unit(db):
+    with db.transaction():
+        db.meta.set("meta_test_rb", "old")
+    with pytest.raises(RuntimeError), db.transaction():
+        db.meta.set("meta_test_rb", "new")
+        raise RuntimeError("boom")
     assert db.meta.get("meta_test_rb") == "old"
-
-
-def test_set_without_commit_issues_no_commit(db):
-    statements = []
-    db.conn.set_trace_callback(statements.append)
-    try:
-        db.meta.set("meta_test_nocommit_sql", "1", _commit=False)
-    finally:
-        db.conn.set_trace_callback(None)
-    assert "COMMIT" not in statements
-    db.conn.rollback()
-
-
-def test_set_commit_flushes_pending_caller_writes(db):
-    """The default commit also commits writes the caller left open."""
-    db.meta.set("meta_test_a", "1", _commit=False)
-    db.meta.set("meta_test_b", "2")
-    assert _read_other(db, "meta_test_a") == "1"
-    assert _read_other(db, "meta_test_b") == "2"
+    assert _read_other(db, "meta_test_rb") == "old"
 
 
 def test_set_needs_no_active_workspace(db):
     db.set_active_workspace(None)
-    db.meta.set("meta_test_ws_set", "1")
+    with db.transaction():
+        db.meta.set("meta_test_ws_set", "1")
     assert _read_other(db, "meta_test_ws_set") == "1"
 
 
 def test_set_persists_across_reopen(tmp_path):
     path = str(tmp_path / "meta.db")
     first = Database(path)
-    first.meta.set("meta_test_reopen", "kept")
+    with first.transaction():
+        first.meta.set("meta_test_reopen", "kept")
     first.close()
     second = Database(path)
     try:
@@ -219,9 +202,7 @@ def test_meta_signatures():
     from repositories.meta import MetaRepository
 
     assert list(inspect.signature(MetaRepository.get).parameters) == ["self", "key"]
-    params = inspect.signature(MetaRepository.set).parameters
-    assert list(params) == ["self", "key", "value", "_commit"]
-    assert params["_commit"].default is True
+    assert list(inspect.signature(MetaRepository.set).parameters) == ["self", "key", "value"]
 
 
 # -- structure: the db_meta SQL lives in the repository -----------------------

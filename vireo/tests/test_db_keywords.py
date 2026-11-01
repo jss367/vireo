@@ -1312,7 +1312,10 @@ def test_mark_species_keywords(db, lib):
         "Turdus": {"taxon_id": None},
         "Puma": {"taxon_id": 42007},
     })
-    assert db.keyword_taxa.mark_species(tax) == 2
+    # The caller's unit commits; the repository writes and returns.
+    with db.transaction():
+        assert db.keyword_taxa.mark_species(tax) == 2
+        assert db.conn.in_transaction
     assert not db.conn.in_transaction
     assert _kw(db, general)[2:5] == ("taxonomy", 1, 3)
     assert _kw(db, rebind)[4] == 5

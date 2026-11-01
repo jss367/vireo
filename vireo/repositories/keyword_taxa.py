@@ -464,8 +464,6 @@ class KeywordTaxonRepository:
             lookup_local_id, lookup_rank = self._local_species_taxon(taxon)
             if self._mark_species_row(kw, lookup_local_id, lookup_rank):
                 updated += 1
-        if updated:
-            self.conn.commit()
         return updated
 
 

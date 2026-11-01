@@ -86,7 +86,15 @@ def test_backfill_indexes_photos_in_batches(db):
     assert unindexed >= 5
 
     after_id, indexed, batches = 0, 0, 0
-    while (batch := db.exif_search.index_batch(after_id, 2)) is not None:
+    while True:
+        # Each batch is its caller's unit of work: the repository writes and
+        # leaves the commit to the block.
+        with db.transaction():
+            batch = db.exif_search.index_batch(after_id, 2)
+            if batch is not None:
+                assert db.conn.in_transaction
+        if batch is None:
+            break
         after_id, count = batch
         indexed += count
         batches += 1
@@ -180,25 +188,12 @@ def test_startup_backfill_job_indexes_unindexed_photos(tmp_path, monkeypatch):
 # -- structure ------------------------------------------------------------------
 
 
-def test_exif_search_is_a_fresh_repository_on_the_connection_per_access(db, monkeypatch):
-    """``db.exif_search`` builds a new repository each time, never a cached one.
-
-    It carries the module's ``commit_with_retry`` as read at the access, so a
-    patch of that helper reaches the next backfill batch.
-    """
-    import db as db_module
-
+def test_exif_search_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.exif_search`` builds a new repository each time, never a cached one."""
     first, second = db.exif_search, db.exif_search
     assert isinstance(first, ExifSearchRepository)
     assert first is not second
     assert first.conn is db.conn
-    assert first._commit_with_retry is db_module.commit_with_retry
-
-    def recording(conn, *args, **kwargs):
-        return None
-
-    monkeypatch.setattr(db_module, "commit_with_retry", recording)
-    assert db.exif_search._commit_with_retry is recording
 
 
 def test_exif_search_has_no_forwarding_wrappers_on_database():

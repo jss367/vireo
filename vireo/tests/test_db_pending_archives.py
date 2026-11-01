@@ -68,43 +68,51 @@ def test_open_with_review_collection(db):
         db.pending_archives.open_with_review_collection()
 
 
-def test_delete_is_workspace_scoped_and_commits(db):
+def test_delete_is_workspace_scoped(db):
     ws = db.require_workspace_id()
     other = db.create_workspace("Other")
     _archive(db, "mine")
     _archive(db, "theirs", workspace_id=other)
     db.pending_archives.delete("mine")
+    db.commit()
     db.pending_archives.delete("theirs")
+    db.commit()
     assert not db.in_transaction
     assert _committed(db, "mine") is None
     assert _committed(db, "theirs") is not None
     db.set_active_workspace(other)
     db.pending_archives.delete("theirs")
+    db.commit()
     assert _committed(db, "theirs") is None
     db.set_active_workspace(ws)
 
 
-def test_set_state_commits_by_id_in_any_workspace(db):
+def test_set_state_writes_by_id_in_any_workspace(db):
     other = db.create_workspace("Other")
     _archive(db, "a", workspace_id=other)
     db.pending_archives.set_state("a", "pending", "disk full")
+    db.commit()
     assert not db.in_transaction
     assert tuple(_committed(db, "a")) == ("pending", "disk full")
     db.pending_archives.set_state("a", "complete")
+    db.commit()
     assert tuple(_committed(db, "a")) == ("complete", "")
     # Needs no active workspace: the send job addresses the transfer by id.
     db.set_active_workspace(None)
     db.pending_archives.set_state("a", "sending")
+    db.commit()
     assert tuple(_committed(db, "a")) == ("sending", "")
 
 
-def test_register_commits_once_per_id_and_get_is_workspace_scoped(db):
+def test_register_writes_once_per_id_and_get_is_workspace_scoped(db):
     ws = db.require_workspace_id()
     db.pending_archives.register("a1", "/nas/a1", "/staging/a1", {"host": "nas", "port": 22})
+    db.commit()
     assert not db.in_transaction
     assert _committed(db, "a1")[0] == "pending"
     # A second register for the same id keeps the first row.
     db.pending_archives.register("a1", "/nas/other", "/staging/other", {})
+    db.commit()
     row = db.pending_archives.get("a1")
     assert (row["workspace_id"], row["destination"], row["staging_destination"]) == (
         ws, "/nas/a1", "/staging/a1",

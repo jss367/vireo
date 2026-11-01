@@ -3576,16 +3576,16 @@ class Database:
         """Build the (catalog-wide) EXIF search text backfill on this connection."""
         from repositories.exif_search import ExifSearchRepository
 
-        return ExifSearchRepository(self.conn, commit_with_retry)
+        return ExifSearchRepository(self.conn)
 
     @property
     def exif_search(self) -> ExifSearchRepository:
         """The EXIF search-text backfill: ``db.exif_search.index_batch(after_id, limit)``.
 
         A domain accessor, not a cached attribute: every access builds a fresh
-        repository through ``_exif_search_repository``, so the connection and
-        the module's ``commit_with_retry`` are read per use. The domain is
-        catalog-wide, so it needs no active workspace.
+        repository through ``_exif_search_repository``, so the connection is
+        read per use. The domain is catalog-wide, so it needs no active
+        workspace.
         """
         return self._exif_search_repository()
 

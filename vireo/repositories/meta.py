@@ -17,12 +17,10 @@ class MetaRepository:
         ).fetchone()
         return row["value"] if row else None
 
-    def set(self, key, value, _commit=True):
-        """Upsert a db_meta row."""
+    def set(self, key, value):
+        """Upsert a db_meta row (no commit: the caller's unit owns it)."""
         self.conn.execute(
             "INSERT INTO db_meta (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, str(value)),
         )
-        if _commit:
-            self.conn.commit()

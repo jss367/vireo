@@ -1509,6 +1509,7 @@ def test_expanded_stack_paints_its_members_once(live_server, page):
     db.inat.record_submission(
         hidden_member_id, 12345, "https://www.inaturalist.org/observations/12345"
     )
+    db.commit()
 
     page.goto(f"{live_server['url']}/browse")
     # Count member cards as they are created rather than comparing before and

@@ -415,7 +415,8 @@ def create_pipeline_blueprint(
         if err is not None:
             return json_error(err)
         try:
-            pid = db.processes.create(**kwargs)
+            with db.transaction():
+                pid = db.processes.create(**kwargs)
         except ValueError as e:
             return json_error(str(e))
         return jsonify(db.processes.get(pid))

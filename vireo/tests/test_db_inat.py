@@ -37,9 +37,12 @@ def _insert(db, photo_id, observation_id, submitted_at):
 # -- inat.record_submission ---------------------------------------------------
 
 
-def test_record_commits_and_returns_none(db):
+def test_record_returns_none_and_commits_with_its_unit(db):
     pid = _photo(db)
-    result = db.inat.record_submission(pid, 42, "https://inat/42")
+    with db.transaction():
+        result = db.inat.record_submission(pid, 42, "https://inat/42")
+        # The repository never commits: nothing is durable until the unit ends.
+        assert db.conn.in_transaction
     assert result is None
     assert not db.conn.in_transaction
 
@@ -56,12 +59,14 @@ def test_record_commits_and_returns_none(db):
     assert rows[0][3]  # server-side default timestamp
 
 
-def test_record_duplicate_is_ignored_and_still_commits(db):
+def test_record_duplicate_is_ignored(db):
     pid = _photo(db)
     db.inat.record_submission(pid, 42, "https://inat/42")
+    db.commit()
     # Same (photo_id, observation_id) with a different URL: INSERT OR IGNORE
     # keeps the original row and does not raise.
     db.inat.record_submission(pid, 42, "https://inat/other")
+    db.commit()
     assert not db.conn.in_transaction
     rows = db.conn.execute(
         "SELECT observation_url FROM inat_submissions WHERE photo_id = ?", (pid,)
@@ -72,19 +77,22 @@ def test_record_duplicate_is_ignored_and_still_commits(db):
 def test_record_allows_multiple_observations_per_photo(db):
     pid = _photo(db)
     db.inat.record_submission(pid, 1, "https://inat/1")
+    db.commit()
     db.inat.record_submission(pid, 2, "https://inat/2")
+    db.commit()
     count = db.conn.execute(
         "SELECT COUNT(*) FROM inat_submissions WHERE photo_id = ?", (pid,)
     ).fetchone()[0]
     assert count == 2
 
 
-def test_record_commits_pending_caller_writes(db):
-    """The unconditional commit also flushes writes the caller left open."""
+def test_record_joins_the_callers_open_writes(db):
+    """The record lands in the same transaction as writes the caller left open."""
     pid = _photo(db)
     db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?", (pid,))
     assert db.conn.in_transaction
     db.inat.record_submission(pid, 7, "https://inat/7")
+    db.commit()
     other = sqlite3.connect(db._db_path)
     try:
         rating = other.execute(
@@ -98,12 +106,14 @@ def test_record_commits_pending_caller_writes(db):
 def test_record_unknown_photo_raises_integrity_error(db):
     with pytest.raises(sqlite3.IntegrityError):
         db.inat.record_submission(999_999, 1, "https://inat/1")
+        db.commit()
 
 
 def test_record_needs_no_active_workspace(db):
     pid = _photo(db)
     db.set_active_workspace(None)
     db.inat.record_submission(pid, 5, "https://inat/5")
+    db.commit()
     assert db.inat.get_submissions([pid])[pid]["observation_id"] == 5
 
 
@@ -129,6 +139,7 @@ def test_get_empty_input_needs_no_active_workspace(db):
 def test_get_needs_no_active_workspace(db):
     pid = _photo(db)
     db.inat.record_submission(pid, 3, "https://inat/3")
+    db.commit()
     db.set_active_workspace(None)
     assert set(db.inat.get_submissions([pid])) == {pid}
 
@@ -230,6 +241,7 @@ def test_get_newest_wins_across_chunks_per_photo(db):
 def test_get_does_not_open_a_transaction(db):
     pid = _photo(db)
     db.inat.record_submission(pid, 1, "https://inat/1")
+    db.commit()
     db.inat.get_submissions([pid])
     assert not db.conn.in_transaction
 
@@ -249,6 +261,7 @@ def test_inat_is_a_fresh_repository_on_the_connection_per_access(db):
     pid = _photo(db)
     db.set_active_workspace(None)
     db.inat.record_submission(pid, 7, "https://inat/7")
+    db.commit()
     assert db.inat.get_submissions([pid])[pid]["observation_id"] == 7
 
 

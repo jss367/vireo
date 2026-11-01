@@ -32,6 +32,7 @@ def test_record_inat_submission(db):
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
     db.inat.record_submission(pid, 123456, "https://www.inaturalist.org/observations/123456")
+    db.commit()
     subs = db.inat.get_submissions([pid])
     assert len(subs) == 1
     assert subs[pid]['observation_id'] == 123456
@@ -48,6 +49,7 @@ def test_inat_submission_cascades_on_photo_delete(db):
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
     db.inat.record_submission(pid, 111, "https://www.inaturalist.org/observations/111")
+    db.commit()
     db.conn.execute("DELETE FROM photos WHERE id = ?", (pid,))
     db.conn.commit()
     row = db.conn.execute("SELECT * FROM inat_submissions WHERE photo_id = ?", (pid,)).fetchone()
@@ -316,6 +318,7 @@ def test_api_inat_prepare_includes_submission_status(app_and_db):
 
     # After submission
     db.inat.record_submission(pid, 999, "https://www.inaturalist.org/observations/999")
+    db.commit()
     resp = client.get(f'/api/inat/prepare/{pid}')
     data = resp.get_json()
     assert data['already_submitted'] is True
@@ -1317,6 +1320,7 @@ def test_api_inat_submit_batch_rejects_out_of_workspace_photo(app_and_db):
 def test_api_inat_submissions_lookup(app_and_db):
     app, db, pid = app_and_db
     db.inat.record_submission(pid, 777, "https://www.inaturalist.org/observations/777")
+    db.commit()
     client = app.test_client()
     resp = client.get(f'/api/inat/submissions?photo_ids={pid}')
     data = resp.get_json()

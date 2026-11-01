@@ -18,14 +18,13 @@ class InatRepository:
 
     def record_submission(self, photo_id: int, observation_id: int | str,
                           observation_url: str) -> None:
-        """Record a successful iNaturalist submission and commit."""
+        """Record a successful iNaturalist submission (no commit)."""
         self.conn.execute(
             """INSERT OR IGNORE INTO inat_submissions
                (photo_id, observation_id, observation_url)
                VALUES (?, ?, ?)""",
             (photo_id, observation_id, observation_url),
         )
-        self.conn.commit()
 
     def get_submissions(self, photo_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
         """Return {photo_id: {observation_id, observation_url, submitted_at}} for given IDs."""

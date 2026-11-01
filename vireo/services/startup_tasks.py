@@ -248,7 +248,8 @@ class StartupTasks:
             log.debug("[%s] taxonomy not loaded; deferring species marking", log_label)
             return
         try:
-            updated = db.keyword_taxa.mark_species(tax)
+            with db.transaction():
+                updated = db.keyword_taxa.mark_species(tax)
             if updated:
                 log.info("[%s] Marked %d keywords as species from taxonomy",
                          log_label, updated)
@@ -515,7 +516,10 @@ class StartupTasks:
                 after_id = 0
                 job["progress"]["total"] = total
                 while not runner.is_cancelled(job["id"]):
-                    batch = thread_db.exif_search.index_batch(after_id, 500)
+                    # Durable boundary: one batch, so scans writing EXIF
+                    # are never held behind the whole pass.
+                    with thread_db.transaction():
+                        batch = thread_db.exif_search.index_batch(after_id, 500)
                     if batch is None:
                         break
                     after_id, count = batch

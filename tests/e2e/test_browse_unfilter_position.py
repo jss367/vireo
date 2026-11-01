@@ -32,6 +32,7 @@ def _prepare(page, live_server, action, photo_link=False):
             db.tag_photo(photo_id, place)
         elif action == "color":
             db.photo_labels.set(photo_id, "red")
+            db.commit()
     with db.conn:
         db.conn.executemany(
             "UPDATE photos SET rating=5, flag='flagged' WHERE id=?",

@@ -1340,7 +1340,7 @@ def _migrate_edit_math_render_caches(app):
             )
             return
 
-        db.meta.set("edit_math_version", EDIT_MATH_VERSION, _commit=False)
+        db.meta.set("edit_math_version", EDIT_MATH_VERSION)
         db.commit()
 
         if photo_ids:

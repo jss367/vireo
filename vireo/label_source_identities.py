@@ -295,7 +295,7 @@ def apply_label_set(db, fingerprint, planned, label_count, unidentified=(), *, l
             "identified": len(planned),
             "predictions_updated": count,
             "unidentified": sorted(set(unidentified)),
-        }), _commit=False)
+        }))
     return count
 
 
@@ -410,7 +410,7 @@ def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, s
         # Nothing ever writes new rows under 'legacy', so these runs are
         # retired from export like any other corrected historical run.
         count = apply_repairs(db, changes)
-        db.meta.set(LEGACY_MARKER, json.dumps({"predictions_updated": count}), _commit=False)
+        db.meta.set(LEGACY_MARKER, json.dumps({"predictions_updated": count}))
     return count
 
 

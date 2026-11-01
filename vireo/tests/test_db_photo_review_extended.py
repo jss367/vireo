@@ -304,16 +304,19 @@ def test_get_wildlife_excluded_states_without_workspace(db, photos):
 # -- color labels -------------------------------------------------------------
 
 
-def test_color_label_set_get_remove_commits(db, photos):
+def test_color_label_set_get_remove(db, photos):
     ws = db._ws_id()
     assert db.photo_labels.get(photos[0]) is None
     db.photo_labels.set(photos[0], "red")
+    db.commit()
     assert not db.conn.in_transaction
     assert _labels_table(db) == [(photos[0], ws, "red")]
     db.photo_labels.set(photos[0], "blue")
+    db.commit()
     assert db.photo_labels.get(photos[0]) == "blue"
     assert _labels_table(db) == [(photos[0], ws, "blue")]
     db.photo_labels.remove(photos[0])
+    db.commit()
     assert not db.conn.in_transaction
     assert db.photo_labels.get(photos[0]) is None
     assert _labels_table(db) == []
@@ -322,18 +325,22 @@ def test_color_label_set_get_remove_commits(db, photos):
 def test_set_color_label_rejects_unknown_color(db, photos):
     with pytest.raises(ValueError, match=r"Invalid color label: pink\. Must be one of"):
         db.photo_labels.set(photos[0], "pink")
+        db.commit()
     assert _labels_table(db) == []
 
 
 def test_color_labels_are_workspace_scoped(db, photos):
     first = db._ws_id()
     db.photo_labels.set(photos[0], "green")
+    db.commit()
     second = db.create_workspace("Second")
     db.set_active_workspace(second)
     assert db.photo_labels.get(photos[0]) is None
     assert db.photo_labels.get_for_photos(photos) == {}
     db.photo_labels.set(photos[0], "purple")
+    db.commit()
     db.photo_labels.remove(photos[0])
+    db.commit()
     db.set_active_workspace(first)
     assert db.photo_labels.get(photos[0]) == "green"
 
@@ -358,7 +365,9 @@ def test_color_label_methods_require_active_workspace(db, photos):
 def test_get_color_labels_for_photos(db, photos, monkeypatch):
     assert db.photo_labels.get_for_photos([]) == {}
     db.photo_labels.set(photos[0], "red")
+    db.commit()
     db.photo_labels.set(photos[2], "yellow")
+    db.commit()
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 1)
     labels = db.photo_labels.get_for_photos(photos + [999_999])
     assert labels == {photos[0]: "red", photos[2]: "yellow"}
@@ -381,13 +390,16 @@ def test_batch_set_color_label_sets_and_clears(db, photos, monkeypatch):
     ws = db._ws_id()
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
     db.photo_labels.set_many(photos, "green")
+    db.commit()
     assert not db.conn.in_transaction
     assert _labels_table(db) == [(pid, ws, "green") for pid in sorted(photos)]
     db.photo_labels.set_many(photos[:1], "red")
+    db.commit()
     assert db.photo_labels.get_for_photos(photos) == {
         photos[0]: "red", photos[1]: "green", photos[2]: "green",
     }
     db.photo_labels.set_many(photos, None)
+    db.commit()
     assert not db.conn.in_transaction
     assert _labels_table(db) == []
 
@@ -395,18 +407,22 @@ def test_batch_set_color_label_sets_and_clears(db, photos, monkeypatch):
 def test_batch_set_color_label_clear_leaves_other_workspaces(db, photos):
     first = db._ws_id()
     db.photo_labels.set_many(photos, "blue")
+    db.commit()
     second = db.create_workspace("Second")
     db.set_active_workspace(second)
     db.photo_labels.set_many(photos, None)
+    db.commit()
     db.set_active_workspace(first)
     assert db.photo_labels.get_for_photos(photos) == dict.fromkeys(photos, "blue")
 
 
 def test_batch_set_color_label_empty_and_invalid(db, photos):
     db.photo_labels.set_many([], "not-a-color")
+    db.commit()
     assert not db.conn.in_transaction
     with pytest.raises(ValueError, match=r"Invalid color label: pink\. Must be one of"):
         db.photo_labels.set_many(photos, "pink")
+        db.commit()
     assert _labels_table(db) == []
 
 
@@ -459,10 +475,11 @@ def test_get_color_label_descriptions_missing_workspace_row(db):
     assert db.photo_labels.get_descriptions() == {}
 
 
-def test_set_color_label_description_normalizes_and_commits(db):
+def test_set_color_label_description_normalizes(db):
     ws = db._ws_id()
     _raw_overrides(db, ws, json.dumps({"keep": True}))
     result = db.photo_labels.set_description("red", "  Best \n  of   day ")
+    db.commit()
     assert result == "Best of day"
     assert not db.conn.in_transaction
     assert json.loads(_stored_overrides(db, ws)) == {
@@ -475,15 +492,20 @@ def test_set_color_label_description_normalizes_and_commits(db):
 def test_set_color_label_description_clearing_drops_key_and_nulls_column(db):
     ws = db._ws_id()
     db.photo_labels.set_description("red", "Keepers")
+    db.commit()
     db.photo_labels.set_description("blue", "Edit")
+    db.commit()
     assert db.photo_labels.set_description("red", "   ") == ""
+    db.commit()
     assert json.loads(_stored_overrides(db, ws)) == {
         "color_label_descriptions": {"blue": "Edit"},
     }
     assert db.photo_labels.set_description("blue", "") == ""
+    db.commit()
     assert _stored_overrides(db, ws) is None
     # Clearing a color that was never set is harmless.
     assert db.photo_labels.set_description("green", "") == ""
+    db.commit()
     assert _stored_overrides(db, ws) is None
 
 
@@ -493,6 +515,7 @@ def test_set_color_label_description_keeps_other_overrides_when_clearing(db):
         db, ws, json.dumps({"x": 1, "color_label_descriptions": {"red": "a"}})
     )
     db.photo_labels.set_description("red", "")
+    db.commit()
     assert json.loads(_stored_overrides(db, ws)) == {"x": 1}
 
 
@@ -504,6 +527,7 @@ def test_set_color_label_description_replaces_malformed_overrides(db, raw):
     ws = db._ws_id()
     _raw_overrides(db, ws, raw)
     db.photo_labels.set_description("purple", "Share")
+    db.commit()
     stored = json.loads(_stored_overrides(db, ws))
     assert stored["color_label_descriptions"] == {"purple": "Share"}
 
@@ -512,11 +536,15 @@ def test_set_color_label_description_validation(db):
     ws = db._ws_id()
     with pytest.raises(ValueError, match=r"Invalid color label: pink\. Must be one of"):
         db.photo_labels.set_description("pink", "x")
+        db.commit()
     with pytest.raises(ValueError, match="description must be a string"):
         db.photo_labels.set_description("red", None)
+        db.commit()
     assert db.photo_labels.set_description("red", "x" * 120) == "x" * 120
+    db.commit()
     with pytest.raises(ValueError, match="description must be 120 characters or fewer"):
         db.photo_labels.set_description("red", "y" * 121)
+        db.commit()
     assert db.photo_labels.get_descriptions() == {"red": "x" * 120}
     assert json.loads(_stored_overrides(db, ws)) == {
         "color_label_descriptions": {"red": "x" * 120},

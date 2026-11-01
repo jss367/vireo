@@ -354,6 +354,7 @@ def test_pipeline_rename_process_uses_in_page_dialog(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
     process_id = db.processes.create("Old process name")
+    db.commit()
     page.goto(f"{url}/pipeline")
     page.locator("#strategySelect").select_option(str(process_id))
 
@@ -376,6 +377,7 @@ def test_pipeline_delete_process_uses_in_page_confirmation(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
     process_id = db.processes.create("Disposable process")
+    db.commit()
     page.goto(f"{url}/pipeline")
     page.locator("#strategySelect").select_option(str(process_id))
 
@@ -398,7 +400,9 @@ def test_pipeline_delete_dialog_keeps_original_process_target(live_server, page)
     url = live_server["url"]
     db = live_server["db"]
     original_id = db.processes.create("Delete this process")
+    db.commit()
     other_id = db.processes.create("Keep this process")
+    db.commit()
     page.goto(f"{url}/pipeline")
     page.locator("#strategySelect").select_option(str(original_id))
 

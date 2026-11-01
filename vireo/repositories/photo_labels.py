@@ -68,7 +68,7 @@ class PhotoLabelRepository:
         return labels
 
     def set(self, photo_id: int, color: str) -> None:
-        """Set a photo's color label in the active workspace and commit."""
+        """Set a photo's color label in the active workspace (no commit)."""
         workspace_id = self.workspace_id_fn()
         if color not in VALID_COLOR_LABELS:
             raise ValueError(
@@ -79,20 +79,18 @@ class PhotoLabelRepository:
             "(photo_id, workspace_id, color) VALUES (?, ?, ?)",
             (photo_id, workspace_id, color),
         )
-        self.conn.commit()
 
     def remove(self, photo_id: int) -> None:
-        """Remove a photo's color label in the active workspace and commit."""
+        """Remove a photo's color label in the active workspace (no commit)."""
         workspace_id = self.workspace_id_fn()
         self.conn.execute(
             "DELETE FROM photo_color_labels "
             "WHERE photo_id = ? AND workspace_id = ?",
             (photo_id, workspace_id),
         )
-        self.conn.commit()
 
     def set_many(self, photo_ids: Collection[int], color: str | None) -> None:
-        """Set (or, with ``color=None``, remove) several photos' color label and commit."""
+        """Set (or, with ``color=None``, remove) several photos' color label (no commit)."""
         workspace_id = self.workspace_id_fn()
         if not photo_ids:
             return
@@ -114,7 +112,6 @@ class PhotoLabelRepository:
                 "(photo_id, workspace_id, color) VALUES (?, ?, ?)",
                 [(photo_id, workspace_id, color) for photo_id in photo_ids],
             )
-        self.conn.commit()
 
     def get_descriptions(self) -> dict[str, str]:
         """Return the active workspace's valid, non-empty color descriptions."""
@@ -186,7 +183,6 @@ class PhotoLabelRepository:
             "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
             (json.dumps(overrides) if overrides else None, workspace_id),
         )
-        self.conn.commit()
         return description
 
     def _chunks(self, values):

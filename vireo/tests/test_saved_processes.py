@@ -77,6 +77,7 @@ def test_create_and_get_saved_process(tmp_path):
         "My combo", skip_extract_masks=True, miss_enabled=False,
         review_mode="species",
     )
+    db.commit()
     proc = db.processes.get(pid)
     assert proc["name"] == "My combo"
     assert proc["skip_extract_masks"] is True
@@ -89,23 +90,27 @@ def test_create_duplicate_name_rejected(tmp_path):
     db = _db(tmp_path)
     with pytest.raises(ValueError):
         db.processes.create("Identify birds")
+        db.commit()
 
 
 def test_create_blank_name_rejected(tmp_path):
     db = _db(tmp_path)
     with pytest.raises(ValueError):
         db.processes.create("   ")
+        db.commit()
 
 
 def test_create_bad_review_mode_rejected(tmp_path):
     db = _db(tmp_path)
     with pytest.raises(ValueError):
         db.processes.create("Bad", review_mode="whatever")
+        db.commit()
 
 
 def test_update_saved_process_rename_and_flags(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("Temp")
+    db.commit()
     assert saved_processes.update_saved_process(
         db, pid, name="Renamed", skip_classify=True, review_mode="species",
     )
@@ -120,6 +125,7 @@ def test_update_partial_leaves_other_fields(tmp_path):
     pid = db.processes.create(
         "Base", skip_regroup=True, miss_enabled=False, review_mode="species",
     )
+    db.commit()
     saved_processes.update_saved_process(db, pid, name="Base2")
     proc = db.processes.get(pid)
     assert proc["name"] == "Base2"
@@ -131,6 +137,7 @@ def test_update_partial_leaves_other_fields(tmp_path):
 def test_update_can_clear_review_mode(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("HasReview", review_mode="species")
+    db.commit()
     saved_processes.update_saved_process(db, pid, review_mode=None)
     assert db.processes.get(pid)["review_mode"] is None
 
@@ -143,6 +150,7 @@ def test_update_missing_returns_false(tmp_path):
 def test_update_duplicate_name_rejected(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("Unique")
+    db.commit()
     with pytest.raises(ValueError):
         saved_processes.update_saved_process(db, pid, name="Full")
 
@@ -150,6 +158,7 @@ def test_update_duplicate_name_rejected(tmp_path):
 def test_delete_saved_process(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("Doomed")
+    db.commit()
     assert saved_processes.delete_saved_process(db, pid) is True
     assert db.processes.get(pid) is None
     assert saved_processes.delete_saved_process(db, pid) is False
@@ -158,6 +167,7 @@ def test_delete_saved_process(tmp_path):
 def test_delete_nulls_referencing_workspace_default(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("WsDefault")
+    db.commit()
     ws_id = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": pid}},
     )
@@ -174,7 +184,9 @@ def test_delete_workspace_default_beats_global_default(tmp_path):
     back to import-only even when a global default_process_id is set."""
     db = _db(tmp_path)
     keep = db.processes.create("KeepGlobal")
+    db.commit()
     doomed = db.processes.create("Doomed")
+    db.commit()
     ws_id = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": doomed}},
     )
@@ -189,7 +201,9 @@ def test_delete_workspace_default_beats_global_default(tmp_path):
 def test_delete_leaves_other_workspace_defaults_intact(tmp_path):
     db = _db(tmp_path)
     keep = db.processes.create("Keep")
+    db.commit()
     doomed = db.processes.create("Doomed")
+    db.commit()
     ws_id = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": keep}},
     )

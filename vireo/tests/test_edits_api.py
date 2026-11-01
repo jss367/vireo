@@ -148,6 +148,7 @@ def test_get_color_labels(app_and_db):
     photos = db.photos.list_page()
     pids = [photo['id'] for photo in photos[:2]]
     db.photo_labels.set(pids[0], 'purple')
+    db.commit()
 
     resp = client.get(
         f'/api/photos/color_labels?ids={pids[0]},{pids[1]},not-an-id'

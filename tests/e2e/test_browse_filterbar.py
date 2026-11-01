@@ -617,6 +617,7 @@ def test_enum_shortcuts_preserve_advanced_root(live_server, page, mode, field, v
         db.photo_review.set_flag(photo_id, value)
     else:
         db.photo_labels.set(photo_id, value)
+        db.commit()
     _open_browse(page, live_server)
     original = {"mode": mode, "rules": [
         {"field": field, "op": "is", "value": value},
