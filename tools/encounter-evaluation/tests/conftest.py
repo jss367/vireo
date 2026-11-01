@@ -28,7 +28,8 @@ def library(tmp_path):
     CREATE TABLE keywords(id INTEGER PRIMARY KEY, name TEXT, taxon_id INTEGER, is_species INTEGER, type TEXT);
     CREATE TABLE photo_keywords(photo_id INTEGER, keyword_id INTEGER, source TEXT);
     CREATE TABLE detections(id INTEGER PRIMARY KEY, photo_id INTEGER, detector_model TEXT, runtime_fingerprint TEXT,
-        box_x REAL, box_y REAL, box_w REAL, box_h REAL, detector_confidence REAL, category TEXT);
+        box_x REAL, box_y REAL, box_w REAL, box_h REAL, detector_confidence REAL, category TEXT,
+        subject_verdict TEXT);
     CREATE TABLE detector_runs(photo_id INTEGER, detector_model TEXT, box_count INTEGER);
     CREATE TABLE predictions(id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT, scientific_name TEXT,
         confidence REAL, classifier_model TEXT, labels_fingerprint TEXT, created_at TEXT);
@@ -48,7 +49,7 @@ def library(tmp_path):
                      (i, f"photo-{i:03}.jpg", f"2026-01-01T12:00:{i:02}"))
         conn.execute("INSERT INTO photo_keywords VALUES(?,?,?)", (i, 1 if i < 7 else 2, "manual"))
         if i != 6:
-            conn.execute("INSERT INTO detections VALUES(?,?, 'megadetector-v6','runtime',.1,.1,.4,.4,.9,'animal')", (i, i))
+            conn.execute("INSERT INTO detections VALUES(?,?, 'megadetector-v6','runtime',.1,.1,.4,.4,.9,'animal',NULL)", (i, i))
             conn.execute("INSERT INTO predictions VALUES(?,?,?,?,?,?,?,?)", (i, i, species, None, .95, "model-a", "labels-1", "2026-01-02"))
         conn.execute("INSERT INTO detector_runs VALUES(?,'megadetector-v6',?)", (i, int(i != 6)))
     conn.commit()

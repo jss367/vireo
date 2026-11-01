@@ -175,6 +175,35 @@ def test_verdict_is_one_undo_step_with_provenance(db, scene):
     assert db.subjects.primary_state(photo_id)["detection_id"] == stump
 
 
+@pytest.mark.timeout(10)
+def test_replay_does_not_take_the_photo_mask_lock(db, scene):
+    """Undo and redo must not touch the per-photo mask lock.
+
+    ``set_subject_verdict`` takes that lock before it opens its own
+    ``BEGIN IMMEDIATE`` transaction; ``/api/undo`` and ``/api/redo`` already
+    hold SQLite's writer lock through ``under_prediction_decision_lock`` when
+    ``replay_history`` runs. If the replay also waited for the photo lock,
+    a concurrent verdict request holding the photo lock would wait on the
+    writer lock here while this path waited on the photo lock there — the
+    two-request deadlock SQLite's busy timeout would eventually break with a
+    500. Hold the photo lock across the replay and both paths complete
+    without touching the lock the other owns.
+    """
+    import pipeline_locks
+
+    photo_id, stump, _, _ = scene
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    held = pipeline_locks.acquire_photo_mask(photo_id)
+    assert held.acquire(blocking=False)
+    try:
+        assert undo_last_edit(db) is not None
+        assert _verdict(db, stump) is None
+        assert redo_last_undo(db) is not None
+        assert _verdict(db, stump) == "not_animal"
+    finally:
+        held.release()
+
+
 def test_cache_refresh_recomputes_only_the_photos_evidence(db, scene, tmp_path):
     photo_id, stump, bird, _ = scene
     sibling = photo_ingest.add_photo(db, folder_id=db.photos.get(photo_id)["folder_id"],

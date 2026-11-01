@@ -147,6 +147,20 @@ def replay_history(
     Runs inside the caller's transaction. A region the detector has since
     retired is skipped: there is nothing to restore and the photo's primary
     was already re-projected when the row went.
+
+    Does NOT acquire the per-photo mask lock. ``/api/undo`` and ``/api/redo``
+    enter under ``under_prediction_decision_lock``, which has already taken
+    SQLite's writer lock through ``BEGIN IMMEDIATE``, while
+    ``set_subject_verdict`` takes the photo mask lock before it opens its own
+    immediate transaction. Acquiring the photo mask lock here would complete
+    the lock-order inversion between the two paths — a verdict request and a
+    concurrent undo/redo on the same photo would each wait on what the other
+    holds until SQLite's busy timeout fired on the verdict request. The
+    writer lock already serializes this reversion with ``set_subject_verdict``
+    and with every other decision writer, which is the only concurrency the
+    row-level write (``db.detections.set_subject_verdict``) and the following
+    ``sync_primary`` check-then-write actually need: both see the catalog
+    snapshot the lock just took, and SQLite rejects any overlapping writer.
     """
     key = "old_value" if undo else "new_value"
     for item in items:
@@ -155,8 +169,7 @@ def replay_history(
         if db.detections.row(detection_id) is None:
             continue
         photo_id = int(str(item["photo_id"]))
-        with acquire_photo_mask(photo_id):
-            _apply(db, photo_id, detection_id, state["verdict"])
+        _apply(db, photo_id, detection_id, state["verdict"])
 
 
 def refresh_pipeline_cache(db: Database, db_path: str, photo_ids: Sequence[int]) -> bool:

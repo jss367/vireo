@@ -461,7 +461,7 @@ def test_subject_analysis_compatibility_keeps_library_unchanged(library, has_sub
                     quality_score REAL, exposure_ev REAL);
                 CREATE TABLE photo_subject_choices(photo_id INTEGER, detection_id INTEGER);
                 INSERT INTO detections VALUES(100, 1, 'megadetector-v6', 'runtime',
-                    .6, .1, .2, .2, .7, 'animal');
+                    .6, .1, .2, .2, .7, 'animal', NULL);
                 INSERT INTO detection_subjects VALUES(100, '{"x":0.5,"y":0,"w":0.4,"h":0.4}', .8, .5);
                 INSERT INTO photo_subject_choices VALUES(1, 100);
             """)
