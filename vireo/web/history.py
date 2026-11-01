@@ -234,6 +234,10 @@ def create_history_blueprint(
                 # the decision, and the caller reports the 409 afterwards.
                 stale.append(exc)
                 return None
+            except subject_verdicts.SubjectVerdictError as exc:
+                # Subject analysis holds the photo: refuse, and the decision
+                # rolls back whatever the replay wrote before it noticed.
+                return json_error(str(exc), exc.status)
             if entry is None:
                 return json_error("nothing to undo")
             undone.append(entry)
@@ -300,6 +304,9 @@ def create_history_blueprint(
                 # Retired with the decision; reported after it, as in undo.
                 stale.append(exc)
                 return None
+            except subject_verdicts.SubjectVerdictError as exc:
+                # Refused and rolled back, as in undo.
+                return json_error(str(exc), exc.status)
             if entry is None:
                 return json_error("nothing to redo")
             redone.append(entry)

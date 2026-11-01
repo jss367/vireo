@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from pipeline_locks import acquire_photo_mask
@@ -32,13 +33,14 @@ from subjects import sync_primary
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from db import Database
     from services.service_types import JsonDict
 
 VERDICTS = frozenset({"not_animal"})
 ACTION_TYPE = "subject_verdict"
+ANALYSIS_BUSY_MESSAGE = "Subject analysis is running for this photo. Try again when it finishes."
 SOURCE_MAX_LENGTH = 80
 REASON_MAX_LENGTH = 300
 
@@ -89,10 +91,37 @@ def _state(detection_id: int, verdict: str | None) -> str:
     return json.dumps({"detection_id": detection_id, "verdict": verdict}, sort_keys=True)
 
 
+@contextmanager
+def _photo_free_of_analysis(photo_id: int) -> Iterator[None]:
+    """Hold the photo's mask lock for a verdict write, or refuse at once (409).
+
+    Subject analysis (``subjects.analyze_photo``, the features stage, the
+    analysis retry) holds this lock across its own read-then-write of the
+    photo's primary state, so a verdict written meanwhile could be projected
+    over by a primary computed from the catalog as it stood before. Every
+    verdict write therefore takes the lock too, and never waits for it: the
+    analysis side takes the photo lock first and SQLite's writer lock second,
+    while a verdict writer already holds the writer lock (``/api/undo`` and
+    ``/api/redo`` replay under ``under_prediction_decision_lock``;
+    ``set_subject_verdict`` opens its immediate transaction first), so
+    blocking here would be the lock-order inversion that stalls both sides
+    until the busy timeout. A held lock is a 409 the caller's transaction
+    rolls back on, as ``PUT /api/photos/<id>/primary-subject`` answers.
+    """
+    lock = acquire_photo_mask(photo_id)
+    if not lock.acquire(blocking=False):
+        raise SubjectVerdictError(ANALYSIS_BUSY_MESSAGE, 409)
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def _apply(db: Database, photo_id: int, detection_id: int, verdict: str | None) -> None:
     """Write the verdict and re-project the photo's primary subject (no commit)."""
-    db.detections.set_subject_verdict(detection_id, verdict)
-    sync_primary(db, photo_id)
+    with _photo_free_of_analysis(photo_id):
+        db.detections.set_subject_verdict(detection_id, verdict)
+        sync_primary(db, photo_id)
 
 
 def set_subject_verdict(
@@ -117,25 +146,19 @@ def set_subject_verdict(
                         "verdict": verdict, "previous_verdict": previous, "changed": previous != verdict}
     if previous == verdict:
         return result
-    lock = acquire_photo_mask(photo_id)
-    if not lock.acquire(blocking=False):
-        raise SubjectVerdictError(
-            "Subject analysis is running for this photo. Try again when it finishes.", 409,
+    # One unit of work: the verdict, the primary re-projection and the
+    # history row commit together (record_edit's own commit and prune run
+    # inside the unit, where a legacy commit is a no-op). The writer lock
+    # comes first and the photo lock inside ``_apply`` second, the one order
+    # every verdict writer uses; the 409 raised there rolls the unit back.
+    with db.transaction(immediate=True):
+        _apply(db, photo_id, detection_id, verdict)
+        result["edit_id"] = db.record_edit(
+            ACTION_TYPE, _description(verdict, source, reason), _state(detection_id, verdict),
+            [{"photo_id": photo_id, "old_value": _state(detection_id, previous),
+              "new_value": _state(detection_id, verdict)}],
+            source=source, reason=reason,
         )
-    try:
-        # One unit of work: the verdict, the primary re-projection and the
-        # history row commit together (record_edit's own commit and prune
-        # run inside the unit, where a legacy commit is a no-op).
-        with db.transaction(immediate=True):
-            _apply(db, photo_id, detection_id, verdict)
-            result["edit_id"] = db.record_edit(
-                ACTION_TYPE, _description(verdict, source, reason), _state(detection_id, verdict),
-                [{"photo_id": photo_id, "old_value": _state(detection_id, previous),
-                  "new_value": _state(detection_id, verdict)}],
-                source=source, reason=reason,
-            )
-    finally:
-        lock.release()
     return result
 
 
@@ -148,19 +171,9 @@ def replay_history(
     retired is skipped: there is nothing to restore and the photo's primary
     was already re-projected when the row went.
 
-    Does NOT acquire the per-photo mask lock. ``/api/undo`` and ``/api/redo``
-    enter under ``under_prediction_decision_lock``, which has already taken
-    SQLite's writer lock through ``BEGIN IMMEDIATE``, while
-    ``set_subject_verdict`` takes the photo mask lock before it opens its own
-    immediate transaction. Acquiring the photo mask lock here would complete
-    the lock-order inversion between the two paths — a verdict request and a
-    concurrent undo/redo on the same photo would each wait on what the other
-    holds until SQLite's busy timeout fired on the verdict request. The
-    writer lock already serializes this reversion with ``set_subject_verdict``
-    and with every other decision writer, which is the only concurrency the
-    row-level write (``db.detections.set_subject_verdict``) and the following
-    ``sync_primary`` check-then-write actually need: both see the catalog
-    snapshot the lock just took, and SQLite rejects any overlapping writer.
+    Raises ``SubjectVerdictError`` (409) when subject analysis holds one of
+    the photos, so the caller's transaction rolls back and nothing is
+    replayed; it never waits for that lock (``_photo_free_of_analysis``).
     """
     key = "old_value" if undo else "new_value"
     for item in items:

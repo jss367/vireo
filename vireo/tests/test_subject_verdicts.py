@@ -176,32 +176,51 @@ def test_verdict_is_one_undo_step_with_provenance(db, scene):
 
 
 @pytest.mark.timeout(10)
-def test_replay_does_not_take_the_photo_mask_lock(db, scene):
-    """Undo and redo must not touch the per-photo mask lock.
+def test_every_verdict_write_refuses_at_once_while_analysis_holds_the_photo(db, scene):
+    """A verdict, an undo and a redo all refuse (409) while the photo lock is held, and never wait.
 
-    ``set_subject_verdict`` takes that lock before it opens its own
-    ``BEGIN IMMEDIATE`` transaction; ``/api/undo`` and ``/api/redo`` already
-    hold SQLite's writer lock through ``under_prediction_decision_lock`` when
-    ``replay_history`` runs. If the replay also waited for the photo lock,
-    a concurrent verdict request holding the photo lock would wait on the
-    writer lock here while this path waited on the photo lock there — the
-    two-request deadlock SQLite's busy timeout would eventually break with a
-    500. Hold the photo lock across the replay and both paths complete
-    without touching the lock the other owns.
+    Subject analysis holds the per-photo mask lock across its read-then-write
+    of the primary state, so a verdict written meanwhile could be projected
+    over by stale reads. ``/api/undo`` and ``/api/redo`` hold SQLite's writer
+    lock through ``under_prediction_decision_lock`` when ``replay_history``
+    runs, and analysis takes the photo lock before the writer lock, so a
+    replay that waited for the photo lock would deadlock until the busy
+    timeout. The timeout mark pins the non-blocking acquire; the rolled-back
+    verdict pins that a refused replay changes nothing.
     """
     import pipeline_locks
 
     photo_id, stump, _, _ = scene
-    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
     held = pipeline_locks.acquire_photo_mask(photo_id)
     assert held.acquire(blocking=False)
     try:
-        assert undo_last_edit(db) is not None
-        assert _verdict(db, stump) is None
-        assert redo_last_undo(db) is not None
+        with pytest.raises(subject_verdicts.SubjectVerdictError) as refused:
+            subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+        assert refused.value.status == 409
+        assert _verdict(db, stump) is None and not db.in_transaction
+    finally:
+        held.release()
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    assert held.acquire(blocking=False)
+    try:
+        with db.transaction(immediate=True):
+            with pytest.raises(subject_verdicts.SubjectVerdictError) as refused:
+                undo_last_edit(db)
+            assert refused.value.status == 409
         assert _verdict(db, stump) == "not_animal"
     finally:
         held.release()
+    assert undo_last_edit(db) is not None
+    assert _verdict(db, stump) is None
+    assert held.acquire(blocking=False)
+    try:
+        with db.transaction(immediate=True), pytest.raises(subject_verdicts.SubjectVerdictError):
+            redo_last_undo(db)
+        assert _verdict(db, stump) is None
+    finally:
+        held.release()
+    assert redo_last_undo(db) is not None
+    assert _verdict(db, stump) == "not_animal"
 
 
 def test_cache_refresh_recomputes_only_the_photos_evidence(db, scene, tmp_path):
@@ -293,8 +312,27 @@ def test_route_rejects_restores_and_undoes_with_the_subject_payload(app_and_db):
     listing = client.get("/api/predictions", query_string={"photo_id": photo_id}).json["predictions"]
     assert all(p["detection_id"] != stump for p in listing)
 
+    # While subject analysis holds the photo, undo and redo refuse with the
+    # same 409 the verdict route gives, and the history entry stays put.
+    import pipeline_locks
+    held = pipeline_locks.acquire_photo_mask(photo_id)
+    assert held.acquire(blocking=False)
+    try:
+        busy = client.post("/api/undo")
+        assert busy.status_code == 409 and "analysis is running" in busy.json["error"]
+        assert db.detections.row(stump)["subject_verdict"] == "not_animal"
+        assert client.get("/api/undo/status").json["count"] == 1
+    finally:
+        held.release()
+
     assert client.post("/api/undo").status_code == 200
     assert db.detections.row(stump)["subject_verdict"] is None
+    assert held.acquire(blocking=False)
+    try:
+        assert client.post("/api/redo").status_code == 409
+        assert db.detections.row(stump)["subject_verdict"] is None
+    finally:
+        held.release()
     assert client.post("/api/redo").status_code == 200
     assert db.detections.row(stump)["subject_verdict"] == "not_animal"
 
