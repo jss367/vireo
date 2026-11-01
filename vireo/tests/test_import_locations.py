@@ -509,15 +509,22 @@ def test_a_county_keyword_group_keeps_your_photos_cells_and_splits_off_broad_out
     assert [p["place_id"] for p in broad["nearby_places"]] == ["lagoon-park"]
 
 
-@pytest.mark.parametrize("points", [
-    [(60.0, -120.0), (60.016, -120.0)],          # ~1.8 km due north
-    [(60.016, -120.0), (60.0, -120.0)],          # the same pair, reversed
+_ONE_OUTING_WALKS = [
+    [(60.0, -120.0), (60.016, -120.0)],          # ~1.8 km due north at 60°N, 120°W
     [(60.0, -120.0), (60.012, -120.02), (60.024, -120.04)],  # a ~1.7 km-step chain
-    [(60.024, -120.04), (60.012, -120.02), (60.0, -120.0)],
+    [(89.9, 0.0), (89.9, 3.0)],                  # ~580 m near the North Pole
+    [(-89.99, 10.0), (-89.99, 40.0), (-89.995, 100.0)],  # a chain around the South Pole
+    [(60.0, 179.99), (60.0, -179.99)],           # ~1.1 km across the antimeridian
+    [(-16.5, 179.995), (-16.5, -179.995), (-16.49, -179.985)],  # a chain across it (Fiji)
+]
+
+
+@pytest.mark.parametrize("points", [
+    *_ONE_OUTING_WALKS, *(list(reversed(walk)) for walk in _ONE_OUTING_WALKS),
 ])
-def test_nearby_cells_far_from_the_equator_and_prime_meridian_are_one_outing(points):
-    """Every cell must share one longitude grid: per-latitude widths put cells
-    1.8 km apart at 60°N, 120°W into non-adjacent buckets, splitting a walk."""
+def test_nearby_cells_are_one_outing_anywhere_on_earth(points):
+    """Cells within the link distance chain into one outing at high
+    latitudes, at the poles and across the antimeridian, in any order."""
     from location_review import distance_meters
     for (a_lat, a_lng), (b_lat, b_lng) in zip(points, points[1:], strict=False):
         step = distance_meters({"latitude": a_lat, "longitude": a_lng},
@@ -528,11 +535,29 @@ def test_nearby_cells_far_from_the_equator_and_prime_meridian_are_one_outing(poi
     assert import_locations._outings(cells, list(cells)) == [list(cells)]
 
 
-def test_cells_just_past_the_link_distance_stay_separate_outings():
-    far_pair = {cell_key(60.0, -120.0): {"lat": 60.0, "lng": -120.0},
-                cell_key(60.019, -120.0): {"lat": 60.019, "lng": -120.0}}  # ~2.1 km
+@pytest.mark.parametrize("pair", [
+    [(60.0, -120.0), (60.019, -120.0)],          # ~2.1 km
+    [(89.9, 0.0), (89.9, 12.0)],                 # ~2.3 km near the pole
+    [(60.0, 179.98), (60.0, -179.98)],           # ~2.2 km across the antimeridian
+])
+def test_cells_just_past_the_link_distance_stay_separate_outings(pair):
+    cells = {cell_key(*p): {"lat": p[0], "lng": p[1]} for p in pair}
 
-    assert len(import_locations._outings(far_pair, list(far_pair))) == 2
+    assert len(import_locations._outings(cells, list(cells))) == 2
+
+
+def test_an_outing_across_the_antimeridian_is_offered_places_not_called_spread_out(db, monkeypatch):
+    """Longitudes 179.99 and -179.99 are 1.1 km apart, not half the planet."""
+    walk = [(-16.5, 179.995), (-16.5, -179.995)]
+    reef = {"place_id": "reef", "name": "Reef Park", "type": "park", "lat": -16.501, "lng": 180.0}
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [reef])
+
+    [group] = suggest_import_locations(db, _files(walk), api_key="KEY", language="en")["groups"]
+
+    assert len(group["cells"]) == 2
+    assert [p["place_id"] for p in group["nearby_places"]] == ["reef"]
+    assert group["nearby_places"][0]["farthest_m"] < 1000
 
 
 def test_a_place_out_of_reach_of_any_photo_in_the_outing_is_not_offered(db, monkeypatch):

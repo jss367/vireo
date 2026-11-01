@@ -461,15 +461,32 @@ def _finish_group(db: Database, group: JsonDict) -> JsonDict | None:
     }
 
 
+# The Earth radius distance_meters uses.
+_EARTH_RADIUS_M = 6_371_000
+
+
+def _earth_point(lat: float, lng: float) -> tuple[float, float, float]:
+    """A point's Earth-centered coordinates in meters.
+
+    Straight-line distance never exceeds distance along the surface, so two
+    points within ``d`` meters of each other on the map are within ``d`` here
+    too, at the poles and across the antimeridian alike.
+    """
+    phi, lam = math.radians(lat), math.radians(lng)
+    return (_EARTH_RADIUS_M * math.cos(phi) * math.cos(lam),
+            _EARTH_RADIUS_M * math.cos(phi) * math.sin(lam),
+            _EARTH_RADIUS_M * math.sin(phi))
+
+
 def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[str]]:
     """Split cells into chains of cells within :data:`OUTING_LINK_M` of each other.
 
-    Single linkage over a grid of link-sized buckets, so each cell is only
-    compared with the cells in its own and the eight neighboring buckets.
-    The grid has one longitude width, sized for the cells' highest latitude
-    (where a degree of longitude is shortest), so any two cells within the
-    link distance land in the same or adjacent buckets wherever they are.
-    Outings come back in the order of their first cell.
+    Single linkage over a grid of link-sized cubes in Earth-centered space
+    (:func:`_earth_point`), so each cell is only compared with the cells in
+    its own and the 26 neighboring cubes, and any two cells within the link
+    distance share or neighbor a cube wherever they are on Earth. The exact
+    map distance decides each link. Outings come back in the order of their
+    first cell.
     """
     parent = {key: key for key in keys}
 
@@ -479,32 +496,42 @@ def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[st
             key = parent[key]
         return key
 
-    lat_deg = OUTING_LINK_M / _M_PER_DEG_LAT
-    max_abs_lat = min(89.0, max((abs(cells[key]["lat"]) for key in keys), default=0.0))
-    lng_deg = lat_deg / max(0.01, math.cos(math.radians(max_abs_lat)))
-    grid: dict[tuple[int, int], list[str]] = {}
+    grid: dict[tuple[int, int, int], list[str]] = {}
+    neighbors = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
     for key in keys:
         cell = cells[key]
-        bucket = (math.floor(cell["lat"] / lat_deg), math.floor(cell["lng"] / lng_deg))
+        x, y, z = _earth_point(cell["lat"], cell["lng"])
+        cube = (math.floor(x / OUTING_LINK_M), math.floor(y / OUTING_LINK_M),
+                math.floor(z / OUTING_LINK_M))
         here = {"latitude": cell["lat"], "longitude": cell["lng"]}
-        for dlat in (-1, 0, 1):
-            for dlng in (-1, 0, 1):
-                for other in grid.get((bucket[0] + dlat, bucket[1] + dlng), ()):
-                    there = {"latitude": cells[other]["lat"], "longitude": cells[other]["lng"]}
-                    if distance_meters(here, there) <= OUTING_LINK_M:
-                        parent[root(other)] = root(key)
-        grid.setdefault(bucket, []).append(key)
+        for dx, dy, dz in neighbors:
+            for other in grid.get((cube[0] + dx, cube[1] + dy, cube[2] + dz), ()):
+                there = {"latitude": cells[other]["lat"], "longitude": cells[other]["lng"]}
+                if distance_meters(here, there) <= OUTING_LINK_M:
+                    parent[root(other)] = root(key)
+        grid.setdefault(cube, []).append(key)
     outings: dict[str, list[str]] = {}
     for key in keys:
         outings.setdefault(root(key), []).append(key)
     return list(outings.values())
 
 
-def _spread_m(points: Iterable[tuple[float, float]]) -> float:
-    """The diagonal of the points' bounding box, in meters."""
-    lats, lngs = zip(*points, strict=True)
-    return distance_meters({"latitude": min(lats), "longitude": min(lngs)},
-                           {"latitude": max(lats), "longitude": max(lngs)})
+def _beyond_any_pin(points: Iterable[tuple[float, float]]) -> bool:
+    """Whether no single pin can be within :data:`NEARBY_RADIUS_M` of all points.
+
+    Points all within that reach of one pin are within twice it of each
+    other, so a point farther than that from the first one rules every pin
+    out. Measured on the map, so it holds across the antimeridian.
+    """
+    points = iter(points)
+    first = next(points, None)
+    if first is None:
+        return False
+    origin = {"latitude": first[0], "longitude": first[1]}
+    return any(
+        distance_meters(origin, {"latitude": lat, "longitude": lng}) > 2 * NEARBY_RADIUS_M
+        for lat, lng in points
+    )
 
 
 def _pin_reach(place: JsonDict, points: Iterable[tuple[float, float]]) -> tuple[int, int] | None:
@@ -646,9 +673,8 @@ class ImportLocationSuggester:
             for place in found:
                 candidates.setdefault(place["place_id"], place)
         candidates.pop((group["suggestion"] or {}).get("place_id") or "", None)
-        if candidates and _spread_m(points) > 2 * math.sqrt(2) * NEARBY_RADIUS_M:
-            # Points all within reach of one pin fit in a square of side twice
-            # the reach, so no pin can cover this outing; skip measuring each.
+        if candidates and _beyond_any_pin(points):
+            # No pin can cover this outing; skip measuring each candidate.
             return [], "spread_out"
         offered = []
         for place in candidates.values():
