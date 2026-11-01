@@ -4312,8 +4312,10 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
     ) == []
 
 
-@pytest.mark.parametrize('job_kind', ['process', 'classify'])
-@pytest.mark.parametrize('fresh_automatic', [False, True])
+@pytest.mark.parametrize(('job_kind', 'fresh_automatic'), [
+    ('process', False), ('process', True), ('classify', False),
+    ('classify', True), ('classify', 'detector-failed'),
+])
 @pytest.mark.parametrize('reviewer_box', [None, 'accepted', 'rejected'])
 def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, reviewer_box, fresh_automatic, job_kind):
     """Both job entry points refresh reviewer and automatic evidence together.
@@ -4346,6 +4348,10 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     )
     db.commit()
     assert prior_det_ids, "setup sanity: prior detection was inserted"
+
+    db.predictions.add(prior_det_ids[0], "Stale species", .8, "BioCLIP",
+                       labels_fingerprint="older-label-set")
+    db.commit()
 
     chosen = None
     if reviewer_box:
@@ -4404,6 +4410,8 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
         import classify_job.job_run as job_run
 
         def fake_subjects(*, photos, folders, runner, job, reclassify, db, **kwargs):
+            if fresh_automatic == "detector-failed":
+                return {}, 0
             dmap, count, _ = fake_detect_batch(photos, folders, runner, job, reclassify, db)
             return dmap, count
 
@@ -4421,8 +4429,12 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
     remaining = detection_store.get_detections(verify_db, photo_id)
-    assert not set(prior_det_ids) & {d['id'] for d in remaining}
-    assert {d['id'] for d in remaining} == set(fresh_ids + ([chosen] if chosen else []))
+    preserved_stale_boxes = prior_det_ids if fresh_automatic == 'detector-failed' else []
+    assert {d['id'] for d in remaining} == set(
+        fresh_ids + preserved_stale_boxes + ([chosen] if chosen else []))
+    for prior_id in prior_det_ids:
+        assert detection_store.get_predictions_for_detection(
+            verify_db, prior_id, classifier_model='BioCLIP') == []
     for automatic_id in fresh_ids:
         automatic = detection_store.get_predictions_for_detection(
             verify_db, automatic_id, classifier_model='BioCLIP')

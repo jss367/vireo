@@ -629,7 +629,7 @@ class _ClassifyPhotosPass:
                     model=self.model.model_name,
                     collection_photo_ids=[photo["id"]],
                     labels_fingerprint=(
-                        self.fp if photo_detections else None
+                        self.fp if self.detection_map.get(photo["id"]) else None
                     ),
                     exclude_detector_model="reviewer-selected",
                 )
