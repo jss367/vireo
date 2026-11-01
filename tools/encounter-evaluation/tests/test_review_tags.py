@@ -1,5 +1,9 @@
 """Integration checks against real Vireo writers, using disposable libraries."""
 import json
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 from services import photo_ingest, workspace_folders
@@ -201,3 +205,59 @@ def test_individually_shared_photo_can_sync_review_tags(writable_queue):
     assert old not in keywords(db, pid)
     assert preserved <= keywords(db, pid)
     assert db.pending_changes.list_all()
+
+
+def test_sync_review_tags_bootstraps_settings_provider_in_fresh_process(writable_queue, tmp_path):
+    """A supported direct Database consumer that never imported config in-process.
+
+    ``sync_review_tags`` reaches ``Database.add_keyword``, which reads the
+    ``keyword_case`` override through ``settings_source.get``. In a fresh
+    process that only imports what this tool chain's public entry point
+    (``configure_repo``) and then ``review_tags.sync_review_tags`` import,
+    the settings provider must still be installed. A spawn-method subprocess
+    with an empty ``PYTHONPATH`` reproduces that isolation: ``conftest.py``'s
+    ``configure_repo`` call for this suite ran in the parent and the child
+    does not inherit any of its sys.modules.
+    """
+    queue, db, pid, old, preserved = writable_queue
+    with connect(queue) as conn:
+        save_review(conn, pid, taxa=['inat:102'], complete=True, revision=0, update_vireo_tags=True)
+    db_path = db._db_path
+    ws_id = db._ws_id()
+    db.close()  # The subprocess opens its own connection to the same library.
+    repo_root = Path(__file__).resolve().parents[3]
+    script = tmp_path/'drive.py'
+    script.write_text(textwrap.dedent(f"""
+        import json, sys
+        from pathlib import Path
+        src = Path({str(repo_root)!r})/'tools'/'encounter-evaluation'/'src'
+        sys.path.insert(0, str(src))
+        import encounter_eval  # noqa: F401
+        # Prove no caller preloaded config: the tool chain's own
+        # configure_repo is the one place that installs it.
+        assert 'config' not in sys.modules
+        from encounter_eval.common import configure_repo
+        configure_repo({str(repo_root)!r})
+        from encounter_eval.review import connect
+        from encounter_eval.review_tags import sync_review_tags
+        with connect({str(queue)!r}) as conn:
+            result = sync_review_tags(conn, {pid})
+        sys.stdout.write(json.dumps(result))
+    """))
+    completed = subprocess.run(
+        [sys.executable, '-I', str(script)],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, (completed.returncode, completed.stdout, completed.stderr)
+    result = json.loads(completed.stdout)
+    assert result['status'] == 'applied', (result, completed.stderr)
+    # The isolated process actually wrote the species replacement into the library.
+    from db import Database as _Database
+    db2 = _Database(db_path)
+    try:
+        db2.set_active_workspace(ws_id)
+        after = {r['id'] for r in db2.photo_keywords.get_for_photo(pid)}
+        assert old not in after
+        assert preserved <= after
+    finally:
+        db2.close()
