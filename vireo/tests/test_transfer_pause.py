@@ -409,7 +409,7 @@ def test_resume_verifies_skipped_symlinks(transfer_env, monkeypatch, entry, link
 @pytest.mark.parametrize("entry", ["matching", "missing", "wrong_target", "file", "directory", "source_alias"])
 @pytest.mark.parametrize("link_kind", ["directory", "file", "broken"])
 def test_both_folder_verifiers_check_symlinks(tmp_path, entry, link_kind):
-    from move.verify import _first_missing_source_file, _fresh_copy_mismatch, preview_merge
+    from move.verify import _find_content_conflict, _first_missing_source_file, _fresh_copy_mismatch, preview_merge
 
     source, destination, external = (tmp_path / name for name in ("source", "destination", "external"))
     for path in (source, destination, external):
@@ -445,3 +445,39 @@ def test_both_folder_verifiers_check_symlinks(tmp_path, entry, link_kind):
         "will_block": int(entry not in ("missing", "matching")),
         "source_total": 1,
     }
+    conflict = _find_content_conflict(str(source), str(destination))
+    assert (conflict is None) == (entry in ("matching", "missing")), conflict
+
+
+@pytest.mark.parametrize("link_kind", ["directory", "file"])
+def test_folder_merge_rejects_symlink_conflicts_before_copying(transfer_env, monkeypatch, link_kind):
+    import move
+
+    _, db_path, workspace_id, folder_id, source, destination = transfer_env
+    targets = []
+    for name in ("first-target", "second-target"):
+        target = source.parent / name
+        target.mkdir()
+        (target / "photo.bin").write_bytes(b"identical target bytes")
+        targets.append(target if link_kind == "directory" else target / "photo.bin")
+    landing = destination / source.name
+    landing.mkdir()
+    try:
+        (source / "link").symlink_to(targets[0], target_is_directory=link_kind == "directory")
+        (landing / "link").symlink_to(targets[1], target_is_directory=link_kind == "directory")
+    except OSError:
+        pytest.skip("Symlinks are unavailable")
+    original_target = os.readlink(landing / "link")
+
+    def must_not_copy(*args, **kwargs):
+        pytest.fail("a conflicting merge started copying before refusing it")
+
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", must_not_copy)
+    with Database(db_path) as db:
+        db.set_active_workspace(workspace_id)
+        result = move.move_folder(db, folder_id, str(destination), merge=True)
+        assert db.folders.get(folder_id)["path"] == str(source)
+    assert any("Conflict" in error for error in result["errors"]), result
+    assert sorted(path.name for path in landing.iterdir()) == ["link"]
+    assert os.readlink(landing / "link") == original_target
+    assert source.exists()

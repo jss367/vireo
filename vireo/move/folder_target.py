@@ -338,6 +338,6 @@ class _FolderMoveTarget:
             if conflict is not None:
                 return {"moved": 0, "errors": [
                     f"Conflict: '{conflict}' already exists at the destination "
-                    f"with different content. Nothing was copied or deleted."
+                    f"with different content or an unsafe link. Nothing was copied or deleted."
                 ]}
         return None

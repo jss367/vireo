@@ -162,6 +162,9 @@ def _find_content_conflict(src_path, dest_path, *, checkpoint=None):
     filecmp with shallow=False compares contents — so we never overwrite or
     later delete the source over a genuinely different destination file.
 
+    Existing file and directory symlinks must be independent links with the
+    same literal targets. Missing entries are left for the copy to create.
+
     Finder metadata (``.DS_Store``) is ignored only for REGULAR non-symlink
     source files: those are the ones ``_rsync_finder_metadata_excludes``
     drops from the transfer, so a same-name Finder-managed difference at
@@ -178,7 +181,11 @@ def _find_content_conflict(src_path, dest_path, *, checkpoint=None):
     entry type (symlink, missing source) falls through to the normal
     content check.
     """
-    for root, _, files in os.walk(src_path):
+    for root, directories, files in os.walk(src_path):
+        mismatch = _directory_symlink_mismatch(
+            root, directories, src_path, dest_path, allow_missing=True)
+        if mismatch is not None:
+            return mismatch
         rel = os.path.relpath(root, src_path)
         for fn in files:
             if checkpoint:
@@ -190,6 +197,10 @@ def _find_content_conflict(src_path, dest_path, *, checkpoint=None):
                 continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
+            if os.path.islink(src_file):
+                if os.path.lexists(dst_file) and not _matching_independent_symlink(src_file, dst_file):
+                    return rel_name
+                continue
             if os.path.isfile(dst_file) and \
                     not filecmp.cmp(src_file, dst_file, shallow=False):
                 return rel_name
@@ -263,13 +274,14 @@ def _matching_independent_symlink(source, destination):
         return False
 
 
-def _directory_symlink_mismatch(root, directories, src_path, dest_path):
+def _directory_symlink_mismatch(root, directories, src_path, dest_path, *, allow_missing=False):
     """Verify opaque directory links without traversing their targets.
 
     ``os.walk(..., followlinks=False)`` puts directory symlinks in ``dirs``
     but never visits their contents. A file-only verifier would silently
     accept a missing link, a different link, or an ordinary directory.
     lstat also rejects a destination parent alias back into the source.
+    Preflight allows missing destinations; final verification does not.
     """
     for name in directories:
         source = os.path.join(root, name)
@@ -277,6 +289,8 @@ def _directory_symlink_mismatch(root, directories, src_path, dest_path):
             continue
         relative = os.path.relpath(source, src_path)
         destination = os.path.join(dest_path, relative)
+        if allow_missing and not os.path.lexists(destination):
+            continue
         if not _matching_independent_symlink(source, destination):
             return relative
     return None
