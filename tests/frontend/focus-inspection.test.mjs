@@ -16,6 +16,7 @@ for (const [status, contentType, body, expected] of [
       inspectedFocusImg: {src: 'blob:old', hidden: false, removeAttribute(name) { delete this[name]; }},
       focusRasterStatus: {textContent: ''}, focusCenter: {hidden: false},
       focusEvidenceStatus: {textContent: ''},
+      headFocusBtn: {disabled: false},
     };
     const context = vm.createContext({
       AbortController, Error, byId: id => nodes[id],
@@ -87,6 +88,56 @@ test('head inspection keeps the selected subject and generation when using a ver
   assert.equal(url.searchParams.get('detection_id'), '42');
   assert.equal(url.searchParams.get('analysis_key'), 'generation');
   assert.equal(url.searchParams.get('source'), 'original');
+});
+
+test('repeated head activation during a pending eye crop cannot enable manual placement', async () => {
+  const {ctx, byId} = focusHarness({'X-Vireo-Focus-Eye-Status': 'located'});
+  ctx.bindFocusControls();
+  await ctx.loadFocus('/photos/1/focus-crop?detection_id=42&analysis_key=generation');
+  byId('manualFocusBtn').handlers.click();
+  assert.equal(byId('manualFocusBtn')['aria-pressed'], 'true');
+  let finish;
+  const requests = [];
+  ctx.fetch = url => {
+    requests.push(url);
+    return new Promise(resolve => { finish = resolve; });
+  };
+  byId('headFocusBtn').handlers.click();
+  assert.equal(byId('headFocusBtn').disabled, true);
+  byId('headFocusBtn').handlers.click();
+  assert.equal(requests.length, 1);
+  assert.equal(byId('manualFocusBtn')['aria-pressed'], 'false');
+  finish(new Response('eye pixels', {headers: {'X-Vireo-Focus-Basis': 'eye', 'X-Vireo-Focus-Eye-Status': 'located'}}));
+  // Drain the response/blob promises without a timing-dependent sleep.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(byId('headFocusBtn').disabled, false);
+  assert.equal(byId('manualFocusBtn')['aria-pressed'], 'false');
+  const full = byId('inspectImg');
+  full.complete = true;
+  full.naturalWidth = 100;
+  full.getBoundingClientRect = () => ({left:0,top:0,width:100,height:100});
+  full.handlers.click({currentTarget:full,clientX:30,clientY:20});
+  assert.equal(requests.length, 1, 'The next full-frame click does not replace the eye crop');
+});
+
+test('only the current crop request can re-enable head inspection', async () => {
+  const {ctx, byId} = focusHarness();
+  const pending = [];
+  ctx.fetch = () => new Promise(resolve => pending.push(resolve));
+  const old = ctx.loadFocus('/photos/1/focus-crop');
+  const current = ctx.loadFocus('/photos/2/focus-crop');
+  pending[0](new Response('old pixels'));
+  await old;
+  assert.equal(byId('headFocusBtn').disabled, true);
+  pending[1](new Response('missing', {status:404}));
+  await current;
+  assert.equal(byId('headFocusBtn').disabled, false, 'Failure restores the manual head fallback');
+  const abandoned = ctx.loadFocus('/photos/3/focus-crop');
+  ctx.renderFocus({id:4,subject:{candidates:[]}});
+  assert.equal(byId('headFocusBtn').disabled, false, 'An unanalyzed subject still allows manual head placement');
+  pending[2](new Response('abandoned pixels'));
+  await abandoned;
+  assert.equal(byId('headFocusBtn').disabled, false);
 });
 
 test('legacy eye scoring never labels a body crop as eye-centered or draws a false center crosshair', () => {

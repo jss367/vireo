@@ -67,6 +67,7 @@ async function focusResponseError(response) {
 /** @param {string} url */
 async function loadFocus(url) {
   var current = ++sequence;
+  /** @type {HTMLButtonElement} */ (byId('headFocusBtn')).disabled = true;
   eyeUrl = null;
   if (controller) controller.abort();
   controller = new AbortController();
@@ -105,6 +106,8 @@ async function loadFocus(url) {
     eyeUrl = null;
     byId('focusEvidenceStatus').textContent = 'Eye evidence unavailable. Inspect the intended head in the full frame or place a manual center before rejecting the photo.';
     byId('focusRasterStatus').textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (current === sequence) /** @type {HTMLButtonElement} */ (byId('headFocusBtn')).disabled = false;
   }
 }
 
@@ -112,6 +115,7 @@ async function loadFocus(url) {
 export function renderFocus(card) {
   choosing = false;
   eyeUrl = null;
+  /** @type {HTMLButtonElement} */ (byId('headFocusBtn')).disabled = false;
   byId('manualFocusBtn').setAttribute('aria-pressed', 'false');
   markCenter(null);
   var box = card.subject?.candidates.find(function(c) { return c.detection_id === card.subject?.detection_id; })?.box;
@@ -128,7 +132,10 @@ export function renderFocus(card) {
 
 export function bindFocusControls() {
   byId('headFocusBtn').addEventListener('click', function() {
+    if (/** @type {HTMLButtonElement} */ (byId('headFocusBtn')).disabled) return;
     if (eyeUrl) {
+      choosing = false;
+      byId('manualFocusBtn').setAttribute('aria-pressed', 'false');
       var url = new URL(eyeUrl, window.location.origin);
       url.searchParams.set('basis', 'eye');
       loadFocus(url.pathname + url.search);
