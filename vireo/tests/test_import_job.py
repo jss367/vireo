@@ -15218,7 +15218,7 @@ def test_symlinked_offcard_candidate_is_adopted(tmp_path):
 
     The walk stats candidates with ``os.stat``, which follows symlinks, so
     this has been true since long before PR 7b — and it is what makes
-    ``test_check_duplicates_recovery_follows_symlinked_candidate`` the
+    ``test_check_duplicates_recovery_follows_offcard_symlinks_only_with_source_roots`` the
     correct expectation for the preview rather than a guess. Contrast
     ``test_local_source_backed_suffix_candidate_not_adopted``: a symlink
     into the CARD is refused, because then the bytes are not really at the

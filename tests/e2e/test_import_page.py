@@ -6307,3 +6307,15 @@ def test_duplicate_check_names_catalog_fingerprinting(live_server, page):
     )
     expect(summary).not_to_contain_text("fingerprinting")
     expect(page.locator("#btnStart")).not_to_have_text("Checking duplicates…")
+
+
+@pytest.mark.parametrize("skip_duplicates", [True, False])
+def test_recovery_preview_sends_every_selected_source_root(live_server, page, skip_duplicates):
+    page.goto(f"{live_server['url']}/import")
+    _stub_preview(page, _files(2), recovered=[])
+    _set_destination(page)
+    page.locator('#chkSkipDuplicates').set_checked(skip_duplicates)
+    page.evaluate("window.pickDirectory = async () => ['/tmp/card', '/tmp/other-card']")
+    _preview(page)
+    assert page.evaluate("window.__dayCheckRequest.sources") == ['/tmp/card', '/tmp/other-card']
+    assert page.evaluate("window.__dayCheckRequest.skip_duplicates") is skip_duplicates

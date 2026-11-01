@@ -13,6 +13,5 @@
   "repositories/moves_merge.py:_StagedTreeMerge.__init__": 16,
   "repositories/photos.py:PhotoRepository.list_page": 14,
   "repositories/predictions.py:PredictionRepository.add": 17,
-  "web/imports.py:_DuplicateCheckStream.__init__": 13,
   "web/job_launchers.py:create_job_launchers_blueprint": 14
 }
