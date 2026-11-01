@@ -1565,15 +1565,17 @@ def test_closed_recovery_preview_stops_long_walks(
         (folder / name).mkdir()
     (folder / f"{source.stem}_4{source.suffix}").write_bytes(source.read_bytes())
     checkpoints = []
-    original = imports._DuplicateCheckStream._recovery_checkpoint
 
     def checkpoint(stream):
         in_listing = str(folder) not in stream.dir_listings
         checkpoints.append("listing" if in_listing else "suffixes")
         if checkpoints[-1] == phase:
+            # Emit only in the target phase. Delegating to the real checkpoint
+            # in the other phase would race the 0.1s interval — the init-time
+            # last_recovery_flush can elapse during catalog indexing on a
+            # loaded run, firing a listing frame that closes the response
+            # before any suffix checkpoint runs.
             yield ": checking recovery candidates\n\n"
-        else:
-            yield from original(stream)
 
     monkeypatch.setattr(imports._DuplicateCheckStream, "_recovery_checkpoint", checkpoint)
     response = app.test_client().post("/api/import/check-duplicates", json={
