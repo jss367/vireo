@@ -23,6 +23,7 @@ import { loadDetailPredictions } from './prediction-panels.js';
 import { refreshCardSelectionVisuals } from './selection.js';
 import { appendVisualScopeParams } from './view-controls.js';
 import { bindBrowseMarkup } from './markup.js';
+import { clearBrowseHistogram, showBrowseHistogram } from './histogram.js';
 
 /* ---------- Undo / Redo ---------- */
 export async function undoLast() {
@@ -49,6 +50,7 @@ export async function loadDetail(/** @type {number} */ id) {
   // stays A, so both the sync class removal below and the post-await
   // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
   if (selection.batchIds.size > 1) return;
+  clearBrowseHistogram();
   panelRequests.detailPredictions.invalidate();
   /** @type {HTMLElement} */ (document.getElementById('summaryPanel')).classList.add('hidden');
   var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
@@ -78,6 +80,7 @@ export async function loadDetail(/** @type {number} */ id) {
     // don't clobber it with this stale single-photo response.
     if (selection.focusedPhotoId === id && selection.batchIds.size <= 1) {
       renderDetail(photo);
+      showBrowseHistogram(photo.id);
       if (detail) detail.classList.add('visible');
       // Fetched separately from /api/photos so the panel renders the same
       // enriched rows Review does (nested alternatives, disagreement context)

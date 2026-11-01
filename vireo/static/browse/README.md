@@ -35,6 +35,7 @@ is involved.
 | `lightbox.js` | Opening the shared lightbox from the grid and reconciling its events |
 | `species-provenance.js` | Per-species evidence display and editing, including supporting-frame links |
 | `detail.js` | The single-photo detail panel, metadata, the summary panel, undo/redo |
+| `histogram.js` | RGB histogram and near-clipping feedback sampled from the current detail preview, refreshed on image loads and source changes |
 | `edit-actions.js` | Detail-panel edits and the batch inspector |
 | `location.js` | Detail-panel location editing (Google Places, keywords, EXIF suggestion) |
 | `batch-bar.js` | The floating batch bar (`batchBarTiming`) |
