@@ -707,7 +707,7 @@ def test_large_scope_counts_match_inline_scope(db, lib):
     statements = _trace(db)
     assert stage_counts.count_real_detections_in_scope(db, photo_ids=big) == \
         stage_counts.count_real_detections_in_scope(db, photo_ids=small)
-    assert "SAVEPOINT stage_read_scope" in statements
+    assert any("INSERT OR IGNORE INTO scope_ids" in s for s in statements)
     assert any("IN (SELECT id FROM scope_ids)" in s for s in statements)
     assert stage_counts.count_photos_missing_thumb_or_preview(db, 1920, photo_ids=big) == \
         stage_counts.count_photos_missing_thumb_or_preview(db, 1920, photo_ids=small)
@@ -726,24 +726,27 @@ def test_stage_scope_ids_rejects_unknown_table(db):
 
 
 def test_stage_scope_ids_replaces_and_supports_both_tables(db):
-    db.stats.stage_scope_ids("missing_subtree_ids", [1, 2, 2])
-    db.stats.stage_scope_ids("missing_subtree_ids", [5])
+    with db.transaction(join=True):
+        db.stats.stage_scope_ids("missing_subtree_ids", [1, 2, 2])
+    with db.transaction(join=True):
+        db.stats.stage_scope_ids("missing_subtree_ids", [5])
     rows = db.conn.execute("SELECT id FROM temp.missing_subtree_ids").fetchall()
     assert [r[0] for r in rows] == [5]
     assert not db.conn.in_transaction
 
 
 def test_stage_scope_ids_rolls_back_a_failed_stage(db, lib):
-    db.stats.stage_scope_ids("scope_ids", [1, 2])
+    with db.transaction(join=True):
+        db.stats.stage_scope_ids("scope_ids", [1, 2])
 
     def ids():
         yield 3
         raise KeyError("boom")
 
     db.conn.execute("UPDATE photos SET rating = 3 WHERE id = ?", (lib["p2"],))
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError), db.transaction(join=True):
         db.stats.stage_scope_ids("scope_ids", ids())
-    # The failed stage is undone to the savepoint; the caller's own
+    # The failed stage is undone to the joined savepoint; the caller's own
     # uncommitted write and transaction survive.
     rows = db.conn.execute("SELECT id FROM temp.scope_ids ORDER BY id").fetchall()
     assert [r[0] for r in rows] == [1, 2]

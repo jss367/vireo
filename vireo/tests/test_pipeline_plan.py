@@ -1873,6 +1873,7 @@ def test_count_photos_missing_preview_basic(tmp_path):
         file_size=1, file_mtime=1.0,
     )
     db.caches.preview_insert(pid_a, 1920, 100)
+    db.commit()
     assert stage_counts.count_photos_missing_preview(db, 1920) == {
         "eligible": 2, "pending": 1,
     }
@@ -1888,6 +1889,7 @@ def test_count_photos_missing_preview_size_specific(tmp_path):
         file_size=1, file_mtime=1.0,
     )
     db.caches.preview_insert(pid, 1280, 100)
+    db.commit()
     assert stage_counts.count_photos_missing_preview(db, 1920) == {
         "eligible": 1, "pending": 1,
     }
@@ -1928,6 +1930,7 @@ def test_count_photos_missing_thumb_or_preview_union(tmp_path):
     # a and c have a 1920px preview cached; b and d do not.
     db.caches.preview_insert(pid_thumb_only_missing, 1920, 100)
     db.caches.preview_insert(pid_both_done, 1920, 100)
+    db.commit()
 
     # max(thumb_pending=2, preview_pending=2) = 2 — but the real union is
     # {a, b, d} = 3 photos the next run will touch.
@@ -1959,6 +1962,7 @@ def test_previews_plan_pending_uses_union_not_max(tmp_path):
     )
     db.conn.commit()
     db.caches.preview_insert(pid_thumb_only_missing, 1920, 100)
+    db.commit()
 
     plan = compute_plan(
         db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
@@ -1991,6 +1995,7 @@ def test_previews_plan_done_prior_when_all_cached(tmp_path):
     db.conn.commit()
     db.caches.preview_insert(pid_a, 1920, 100)
     db.caches.preview_insert(pid_b, 1920, 100)
+    db.commit()
     plan = compute_plan(
         db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
     )
@@ -2021,6 +2026,7 @@ def test_previews_plan_will_run_with_pending_counts(tmp_path):
     )
     db.conn.commit()
     db.caches.preview_insert(pid_done, 1920, 100)
+    db.commit()
     plan = compute_plan(
         db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
     )
@@ -2092,6 +2098,7 @@ def test_previews_plan_size_change_invalidates_done_prior(tmp_path):
     )
     db.conn.commit()
     db.caches.preview_insert(pid, 1280, 100)
+    db.commit()
     # 1280 selected → done-prior.
     plan_1280 = compute_plan(
         db, _params(preview_max_size=1280), str(tmp_path / "test.db"),

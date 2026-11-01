@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import config as cfg
 from config import config_value
+from services import stage_counts
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -88,7 +89,7 @@ def sam_variant_rerun_warning(
     # eagerly scoped repository did.
     db.require_workspace_id()
     repo = db.masks_features
-    scope_sql, scope_params = db.stats.scope_clause(photo_ids)
+    scope_sql, scope_params = stage_counts.staged_scope_clause(db, photo_ids)
     return repo.sam_variant_rerun_warning(
         sam2_variant, floor, scope_sql, scope_params,
         selected_max_ratio=selected_max_ratio,
@@ -167,7 +168,7 @@ def list_photos_for_eye_keypoint_stage(
         photo_ids = list(photo_ids)
         if not photo_ids:
             return []
-    extra_where, scope_params = db.stats.scope_clause(photo_ids)
+    extra_where, scope_params = stage_counts.staged_scope_clause(db, photo_ids)
     return repo.list_photos_for_eye_keypoint_stage(
         min_conf, extra_where, scope_params,
         eye_kp_fingerprint_version=EYE_KP_FINGERPRINT_VERSION,

@@ -198,24 +198,21 @@ class StatsRepository:
         return out
 
     def stage_scope_ids(self, table: str, ids: Iterable[int]) -> None:
-        """Stage a read scope without opening or committing a caller transaction."""
+        """Stage a read scope in a connection-local TEMP table (no commit).
+
+        Callers stage inside ``with db.transaction(join=True):``
+        (``services.stage_counts.staged_scope_clause``): that commits when no
+        transaction was open, so none is left open across the reads that
+        follow, and is a savepoint inside one a caller already owns, so an
+        atomic edit that happens to query a large selection is not committed.
+        """
         if table not in {"scope_ids", "missing_subtree_ids"}:
             raise ValueError("Unknown scope table")
-        # An outermost SAVEPOINT releases its own transaction; a nested one
-        # preserves the caller's writes. A plain commit here would break
-        # atomic edits that happen to query a large selection.
-        self.conn.execute("SAVEPOINT stage_read_scope")
-        try:
-            self.conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY)")
-            self.conn.execute(f"DELETE FROM {table}")
-            self.conn.executemany(
-                f"INSERT OR IGNORE INTO {table} (id) VALUES (?)", ((i,) for i in ids),
-            )
-        except BaseException:
-            self.conn.execute("ROLLBACK TO stage_read_scope")
-            raise
-        finally:
-            self.conn.execute("RELEASE stage_read_scope")
+        self.conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY)")
+        self.conn.execute(f"DELETE FROM {table}")
+        self.conn.executemany(
+            f"INSERT OR IGNORE INTO {table} (id) VALUES (?)", ((i,) for i in ids),
+        )
 
     def count_real_detections_in_scope(self, min_conf, scope_sql, scope_params):
         """Count photos with real detections and the detections themselves."""

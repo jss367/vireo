@@ -275,12 +275,14 @@ def test_defer_and_undo_deferral_round_trip(db, tmp_path):
     db.rollback()
 
 
-def test_load_scope_commits_only_the_transaction_it_opened(db, tmp_path):
-    clause = db.working_copies.load_scope([(str(tmp_path), "exact", None)])
+def test_load_scope_in_a_joined_unit_commits_only_the_transaction_it_opened(db, tmp_path):
+    with db.transaction(join=True):
+        clause = db.working_copies.load_scope([(str(tmp_path), "exact", None)])
     assert "working_copy_scope" in clause
     assert not db.in_transaction
     db.begin()
-    db.working_copies.load_scope([(str(tmp_path), "exact", None)])
+    with db.transaction(join=True):
+        db.working_copies.load_scope([(str(tmp_path), "exact", None)])
     assert db.in_transaction
     db.rollback()
 

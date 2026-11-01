@@ -281,7 +281,8 @@ def _recover_companion_batch(db, rows):
     # already synchronized: NULL mtime alone is also used for trusted
     # identities whose JPEG-only metadata refill needs a retry.
     # The hash is kept so duplicate preview recognizes a second card.
-    db.imports.record_recovered_companion_identities(recovered)
+    with db.transaction(join=True):
+        db.imports.record_recovered_companion_identities(recovered)
 
 
 class CatalogIndex:

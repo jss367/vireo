@@ -12968,6 +12968,7 @@ def test_api_folder_delete_removes_preview_files(app_and_db, tmp_path):
         with open(legacy, "wb") as f:
             f.write(b"\xff\xd8\xff\xd9")
         db.caches.preview_insert(pid, 1920, 4)
+        db.commit()
         created.extend([sized, legacy])
 
     client = app.test_client()

@@ -113,7 +113,7 @@ class StartMissingOriginalsScan(Protocol):
 class ClearPreviewCacheInvalid(Protocol):
     """``RenderCache.clear_preview_cache_invalid``."""
 
-    def __call__(self, db: Database, photo_id: int, size: int | str, *, commit: bool = True) -> None: ...
+    def __call__(self, db: Database, photo_id: int, size: int | str) -> None: ...
 
 
 class CleanupCachedFiles(Protocol):

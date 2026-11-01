@@ -23,6 +23,7 @@ def seed(db, root, *, size=700_000):
     ordinary.write_bytes(b'a' * size)
     paired.write_bytes(b'b' * size)
     db.caches.preview_insert(pid, 1920, size)
+    db.commit()
     with db.conn:
         db.caches.paired_preview_insert(pid, paired.name, size)
     return pid, ordinary, paired

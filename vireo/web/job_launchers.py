@@ -1891,7 +1891,7 @@ class _FullResolutionPreparation:
                 self.skipped_deleted += 1
                 if attempted:
                     thread_db.caches.offline_original_delete(
-                        photo_id, _commit=False,
+                        photo_id,
                     )
                     if current_photo is None:
                         cleanup_cached_files_for_deleted_photos(

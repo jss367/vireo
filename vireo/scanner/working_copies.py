@@ -285,7 +285,8 @@ def _working_copy_scope_clause(db: Database, scope: Iterable[WorkingCopyScopeEnt
 
     # The TEMP table and why the scope lives there instead of in the WHERE
     # clause: ``WorkingCopyRepository.load_scope``.
-    return db.working_copies.load_scope(scope_rows)
+    with db.transaction(join=True):
+        return db.working_copies.load_scope(scope_rows)
 
 
 def _working_copy_candidate_rows(

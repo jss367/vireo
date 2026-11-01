@@ -177,25 +177,17 @@ class ImportRepository:
         """Write recovered ``(photo_id, filename, file_size, timestamp,
         file_hash)`` identities with a NULL ``file_mtime`` and ``needs_sync``.
 
-        Runs in ``SAVEPOINT recover_companion_identities``: an exception rolls
-        back to it and re-raises, and the savepoint is released either way
-        (which commits when no outer transaction is open). See
-        ``import_dedup._recover_companion_batch`` for why ``file_mtime`` stays
-        NULL.
+        No commit: the caller runs it inside ``with db.transaction(join=True):``,
+        which commits when no outer transaction is open and is a savepoint
+        inside one that is. See ``import_dedup._recover_companion_batch`` for
+        why ``file_mtime`` stays NULL.
         """
-        self.conn.execute("SAVEPOINT recover_companion_identities")
-        try:
-            self.conn.executemany(
-                "INSERT OR REPLACE INTO companion_identities "
-                "(photo_id, filename, file_size, timestamp, file_hash, file_mtime, needs_sync)"
-                " VALUES (?, ?, ?, ?, ?, NULL, 1)",
-                recovered,
-            )
-        except BaseException:
-            self.conn.execute("ROLLBACK TO recover_companion_identities")
-            raise
-        finally:
-            self.conn.execute("RELEASE recover_companion_identities")
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO companion_identities "
+            "(photo_id, filename, file_size, timestamp, file_hash, file_mtime, needs_sync)"
+            " VALUES (?, ?, ?, ?, ?, NULL, 1)",
+            recovered,
+        )
 
     def destination_identity_rows(
             self, folder_scope: str, folder_params: Sequence[Any],

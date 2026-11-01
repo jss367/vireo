@@ -855,11 +855,12 @@ def _keep_existing_preview(
         return False
     try:
         if cache_row is None:
-            thread_db.caches.preview_insert(
-                photo["id"],
-                max_size,
-                os.path.getsize(cache_path),
-            )
+            with thread_db.transaction():
+                thread_db.caches.preview_insert(
+                    photo["id"],
+                    max_size,
+                    os.path.getsize(cache_path),
+                )
     except (sqlite3.Error, OSError):
         # The photo (FK) or the file may have been deleted
         # mid-pipeline; the preview itself is already on disk.

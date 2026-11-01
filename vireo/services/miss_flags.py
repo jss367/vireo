@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import config as cfg
 from config import config_value
+from services import stage_counts
 from services.photo_review import PhotoReviewService
 
 if TYPE_CHECKING:
@@ -46,7 +47,7 @@ def list_misses(
     ws_id = db.require_workspace_id()
     repo = db.detections
     where = repo.miss_where(category)
-    scope_clause, scope_params = db.stats.scope_clause(photo_ids)
+    scope_clause, scope_params = stage_counts.staged_scope_clause(db, photo_ids)
     photos = repo.list_miss_photos(ws_id, where, since, scope_clause, scope_params)
     if not photos:
         return photos
@@ -89,7 +90,7 @@ def bulk_reject_miss_category(
     repo = db.detections
     col = repo.miss_column(category)
     ws_id = db.require_workspace_id()
-    scope_clause, scope_params = db.stats.scope_clause(photo_ids)
+    scope_clause, scope_params = stage_counts.staged_scope_clause(db, photo_ids)
     owns_transaction = not db.in_transaction
     with db.transaction(immediate=True, join=True):
         affected = repo.select_misses_to_reject(col, ws_id, since, scope_clause, scope_params)

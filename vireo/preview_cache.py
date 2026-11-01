@@ -519,8 +519,8 @@ class RecycledIdIndex:
         return False
 
 
-def mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
-    """Record that ``(photo_id, size)``'s on-disk preview must not be adopted.
+def mark_preview_cache_invalid(db, photo_id, size):
+    """Record that ``(photo_id, size)``'s on-disk preview must not be adopted (no commit).
 
     ``preview_cache_invalidations`` is the durable "do not adopt" marker
     consulted by ``web.media_previews._PreviewServer._serve_preview``.
@@ -530,8 +530,6 @@ def mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
     is part of the canonical schema (``canonical_schema.FORMERLY_LAZY_OBJECTS``).
     """
     db.caches.mark_preview_invalidated(photo_id, size)
-    if commit:
-        db.commit()
 
 
 def _preview_size_from_path(path, photo_id, preview_dir=None):
@@ -639,7 +637,8 @@ def _neutralize_recycled_survivor(path, photo_id, dirs, db, backdate_target):
         if db is None:
             return False
         try:
-            mark_preview_cache_invalid(db, photo_id, size)
+            with db.transaction():
+                mark_preview_cache_invalid(db, photo_id, size)
         except sqlite3.Error:
             log.warning(
                 "Could not mark surviving preview %s invalid", path,
@@ -821,10 +820,11 @@ def _entry_path(preview_dir, row):
 
 
 def _delete_preview_entries(db, rows):
-    db.caches.preview_delete_entries(
-        [(r["photo_id"], r["size"]) for r in rows if not r["paired"]],
-        [r["filename"] for r in rows if r["paired"]],
-    )
+    with db.transaction():
+        db.caches.preview_delete_entries(
+            [(r["photo_id"], r["size"]) for r in rows if not r["paired"]],
+            [r["filename"] for r in rows if r["paired"]],
+        )
 
 
 def _current_preview_entry(db, row):

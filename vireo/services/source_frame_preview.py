@@ -77,7 +77,8 @@ class _SourceFrame:
         try:
             with open(path, 'rb') as handle:
                 data = handle.read()
-            self.db.caches.paired_preview_touch(os.path.basename(path))
+            with self.db.transaction():
+                self.db.caches.paired_preview_touch(os.path.basename(path))
             return data
         except (OSError, sqlite3.Error):
             return None

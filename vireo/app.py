@@ -1228,7 +1228,8 @@ def _adopt_unsized_legacy_previews(db, preview_dir, unsized_files, unsized_pat,
         try:
             os.rename(src, dst)
             st = os.stat(dst)
-            db.caches.preview_insert(photo_id, target_size, st.st_size)
+            with db.transaction():
+                db.caches.preview_insert(photo_id, target_size, st.st_size)
             migrated += 1
         except OSError as e:
             log.warning("Failed to migrate legacy preview %s: %s", src, e)
@@ -1258,7 +1259,8 @@ def _adopt_untracked_sized_previews(db, preview_dir, sized_files, sized_pat):
             continue
         try:
             st = os.stat(path)
-            db.caches.preview_insert(photo_id, size, st.st_size)
+            with db.transaction():
+                db.caches.preview_insert(photo_id, size, st.st_size)
             adopted += 1
         except OSError as e:
             log.warning("Failed to adopt sized preview %s: %s", path, e)

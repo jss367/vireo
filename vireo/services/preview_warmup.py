@@ -208,11 +208,12 @@ class _PreviewWarmup:
         # Best-effort: photo may be deleted mid-job (FK error).
         try:
             if cache_row is None:
-                thread_db.caches.preview_insert(
-                    photo["id"],
-                    max_size,
-                    os.path.getsize(cache_path),
-                )
+                with thread_db.transaction():
+                    thread_db.caches.preview_insert(
+                        photo["id"],
+                        max_size,
+                        os.path.getsize(cache_path),
+                    )
         except (sqlite3.Error, OSError):
             log.debug(
                 "Could not track existing preview for photo %s",

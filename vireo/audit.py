@@ -420,14 +420,15 @@ def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
 def _record_integrity_runs(db, stats):
     """Record a completed verification as both the integrity and orphans run."""
     problems = stats["modified"] + stats["corrupt"] + stats["unreadable"]
-    db.audit.record_run("integrity", problems)
-    # This walk just applied the orphans check's exact predicate to
-    # its exact population, so record that result too. Missing files
-    # stay under the orphans check (where the UI offers the right
-    # remediation) instead of inflating the integrity count, and a
-    # stale clean orphans verdict can't keep the banner green after
-    # this run saw a missing file.
-    db.audit.record_run("orphans", stats["missing"])
+    with db.transaction():
+        db.audit.record_run("integrity", problems)
+        # This walk just applied the orphans check's exact predicate to
+        # its exact population, so record that result too. Missing files
+        # stay under the orphans check (where the UI offers the right
+        # remediation) instead of inflating the integrity count, and a
+        # stale clean orphans verdict can't keep the banner green after
+        # this run saw a missing file.
+        db.audit.record_run("orphans", stats["missing"])
 
 
 def _record_hash_verdict(db, photo, path, actual, stats):
@@ -441,13 +442,12 @@ def _record_hash_verdict(db, photo, path, actual, stats):
         # other zero-byte image in the archive. Mark the row "ok"
         # without writing file_hash so its NULL state survives audits.
         if actual == EMPTY_FILE_SHA256:
-            db.audit.update_photo_hash_check(photo["id"], "ok", commit=False)
+            db.audit.update_photo_hash_check(photo["id"], "ok")
         else:
-            db.audit.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
-                                       commit=False)
+            db.audit.update_photo_hash_check(photo["id"], "ok", file_hash=actual)
         stats["baselined"] += 1
     elif actual == photo["file_hash"]:
-        db.audit.update_photo_hash_check(photo["id"], "ok", commit=False)
+        db.audit.update_photo_hash_check(photo["id"], "ok")
         stats["ok"] += 1
     else:
         try:
@@ -465,7 +465,7 @@ def _record_hash_verdict(db, photo, path, actual, stats):
             status = "modified"
         else:
             status = "corrupt"
-        db.audit.update_photo_hash_check(photo["id"], status, commit=False)
+        db.audit.update_photo_hash_check(photo["id"], status)
         stats[status] += 1
 
 
@@ -533,8 +533,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
         try:
             actual = compute_file_hash(path)
         except OSError:
-            db.audit.update_photo_hash_check(photo["id"], "unreadable",
-                                       commit=False)
+            db.audit.update_photo_hash_check(photo["id"], "unreadable")
             stats["checked"] += 1
             stats["unreadable"] += 1
             continue
@@ -616,10 +615,11 @@ def accept_current_hash(db, photo_ids):
             file_size = os.path.getsize(path)
         except OSError:
             file_size = None
-        if new_hash == EMPTY_FILE_SHA256 and file_size == 0:
-            db.audit.update_photo_hash_check(pid, "ok", clear_file_hash=True)
-        else:
-            db.audit.update_photo_hash_check(pid, "ok", file_hash=new_hash)
+        with db.transaction():
+            if new_hash == EMPTY_FILE_SHA256 and file_size == 0:
+                db.audit.update_photo_hash_check(pid, "ok", clear_file_hash=True)
+            else:
+                db.audit.update_photo_hash_check(pid, "ok", file_hash=new_hash)
         accepted += 1
     log.info("Accepted current hash for %d photos", accepted)
     return accepted

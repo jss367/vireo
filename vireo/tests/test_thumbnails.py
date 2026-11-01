@@ -852,6 +852,7 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
         "2026-07-14T00:00:00Z",
         "cached",
     )
+    db.commit()
 
     for endpoint in (
         f"/thumbnails/{pid}.jpg",

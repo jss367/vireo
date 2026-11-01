@@ -288,6 +288,36 @@ def test_remove_orphans(tmp_path):
     assert photo is None
 
 
+def test_integrity_and_orphans_runs_are_recorded_together(tmp_path, monkeypatch):
+    """A completed verification records both checks or neither.
+
+    Each ``record_run`` used to commit on its own, so a failure recording
+    the orphans run left a fresh integrity verdict next to a stale orphans
+    one, and the summary could read the archive as intact.
+    """
+    import sqlite3
+
+    import pytest
+    from audit import _record_integrity_runs
+    from db import Database
+    from repositories.audit import AuditRepository
+
+    db = Database(str(tmp_path / "test.db"))
+    real = AuditRepository.record_run
+
+    def fail_on_orphans(self, check_name, problem_count):
+        if check_name == "orphans":
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(self, check_name, problem_count)
+
+    monkeypatch.setattr(AuditRepository, "record_run", fail_on_orphans)
+    stats = {"modified": 0, "corrupt": 0, "unreadable": 0, "missing": 1}
+    with pytest.raises(sqlite3.OperationalError):
+        _record_integrity_runs(db, stats)
+    assert not db.conn.in_transaction
+    assert db.audit.get_runs() == {}
+
+
 def test_check_stray_sidecars_skips_symlinked_directory_with_image_suffix(tmp_path):
     """A symlink to a directory whose name ends in .xmp/.jpg must not be
     treated as a sidecar/image.
@@ -811,6 +841,7 @@ def test_build_summary_states(tmp_path):
     # Four checks ran clean but hashes never verified: still not intact
     for name in ('drift', 'orphans', 'untracked', 'sidecars'):
         db.audit.record_run(name, 0)
+        db.commit()
     s = build_summary(db)
     assert s['status'] == 'unverified'
 
@@ -824,12 +855,14 @@ def test_build_summary_states(tmp_path):
     Image.new('RGB', (60, 60)).save(os.path.join(root, 'new.jpg'))
     scan(root, db, options=ScanOptions(incremental=True))
     db.audit.record_run('untracked', 0)
+    db.commit()
     s = build_summary(db)
     assert s['status'] == 'stale'
     assert s['integrity']['unchecked'] == 1
 
     # A check with findings: problems
     db.audit.record_run('drift', 3)
+    db.commit()
     s = build_summary(db)
     assert s['status'] == 'problems'
     assert s['problem_count'] == 3
@@ -853,6 +886,7 @@ def test_verify_hashes_missing_file_updates_orphans_verdict(tmp_path):
     scan(root, db)
     for name in ('drift', 'orphans', 'untracked', 'sidecars'):
         db.audit.record_run(name, 0)
+        db.commit()
     verify_hashes(db)
     assert build_summary(db)['status'] == 'intact'
 
@@ -897,6 +931,7 @@ def test_build_summary_missing_folder_blocks_intact(tmp_path):
     scan(root, db)
     for name in ('drift', 'orphans', 'untracked', 'sidecars'):
         db.audit.record_run(name, 0)
+        db.commit()
     verify_hashes(db)
     assert build_summary(db)['status'] == 'intact'
 
