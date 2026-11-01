@@ -238,7 +238,22 @@ class DetectionsRepository:
             ).fetchall()
             return [row["id"] for row in rows]
 
+        preserved_verdicts: dict[int, str] = {}
         if identity_changed or no_run_replace:
+            # Preserve the reviewer's subject verdicts across runtime
+            # replacement: the id is content-addressed on (photo, model, box,
+            # category) and does not change with the detector runtime, so a
+            # region the new run reproduces by the same id is the same pixels
+            # and must keep its verdict rather than silently re-enter review.
+            preserved_verdicts = {
+                row["id"]: row["subject_verdict"]
+                for row in self.conn.execute(
+                    """SELECT id, subject_verdict FROM detections
+                       WHERE photo_id = ? AND detector_model = ?
+                         AND subject_verdict IS NOT NULL""",
+                    (photo_id, detector_model),
+                )
+            }
             # Runtime ownership changes are an explicit retirement event.
             # Deleting first prevents old-runtime rows from surviving the
             # new run's same-runtime stale-row sweep.
@@ -251,6 +266,11 @@ class DetectionsRepository:
         ids = self.upsert_rows(
             photo_id, detector_model, detections, runtime_fingerprint,
         )
+        for det_id in set(ids) & preserved_verdicts.keys():
+            self.conn.execute(
+                "UPDATE detections SET subject_verdict = ? WHERE id = ?",
+                (preserved_verdicts[det_id], det_id),
+            )
         self.conn.execute(
             """INSERT INTO detector_runs
                  (photo_id, detector_model, runtime_fingerprint,

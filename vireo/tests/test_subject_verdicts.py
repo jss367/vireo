@@ -99,6 +99,34 @@ def test_verdict_survives_a_rerun_that_finds_the_same_box_and_goes_with_a_retire
     assert [d["id"] for d in detection_store.get_detections(db, photo_id)] == [bird]
 
 
+def test_verdict_survives_runtime_fingerprint_replacement(db, scene):
+    photo_id, stump, bird, _ = scene
+    detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [STUMP, BIRD], runtime_fingerprint="rt-a",
+    )
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    # A new runtime retires the old (photo, model) rows before upserting;
+    # the id is content-addressed so the stump's id is unchanged under rt-b
+    # and the reviewer's verdict must survive the retirement DELETE.
+    again = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [STUMP, BIRD], runtime_fingerprint="rt-b",
+    )
+    assert again == [stump, bird]
+    assert _verdict(db, stump) == "not_animal"
+    # A forced replace without a prior detector_runs row (legacy state)
+    # takes the same retirement path and must also preserve the verdict.
+    db.conn.execute(
+        "DELETE FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    )
+    db.commit()
+    detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [STUMP, BIRD],
+        runtime_fingerprint="rt-c", force_runtime_replace=True,
+    )
+    assert _verdict(db, stump) == "not_animal"
+
+
 def test_verdict_refuses_full_image_unknown_and_foreign_regions(db, scene, tmp_path):
     photo_id, stump, bird, _ = scene
     with pytest.raises(subject_verdicts.SubjectVerdictError) as missing:
@@ -264,6 +292,94 @@ def test_route_reports_a_stale_pipeline_cache_instead_of_failing(app_and_db, mon
     assert response.json["pipeline_cache_stale"] is True
     assert "Process Review" in response.json["warning"]
     assert db.detections.row(stump)["subject_verdict"] == "not_animal"
+
+
+def _seed_cache(cache_dir, workspace_id, photos):
+    serialized = [dict(p) for p in photos]
+    for p in serialized:
+        p.pop("dino_subject_embedding", None)
+        p.pop("dino_global_embedding", None)
+    seed = {"photos": serialized, "encounters": [], "summary": {}}
+    with open(os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json"), "w") as f:
+        json.dump(seed, f)
+
+
+def test_cache_refresh_rewrites_every_workspace_that_sees_the_photo(db, scene, tmp_path):
+    photo_id, stump, bird, _ = scene
+    first_ws = db.require_workspace_id()
+    other_ws = db.create_workspace("Other")
+    folder_id = db.photos.get(photo_id)["folder_id"]
+    db.set_active_workspace(first_ws)
+    workspace_folders.add_workspace_folder(db, other_ws, folder_id)
+    assert {first_ws, other_ws} <= db.photo_visibility.workspace_ids_for_photo(photo_id)
+
+    cache_dir = str(tmp_path / "cache")
+    os.makedirs(cache_dir)
+    photos = load_photo_features(db, photo_ids=[photo_id])
+    _seed_cache(cache_dir, first_ws, photos)
+    _seed_cache(cache_dir, other_ws, photos)
+
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    db_path = os.path.join(cache_dir, "test.db")
+    assert subject_verdicts.refresh_pipeline_cache(db, db_path, [photo_id]) is True
+    # The verdict is catalog-wide, so every workspace that lists the photo
+    # has its cached species rewritten with its own effective config.
+    for ws in (first_ws, other_ws):
+        with open(os.path.join(cache_dir, f"pipeline_results_ws{ws}.json")) as f:
+            cached = json.load(f)
+        by_id = {p["id"]: p for p in cached["photos"]}
+        assert [e[0] for e in by_id[photo_id]["species_top5"]] == ["Hairy Woodpecker"], (
+            f"workspace {ws} cache still names the rejected region's species"
+        )
+    # The active workspace is restored after the multi-workspace refresh.
+    assert db.active_workspace_id == first_ws
+
+
+def test_cache_refresh_holds_the_workspace_regroup_lock(db, scene, tmp_path, monkeypatch):
+    photo_id, stump, _, _ = scene
+    cache_dir = str(tmp_path / "cache")
+    os.makedirs(cache_dir)
+    ws = db.require_workspace_id()
+    _seed_cache(cache_dir, ws, load_photo_features(db, photo_ids=[photo_id]))
+
+    import pipeline
+    import pipeline_locks
+    events = []
+    real_acquire = pipeline_locks.acquire_workspace_regroup
+
+    class _Trace:
+        def __init__(self, inner): self.inner = inner
+        def __enter__(self):
+            events.append(("acquired", self.workspace_id))
+            self.inner.__enter__()
+            return self
+        def __exit__(self, *exc):
+            events.append(("released", self.workspace_id))
+            return self.inner.__exit__(*exc)
+
+    def tracer(workspace_id):
+        events.append(("asked", workspace_id))
+        inner = real_acquire(workspace_id)
+        trace = _Trace(inner)
+        trace.workspace_id = workspace_id
+        return trace
+
+    real_refresh = pipeline.refresh_cache_predictions_for_photos
+
+    def spy(db_, dir_, ws_, ids):
+        events.append(("refresh", ws_))
+        return real_refresh(db_, dir_, ws_, ids)
+
+    monkeypatch.setattr(pipeline_locks, "acquire_workspace_regroup", tracer)
+    monkeypatch.setattr(pipeline, "refresh_cache_predictions_for_photos", spy)
+
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    db_path = os.path.join(cache_dir, "test.db")
+    assert subject_verdicts.refresh_pipeline_cache(db, db_path, [photo_id]) is True
+    # The lock is acquired before the refresh reads the cache and released
+    # after it writes, so an overlapping regroup, detach or species
+    # confirmation cannot interleave with the load-modify-dump.
+    assert events == [("asked", ws), ("acquired", ws), ("refresh", ws), ("released", ws)]
 
 
 def test_species_evidence_names_the_rejection_and_drops_the_candidate(app_and_db):

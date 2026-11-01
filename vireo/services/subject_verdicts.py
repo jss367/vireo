@@ -160,23 +160,49 @@ def replay_history(
 
 
 def refresh_pipeline_cache(db: Database, db_path: str, photo_ids: Sequence[int]) -> bool:
-    """Rewrite the photos' cached evidence; True unless the refresh failed.
+    """Rewrite every affected workspace's cached evidence; True unless any refresh failed.
 
-    The catalog write already committed, so a cache that cannot be rewritten
-    is reported (the caller tells the user Process Review may be stale)
-    rather than failing the verdict.
+    The verdict is catalog-wide, so a photo visible in multiple workspaces
+    needs each workspace's cache rewritten with its own effective
+    configuration or Process Review there would still list the rejected
+    region's species. Each rewrite runs under ``acquire_workspace_regroup``
+    so a regroup, detach, or species confirmation on the same workspace
+    cannot interleave with the load-modify-dump and silently publish a
+    stale snapshot. The catalog write already committed, so a cache that
+    cannot be rewritten is reported (the caller tells the user Process
+    Review may be stale) rather than failing the verdict.
     """
     from pipeline import refresh_cache_predictions_for_photos
+    from pipeline_locks import acquire_workspace_regroup
 
+    cache_dir = os.path.dirname(db_path)
+    photos_by_workspace: dict[int, list[int]] = {}
+    for pid in dict.fromkeys(photo_ids):
+        for ws_id in db.photo_visibility.workspace_ids_for_photo(pid):
+            photos_by_workspace.setdefault(ws_id, []).append(pid)
+
+    original_workspace = db.active_workspace_id
+    ok = True
     try:
-        refresh_cache_predictions_for_photos(
-            db, os.path.dirname(db_path), db.require_workspace_id(), list(photo_ids),
-        )
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
-        import logging
+        for ws_id in sorted(photos_by_workspace):
+            ws_photos = photos_by_workspace[ws_id]
+            try:
+                # ``load_photo_features`` reads ``db.require_workspace_id``
+                # and the active workspace's effective config, so switch to
+                # each affected workspace before loading its features.
+                db.set_active_workspace(ws_id)
+                with acquire_workspace_regroup(ws_id):
+                    refresh_cache_predictions_for_photos(
+                        db, cache_dir, ws_id, ws_photos,
+                    )
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                import logging
 
-        logging.getLogger(__name__).exception(
-            "Could not refresh pipeline cache evidence after a subject verdict on %s", list(photo_ids),
-        )
-        return False
-    return True
+                logging.getLogger(__name__).exception(
+                    "Could not refresh pipeline cache evidence after a subject "
+                    "verdict on %s in workspace %s", ws_photos, ws_id,
+                )
+                ok = False
+    finally:
+        db.set_active_workspace(original_workspace)
+    return ok
