@@ -136,8 +136,8 @@ def test_top_stat_leads_to_likely_copies_and_reused_counts_stay_collapsed(live_s
     page.set_viewport_size({"width": 1280, "height": 900})
     page.goto(f"{live_server['url']}/duplicates")
     stat = page.locator("#summary a.summary-stat-link")
-    expect(stat).to_contain_text("1")
-    expect(stat).to_contain_text("Same-shot to review")
+    expect(stat.locator(".num")).to_have_text("1")
+    expect(stat.locator(".label")).to_have_text("Same-shot to review")
     stat.click()
     section = page.locator("#sameShotResults")
     expect(section).to_be_in_viewport()
@@ -183,8 +183,8 @@ def test_same_shot_stat_renders_without_exact_proposals_and_when_all_are_filtere
     page.set_viewport_size({"width": 1280, "height": 900})
     page.goto(f"{live_server['url']}/duplicates")
     stat = page.locator("#summary a.summary-stat-link")
-    expect(stat).to_contain_text("1")
-    expect(stat).to_contain_text("Same-shot to review")
+    expect(stat.locator(".num")).to_have_text("1")
+    expect(stat.locator(".label")).to_have_text("Same-shot to review")
     expect(page.locator("#applyBar")).to_be_hidden()
     expect(page.locator("#results")).to_contain_text("No exact-byte duplicates found")
     section = page.locator("#sameShotResults")
@@ -205,14 +205,14 @@ def test_same_shot_stat_renders_without_exact_proposals_and_when_all_are_filtere
     db.commit()
     same_shot_photo_id = refreshed["same_shot_groups"][0]["photos"][0]["id"]
     page.reload()
-    expect(stat).to_contain_text("1")
+    expect(stat.locator(".num")).to_have_text("1")
     # Hide every exact-byte group by filtering to a same-shot member id only.
     page.evaluate(
         "id => { duplicatesState.filterMatchedIds = new Set([id]);"
         " pageModules.results.renderResults(duplicatesState.lastScanResult); }",
         same_shot_photo_id,
     )
-    expect(stat).to_contain_text("Same-shot to review")
+    expect(stat.locator(".label")).to_have_text("Same-shot to review")
     expect(stat.locator(".num")).to_have_text("1")
     expect(page.locator("#applyBar")).to_be_hidden()
     expect(page.locator("#results")).to_contain_text(
