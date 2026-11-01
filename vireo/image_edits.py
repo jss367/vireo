@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import math
-
 from edit_recipe import (
     _ADJUSTMENT_RANGES,
     _DETAIL_KEYS,
+    _OPTICS_KEYS,
     _PRESENCE_KEYS,
     SHARPEN_RADIUS_DEFAULT,
     normalize_recipe,
@@ -15,8 +14,12 @@ from PIL import Image
 
 try:
     from .float_image import FloatImage
+    from .optics import apply_optics, distort_image
+    from .render_fingerprint import record_render_source
 except ImportError:
     from float_image import FloatImage
+    from optics import apply_optics, distort_image
+    from render_fingerprint import record_render_source
 
 # Bump whenever the rendering math in this module or `tone.py` changes
 # in a way that produces different output bytes for the same recipe. Cached
@@ -34,7 +37,10 @@ except ImportError:
 #   5 — monotonic, linear-luminance range curves with chroma preservation.
 #   6 — scene-linear RAW decode and floating-point render/export buffers.
 #   7 — edge-aware Shadows/Highlights with local contrast preservation.
-EDIT_MATH_VERSION = 8
+#   8 — camera-aware denoising.
+#   9 — manual lens corrections and edge-aware defringing.
+#  10 — Shadows/Highlights as scene-linear local exposure before the shoulder.
+EDIT_MATH_VERSION = 10
 
 # Tile budget for the tone pass, in pixels. Bounds peak memory on
 # full-resolution originals/exports; overridable in tests to force many tiles.
@@ -42,28 +48,17 @@ _ADJUST_TILE_PIXELS = 4_000_000
 _ADVANCED_COLOR_TILE_PIXELS = 1_000_000
 
 
-def _adjust_tile_shape(width, height, *, spatial, color_ops):
-    """``(columns_per_tile, rows_per_tile)`` for the tiled tone pass."""
+def _adjust_rows_per_tile(width, *, spatial, color_ops):
+    """Rows per strip of the tiled tone pass."""
     # Bound working memory on full-resolution originals/exports (45MP+).
-    # The guided range filter needs a halo on every tile edge; all remaining
-    # tone/color operations are per-pixel.
+    # Every operation is per-pixel (Shadows/Highlights sample a base built
+    # once over the whole frame), so strips need no overlap. Shadows/
+    # Highlights, HSL conversion and curve indexing keep several additional
+    # float planes alive; smaller strips bound their peak memory.
     tile_budget = _ADJUST_TILE_PIXELS
-    if spatial:
+    if spatial or color_ops:
         tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
-    if color_ops:
-        # HSL conversion and curve indexing keep several additional float
-        # planes alive. Smaller tiles bound peak memory on 45MP+ exports while
-        # preserving byte-identical output because every operation is per-pixel.
-        tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
-    # Full-width strips become very short at native resolution: a 1MP strip
-    # on an 8K-wide photo has almost as many halo rows as useful rows. Square
-    # spatial tiles minimize repeated filtering without increasing the budget.
-    # Keep the contiguous row path for pointwise edits, which need no halo.
-    columns_per_tile = width
-    if spatial and width * height > tile_budget:
-        columns_per_tile = min(width, max(1, math.isqrt(tile_budget)))
-    rows_per_tile = max(1, tile_budget // max(1, columns_per_tile))
-    return columns_per_tile, rows_per_tile
+    return max(1, tile_budget // max(1, width))
 
 
 def _promote_to_rgb(img):
@@ -87,21 +82,21 @@ def _adjusted_image(output, img, floating):
 
 def _apply_adjustments(
     img, adjustments, local_weight=None, local_subject=None,
-    local_background=None, range_scale=1.0,
+    local_background=None, range_sigma=0.0,
 ):
     """Apply tonal adjustments to a PIL image via the linear tone pipeline.
 
-    Promotes the image to RGB(A), runs the shared tone pipeline, and merges
-    alpha back unchanged. Overlapping tiles provide full neighborhood
-    support for Shadows/Highlights. Local weights use the same overlap;
-    ``range_scale`` converts the range-filter radius from native pixels.
+    Promotes the image to RGB(A), runs the shared tone pipeline in strips,
+    and merges alpha back unchanged. ``range_sigma`` is the Shadows/Highlights
+    base blur in this image's pixels; the base is built once over the whole
+    frame, so every strip samples what a whole-frame render would.
     """
     import numpy as np
 
     try:
-        from .tone import RANGE_RADIUS, LocalAdjustments, ToneAdjustments, apply_adjustments
+        from .tone import LocalAdjustments, RangeBase, ToneAdjustments, apply_adjustments
     except ImportError:
-        from tone import RANGE_RADIUS, LocalAdjustments, ToneAdjustments, apply_adjustments
+        from tone import LocalAdjustments, RangeBase, ToneAdjustments, apply_adjustments
 
     img = _promote_to_rgb(img)
 
@@ -113,17 +108,24 @@ def _apply_adjustments(
             for region in (local_subject or {}, local_background or {})
         )
     )
-    range_radius = max(1, int(round(RANGE_RADIUS * range_scale))) if spatial else 0
-    halo = 2 * range_radius
 
     floating = isinstance(img, FloatImage)
     src = np.asarray(img)  # view onto the source buffer
     height, width = src.shape[:2]
     channels = src.shape[2]
+    input_linear = floating and img.encoding == "linear"
     output = np.empty((height, width, channels), dtype=np.float32 if floating else np.uint8)
+    range_base = (
+        RangeBase.build(
+            src, range_sigma, exposure=controls.exposure,
+            white_balance=controls.white_balance, input_linear=input_linear,
+            value_scale=1.0 if floating else 1.0 / 255.0,
+        )
+        if spatial and range_sigma else None
+    )
 
-    columns_per_tile, rows_per_tile = _adjust_tile_shape(
-        width, height, spatial=spatial,
+    rows_per_tile = _adjust_rows_per_tile(
+        width, spatial=spatial,
         color_ops=(
             controls.tone_curve or controls.point_curves or controls.point_color
             or controls.hsl or controls.color_grading
@@ -131,46 +133,42 @@ def _apply_adjustments(
     )
     for top in range(0, height, rows_per_tile):
         bottom = min(top + rows_per_tile, height)
-        start, end = max(0, top - halo), min(height, bottom + halo)
-        for x in range(0, width, columns_per_tile):
-            stop = min(x + columns_per_tile, width)
-            left, right = max(0, x - halo), min(width, stop + halo)
-            tile = src[start:end, left:right].astype(np.float32)
-            if not floating:
-                tile /= 255.0
-            adj = apply_adjustments(
-                tile[..., :3],
-                controls,
-                local=(
-                    LocalAdjustments(
-                        weight=local_weight[start:end, left:right],
-                        subject=local_subject,
-                        background=local_background,
-                    )
-                    if local_weight is not None else None
-                ),
-                input_linear=floating and img.encoding == "linear",
-                range_radius=range_radius,
-            )
-            adj = adj[top - start:bottom - start, x - left:stop - left]
-            output[top:bottom, x:stop, :3] = (
-                adj if floating else np.clip(adj * 255.0 + 0.5, 0, 255).astype(np.uint8)
-            )
-            if channels == 4:
-                # Alpha passes through unchanged (round-trip uint8->float->uint8 is
-                # identity for 8-bit values).
-                output[top:bottom, x:stop, 3] = src[top:bottom, x:stop, 3]
+        tile = src[top:bottom].astype(np.float32)
+        if not floating:
+            tile /= 255.0
+        adj = apply_adjustments(
+            tile[..., :3],
+            controls,
+            local=(
+                LocalAdjustments(
+                    weight=local_weight[top:bottom],
+                    subject=local_subject,
+                    background=local_background,
+                )
+                if local_weight is not None else None
+            ),
+            input_linear=input_linear,
+            range_base=range_base,
+            origin=(top, 0),
+        )
+        output[top:bottom, :, :3] = (
+            adj if floating else np.clip(adj * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        )
+        if channels == 4:
+            # Alpha passes through unchanged (round-trip uint8->float->uint8 is
+            # identity for 8-bit values).
+            output[top:bottom, :, 3] = src[top:bottom, :, 3]
 
     return _adjusted_image(output, img, floating)
 
 
-def _apply_geometry(image, normalized):
+def _apply_geometry(image, normalized, lens_profile=None):
     """Apply the recipe's geometry ops (rotate/flip/straighten/crop).
 
     Used for both the photo and the local-adjustment mask so their pixels
     stay aligned through every transform.
     """
-    result = image
+    result = distort_image(image, (normalized.get("adjustments") or {}).get("distortion", 0), lens_profile)
 
     rotation = normalized.get("rotation", 0)
     if rotation:
@@ -263,7 +261,7 @@ def _feathered_weight(mask_img, sigma):
 
 
 def _apply_recipe_impl(
-    img, normalized, local_mask, native_size, detail_scale=None,
+    img, normalized, local_mask, native_size, detail_scale=None, lens_profile=None,
 ):
     """Geometry + weighted tone. Returns (image, geometry-transformed mask).
 
@@ -294,21 +292,23 @@ def _apply_recipe_impl(
 
     # Float geometry returns new buffers/views and the tone pass allocates its
     # output; avoid copying a 500+ MB source only to immediately replace it.
-    result = _apply_geometry(img if isinstance(img, FloatImage) else img.copy(), normalized)
-    mask_geo = _apply_geometry(fitted, normalized) if fitted is not None else None
-
     adjustments = normalized.get("adjustments") or {}
+    corrected = apply_optics(img, adjustments, lens_profile)
+    result = _apply_geometry(corrected if isinstance(corrected, FloatImage) else corrected.copy(), normalized, lens_profile)
+    mask_geo = _apply_geometry(fitted, normalized, lens_profile) if fitted is not None else None
+
     tone_adjustments = {
         k: v for k, v in adjustments.items()
-        if k not in _DETAIL_KEYS | _PRESENCE_KEYS
+        if k not in _DETAIL_KEYS | _PRESENCE_KEYS | _OPTICS_KEYS
     }
     subject_tone, background_tone = (
         _local_region_deltas(local, _LOCAL_TONE_KEYS)
         if mask_geo is not None else ({}, {})
     )
     # Tone runs at loaded resolution, before the final output resize. The
-    # detail override describes output pixels and must not shrink this radius.
-    range_scale = detail_render_scale(result.size, native_size, normalized)
+    # Shadows/Highlights base scales with the loaded full frame (before crop),
+    # never with the detail override, which describes output pixels.
+    range_sigma = _range_sigma_for(img)
     scale = (
         detail_scale
         if detail_scale is not None
@@ -322,12 +322,21 @@ def _apply_recipe_impl(
             local_weight=weight,
             local_subject=subject_tone,
             local_background=background_tone,
-            range_scale=range_scale,
+            range_sigma=range_sigma,
         )
     elif tone_adjustments or isinstance(result, FloatImage):
-        result = _apply_adjustments(result, tone_adjustments, range_scale=range_scale)
+        result = _apply_adjustments(result, tone_adjustments, range_sigma=range_sigma)
 
     return result, mask_geo
+
+
+def _range_sigma_for(source):
+    """Shadows/Highlights base blur, in pixels of the loaded ``source`` frame."""
+    try:
+        from .tone import range_sigma
+    except ImportError:
+        from tone import range_sigma
+    return range_sigma(max(source.size))
 
 
 def apply_recipe(img, recipe, local_mask=None, native_size=None):
@@ -494,6 +503,7 @@ def apply_recipe_to_loaded_image(
         result, mask_geo = _apply_recipe_impl(
             img, normalized, local_mask, native_size,
             detail_scale=detail_scale,
+            lens_profile=_lens_profile_for_image(img, normalized, camera_metadata),
         )
     if max_size and max_size > 0 and max(result.size) > max_size:
         result.thumbnail((max_size, max_size), resample=Image.Resampling.LANCZOS)
@@ -528,7 +538,7 @@ def apply_recipe_to_loaded_image(
             result = apply_background_denoise(
                 result, weight, local["background_denoise"], scale, camera_metadata,
             )
-    return result
+    return record_render_source(result, img, normalized)
 
 
 def _apply_render_detail(result, adjustments, local, mask_geo, scale, denoise_kwargs):
@@ -566,7 +576,7 @@ def _apply_render_detail(result, adjustments, local, mask_geo, scale, denoise_kw
 
 def local_weight_map(
     local_mask, source_size, recipe, native_size=None, detail_scale=None,
-    feather=None, render_size=None,
+    feather=None, render_size=None, camera_metadata=None,
 ):
     """The local-adjustment weight map exactly as the renderer computes it.
 
@@ -603,7 +613,8 @@ def local_weight_map(
     fitted = _fit_mask_to_source(local_mask, source_size)
     if fitted is None:
         return None
-    mask_geo = _apply_geometry(fitted, normalized)
+    lens_profile = _resolve_lens_profile(normalized, camera_metadata)
+    mask_geo = _apply_geometry(fitted, normalized, lens_profile)
     if render_size and mask_geo.size != render_size:
         mask_geo = mask_geo.resize(render_size, Image.Resampling.BILINEAR)
     scale = (
@@ -617,3 +628,22 @@ def local_weight_map(
         from background_denoise import protection_weight
         return protection_weight(mask_geo, scale, feather)
     return _feathered_weight(mask_geo, feather * scale)
+
+
+def _resolve_lens_profile(recipe, metadata):
+    if not ((recipe or {}).get("adjustments") or {}).get("lens_profile"):
+        return None
+    try:
+        from .lens_profiles import resolve_profile
+    except ImportError:
+        from lens_profiles import resolve_profile
+    profile = resolve_profile(metadata)
+    return profile if profile["matched"] else None
+
+
+def _lens_profile_for_image(image, recipe, metadata):
+    # A RAW catalog row can render from an embedded/companion JPEG or working
+    # copy. Those may already be corrected: never apply the calibration twice.
+    if not isinstance(image, FloatImage) or image.encoding != "linear":
+        return None
+    return _resolve_lens_profile(recipe, metadata)
