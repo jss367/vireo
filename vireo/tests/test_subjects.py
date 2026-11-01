@@ -568,3 +568,22 @@ def test_reviewer_box_resave_response_has_no_cached_analysis(app_and_db):
     assert response.get_json()['subjects'][0]['analysis'] is None
     assert db.photos.get(pid)['quality_score'] is None
     assert db.photos.get(pid)['subject_sharpness'] is None
+
+
+def test_oversized_box_api_preserves_catalog_and_history(app_and_db):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    client = app.test_client()
+    url = f'/api/photos/{pid}/subjects/reviewer-box'
+    assert client.put(url, json={'box': dict(x=.1, y=.1, w=.2, h=.2)}).status_code == 200
+    assert client.put(f'/api/photos/{pid}/edit-recipe', json={
+        'recipe': {'adjustments': {'exposure': .5}},
+    }).status_code == 200
+    assert client.post('/api/undo').status_code == 200
+    before = tuple(db.conn.iterdump())
+    for coordinate in 'xywh':
+        for huge in [10**400, -(10**400)]:
+            box = dict(x=.1, y=.1, w=.1, h=.1)
+            box[coordinate] = huge
+            assert client.put(url, json={'box': box}).status_code == 400
+            assert tuple(db.conn.iterdump()) == before
