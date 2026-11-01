@@ -99,7 +99,8 @@ class StartupTasks:
 
     def _maintain_retained_caches(self, job: JobDict) -> JsonDict:
         import config as cfg
-        from services.result_files import delete_workspace_results, result_files
+        from catalog_result_files import result_files
+        from services.result_files import delete_workspace_results
         from services.retained_cache import cleanup, source_verifier
 
         runner = self._app._job_runner

@@ -125,7 +125,7 @@ def _clear_new_images_cache():
     endpoint. Tests that drop files on disk between page loads must clear it
     or the banner never appears.
     """
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
     get_shared_cache().clear()
 
 
@@ -192,7 +192,7 @@ def test_banner_click_during_walk_shows_preparing_state(fresh_server, page, monk
     import threading
 
     import new_images as new_images_module
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     url = fresh_server["url"]
     photo_dir = fresh_server["photo_dir"]

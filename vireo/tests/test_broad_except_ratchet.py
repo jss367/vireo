@@ -98,6 +98,7 @@ DOCUMENTED_ROOTS: tuple[str, ...] = (
     "models.py",
     "move_cleanup.py",
     "new_images.py",
+    "new_images_cache.py",
     "onnx_runtime.py",
     "panorama.py",
     "pipeline.py",

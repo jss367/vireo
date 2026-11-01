@@ -1,18 +1,13 @@
 {
  "upward_edges": [
-  "db -> new_images",
   "db -> services",
   "db -> services.grouping_history",
   "db -> services.identity_alternatives",
   "db -> services.pending_changes",
-  "db -> services.result_files",
   "db -> services.species_provenance",
-  "db -> species_identity_repair",
   "repositories.duplicates -> volume_reachability",
   "repositories.sync -> sidecar_identity",
   "schema -> file_replace",
-  "site_export -> web",
-  "site_export -> web.background_jobs",
   "species_identity -> taxonomy"
  ],
  "cycles": [
@@ -45,7 +40,6 @@
    "move.folder_transfer",
    "move.photos",
    "move_cleanup",
-   "new_images",
    "pipeline",
    "pipeline_locks",
    "pipeline_results",
@@ -77,7 +71,6 @@
    "services.identity_alternatives",
    "services.moves_merge",
    "services.photo_ingest",
-   "services.result_files",
    "services.retained_cache",
    "services.review_refresh",
    "services.saved_review",

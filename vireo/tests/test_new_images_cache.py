@@ -7,7 +7,7 @@ from testing.waits import synchronization_timeout
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-from new_images import NewImagesCache
+from new_images_cache import NewImagesCache
 
 # Sentinel db_path for the unit tests — the cache keys by
 # (db_path, workspace_id), so every call site must pass one. The exact string
@@ -440,7 +440,7 @@ def test_partial_offline_results_expire_at_offline_retry_interval(monkeypatch):
     the reachability gate re-probes it — not after the full 300s TTL."""
     import time as time_module
 
-    from new_images import NewImagesCache
+    from new_images_cache import NewImagesCache
 
     now = [1000.0]
     monkeypatch.setattr(time_module, "monotonic", lambda: now[0])

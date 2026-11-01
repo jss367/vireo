@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from db import Database
+from new_images import get_new_images_for_workspace
 from PIL import Image
 from scanner import ScanOptions
 from services import catalog_deletion, photo_ingest, workspace_folders, workspace_lifecycle
@@ -20,7 +21,7 @@ def _touch_image(path):
 
 @pytest.fixture(autouse=True)
 def _clear_shared_new_images_cache():
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
     get_shared_cache().clear()
     yield
     get_shared_cache().clear()
@@ -608,8 +609,8 @@ def test_db_get_new_images_for_workspace_caches_result(db_with_workspace, monkey
 
     monkeypatch.setattr(new_images, "count_new_images_for_workspace", counting_wrapper)
 
-    r1 = db.get_new_images_for_workspace(ws_id)
-    r2 = db.get_new_images_for_workspace(ws_id)
+    r1 = get_new_images_for_workspace(db, ws_id)
+    r2 = get_new_images_for_workspace(db, ws_id)
     assert r1 == r2
     assert calls[0] == 1  # second call served from cache
 
@@ -630,8 +631,8 @@ def test_invalidate_cache_for_shared_folder_across_workspaces(tmp_path):
 
     # Prime both caches.
     db.set_active_workspace(ws_a)
-    db.get_new_images_for_workspace(ws_a)
-    db.get_new_images_for_workspace(ws_b)
+    get_new_images_for_workspace(db, ws_a)
+    get_new_images_for_workspace(db, ws_b)
     assert db._new_images_cache.get(db._db_path, ws_a) is not None
     assert db._new_images_cache.get(db._db_path, ws_b) is not None
 
@@ -650,7 +651,7 @@ def test_scan_job_invalidates_cache(db_with_workspace):
     root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime cache with current state (1 new).
-    r1 = db.get_new_images_for_workspace(ws_id)
+    r1 = get_new_images_for_workspace(db, ws_id)
     assert r1["new_count"] == 1
 
     # Simulate a scan by inserting the photo row and invalidating.
@@ -658,7 +659,7 @@ def test_scan_job_invalidates_cache(db_with_workspace):
                  file_size=1, file_mtime=0.0)
     db.invalidate_new_images_cache_for_folders([root_id])
 
-    r2 = db.get_new_images_for_workspace(ws_id)
+    r2 = get_new_images_for_workspace(db, ws_id)
     assert r2["new_count"] == 0
 
 
@@ -670,7 +671,7 @@ def test_two_database_instances_share_cache(tmp_path):
     os.makedirs(root, exist_ok=True)
     Image.new("RGB", (1, 1), "white").save(str(root / "a.JPG"), "JPEG")
     workspace_folders.add_folder(db_a, str(root), name="shoot")
-    db_a.get_new_images_for_workspace(ws_id)  # populates shared cache
+    get_new_images_for_workspace(db_a, ws_id)  # populates shared cache
 
     # A second Database instance (simulating a different thread / request)
     db_b = Database(str(tmp_path / "test.db"))
@@ -722,7 +723,7 @@ def test_cache_does_not_share_across_different_db_paths(tmp_path):
     # Prime db_a's cache AFTER both DBs exist. A cache keyed only on
     # workspace_id would now publish this entry under key=1 — visible to
     # any ``get(..., 1)``, including db_b's.
-    result_a = db_a.get_new_images_for_workspace(ws_a)
+    result_a = get_new_images_for_workspace(db_a, ws_a)
     assert result_a["new_count"] == 1
     assert db_a._new_images_cache.get(db_a._db_path, ws_a) is not None
 
@@ -735,7 +736,7 @@ def test_cache_does_not_share_across_different_db_paths(tmp_path):
 
     # Full round-trip: fetching via db_b must compute fresh against db_b's
     # (empty) folder set, not serve db_a's cached value.
-    result_b = db_b.get_new_images_for_workspace(ws_b)
+    result_b = get_new_images_for_workspace(db_b, ws_b)
     assert result_b["new_count"] == 0, (
         f"db_b (empty folder set) must compute new_count=0, got "
         f"{result_b['new_count']} — stale data from db_a leaked across the "
@@ -781,7 +782,7 @@ def test_invalidate_new_images_after_scan_normalizes_trailing_slash(tmp_path):
     workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime the cache.
-    db.get_new_images_for_workspace(ws_id)
+    get_new_images_for_workspace(db, ws_id)
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
     # Invalidate with a trailing slash. Must still clear the cache.
@@ -809,7 +810,7 @@ def test_invalidate_new_images_after_scan_follows_symlinked_root(tmp_path):
     link = tmp_path / "shoot-link"
     link.symlink_to(root, target_is_directory=True)
 
-    db.get_new_images_for_workspace(ws_id)
+    get_new_images_for_workspace(db, ws_id)
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
     _invalidate_new_images_after_scan(db, str(link))
@@ -850,7 +851,7 @@ def test_invalidate_new_images_after_scan_preserves_dotdot_segments(tmp_path):
     workspace_folders.add_folder(db, stored, name="y")
 
     # Prime the cache.
-    db.get_new_images_for_workspace(ws_id)
+    get_new_images_for_workspace(db, ws_id)
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
     # Invalidate using the same `..`-bearing path. Canonicalization inside
@@ -898,8 +899,8 @@ def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(t
     workspace_folders.add_workspace_folder(db_a, ws_b, descendant_id)
 
     # Prime caches for both workspaces via db_a.
-    db_a.get_new_images_for_workspace(ws_id)
-    db_a.get_new_images_for_workspace(ws_b)
+    get_new_images_for_workspace(db_a, ws_id)
+    get_new_images_for_workspace(db_a, ws_b)
     assert db_a._new_images_cache.get(db_a._db_path, ws_id) is not None
     assert db_a._new_images_cache.get(db_a._db_path, ws_b) is not None
 
@@ -1000,7 +1001,7 @@ def test_get_new_images_for_workspace_race_does_not_repopulate_stale(db_with_wor
 
     monkeypatch.setattr(new_images, "count_new_images_for_workspace", racing_compute)
 
-    db.get_new_images_for_workspace(ws_id)
+    get_new_images_for_workspace(db, ws_id)
     # Cache must NOT hold the stale value.
     assert db._new_images_cache.get(db._db_path, ws_id) is None, "Stale compute leaked into cache"
 
@@ -1019,7 +1020,7 @@ def test_scan_handler_invalidates_cache_when_scan_raises(tmp_path, monkeypatch):
     root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime the cache.
-    db.get_new_images_for_workspace(ws_id)
+    get_new_images_for_workspace(db, ws_id)
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
     # Simulate the try/finally pattern used in api_job_scan / api_job_import_full:
@@ -1069,7 +1070,7 @@ def test_pipeline_job_scan_invalidates_cache(tmp_path, monkeypatch):
     workspace_folders.add_folder(db, str(photo_dir), name="photos")
 
     # Prime the cache: two files present, none ingested yet -> new_count=2.
-    primed = db.get_new_images_for_workspace(ws_id)
+    primed = get_new_images_for_workspace(db, ws_id)
     assert primed["new_count"] == 2
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
@@ -1136,7 +1137,7 @@ def test_audit_import_untracked_invalidates_cache(db_with_workspace):
     workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime the cache: one file present, none ingested -> new_count=1.
-    primed = db.get_new_images_for_workspace(ws_id)
+    primed = get_new_images_for_workspace(db, ws_id)
     assert primed["new_count"] == 1
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
@@ -1180,7 +1181,7 @@ def test_invalidate_new_images_cache_for_folders_handles_thousands_of_ids(
     _touch_image(str(root / "IMG.JPG"))
     root_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
-    db.get_new_images_for_workspace(ws_id)
+    get_new_images_for_workspace(db, ws_id)
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
     mixed = unknown_ids + [root_id]
@@ -1260,7 +1261,7 @@ def test_create_workspace_clears_stale_cache_on_id_reuse(tmp_path):
 
     # And a full round-trip: fetching new-images for ws_b must not return the
     # stale payload from ws_a.
-    result = db.get_new_images_for_workspace(ws_b)
+    result = get_new_images_for_workspace(db, ws_b)
     assert result != stale_payload, (
         f"New workspace (id={ws_b}) must not inherit deleted workspace's cache "
         f"(id reuse of {ws_a}? {ws_a == ws_b})"
@@ -1292,7 +1293,7 @@ def test_delete_photos_invalidates_cache(db_with_workspace):
     )
 
     # Prime the cache: nothing should be new yet.
-    r1 = db.get_new_images_for_workspace(ws_id)
+    r1 = get_new_images_for_workspace(db, ws_id)
     assert r1["new_count"] == 0
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
@@ -1302,7 +1303,7 @@ def test_delete_photos_invalidates_cache(db_with_workspace):
 
     # a.JPG on disk is now untracked: it should re-appear as "new" on the
     # next read. If the cache was not invalidated, this would still be 0.
-    r2 = db.get_new_images_for_workspace(ws_id)
+    r2 = get_new_images_for_workspace(db, ws_id)
     assert r2["new_count"] == 1, (
         f"Expected a.JPG to re-surface as new after delete_photos removed "
         f"its row; got new_count={r2['new_count']}. per_root={r2['per_root']}"
@@ -1328,7 +1329,7 @@ def test_add_workspace_folder_invalidates_cache(tmp_path):
 
     # Prime the cache for ws_a — it has no linked folders yet, so new_count=0.
     db.set_active_workspace(ws_a)
-    r1 = db.get_new_images_for_workspace(ws_a)
+    r1 = get_new_images_for_workspace(db, ws_a)
     assert r1["new_count"] == 0
     assert db._new_images_cache.get(db._db_path, ws_a) is not None
 
@@ -1352,7 +1353,7 @@ def test_remove_workspace_folder_invalidates_cache(db_with_workspace):
     folder_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime the cache: one untracked file in this workspace.
-    r1 = db.get_new_images_for_workspace(ws_id)
+    r1 = get_new_images_for_workspace(db, ws_id)
     assert r1["new_count"] == 1
     assert db._new_images_cache.get(db._db_path, ws_id) is not None
 
@@ -1380,8 +1381,8 @@ def test_move_folders_to_workspace_invalidates_both_workspaces(tmp_path):
     folder_id = workspace_folders.add_folder(db, str(root), name="shoot")
 
     # Prime both caches.
-    db.get_new_images_for_workspace(ws_a)
-    db.get_new_images_for_workspace(ws_b)
+    get_new_images_for_workspace(db, ws_a)
+    get_new_images_for_workspace(db, ws_b)
     assert db._new_images_cache.get(db._db_path, ws_a) is not None
     assert db._new_images_cache.get(db._db_path, ws_b) is not None
 

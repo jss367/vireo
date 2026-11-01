@@ -96,6 +96,9 @@ DATA_MODULES = frozenset({
     "schema",
     "photo_visibility_schema",
     "metadata_search",
+    "new_images_cache",
+    "catalog_result_files",
+    "species_identity_repair",
 })
 
 WEB_PACKAGES = ("web",)
