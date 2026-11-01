@@ -11,13 +11,13 @@ establish animal absence. Drawing a region does not assign or confirm a species.
 
 Reviewer boxes are stored under `reviewer-selected`, separate from detector
 output, and become the primary subject. A new box replaces the previous
-reviewer box for that photo. Model-specific detection reruns leave it intact.
+reviewer box for that photo. Detector reruns and Reclassify leave it intact.
 The internal confidence value of 1 preserves the explicit region through
 confidence filtering; it is not a model probability. The lightbox labels the
 region as reviewer-selected instead of displaying a detector percentage.
 
-Selecting a box clears previous subject measurements, mask, embedding, and eye
-state. Box measurements use the existing subject-analysis path at up to 1024
+Saving a box, including re-saving the same coordinates, clears its cached box
+analysis and previous subject measurements, mask, embedding, and eye state. Box measurements use the existing subject-analysis path at up to 1024
 pixels on the long edge: sharpness, area, clipping, median brightness, quality,
 and an exposure suggestion. They include background inside the rectangle.
 They do not constitute segmentation or eye analysis, and do not mark the Full

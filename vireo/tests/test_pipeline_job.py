@@ -4309,7 +4309,8 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
     ) == []
 
 
-def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
+@pytest.mark.parametrize('reviewer_box', [False, True])
+def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, reviewer_box):
     """On reclassify, prior-run detection rows must be deleted after model 1
     re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
     stale bounding boxes via get_existing_detection_photo_ids + get_detections.
@@ -4345,6 +4346,15 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
         detector_model="MegaDetector",
     )
     assert prior_det_ids, "setup sanity: prior detection was inserted"
+
+    chosen = None
+    if reviewer_box:
+        from subjects import analyze_photo, select_reviewer_box
+        chosen = select_reviewer_box(db, photo_id, dict(x=.2, y=.2, w=.2, h=.2))
+        analyze_photo(db, photo_id, os.path.join(folder_path, "test.jpg"), detection_id=chosen)
+        db.predictions.add(chosen, 'Ruby-crowned Kinglet', .9, 'reviewed-classifier', status='accepted')
+        recipe = db.set_photo_edit_recipe(photo_id, {'adjustments': {'exposure': .5}})
+        db.commit()
 
     col_id = db.collections.add(
         "Test",
@@ -4382,6 +4392,16 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
     remaining = detection_store.get_detections(verify_db, photo_id)
+    if reviewer_box:
+        from subjects import payload
+        assert [d['id'] for d in remaining] == [chosen]
+        result = payload(verify_db, photo_id)
+        assert result['primary_detection_id'] == chosen
+        assert result['subjects'][0]['analysis'] is not None
+        assert any(p['species'] == 'Ruby-crowned Kinglet' and p['status'] == 'accepted'
+                   for p in result['subjects'][0]['predictions'])
+        assert verify_db.get_photo_edit_recipe(photo_id) == recipe
+        return
     assert remaining == [], (
         f"Stale prior-run detection rows must be purged during reclassify but "
         f"db.get_detections({photo_id}) returned {remaining!r}. "
