@@ -191,13 +191,24 @@ def create_history_blueprint(
         recorded. Without the lock it can restore a status on top of a batch
         decision that landed in between, and two overlapping undos can pick
         the same entry and apply it twice.
+
+        A ``CacheRestore`` wraps the decision so a grouping or species-cache
+        entry's pipeline-cache save is put back if the outer unit's commit
+        fails after ``restore_grouping_edit`` /
+        ``restore_species_confirm_cache_edit`` have already exited.
         """
         db = get_db()
         undone = []
         stale: list[Exception] = []
 
-        from services.grouping_history import GroupingHistoryConflict, GroupingHistoryStale
+        from services.grouping_history import (
+            CacheRestore,
+            GroupingHistoryConflict,
+            GroupingHistoryStale,
+        )
         from services.identity_alternatives import IdentityHistoryConflict, IdentityHistoryStale
+
+        cache_restore = CacheRestore()
 
         def _apply() -> ErrorResponse | None:
             body = request.get_json(silent=True) or {}
@@ -210,7 +221,7 @@ def create_history_blueprint(
                 if latest is None or latest["id"] != body["edit_id"]:
                     return json_error("This edit is no longer the latest undoable edit", 409)
             try:
-                entry = db.undo_last_edit()
+                entry = db.undo_last_edit(cache_restore=cache_restore)
             except (GroupingHistoryStale, IdentityHistoryStale) as exc:
                 # The stale entry was retired: that retirement commits with
                 # the decision, and the caller reports the 409 afterwards.
@@ -222,9 +233,10 @@ def create_history_blueprint(
             return None
 
         try:
-            early = prediction_decisions.under_prediction_decision_lock(
-                db, _apply, json_error=json_error,
-            )
+            with cache_restore:
+                early = prediction_decisions.under_prediction_decision_lock(
+                    db, _apply, json_error=json_error,
+                )
         except (GroupingHistoryConflict, IdentityHistoryConflict) as exc:
             return json_error(str(exc), 409)
         if early is not None:
@@ -258,18 +270,25 @@ def create_history_blueprint(
     def api_redo() -> ResponseReturnValue:
         """Redo the most recently undone edit.
 
-        Under the prediction decision lock for the reason ``api_undo`` gives.
+        Under the prediction decision lock for the reason ``api_undo`` gives,
+        and under a ``CacheRestore`` scope for the reason ``api_undo`` gives.
         """
         db = get_db()
         redone = []
         stale: list[Exception] = []
 
-        from services.grouping_history import GroupingHistoryConflict, GroupingHistoryStale
+        from services.grouping_history import (
+            CacheRestore,
+            GroupingHistoryConflict,
+            GroupingHistoryStale,
+        )
         from services.identity_alternatives import IdentityHistoryConflict, IdentityHistoryStale
+
+        cache_restore = CacheRestore()
 
         def _apply() -> ErrorResponse | None:
             try:
-                entry = db.redo_last_undo()
+                entry = db.redo_last_undo(cache_restore=cache_restore)
             except (GroupingHistoryStale, IdentityHistoryStale) as exc:
                 # Retired with the decision; reported after it, as in undo.
                 stale.append(exc)
@@ -280,9 +299,10 @@ def create_history_blueprint(
             return None
 
         try:
-            early = prediction_decisions.under_prediction_decision_lock(
-                db, _apply, json_error=json_error,
-            )
+            with cache_restore:
+                early = prediction_decisions.under_prediction_decision_lock(
+                    db, _apply, json_error=json_error,
+                )
         except (GroupingHistoryConflict, IdentityHistoryConflict) as exc:
             return json_error(str(exc), 409)
         if early is not None:

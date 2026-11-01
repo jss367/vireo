@@ -480,7 +480,7 @@ def _grouping_hooks(monkeypatch, *, stale=False, calls=None):
     import services.grouping_history as gh
 
     @contextlib.contextmanager
-    def restore(db, entry, *, undo):
+    def restore(db, entry, *, undo, cache_restore=None):
         if calls is not None:
             calls.append(("restore", entry["id"], undo))
         if stale:

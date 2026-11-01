@@ -4584,7 +4584,7 @@ class Database:
         'prediction_reviewed', 'prediction_replace_species',
     )
 
-    def undo_last_edit(self) -> dict[str, Any] | None:
+    def undo_last_edit(self, *, cache_restore: Any = None) -> dict[str, Any] | None:
         """Undo the most recent undoable edit. Returns the undone entry dict, or None.
 
         Non-undoable entries (prediction_reject, discard) are skipped.
@@ -4594,6 +4594,12 @@ class Database:
         another entry. The caller must refresh the controls so the next click
         names the edit it will actually reverse. Retirement commits on its own;
         valid combined photo/group edits retain the writer lock until complete.
+
+        ``cache_restore`` is a ``services.grouping_history.CacheRestore`` the
+        caller created around the outer unit of work. When passed, the
+        pipeline-cache put-back is registered on it so a commit failure after
+        this method returns rolls back the DB and puts the cache back
+        together, instead of leaving the catalog and cache desynchronized.
         """
         found = self._edit_history_repository().next_undo()
         if not found:
@@ -4609,7 +4615,7 @@ class Database:
             )
 
             try:
-                with restore_grouping_edit(self, entry, undo=True):
+                with restore_grouping_edit(self, entry, undo=True, cache_restore=cache_restore):
                     apply_grouping_photo_edit(self, entry, items, undo=True)
                     history.mark_undone(entry['id'])
             except GroupingHistoryStale:
@@ -4626,7 +4632,7 @@ class Database:
             )
 
             try:
-                with restore_species_confirm_cache_edit(self, entry, undo=True):
+                with restore_species_confirm_cache_edit(self, entry, undo=True, cache_restore=cache_restore):
                     history.mark_undone(entry['id'])
             except GroupingHistoryStale:
                 history.retire_stale_grouping_entry(entry['id'])
@@ -4643,12 +4649,14 @@ class Database:
                 history.mark_undone(entry['id'])
         return entry
 
-    def redo_last_undo(self) -> dict[str, Any] | None:
+    def redo_last_undo(self, *, cache_restore: Any = None) -> dict[str, Any] | None:
         """Redo the most recently undone edit. Returns the entry dict, or None.
 
         Replays in chronological order (ASC) so sequential undos are redone
         correctly. Stale cache-linked actions are retired and reported without
         replaying another entry, just as in ``undo_last_edit``.
+
+        ``cache_restore``: see ``undo_last_edit``.
         """
         found = self._edit_history_repository().next_redo()
         if not found:
@@ -4664,7 +4672,7 @@ class Database:
             )
 
             try:
-                with restore_grouping_edit(self, entry, undo=False):
+                with restore_grouping_edit(self, entry, undo=False, cache_restore=cache_restore):
                     apply_grouping_photo_edit(self, entry, items, undo=False)
                     history.mark_redone(entry['id'])
             except GroupingHistoryStale:
@@ -4681,7 +4689,7 @@ class Database:
             )
 
             try:
-                with restore_species_confirm_cache_edit(self, entry, undo=False):
+                with restore_species_confirm_cache_edit(self, entry, undo=False, cache_restore=cache_restore):
                     history.mark_redone(entry['id'])
             except GroupingHistoryStale:
                 history.retire_stale_grouping_entry(entry['id'])

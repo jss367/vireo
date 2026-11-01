@@ -633,6 +633,54 @@ def test_species_confirmation_restores_cache_when_rollback_also_fails(
     assert 'Commit failed' in caplog.text
 
 
+@pytest.mark.parametrize('operation', ['undo', 'redo'])
+def test_undo_redo_restores_cache_on_commit_failure(app_and_db, monkeypatch, operation):
+    """A commit failure after ``restore_grouping_edit`` exits restores the cache.
+
+    ``restore_grouping_edit`` saves the restored cache before yielding to the
+    caller, which commits inside the decision's unit of work. The caller's
+    outer commit now runs after the CM has already exited: without a
+    ``CacheRestore`` scope the DB rolls back on commit failure but the cache
+    on disk still shows the undone/redone state. The route wraps the
+    decision in a ``CacheRestore`` so a commit failure also puts the cache
+    back.
+    """
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    ids, _original = _seed(db)
+    _detach(client)  # Creates a pipeline_grouping history entry.
+    if operation == 'redo':
+        assert client.post('/api/undo').status_code == 200
+    cache_before = _load(db)
+    history_before = db.edit_history.list_recent()
+    original_init = Database.__init__
+
+    class FailCommit:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def commit(self):
+            raise OSError('Commit failed')
+
+    with monkeypatch.context() as patch:
+        def fail_commit_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.conn = FailCommit(self.conn)
+
+        patch.setattr(Database, '__init__', fail_commit_init)
+        response = client.post('/api/' + operation)
+        assert response.status_code == 500
+    # The failed decision must put the cache back to what it was before the
+    # request fired, since the DB has rolled back too.
+    assert _load(db) == cache_before
+    assert db.edit_history.list_recent() == history_before
+
+
 @pytest.mark.parametrize('replacement', [False, True])
 def test_keyword_changing_auto_detach_is_one_atomic_history_action(app_and_db, replacement):
     app, db = app_and_db
