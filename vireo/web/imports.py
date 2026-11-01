@@ -584,8 +584,9 @@ class _DuplicateCheckStream:
         yield from self._planned_folder_listing(folder)
         listing = self.dir_listings[folder]
         if self.path_under_any_source is None:
-            # Legacy clients lack complete root context. Keep their regular
-            # recovery checks, but never follow candidate symlinks for them.
+            # Legacy clients lack complete root context. Keep their regular-file
+            # recovery checks, but stop at the first candidate symlink rather
+            # than silently advancing past one the importer may reject.
             self.path_under_any_source = _build_source_root_guard(self.source_roots or ())
         source_guard = self.path_under_any_source
         if self.source_roots and not source_guard(source_file):
@@ -602,7 +603,13 @@ class _DuplicateCheckStream:
                 return False
             entry = listing[candidate.name]
             metadata = entry.metadata
-            if entry.symlink and self.source_roots:
+            if entry.symlink:
+                if not self.source_roots:
+                    # Without complete source roots we cannot tell whether this
+                    # link resolves to the source card. The importer's per-file
+                    # guard would reject such a primary, so a later suffix
+                    # cannot prove recovery either. Stop the walk conservatively.
+                    return False
                 try:
                     metadata = os.stat(candidate.path)
                 except OSError:

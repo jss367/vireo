@@ -798,6 +798,60 @@ def test_check_duplicates_never_reports_recovery_via_a_card_symlink(
     assert _recovered_paths(events) == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.symlink usually requires elevation on Windows.",
+)
+@pytest.mark.parametrize("with_source_roots", [False, True])
+def test_check_duplicates_recovery_stops_at_unverifiable_primary_symlink(
+    app_and_db, tmp_path, with_source_roots,
+):
+    """A primary that symlinks to another card file poisons the walk.
+
+    A legacy client (no ``sources``) cannot verify where the primary link
+    points, so advancing past it to a byte-identical ``name_1.ext`` would
+    report "recovered" for a file the real importer rejects via its
+    source-root guard. Both the omitted-roots case and the complete-roots
+    case must therefore drop the file from the recovery stream.
+    """
+    from datetime import datetime
+
+    app, db, fid = app_and_db
+
+    card = tmp_path / "card"
+    card.mkdir(exist_ok=True)
+    src = card / "IMG.jpg"
+    src.write_bytes(b"the real bytes")
+    other = card / "other.jpg"
+    other.write_bytes(b"different bytes on the card")  # different inode + bytes
+    ts = datetime(2026, 7, 3, 10, 0, 0).timestamp()
+    for p in (src, other):
+        os.utime(str(p), (ts, ts))
+
+    dest = tmp_path / "archive"
+    planned = dest / "2026" / "2026-07-03"
+    planned.mkdir(parents=True)
+    # Primary name links to a different card file (not the source).
+    os.symlink(str(other), str(planned / "IMG.jpg"))
+    # A later matching regular file sits at the suffix slot the walk
+    # would advance to; without the primary-symlink stop, legacy clients
+    # would misreport this as recovery.
+    (planned / "IMG_1.jpg").write_bytes(b"the real bytes")
+
+    client = app.test_client()
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(src)],
+        "destination": str(dest),
+        **({"sources": [str(card)]} if with_source_roots else {}),
+    })
+    events = parse_sse_events(resp.data)
+    done = [e for e in events if e.get("done")]
+    assert done[0]["recovered_count"] == 0, (
+        "advanced past an unverifiable primary symlink to a card-matching suffix"
+    )
+    assert _recovered_paths(events) == []
+
+
 def test_check_duplicates_rejects_relative_destination(app_and_db, tmp_path):
     app, db, fid = app_and_db
     src = _make_dated_source(tmp_path)
