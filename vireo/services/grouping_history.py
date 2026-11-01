@@ -32,10 +32,22 @@ class CacheRestore:
     of work commits. Used as a context manager around the whole decision,
     so a failure anywhere after the save, including the unit's own commit,
     restores the cache the catalog still matches.
+
+    ``add_cleanup`` registers a resource release — a regroup lock, say — to
+    run after the restoration (whether or not it fired). The restore CM
+    hands the regroup lock to ``cache_restore`` instead of releasing it in
+    its own ``finally``, so the lock is still held while the outer commit
+    runs AND while the cache is being put back. Cleanups run in LIFO order,
+    like a nested context manager; one failing never stops the next.
     """
 
     def __init__(self) -> None:
         self.restore: Callable[[], object] | None = None
+        self._cleanup: list[Callable[[], object]] = []
+
+    def add_cleanup(self, fn: Callable[[], object]) -> None:
+        """Register a cleanup to run after any restoration, regardless of outcome."""
+        self._cleanup.append(fn)
 
     def __enter__(self) -> CacheRestore:
         return self
@@ -46,12 +58,19 @@ class CacheRestore:
         _exc: BaseException | None,
         _tb: TracebackType | None,
     ) -> None:
-        if exc_type is None or self.restore is None:
-            return
         try:
-            self.restore()
-        except (OSError, TypeError, ValueError):
-            log.exception("Failed to restore pipeline cache after undo/redo failed")
+            if exc_type is not None and self.restore is not None:
+                try:
+                    self.restore()
+                except (OSError, TypeError, ValueError):
+                    log.exception("Failed to restore pipeline cache after undo/redo failed")
+        finally:
+            while self._cleanup:
+                fn = self._cleanup.pop()
+                try:
+                    fn()
+                except RuntimeError:
+                    log.exception("CacheRestore cleanup failed")
 
 
 class GroupingHistoryConflict(ValueError):
@@ -499,6 +518,7 @@ def restore_species_confirm_cache_edit(
         raise GroupingHistoryConflict(
             'Photo groups are being updated. Try again when processing finishes.'
         )
+    lock_transferred = False
     try:
         cache_dir = os.path.dirname(db._db_path)
         ws_id = db.require_workspace_id()
@@ -525,11 +545,15 @@ def restore_species_confirm_cache_edit(
             _restore_encounter_confirmation(enc, change, undo=undo)
         save_results_raw(restored, cache_dir, ws_id)
         if cache_restore is not None:
-            # Extend restoration through the caller's outer commit: if the
-            # unit of work rolls back after this CM has already exited,
-            # ``cache_restore.__exit__`` puts the cache back. The unit of
-            # work handles the DB rollback; we only own the cache file.
+            # Extend restoration through the caller's outer commit: the unit
+            # of work rolls back the DB and then ``cache_restore.__exit__``
+            # puts the cache back. Hand the regroup lock to ``cache_restore``
+            # too, so no competing writer can slip in between the lock
+            # release in our ``finally`` and the restoration; the lock stays
+            # held through the whole restoration lifecycle.
             cache_restore.restore = lambda: save_results_raw(current, cache_dir, ws_id)
+            cache_restore.add_cleanup(lock.release)
+            lock_transferred = True
             yield
             return
         try:
@@ -540,7 +564,8 @@ def restore_species_confirm_cache_edit(
             save_results_raw(current, cache_dir, ws_id)
             raise
     finally:
-        lock.release()
+        if not lock_transferred:
+            lock.release()
 
 
 @contextmanager
@@ -577,6 +602,7 @@ def restore_grouping_edit(
     lock = acquire_workspace_regroup(db.require_workspace_id())
     if not lock.acquire(blocking=False):
         raise GroupingHistoryConflict('Photo groups are being updated. Try again when processing finishes.')
+    lock_transferred = False
     try:
         cache_dir = os.path.dirname(db._db_path)
         ws_id = db.require_workspace_id()
@@ -608,11 +634,15 @@ def restore_grouping_edit(
                 photo["flag"] = flags[photo["id"]]
         save_results_raw(restored, cache_dir, ws_id)
         if cache_restore is not None:
-            # Extend restoration through the caller's outer commit: if the
-            # unit of work rolls back after this CM has already exited,
-            # ``cache_restore.__exit__`` puts the cache back. The unit of
-            # work handles the DB rollback; we only own the cache file.
+            # Extend restoration through the caller's outer commit: the unit
+            # of work rolls back the DB and then ``cache_restore.__exit__``
+            # puts the cache back. Hand the regroup lock to ``cache_restore``
+            # too, so no competing writer can slip in between the lock
+            # release in our ``finally`` and the restoration; the lock stays
+            # held through the whole restoration lifecycle.
             cache_restore.restore = lambda: save_results_raw(current, cache_dir, ws_id)
+            cache_restore.add_cleanup(lock.release)
+            lock_transferred = True
             yield
             return
         try:
@@ -628,7 +658,8 @@ def restore_grouping_edit(
             save_results_raw(current, cache_dir, ws_id)
             raise
     finally:
-        lock.release()
+        if not lock_transferred:
+            lock.release()
 
 
 def apply_grouping_photo_edit(

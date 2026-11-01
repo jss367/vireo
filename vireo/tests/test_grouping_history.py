@@ -633,52 +633,119 @@ def test_species_confirmation_restores_cache_when_rollback_also_fails(
     assert 'Commit failed' in caplog.text
 
 
-@pytest.mark.parametrize('operation', ['undo', 'redo'])
-def test_undo_redo_restores_cache_on_commit_failure(app_and_db, monkeypatch, operation):
-    """A commit failure after ``restore_grouping_edit`` exits restores the cache.
+def _seed_species_confirm_cache_entry(db, client, ids):
+    """Create a cache-only species_confirm_cache history entry.
 
-    ``restore_grouping_edit`` saves the restored cache before yielding to the
-    caller, which commits inside the decision's unit of work. The caller's
-    outer commit now runs after the CM has already exited: without a
-    ``CacheRestore`` scope the DB rolls back on commit failure but the cache
-    on disk still shows the undone/redone state. The route wraps the
-    decision in a ``CacheRestore`` so a commit failure also puts the cache
-    back.
+    Tags every submitted photo with ``Cardinal`` first so the confirmation
+    takes the ``cache_only_write`` branch — nothing new is tagged, no
+    ``photo_edit_id`` is recorded, and the confirmation lives only in the
+    pipeline cache plus a ``species_confirm_cache`` edit_history row.
     """
-    from db import Database
+    kid = db.add_keyword('Cardinal', is_species=True)
+    for pid in ids:
+        db.tag_photo(pid, kid)
+    db.conn.commit()
+    assert client.post('/api/encounters/species', json={
+        'species': 'Cardinal', 'photo_ids': ids,
+    }).status_code == 200
+    assert db.edit_history.list_recent()[0]['action_type'] == 'species_confirm_cache'
+
+
+@pytest.mark.parametrize('operation', ['undo', 'redo'])
+@pytest.mark.parametrize('action', ['pipeline_grouping', 'species_confirm_cache'])
+def test_undo_redo_restores_cache_on_commit_failure(
+    app_and_db, monkeypatch, operation, action,
+):
+    """A failed outer commit restores the cache for both grouping action types.
+
+    ``restore_grouping_edit`` / ``restore_species_confirm_cache_edit`` save
+    the restored cache before yielding, inside the decision's unit of work.
+    The caller's outer commit (``unit_of_work._commit``) runs after the CM
+    has already exited. Without a ``CacheRestore`` scope the DB rolls back
+    on commit failure but the cache on disk still shows the undone/redone
+    state. The route wraps the decision in a ``CacheRestore`` that puts the
+    cache back when the outer commit fails.
+    """
+    import unit_of_work
 
     app, db = app_and_db
     client = app.test_client()
-    ids, _original = _seed(db)
-    _detach(client)  # Creates a pipeline_grouping history entry.
+    ids, _ = _seed(db)
+    if action == 'pipeline_grouping':
+        _detach(client)
+    else:
+        _seed_species_confirm_cache_entry(db, client, ids)
     if operation == 'redo':
         assert client.post('/api/undo').status_code == 200
     cache_before = _load(db)
+    photo_rows_before = [dict(db.photos.get(pid)) for pid in ids]
+    photo_keywords_before = {pid: list(db.photo_keywords.get_for_photo(pid)) for pid in ids}
     history_before = db.edit_history.list_recent()
-    original_init = Database.__init__
 
-    class FailCommit:
-        def __init__(self, conn):
-            self.conn = conn
-
-        def __getattr__(self, name):
-            return getattr(self.conn, name)
-
-        def commit(self):
-            raise OSError('Commit failed')
+    def fail(*_args, **_kwargs):
+        raise OSError('Commit failed')
 
     with monkeypatch.context() as patch:
-        def fail_commit_init(self, *args, **kwargs):
-            original_init(self, *args, **kwargs)
-            self.conn = FailCommit(self.conn)
-
-        patch.setattr(Database, '__init__', fail_commit_init)
+        # The decision's unit of work is the one commit point.
+        patch.setattr(unit_of_work, '_commit', fail)
         response = client.post('/api/' + operation)
         assert response.status_code == 500
-    # The failed decision must put the cache back to what it was before the
-    # request fired, since the DB has rolled back too.
+    # The DB rolled back and the cache was put back together: cache file,
+    # photo rows, their keywords and the edit history all match pre-request.
     assert _load(db) == cache_before
+    assert [dict(db.photos.get(pid)) for pid in ids] == photo_rows_before
+    assert {pid: list(db.photo_keywords.get_for_photo(pid)) for pid in ids} == photo_keywords_before
     assert db.edit_history.list_recent() == history_before
+
+
+@pytest.mark.parametrize('action', ['pipeline_grouping', 'species_confirm_cache'])
+def test_undo_holds_regroup_lock_through_commit_and_restoration(
+    app_and_db, monkeypatch, action,
+):
+    """A competing writer cannot slip in while the cache is being restored.
+
+    The regroup lock must stay held for the full restoration lifecycle:
+    from the restore CM's save through the outer unit's commit (or its
+    failure) and the ``CacheRestore`` put-back. Otherwise a pipeline writer
+    could grab the lock between the restore CM's ``finally`` and the
+    outer commit, modify the cache based on the undone state, and have its
+    save silently overwritten by the restoration (or vice versa).
+
+    Probe the lock from inside ``unit_of_work._commit``: that call runs
+    AFTER the restore CM has exited, so it is where the pre-fix would
+    release the lock. ``acquire(blocking=False)`` must still fail here.
+    """
+    import unit_of_work
+    from pipeline_locks import acquire_workspace_regroup
+
+    app, db = app_and_db
+    client = app.test_client()
+    ids, _ = _seed(db)
+    if action == 'pipeline_grouping':
+        _detach(client)
+    else:
+        _seed_species_confirm_cache_entry(db, client, ids)
+    workspace_id = db._ws_id()
+    lock_still_held_at_commit: list[bool] = []
+
+    def fail(*_args, **_kwargs):
+        # Snapshot whether the regroup lock is still held at the outer
+        # commit, then fail so the restoration path runs too.
+        other = acquire_workspace_regroup(workspace_id)
+        lock_still_held_at_commit.append(not other.acquire(blocking=False))
+        if lock_still_held_at_commit[-1] is False:
+            other.release()
+        raise OSError('Commit failed')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(unit_of_work, '_commit', fail)
+        response = client.post('/api/undo')
+        assert response.status_code == 500
+    assert lock_still_held_at_commit == [True]
+    # And the lock is released after the restoration lifecycle completes.
+    tail = acquire_workspace_regroup(workspace_id)
+    assert tail.acquire(blocking=False) is True
+    tail.release()
 
 
 @pytest.mark.parametrize('replacement', [False, True])
