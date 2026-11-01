@@ -75,7 +75,7 @@
   "repositories/edits.py": 3,
   "repositories/folders.py": 1,
   "repositories/imports.py": 1,
-  "repositories/keyword_provenance.py": 2,
+  "repositories/keyword_provenance.py": 1,
   "repositories/keyword_tree.py": 1,
   "repositories/keywords.py": 1,
   "repositories/locations.py": 1,

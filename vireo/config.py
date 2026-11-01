@@ -7,12 +7,15 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import threading
 from collections.abc import Mapping
 from typing import Any
 
+import settings_source
 from app_paths import default_path
+from config_schema import deep_merge
 from file_replace import replace_file
 from filter_shortcuts import DEFAULT_SHORTCUTS
 
@@ -305,15 +308,9 @@ def config_value(values: Mapping[str, Any] | None, key: str, section: str | None
     return (values or {}).get(key, defaults[key])
 
 
-def _deep_merge(base, override):
-    """Merge override into base recursively so nested dicts are merged, not replaced."""
-    result = dict(base)
-    for k, v in override.items():
-        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-            result[k] = _deep_merge(result[k], v)
-        else:
-            result[k] = v
-    return result
+# The merge lives in config_schema so the data layer's workspace overrides
+# (``Database.get_effective_config``) use it without importing this module.
+_deep_merge = deep_merge
 
 
 def _preserve_corrupt_config():
@@ -651,3 +648,9 @@ def get_remote_target(target_id):
         if t["id"] == target_id:
             return t
     return None
+
+
+# The data layer reads global settings through settings_source, never by
+# importing this module; installing the module itself keeps every read late-bound,
+# so tests that monkeypatch load/get or CONFIG_PATH reach those reads too.
+settings_source.install(sys.modules[__name__])

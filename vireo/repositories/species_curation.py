@@ -49,9 +49,9 @@ caller owns the transaction, and no method here commits unless the
 
 import json
 
-import config as cfg
 from keyword_normalization import keyword_match_key
 from repositories.prediction_review import prediction_review_join, prediction_review_status
+from settings_source import config_value
 from species_memberships import photo_species_memberships
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
@@ -291,7 +291,7 @@ class SpeciesCurationRepository:
         life_list_ancestor_suppression_clause,
         resolve_species_display_name,
         get_folder_subtree_ids,
-        get_effective_config,
+        effective_config,
     ):
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
@@ -303,7 +303,7 @@ class SpeciesCurationRepository:
         # Bound ``Database`` methods, kept under their façade names.
         self.resolve_species_display_name = resolve_species_display_name
         self.get_folder_subtree_ids = get_folder_subtree_ids
-        self.get_effective_config = get_effective_config
+        self.effective_config = effective_config
 
     @property
     def workspace_id(self):
@@ -311,7 +311,7 @@ class SpeciesCurationRepository:
         return self._resolve_workspace_id()
 
     def _detector_floor(self):
-        return self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+        return config_value(self.effective_config(), "detector_confidence")
 
     def next_representative_order(self):
         row = self.conn.execute(

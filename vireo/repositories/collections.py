@@ -19,7 +19,7 @@ Callers reach this repository through the ``db.collections`` accessor
 workspace is resolved lazily through ``Database._ws_id`` at exactly the
 points the original code called it, so a malformed rule tree still raises
 ``ValueError`` before a missing workspace raises ``RuntimeError``. The façade
-methods the rules engine consults (``get_effective_config``,
+methods the rules engine consults (``effective_config``,
 ``get_subject_types``, ``get_folder_subtree_ids``) arrive as bound methods so
 monkeypatches of ``Database`` keep reaching this code. The compositions with
 no SQL of their own (``rules_resolvable``, ``query_photo_position``,
@@ -41,6 +41,7 @@ from repositories import UNSET
 from repositories.keyword_identity_sql import identity_sql
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
+from settings_source import config_value
 from sql_chunks import chunked
 
 
@@ -50,7 +51,7 @@ class CollectionRepository:
         conn,
         resolve_workspace_id,
         *,
-        get_effective_config,
+        effective_config,
         get_subject_types,
         get_folder_subtree_ids,
         chunks,
@@ -77,7 +78,7 @@ class CollectionRepository:
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
         # Bound ``Database`` methods, kept under their façade names.
-        self.get_effective_config = get_effective_config
+        self.effective_config = effective_config
         self.get_subject_types = get_subject_types
         self.get_folder_subtree_ids = get_folder_subtree_ids
         # ``db`` module helpers and constants, kept under their module names
@@ -370,9 +371,8 @@ class CollectionRepository:
         the sort, the badge, and the universal filter agreeing about which
         detections exist after the user moves the slider.
         """
-        import config as cfg
         floor = float(
-            self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+            config_value(self.effective_config(), "detector_confidence")
         )
         return [self.workspace_id, floor]
 
@@ -2365,17 +2365,14 @@ class _RuleQueryBuilder:
 
     def _min_detector_conf(self):
         """Lazily read the workspace-effective detector_confidence floor —
-        cfg.load() reads a JSON file, so only pay for it when a prediction
+        the effective config reads the settings file, so only pay for it when a prediction
         rule actually references it. Cached across every _prediction_exists
         call in the same query so a rule tree with multiple prediction
         predicates doesn't reread the config per predicate.
         """
         if "value" not in self._conf_cache:
-            import config as cfg
             self._conf_cache["value"] = float(
-                self._repo.get_effective_config(cfg.load()).get(
-                    "detector_confidence", 0.2
-                )
+                config_value(self._repo.effective_config(), "detector_confidence")
             )
         return self._conf_cache["value"]
 

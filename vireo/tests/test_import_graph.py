@@ -82,6 +82,7 @@ FOUNDATION = frozenset({
     "edit_recipe",
     "keyword_normalization",
     "process_strategies",
+    "settings_source",
     "species_identity",
     "species_memberships",
     "sql_chunks",

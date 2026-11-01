@@ -70,6 +70,7 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
+from compare import compare_prediction_to_keywords
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from repositories.identity_alternatives import retarget_candidate_names
 from repositories.keyword_identity_sql import (
@@ -78,6 +79,7 @@ from repositories.keyword_identity_sql import (
     keywords_claim_different_taxa,
 )
 from repositories.prediction_review import prediction_review_join, prediction_review_status
+from settings_source import config_value
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +98,7 @@ FACADE_METHODS = (
     "rename_species_highlights_species",
     # accept_prediction
     "add_keyword",
-    "get_effective_config",
+    "effective_config",
     "get_photos_with_equivalent_species",
     "update_prediction_status",
     "queue_change",
@@ -1038,7 +1040,7 @@ class KeywordProvenanceRepository:
     rename_photo_preferences_species: Callable[..., Any]
     rename_species_highlights_species: Callable[..., Any]
     add_keyword: Callable[..., Any]
-    get_effective_config: Callable[..., Any]
+    effective_config: Callable[..., Any]
     get_photos_with_equivalent_species: Callable[..., Any]
     update_prediction_status: Callable[..., Any]
     queue_change: Callable[..., Any]
@@ -1804,7 +1806,7 @@ class KeywordProvenanceRepository:
             old_species = _strip_replaced_species(
                 self.conn, ws, photo_id, this_pred_id, kid, species,
                 replace_taxonomy,
-                get_effective_config=self.get_effective_config,
+                effective_config=self.effective_config,
                 remove_pending_changes=self.remove_pending_changes,
                 queue_change=self.queue_change,
                 species_root_name_for_taxon=self._species_root_name_for_taxon,
@@ -1829,6 +1831,7 @@ class KeywordProvenanceRepository:
         photo_ids=None,
         prediction_ids=None,
         _commit=True,
+        species_taxonomy=None,
     ):
         """Accept a prediction: mark as accepted and add species keyword.
 
@@ -1868,9 +1871,7 @@ class KeywordProvenanceRepository:
         ws = self.workspace_id
         limited_photo_ids = _int_id_set(photo_ids)
         limited_pred_ids = _int_id_set(prediction_ids)
-        replace_taxonomy = (None, None)
-        if replace_species:
-            replace_taxonomy = _taxonomy_for_species_replacement()
+        replace_taxonomy = _replacement_taxonomy(replace_species, species_taxonomy)
         pred = _fetch_entry_prediction(self.conn, ws, prediction_id)
         if not pred:
             return None
@@ -1952,30 +1953,17 @@ def _int_id_set(ids):
     return {int(pid) for pid in ids}
 
 
-def _taxonomy_for_species_replacement():
-    """Return ``(taxonomy, compare_prediction_to_keywords)`` for replace.
+def _replacement_taxonomy(replace_species, species_taxonomy):
+    """``(taxonomy, compare_prediction_to_keywords)`` for a replace-species accept.
 
-    Load taxonomy once for the whole call so replace_species can protect
-    keywords whose relationship to a neighbouring subject's prediction is
-    broader/same/narrower — not just exact-text matches. Loaded once per
-    accept rather than inside ``_accept_for_photo`` so grouped accepts don't
-    repeat the JSON parse per photo. ``(None, None)`` (missing/corrupt file,
-    or unrelated import failure) cleanly degrades to exact-text protection.
+    With a loaded taxonomy (the caller's ``load_local_taxonomy()``),
+    replace_species also protects keywords a neighbouring subject's
+    prediction supports as broader/same/narrower; ``(None, None)`` protects
+    exact-name keywords only.
     """
-    try:
-        from compare import compare_prediction_to_keywords as _cpk
-        from taxonomy import load_local_taxonomy as _llt
-        _replace_taxonomy = _llt()
-        _compare_pred_to_kws = _cpk
-    except Exception:
-        log.warning(
-            "Taxonomy unavailable for species replacement; "
-            "protecting only exact-name keywords",
-            exc_info=True,
-        )
-        _replace_taxonomy = None
-        _compare_pred_to_kws = None
-    return _replace_taxonomy, _compare_pred_to_kws
+    if replace_species and species_taxonomy is not None:
+        return species_taxonomy, compare_prediction_to_keywords
+    return None, None
 
 
 def _fetch_entry_prediction(conn, ws, prediction_id):
@@ -2256,7 +2244,7 @@ def _reject_detection_alternatives(conn, ws, this_pred_id):
 
 def _strip_replaced_species(
     conn, ws, photo_id, this_pred_id, kid, species, replace_taxonomy, *,
-    get_effective_config, remove_pending_changes, queue_change,
+    effective_config, remove_pending_changes, queue_change,
     species_root_name_for_taxon, rename_species_highlights_species,
     rename_photo_preferences_species,
 ):
@@ -2270,7 +2258,7 @@ def _strip_replaced_species(
     """
     to_remove = _species_rows_to_replace(
         conn, ws, photo_id, this_pred_id, kid, replace_taxonomy,
-        get_effective_config=get_effective_config,
+        effective_config=effective_config,
     )
     old_species = [row["name"] for row in to_remove]
     for row in to_remove:
@@ -2295,7 +2283,7 @@ def _strip_replaced_species(
 
 def _species_rows_to_replace(
     conn, ws, photo_id, this_pred_id, kid, replace_taxonomy, *,
-    get_effective_config,
+    effective_config,
 ):
     """The photo's species keyword rows a replace should strip.
 
@@ -2310,7 +2298,7 @@ def _species_rows_to_replace(
     """
     neighbour_species = _live_neighbour_species(
         conn, ws, photo_id, this_pred_id,
-        get_effective_config=get_effective_config,
+        effective_config=effective_config,
     )
     protected = {
         keyword_match_key(s) for s in neighbour_species
@@ -2336,7 +2324,7 @@ def _species_rows_to_replace(
     ]
 
 
-def _live_neighbour_species(conn, ws, photo_id, this_pred_id, *, get_effective_config):
+def _live_neighbour_species(conn, ws, photo_id, this_pred_id, *, effective_config):
     """Species named by live predictions on the photo's *other* detections.
 
     Mirror Compare's visibility filter when picking which
@@ -2359,10 +2347,7 @@ def _live_neighbour_species(conn, ws, photo_id, this_pred_id, *, get_effective_c
         (this_pred_id,),
     ).fetchone()
     this_det_id = this_det["detection_id"] if this_det else None
-    import config as _cfg
-    _det_threshold = get_effective_config(
-        _cfg.load()
-    ).get("detector_confidence", 0.2)
+    _det_threshold = config_value(effective_config(), "detector_confidence")
     # Restrict to the latest labels_fingerprint per
     # (detection, classifier_model) — mirrors get_predictions
     # and the review/summary paths so stale rows from a prior

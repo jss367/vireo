@@ -7985,7 +7985,6 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
     """
     import json as _json
 
-    import taxonomy as taxonomy_mod
     from db import Database
     from taxonomy import Taxonomy
 
@@ -8072,9 +8071,6 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
             },
         }, f)
     fake_tax = Taxonomy(str(tax_path))
-    monkeypatch.setattr(
-        taxonomy_mod, "load_local_taxonomy", lambda: fake_tax,
-    )
 
     db = Database(str(tmp_path / "test.db"))
     fid = workspace_folders.add_folder(db, "/photos")
@@ -8123,7 +8119,9 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(
+        target_pred["id"], replace_species=True, species_taxonomy=fake_tax,
+    )
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Wood Duck" in names                # target's corrected identity

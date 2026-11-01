@@ -77,7 +77,7 @@ from repositories.keyword_identity_sql import identity_sql
 FACADE_METHODS = (
     "_apply_case_convention",
     "resolve_species_display_name",
-    "detect_keyword_case_convention",
+    "species_case_convention",
     "_lookup_taxon_id_for_keyword",
     "_add_source_species_keyword",
 )
@@ -88,7 +88,7 @@ class KeywordRepository:
     # ``FACADE_METHODS``, declared so the type checker sees them.
     _apply_case_convention: Callable[..., Any]
     resolve_species_display_name: Callable[..., Any]
-    detect_keyword_case_convention: Callable[..., Any]
+    species_case_convention: Callable[..., Any]
     _lookup_taxon_id_for_keyword: Callable[..., Any]
     _add_source_species_keyword: Callable[..., Any]
 
@@ -491,15 +491,11 @@ class KeywordRepository:
         """``(name, kw_type, taxon_id)`` for a keyword ``add`` will insert."""
         # Apply casing convention for new species keywords
         if is_species:
-            import config as cfg
-
-            override = cfg.get("keyword_case")
-            if override and override != "auto":
-                name = self._apply_case_convention(name, override)
-            else:
-                convention = self.detect_keyword_case_convention()
-                if convention:
-                    name = self._apply_case_convention(name, convention)
+            # The configured override, else the convention detected from the
+            # existing species keywords.
+            convention = self.species_case_convention()
+            if convention:
+                name = self._apply_case_convention(name, convention)
 
         # Explicit species/taxonomy inserts still need their taxonomy link.
         # The earlier kw_type reconciliation turns is_species=True into
