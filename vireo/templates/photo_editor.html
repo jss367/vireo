@@ -645,12 +645,9 @@ body {
     max-height: 70vh;
   }
 }
-.editor-version-card { display:grid; grid-template-columns:72px minmax(0,1fr); gap:8px; padding:10px 0; border-bottom:1px solid var(--border); }
-.editor-version-card.current { border-left:3px solid var(--accent); padding-left:6px; }
-.editor-version-card img { width:72px; height:56px; object-fit:contain; background:#151515; border-radius:4px; }
-.editor-version-card strong, .editor-version-card small { display:block; overflow-wrap:anywhere; }
-.editor-version-card small { opacity:.7; margin-top:4px; }
-.editor-version-actions { grid-column:1 / -1; display:flex; gap:6px; flex-wrap:wrap; }
+.editor-version-picker { display:grid; gap:8px; margin:10px 0; }
+.editor-version-picker label { color:var(--text-secondary); font-size:12px; }
+.editor-version-actions { display:flex; gap:6px; flex-wrap:wrap; }
 </style>
 <link rel="stylesheet" href="/static/vireo-export.css">
 <link rel="stylesheet" href="/static/photo_editor_color.css">
@@ -771,12 +768,10 @@ body {
 
     <div class="panel-band">
       <div class="panel-title">Versions</div>
-      <p class="history-empty">Virtual copies share the original file and photo labels. Each copy keeps its own edits. Snapshots are saved checkpoints.</p>
+      <div id="editorVersions" aria-label="Photo versions" aria-live="polite"></div>
       <div class="button-row">
-        <button class="editor-btn" type="button" onclick="createEditorVersion('copy')">Create Virtual Copy</button>
-        <button class="editor-btn" type="button" onclick="createEditorVersion('snapshot')">Save Snapshot</button>
+        <button class="editor-btn" type="button" onclick="saveEditorSnapshot()">Save Snapshot</button>
       </div>
-      <div id="editorVersions" aria-label="Photo versions"></div>
     </div>
     <div class="panel-band">
       <div class="panel-title">Presets</div>

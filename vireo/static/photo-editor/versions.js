@@ -13,24 +13,23 @@ async function switchEditorVersion(versionId) {
   if (editorState.photoId) await loadPhoto(editorState.photoId, {versionId: versionId});
 }
 
-/** @param {'copy'|'snapshot'} kind */
-async function createEditorVersion(kind) {
-  if (!editorState.photoId || editorState.loading || maskBrush.busy || maskBrush.stroke) return;
-  var name = window.prompt(kind === 'copy' ? 'Name this virtual copy' : 'Name this snapshot', '');
+async function saveEditorSnapshot() {
+  if (!editorState.photoId || editorState.loading || maskBrush.busy || maskBrush.stroke || Object.keys(editorState.savingPhotoIds).length) return;
+  var name = window.prompt('Name this snapshot', '');
   if (name === null) return;
   var photoId = editorState.photoId, seq = editorState.loadSeq;
   finishEditorHistoryGesture();
   setEditorLoading(true);
   try {
-    /** @type {{version:EditorVersion}} */ var result = await safeFetch('/api/photos/' + photoId + '/versions', {
+    await safeFetch('/api/photos/' + photoId + '/versions', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({kind: kind, name: name.trim() || undefined, recipe: recipeForSave(editorState.recipe)}),
+      body: JSON.stringify({kind: 'snapshot', name: name.trim() || undefined, recipe: recipeForSave(editorState.recipe)}),
     }, {toast: false});
     if (editorState.loadSeq !== seq) return;
-    if (kind === 'copy') await loadPhoto(photoId, {versionId: result.version.id});
-    else { await loadEditorVersions(); showToast('Snapshot saved', 'success'); }
+    await loadEditorVersions();
+    showToast('Snapshot saved', 'success');
     if (window.renderHistoryControls) window.renderHistoryControls();
-  } catch (error) { showToast(editorErrorMessage(error) || 'Could not create version', 'error'); }
+  } catch (error) { showToast(editorErrorMessage(error) || 'Could not save snapshot', 'error'); }
   finally { if (editorState.loadSeq === seq) setEditorLoading(false); }
 }
 
@@ -68,40 +67,57 @@ function versionButton(label, action) {
   return button;
 }
 
-/** @param {EditorVersion|null} version */
-function editorVersionCard(version) {
-  var id = version ? version.id : null;
-  var current = id === editorState.versionId;
-  var card = document.createElement('div');
-  card.className = 'editor-version-card' + (current ? ' current' : '');
-  var image = document.createElement('img'); image.alt = ''; image.loading = 'lazy';
-  image.src = '/photos/' + editorState.photoId + '/edit-preview?size=256&apply_crop=1' +
-    (version ? '&version_id=' + version.id + '&v=' + version.revision : '&v=' + editorState.savedRecipeSeq);
-  image.addEventListener('error', function() {
-    var placeholder = document.createElement('small');
-    placeholder.className = 'editor-version-placeholder'; placeholder.textContent = 'Preview unavailable';
-    image.replaceWith(placeholder);
-  }, {once: true});
-  card.appendChild(image);
-  var info = document.createElement('div');
-  var name = document.createElement('strong'); name.textContent = version ? version.name : 'Original';
-  info.appendChild(name);
-  var kind = document.createElement('small');
-  kind.textContent = current ? 'Editing' : (version && version.kind === 'snapshot' ? 'Snapshot' : 'Editable');
-  info.appendChild(kind); card.appendChild(info);
+/** @param {string} id @param {string} title @param {EditorVersion[]} versions @param {string} firstOption */
+function editorVersionPicker(id, title, versions, firstOption) {
+  var row = document.createElement('div'); row.className = 'editor-version-picker';
+  var label = document.createElement('label'); label.htmlFor = id; label.textContent = title;
+  var select = document.createElement('select'); select.id = id; select.className = 'advanced-select';
+  select.add(new Option(firstOption, ''));
+  for (var version of versions) select.add(new Option(version.name, version.id));
+  row.append(label, select);
+  return {row: row, select: select};
+}
+
+/** @param {HTMLElement} row @param {EditorVersion|null} version */
+function appendEditorVersionActions(row, version) {
+  if (!version) return;
   var actions = document.createElement('div'); actions.className = 'editor-version-actions';
-  var select = versionButton(version && version.kind === 'snapshot' ? 'Restore' : 'Edit', function() {
-    if (version && version.kind === 'snapshot') {
+  actions.appendChild(versionButton('Rename', function() { changeEditorVersion(version, false); }));
+  actions.appendChild(versionButton('Delete', function() { changeEditorVersion(version, true); }));
+  row.appendChild(actions);
+}
+
+/** @param {EditorVersion[]} versions */
+function editorCopyPicker(versions) {
+  var picker = editorVersionPicker('editorVersionSelect', 'Editing', versions, 'Original');
+  picker.select.value = editorState.versionId || '';
+  picker.select.addEventListener('change', function() {
+    var versionId = picker.select.value || null;
+    // Keep the label truthful when switching is blocked or the discard prompt is canceled.
+    picker.select.value = editorState.versionId || '';
+    switchEditorVersion(versionId);
+  });
+  appendEditorVersionActions(picker.row, versions.find(function(version) { return version.id === editorState.versionId; }) || null);
+  return picker.row;
+}
+
+/** @param {EditorVersion[]} versions */
+function editorSnapshotPicker(versions) {
+  var picker = editorVersionPicker('editorSnapshotSelect', 'Snapshots', versions, 'Choose a snapshot…');
+  var actions = document.createElement('div'); actions.className = 'editor-version-actions';
+  picker.row.appendChild(actions);
+  picker.select.addEventListener('change', function() {
+    actions.replaceChildren();
+    const version = versions.find(function(item) { return item.id === picker.select.value; });
+    if (!version) return;
+    actions.appendChild(versionButton('Restore', function() {
+      if (editorState.loading || Object.keys(editorState.savingPhotoIds).length) return;
       if (isEditorDirty() && !window.confirm('Replace unsaved edits with this snapshot?')) return;
       restoreRecipe(version.recipe);
-    } else switchEditorVersion(id);
+    }));
+    appendEditorVersionActions(actions, version);
   });
-  select.disabled = current; actions.appendChild(select);
-  if (version) {
-    actions.appendChild(versionButton('Rename', function() { changeEditorVersion(version, false); }));
-    actions.appendChild(versionButton('Delete', function() { changeEditorVersion(version, true); }));
-  }
-  card.appendChild(actions); return card;
+  return picker.row;
 }
 
 async function loadEditorVersions() {
@@ -111,8 +127,9 @@ async function loadEditorVersions() {
   try {
     /** @type {{versions:EditorVersion[]}} */ var result = await safeFetch('/api/photos/' + photoId + '/versions', {}, {toast: false});
     if (seq !== editorState.loadSeq || requestSeq !== editorVersionsRequestSeq) return;
-    list.replaceChildren(editorVersionCard(null));
-    for (var version of result.versions) list.appendChild(editorVersionCard(version));
+    list.replaceChildren(editorCopyPicker(result.versions.filter(function(version) { return version.kind === 'copy'; })));
+    var snapshots = result.versions.filter(function(version) { return version.kind === 'snapshot'; });
+    if (snapshots.length) list.appendChild(editorSnapshotPicker(snapshots));
   } catch (_) {
     if (seq === editorState.loadSeq && requestSeq === editorVersionsRequestSeq) list.textContent = 'Could not load versions. Reload this photo to try again.';
   }
