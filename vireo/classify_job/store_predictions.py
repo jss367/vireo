@@ -435,11 +435,15 @@ def _xmp_review_category(
 def _store_burst_group(
     db: Database, group: list[RawResult], gid: str, model_name: str, labels_fingerprint: str,
     tax: Taxonomy | None, identity_for: Callable[[RawResult], SpeciesIdentity],
-    comparison_name: Callable[[RawResult], str],
     consensus_prediction: Callable[[list[dict[str, Any]]], dict[str, Any] | None],
-    read_keywords: Callable[[str], Iterable[str]],
+    member_categories: list[tuple[str, bool]],
 ) -> tuple[int, int]:
     """Store one burst group's predictions under its consensus vote.
+
+    ``member_categories`` is the ``(category, auto_accept)`` pair for each
+    member, computed by the caller *before* opening the write transaction so
+    the per-member XMP sidecar reads do not hold SQLite's writer lock across
+    a slow or disconnected mounted volume.
 
     Returns ``(stored, already_labeled)``; both are 0 when the group has no
     consensus.
@@ -476,11 +480,7 @@ def _store_burst_group(
     )
     stored_in_group = 0
     skipped_match = 0
-    for item in group:
-        category, auto_accept = _xmp_review_category(
-            item, tax, comparison_name, read_keywords,
-        )
-
+    for item, (category, auto_accept) in zip(group, member_categories, strict=True):
         if auto_accept:
             _store_match_prediction(
                 db, item, model_name, labels_fingerprint, tax,
@@ -507,17 +507,17 @@ def _store_burst_group(
 
 def _store_single_prediction(
     db: Database, item: RawResult, model_name: str, labels_fingerprint: str, tax: Taxonomy | None,
-    comparison_name: Callable[[RawResult], str], read_keywords: Callable[[str], Iterable[str]],
+    category: str, auto_accept: bool,
 ) -> tuple[int, int]:
     """Store a result that formed no burst group.
+
+    ``category`` / ``auto_accept`` are computed by the caller before the
+    write transaction opens; see ``_store_burst_group`` for why the XMP
+    sidecar read stays out of the transaction.
 
     Returns ``(stored, already_labeled)``: ``(0, 1)`` when it auto-accepted
     as a match, ``(1, 0)`` when it went to review.
     """
-    category, auto_accept = _xmp_review_category(
-        item, tax, comparison_name, read_keywords,
-    )
-
     if auto_accept:
         _store_match_prediction(
             db, item, model_name, labels_fingerprint, tax,
@@ -604,13 +604,17 @@ def _store_grouped_predictions(
     skipped_match = 0
 
     for group in groups:
+        # XMP sidecar reads happen outside the batch transaction so a slow
+        # mount cannot block other catalog writers under the writer lock.
+        member_categories = [
+            _xmp_review_category(item, tax, comparison_name, read_keywords)
+            for item in group
+        ]
         if len(group) == 1:
-            # Batch boundary: one photo's predictions, review state and
-            # candidate cleanup land together.
-            with db.transaction():
+            with db.transaction():  # one photo's predictions land together
                 stored, matched = _store_single_prediction(
                     db, group[0], model_name, labels_fingerprint, tax,
-                    comparison_name, read_keywords,
+                    *member_categories[0],
                 )
         else:
             group_count += 1
@@ -618,12 +622,10 @@ def _store_grouped_predictions(
                 json.dumps([job_id, model_name, labels_fingerprint]).encode()
             ).hexdigest()[:16]
             gid = f"g{group_namespace}-{group_count:04d}"
-            # Batch boundary: one burst group, consensus and members together.
-            with db.transaction():
+            with db.transaction():  # one burst group, consensus + members
                 stored, matched = _store_burst_group(
                     db, group, gid, model_name, labels_fingerprint, tax,
-                    identity_for, comparison_name, consensus_prediction,
-                    read_keywords,
+                    identity_for, consensus_prediction, member_categories,
                 )
         predictions_stored += stored
         skipped_match += matched
