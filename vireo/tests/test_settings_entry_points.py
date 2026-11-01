@@ -73,12 +73,23 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
     scopes = [node for node in ast.walk(tree)
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
     in_functions = {id(n) for scope in scopes for n in ast.walk(scope)}
-    # A top-level ``import config`` bootstraps every function-level call: a
-    # function body only runs after module import has completed, so later
-    # imports in the module are fine for calls inside functions. Module-level
-    # calls, which execute during import, still need an import that precedes
-    # them in source order and must be checked against the module body itself.
-    module_bootstrapped = any(_imports_config(node) for node in tree.body)
+    local_funcs = {
+        n.name: n for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    # Earliest module-level bootstrap, as a (lineno, col_offset) pair. ``None``
+    # if the module has no top-level bootstrap at all. A function body only
+    # runs after module import has completed, so a late module-level import
+    # still bootstraps function-level calls that are never invoked during the
+    # module's own initialization; but any function entered during init runs
+    # before a later import, so the bootstrap must precede the entry.
+    module_bootstrap_pos = None
+    for stmt in tree.body:
+        if _bootstraps(stmt) or (isinstance(stmt, ast.Expr) and _bootstraps(stmt.value)):
+            module_bootstrap_pos = (stmt.lineno, stmt.col_offset)
+            break
+    module_bootstrapped = module_bootstrap_pos is not None
+    first_init_entry = _functions_invoked_during_init(tree, local_funcs)
     offenders = []
     for node in ast.walk(tree):
         if not _opens_database(node) or id(node) in in_functions:
@@ -89,19 +100,75 @@ def unbootstrapped_database_opens(source: str) -> list[int]:
         for node in ast.walk(scope):
             if not _opens_database(node):
                 continue
-            if module_bootstrapped:
-                continue
             # Any enclosing function may have bootstrapped before this call,
             # but only a statement at the top level of that function's body
             # is guaranteed to execute before entering a nested scope: an
             # ``import config`` inside ``if cond:`` runs only when ``cond``
             # is true, so it is not a reliable bootstrap for a static check.
             enclosing = [s for s in scopes if s.lineno <= node.lineno <= (s.end_lineno or s.lineno)]
-            if not any(
-                _bootstraps_in_body(s, node.lineno) for s in enclosing
-            ):
+            if any(_bootstraps_in_body(s, node.lineno) for s in enclosing):
+                continue
+            outermost = min(enclosing, key=lambda s: s.lineno)
+            entry_pos = first_init_entry.get(outermost.name)
+            if entry_pos is not None:
+                # The outermost enclosing function is reached during module
+                # init at ``entry_pos``; the module-level bootstrap must
+                # precede that entry in source order.
+                if module_bootstrap_pos is None or module_bootstrap_pos > entry_pos:
+                    offenders.append(node.lineno)
+                continue
+            if not module_bootstrapped:
                 offenders.append(node.lineno)
     return sorted(set(offenders))
+
+
+def _walk_module_level(node: ast.AST):
+    """Yield ``node`` and its descendants, but stop at function/class/lambda
+    bodies, which do not execute until the function is called."""
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef, ast.Lambda)):
+            continue
+        yield from _walk_module_level(child)
+
+
+def _functions_invoked_during_init(
+    tree: ast.Module, local_funcs: dict[str, ast.AST]
+) -> dict[str, tuple[int, int]]:
+    """Local functions reached during module init, keyed by earliest entry
+    position. A call site at module top level enters its target then; a call
+    inside an already-reached function's own body propagates the caller's
+    entry position (that's when the call runs). Calls nested inside deferred
+    bodies — a further ``def``, ``class`` or ``lambda`` — do not."""
+    entry: dict[str, tuple[int, int]] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for child in _walk_module_level(stmt):
+            if (isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                    and child.func.id in local_funcs):
+                pos = (child.lineno, child.col_offset)
+                prev = entry.get(child.func.id)
+                if prev is None or pos < prev:
+                    entry[child.func.id] = pos
+    changed = True
+    while changed:
+        changed = False
+        for name in list(entry):
+            caller_pos = entry[name]
+            for stmt in local_funcs[name].body:
+                for child in _walk_module_level(stmt):
+                    if (isinstance(child, ast.Call)
+                            and isinstance(child.func, ast.Name)
+                            and child.func.id in local_funcs):
+                        callee = child.func.id
+                        prev = entry.get(callee)
+                        if prev is None or caller_pos < prev:
+                            entry[callee] = caller_pos
+                            changed = True
+    return entry
 
 
 def _bootstraps_in_body(scope: ast.AST, max_lineno: int) -> bool:
@@ -169,6 +236,28 @@ def test_entry_points_import_config_before_opening_a_database():
     # body statements.
     ("def f(p, items):\n    for _ in items:\n        import config\n    return Database(p)\n", [4]),
     ("def f(p, ctx):\n    with ctx:\n        import config\n    return Database(p)\n", [4]),
+    # Invoking a local function during module init runs its body before any
+    # later ``import config``: the function-level call is flagged.
+    ("def f():\n    return Database(':memory:')\nf()\nimport config\n", [2]),
+    # The module-level bootstrap precedes the invocation, so the entry is
+    # already bootstrapped by the time the function runs.
+    ("def f():\n    return Database(':memory:')\nimport config\nf()\n", []),
+    # Transitive module-init invocation: a helper called during init that
+    # itself calls a Database-opening local function entrains the callee at
+    # the helper's invocation position.
+    ("def helper():\n    f()\ndef f():\n    return Database(':memory:')\nhelper()\nimport config\n", [4]),
+    ("import config\ndef helper():\n    f()\ndef f():\n    return Database(':memory:')\nhelper()\n", []),
+    # A guarded invocation inside ``if __name__ == '__main__':`` still runs
+    # during module init when the condition is true; a bootstrap earlier in
+    # the guard counts as a module-body bootstrap (same ``if``'s own body
+    # is nested, so it does not).
+    ("def main():\n    return Database(':memory:')\nif __name__ == '__main__':\n    import config\n    main()\n", [2]),
+    # A top-level import precedes the guarded invocation, so the entry has a
+    # bootstrap in source order ahead of it.
+    ("import config\ndef main():\n    return Database(':memory:')\nif __name__ == '__main__':\n    main()\n", []),
+    # A function defined but never invoked during init is bootstrapped by a
+    # late module-level import, since it only runs after module init.
+    ("def f(p):\n    return Database(p)\ndef g(p):\n    pass\ng(1)\nimport config\n", []),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines
