@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "vireo"
 version = "0.69.0"
 description = "AI-powered wildlife photo organizer"
-license = "MIT AND GPL-3.0-or-later"
-license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "vireo/data/denoise/LICENSE.txt", "vireo/data/denoise/NOTICE.txt", "vireo/data/native-detail/THIRD_PARTY_LICENSES.txt"]
+license = "MIT AND GPL-3.0-or-later AND CC-BY-SA-3.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "vireo/data/denoise/LICENSE.txt", "vireo/data/denoise/NOTICE.txt", "vireo/data/native-detail/THIRD_PARTY_LICENSES.txt", "vireo/data/lensfun/LICENSE.txt", "vireo/data/lensfun/NOTICE.txt"]
 requires-python = ">=3.14"
 dependencies = [
     "certifi>=2024.0.0",
@@ -22,7 +22,7 @@ dependencies = [
     "onnxruntime>=1.22.0",
     "Pillow>=12.1.1",
     "tifffile>=2026.1.28",
-    "rawpy>=0.26.1",
+    "rawpy>=0.28.0",
     "requests>=2.32.0",
     "scipy>=1.17.1",
     "exifread>=3.0",
@@ -82,6 +82,8 @@ include = ["vireo*"]
 vireo = [
     "data/**/*.json",
     "data/denoise/*.txt",
+    "data/lensfun/*.xml",
+    "data/lensfun/*.txt",
     "data/native-detail/*.txt",
     "templates/**/*.html",
     "static/**/*",

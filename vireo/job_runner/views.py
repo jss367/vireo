@@ -4,18 +4,24 @@ import time
 from datetime import datetime
 
 from job_runner.outcome import attach_result_text
+from job_runner.pause_policy import resolve_pause_policy
 from resource_ledger import get_resource_ledger
 
 
 def new_job_dict(job_id, job_type, *, config, workspace_id,
                  ephemeral, counts_for_badge, pausable,
                  blocks_local_transitions, runtime_warning,
-                 singleton_key=None, now=None):
+                 singleton_key=None, workspace_paths=None, lineage=None):
+    """A fresh running job; ``lineage`` is ``resolve_lineage``'s fields."""
+    lineage = lineage or {
+        "origin": "user", "parent_job_id": None, "reason": None, "task_scope": None,
+    }
+    pausable, pause_unavailable_reason = resolve_pause_policy(job_type, pausable)
     return {
         "id": job_id,
         "type": job_type,
         "status": "running",
-        "started_at": now or datetime.now().isoformat(),
+        "started_at": datetime.now().isoformat(),
         "finished_at": None,
         "progress": {"current": 0, "total": 0, "current_file": ""},
         "result": None,
@@ -26,11 +32,22 @@ def new_job_dict(job_id, job_type, *, config, workspace_id,
         "ephemeral": ephemeral,
         "counts_for_badge": counts_for_badge,
         "pausable": bool(pausable),
+        "pause_unavailable_reason": pause_unavailable_reason,
+        "cancellable": True,
+        "control_unavailable_reason": None,
         "blocks_local_transitions": bool(blocks_local_transitions),
         "exclusive_workspace": False,
         "workspace_transfer_batch": None,
+        # The folder trees the job reads or writes, realpath'd, when it
+        # declared them; None means "anywhere in the workspace". A transfer's
+        # are the trees it moves; see job_runner.reservations.
+        "workspace_paths": list(workspace_paths) if workspace_paths else None,
         "runtime_warning": runtime_warning,
         "singleton_key": singleton_key,
+        "origin": lineage["origin"],
+        "parent_job_id": lineage["parent_job_id"],
+        "reason": lineage["reason"],
+        "task_scope": lineage["task_scope"],
         "resource_wait_seconds": 0.0,
         "resource_wait_count": 0,
         # Pre-seeded so later writes from worker threads update an
@@ -70,8 +87,19 @@ def synthesize_queued_view(job_id, ctx):
         "counts_for_badge": True,
         "pausable": False,
         "runtime_warning": ctx.get("runtime_warning"),
+        **queued_lineage(ctx),
         "resource_wait_seconds": 0.0,
         "resource_wait_count": 0,
+    }
+
+
+def queued_lineage(ctx):
+    """A queued pipeline context's lineage fields (absent: the user's own run)."""
+    return {
+        "origin": ctx.get("origin") or "user",
+        "parent_job_id": ctx.get("parent_job_id"),
+        "reason": ctx.get("reason"),
+        "task_scope": ctx.get("task_scope"),
     }
 
 

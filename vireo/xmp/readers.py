@@ -269,6 +269,7 @@ def read_sync_preview_metadata(xmp_path):
         "location_source": None,
         "location_keywords": None,
         "edit_recipe": None,
+        "photo_versions": None,
     }
     try:
         root = ET.parse(path).getroot()
@@ -321,4 +322,5 @@ def read_sync_preview_metadata(xmp_path):
         "location_source": location_source,
         "location_keywords": _get_property(root, LOCATION_KEYWORDS_MARKER),
         "edit_recipe": _get_property(root, f"{{{NS_VIREO}}}editRecipe"),
+        "photo_versions": _get_property(root, f"{{{NS_VIREO}}}photoVersions"),
     }

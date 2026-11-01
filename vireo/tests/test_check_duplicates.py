@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -684,8 +685,8 @@ def test_check_duplicates_zero_byte_source_not_recovered_from_fifo(
     """A FIFO at the planned name is not a recovery, matching the import
     job's S_ISREG guard: it stats as size 0, so without the regular-file
     rule both sides would treat it as this empty source's archive copy.
-    The preview gets this right for free — ``_planned_folder_listing``
-    only records ``is_file(follow_symlinks=False)`` entries."""
+    The preview retains the occupied name but records no regular-file
+    metadata for it, so the shared adoption policy cannot accept it."""
     from datetime import datetime
 
     app, db, fid = app_and_db
@@ -717,28 +718,11 @@ def test_check_duplicates_zero_byte_source_not_recovered_from_fifo(
     sys.platform == "win32",
     reason="os.symlink usually requires elevation on Windows.",
 )
-def test_check_duplicates_symlinked_candidate_is_not_reported_recovered(
-    app_and_db, tmp_path
+@pytest.mark.parametrize("with_source_roots", [False, True])
+def test_check_duplicates_recovery_follows_offcard_symlinks_only_with_source_roots(
+    app_and_db, tmp_path, with_source_roots,
 ):
-    """KNOWN DIVERGENCE, deliberately deferred to PR 8 (the preflight
-    de-mirror): a candidate that is a symlink to an off-card regular file
-    with this source's bytes IS adopted by the run — pinned by
-    ``test_symlinked_offcard_candidate_is_adopted`` in the import-job
-    suite — but the preview reports it as still needing transfer.
-
-    ``_planned_folder_listing`` excludes symlinks, so the slot reads as
-    free. PR 7b tried following them and reverted: the walk refuses a
-    candidate resolving under ANY source root, whereas this endpoint's
-    ``_is_source`` can only compare ``samefile`` against the current
-    source file, so a symlink to a *different* card file with identical
-    bytes was reported as recovered — an OVER-claim promising "already
-    safe at the destination" for bytes that live only on the card. This
-    endpoint receives ``paths``, never the import's source roots, so it
-    cannot rebuild that guard; doing it right needs the shared walk.
-
-    So the preview under-reports here, which is the safe direction, and
-    this test pins that until PR 8. Codex review of #1450, rounds 4-5.
-    """
+    """Follow safe links with complete roots; legacy clients under-report."""
     from datetime import datetime
 
     app, db, fid = app_and_db
@@ -764,11 +748,12 @@ def test_check_duplicates_symlinked_candidate_is_not_reported_recovered(
     resp = client.post("/api/import/check-duplicates", json={
         "paths": [str(src)],
         "destination": str(dest),
+        **({"sources": [str(source)]} if with_source_roots else {}),
     })
     events = parse_sse_events(resp.data)
     done = [e for e in events if e.get("done")]
-    assert done[0]["recovered_count"] == 0
-    assert _recovered_paths(events) == []
+    assert done[0]["recovered_count"] == int(with_source_roots)
+    assert _recovered_paths(events) == ([str(src)] if with_source_roots else [])
 
 
 @pytest.mark.skipif(
@@ -776,19 +761,9 @@ def test_check_duplicates_symlinked_candidate_is_not_reported_recovered(
     reason="os.symlink usually requires elevation on Windows.",
 )
 def test_check_duplicates_never_reports_recovery_via_a_card_symlink(
-    app_and_db, tmp_path
+    app_and_db, tmp_path,
 ):
-    """THE SAFETY DIRECTION, and the reason the symlink exclusion stays.
-
-    A candidate symlinked to a DIFFERENT file on the card with bytes
-    identical to this source must never be reported as recovered: the
-    bytes live only on the card, and claiming "already at the
-    destination" is the over-report that could talk a user into wiping
-    it. The import walk refuses this geometry via
-    ``_is_source_backed_dest``'s under-any-source-root check; this
-    endpoint has no equivalent, and excluding symlinks is what keeps it
-    honest until PR 8 lets both sides share one walk.
-    """
+    """A different file on the same card cannot prove off-card recovery."""
     from datetime import datetime
 
     app, db, fid = app_and_db
@@ -814,11 +789,66 @@ def test_check_duplicates_never_reports_recovery_via_a_card_symlink(
     resp = client.post("/api/import/check-duplicates", json={
         "paths": [str(src)],
         "destination": str(dest),
+        "sources": [str(card)],
     })
     events = parse_sse_events(resp.data)
     done = [e for e in events if e.get("done")]
     assert done[0]["recovered_count"] == 0, (
         "reported recovery for bytes that exist only on the card"
+    )
+    assert _recovered_paths(events) == []
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.symlink usually requires elevation on Windows.",
+)
+@pytest.mark.parametrize("with_source_roots", [False, True])
+def test_check_duplicates_recovery_stops_at_unverifiable_primary_symlink(
+    app_and_db, tmp_path, with_source_roots,
+):
+    """A primary that symlinks to another card file poisons the walk.
+
+    A legacy client (no ``sources``) cannot verify where the primary link
+    points, so advancing past it to a byte-identical ``name_1.ext`` would
+    report "recovered" for a file the real importer rejects via its
+    source-root guard. Both the omitted-roots case and the complete-roots
+    case must therefore drop the file from the recovery stream.
+    """
+    from datetime import datetime
+
+    app, db, fid = app_and_db
+
+    card = tmp_path / "card"
+    card.mkdir(exist_ok=True)
+    src = card / "IMG.jpg"
+    src.write_bytes(b"the real bytes")
+    other = card / "other.jpg"
+    other.write_bytes(b"different bytes on the card")  # different inode + bytes
+    ts = datetime(2026, 7, 3, 10, 0, 0).timestamp()
+    for p in (src, other):
+        os.utime(str(p), (ts, ts))
+
+    dest = tmp_path / "archive"
+    planned = dest / "2026" / "2026-07-03"
+    planned.mkdir(parents=True)
+    # Primary name links to a different card file (not the source).
+    os.symlink(str(other), str(planned / "IMG.jpg"))
+    # A later matching regular file sits at the suffix slot the walk
+    # would advance to; without the primary-symlink stop, legacy clients
+    # would misreport this as recovery.
+    (planned / "IMG_1.jpg").write_bytes(b"the real bytes")
+
+    client = app.test_client()
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(src)],
+        "destination": str(dest),
+        **({"sources": [str(card)]} if with_source_roots else {}),
+    })
+    events = parse_sse_events(resp.data)
+    done = [e for e in events if e.get("done")]
+    assert done[0]["recovered_count"] == 0, (
+        "advanced past an unverifiable primary symlink to a card-matching suffix"
     )
     assert _recovered_paths(events) == []
 
@@ -1398,3 +1428,218 @@ def test_closed_duplicate_check_stops_companion_recovery(
     assert len(hashed) == 1
     assert db.conn.execute(
         "SELECT COUNT(*) FROM companion_identities").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("sources", [[], "not-a-list", ["relative/card"], [None], [1]])
+def test_check_duplicates_rejects_invalid_source_roots(app_and_db, tmp_path, sources):
+    app, _, _ = app_and_db
+    source = _make_dated_source(tmp_path)
+    response = app.test_client().post("/api/import/check-duplicates", json={
+        "paths": [str(source)], "sources": sources,
+        "destination": str(tmp_path / "archive"),
+    })
+    assert response.status_code == 400
+    assert "sources" in response.json["error"]
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("geometry,expected", [
+    ("match", "recovered"),
+    ("different_bytes", "copied"),
+    ("free_before_match", "copied"),
+    ("directory_before_match", "recovered"),
+    ("unreadable_before_match", "recovered"),
+    ("dangling_before_match", "recovered"),
+    ("fifo_before_match", "recovered"),
+    ("offcard_link", "recovered"),
+    ("offcard_suffix_link", "recovered"),
+    ("other_source_suffix_link", "recovered"),
+    ("other_source_suffix_link_without_archive", "copied"),
+    ("other_source_primary_link", "failed"),
+])
+def test_preview_and_import_recovery_agree(
+        app_and_db, tmp_path, monkeypatch, remote, geometry, expected):
+    """Exercise HTTP preview and both real import walks against the same files."""
+    from import_job import ImportParams
+    from test_import_job import (
+        _install_fake_remote_rsync,
+        _remote_archive_for,
+        _remote_calls,
+        _run_import,
+    )
+
+    if ("link" in geometry or "dangling" in geometry) and sys.platform == "win32":
+        pytest.skip("symlink creation usually requires elevation on Windows")
+    if geometry == "fifo_before_match" and not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation unavailable")
+    app, _, _ = app_and_db
+    source = _make_dated_source(tmp_path)
+    other_card = tmp_path / "other-card"
+    other_card.mkdir()
+    other_source = other_card / "unselected.bin"
+    other_source.write_bytes(source.read_bytes())
+    roots = [str(source.parent), str(other_card)]
+    archive = tmp_path / "archive"
+    remote_target = None
+    if remote:
+        remote_target = _remote_archive_for(tmp_path)
+        archive = tmp_path / "mount"
+        _install_fake_remote_rsync(monkeypatch, _remote_calls(remote_target))
+    folder = archive / "2026" / "2026-07-03"
+    folder.mkdir(parents=True)
+    primary = folder / source.name
+    suffix = folder / f"{source.stem}_1{source.suffix}"
+    if geometry == "match":
+        primary.write_bytes(source.read_bytes())
+    elif geometry in (
+        "different_bytes", "free_before_match", "other_source_suffix_link",
+        "other_source_suffix_link_without_archive",
+    ):
+        primary.write_bytes(b"different content")
+        if geometry == "free_before_match":
+            (folder / f"{source.stem}_2{source.suffix}").write_bytes(source.read_bytes())
+        elif geometry.startswith("other_source_suffix_link"):
+            suffix.symlink_to(other_source)
+            if geometry == "other_source_suffix_link":
+                (folder / f"{source.stem}_2{source.suffix}").write_bytes(source.read_bytes())
+    elif geometry in ("directory_before_match", "unreadable_before_match"):
+        if geometry == "directory_before_match":
+            primary.mkdir()
+        else:
+            primary.write_bytes(source.read_bytes())
+            real_stat = os.stat
+
+            def fail_primary_stat(path, *args, **kwargs):
+                if str(path) == str(primary):
+                    raise PermissionError("unreadable candidate")
+                return real_stat(path, *args, **kwargs)
+
+            monkeypatch.setattr(os, "stat", fail_primary_stat)
+        suffix.write_bytes(source.read_bytes())
+    elif geometry == "dangling_before_match":
+        primary.symlink_to(tmp_path / "missing")
+        suffix.write_bytes(source.read_bytes())
+    elif geometry == "fifo_before_match":
+        os.mkfifo(primary)
+        suffix.write_bytes(source.read_bytes())
+    elif geometry == "other_source_primary_link":
+        primary.symlink_to(other_source)
+        suffix.write_bytes(source.read_bytes())
+    else:
+        target = tmp_path / "offcard.jpg"
+        target.write_bytes(source.read_bytes())
+        if geometry == "offcard_suffix_link":
+            primary.mkdir()
+            suffix.symlink_to(target)
+        else:
+            primary.symlink_to(target)
+    response = app.test_client().post("/api/import/check-duplicates", json={
+        "paths": [str(source)], "sources": roots, "destination": str(archive),
+        "skip_duplicates": False,
+    })
+    assert response.status_code == 200
+    events = parse_sse_events(response.data)
+    assert events[-1]["recovered_count"] == int(expected == "recovered")
+    _, _, result = _run_import(tmp_path, ImportParams(
+        sources=roots, destination=str(archive), skip_duplicates=False,
+        remote_target=remote_target, verify_by_hash=True,
+    ))
+    assert result["skipped_duplicate"] == int(expected == "recovered"), result
+    assert result["copied"] == int(expected == "copied"), result
+    assert result["failed"] == int(expected == "failed"), result
+    assert source.is_file() and other_source.is_file()
+
+
+@pytest.mark.parametrize("phase", ["listing", "suffixes"])
+@pytest.mark.parametrize("alternate_spelling", [False, True])
+def test_closed_recovery_preview_stops_long_walks(
+        app_and_db, tmp_path, monkeypatch, phase, alternate_spelling):
+    from web import imports
+
+    app, _, _ = app_and_db
+    source = _make_dated_source(tmp_path)
+    folder = tmp_path / "archive" / "2026" / "2026-07-03"
+    folder.mkdir(parents=True)
+    # Non-regular entries used to disappear from the listing. Walking them
+    # must yield so a disconnected request doesn't keep probing suffixes.
+    for slot in range(4):
+        name = source.name if slot == 0 else f"{source.stem}_{slot}{source.suffix}"
+        (folder / name).mkdir()
+    (folder / f"{source.stem}_4{source.suffix}").write_bytes(source.read_bytes())
+    checkpoints = []
+
+    def checkpoint(stream):
+        # Planner paths may use forward slashes on Windows or contain '.'.
+        in_listing = folder not in map(Path, stream.dir_listings)
+        checkpoints.append("listing" if in_listing else "suffixes")
+        if checkpoints[-1] == phase:
+            # Emit only in the target phase. Delegating to the real checkpoint
+            # in the other phase would race the 0.1s interval — the init-time
+            # last_recovery_flush can elapse during catalog indexing on a
+            # loaded run, firing a listing frame that closes the response
+            # before any suffix checkpoint runs.
+            yield ": checking recovery candidates\n\n"
+
+    monkeypatch.setattr(imports._DuplicateCheckStream, "_recovery_checkpoint", checkpoint)
+    destination = str(tmp_path / "archive")
+    if alternate_spelling:
+        destination = os.path.join(destination, ".")
+    response = app.test_client().post("/api/import/check-duplicates", json={
+        "paths": [str(source)], "sources": [str(source.parent)],
+        "destination": destination, "skip_duplicates": False,
+    }, buffered=False)
+    for frame in response.response:
+        if b": checking recovery candidates" in frame:
+            response.close()
+            break
+    else:
+        pytest.fail("long recovery work never yielded a cancellation boundary")
+    assert checkpoints.count(phase) == 1
+
+
+@pytest.mark.parametrize("alternate_spelling", [False, True])
+def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
+        app_and_db, tmp_path, monkeypatch, alternate_spelling):
+    import scanner
+    from import_job import collision
+    from web import imports
+
+    app, _, _ = app_and_db
+    sources = [_make_dated_source(tmp_path, name=f"IMG_{i}.jpg") for i in range(3)]
+    folder = tmp_path / "archive" / "2026" / "2026-07-03"
+    folder.mkdir(parents=True)
+    for source in sources:
+        (folder / source.name).write_bytes(b"wrong size")
+        (folder / f"{source.stem}_1.jpg").write_bytes(source.read_bytes())
+    listings, hashes, guard_probes = [], [], []
+    real_guard = collision._is_source_backed_path
+    real_scandir, real_hash = os.scandir, scanner.compute_file_hash
+
+    def scandir(path):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == folder:
+            listings.append(Path(path))
+        return real_scandir(path)
+
+    def file_hash(path):
+        hashes.append(Path(path))
+        return real_hash(path)
+
+    def guard(source, candidate, under_source):
+        guard_probes.append(Path(candidate))
+        return real_guard(source, candidate, under_source)
+
+    monkeypatch.setattr(collision, "_is_source_backed_path", guard)
+    monkeypatch.setattr(imports.os, "scandir", scandir)
+    monkeypatch.setattr(scanner, "compute_file_hash", file_hash)
+    destination = str(tmp_path / "archive")
+    if alternate_spelling:
+        destination = os.path.join(destination, ".")
+    response = app.test_client().post("/api/import/check-duplicates", json={
+        "paths": [str(p) for p in sources], "sources": [str(sources[0].parent)],
+        "destination": destination, "skip_duplicates": False,
+    })
+    assert parse_sse_events(response.data)[-1]["recovered_count"] == 3
+    assert len(listings) == 1
+    assert len(hashes) == 6  # One matching candidate and one source per file.
+    assert all(folder / source.name not in hashes for source in sources)
+    assert guard_probes == [folder / f"{source.stem}_1.jpg" for source in sources]

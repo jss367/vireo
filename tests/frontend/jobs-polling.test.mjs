@@ -19,6 +19,7 @@ function harness() {
     // on abort being honored by every transport/body decoder.
     fetch: (url, options) => new Promise((resolve, reject) => requests.push({url, options, resolve, reject})),
     updateList() {}, updateRunningBadge() {}, populateTypeFilter() {},
+    selectedOriginFilter: () => '',
     renderDetail: job => renders.push(['active', job.id]),
     renderHistoryDetail: job => renders.push(['history', job.id]),
     renderActiveOverview: () => renders.push(['active-overview']),

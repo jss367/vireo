@@ -100,7 +100,7 @@ def test_unknown_job_type_is_protected_by_default(runner_with_recorder):
     protecting costs a dead multi-hour job."""
     runner, recorder = runner_with_recorder
 
-    job_id = runner.start("some-future-job", lambda job: {"ok": True})
+    job_id = runner.start("some-future-job", lambda job: {"ok": True}, pausable=False)
     wait_for_job_via_runner(runner, job_id)
 
     wait_until(lambda: recorder.stopped == 1, what="inhibitor release")

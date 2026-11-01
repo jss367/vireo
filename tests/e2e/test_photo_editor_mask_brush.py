@@ -94,6 +94,33 @@ def test_brush_inverse_geometry(page, live_server, masked_photo, rotation, flip)
     assert point == pytest.approx([0.3, 0.6])
 
 
+@pytest.mark.parametrize('amount', [-100, 100])
+def test_distorted_brush_paints_the_visible_cursor_footprint(page, live_server, masked_photo, amount):
+    open_mask(page, live_server, masked_photo)
+    page.evaluate("amount => setAdjustment('distortion', amount)", amount)
+    page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
+    page.locator('#maskBrushSize').fill('80')
+    radius = page.evaluate('maskBrushFootprint(document.getElementById("editorImg")).radius')
+    requests = []
+    page.on('request', lambda request: requests.append(request.post_data_json)
+            if request.url.endswith('/local-mask/correct') else None)
+    stroke(page, 'add', 0.83, 0.75)
+    assert requests[-1]['optics'] == {'distortion': amount, 'warp': None}
+    assert requests[-1]['points'][0] == pytest.approx([0.83, 0.75], abs=0.005)
+    recipe = page.evaluate('recipeForSave(editorState.recipe)')
+    response = page.request.get(f"{live_server['url']}/photos/{masked_photo}/edit-mask-preview",
+                                params={'recipe': json.dumps(recipe), 'size': 256})
+    assert response.ok
+    alpha = np.asarray(Image.open(io.BytesIO(response.body())))[..., 3]
+    ys, xs = np.where((alpha > 75) & (np.indices(alpha.shape)[1] > 165))
+    assert len(xs) > 0
+    assert (xs.min() + xs.max()) / 2 == pytest.approx(0.83 * 255, abs=2)
+    assert (ys.min() + ys.max()) / 2 == pytest.approx(0.75 * 127, abs=2)
+    diameter = 2 * radius * 128
+    assert xs.max() - xs.min() + 1 == pytest.approx(diameter, abs=4)
+    assert ys.max() - ys.min() + 1 == pytest.approx(diameter, abs=4)
+
+
 def test_brush_failure_and_cancel_preserve_recipe(page, live_server, masked_photo):
     open_mask(page, live_server, masked_photo)
     page.route('**/local-mask/correct', lambda route: route.fulfill(status=400, json={'error': 'Mask unavailable'}))

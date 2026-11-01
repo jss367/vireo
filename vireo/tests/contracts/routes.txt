@@ -18,6 +18,7 @@ DELETE       /api/settings/workspace/<path:key>
 DELETE       /api/species-highlights
 DELETE       /api/workspaces/<int:ws_id>
 DELETE       /api/workspaces/<int:ws_id>/folders/<int:folder_id>
+DELETE,GET,PUT /api/photos/<int:photo_id>/versions/<version_id>
 GET          /
 GET          /api/audit/drift
 GET          /api/audit/integrity
@@ -112,6 +113,7 @@ GET          /api/photos/<int:photo_id>/edit-recipe
 GET          /api/photos/<int:photo_id>/pipeline
 GET          /api/photos/<int:photo_id>/similar
 GET          /api/photos/<int:photo_id>/subjects
+GET          /api/photos/<int:photo_id>/versions/<version_id>/history
 GET          /api/photos/<int:pid>/masks
 GET          /api/photos/calendar
 GET          /api/photos/color_labels
@@ -227,6 +229,7 @@ GET          /workspace
 GET,POST     /api/edit-presets
 GET,POST     /api/jobs/<job_id>/source-cleanup
 GET,POST     /api/misses
+GET,POST     /api/photos/<int:photo_id>/versions
 GET,POST     /api/photos/geo
 GET,POST     /api/pipeline/config
 GET,PUT      /api/editor/crop-ratio

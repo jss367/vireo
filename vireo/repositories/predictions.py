@@ -79,10 +79,11 @@ from typing import Any
 
 from keyword_normalization import normalize_keyword_display
 from repositories.prediction_review import prediction_review_join, prediction_review_status
+from settings_source import config_value
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (
-    "get_effective_config",
+    "effective_config",
     "_build_query_from_rules",
     "_relax_negated_prediction_leaves",
     "_filter_prediction_rows_by_rules",
@@ -98,7 +99,7 @@ class DeferredIdentificationError(ValueError):
 class PredictionRepository:
     # Bound ``Database`` methods that ``__init__`` installs from
     # ``FACADE_METHODS``, declared so the type checker sees them.
-    get_effective_config: Callable[..., Any]
+    effective_config: Callable[..., Any]
     _build_query_from_rules: Callable[..., Any]
     _relax_negated_prediction_leaves: Callable[..., Any]
     _filter_prediction_rows_by_rules: Callable[..., Any]
@@ -758,10 +759,9 @@ class PredictionRepository:
         """
         if not photo_ids:
             return {}
-        import config as cfg
-        effective = self.get_effective_config(cfg.load())
+        effective = self.effective_config()
         threshold = effective.get("classifier_confidence", 0.0) or 0.0
-        detector_floor = effective.get("detector_confidence", 0.2)
+        detector_floor = config_value(effective, "detector_confidence")
         ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
         states = {
             pid: {
@@ -815,10 +815,7 @@ class PredictionRepository:
         """
         if not photo_ids:
             return {}
-        import config as cfg
-        detector_floor = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        detector_floor = config_value(self.effective_config(), "detector_confidence")
         ws = self.workspace_id
         ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
         rows_by_photo = {}
@@ -901,11 +898,8 @@ class PredictionRepository:
         It applies only when the tree can be resolved safely per row — see
         that method's docstring for the fallback to the SQL result.
         """
-        import config as cfg
         ws = self.workspace_id
-        detector_floor = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        detector_floor = config_value(self.effective_config(), "detector_confidence")
         base_conditions = [
             "wf.workspace_id = ?",
             "(d.detector_model = 'full-image' OR d.detector_confidence >= ?)",
@@ -1453,8 +1447,7 @@ class PredictionRepository:
         if not photo_ids:
             return {}
         ws = self.workspace_id
-        import config as cfg
-        detector_floor = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
+        detector_floor = config_value(self.effective_config(), "detector_confidence")
         results = {}
         for chunk in self._chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)

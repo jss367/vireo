@@ -3,7 +3,7 @@
 
 import { jobsElement, state } from './state.js';
 import { bindDetailPaneActions } from './actions.js';
-import { applyFilters, bindJobListClicks } from './list.js';
+import { applyFilters, applyOriginFilter, bindJobListClicks } from './list.js';
 import { fetchHistory, fetchJobs, retryJobsPolling } from './polling.js';
 import { bindSourceCleanupConfirm } from './source-cleanup.js';
 import { bindStepRetryButtons } from './steps.js';
@@ -18,6 +18,7 @@ jobsElement('retryJobsPolling', HTMLButtonElement).addEventListener('click', ret
 // The type and status filters used to carry onchange="applyFilters()".
 jobsElement('filterType', HTMLSelectElement).addEventListener('change', applyFilters);
 jobsElement('filterStatus', HTMLSelectElement).addEventListener('change', applyFilters);
+jobsElement('filterOrigin', HTMLSelectElement).addEventListener('change', applyOriginFilter);
 
 // Initial load
 fetchJobs();

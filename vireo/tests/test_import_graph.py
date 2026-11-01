@@ -18,9 +18,9 @@ below it; an import that points to a higher layer is an *upward edge*:
    ``keyword_normalization``, ``duplicates``, ...).
 1. **data**: ``db``, ``repositories/``, ``canonical_schema``, ``schema`` and
    the other ``DATA_MODULES``. They depend only on ``sqlite3``, the schema and
-   foundation helpers. Configuration reaches them as values from the caller
-   (``db.get_effective_config(cfg.load())`` is the caller's job), never by
-   importing ``config``.
+   foundation helpers. Global settings reach them through the
+   ``settings_source`` port (``config`` installs itself there on import) and
+   ``Database.effective_config()``, never by importing ``config``.
 2. **application**: ``services/``, the job machinery (``jobs``,
    ``job_runner/``, ``import_job/``, ``classify_job/``), the pipeline
    (``pipeline*``, ``pipeline_stages/``) and every other top-level domain
@@ -82,6 +82,7 @@ FOUNDATION = frozenset({
     "edit_recipe",
     "keyword_normalization",
     "process_strategies",
+    "settings_source",
     "species_identity",
     "species_memberships",
     "sql_chunks",
@@ -95,6 +96,9 @@ DATA_MODULES = frozenset({
     "schema",
     "photo_visibility_schema",
     "metadata_search",
+    "new_images_cache",
+    "catalog_result_files",
+    "species_identity_repair",
 })
 
 WEB_PACKAGES = ("web",)

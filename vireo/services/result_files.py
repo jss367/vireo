@@ -9,41 +9,32 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from typing import TYPE_CHECKING
+
+from catalog_result_files import result_files
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Iterable
 
 log = logging.getLogger(__name__)
-RESULT_NAME = re.compile(r"^(pipeline|culling)_results_ws([1-9][0-9]*)\.json$")
 
 
-def result_files(catalog_dir: str) -> list[tuple[str, str, int]]:
-    try:
-        with os.scandir(catalog_dir or os.curdir) as entries:
-            return [
-                (entry.path, match[1], int(match[2]))
-                for entry in entries
-                if (match := RESULT_NAME.fullmatch(entry.name)) and entry.is_file()
-                and not entry.is_symlink()
-                and int(match[2]) < 2**63 - 1
-            ]
-    except FileNotFoundError:
-        return []
+def delete_workspace_results(
+    catalog_dir: str, workspace_id: int | str, removed: list[str] | None = None,
+) -> list[str]:
+    """Remove a workspace's result files; return the errors.
 
-
-def highest_workspace_id(catalog_dir: str) -> int:
-    return max((ws for _path, _kind, ws in result_files(catalog_dir)), default=0)
-
-
-def delete_workspace_results(catalog_dir: str, workspace_id: int | str) -> list[str]:
+    Paths actually removed are appended to ``removed`` when it is given, so
+    a caller can report the work done, not only the failures.
+    """
     errors = []
     workspace_id = int(workspace_id)
     for kind in ("pipeline", "culling"):
         path = os.path.join(catalog_dir, f"{kind}_results_ws{workspace_id}.json")
         try:
             os.unlink(path)
+            if removed is not None:
+                removed.append(path)
         except FileNotFoundError:
             pass
         except OSError as exc:

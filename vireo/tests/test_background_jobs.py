@@ -152,7 +152,7 @@ def test_runner_is_looked_up_per_request():
     @app.route("/api/jobs/demo", methods=["POST"])
     @background_job
     def api_job_demo(ctx):
-        return ctx.start("demo", lambda job: None)
+        return ctx.start("demo", lambda job: None, pausable=False)
 
     client = app.test_client()
     client.post("/api/jobs/demo")

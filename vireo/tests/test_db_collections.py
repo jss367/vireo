@@ -1113,7 +1113,7 @@ def test_collection_repository_wiring(db, monkeypatch):
     db.set_active_workspace(1)
     assert repo.workspace_id == 1
     assert repo.conn is db.conn
-    assert repo.get_effective_config == db.get_effective_config
+    assert repo.effective_config == db.effective_config
     assert repo.get_subject_types == db.get_subject_types
     assert repo.get_folder_subtree_ids == db.get_folder_subtree_ids
     assert repo._chunks is db_module._chunks

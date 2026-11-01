@@ -24,6 +24,7 @@ from db import (
     Database,
     normalize_browse_stack_config,
 )
+from new_images import get_new_images_for_workspace
 from repositories.workspaces import WorkspaceRepository
 from services import workspace_config, workspace_folders, workspace_lifecycle
 
@@ -504,12 +505,12 @@ def test_get_new_images_for_workspace_uses_cache(db, monkeypatch):
     monkeypatch.setattr(new_images, "count_new_images_for_workspace", fake_count)
     ws_id = db._ws_id()
     db.invalidate_new_images_cache_for_workspace(ws_id)
-    first = db.get_new_images_for_workspace(ws_id)
-    second = db.get_new_images_for_workspace(ws_id)
+    first = get_new_images_for_workspace(db, ws_id)
+    second = get_new_images_for_workspace(db, ws_id)
     assert first == second == {"new_count": 1}
     assert calls == [ws_id]
     db.invalidate_new_images_cache_for_workspace(ws_id)
-    assert db.get_new_images_for_workspace(ws_id) == {"new_count": 2}
+    assert get_new_images_for_workspace(db, ws_id) == {"new_count": 2}
 
 
 # -- legacy config migrations -------------------------------------------------

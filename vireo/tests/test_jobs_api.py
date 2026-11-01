@@ -1932,7 +1932,7 @@ def test_job_cancel_running_job_marks_cancelled(app_and_db):
             time.sleep(0.05)
         return {"stopped": False}
 
-    job_id = runner.start("test", slow_work)
+    job_id = runner.start("test", slow_work, pausable=False)
 
     with app.test_client() as c:
         resp = c.post(f"/api/jobs/{job_id}/cancel")
@@ -1953,7 +1953,7 @@ def test_job_cancel_finished_job_returns_404(app_and_db):
     def quick_work(job):
         return {"ok": True}
 
-    job_id = runner.start("test", quick_work)
+    job_id = runner.start("test", quick_work, pausable=False)
 
     wait_for_job_via_runner(runner, job_id)
 
@@ -2006,7 +2006,7 @@ def test_job_pause_api_rejects_unsupported_job(app_and_db):
         release.wait(timeout=synchronization_timeout(2))
         return {}
 
-    job_id = runner.start("test", work)
+    job_id = runner.start("test", work, pausable=False)
     with app.test_client() as c:
         resp = c.post(f"/api/jobs/{job_id}/pause")
         assert resp.status_code == 409
@@ -5466,9 +5466,9 @@ def test_recovery_options_reads_pipeline_outside_history_window(
 ):
     app, db = app_and_db
     db.conn.execute(
-        "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) "
+        "INSERT INTO job_history (id,type,status,started_at,parent_job_id,result,workspace_id) "
         "VALUES ('old-pipeline','pipeline',?,'2020-01-01',?,?,?)",
-        (pipeline_status, json.dumps({"chained_from": "interrupted-import"}),
+        (pipeline_status, "interrupted-import",
          json.dumps(pipeline_result) if pipeline_result is not None else None,
          db.active_workspace_id),
     )
@@ -5810,6 +5810,238 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     assert not os.path.exists(staging)
     assert client.get("/api/import/pending-archives").get_json()["items"] == []
     assert client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["already_sent"]
+
+
+@pytest.mark.parametrize("action", ["resume", "cancel"])
+def test_pending_archive_pause_releases_sync_lock_and_retains_originals(app_and_db, tmp_path, monkeypatch, action):
+    import move
+    from wait import wait_for_job
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    entered, release = threading.Event(), threading.Event()
+    original_copy = move.folder_transfer._copy_tree_with_progress
+
+    def no_rsync(*args, **kwargs):
+        raise FileNotFoundError()
+
+    def copy_with_boundary(src, dst, skip, total, progress, **kwargs):
+        def report(current, count, name, phase):
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(synchronization_timeout(5))
+            progress(current, count, name, phase)
+
+        return original_copy(src, dst, skip, total, report, **kwargs)
+
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_copy_tree_with_progress", copy_with_boundary)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": True})
+    assert response.status_code == 200, response.get_json()
+    job_id = response.get_json()["job_id"]
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
+        release.set()
+        wait_for_job(lambda: client.get(f"/api/jobs/{job_id}").get_json(), terminal=("paused",), timeout=5)
+        assert os.path.isdir(staging)
+        assert app._sync_job_lock.acquire(blocking=False)
+        app._sync_job_lock.release()
+        # A paused transfer still owns its source and joins repeated clicks.
+        assert client.post(f"/api/import/pending-archives/{archive_id}/send",
+                           json={"sync_first": True}).get_json()["job_id"] == job_id
+        assert client.post(f"/api/jobs/{job_id}/{action}").status_code == 200
+        job = wait_for_job_via_client(client, job_id)
+        assert job["status"] == ("completed" if action == "resume" else "cancelled"), job
+        assert os.path.isdir(staging) == (action == "cancel")
+        assert db.pending_archives.get(archive_id)["state"] == ("complete" if action == "resume" else "pending")
+    finally:
+        release.set()
+        app._job_runner.cancel_job(job_id)
+
+
+def test_import_runs_while_another_import_is_sent_to_nas(app_and_db, tmp_path, monkeypatch):
+    """A second card imports and processes in the same workspace mid-send.
+
+    The send moves only the first import's staged originals and their NAS
+    folder; an import that writes into that NAS folder still has to wait.
+    """
+    import move
+
+    app, db = app_and_db
+    first = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = first["config"]["pending_archive_id"]
+    sending, release = threading.Event(), threading.Event()
+    real_move_folder = move.move_folder
+
+    def held_move_folder(*args, **kwargs):
+        sending.set()
+        assert release.wait(synchronization_timeout(30))
+        return real_move_folder(*args, **kwargs)
+
+    def no_rsync(*a, **kw):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "move_folder", held_move_folder)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send")
+    assert response.status_code == 200, response.get_json()
+    send_job = response.get_json()["job_id"]
+    try:
+        assert sending.wait(synchronization_timeout(30))
+        second_card = tmp_path / "second-card"
+        second_card.mkdir()
+        Image.new("RGB", (16, 16), "green").save(str(second_card / "second.jpg"))
+        response = client.post("/api/jobs/import-photos", json={
+            "sources": [str(second_card)], "destination": str(tmp_path / "NAS" / "day-two"),
+            "folder_template": "", "local_processing": True, "defer_nas_transfer": True,
+            "after_import": _process_id(db, "Cull-ready"),
+        })
+        assert response.status_code == 200, response.get_json()
+        second = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert second["status"] == "completed", second
+        processed = wait_for_job_via_client(client, second["result"]["process_job_id"])
+        assert processed["status"] == "completed", processed
+        in_place = tmp_path / "in-place"
+        in_place.mkdir()
+        Image.new("RGB", (16, 16), "black").save(str(in_place / "in_place.jpg"))
+        response = client.post("/api/jobs/import-in-place", json={
+            "sources": [str(in_place)], "after_import": None,
+        })
+        assert response.status_code == 200, response.get_json()
+        cataloged = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert cataloged["status"] == "completed", cataloged
+        assert client.get(f"/api/jobs/{send_job}").get_json()["status"] == "running"
+
+        # Copying straight into the NAS folder the send is filling must wait.
+        third_card = tmp_path / "third-card"
+        third_card.mkdir()
+        Image.new("RGB", (16, 16), "white").save(str(third_card / "third.jpg"))
+        response = client.post("/api/jobs/import-photos", json={
+            "sources": [str(third_card)], "destination": str(tmp_path / "NAS" / "trip"),
+            "folder_template": "",
+        })
+        assert response.status_code == 409, response.get_json()
+        assert "which this job also uses" in response.get_json()["error"]
+        assert not (tmp_path / "NAS" / "trip" / "third.jpg").exists()
+        # ...including through a symlink alias of that folder (where the
+        # platform lets the test create one; Windows needs a privilege).
+        try:
+            (tmp_path / "NAS-link").symlink_to(tmp_path / "NAS", target_is_directory=True)
+        except OSError:
+            pass
+        else:
+            response = client.post("/api/jobs/import-photos", json={
+                "sources": [str(third_card)], "destination": str(tmp_path / "NAS-link" / "trip"),
+                "folder_template": "",
+            })
+            assert response.status_code == 409, response.get_json()
+            assert "which this job also uses" in response.get_json()["error"]
+            assert not (tmp_path / "NAS" / "trip" / "third.jpg").exists()
+        # Anything else in the workspace still waits for the send.
+        assert client.post("/api/batch/flag", json={"photo_ids": [], "flag": "flagged"}).status_code == 409
+    finally:
+        release.set()
+    sent = wait_for_job_via_client(client, send_job)
+    assert sent["status"] == "completed", sent
+    assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
+    staged = second["config"]["managed_staging"]["destination"]
+    assert os.path.exists(os.path.join(staged, "second.jpg"))
+    items = client.get("/api/import/pending-archives").get_json()["items"]
+    assert [item["id"] for item in items] == [second["config"]["pending_archive_id"]]
+
+
+
+@pytest.mark.parametrize("mode", ["wait_for_commit", "write_during_pause"])
+def test_pending_archive_sync_first_guards_final_verification(app_and_db, tmp_path, monkeypatch, mode):
+    import move
+    from db import Database
+    from wait import wait_for_job
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = Path(imported["config"]["managed_staging"]["destination"])
+    photo_id = imported["result"]["photo_ids"][0]
+    db.queue_change(photo_id, "keyword_add", "Osprey")
+    sibling = db.create_workspace("Sibling metadata edits")
+    workspace_folders.add_workspace_folder(db, sibling, workspace_folders.add_folder(db, str(staging)), is_root=True)
+    db.queue_change(photo_id, "keyword_add", "Kestrel", workspace_id=sibling)
+    entered, release = threading.Event(), threading.Event()
+    verify = move.folder_transfer._first_missing_source_file
+
+    def hold_after_verification(*args, **kwargs):
+        result = verify(*args, **kwargs)
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(synchronization_timeout(10))
+        return result
+
+    def no_rsync(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_first_missing_source_file", hold_after_verification)
+    response = client.post(f"/api/import/pending-archives/{archive_id}/send", json={"sync_first": True})
+    assert response.status_code == 200, response.get_json()
+    job_id = response.get_json()["job_id"]
+    sync_id = None
+    try:
+        assert entered.wait(synchronization_timeout(10))
+        acquired = app._sync_job_lock.acquire(blocking=False)
+        if acquired:
+            app._sync_job_lock.release()
+        assert not acquired, "sidecar writers can change files after verification read them"
+        if mode == "write_during_pause":
+            assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
+            release.set()
+            _wait_for_runner_status(app._job_runner, job_id, "paused")
+            assert app._sync_job_lock.acquire(blocking=False), "paused verification retained the sync lock"
+            app._sync_job_lock.release()
+        assert client.post(f"/api/workspaces/{sibling}/activate").status_code == 200
+        response = client.post("/api/jobs/sync")
+        assert response.status_code == 200, response.get_json()
+        sync_id = response.get_json()["job_id"]
+        if mode == "wait_for_commit":
+            def sync_waiting():
+                job = app._job_runner.get(sync_id)
+                ready = job["progress"].get("phase") == "Waiting for current XMP sync"
+                return {"status": "ready", "job": job} if ready or job["status"] != "running" else None
+
+            waiting = wait_for_job(sync_waiting, terminal=("ready",), timeout=5)
+            assert waiting["job"]["status"] == "running", waiting
+            with Database(app.config["DB_PATH"]) as sibling_db:
+                sibling_db.set_active_workspace(sibling)
+                assert sibling_db.pending_changes.count() == 1, "the sibling edit was cleared before commit"
+            release.set()
+            sent = wait_for_job_via_client(client, job_id)
+            assert sent["status"] == "completed", sent
+            synced = wait_for_job_via_client(client, sync_id)
+            assert synced["status"] == "completed", synced
+            assert not staging.exists()
+            sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
+            assert len(sidecars) == 1
+            assert "Kestrel" in sidecars[0].read_text()
+        else:
+            synced = wait_for_job_via_client(client, sync_id)
+            assert synced["status"] == "completed", synced
+            assert client.post(f"/api/jobs/{job_id}/resume").status_code == 200
+            sent = wait_for_job_via_client(client, job_id)
+            assert sent["status"] == "failed", sent
+            assert staging.exists(), "stale verification deleted the newly synced edit"
+            sidecars = list(staging.rglob("*.xmp"))
+            assert len(sidecars) == 1
+            assert "Kestrel" in sidecars[0].read_text()
+    finally:
+        release.set()
+        app._job_runner.cancel_job(job_id)
+        if sync_id is not None:
+            app._job_runner.cancel_job(sync_id)
 
 
 def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_and_db, tmp_path, monkeypatch):
@@ -7542,7 +7774,8 @@ def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
     for mid in move_ids:
         mj = wait_for_job_via_client(client, mid)
         assert mj["status"] == "completed", mj
-        assert _job_config(client, mid)["chained_from"] == import_job["result"]["process_job_id"]
+        assert mj["parent_job_id"] == import_job["result"]["process_job_id"]
+        assert mj["origin"] == "user"
     # merge + allow_tracked_merge: re-importing into an existing shoot
     # folder chains a move onto the tracked NAS copy of that folder — the
     # chain must opt into move_folder's exact-overlap reconciliation or the
@@ -7645,7 +7878,7 @@ def test_chain_moves_when_process_preblocked_on_missing_labels(
     for mid in move_ids:
         mj = wait_for_job_via_client(client, mid)
         assert mj["status"] == "completed", mj
-        assert _job_config(client, mid)["chained_from"] == import_job["id"]
+        assert mj["parent_job_id"] == import_job["id"]
     # move_folder was actually called (via the stub) — the chain didn't
     # just enqueue placeholder jobs.
     assert stub_move
@@ -11595,7 +11828,8 @@ def test_import_chains_process_job(app_and_db, tmp_path):
 
         pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
         assert pj["config"]["process_id"] == quick_look_id
-        assert pj["config"].get("chained_from") == job_id
+        assert pj["parent_job_id"] == job_id
+        assert pj["origin"] == "user"
         col_id = pj["config"]["collection_id"]
         assert res["collection_id"] == col_id
         assert res["collection_name"].startswith("Import ")
@@ -11948,7 +12182,7 @@ def _interrupt_import_row(app, db, job_id, result, *, chained=False):
     with runner._lock:
         chained_ids = [
             jid for jid, j in runner._jobs.items()
-            if (j.get("config") or {}).get("chained_from") == job_id
+            if j.get("parent_job_id") == job_id
         ]
     # Let each chained run land its final history row first, or it could
     # write it back after the delete below.
@@ -11961,8 +12195,7 @@ def _interrupt_import_row(app, db, job_id, result, *, chained=False):
                 runner._jobs.pop(other_id, None)
     if not chained:
         db.conn.execute(
-            "DELETE FROM job_history "
-            "WHERE json_extract(config, '$.chained_from') = ?",
+            "DELETE FROM job_history WHERE parent_job_id = ?",
             (job_id,),
         )
     db.conn.execute(
@@ -12368,11 +12601,11 @@ def test_resume_allows_a_parent_whose_chained_pipeline_never_started(
         # same ``chained_from``, same ``never_started`` on the result.
         db.conn.execute(
             "INSERT INTO job_history "
-            "(id, type, status, config, result, workspace_id) "
+            "(id, type, status, parent_job_id, result, workspace_id) "
             "VALUES (?, 'pipeline', 'failed', ?, ?, ?)",
             (
                 f"never-started-{parent_id}",
-                json.dumps({"chained_from": parent_id}),
+                parent_id,
                 json.dumps({
                     "error": "Interrupted by Vireo restart",
                     "interrupted": True,
@@ -12730,9 +12963,9 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
     if chain_paid:
         original["result"]["process_job_id"] = "original-process"
         db.conn.execute(
-            "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
+            "INSERT INTO job_history (id, type, status, parent_job_id, result, workspace_id) "
             "VALUES ('original-process', 'pipeline', 'queued', ?, '{}', ?)",
-            (json.dumps({"chained_from": original_id}), db.active_workspace_id),
+            (original_id, db.active_workspace_id),
         )
     db.conn.execute("UPDATE job_history SET result=?, config=? WHERE id=?", (
         json.dumps(original["result"]), json.dumps(original["config"]), original_id,
@@ -13078,7 +13311,7 @@ def test_import_pauses_chained_classification_when_labels_are_missing(
         history = client.get("/api/jobs/history").get_json()
         chained = [
             item for item in history
-            if item.get("config", {}).get("chained_from") == job_id
+            if item.get("parent_job_id") == job_id
         ]
         assert chained == []
 

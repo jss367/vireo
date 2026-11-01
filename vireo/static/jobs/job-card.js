@@ -6,6 +6,7 @@ import {
   canRestartInPlace, hasActiveRetryFor, importResumeHint, importResumeTakeover, importRetryBody,
   importTakeoverNote, inPlaceRestartJobId, isResumableImport,
 } from './import-retry.js';
+import { findJob, followUpText, isSystemJob, repeatText } from './lineage.js';
 import { renderMoveRoute } from './move-route.js';
 import { renderSourceCleanup } from './source-cleanup.js';
 import { renderRichStep } from './steps.js';
@@ -23,7 +24,91 @@ import {
   return '';
 }
 
-/** @param {JobsRow} job @param {{workspaceName?:string}=} options */ export function renderJobCard(job, options) {
+/** @param {JobsRow} job */ function renderJobControls(job) {
+  var html = '';
+  if (job.pausable && job.cancellable !== false && job.status === 'running') {
+    html += '<button class="btn-pause" data-pause-job="' + escapeAttr(job.id) + '">Pause</button>';
+  } else if (job.pausable && job.status === 'pausing') {
+    // The pause has been requested but not yet honored: the worker
+    // stops at its next safe checkpoint, which can be minutes away
+    // (e.g. label embeddings inside the model lock). The status pill
+    // still reads "pausing" so the user can see it is underway; this
+    // button withdraws the request via the resume endpoint, which
+    // accepts pausing as well as paused.
+    //
+    // BUT: when the pipeline itself parked the job on a dead source
+    // (``_handle_source_offline`` in pipeline_job.py publishes
+    // ``pause_reason`` before flipping to ``pausing``), cancelling
+    // the pause would immediately retry the unreachable volume and
+    // burn one of the bounded ``_MAX_SOURCE_OFFLINE_PAUSES`` attempts
+    // — repeated clicks can convert a recoverable outage into a
+    // failed run. Only offer cancel for user-requested pauses; for
+    // safety pauses, leave the disabled ``Pausing…`` button so the
+    // banner tells the user to reconnect the source instead.
+    var automaticPauseReason = job.progress && job.progress.pause_reason;
+    if (automaticPauseReason) {
+      html += '<button class="btn-pause" disabled title="This pause was triggered automatically (see the pause banner). Fix the underlying issue, then Resume.">Pausing…</button>';
+    } else {
+      html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '" data-cancel-pause="1" title="Pause is still pending; the job stops at its next safe checkpoint. Click to keep it running instead.">Cancel pause</button>';
+    }
+  } else if (job.pausable && job.status === 'paused') {
+    html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '">Resume</button>';
+  }
+  if (job.cancellable === false) {
+    html += '<button class="btn-cancel" disabled title="' + escapeAttr(job.control_unavailable_reason || 'Finishing safely') + '">Finishing…</button>';
+  } else if (state.cancellingJobIds[job.id]) {
+    html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';
+  } else {
+    html += '<button class="btn-cancel" data-cancel-job="' + escapeHtml(job.id) + '">Cancel</button>';
+  }
+  return html;
+}
+
+/**
+ * The card's header row (type, workspace label, status, a live job's
+ * controls) and the banner explaining a control that is unavailable.
+ * @param {JobsRow} job @param {{workspaceName?:string}} options @param {boolean} isLive
+ */
+function renderCardHeader(job, options, isLive) {
+  var html = '<div class="job-card-header">';
+  html += '<span class="job-detail-title">' + escapeHtml(formatJobType(job.type)) + '</span>';
+  if (options.workspaceName) {
+    html += '<span class="job-card-workspace">' + escapeHtml(options.workspaceName) + '</span>';
+  }
+  html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
+  if (isLive) html += renderJobControls(job);
+  html += '</div>';
+
+  if (isLive && (job.control_unavailable_reason || (!job.pausable && job.pause_unavailable_reason))) {
+    html += '<div class="job-pause-banner">' + escapeHtml(job.control_unavailable_reason || job.pause_unavailable_reason) + '</div>';
+  }
+  return html;
+}
+
+/**
+ * Who started the job: Vireo (with why), or the job it follows.
+ * @param {JobsRow} job
+ */
+function renderProvenance(job) {
+  var parts = [];
+  if (job.parent_job_id) {
+    var parent = findJob(job.parent_job_id, [state.activeJobs, state.historyJobs]);
+    var text = escapeHtml(followUpText(job, parent));
+    if (parent) {
+      text += ' <button class="btn-link" data-show-job="' + escapeAttr(parent.id) + '">Show</button>';
+    }
+    parts.push(text);
+  } else if (isSystemJob(job)) {
+    parts.push('<span class="job-origin-chip">Started by Vireo</span>' +
+      (job.reason ? ' ' + escapeHtml(job.reason) : ''));
+  }
+  var repeats = repeatText(job);
+  if (repeats) parts.push(escapeHtml(repeats));
+  if (!parts.length) return '';
+  return '<div class="job-provenance">' + parts.join(' &middot; ') + '</div>';
+}
+
+/** @param {JobsRow} job @param {{workspaceName?:string, followUp?:boolean}=} options */ export function renderJobCard(job, options) {
   options = options || {};
   // Queued pipelines are "live" for UI purposes: they have a real
   // backend identity, they're cancellable (runner.cancel_job handles
@@ -42,51 +127,9 @@ import {
     elapsed = formatElapsed((new Date(job.finished_at).getTime() - new Date(job.started_at).getTime()) / 1000);
   }
 
-  var html = '<div class="job-card">';
-
-  // Header: type, workspace label, status, cancel
-  html += '<div class="job-card-header">';
-  html += '<span class="job-detail-title">' + escapeHtml(formatJobType(job.type)) + '</span>';
-  if (options.workspaceName) {
-    html += '<span class="job-card-workspace">' + escapeHtml(options.workspaceName) + '</span>';
-  }
-  html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
-  if (isLive) {
-    if (job.pausable && job.status === 'running') {
-      html += '<button class="btn-pause" data-pause-job="' + escapeAttr(job.id) + '">Pause</button>';
-    } else if (job.pausable && job.status === 'pausing') {
-      // The pause has been requested but not yet honored: the worker
-      // stops at its next safe checkpoint, which can be minutes away
-      // (e.g. label embeddings inside the model lock). The status pill
-      // still reads "pausing" so the user can see it is underway; this
-      // button withdraws the request via the resume endpoint, which
-      // accepts pausing as well as paused.
-      //
-      // BUT: when the pipeline itself parked the job on a dead source
-      // (``_handle_source_offline`` in pipeline_job.py publishes
-      // ``pause_reason`` before flipping to ``pausing``), cancelling
-      // the pause would immediately retry the unreachable volume and
-      // burn one of the bounded ``_MAX_SOURCE_OFFLINE_PAUSES`` attempts
-      // — repeated clicks can convert a recoverable outage into a
-      // failed run. Only offer cancel for user-requested pauses; for
-      // safety pauses, leave the disabled ``Pausing…`` button so the
-      // banner tells the user to reconnect the source instead.
-      var automaticPauseReason = job.progress && job.progress.pause_reason;
-      if (automaticPauseReason) {
-        html += '<button class="btn-pause" disabled title="This pause was triggered automatically (see the pause banner). Fix the underlying issue, then Resume.">Pausing…</button>';
-      } else {
-        html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '" data-cancel-pause="1" title="Pause is still pending; the job stops at its next safe checkpoint. Click to keep it running instead.">Cancel pause</button>';
-      }
-    } else if (job.pausable && job.status === 'paused') {
-      html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '">Resume</button>';
-    }
-    if (state.cancellingJobIds[job.id]) {
-      html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';
-    } else {
-      html += '<button class="btn-cancel" data-cancel-job="' + escapeHtml(job.id) + '">Cancel</button>';
-    }
-  }
-  html += '</div>';
+  var html = '<div class="job-card' + (options.followUp ? ' job-card-follow-up' : '') + '">';
+  html += renderCardHeader(job, options, isLive);
+  html += renderProvenance(job);
 
   // Meta: started, elapsed, overall %
   html += '<div class="job-detail-meta">';

@@ -25,6 +25,10 @@ var HSL_COLORS = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 
     sharpen: Number(adj.sharpen || 0),
     sharpen_radius: Number(adj.sharpen_radius || 1),
     noise_reduction: Number(adj.noise_reduction || 0),
+    distortion: Number(adj.distortion || 0),
+    vignetting: Number(adj.vignetting || 0),
+    defringe_purple: Number(adj.defringe_purple || 0),
+    defringe_green: Number(adj.defringe_green || 0),
   };
 }
 
@@ -75,7 +79,8 @@ var HSL_COLORS = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 
   var vals = adjustmentValues(out);
   /** @type {EditorAdjustments} */ var adj = {};
   if ((out.adjustments || {}).denoise_mode === 'camera') adj.denoise_mode = 'camera';
-  /** @type {EditorNumericKey[]} */ (['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction']).forEach(function(key) {
+  if ((out.adjustments || {}).lens_profile) adj.lens_profile = true;
+  /** @type {EditorNumericKey[]} */ (['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction', 'distortion', 'vignetting', 'defringe_purple', 'defringe_green']).forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) adj[key] = Number(vals[key]);
   });
   // Radius only rides along with active sharpening, and its 1.0 default is
@@ -159,6 +164,9 @@ function updateRecipeSummary() {
       else if (key === 'tone_curve' || key === 'point_curves') parts.push('tone curve');
       else if (key === 'point_color') parts.push('point color');
       else if (key === 'hsl') parts.push('color mixer');
+      else if (key === 'lens_profile') parts.push('automatic lens profile');
+      else if (key === 'defringe_purple') parts.push('purple defringing');
+      else if (key === 'defringe_green') parts.push('green defringing');
       else if (key === 'color_grading') parts.push('color grading');
       else parts.push(key);
     });
@@ -197,7 +205,12 @@ function syncControls() {
   set('sharpen', vals.sharpen, false);
   set('sharpen_radius', vals.sharpen_radius, true);
   set('noise_reduction', vals.noise_reduction, false);
+  set('distortion', vals.distortion, false);
+  set('vignetting', vals.vignetting, false);
+  set('defringe_purple', vals.defringe_purple, false);
+  set('defringe_green', vals.defringe_green, false);
   syncDenoiseControls();
+  syncLensProfileControls();
   syncAdvancedColorControls();
   var straight = Number(r.straighten || 0);
   var straightInput = /** @type {HTMLInputElement} */ (document.getElementById('straightenRange'));

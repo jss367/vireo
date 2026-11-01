@@ -28,7 +28,7 @@ def test_job_runner_starts_and_completes(tmp_path):
             time.sleep(0.01)
         return {'items': 3}
 
-    job_id = runner.start('test', work, config={'note': 'hello'})
+    job_id = runner.start('test', work, config={'note': 'hello'}, pausable=False)
     assert job_id is not None
 
     job = wait_for_job_via_runner(runner, job_id)
@@ -69,6 +69,189 @@ def test_workspace_transfer_reservation_blocks_job_admission(admission):
         wait_for_job_via_runner(runner, transfer)
     assert wait_for_job_via_runner(runner, admit(1))["status"] == "completed"
     runner.shutdown()
+
+
+_TRANSFER_TREES = [os.path.join(os.sep, "staging", "import-a", "trip"), os.path.join(os.sep, "NAS", "trip")]
+
+
+def _start_transfer(runner, release, paths=_TRANSFER_TREES):
+    return runner.start_singleton(
+        "send-to-nas", lambda job: release.wait(synchronization_timeout(10)), singleton_key="archive",
+        workspace_id=1, exclusive_workspace=True, workspace_paths=paths,
+    )[0]
+
+
+@pytest.mark.parametrize("admission", ["start", "singleton", "pipeline"])
+def test_job_declaring_other_folders_runs_beside_a_transfer(admission):
+    """An import into other folders need not wait for a NAS send to finish."""
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release = threading.Event()
+    transfer = _start_transfer(runner, release)
+
+    def admit(paths, key):
+        if admission == "start":
+            return runner.start("import", lambda job: None, workspace_id=1, workspace_paths=paths)
+        if admission == "singleton":
+            return runner.start_singleton("import", lambda job: None, workspace_id=1,
+                                          singleton_key=key, workspace_paths=paths)[0]
+        return runner.enqueue_pipeline(lambda job: None, workspace_id=1, workspace_paths=paths)
+
+    try:
+        elsewhere = [os.path.join(os.sep, "card"), os.path.join(os.sep, "staging", "import-b", "trip")]
+        job_id = admit(elsewhere, "elsewhere")
+        assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+        # A sibling whose name merely starts with the transfer's is another folder.
+        job_id = admit([os.path.join(os.sep, "NAS", "trip-2")], "sibling")
+        assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+        # The NAS folder the send merges into, a parent of it, the staged
+        # originals in a different case, and a job that declares nothing all
+        # still wait.
+        nas_parent = os.path.join(os.sep, "NAS")
+        with pytest.raises(WorkspaceBusyError, match=r"it is moving .*trip, which this job also uses"):
+            admit([nas_parent], "parent")
+        with pytest.raises(WorkspaceBusyError, match="which this job also uses"):
+            admit([os.path.join(os.sep, "Staging", "Import-A", "trip", "DCIM")], "inside")
+        with pytest.raises(WorkspaceBusyError, match="before starting another job"):
+            admit(None, "undeclared")
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+        runner.shutdown()
+
+
+def test_transfer_without_declared_folders_refuses_every_job():
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release = threading.Event()
+    transfer = _start_transfer(runner, release, paths=None)
+    try:
+        with pytest.raises(WorkspaceBusyError, match="NAS transfer"):
+            runner.start("import", lambda job: None, workspace_id=1,
+                         workspace_paths=[os.path.join(os.sep, "elsewhere")])
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+        runner.shutdown()
+
+
+def test_job_admitted_beside_a_transfer_still_keeps_the_next_transfer_out():
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release_transfer, release_import = threading.Event(), threading.Event()
+    transfer = _start_transfer(runner, release_transfer)
+    imported = runner.start("import", lambda job: release_import.wait(synchronization_timeout(10)),
+                            workspace_id=1, workspace_paths=[os.path.join(os.sep, "card")])
+    try:
+        release_transfer.set()
+        wait_for_job_via_runner(runner, transfer)
+        with pytest.raises(WorkspaceBusyError, match=r"busy with the import job"):
+            runner.start_singleton("send-to-nas", lambda job: None, singleton_key="next",
+                                   workspace_id=1, exclusive_workspace=True,
+                                   workspace_paths=[os.path.join(os.sep, "other")])
+    finally:
+        release_transfer.set()
+        release_import.set()
+        wait_for_job_via_runner(runner, imported)
+        runner.shutdown()
+
+
+def test_deferred_mutation_runs_beside_a_transfer_but_not_a_deletion():
+    """An import request is checked by its job, not refused by the hook.
+
+    Its reservation still keeps a new transfer out while it runs, and a
+    workspace deletion still refuses it.
+    """
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release = threading.Event()
+    transfer = _start_transfer(runner, release)
+    try:
+        with runner.workspace_mutation(1, label="the request POST /api/jobs/import-photos",
+                                       defer_transfer_check=True):
+            pass
+        with pytest.raises(WorkspaceBusyError):
+            with runner.workspace_mutation(1):
+                pytest.fail("Undeferred mutation entered during transfer")
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+    with runner.workspace_mutation(1, label="the request POST /api/jobs/import-photos",
+                                   defer_transfer_check=True):
+        with pytest.raises(WorkspaceBusyError, match="POST /api/jobs/import-photos"):
+            runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
+                                   workspace_id=1, exclusive_workspace=True)
+    with runner.workspace_mutation(1, exclusive=True):
+        with pytest.raises(WorkspaceBusyError):
+            with runner.workspace_mutation(1, defer_transfer_check=True):
+                pytest.fail("Mutation entered a workspace being deleted")
+    runner.shutdown()
+
+
+def test_automatic_transfer_registers_beside_a_running_transfer_and_waits():
+    """A chained NAS move of an import admitted mid-send queues behind it."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+    moved = threading.Event()
+    transfer = _start_transfer(runner, release)
+
+    def move(job):
+        if runner.wait_for_workspace_transfer(job["id"]):
+            moved.set()
+
+    job_id = runner.start("move-folder", move, workspace_id=1, workspace_transfer_batch="b",
+                          workspace_paths=list(_TRANSFER_TREES))
+    try:
+        assert not moved.wait(0.3)
+        release.set()
+        assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+        assert moved.is_set()
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, transfer)
+        runner.shutdown()
+
+
+@pytest.mark.parametrize("folder_template,expected_leaf", [("", "day"), ("%Y-%m-%d", None)])
+def test_move_declares_the_tree_it_writes(tmp_path, folder_template, expected_leaf):
+    """A date-organized move writes under the destination itself, not one leaf of it."""
+    from services.folder_moves import FolderMoveRequest, FolderMoves
+
+    started = {}
+
+    class Runner:
+        def start(self, *args, **kwargs):
+            started.update(kwargs)
+            return "job"
+
+    source, destination = tmp_path / "staging" / "day", tmp_path / "NAS"
+    request = FolderMoveRequest(
+        folder_id=1, source_path=str(source), destination=str(destination),
+        display_dest=str(destination), resolved_destination=str(destination / "day"),
+        merge=False, developed_dir="", keep_visible=False, folder_template=folder_template,
+    )
+    moves = FolderMoves(get_runner=lambda: None, get_db=lambda: None, db_path="",
+                        config={}, invalidate_missing_originals=lambda *a, **k: None)
+    moves.start_job(Runner(), 1, request)
+    landing = destination / expected_leaf if expected_leaf else destination
+    assert started["workspace_paths"] == [os.path.realpath(source), os.path.realpath(landing)]
+
+
+def test_paths_overlap_compares_whole_folder_names():
+    from job_runner.reservations import paths_overlap
+
+    root = os.sep
+    assert paths_overlap(os.path.join(root, "a", "b"), os.path.join(root, "a", "b", "c"))
+    assert paths_overlap(os.path.join(root, "a", "b", "c"), os.path.join(root, "a", "b"))
+    assert paths_overlap(os.path.join(root, "a", "b") + os.sep, os.path.join(root, "A", "B"))
+    assert not paths_overlap(os.path.join(root, "a", "b"), os.path.join(root, "a", "bc"))
+    assert paths_overlap(root, os.path.join(root, "a"))
 
 
 def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch):
@@ -291,7 +474,7 @@ def test_job_runner_shutdown_cancels_and_joins_workers():
         stopped.set()
         return {}
 
-    job_id = runner.start("test", work)
+    job_id = runner.start("test", work, pausable=False)
     assert started.wait(timeout=synchronization_timeout(2))
     with runner._lock:
         runner._queue.schedule_retry_locked()
@@ -302,7 +485,7 @@ def test_job_runner_shutdown_cancels_and_joins_workers():
     assert not runner._workers.threads
 
     with pytest.raises(RuntimeError, match="shut down"):
-        runner.start("late", lambda _job: {})
+        runner.start("late", lambda _job: {}, pausable=False)
 
 
 def test_job_runner_shutdown_joins_after_queued_cancel_failure(monkeypatch):
@@ -317,7 +500,7 @@ def test_job_runner_shutdown_joins_after_queued_cancel_failure(monkeypatch):
             time.sleep(0.01)
         stopped.set()
 
-    runner.start("test", work)
+    runner.start("test", work, pausable=False)
     runner._queue.queued["queued"] = {}
     observed_timeouts = []
 
@@ -590,7 +773,7 @@ def test_non_pausable_job_rejects_pause():
         release.wait(timeout=synchronization_timeout(2))
         return {}
 
-    job_id = runner.start("test", work)
+    job_id = runner.start("test", work, pausable=False)
     assert runner.pause_job(job_id) is False
     assert runner.get(job_id)["pausable"] is False
     release.set()
@@ -606,7 +789,7 @@ def test_job_runner_tracks_failure(tmp_path):
     def failing_work(job):
         raise ValueError("something broke")
 
-    job_id = runner.start('test', failing_work)
+    job_id = runner.start('test', failing_work, pausable=False)
 
     job = wait_for_job_via_runner(runner, job_id)
     assert job['status'] == 'failed'
@@ -630,7 +813,7 @@ def test_job_runner_does_not_duplicate_preexisting_errors():
         job['errors'].append("[model_loader] Fatal: model_path must not be empty")
         raise RuntimeError("[model_loader] Fatal: model_path must not be empty")
 
-    job_id = runner.start('test', failing_work)
+    job_id = runner.start('test', failing_work, pausable=False)
 
     wait_for_job_via_runner(runner, job_id)
 
@@ -654,7 +837,7 @@ def test_job_runner_still_records_novel_exception_text():
         job['errors'].append("stage warning: something odd")
         raise RuntimeError("orchestrator failure: unexpected state")
 
-    job_id = runner.start('test', failing_work)
+    job_id = runner.start('test', failing_work, pausable=False)
 
     wait_for_job_via_runner(runner, job_id)
 
@@ -700,7 +883,7 @@ def test_job_result_ok_is_the_jobs_own_verdict(tmp_path):
     def work(job):
         return {"copied": 5, "errors": ["Deselected files: 1 not copied"], "ok": True}
 
-    job_id = runner.start('import-photos', work)
+    job_id = runner.start('import-photos', work, pausable=False)
 
     job = wait_for_job_via_runner(runner, job_id)
     assert job['status'] == 'completed'
@@ -764,7 +947,7 @@ def test_job_without_errors_stays_completed(tmp_path):
     from jobs import JobRunner
 
     runner = JobRunner()
-    job_id = runner.start('test', lambda job: {"moved": 3})
+    job_id = runner.start('test', lambda job: {"moved": 3}, pausable=False)
     job = wait_for_job_via_runner(runner, job_id)
     assert job['status'] == 'completed'
 
@@ -779,7 +962,7 @@ def test_job_result_without_ok_key_unaffected(tmp_path):
     def work(job):
         return {"moved": 0, "errors": ["informational note"]}
 
-    job_id = runner.start('test', work)
+    job_id = runner.start('test', work, pausable=False)
 
     job = wait_for_job_via_runner(runner, job_id)
     assert job['status'] == 'completed'
@@ -1113,7 +1296,7 @@ def test_failed_job_history_falls_back_when_no_structured_result(tmp_path):
     def failing_work(job):
         raise RuntimeError("boom")
 
-    job_id = runner.start('test', failing_work)
+    job_id = runner.start('test', failing_work, pausable=False)
 
     # The row exists as ``running`` from job start; wait for the final
     # write rather than for the row to appear.
@@ -1160,14 +1343,14 @@ def test_start_singleton_returns_existing_when_active():
 
     first_id, first_joined, first_snap = runner.start_singleton(
         'download-x', work, singleton_key='k',
-        config={'note': 'first'},
+        config={'note': 'first'}, pausable=False,
     )
     assert first_joined is False
     assert first_snap is None
 
     second_id, second_joined, second_snap = runner.start_singleton(
         'download-x', work, singleton_key='k',
-        config={'note': 'second-should-be-ignored'},
+        config={'note': 'second-should-be-ignored'}, pausable=False,
     )
     assert second_joined is True
     assert second_id == first_id
@@ -1195,13 +1378,13 @@ def test_start_singleton_starts_a_fresh_job_once_the_first_finishes():
         return {'ok': True}
 
     first_id, first_joined, _ = runner.start_singleton(
-        'download-x', quick, singleton_key='k',
+        'download-x', quick, singleton_key='k', pausable=False,
     )
     assert first_joined is False
     wait_for_job_via_runner(runner, first_id)
 
     second_id, second_joined, second_snap = runner.start_singleton(
-        'download-x', quick, singleton_key='k',
+        'download-x', quick, singleton_key='k', pausable=False,
     )
     assert second_joined is False, (
         "a completed job must not pin the singleton — otherwise Retry stays broken"
@@ -1236,7 +1419,7 @@ def test_start_singleton_check_and_start_are_atomic_under_thread_pressure():
     def fire():
         barrier.wait()
         jid, _joined, _snap = runner.start_singleton(
-            'download-x', work, singleton_key='k',
+            'download-x', work, singleton_key='k', pausable=False,
         )
         with ids_lock:
             ids.append(jid)
@@ -1271,10 +1454,10 @@ def test_start_singleton_isolates_different_keys():
         return {'ok': True}
 
     a_id, a_joined, _ = runner.start_singleton(
-        'download-x', hold, singleton_key='alpha',
+        'download-x', hold, singleton_key='alpha', pausable=False,
     )
     b_id, b_joined, _ = runner.start_singleton(
-        'download-x', hold, singleton_key='beta',
+        'download-x', hold, singleton_key='beta', pausable=False,
     )
     assert a_joined is False
     assert b_joined is False
@@ -1299,9 +1482,9 @@ def test_start_singleton_does_not_match_plain_start_jobs_without_a_key():
         assert release.wait(timeout=synchronization_timeout(5))
         return {'ok': True}
 
-    plain_id = runner.start('download-x', hold)
+    plain_id = runner.start('download-x', hold, pausable=False)
     sing_id, joined, _ = runner.start_singleton(
-        'download-x', hold, singleton_key='k',
+        'download-x', hold, singleton_key='k', pausable=False,
     )
     assert joined is False, (
         "start_singleton must not join a plain start() job with key=None"
@@ -1433,7 +1616,7 @@ def test_job_records_resource_wait_timing_in_snapshot_and_history(tmp_path):
             return {"ok": True}
 
     try:
-        job_id = runner.start("test", work, workspace_id=workspace_id)
+        job_id = runner.start("test", work, workspace_id=workspace_id, pausable=False)
         active_job = wait_for_job(
             lambda: runner.get(job_id) if waiting.is_set() else None,
             terminal=("running",),
@@ -1710,7 +1893,7 @@ def test_job_history_prunes_to_100(tmp_path):
     # _persisted flips true only after both commit. A fixed sleep raced the
     # worker thread on slower Windows I/O; wait_for_history is the exact
     # sync point.
-    job_id = runner.start("test", work, workspace_id=ws_id)
+    job_id = runner.start("test", work, workspace_id=ws_id, pausable=False)
     wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
     count = db.conn.execute(
@@ -1719,21 +1902,23 @@ def test_job_history_prunes_to_100(tmp_path):
     assert count <= 100
 
 
-def test_discovery_history_does_not_evict_user_jobs(tmp_path):
+def test_system_history_does_not_evict_user_jobs(tmp_path):
+    """Vireo's own recurring checks keep a quota separate from the user's jobs."""
     from db import Database
-    from jobs import JobRunner
+    from jobs import JobLineage, JobRunner
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
     for job_type in ("pipeline", "new_images_walk", "missing_originals_scan"):
+        origin = "user" if job_type == "pipeline" else "system"
         for i in range(101):
             db.conn.execute(
                 """INSERT INTO job_history
-                   (id, type, status, started_at, workspace_id)
-                   VALUES (?, ?, 'completed', ?, ?)""",
-                (f"{job_type}-{i}", job_type, f"2026-01-01T00:00:{i:03d}", ws_id),
+                   (id, type, status, started_at, workspace_id, origin)
+                   VALUES (?, ?, 'completed', ?, ?, ?)""",
+                (f"{job_type}-{i}", job_type, f"2026-01-01T00:00:{i:03d}", ws_id, origin),
             )
     db.conn.execute(
         """INSERT INTO job_history (id, type, status, started_at, workspace_id)
@@ -1741,7 +1926,10 @@ def test_discovery_history_does_not_evict_user_jobs(tmp_path):
         (ws_id,),
     )
     db.conn.commit()
-    job_id = runner.start("new_images_walk", lambda _: {}, workspace_id=ws_id)
+    job_id = runner.start(
+        "new_images_walk", lambda _: {}, workspace_id=ws_id,
+        lineage=JobLineage.system("Regular check"),
+    )
     wait_for_job_via_runner(runner, job_id, wait_for_history=True)
     counts = dict(db.conn.execute(
         """SELECT type, COUNT(*) FROM job_history
@@ -1779,7 +1967,7 @@ def test_progress_events_include_steps(tmp_path):
         })
         return {}
 
-    job_id = runner.start("test", work, workspace_id=1)
+    job_id = runner.start("test", work, workspace_id=1, pausable=False)
 
     wait_for_job_via_runner(runner, job_id)
 
@@ -1818,7 +2006,7 @@ def test_push_event_mirrors_progress_onto_job(tmp_path):
         gate.wait(timeout=synchronization_timeout(2))
         return {}
 
-    job_id = runner.start("test", work, workspace_id=1)
+    job_id = runner.start("test", work, workspace_id=1, pausable=False)
 
     try:
         # Observe the actual publication checkpoint before polling the mirrored
@@ -2140,7 +2328,7 @@ def test_ephemeral_job_is_never_checkpointed(tmp_path):
         release.wait(timeout=synchronization_timeout(5))
         return {}
 
-    job_id = runner.start("walk", work, ephemeral=True)
+    job_id = runner.start("walk", work, ephemeral=True, pausable=False)
     assert started.wait(timeout=synchronization_timeout(5))
     assert runner.checkpoint_live_jobs() == 0
     assert _history_row(db, job_id) is None
@@ -2354,7 +2542,7 @@ def test_explicit_blocking_flag_overrides_the_job_type_policy():
     try:
         dynamic = runner.start(
             "download-sam2", lambda job: None, workspace_id=1,
-            blocks_local_transitions=False,
+            blocks_local_transitions=False, pausable=False,
         )
         forced = runner.start(
             "verify-models", lambda job: None, workspace_id=1,

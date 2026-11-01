@@ -14,6 +14,9 @@ import filecmp
 import os
 import subprocess
 
+from job_runner.subprocess_control import run_controlled_process
+
+from .paths import _unsafe_destination_directory
 from .remote import _ssh_rsh_string
 from .transfer import FINDER_METADATA_FILES, _rsync_finder_metadata_exclude_file
 
@@ -31,7 +34,7 @@ REMOTE_VERIFY_TIMEOUT = 7200  # 2 hours
 
 
 def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
-                            *, is_merge=False):
+                            *, is_merge=False, control=None):
     """Independent verification that the remote copy is complete and correct.
 
     The local move's safety check walks the destination filesystem before
@@ -63,9 +66,12 @@ def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
                *metadata_excludes,
                src_path + "/", rsync_target + "/"]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=REMOTE_VERIFY_TIMEOUT,
-                                  **no_window_kwargs())
+            if control:
+                proc = run_controlled_process(cmd, control, timeout=REMOTE_VERIFY_TIMEOUT)
+            else:
+                proc = subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=REMOTE_VERIFY_TIMEOUT,
+                                      **no_window_kwargs())
         except subprocess.TimeoutExpired:
             return ("__ERROR__", f"verification timed out after "
                     f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
@@ -149,13 +155,16 @@ def remote_verify_files(rsync_bin, src_specs, rsync_target, remote,
     return None
 
 
-def _find_content_conflict(src_path, dest_path):
+def _find_content_conflict(src_path, dest_path, *, checkpoint=None):
     """Return the relative path of the first source file that ALSO exists at
     dest_path but with different content, or None. Run before a merge copies
     anything: a same-name destination file is only safe to treat as "already
     there" if its bytes match the source. A size match alone is not enough —
     filecmp with shallow=False compares contents — so we never overwrite or
     later delete the source over a genuinely different destination file.
+
+    Existing file and directory symlinks must be independent links with the
+    same literal targets. Missing entries are left for the copy to create.
 
     Finder metadata (``.DS_Store``) is ignored only for REGULAR non-symlink
     source files: those are the ones ``_rsync_finder_metadata_excludes``
@@ -173,9 +182,15 @@ def _find_content_conflict(src_path, dest_path):
     entry type (symlink, missing source) falls through to the normal
     content check.
     """
-    for root, _, files in os.walk(src_path):
+    for root, directories, files in os.walk(src_path):
+        mismatch = _directory_mismatch(
+            root, directories, src_path, dest_path, allow_missing=True)
+        if mismatch is not None:
+            return mismatch
         rel = os.path.relpath(root, src_path)
         for fn in files:
+            if checkpoint:
+                checkpoint()
             src_file = os.path.join(root, fn)
             if fn in FINDER_METADATA_FILES and \
                     not os.path.islink(src_file) and \
@@ -183,13 +198,17 @@ def _find_content_conflict(src_path, dest_path):
                 continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
+            if os.path.islink(src_file):
+                if os.path.lexists(dst_file) and not _matching_independent_symlink(src_file, dst_file):
+                    return rel_name
+                continue
             if os.path.isfile(dst_file) and \
                     not filecmp.cmp(src_file, dst_file, shallow=False):
                 return rel_name
     return None
 
 
-def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
+def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote, *, control=None):
     """Remote counterpart to ``_find_content_conflict`` — find the first
     source file whose same-name twin at the remote destination differs in
     content. The destination is on the NAS so we can't filecmp it directly;
@@ -220,9 +239,12 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
                *metadata_excludes,
                src_path + "/", rsync_target + "/"]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=REMOTE_VERIFY_TIMEOUT,
-                                  **no_window_kwargs())
+            if control:
+                proc = run_controlled_process(cmd, control, timeout=REMOTE_VERIFY_TIMEOUT)
+            else:
+                proc = subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=REMOTE_VERIFY_TIMEOUT,
+                                      **no_window_kwargs())
         except subprocess.TimeoutExpired:
             return ("__ERROR__", f"conflict check timed out after "
                     f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
@@ -239,6 +261,47 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
         return None
 
 
+def _matching_independent_symlink(source, destination):
+    """Preserve a link's target while rejecting aliases back to its own entry."""
+    try:
+        if not os.path.islink(destination):
+            return False
+        source_stat, destination_stat = os.lstat(source), os.lstat(destination)
+        return (
+            (source_stat.st_dev, source_stat.st_ino) != (destination_stat.st_dev, destination_stat.st_ino)
+            and os.readlink(source) == os.readlink(destination)
+        )
+    except OSError:
+        return False
+
+
+def _directory_mismatch(root, directories, src_path, dest_path, *, allow_missing=False):
+    """Verify physical destination parents and opaque directory links.
+
+    ``os.walk(..., followlinks=False)`` puts directory symlinks in ``dirs``
+    but never visits their contents. A file-only verifier would silently
+    accept a missing link, a different link, or an ordinary directory.
+    lstat also rejects a destination parent alias back into the source.
+    Preflight allows missing destinations; final verification does not.
+    """
+    relative = os.path.relpath(root, src_path)
+    destination_dir = dest_path if relative == "." else os.path.join(dest_path, relative)
+    unsafe = _unsafe_destination_directory(dest_path, destination_dir, allow_missing=allow_missing)
+    if unsafe is not None:
+        return os.path.relpath(unsafe, dest_path)
+    for name in directories:
+        source = os.path.join(root, name)
+        if not os.path.islink(source):
+            continue
+        relative = os.path.relpath(source, src_path)
+        destination = os.path.join(dest_path, relative)
+        if allow_missing and not os.path.lexists(destination):
+            continue
+        if not _matching_independent_symlink(source, destination):
+            return relative
+    return None
+
+
 def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
                                is_merge=False, progress=None):
     """Return the relative path of the first source file absent (or
@@ -249,7 +312,9 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     With ``verify_contents``, compare fresh bytes as well before allowing
     managed temporary originals to be removed.
 
-    A symlinked destination entry is treated as missing: `os.path.isfile` /
+    Expected source symlinks must remain independent links with identical
+    target strings. For regular source files, a symlinked destination is
+    treated as missing: `os.path.isfile` /
     `os.path.getsize` follow the link, so a symlink pointing back into the
     source tree (directly, or via a symlinked parent directory) would pass
     a size compare even though no independent copy exists at the
@@ -285,7 +350,10 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     file has passed, where ``checked`` counts the source files done so far.
     """
     checked = 0
-    for root, _, files in os.walk(src_path):
+    for root, directories, files in os.walk(src_path):
+        mismatch = _directory_mismatch(root, directories, src_path, dest_path)
+        if mismatch is not None:
+            return mismatch
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)
@@ -298,6 +366,10 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
                     os.path.isfile(src_file):
                 continue
             dst_file = os.path.join(dest_path, rel_name)
+            if os.path.islink(src_file):
+                if not _matching_independent_symlink(src_file, dst_file):
+                    return rel_name
+                continue
             if not os.path.lexists(dst_file) or os.path.islink(dst_file):
                 return rel_name
             try:
@@ -327,8 +399,10 @@ def _verifier_would_accept_skip(src_file, dst_file):
     already-present by ``_first_missing_source_file`` (the post-copy
     verifier the merge gates the source delete on). Mirrors that
     verifier's structural predicates — destination must exist, must NOT be
-    a symlink, must NOT resolve to the same inode as the source, and must
-    be a regular file. The size check the verifier also performs is
+    a symlink for regular source files, must NOT resolve to the same inode
+    as the source, and must be a regular file. Source symlinks require an
+    independent destination link with the same literal target. The size
+    check the verifier also performs is
     deliberately omitted: this backs ``preview_merge``, which is name-only
     by design and must not stat the destination tree's bytes. Same-size
     content collisions are caught separately by ``_find_content_conflict``
@@ -337,6 +411,8 @@ def _verifier_would_accept_skip(src_file, dst_file):
     rsync ``--ignore-existing`` skips the copy but the verifier then
     refuses to delete the originals with ``Verification failed``.
     """
+    if os.path.islink(src_file):
+        return _matching_independent_symlink(src_file, dst_file)
     if not os.path.lexists(dst_file) or os.path.islink(dst_file):
         return False
     try:
@@ -376,23 +452,15 @@ def preview_merge(src_path, dest_path):
     untouched". Surfaced separately so the confirm dialog can warn that
     the merge would not complete instead of implying a no-op resume.
 
-    It also covers source files that are themselves symlinks with no
-    destination entry yet. ``rsync -a`` (and the shutil fallback's
-    ``os.symlink``) recreate them as symlinks at the destination rather
-    than materializing a regular file — and the verifier then rejects the
-    freshly-created symlink and aborts the merge. Telling the user the
-    file will be copied when the job deterministically fails at verify
-    after creating it is the same false promise as the destination-entry
-    case, so it's classified as blocked too.
-
     Directory symlinks under ``src_path`` count as one transfer item each:
     the rsync ``-a`` path and the shutil fallback (see
     ``_copy_tree_with_progress``) both recreate them as symlinks at the
     destination without descending, so omitting them would let the confirm
     dialog say "All 0 files are already present" for a source that is
     actually just a directory symlink, undercounting what the move
-    transfers. The verifier does not check directory entries, so they stay
-    name-only (skip iff anything exists at the destination name).
+    transfers. File and directory symlinks are copied when absent, skipped
+    only for independent links with identical target strings, and blocked
+    for mismatched destination entries, just like the post-copy verifier.
     """
     will_copy = 0
     will_skip = 0
@@ -402,14 +470,22 @@ def preview_merge(src_path, dest_path):
     # transfer semantics the merge applies, so each such entry is one item.
     for root, dirs, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
+        target_dir = dest_path if rel == "." else os.path.join(dest_path, rel)
+        unsafe_parent = _unsafe_destination_directory(dest_path, target_dir, allow_missing=True) is not None
         for d in dirs:
-            if not os.path.islink(os.path.join(root, d)):
+            src_sub = os.path.join(root, d)
+            if not os.path.islink(src_sub):
                 continue
             rel_name = d if rel == "." else os.path.join(rel, d)
-            if os.path.lexists(os.path.join(dest_path, rel_name)):
+            dst_sub = os.path.join(dest_path, rel_name)
+            if unsafe_parent:
+                will_block += 1
+            elif not os.path.lexists(dst_sub):
+                will_copy += 1
+            elif _matching_independent_symlink(src_sub, dst_sub):
                 will_skip += 1
             else:
-                will_copy += 1
+                will_block += 1
         for fn in files:
             src_file = os.path.join(root, fn)
             # Merges discard Finder-managed regular ``.DS_Store`` files, so
@@ -426,17 +502,10 @@ def preview_merge(src_path, dest_path):
                 continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
-            if not os.path.lexists(dst_file):
-                # A source-file symlink gets recreated as a symlink at the
-                # destination by rsync -a / the shutil fallback's os.symlink;
-                # the verifier then rejects that symlink via its islink check
-                # and the merge aborts with "Verification failed". Surface it
-                # as blocked so the dialog never promises a copy that won't
-                # survive verification.
-                if os.path.islink(src_file):
-                    will_block += 1
-                else:
-                    will_copy += 1
+            if unsafe_parent:
+                will_block += 1
+            elif not os.path.lexists(dst_file):
+                will_copy += 1
             elif _verifier_would_accept_skip(src_file, dst_file):
                 will_skip += 1
             else:
@@ -478,7 +547,10 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
     ``progress`` is called as in ``_first_missing_source_file``.
     """
     src_count = 0
-    for root, _dirs, files in os.walk(src_path):
+    for root, directories, files in os.walk(src_path):
+        mismatch = _directory_mismatch(root, directories, src_path, transfer_dest)
+        if mismatch is not None:
+            return f"'{mismatch}' directory missing, linked, or different at destination"
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)
@@ -496,9 +568,9 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
                     f"'{rel_name}' type mismatch (symlink vs regular file) "
                     f"at destination")
             if src_is_link:
-                if os.readlink(src_file) != os.readlink(dst_file):
+                if not _matching_independent_symlink(src_file, dst_file):
                     return (
-                        f"'{rel_name}' symlink target mismatch at destination")
+                        f"'{rel_name}' symlink target mismatch or source alias at destination")
                 continue
             try:
                 src_size = os.stat(src_file, follow_symlinks=False).st_size

@@ -14,6 +14,10 @@ import tempfile
 import threading
 import time
 
+from job_runner.subprocess_control import process_group_kwargs, stop_process_tree
+
+from .paths import _unsafe_destination_directory
+
 try:
     from ..proc import no_window_kwargs
 except ImportError:
@@ -59,7 +63,7 @@ def _copy_and_verify(src, dst):
 
 
 def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
-                             progress_cb):
+                             progress_cb, control=None):
     """Recursively copy src_path into dest_path, reporting each file copied.
 
     ``skip_existing`` mirrors rsync ``--ignore-existing`` (merge/resume): a
@@ -79,8 +83,11 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
     copied = 0
     created_dirs = []
     for root, dirs, files in os.walk(src_path, onerror=_raise):
+        if control:
+            control.checkpoint()
         rel = os.path.relpath(root, src_path)
         target_dir = dest_path if rel == "." else os.path.join(dest_path, rel)
+        _require_destination_directory(dest_path, target_dir, allow_missing=True)
         os.makedirs(target_dir, exist_ok=True)
         created_dirs.append((root, target_dir))
         # os.walk lists a symlinked subdirectory in `dirs` but, with its
@@ -92,34 +99,27 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
         # primary rsync -a path (which preserves symlinks rather than
         # following them) and keeping the verification counts consistent.
         for d in dirs:
+            if control:
+                control.checkpoint()
+            _require_destination_directory(dest_path, target_dir)
             src_sub = os.path.join(root, d)
             if not os.path.islink(src_sub):
                 continue
             dst_sub = os.path.join(target_dir, d)
-            if skip_existing and os.path.lexists(dst_sub):
+            if (skip_existing or (control and control.generation)) and os.path.lexists(dst_sub):
                 continue
             os.symlink(os.readlink(src_sub), dst_sub)
         for fn in files:
-            # Merges skip Finder metadata (``.DS_Store``) — the destination
-            # keeps its own copy, and the source's is discarded when the
-            # source tree is removed after a successful merge. Fresh moves
-            # carry them along, matching the primary rsync path.
-            if skip_existing and fn in FINDER_METADATA_FILES:
-                continue
+            if control:
+                control.checkpoint()
+            _require_destination_directory(dest_path, target_dir)
             src_file = os.path.join(root, fn)
             dst_file = os.path.join(target_dir, fn)
-            # lexists (not exists): a broken or symlinked destination entry
-            # still counts as present for a merge, so we never dereference it
-            # and write through to its target. exists() returns False for a
-            # broken symlink and would fall through to copy2 below.
-            if skip_existing and os.path.lexists(dst_file):
+            if not _copy_tree_file(
+                    src_file, dst_file,
+                    is_merge=skip_existing,
+                    skip_existing=skip_existing or (control and control.generation)):
                 continue
-            if os.path.islink(src_file):
-                # Preserve the symlink rather than copy2's dereferenced target,
-                # matching rsync -a and the directory-symlink handling above.
-                os.symlink(os.readlink(src_file), dst_file)
-            else:
-                shutil.copy2(src_file, dst_file)
             copied += 1
             if progress_cb:
                 progress_cb(copied, total_files, fn, "Copying files")
@@ -132,9 +132,43 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
     # metadata. Run after all contents exist so child writes don't re-bump a
     # parent's mtime. Skipped on a merge: a pre-existing destination dir keeps
     # the user's own metadata rather than being overwritten with the source's.
-    if not skip_existing:
+    if not skip_existing and not (control and control.generation):
         for src_dir, target_dir in created_dirs:
+            _require_destination_directory(dest_path, target_dir)
             shutil.copystat(src_dir, target_dir)
+
+
+def _require_destination_directory(root, directory, *, allow_missing=False):
+    """Refuse writes and metadata changes through redirected directories."""
+    unsafe = _unsafe_destination_directory(root, directory, allow_missing=allow_missing)
+    if unsafe is not None:
+        raise OSError(f"Destination directory is missing, linked, or unsafe: {unsafe}")
+
+
+def _copy_tree_file(source, destination, is_merge, skip_existing):
+    """Copy one opaque entry, preserving links and existing merge entries.
+
+    ``is_merge`` discards regular Finder metadata; fresh moves copy them.
+    ``skip_existing`` keeps whatever is already at the destination — true
+    for merges AND for resumed fresh moves, so a Resume preserves anything
+    that landed before the Pause without overwriting it. The two flags are
+    separate: on a resumed fresh move ``skip_existing`` is true but
+    ``is_merge`` is false, so a ``.DS_Store`` that had not yet copied is
+    still carried across and the fresh verifier does not see it missing.
+    """
+    # Only regular Finder metadata is discarded; source symlinks with the
+    # same name still need to be copied and verified as opaque entries.
+    if (is_merge and os.path.basename(source) in FINDER_METADATA_FILES
+            and not os.path.islink(source) and os.path.isfile(source)):
+        return False
+    # lexists includes broken links so a merge never writes through them.
+    if skip_existing and os.path.lexists(destination):
+        return False
+    if os.path.islink(source):
+        os.symlink(os.readlink(source), destination)
+    else:
+        shutil.copy2(source, destination)
+    return True
 
 
 def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
@@ -207,11 +241,11 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
         poll = 1.0 if cancel_check is not None else min(stall_timeout, 30)
         while not done.wait(poll):
             if cancel_check is not None and cancel_check():
-                proc.kill()
+                stop_process_tree(proc)
                 return
             if time.monotonic() - last_activity["t"] > stall_timeout:
                 state["timed_out"] = True
-                proc.kill()
+                stop_process_tree(proc)
                 return
 
     watchdog = threading.Thread(target=_watchdog, daemon=True)
@@ -219,17 +253,22 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
 
     stderr_thread, stderr_chunks = _start_stderr_drain(proc, last_activity)
 
+    completed = False
     try:
         _stream_rsync_progress(
             stdout_stream, total_files, progress_cb, last_activity)
         proc.wait()
+        completed = True
     finally:
         done.set()
+        if not completed:
+            stop_process_tree(proc)
+            proc.wait()
         if stdout_stream is not None and stdout_stream is not proc.stdout:
             with contextlib.suppress(OSError):
                 stdout_stream.close()
-    stderr_thread.join()
-    watchdog.join()
+        stderr_thread.join()
+        watchdog.join()
     return proc.returncode, "".join(stderr_chunks), state["timed_out"]
 
 
@@ -263,7 +302,7 @@ def _spawn_rsync_on_pty(cmd):
     try:
         proc = subprocess.Popen(
             cmd, stdout=stdout_arg, stderr=subprocess.PIPE, text=True,
-            **no_window_kwargs(),
+            **no_window_kwargs(), **process_group_kwargs(),
         )
     except BaseException:
         # Popen can raise after os.openpty() succeeded (bad rsync_bin,

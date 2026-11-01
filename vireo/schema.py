@@ -22,11 +22,14 @@ from canonical_schema import (
     CURRENT_FLAG_ATTRIBUTION_OBJECTS,
     FORMERLY_LAZY_OBJECTS,
     JOB_HISTORY_LATER_COLUMNS,
+    JOB_HISTORY_LINEAGE_COLUMNS,
+    JOB_HISTORY_PARENT_INDEX,
     JOB_HISTORY_WORKSPACE_OBJECTS,
     create_current_flag_attribution,
     create_detection_evidence_reviews,
     create_formerly_lazy_objects,
     create_identity_alternatives,
+    create_photo_versions,
     create_same_shot_reviews,
     create_subject_ranking_analysis,
     job_history_columns,
@@ -236,6 +239,46 @@ def _retain_global_flag_attribution(conn):
     conn.execute(CURRENT_FLAG_ATTRIBUTION_OBJECTS[1])
 
 
+# Job types only Vireo itself started before ``origin`` was recorded: the
+# hourly storage maintenance and the two recurring discovery checks.
+_HISTORICAL_SYSTEM_JOB_TYPES = (
+    "retained-cache-maintenance", "new_images_walk", "missing_originals_scan",
+)
+
+
+def _add_job_history_lineage(conn):
+    """Record who caused each job and which job it followed.
+
+    Rows written before this read as started by the user, except the job
+    types that were always automatic (a missing-originals check the user
+    clicked is indistinguishable from the 30-minute one, and the automatic
+    runs vastly outnumber them). ``config.chained_from``, the old way a
+    follow-up named its parent, becomes ``parent_job_id``.
+    """
+    present = job_history_columns(conn)
+    for column, definition in JOB_HISTORY_LINEAGE_COLUMNS:
+        if column not in present:
+            conn.execute(f"ALTER TABLE job_history ADD COLUMN {column} {definition}")
+    conn.execute(JOB_HISTORY_PARENT_INDEX)
+    conn.execute(
+        "UPDATE job_history SET parent_job_id = json_extract(config, '$.chained_from') "
+        "WHERE parent_job_id IS NULL AND json_valid(config) "
+        "AND json_type(config, '$.chained_from') = 'text'"
+    )
+    placeholders = ",".join("?" for _ in _HISTORICAL_SYSTEM_JOB_TYPES)
+    conn.execute(
+        f"UPDATE job_history SET origin = 'system' WHERE type IN ({placeholders})",
+        _HISTORICAL_SYSTEM_JOB_TYPES,
+    )
+
+
+def _validate_job_history_lineage(conn):
+    columns = job_history_columns(conn)
+    missing = [column for column, _ in JOB_HISTORY_LINEAGE_COLUMNS if column not in columns]
+    if missing:
+        raise RuntimeError(f"job_history is missing {', '.join(missing)}")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -269,6 +312,11 @@ MIGRATIONS = (
     Migration(27, "same_shot_reviews", create_same_shot_reviews),
     Migration(28, "flag_attribution_history", create_current_flag_attribution),
     Migration(29, "global_flag_attribution_lifetime", _retain_global_flag_attribution),
+    Migration(30, "photo_versions", create_photo_versions),
+    Migration(
+        31, "job_history_lineage",
+        _add_job_history_lineage, _validate_job_history_lineage,
+    ),
 )
 
 

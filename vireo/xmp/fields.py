@@ -55,6 +55,12 @@ class _FieldEdits:
         desc = self.document.description()
         return self.properties.set_properties(desc, {f"{{{NS_XMPDM}}}pick": values[flag]})
 
+    def set_photo_versions(self, value):
+        """Persist all independent versions, including an explicit empty set."""
+        return self.properties.set_properties(
+            self.document.description(), {f"{{{NS_VIREO}}}photoVersions": value},
+        )
+
     def set_edit_recipe(self, recipe_json):
         """Write or clear Vireo's non-destructive edit recipe marker."""
         recipe_json = recipe_json or ""

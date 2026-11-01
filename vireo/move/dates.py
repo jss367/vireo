@@ -289,7 +289,8 @@ def _date_move_plan_item(destination, destination_root, relative, photo_ids):
 
 
 def move_folder_by_date(db, folder_id, destination, folder_template,
-                        progress_cb=None, developed_dir="", keep_visible=True):
+                        progress_cb=None, developed_dir="", keep_visible=True,
+                        control=None):
     """Move a folder's tracked photos into capture-date subfolders.
 
     Each photo uses ``move_photos``' copy/verify/catalog-update/delete order,
@@ -354,6 +355,11 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             developed_dir=developed_dir,
             developed_listing_cache=developed_listing_cache,
             keep_visible=keep_visible,
+            **({
+                "cancel_check": lambda: control.runner.cancellation_requested(control.job_id),
+                "pause_requested": lambda: control.runner.pause_requested(control.job_id),
+                "pause_callback": control.checkpoint,
+            } if control else {}),
         )
         group_moved = int(result.get("moved", 0))
         moved += group_moved

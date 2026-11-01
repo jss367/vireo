@@ -48,7 +48,7 @@ function createExportFolderBrowser() {
 
 async function openExportModal() {
   if (!editorState.photoId || !editorState.photo || editorState.loading) return;
-  var photoId = editorState.photoId;
+  var photoId = editorState.photoId, loadSeq = editorState.loadSeq;
   var exportBtn = /** @type {HTMLButtonElement} */ (document.getElementById('exportBtn'));
   exportBtn.disabled = true;
 
@@ -56,7 +56,7 @@ async function openExportModal() {
   // Export always produces the edit currently visible on the canvas.
   if (isEditorDirty()) {
     var saved = await saveRecipe('Saved before export');
-    if (!saved || editorState.photoId !== photoId) {
+    if (!saved || editorState.loadSeq !== loadSeq) {
       exportBtn.disabled = !editorState.photoId || editorState.loading;
       return;
     }
@@ -234,6 +234,8 @@ function selectedExportMetadataFields() {
   }
   return {
     photo_ids: [editorState.photoId],
+    version_id: editorState.versionId || undefined,
+    version_revision: editorState.version ? editorState.version.revision : undefined,
     metadata_fields: selectedExportMetadataFields(),
     destination: /** @type {HTMLInputElement} */ (document.getElementById('exportDest')).value.trim(),
     export_to_subfolder: /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolder')).checked,

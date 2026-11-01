@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 31
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -59,7 +59,13 @@ FORMERLY_LAZY_OBJECTS = (
         resource_wait_count INTEGER DEFAULT 0,
         tree        TEXT,
         summary     TEXT DEFAULT '',
-        progress    TEXT
+        progress    TEXT,
+        origin      TEXT NOT NULL DEFAULT 'user',
+        parent_job_id TEXT,
+        reason      TEXT,
+        repeat_count INTEGER NOT NULL DEFAULT 1,
+        repeat_since TEXT,
+        task_scope  TEXT
     )""",
     # The durable "do not adopt this preview" marker consulted by
     # web.media_previews._PreviewServer._serve_preview:
@@ -115,6 +121,28 @@ JOB_HISTORY_LATER_COLUMNS = (
 )
 
 
+# Who caused a job and how it relates to other work (migration 31).
+# ``origin`` is ``user`` (you asked for it) or ``system`` (Vireo started it on
+# its own); a follow-up job names the job that started it in
+# ``parent_job_id`` and inherits that job's origin; ``reason`` says why a
+# system job started; ``task_scope`` is its stable scope within its type and
+# workspace. ``repeat_count`` / ``repeat_since`` record consecutive
+# failures of one system task with the same error, folded into a single row.
+JOB_HISTORY_LINEAGE_COLUMNS = (
+    ("origin", "TEXT NOT NULL DEFAULT 'user'"),
+    ("parent_job_id", "TEXT"),
+    ("reason", "TEXT"),
+    ("repeat_count", "INTEGER NOT NULL DEFAULT 1"),
+    ("repeat_since", "TEXT"),
+    ("task_scope", "TEXT"),
+)
+
+JOB_HISTORY_PARENT_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_job_history_parent "
+    "ON job_history(parent_job_id)"
+)
+
+
 def job_history_columns(conn):
     return {row[1] for row in conn.execute("PRAGMA table_info(job_history)")}
 
@@ -127,9 +155,14 @@ def create_formerly_lazy_objects(conn):
     to migration 18, instead of failing startup on ``no such column``."""
     for statement in FORMERLY_LAZY_OBJECTS:
         conn.execute(statement)
-    if "workspace_id" in job_history_columns(conn):
+    columns = job_history_columns(conn)
+    if "workspace_id" in columns:
         for statement in JOB_HISTORY_WORKSPACE_OBJECTS:
             conn.execute(statement)
+    if "parent_job_id" in columns:
+        # Older catalogs gain the column in migration 31, which creates
+        # the index after its ``ALTER``.
+        conn.execute(JOB_HISTORY_PARENT_INDEX)
 
 
 
@@ -211,6 +244,16 @@ def create_same_shot_reviews(conn):
     )""")
 
 
+def create_photo_versions(conn):
+    """Version identities belong to a source photo, never to a second file."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS photo_versions (
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        id TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        PRIMARY KEY (photo_id, id)
+    )""")
+
+
 def create_auxiliary_schema_objects(conn):
     """Shared auxiliary objects for fresh catalogs; migrations use the same DDL."""
     create_formerly_lazy_objects(conn)
@@ -219,6 +262,7 @@ def create_auxiliary_schema_objects(conn):
     create_identity_alternatives(conn)
     create_detection_evidence_reviews(conn)
     create_same_shot_reviews(conn)
+    create_photo_versions(conn)
 
 
 class CanonicalSchema:

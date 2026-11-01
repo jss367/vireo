@@ -11,10 +11,12 @@ request database — every dependency is passed in explicitly.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import TYPE_CHECKING, Protocol
 
 from db import Database
+from job_runner.lineage import JobLineage
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
 from services import saved_processes
 
@@ -260,7 +262,6 @@ def _missing_labels_blocker(thread_db: Database, params: PipelineParams, process
 
 def _process_job_config(
     thread_db: Database, collection_id: int, process_id: int, params: PipelineParams,
-    chained_from: str | None,
 ) -> JsonDict:
     """Build the jobs-panel config for a chained/by-id process run."""
     job_config = {
@@ -285,10 +286,6 @@ def _process_job_config(
         "miss_enabled": params.miss_enabled,
         "eye_detect_override": params.eye_detect_override,
     }
-    if chained_from:
-        # Provenance for the jobs panel: this run was started by an
-        # import's after-import choice, not by hand.
-        job_config["chained_from"] = chained_from
     return job_config
 
 
@@ -487,12 +484,23 @@ class PipelineChain:
                     self.chain_after_move(job, result, after_move, workspace_id)
 
         job_config = _process_job_config(
-            thread_db, collection_id, process_id, params, chained_from,
+            thread_db, collection_id, process_id, params,
         )
+        # The folders of every photo the run processes: an import admitted
+        # beside a NAS transfer can process its own photos while the
+        # transfer moves other folders.
+        workspace_paths = [
+            os.path.realpath(path)
+            for path in thread_db.collections.folder_paths(collection_id)
+        ]
         job_id = runner.enqueue_pipeline(
             work,
             config=job_config,
             workspace_id=workspace_id,
             runtime_warning=runtime_warning,
+            workspace_paths=workspace_paths,
+            # Provenance for the Jobs page: started by an import's
+            # after-import choice, grouped under that import.
+            lineage=JobLineage.following(chained_from),
         )
         return job_id, model_warning, None

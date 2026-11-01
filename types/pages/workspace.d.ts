@@ -5,6 +5,8 @@ interface WorkspaceFolder {id: number; path: string; workspace_photo_count?: num
 interface ActiveWorkspace {id: number; name: string; folders?: WorkspaceFolder[]}
 interface WorkspaceListEntry {id: number; name: string; folder_count?: number}
 interface JobHistoryRow {
+  origin?: 'user' | 'system';
+  reason?: string | null;
   type: string; status: string; started_at?: string | null; duration?: number | null;
   summary?: string | null; result?: unknown; error_count?: number;
 }

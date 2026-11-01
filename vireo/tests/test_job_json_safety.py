@@ -181,7 +181,7 @@ def test_guard_flags_a_job_dict_value_json_cannot_encode():
         del job["_photo_ids"]
         return {"ok": True}
 
-    job_id = runner.start("probe", work, ephemeral=True)
+    job_id = runner.start("probe", work, ephemeral=True, pausable=False)
     try:
         assert parked.wait(synchronization_timeout(30))
         runner.list_jobs()

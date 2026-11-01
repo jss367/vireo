@@ -11,11 +11,12 @@ import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict
 
+import settings_source
 from keyword_normalization import (
     keyword_match_key,
     normalize_keyword_display,
 )
-from new_images import get_shared_cache
+from new_images_cache import get_shared_cache
 from repositories.keyword_identity_sql import resolve_import_alias
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.species_taxon_lookup import taxon_lookup_variants
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
     from repositories.photo_metadata import PhotoMetadataRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_species import PhotoSpeciesRepository
+    from repositories.photo_versions import PhotoVersionsRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
     from repositories.pipeline_features import PipelineFeaturesRepository
@@ -1335,27 +1337,6 @@ class Database:
         """Return the active workspace id, raising ``RuntimeError`` if none is set."""
         return self._ws_id()
 
-    def get_new_images_for_workspace(self, workspace_id: int) -> dict[str, Any]:
-        """Return new-images result for workspace, using cache when fresh.
-
-        Race-safe: we snapshot the cache generation before the (potentially
-        slow) walk and pass it to ``set``. If an invalidation fires during
-        the walk, the generation advances and the stale result is dropped
-        on write — so the next reader recomputes instead of seeing the
-        pre-invalidation value. The current caller still returns its own
-        best-effort result.
-        """
-        import new_images
-        cached = self._new_images_cache.get(self._db_path, workspace_id)
-        if cached is not None:
-            return cached
-        generation = self._new_images_cache.get_generation(self._db_path, workspace_id)
-        result = new_images.count_new_images_for_workspace(self, workspace_id)
-        self._new_images_cache.set(
-            self._db_path, workspace_id, result, generation=generation
-        )
-        return result
-
     def invalidate_new_images_cache_for_folders(self, folder_ids: Collection[int]) -> None:
         """Clear cache for every workspace linked to any of the given folder_ids."""
         if not folder_ids:
@@ -1408,7 +1389,7 @@ class Database:
         ui_state: dict[str, Any] | None = None,
     ) -> int:
         """Create a new workspace. Returns the workspace id."""
-        from services.result_files import highest_workspace_id
+        from catalog_result_files import highest_workspace_id
         id_floor = (
             highest_workspace_id(os.path.dirname(self._db_path))
             if self._db_path != ":memory:" else 0
@@ -1432,7 +1413,6 @@ class Database:
             replaces only the named leaf, not the whole parent dict.
         """
         import config_schema
-        from config import _deep_merge
 
         ws = self.workspaces.get(self._active_workspace_id)
         if not ws or not ws["config_overrides"]:
@@ -1441,12 +1421,22 @@ class Database:
             overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
             if not isinstance(overrides, dict):
                 return global_config
-            effective = _deep_merge(global_config, overrides)
+            effective = config_schema.deep_merge(global_config, overrides)
         except (json.JSONDecodeError, TypeError):
             return global_config
         # An override stored before the workspace routes validated values
         # (``null``, ``"abc"``) falls back to the global value it shadows.
         return config_schema.repair_types(effective, global_config)
+
+    def effective_config(self) -> dict[str, Any]:
+        """The global settings with the active workspace's overrides applied.
+
+        Exactly ``get_effective_config(cfg.load())``, for the data layer: the
+        global settings come through ``settings_source`` (which ``config``
+        installs), so neither ``Database`` nor a repository imports ``config``.
+        Repositories receive this method from their factory.
+        """
+        return self.get_effective_config(settings_source.load())
 
     def get_subject_types(self) -> set[str]:
         """Return the keyword types that count as 'identified' for the active
@@ -1458,8 +1448,7 @@ class Database:
         (nested lists/objects) to avoid TypeError downstream in callers
         like collection filtering and the classify skip-gate.
         """
-        import config as cfg
-        effective = self.get_effective_config(cfg.load())
+        effective = self.effective_config()
         raw = effective.get("subject_types", list(SUBJECT_TYPES_DEFAULT))
         if not isinstance(raw, list):
             return set(SUBJECT_TYPES_DEFAULT)
@@ -1616,7 +1605,7 @@ class Database:
             ),
             resolve_species_display_name=self.resolve_species_display_name,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            get_effective_config=self.get_effective_config,
+            effective_config=self.effective_config,
         )
 
     @property
@@ -2076,7 +2065,7 @@ class Database:
                     subject_sharpness, subject_size, quality_score,
                     latitude, longitude, companion_path, working_copy_path,
                     wildlife_excluded, miss_no_subject, miss_clipped, miss_oof,
-                    camera_make, camera_model, iso"""
+                    camera_make, camera_model, iso, lens, focal_length, aperture"""
 
     # Columns for single-photo detail queries (includes exif_data JSON +
     # eye-focus fields consumed by the review lightbox's crosshair overlay)
@@ -2277,6 +2266,12 @@ class Database:
         Do not hold the returned repository across ``set_active_workspace``.
         """
         return self._photo_label_repository()
+
+    @property
+    def photo_versions(self) -> PhotoVersionsRepository:
+        """Independent versions sharing the source photo and its metadata."""
+        from repositories.photo_versions import PhotoVersionsRepository
+        return PhotoVersionsRepository(self.conn)
 
     def _edits_repository(self) -> EditsRepository:
         """Build the edits repository on this connection.
@@ -2511,7 +2506,7 @@ class Database:
         """Build the (catalog-wide) culling-analysis repository on this connection."""
         from repositories.culling import CullingRepository
 
-        return CullingRepository(self.conn, self.get_effective_config)
+        return CullingRepository(self.conn, self.effective_config)
 
     @property
     def culling(self) -> CullingRepository:
@@ -2899,8 +2894,7 @@ class Database:
         once and hand it back to ``resolve_species_display_name`` instead of
         paying for it per name.
         """
-        import config as cfg
-        override = cfg.get("keyword_case")
+        override = settings_source.get("keyword_case")
         if override and override != "auto":
             return override
         return self.detect_keyword_case_convention()
@@ -4110,6 +4104,7 @@ class Database:
         photo_ids: Collection[int] | None = None,
         prediction_ids: Collection[int] | None = None,
         _commit: bool = True,
+        species_taxonomy: Any = None,
     ) -> dict[str, Any] | None:
         """Accept a prediction: mark as accepted and add species keyword.
 
@@ -4162,12 +4157,19 @@ class Database:
         compare this key and record each result's actual ``keyword_id`` for
         undo/redo rather than requiring equivalent aliases to share an ID.
 
+        ``species_taxonomy`` is the loaded taxonomy (``load_local_taxonomy()``)
+        a ``replace_species`` accept uses to keep keywords a neighbouring
+        subject's prediction supports as broader/same/narrower; without it
+        only exact-name keywords are protected. The caller loads it, so the
+        data layer never reads the taxonomy file.
+
         All database changes are performed atomically in a single transaction
         unless ``_commit`` is False and the caller owns the transaction.
         """
         return self._keyword_provenance_repository().accept_prediction(
             prediction_id, replace_species=replace_species, photo_ids=photo_ids,
             prediction_ids=prediction_ids, _commit=_commit,
+            species_taxonomy=species_taxonomy,
         )
 
     def accept_subject_species(
@@ -4434,11 +4436,7 @@ class Database:
                 self._sync_repository().commit()
             return None
         try:
-            import config as cfg
-
-            enabled = bool(
-                self.get_effective_config(cfg.load()).get("sync_flags_to_xmp", False)
-            )
+            enabled = bool(self.effective_config().get("sync_flags_to_xmp", False))
         except Exception:
             log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
             enabled = False
@@ -4795,6 +4793,14 @@ class Database:
             pid, value if value else None, verify_workspace=False,
         )
 
+    def _edit_set_photo_version(self, pid, value):
+        state = json.loads(value)
+        if state["value"] is None:
+            self.photo_versions.delete(pid, state["id"])
+        else:
+            self.photo_versions.put(pid, state["value"])
+        self.photo_versions.queue_sync(pid, self.require_workspace_id())
+
     def _edit_set_photo_location(self, pid, value):
         from services.pending_changes import queue_location_sync_if_enabled
         state = json.loads(value)
@@ -5118,6 +5124,7 @@ class Database:
         'wildlife_excluded': _edit_set_wildlife_excluded,
         'color_label': _edit_set_color_label,
         'edit_recipe': _edit_set_edit_recipe,
+        'photo_version': _edit_set_photo_version,
         'photo_location': _edit_set_photo_location,
         'prediction_status': _edit_set_prediction_status,
     }
@@ -5227,10 +5234,10 @@ class Database:
 
     def _prune_edit_history(self):
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
-        import config as cfg
-        max_entries = cfg.get('max_edit_history') or 1000
+        max_entries = settings_source.get('max_edit_history') or 1000
         return self._edit_history_repository().prune(
-            max_entries, max_payload_bytes=max(0, int(cfg.get('grouping_history_max_mb'))) * 1024**2,
+            max_entries,
+            max_payload_bytes=max(0, int(settings_source.get('grouping_history_max_mb'))) * 1024**2,
         )
 
     # -- Collections --
@@ -5255,7 +5262,7 @@ class Database:
         read it: rule validation still fails before a missing workspace does,
         and ``create_default_collections(workspace_id=...)`` still needs no
         active workspace. The façade methods the rules engine consults
-        (``get_effective_config``, ``get_subject_types``,
+        (``effective_config``, ``get_subject_types``,
         ``get_folder_subtree_ids``) are passed bound, so monkeypatches of
         them keep reaching the moved SQL, and the module helpers and
         constants it reads are passed in at call time for the same reason.
@@ -5265,7 +5272,7 @@ class Database:
         return CollectionRepository(
             self.conn,
             self._ws_id,
-            get_effective_config=self.get_effective_config,
+            effective_config=self.effective_config,
             get_subject_types=self.get_subject_types,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
             chunks=_chunks,

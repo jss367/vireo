@@ -63,7 +63,10 @@ export async function loadHistory() {
       if ((r.error_count || 0) > 0 && result === '-') result = '';
       // For failed jobs, show the error message
       if (r.result) result = resultErrorText(r.result) ?? result;
-      html += '<tr><td>' + escapeHtml(r.type) + '</td><td class="' + cls + '">' + r.status + '</td>' +
+      // Vireo's own work (maintenance, recurring checks) says so.
+      var startedBy = r.origin === 'system'
+        ? ' <span style="color:var(--text-muted);" title="' + escapeHtml(r.reason || 'Started by Vireo') + '">(Vireo)</span>' : '';
+      html += '<tr><td>' + escapeHtml(r.type) + startedBy + '</td><td class="' + cls + '">' + r.status + '</td>' +
         '<td>' + started + '</td><td>' + duration + '</td><td style="' + (r.status === 'failed' ? 'color:var(--danger);' : '') + '">' + escapeHtml(result) + '</td></tr>';
     });
     html += '</tbody></table>';

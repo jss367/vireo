@@ -1,5 +1,6 @@
 // Browse's catalog, selection and asynchronous page-state contracts.
 interface BrowsePhoto {
+  virtual_copy_count?: number;
   id: number; filename: string; rating: number | null;
   flag?: 'none' | 'flagged' | 'rejected' | null;
   width?: number | null; height?: number | null; extension?: string;

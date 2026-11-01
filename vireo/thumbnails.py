@@ -8,7 +8,7 @@ import tempfile
 from datetime import UTC, datetime
 
 from app_paths import default_path, media_root
-from camera_denoise import cache_matches, cache_save_options, uses_camera_profile
+from camera_denoise import uses_camera_profile
 from config import config_value
 from file_replace import replace_file
 from image_loader import (
@@ -16,6 +16,7 @@ from image_loader import (
     RAW_EXTENSIONS,
     load_image,
 )
+from render_fingerprint import cache_matches, cache_save_options
 from render_source import (
     photo_value as _photo_value,
 )
@@ -180,6 +181,7 @@ def _retry_thumbnail_with_companion(
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     recipe_kwargs = {"recipe": recipe} if recipe else {}
     if recipe:
+        recipe_kwargs["original_path"] = os.path.join(folder_path, photo["filename"])
         recipe_kwargs["camera_metadata"] = photo
         recipe_kwargs["native_size"] = _recipe_source_dimensions(photo)
     return generate_thumbnail(
@@ -220,7 +222,7 @@ def _retry_thumbnail_with_working_copy(
         except sqlite3.Error:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
-    recipe_kwargs = {"recipe": recipe, "native_size": _recipe_source_dimensions(photo), "camera_metadata": photo}
+    recipe_kwargs = {"recipe": recipe, "native_size": _recipe_source_dimensions(photo), "camera_metadata": photo, "original_path": source_path}
     return generate_thumbnail(
         photo_id,
         wc_path,
@@ -234,7 +236,7 @@ def _retry_thumbnail_with_working_copy(
 
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
-    raw_decode=None, min_source_size=None, native_size=None, cache_name=None, camera_metadata=None,
+    raw_decode=None, min_source_size=None, native_size=None, cache_name=None, camera_metadata=None, original_path=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -263,13 +265,15 @@ def generate_thumbnail(
             ``{photo_id}.jpg``; paired-source views use a distinct filename
             so switching between RAW and JPEG can never return pixels cached
             for the other source.
+        original_path: primary photo path when ``source_path`` is a fallback;
+            its file identity controls fallback reuse and RAW recovery.
 
     Returns:
         path to the thumbnail file, or None on failure
     """
     thumb_path = os.path.join(cache_dir, cache_name or f"{photo_id}.jpg")
 
-    if os.path.exists(thumb_path) and cache_matches(thumb_path, camera_metadata, recipe):
+    if os.path.exists(thumb_path) and cache_matches(thumb_path, camera_metadata, recipe, original_path or source_path):
         return thumb_path
 
     load_max_size = None if recipe and recipe.get("crop") else size
@@ -314,7 +318,7 @@ def generate_thumbnail(
     )
     os.close(fd)
     try:
-        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe))
+        img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe, original_path or source_path, image=img))
         replace_file(tmp_path, thumb_path)
     except Exception:  # broad: remove the temp file on any failure, then re-raise
         with contextlib.suppress(OSError):
@@ -331,8 +335,8 @@ def get_thumb_path(photo_id, cache_dir):
     return None
 
 
-def _photos_needing_thumbnails(db, photos, cache_dir, cancel_check):
-    """Photos with no thumbnail or a stale camera-denoise one; ``None`` if cancelled."""
+def _photos_needing_thumbnails(db, photos, cache_dir, cancel_check, folders=None):
+    """Photos with missing or stale camera/lens renders; ``None`` if cancelled."""
     needed = []
     for photo in photos:
         if cancel_check and cancel_check():
@@ -342,9 +346,12 @@ def _photos_needing_thumbnails(db, photos, cache_dir, cancel_check):
             needed.append(photo)
         else:
             recipe = db.get_photo_edit_recipe(photo["id"])
-            if uses_camera_profile(recipe):
+            adjustments = (recipe or {}).get("adjustments") or {}
+            if uses_camera_profile(recipe) or adjustments.get("lens_profile"):
                 detail_photo = db.photos.get(photo["id"]) or photo
-                if not cache_matches(thumb_path, detail_photo, recipe):
+                folder = (folders or {}).get(photo["folder_id"])
+                original_path = os.path.join(folder, photo["filename"]) if folder else None
+                if not cache_matches(thumb_path, detail_photo, recipe, original_path):
                     needed.append(photo)
     return needed
 
@@ -364,6 +371,9 @@ def _render_thumbnail_with_fallbacks(
     # add_photo INSERT) past the 30s busy_timeout.
     recipe_kwargs = {"recipe": recipe} if recipe else {}
     if recipe:
+        folder_path = folders.get(source_photo["folder_id"])
+        if folder_path:
+            recipe_kwargs["original_path"] = os.path.join(folder_path, source_photo["filename"])
         recipe_kwargs["camera_metadata"] = source_photo
         recipe_kwargs["native_size"] = _recipe_source_dimensions(
             source_photo
@@ -469,7 +479,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
     folders = {f["id"]: f["path"] for f in db.folders.tree()}
 
     # Filter to only photos needing thumbnails
-    needed = _photos_needing_thumbnails(db, photos, cache_dir, cancel_check)
+    needed = _photos_needing_thumbnails(db, photos, cache_dir, cancel_check, folders)
     if needed is None:
         return {"generated": 0, "skipped": 0, "failed": 0}
 

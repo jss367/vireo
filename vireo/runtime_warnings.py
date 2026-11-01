@@ -101,7 +101,10 @@ def build_cpu_runtime_warning(job_type, *, work_units=None, reason=None):
 
     providers = info["onnxruntime_providers"]
     provider_text = ", ".join(providers) if providers else "none detected"
-    label = job_type.replace("-", " ").replace("_", " ").title()
+    label = " ".join(
+        "NAS" if word.lower() == "nas" else word.title()
+        for word in job_type.replace("-", " ").replace("_", " ").split()
+    )
     warning = {
         "id": "cpu-only-ml",
         "kind": "cpu-only-ml",

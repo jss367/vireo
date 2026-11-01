@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
-const scripts = ['state.js', 'format.js', 'import-retry.js', 'job-card.js', 'actions.js'];
+const scripts = ['state.js', 'format.js', 'import-retry.js', 'lineage.js', 'job-card.js', 'actions.js'];
 let clickHandler;
 let fetchCount = 0;
 let resolveRequest;
@@ -69,6 +69,23 @@ const card = ctx.renderJobCard(parent, false);
 assert.match(card, /Restart import/);
 assert.match(card, /reusing unchanged catalog records/);
 assert.match(card, /Progress starts over/);
+
+// Pause capability stays visible until the backend enters its commit phase.
+// A finishing transfer must never offer controls the server will ignore.
+const transfer = {id: 'transfer', type: 'send-to-nas', status: 'running', pausable: true};
+assert.match(ctx.renderJobCard(transfer), /data-pause-job="transfer"/);
+assert.match(ctx.renderJobCard(transfer), /data-cancel-job="transfer"/);
+assert.match(ctx.renderJobCard({...transfer, status: 'paused'}), /data-resume-job="transfer"/);
+const finishing = ctx.renderJobCard({...transfer, cancellable: false,
+  control_unavailable_reason: 'Finishing safely. Pause and cancel are unavailable during this step.'});
+assert(!finishing.includes('data-pause-job='));
+assert(!finishing.includes('data-cancel-job='));
+assert.match(finishing, /disabled[^>]*>Finishing…/);
+assert.match(finishing, /Finishing safely/);
+const unavailable = ctx.renderJobCard({...transfer, pausable: false,
+  pause_unavailable_reason: 'Pause is unavailable during &lt;installation&gt;.'});
+assert.match(unavailable, /Pause is unavailable/);
+assert.match(unavailable, /&amp;lt;installation&amp;gt;/);
 
 ctx.bindDetailPaneActions();
 const button = {

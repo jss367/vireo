@@ -66,6 +66,7 @@ def _namespace(*, ownership="hier", failure_at=None, initial_error=None):
     ns["filter_removed_import_aliases"] = lambda db, pid, flat, hier, *args: (flat, hier)
     ns["UNREADABLE_SIDECAR_REASON"] = "invented unreadable reason"
     ns["_import_keyword_lists"] = lambda db, pid, flat, hier: imported.append((set(flat), list(hier)))
+    ns["_import_photo_versions"] = lambda db, pid, path: None
     db = SimpleNamespace(
         locations=SimpleNamespace(has_pending_change=lambda photo_id: True),
         pending_changes=SimpleNamespace(keyword_removal_keys=lambda *args, **kwargs: set()),

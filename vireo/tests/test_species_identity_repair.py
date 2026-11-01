@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from repositories.taxa import TaxaRepository
 from species_identity import SpeciesResolver
-from species_identity_repair import refresh_common_name_index
+from taxonomy import refresh_common_name_index
 
 
 @pytest.fixture

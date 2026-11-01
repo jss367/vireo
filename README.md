@@ -22,6 +22,7 @@ Vireo helps wildlife photographers triage thousands of photos using machine lear
 - **iNaturalist integration** — Taxonomy lookup and direct observation uploads
 - **Browse, review, and cull** — Filter, search, rate, keyword, and flag photos in a responsive web UI
 - **[Search across metadata](docs/searching-photos.md)** — Combine words with AND, OR, NOT, parentheses, and quoted phrases across file tags, folders, keywords, camera details, and current predictions
+- **Virtual copies and snapshots** — Keep independently editable crops and looks of one original, or save named checkpoints. [Using photo versions](docs/photo-versions.md)
 - **Non-destructive photo editing** — Adjust geometry, tone, white balance, detail, five-point curves, individual color ranges, and shadow/midtone/highlight grading with reusable presets, selective settings paste, and undoable batch adjustments
 - **Correctable subject masks** — Paint additions and removals to subject masks, undo each stroke, and save corrections with local edits. The original AI mask remains available.
 - **Progressive editing previews** — A smaller preview updates during adjustments, then refines to the selected zoom resolution after a pause.

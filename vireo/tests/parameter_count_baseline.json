@@ -2,8 +2,6 @@
   "classify_job/cached_only.py:_finalize_cached_only": 13,
   "import_job/batch_loop.py:_ImportBatchLoop.__init__": 13,
   "ingest.py:ingest": 13,
-  "move/folder.py:_FolderMove.__init__": 13,
-  "move/folder.py:move_folder": 13,
   "pipeline_stages/classification.py:classify_stage": 13,
   "pipeline_stages/media.py:thumbnail_stage": 13,
   "preview_materializer.py:materialize_preview": 13,
@@ -13,7 +11,5 @@
   "repositories/moves_merge.py:_StagedTreeMerge.__init__": 16,
   "repositories/photos.py:PhotoRepository.list_page": 14,
   "repositories/predictions.py:PredictionRepository.add": 17,
-  "web/export.py:_photo_export_work": 14,
-  "web/imports.py:_DuplicateCheckStream.__init__": 13,
   "web/job_launchers.py:create_job_launchers_blueprint": 14
 }

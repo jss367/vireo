@@ -91,6 +91,9 @@ class SidecarEditor:
         """See :meth:`_LocationKeywordEdits.release_location_flat_ownership_for`."""
         return self.locations.release_location_flat_ownership_for(keywords)
 
+    def set_photo_versions(self, value):
+        return self.fields.set_photo_versions(value)
+
     def set_edit_recipe(self, recipe_json):
         """See :meth:`_FieldEdits.set_edit_recipe`."""
         return self.fields.set_edit_recipe(recipe_json)

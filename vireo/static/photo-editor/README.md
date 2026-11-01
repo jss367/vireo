@@ -15,11 +15,13 @@ for the page's inline event handlers, and the editor's shared state lives on
 | `crop.js` | Crop box, crop fields, rotate/flip/straighten, aspect ratios, and committing a crop |
 | `crop-ratio.js` | The remembered crop ratio, its revisions, and cross-tab sync through localStorage |
 | `crop-drag.js` | Pointer dragging of crop handles and panning the zoomed image |
-| `adjustments.js` | Basic, tone curve, color mixer, color grading, and detail (denoise) controls |
+| `adjustments.js` | Basic, tone curve, color mixer, color grading, manual lens corrections, defringing, and detail (denoise) controls |
+| `optics.js` | Per-photo automatic lens-profile status, the rendered-source receipt, and calibrated inverse brush geometry |
 | `presets.js` | Edit presets: loading, applying, saving, and deleting |
 | `local-adjustments.js` | Subject/background adjustments, the mask snapshot, and the mask overlay |
 | `mask-brush.js` | Add/subtract mask painting, inverse geometry, and immutable correction requests |
 | `auto-tone.js` | Auto Tone requests (Balanced, Subject and Gentle styles) and their result messages |
+| `versions.js` | Virtual copies, named snapshots, version switching, and preview cards |
 | `save.js` | Resetting all edits and saving the recipe |
 | `checkpoints.js` | Edit History checkpoints and the saved-edit undo/redo hooks |
 | `export.js` | The Export dialog: presets, filename preview, preflight, and starting the job |
@@ -73,8 +75,12 @@ deadline. Superseded or stalled workers are killed and replaced; healthy workers
 retain caches. `data-preview-url` holds the recipe URL without transport identity
 so the browser can still reuse an already displayed result.
 
-Brush coordinates are mapped back through crop, straighten, flips and rotation
-into the EXIF-oriented source. The server paints a new content-addressed mask;
+Brush coordinates undo crop, straighten, flips and rotation. With lens geometry
+active, the server rasterizes the complete circular stroke in that corrected
+frame and maps its coverage back through the radial transform into the
+EXIF-oriented source, preserving the cursor's size, shape, softness and opacity.
+Without lens geometry the coordinates already refer to the source.
+The server paints a new content-addressed mask;
 prior files and the active AI mask remain unchanged. `local.mask.corrected`
 retains a corrected snapshot even with no active region adjustments. It is
 removed when rebinding masks for presets or other photos. The original
@@ -102,10 +108,9 @@ python -m pytest -o addopts='' -o junit_family=xunit1 -q \
 
 Cold RAW decoding still uses the full-precision decoder. The quick tier reduces
 render/output work; it does not replace that decode with an embedded JPEG.
-Native Shadows/Highlights rendering uses rectangular tiles with the full filter
-neighborhood on each edge. This avoids repeating the same filtering over wide,
-short strips while keeping the working tile budget bounded. Pointwise edits
-retain contiguous row tiles, and images within the budget run in one pass.
+Native Shadows/Highlights rendering builds its neighborhood base once per
+frame on a coarse grid, so the tone pass runs in contiguous row tiles with no
+overlap, and images within the budget run in one pass.
 See [RAW preview benchmarks](../../../docs/raw-preview-benchmarks.md) for the
 real-camera corpus runner, memory measurements, regression comparisons, and
 server cancellation and its limits.

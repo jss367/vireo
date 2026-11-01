@@ -25,6 +25,8 @@ cancellation). The modules, by responsibility:
   error count, and the one-line summary.
 - ``views``: a fresh job dict, the snapshot copies callers get, and the
   job-shaped view of a queued pipeline.
+- ``lineage``: ``JobLineage``, who caused a job (``origin``), the job it
+  follows (``parent_job_id``) and why Vireo started it (``reason``).
 
 Every collaborator that touches in-memory runner state shares the runner's
 one ``RLock`` (``JobRunner._lock``, with ``_pause_condition`` built on it);

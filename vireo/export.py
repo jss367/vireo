@@ -764,6 +764,7 @@ class _PhotoExportBatch:
         self.cancel_check = cancel_check
         self.cancel_only_check = cancel_only_check
         options = options or {}
+        self.recipe_overrides = options.get("recipe_overrides") or {}
         self.template = options.get("naming_template", "{original}")
         self.max_size = options.get("max_size")
         if self.max_size is not None:
@@ -852,6 +853,7 @@ class _PhotoExportBatch:
         # Get species keywords for all photos in one query
         self.species_map = db.photo_species.get_species_for_photos(self.photo_ids)
         self.edit_recipes = db.edits.get_photo_recipes(self.photo_ids)
+        self.edit_recipes.update(self.recipe_overrides)
 
     def run(self):
         """Export each photo, then finish queued metadata writes."""
@@ -2189,6 +2191,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
     species_map = db.photo_species.get_species_for_photos(photo_ids)
     exif_data_map = _get_photo_exif_data(db, photo_ids)
     edit_recipes = db.edits.get_photo_recipes(photo_ids)
+    edit_recipes.update(options.get("recipe_overrides") or {})
     developed_index = _DevelopedDirIndex()
     seq_counters = {}
     destination_reservations = {}

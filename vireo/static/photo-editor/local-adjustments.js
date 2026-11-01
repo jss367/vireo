@@ -325,7 +325,7 @@ function refreshMaskOverlay() {
   // mask at the Feather slider's value — the mask the first local slider
   // would freeze — so the user can check it before adjusting anything.
   var previewActiveMask = !recipe.local && editorState.localAvailable;
-  if (!editorState.maskOverlay || !(recipe.local || previewActiveMask)) {
+  if (!editorState.maskOverlay || !(recipe.local || previewActiveMask) || lensProfileSourcePending(recipe)) {
     // Bump the sequence and clear handlers so any in-flight preview load
     // can't win the race and re-show an overlay the user just hid (or one
     // from a previous photo during navigation).
@@ -342,7 +342,8 @@ function refreshMaskOverlay() {
   var size = Math.min(previewRenderSize(), 3840);
   var url = '/photos/' + editorState.photoId + '/edit-mask-preview?size=' +
     size + '&apply_crop=' + (editorPreviewAppliesCrop() ? '1' : '0') +
-    '&recipe=' + encodeURIComponent(JSON.stringify(recipe));
+    '&recipe=' + encodeURIComponent(JSON.stringify(recipe)) +
+    '&profile_source=' + (document.getElementById('editorImg')?.dataset.previewSourceKind || 'srgb');
   if (previewActiveMask) {
     url += '&feather=' + encodeURIComponent(Number(editorState.localDraft.feather) || 0);
   }

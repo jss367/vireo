@@ -17,7 +17,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from artifact_flight import atomic_write_bytes, preview_artifact_flights
-from camera_denoise import cache_matches, cache_save_options
+from render_fingerprint import cache_matches, cache_save_options
 from render_source import (
     companion_image_can_replace_raw_result,
     has_current_working_copy_failure,
@@ -259,7 +259,7 @@ def _load_raw_failure_fallback(
 
 def _encode_preview(
     img, photo, *, size, vireo_dir, recipe, preview_quality,
-    apply_recipe_to_loaded_image,
+    apply_recipe_to_loaded_image, source_path=None,
 ):
     """Apply the recipe (if any) and JPEG-encode; always closes ``img``."""
     photo_id = photo["id"]
@@ -282,7 +282,7 @@ def _encode_preview(
             img = rendered
 
         encoded = io.BytesIO()
-        img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe))
+        img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe, source_path, image=img))
         return encoded.getvalue()
     finally:
         # broad: cleanup must not replace the render's own exception (or its bytes)
@@ -372,6 +372,7 @@ def render_preview_bytes(
         img, photo, size=size, vireo_dir=vireo_dir, recipe=recipe,
         preview_quality=preview_quality,
         apply_recipe_to_loaded_image=apply_recipe_to_loaded_image,
+        source_path=original_abs,
     )
 
 
@@ -446,7 +447,7 @@ def materialize_preview(
 
     def consume_published():
         if (cache_path and os.path.exists(cache_path) and os.path.getsize(cache_path)
-                and cache_matches(cache_path, photo, recipe)):
+                and cache_matches(cache_path, photo, recipe, os.path.join(folder_path, photo["filename"]) if folder_path else None, allow_fallback=True)):
             return PreviewMaterialization(
                 data=None, generated=False, published=True,
             )
@@ -460,7 +461,7 @@ def materialize_preview(
             and cache_path
             and os.path.exists(cache_path)
             and os.path.getsize(cache_path)
-            and cache_matches(cache_path, photo, recipe)
+            and cache_matches(cache_path, photo, recipe, os.path.join(folder_path, photo["filename"]) if folder_path else None)
         ):
             return PreviewMaterialization(
                 data=None, generated=False, published=True,

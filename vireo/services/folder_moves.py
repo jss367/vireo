@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from db import Database
+from job_runner.lineage import JobLineage
+from job_runner.work_control import JobCancelled, JobNotStarted, SerializedWork, WorkControl
 from services.local_folder import (
     LOCAL_FOLDER_JOB_TYPES,
     local_root_for_folder,
@@ -155,7 +157,7 @@ class StagedTransfer:
 
     managed_staging_root: str | None = None
     """The import's managed staging root. When set, the job waits for the
-    workspace's other jobs, becomes uncancellable once the transfer starts,
+    workspace's other jobs, becomes uncancellable during the final commit,
     verifies contents, and removes emptied staging parents afterwards."""
 
     mount_baseline: Mapping[str, bool] | None = None
@@ -314,14 +316,19 @@ class FolderMoves:
         staging = staging or StagedTransfer()
 
         def work(job: JobDict) -> JsonDict:
-            return self._run_move_job(
-                runner, job, workspace_id, request, chain, staging,
-            )
+            try:
+                return self._run_move_job(
+                    runner, job, workspace_id, request, chain, staging,
+                )
+            except JobNotStarted:
+                return {"ok": False, "moved": 0, "errors": [],
+                        "summary": "Cancelled before transfer started"}
 
-        job_config = _move_job_config(request, chain.chained_from)
+        job_config = _move_job_config(request)
         managed_staging_root = staging.managed_staging_root
 
         def staged_work(job: JobDict) -> JsonDict:
+            WorkControl(runner, job["id"]).checkpoint()
             runner.push_event(job["id"], "progress", {
                 "current": 0, "total": 0, "current_file": "",
                 "phase": "Waiting for workspace jobs to finish before sending to NAS",
@@ -330,14 +337,33 @@ class FolderMoves:
                 return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
             return work(job)
 
+        # The two trees a move touches. A staged transfer reserves them once
+        # it holds the workspace, so an import that touches neither may run
+        # beside it; any other move may start beside a transfer that misses
+        # both. Canonical like the trees other jobs declare, and resolved
+        # here because the runner lock must not do I/O.
+        # A date-organized move renders its folders under the destination
+        # itself, so the whole destination bounds its writes.
+        landing = request.destination if request.folder_template else os.path.join(
+            request.destination,
+            request.destination_name or os.path.basename(os.path.normpath(request.source_path)),
+        )
+        move_paths = [os.path.realpath(request.source_path), os.path.realpath(landing)]
+        # Provenance for the Jobs page: a chained move follows the
+        # processing run whose completion hook started it.
+        lineage = JobLineage.following(chain.chained_from)
         if managed_staging_root:
             return runner.start(
                 "move-folder", staged_work, config=job_config,
                 workspace_id=workspace_id,
                 workspace_transfer_batch=managed_staging_root,
+                workspace_paths=move_paths,
+                lineage=lineage,
             )
         return runner.start(
             "move-folder", work, config=job_config, workspace_id=workspace_id,
+            workspace_paths=move_paths,
+            lineage=lineage,
         )
 
     def _run_move_job(
@@ -361,13 +387,13 @@ class FolderMoves:
         managed_staging_root = staging.managed_staging_root
         remote = request.remote
 
-        cancelled = _acquire_batch_lock(runner, job, serialize_lock)
-        if cancelled is not None:
-            return cancelled
-        try:
+        if serialize_lock is not None and serialize_lock.locked():
+            runner.push_event(job["id"], "progress", {
+                "current": 0, "total": 0, "current_file": "",
+                "phase": "Waiting for an earlier chained move to finish",
+            })
+        with SerializedWork(runner, job["id"], serialize_lock) as control:
             check_mount = None
-            if managed_staging_root and not runner.begin_uncancellable(job["id"]):
-                return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
             if staging.mount_baseline is not None:
                 from import_staging import check_staged_mount
 
@@ -387,6 +413,7 @@ class FolderMoves:
                     keep_visible=request.keep_visible,
                     progress_cb=progress_cb,
                     developed_dir=request.developed_dir,
+                    control=control,
                 )
             else:
                 steps = MoveSteps(runner, job, folder_move_steps(
@@ -405,12 +432,10 @@ class FolderMoves:
                     destination_name=request.destination_name,
                     allow_tracked_merge=request.allow_tracked_merge,
                     thumb_cache_dir=self._config["THUMB_CACHE_DIR"],
+                    control=control,
                     **({"verify_contents": True} if managed_staging_root and not remote else {}),
                     **({"pre_commit_check": check_mount} if check_mount else {}),
                 )
-        finally:
-            if serialize_lock is not None:
-                serialize_lock.release()
 
         _record_move_outcome(result)
         if result.get("ok") and managed_staging_root:
@@ -555,69 +580,6 @@ def _ssh_move_request(
     )
 
 
-def _acquire_batch_lock(
-    runner: JobRunner, job: JobDict, serialize_lock: threading.Lock | None,
-) -> JsonDict | None:
-    """Take a chained batch's shared lock before the transfer starts.
-
-    Returns ``None`` with the lock held (or with no lock to take), or the
-    job's cancelled result with the lock not held.
-    """
-    # The chained moves from one import all rsync to the same NAS,
-    # and runner.start gives each its own thread immediately — so
-    # N folders would mean N concurrent rsyncs, each honoring
-    # --bwlimit individually and together consuming N× the
-    # configured bandwidth budget. The chain hands every job in
-    # the batch one shared lock so the transfers run one at a
-    # time while all N jobs (and their ids) still enqueue up
-    # front.
-    if serialize_lock is not None and not serialize_lock.acquire(blocking=False):
-        # UI transparency: a job blocked on the batch lock
-        # must say why it isn't moving anything yet.
-        runner.push_event(job["id"], "progress", {
-            "current": 0,
-            "total": 0,
-            "current_file": "",
-            "phase": (
-                "Waiting for an earlier chained move to finish"
-            ),
-        })
-        # Poll instead of blocking outright: this wait is the
-        # one boundary where Cancel can be honored without
-        # touching mid-transfer semantics — a blocking acquire
-        # would run the whole transfer anyway after the user
-        # pressed Stop.
-        while not serialize_lock.acquire(timeout=0.5):
-            if runner.is_cancelled(job["id"]):
-                # Returning with the lock NOT held, before the
-                # caller's try — so the release in its finally
-                # never fires on this path.
-                return {
-                    "ok": False, "moved": 0, "errors": [],
-                    "summary": (
-                        "Cancelled before transfer started"
-                    ),
-                }
-    # Cancel check with the lock held, covering two paths:
-    # (1) the waiter's ``acquire(timeout=0.5)`` returned True in
-    # the same 0.5s window a cancel landed in, exiting the loop
-    # without the in-loop check running; (2) a chained move whose
-    # thread started AFTER the earlier holder already released
-    # the batch lock — its non-blocking acquire succeeds so it
-    # never enters the wait loop, but its ``/cancel`` may have
-    # already been accepted while the thread was still queued.
-    # Either way, don't start the transfer.
-    if serialize_lock is not None and runner.is_cancelled(job["id"]):
-        serialize_lock.release()
-        return {
-            "ok": False, "moved": 0, "errors": [],
-            "summary": (
-                "Cancelled before transfer started"
-            ),
-        }
-    return None
-
-
 def _run_stepped_move(
     steps: MoveSteps, source_path: str, move_folder: Callable[..., JsonDict],
     **move_kwargs: Any,
@@ -626,6 +588,9 @@ def _run_stepped_move(
     steps.start()
     try:
         result = move_folder(**move_kwargs)
+    except JobCancelled as e:
+        steps.fail(str(e), status="cancelled")
+        raise
     except Exception as e:
         steps.fail(str(e))
         raise
@@ -700,7 +665,7 @@ def _remove_empty_staging_parents(source_path: str, managed_staging_root: str) -
         parent = os.path.dirname(parent)
 
 
-def _move_job_config(request: FolderMoveRequest, chained_from: str | None) -> JsonDict:
+def _move_job_config(request: FolderMoveRequest) -> JsonDict:
     """Build the move-folder job's config snapshot for the jobs panel."""
     folder_template = request.folder_template
     date_destinations = request.date_destinations
@@ -746,10 +711,6 @@ def _move_job_config(request: FolderMoveRequest, chained_from: str | None) -> Js
             "mount_dest_base": remote["mount_dest_base"],
             "bwlimit_kbps": remote["bwlimit_kbps"],
         }
-    if chained_from:
-        # Provenance for the jobs panel: this move was started by a
-        # chained process run's completion hook, not by hand.
-        job_config["chained_from"] = chained_from
     return job_config
 
 

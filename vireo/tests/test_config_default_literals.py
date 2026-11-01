@@ -11,9 +11,9 @@ key is a ``DEFAULTS`` setting and whose literal equals that setting's default.
 Booleans, ``None`` and the empty string are not counted: they mean "unset"
 rather than restating a tuned value.
 
-``REPOSITORY_ALLOWANCE`` caps the copies left in ``vireo/repositories/``, which
-are being reworked separately (config loading is moving out of the
-repositories). The caps may only shrink: lower one when you remove copies.
+``REPOSITORY_ALLOWANCE`` caps copies a module may keep while it is reworked;
+it is empty now, and the caps may only shrink. The data layer, which may not
+import ``config``, reads defaults through ``settings_source.config_value``.
 """
 
 import ast
@@ -26,13 +26,7 @@ import config  # noqa: E402
 
 VIREO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-REPOSITORY_ALLOWANCE = {
-    "repositories/collections.py": 2,
-    "repositories/culling.py": 1,
-    "repositories/keyword_provenance.py": 1,
-    "repositories/predictions.py": 4,
-    "repositories/species_curation.py": 1,
-}
+REPOSITORY_ALLOWANCE: dict[str, int] = {}
 
 
 def _defaults_by_key():
