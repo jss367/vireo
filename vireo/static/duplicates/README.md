@@ -107,3 +107,6 @@ Keep these intact when changing this code:
   Review notes never alter files, metadata, ratings, rejection flags or cleanup.
 - Bucket indexes stay stable: buckets are rendered from the unfiltered list,
   and one-group buckets are skipped inline.
+- Resolved groups retain their first rendered card order in `_cardOrder` for
+  the current snapshot. Switching the kept copy moves badges between photos
+  without moving the photos or placing a different Keep button under the pointer.

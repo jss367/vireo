@@ -3,6 +3,8 @@
 from playwright.sync_api import expect
 from services import photo_ingest, workspace_folders
 
+from e2e.module_pages import import_page_modules
+
 
 def _seed_resolved_pair(db, root):
     """Two real copies of one file; the add_photo hook rejects the second.
@@ -49,12 +51,30 @@ def test_keep_this_copy_instead_swaps_keep_and_rejected(live_server, page, tmp_p
     expect(old_keep.locator(".reason")).to_have_text("kept another copy instead")
     expect(old_keep.locator(".keep-btn")).to_be_visible()
     expect(old_keep.locator(".trash-btn")).to_be_visible()
+    # Switching the choice must move the badge, not swap the photos under
+    # the pointer and put another Keep button where the user just clicked.
+    expect(group.locator(".dup-card").nth(0)).to_have_attribute("data-photo-id", str(kept))
+    expect(group.locator(".dup-card").nth(1)).to_have_attribute("data-photo-id", str(rejected))
     flags = {
         r["id"]: r["flag"] for r in db.conn.execute(
             "SELECT id, flag FROM photos WHERE file_hash = 'KEEPE2E'"
         ).fetchall()
     }
     assert flags == {kept: "rejected", rejected: "none"}
+
+    # A full render (as on a filter change) and subsequent switches preserve
+    # the original slots too, even though the proposal now has a new winner.
+    import_page_modules(page, "duplicates", ["results", "state"])
+    page.evaluate("pageModules.results.renderResults(pageModules.state.state.lastScanResult)")
+    expect(group.locator(".dup-card").nth(0)).to_have_attribute("data-photo-id", str(kept))
+    expect(group.locator(".dup-card").nth(1)).to_have_attribute("data-photo-id", str(rejected))
+    expect(chosen.locator(".badge")).to_have_text("KEEP")
+    old_keep.locator(".keep-btn").click()
+    expect(old_keep.locator(".badge")).to_have_text("KEEP")
+    expect(chosen.locator(".badge")).to_have_text("REJECTED")
+    chosen.locator(".keep-btn").click()
+    expect(chosen.locator(".badge")).to_have_text("KEEP")
+    expect(group.locator(".dup-card").nth(1)).to_have_attribute("data-photo-id", str(rejected))
 
     # A reload reads the catalog, so the choice holds.
     page.reload()
