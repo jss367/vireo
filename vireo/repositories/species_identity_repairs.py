@@ -13,7 +13,7 @@ outcome markers in ``db_meta``.
 
 What a change is, which rows qualify and the transaction boundaries stay in
 those modules: nothing here commits or opens a transaction.
-``species_identity_repair.refresh_common_name_index`` works on a bare
+``taxonomy.refresh_common_name_index`` works on a bare
 ``sqlite3`` connection by contract (the encounter-evaluation tool calls it
 without a ``Database``) and keeps its SQL.
 

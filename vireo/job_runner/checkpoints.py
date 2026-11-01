@@ -21,8 +21,9 @@ _LIVE_STATUSES = ("running", "pausing", "paused")
 class JobCheckpointer:
     """Owns the checkpoint thread, its wake-up event and ``write_lock``.
 
-    ``write_lock`` sits above the runner lock in lock order and nothing
-    else acquires it. ``thread`` is guarded by the runner lock. Reads the
+    ``write_lock`` sits above the runner lock in lock order; besides the
+    checkpoint path only ``JobRunner._persist_final`` acquires it, around a
+    finished system job's final row (taking no runner lock inside). ``thread`` is guarded by the runner lock. Reads the
     runner's job registry; writes go through ``JobHistory``.
     """
 
@@ -48,7 +49,8 @@ class JobCheckpointer:
         # race in ``write_checkpoints``, leaving the interrupted row
         # holding stale ``photo_ids`` if Vireo crashes in that window.
         # Held around the whole checkpoint sequence, above ``_lock`` in
-        # lock order: nothing else acquires it.
+        # lock order. A system job's final row write takes it too, so a
+        # stale snapshot can never re-create a row the final write deleted.
         self.write_lock = threading.Lock()
 
     def live_persisted_jobs_locked(self):

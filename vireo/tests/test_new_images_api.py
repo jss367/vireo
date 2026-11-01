@@ -18,7 +18,7 @@ def _touch_image(path):
 
 @pytest.fixture(autouse=True)
 def _clear_shared_new_images_cache():
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
     get_shared_cache().clear()
     yield
     get_shared_cache().clear()
@@ -230,7 +230,7 @@ def test_api_new_images_returns_cached_after_background_compute_finishes(app_and
     request returns the real count instantly — no second walk."""
     import time
 
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
@@ -266,7 +266,7 @@ def test_api_new_images_response_trims_sample_but_caches_full_list(app_and_db):
     snapshot of exactly the advertised files without a second full walk."""
     import time
 
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
@@ -303,7 +303,7 @@ def test_api_new_images_cached_response_slices_without_full_copy(app_and_db):
     """Cached full snapshots may contain tens of thousands of paths. The
     navbar response should copy only the five paths it returns, not materialize
     the entire cached sequence before slicing."""
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     class SampleOnlySlice:
         def __bool__(self):
@@ -516,7 +516,7 @@ def test_api_new_images_no_extra_job_on_cache_hit(app_and_db):
     """
     import time
 
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
@@ -652,7 +652,7 @@ def test_post_snapshot_reuses_live_navbar_cache_without_rewalk(app_and_db, monke
     the snapshot: the next probe picks them up and the banner reappears
     (self-healing), keeping the snapshot honest to what the banner said."""
     import new_images as new_images_module
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
@@ -767,7 +767,7 @@ def test_post_snapshot_coalesces_onto_inflight_navbar_walk(
     import threading
 
     import new_images as new_images_module
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
@@ -892,7 +892,7 @@ def test_post_snapshot_second_click_reuses_cache_until_invalidated(app_and_db, m
     self-healing contract that replaced the old force-a-walk-per-click
     behavior, which took minutes per click on large network volumes."""
     import new_images as new_images_module
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"

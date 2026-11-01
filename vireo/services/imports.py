@@ -1528,7 +1528,7 @@ class ImportService:
         would strand the parent's photos with no way to resume them.
         """
         for job in self.get_runner().list_jobs():
-            if ((job.get("config") or {}).get("chained_from") == parent_id
+            if (job.get("parent_job_id") == parent_id
                     and not _pipeline_never_started(job)):
                 return True
         return db.job_history.chained_job_row(parent_id) is not None

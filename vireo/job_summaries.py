@@ -27,6 +27,7 @@ _SKIPPED_KEYS = {
     "ok", "summary", "photo_ids", "failed_photo_ids", "stages", "duration",
     "collection_id", "workspace_id", "mode", "cancelled", "root_folder_id",
     "interrupted", "last_progress_at", "checkpoint_at", "partial_failure",
+    "noop",
 }
 
 
@@ -163,12 +164,16 @@ def _retained_cache(result: dict, config: dict) -> tuple[str, list[str]]:
     deleted = _int(result, "deleted")
     summary = f"Removed {_n(deleted, 'generated file')}; freed {_human_bytes(_int(result, 'freed_bytes'))}"
     details = [f"Generated files remaining: {_human_bytes(_int(result, 'remaining_bytes'))}"]
+    if orphans := _int(result, "orphan_results_removed"):
+        summary += f"; removed {_n(orphans, 'result file')} of deleted workspaces"
     if retired := _int(result, "grouping_snapshots_retired"):
         summary += f"; retired {_n(retired, 'grouping undo snapshot')}"
         details.append(f"Snapshot data removed from catalog: {_human_bytes(_int(result, 'grouping_snapshot_bytes_removed'))}. Database space is reusable.")
     if kept := _int(result, "kept_unverified_sources"):
         summary += f"; kept {_n(kept, 'generated file')} with unverified sources"
         details.append(f"Kept {_n(kept, 'generated file')}: independent sources could not be verified as readable and unchanged.")
+    if unsafe := _int(result, "kept_unsafe_paths"):
+        summary += f"; left {_n(unsafe, 'file')} whose path led outside its storage folder"
     if errors := _int(result, "errors_total"):
         summary += f"; {_n(errors, 'cleanup error')} (see Jobs for details)"
     return summary, details + _error_details(result)
