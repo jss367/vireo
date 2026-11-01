@@ -8,6 +8,7 @@ import tempfile
 from datetime import UTC, datetime
 
 from app_paths import default_path, media_root
+from camera_denoise import uses_camera_profile
 from config import config_value
 from file_replace import replace_file
 from image_loader import (
@@ -346,7 +347,7 @@ def _photos_needing_thumbnails(db, photos, cache_dir, cancel_check, folders=None
         else:
             recipe = db.get_photo_edit_recipe(photo["id"])
             adjustments = (recipe or {}).get("adjustments") or {}
-            if adjustments.get("denoise_mode") == "camera" or adjustments.get("lens_profile"):
+            if uses_camera_profile(recipe) or adjustments.get("lens_profile"):
                 detail_photo = db.photos.get(photo["id"]) or photo
                 folder = (folders or {}).get(photo["folder_id"])
                 original_path = os.path.join(folder, photo["filename"]) if folder else None

@@ -15,7 +15,20 @@ from services import photo_ingest, workspace_folders
 from thumbnails import generate_all
 
 
-def test_camera_metadata_reaches_all_render_paths(app_and_db, tmp_path):
+def _protected_background_recipe(root, photo_id, size):
+    from local_masks import create_snapshot
+    mask = Image.new('L', size)
+    mask.paste(255, (0, 0, size[0] // 3, size[1]))
+    path = root / 'subject-mask.png'
+    mask.save(path)
+    snapshot = create_snapshot(photo_id=photo_id, mask_row={'path': str(path)},
+                               vireo_dir=str(root), native_size=size)
+    return {'local': {'mask': snapshot, 'regions': [], 'background_denoise': 85}}, mask
+
+
+@pytest.mark.parametrize('background', [False, True])
+
+def test_camera_metadata_reaches_all_render_paths(app_and_db, tmp_path, background):
     app, db = app_and_db
     folder = tmp_path / 'photos'
     folder.mkdir()
@@ -33,14 +46,17 @@ def test_camera_metadata_reaches_all_render_paths(app_and_db, tmp_path):
     db.conn.commit()
     photo = db.photos.get(pid)
     recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 85}}
+    mask = None
+    if background:
+        recipe, mask = _protected_background_recipe(tmp_path, pid, (192, 128))
     client = app.test_client()
     assert client.put(f'/api/photos/{pid}/edit-recipe', json={'recipe': recipe}).status_code == 200
     info = client.get(f'/api/photos/{pid}').get_json()
     assert info['denoise_profile']['source'] == 'camera'
     assert info['denoise_profile']['iso'] == 25600
 
-    expected = apply_recipe_to_loaded_image(Image.fromarray(pixels), recipe, camera_metadata=photo)
-    without_metadata = apply_recipe_to_loaded_image(Image.fromarray(pixels), recipe)
+    expected = apply_recipe_to_loaded_image(Image.fromarray(pixels), recipe, camera_metadata=photo, local_mask=mask)
+    without_metadata = apply_recipe_to_loaded_image(Image.fromarray(pixels), recipe, local_mask=mask)
     assert not np.array_equal(expected, without_metadata)
     encoded = io.BytesIO()
     expected.save(encoded, format='JPEG', quality=90)
@@ -62,13 +78,23 @@ def test_camera_metadata_reaches_all_render_paths(app_and_db, tmp_path):
     exported = load_export_image(lean_photo, vireo_dir, {fid: str(folder)}, recipe=recipe, exif_data=json.dumps(metadata))
     np.testing.assert_array_equal(exported, expected)
 
+    from export import export_photos
+    destination = tmp_path / 'exported'
+    result = export_photos(db, vireo_dir, [pid], str(destination), {
+        'format': 'png', 'naming_template': '{original}', 'metadata_fields': ['location'],
+    })
+    assert result['exported'] == 1 and result['errors'] == []
+    with Image.open(destination / 'noisy.png') as saved:
+        np.testing.assert_array_equal(saved, expected)
+
     thumbs = tmp_path / 'camera-thumbnails'
     generate_all(db, str(thumbs), config={'thumbnail_size': 256, 'thumbnail_quality': 90}, vireo_dir=vireo_dir)
     assert (thumbs / f'{pid}.jpg').read_bytes() == cached_encoding.getvalue()
 
 
+@pytest.mark.parametrize('background', [False, True])
 @pytest.mark.parametrize('metadata_source', ['promoted_columns', 'grouped_exif'])
-def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_path, monkeypatch, metadata_source):
+def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_path, monkeypatch, metadata_source, background):
     import subprocess
 
     import config as cfg
@@ -85,6 +111,8 @@ def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_pa
     pid = photo_ingest.add_photo(db, folder_id=fid, filename=source.name, extension='.png', width=144, height=96,
                        file_size=source.stat().st_size, file_mtime=source.stat().st_mtime)
     recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 85}}
+    if background:
+        recipe, _ = _protected_background_recipe(tmp_path, pid, (144, 96))
     db.set_photo_edit_recipe(pid, recipe)
     client = app.test_client()
     vireo_dir = Path(app.config['THUMB_CACHE_DIR']).parent
@@ -133,7 +161,8 @@ def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_pa
     assert renders() == after
 
 
-def test_preview_warmer_and_thumbnail_generator_refresh_profile(tmp_path):
+@pytest.mark.parametrize('background', [False, True])
+def test_preview_warmer_and_thumbnail_generator_refresh_profile(tmp_path, background):
     from camera_denoise import cache_matches
     from preview_materializer import materialize_preview
     from thumbnails import generate_thumbnail
@@ -143,6 +172,8 @@ def test_preview_warmer_and_thumbnail_generator_refresh_profile(tmp_path):
     photo = {'id': 7, 'folder_id': 3, 'filename': source.name, 'width': 96, 'height': 64,
              'working_copy_path': None, 'companion_path': None, 'camera_make': 'Nikon', 'camera_model': 'Z8', 'iso': 100}
     recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 80}}
+    if background:
+        recipe, _ = _protected_background_recipe(tmp_path, 7, (96, 64))
     preview = tmp_path / 'preview.jpg'
     first = materialize_preview(None, photo, str(tmp_path), size=1920, vireo_dir=str(tmp_path),
                                 preview_quality=90, recipe=recipe, cache_path=str(preview))

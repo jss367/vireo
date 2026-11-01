@@ -257,6 +257,7 @@ function togglePointColorPicker() {
     ['point_color', 'sharpen', 'sharpen_radius', 'noise_reduction', 'denoise_mode'].forEach(function(key) { if (recipe.adjustments) delete recipe.adjustments[/** @type {keyof EditorAdjustments} */ (key)]; });
   }
   if (recipe.local && recipe.local.regions) {
+    delete recipe.local.background_denoise;
     recipe.local.regions.forEach(function(region) {
       ['point_color', 'sharpen', 'sharpen_radius', 'noise_reduction', 'denoise_mode'].forEach(function(key) { delete region.adjustments[key]; });
     });

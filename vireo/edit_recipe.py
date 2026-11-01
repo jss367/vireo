@@ -484,8 +484,8 @@ def normalize_recipe(recipe) -> dict[str, Any] | None:
 def _normalize_local(local):
     """Validate and canonicalize the local (mask-weighted) section.
 
-    Retain manually corrected masks even before a region is adjusted; other
-    masks normalize away when no region references them.
+    Retain masks for manual corrections or protected background smoothing,
+    even before a region is adjusted.
     """
     if not isinstance(local, dict):
         raise RecipeError("local must be an object")
@@ -542,7 +542,10 @@ def _normalize_local(local):
 
     mask_in = local.get("mask")
     corrected = isinstance(mask_in, dict) and mask_in.get("corrected") is True
-    if not normalized_regions and not corrected:
+    background_denoise = _number(
+        local.get("background_denoise", 0), "local.background_denoise", 0, 100,
+    )
+    if not normalized_regions and not corrected and not background_denoise:
         return None
 
     if not isinstance(mask_in, dict):
@@ -574,7 +577,10 @@ def _normalize_local(local):
         normalized_mask["feather"] = round(feather, 4)
 
     normalized_regions.sort(key=lambda entry: entry["region"])
-    return {"mask": normalized_mask, "regions": normalized_regions}
+    result = {"mask": normalized_mask, "regions": normalized_regions}
+    if background_denoise:
+        result["background_denoise"] = background_denoise
+    return result
 
 
 def recipe_to_json(recipe) -> str | None:

@@ -28,6 +28,26 @@ are slower than standard denoising; processing uses overlapping tiles to
 bound temporary memory. Smaller previews estimate their own remaining noise,
 so a full-resolution inspection is the best guide to fine detail.
 
+## Smooth the background while protecting the subject
+
+In **Local (Subject / Background)**, increase **Smooth background** for extra
+camera-aware denoising outside the subject. The control starts at **Off**;
+return it to zero to remove only this effect. It requires a subject mask.
+**Show Protection** displays the area protected from this extra smoothing.
+Use the existing brush controls to correct the mask, and **Save Changes** to
+keep the edit. Undo, presets, previews, and exports retain the setting.
+
+This pass runs after existing edits and preserves the rendered pixels inside
+the protected area. Automatic masks have enclosed holes filled to protect
+dark eyes and facial details. A small margin and an outward fade soften the
+boundary without reducing protection inside the subject. Feather extends
+that fade. Manually corrected masks retain their painted holes. Protection
+depends on the mask, so check fine feathers and other important details at
+100% zoom. Missing, misaligned, or empty masks disable the extra smoothing.
+
+This control uses the existing camera-aware filter, including its image-noise
+fallback. The experimental neural RAW denoiser is not part of this feature.
+
 ## Scope and limitations
 
 This is camera-guided denoising of developed, 8-bit RGB images, including
