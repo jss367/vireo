@@ -210,3 +210,60 @@ def test_running_automatic_missing_scan_yields_and_can_retry(app_and_db, monkeyp
     finally:
         next_probe.set()
         release.set()
+
+
+def test_automatic_missing_scan_stops_between_live_symlink_target_probes(app_and_db, tmp_path, monkeypatch):
+    import os
+
+    import dir_listing_cache
+    from services import missing_originals, photo_ingest, workspace_folders
+
+    app, db = app_and_db
+    runner = app._job_runner
+    root = tmp_path / "photos"
+    root.mkdir()
+    folder = workspace_folders.add_folder(db, str(root))
+    names = ("first.jpg", "second.jpg")
+    for name in names:
+        photo_ingest.add_photo(db, folder, name, ".jpg", 12, 1)
+    listing = dir_listing_cache.DirListing(names, frozenset(), frozenset(names))
+    monkeypatch.setattr(dir_listing_cache, "read_directory", lambda *a, **kw: listing)
+    paths = {str(root / name) for name in names}
+    probes, transfers = [], []
+    release = threading.Event()
+    real_exists = os.path.exists
+    ws_id = db.active_workspace_id
+
+    def exists(path):
+        if path in paths:
+            probes.append(path)
+            if not transfers:
+                transfers.append(runner.start(
+                    "send-to-nas", lambda _: release.wait(synchronization_timeout(10)),
+                    workspace_id=ws_id,
+                ))
+            return True
+        return real_exists(path)
+
+    monkeypatch.setattr(os.path, "exists", exists)
+    service = missing_originals.MissingOriginals(
+        db_path=db._db_path, config=app.config, get_runner=lambda: runner,
+    )
+    scan = service.start_scan(db, automatic=True)
+    try:
+        job = wait_for_job_via_runner(runner, scan["job_id"])
+        assert job["result"]["deferred"] is True, job
+        assert probes == [str(root / names[0])]
+        assert not service.cache and not service.errors and not service.inflight
+        release.set()
+        wait_for_job_via_runner(runner, transfers[0])
+        previous = {job["id"] for job in runner.list_jobs()}
+        retry = service.start_scan(db, automatic=True)
+        retry_id = retry["job_id"] or next(job["id"] for job in runner.list_jobs() if job["id"] not in previous)
+        finished = wait_for_job_via_runner(runner, retry_id)
+        assert finished["status"] == "completed", finished
+        assert not finished["result"].get("deferred")
+        assert probes[-2:] == [str(root / name) for name in names]
+        assert service.cache and not service.errors
+    finally:
+        release.set()

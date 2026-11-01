@@ -66,6 +66,7 @@ def _present_names_via_listing(
     )
     names: set[str] = set()
     for name in listing.names:
+        check_cancelled()
         if name in listing.symlinks and not os.path.exists(
             os.path.join(folder_path, name)
         ):
