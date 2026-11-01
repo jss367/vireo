@@ -114,11 +114,11 @@ class SpeciesProvenanceRepository:
     def assignments(self, photo_id: int) -> list[dict[str, Any]]:
         aliases = self._taxon_aliases(photo_id)
         rows = self.conn.execute(
-            '''SELECT k.id AS keyword_id, k.name AS species, pk.source, pk.species_provenance,
-                      t.id AS taxon_id, t.inat_id AS source_taxon_id,
+            f'''SELECT k.id AS keyword_id, k.name AS species, pk.source, pk.species_provenance,
+                      t.id AS taxon_id, COALESCE(k.source_taxon_id, t.inat_id) AS source_taxon_id,
                       t.name AS scientific_name, t.common_name
                FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id
-               LEFT JOIN taxa t ON t.id=k.taxon_id
+               LEFT JOIN taxa t ON {self._display_taxon_match()}
                WHERE pk.photo_id=? AND (k.is_species=1 OR k.type='taxonomy')
                  AND (t.rank='species' OR t.rank IS NULL) ORDER BY k.id''',
             (photo_id,),
@@ -134,18 +134,25 @@ class SpeciesProvenanceRepository:
                            **self._display_names(row, aliases)})
         return result
 
+    @staticmethod
+    def _display_taxon_match() -> str:
+        """Mirror identity_sql's source-first rule, including absent source taxa."""
+        return '''((k.source_taxon_id IS NOT NULL AND k.source_taxon_id=t.inat_id)
+                   OR (k.source_taxon_id IS NULL AND k.taxon_id=t.id))'''
+
     def _taxon_aliases(self, photo_id: int) -> dict[int, list[str]]:
         """Saved keyword aliases of the photo's taxa, never inferred from spelling."""
         rows = self.conn.execute(
-            '''WITH attached AS (
-                   SELECT DISTINCT k.taxon_id FROM photo_keywords pk
-                   JOIN keywords k ON k.id=pk.keyword_id WHERE pk.photo_id=?
+            f'''WITH attached AS (
+                   SELECT DISTINCT t.id, t.inat_id FROM photo_keywords pk
+                   JOIN keywords k ON k.id=pk.keyword_id
+                   JOIN taxa t ON {self._display_taxon_match()} WHERE pk.photo_id=?
                      AND (k.is_species=1 OR k.type='taxonomy')
                )
-               SELECT taxon_id, name FROM keywords
-               WHERE taxon_id IN (SELECT taxon_id FROM attached)
-                 AND (is_species=1 OR type='taxonomy')
-               ORDER BY name''', (photo_id,),
+               SELECT t.id AS taxon_id, k.name FROM attached t
+               JOIN keywords k ON {self._display_taxon_match()}
+               WHERE k.is_species=1 OR k.type='taxonomy'
+               ORDER BY k.name''', (photo_id,),
         )
         result: dict[int, list[str]] = {}
         for row in rows:
@@ -156,6 +163,8 @@ class SpeciesProvenanceRepository:
     def _display_names(row: sqlite3.Row, aliases: dict[int, list[str]]) -> dict[str, Any]:
         """Preferred taxonomy name for display; stored names remain edit/export keys."""
         if row['taxon_id'] is None:
+            if row['source_taxon_id'] is not None:
+                return {'display_name': row['species'], 'source_taxon_id': row['source_taxon_id']}
             return {}
         preferred = row['common_name'] or row['scientific_name'] or row['species']
         seen = {preferred.casefold(), (row['scientific_name'] or '').casefold()}

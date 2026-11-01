@@ -51,6 +51,9 @@ summary retain their export/curation spellings. For example, a summary of
 when their display metadata identifies the same *Sturnus vulgaris* taxon;
 alternate names do not create extra assignments. Unlinked labels keep their
 stored names without an inferred taxon or synonym relationship.
+An explicit source taxon ID takes precedence over a local taxon link. If that
+source taxon is absent from the catalog, details retain its source ID and stored
+label without borrowing a name or synonyms from a conflicting local taxon.
 Every photo row (`get_photo`, `search_photos`, `find_photos_by_text`) carries
 the app's own analysis readiness, read from
 `POST /api/photos/analysis-readiness` (one call per returned page):

@@ -85,3 +85,48 @@ def test_provenance_update_keeps_display_identity(starling_photo):
     assert assignment['display_name'] == 'European Starling'
     assert assignment['taxon_id'] == 6424
     assert assignment['reviewer'] == 'Another reviewer'
+
+
+@pytest.mark.parametrize('stale_rank', ['species', 'genus', None])
+def test_display_identity_prefers_explicit_source_over_local_link(starling_photo, stale_rank):
+    app, db, leaf, provenance = starling_photo
+    if stale_rank:
+        db.conn.execute("INSERT INTO taxa (id, inat_id, name, common_name, rank) "
+                        "VALUES (6425, 99000, 'Other taxon', 'Other bird', ?)", (stale_rank,))
+    db.conn.execute('UPDATE keywords SET source_taxon_id=14850, taxon_id=? WHERE id=?',
+                    (6425 if stale_rank else None, leaf))
+    # A stale local starling link must not make another source's keyword an alias.
+    other = db.add_keyword('Unrelated bird alias', is_species=True)
+    db.conn.execute('UPDATE keywords SET source_taxon_id=99000, taxon_id=6424 WHERE id=?', (other,))
+    db.commit()
+    before = [tuple(r) for r in db.conn.execute('SELECT * FROM photo_keywords WHERE photo_id=1')]
+    detail = app.test_client().get('/api/photos/1').get_json()
+    for payload in (detail, photo_detail(detail)):
+        assignment = next(a for a in payload['species_assignments'] if a['keyword_id'] == leaf)
+        keyword = next(k for k in payload['keywords'] if k['id'] == leaf)
+        for row in (assignment, keyword):
+            assert row['display_name'] == 'European Starling'
+            assert row['taxon_id'] == 6424
+            assert row['source_taxon_id'] == 14850
+            assert row['scientific_name'] == 'Sturnus vulgaris'
+            assert row['synonyms'] == ['Common starling']
+        assert {key: assignment[key] for key in provenance} == provenance
+    assert [tuple(r) for r in db.conn.execute('SELECT * FROM photo_keywords WHERE photo_id=1')] == before
+    saved = db.conn.execute('SELECT source_taxon_id, taxon_id FROM keywords WHERE id=?', (leaf,)).fetchone()
+    assert tuple(saved) == (14850, 6425 if stale_rank else None)
+
+
+def test_missing_source_taxon_does_not_fall_back_to_conflicting_local_taxon(starling_photo):
+    app, db, leaf, _ = starling_photo
+    db.conn.execute('UPDATE keywords SET source_taxon_id=999999 WHERE id=?', (leaf,))
+    db.commit()
+    detail = app.test_client().get('/api/photos/1').get_json()
+    for payload in (detail, photo_detail(detail)):
+        assignment = next(a for a in payload['species_assignments'] if a['keyword_id'] == leaf)
+        keyword = next(k for k in payload['keywords'] if k['id'] == leaf)
+        for row in (assignment, keyword):
+            assert row['source_taxon_id'] == 999999
+            assert row['display_name'] == 'European starling'
+            assert not row.get('taxon_id')
+            assert not row.get('scientific_name')
+            assert not row.get('synonyms')
