@@ -20,7 +20,7 @@ from services.grouping_history import record_grouping_edit
 from wait import wait_for_job_via_client
 
 
-def test_source_verification_yields_between_reads_without_parking_guarded_recheck(db, tmp_path):
+def test_source_verification_never_waits_with_original_handle_open(db, tmp_path, monkeypatch):
     import hashlib
 
     config = _cache_config(tmp_path)
@@ -32,16 +32,40 @@ def test_source_verification_yields_between_reads_without_parking_guarded_rechec
                     (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()
     render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
-    reads, cancellations = [], []
+    handles, cancellations, transfer_waits = [], [], []
+    real_open = open
+    transfer_started = threading.Event()
+
+    def tracked_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if os.fspath(path) == str(source):
+            handles.append(handle)
+        return handle
+
+    def checkpoint():
+        if any(not handle.closed for handle in handles):
+            # A transfer arrives during the first hash chunk. Subsequent
+            # chunks must finish/close the source instead of parking with it.
+            transfer_started.set()
+        cancellations.append(True)
+
+    def wait_for_transfer():
+        assert all(handle.closed for handle in handles), "transfer wait retained an original handle"
+        transfer_waits.append(transfer_started.is_set())
+
+    monkeypatch.setattr(retained_cache, "open", tracked_open, raising=False)
     probe = retained_cache.source_verifier(
-        db, config, lambda: cancellations.append(True), read_checkpoint=lambda: reads.append(True),
+        db, config, checkpoint, read_checkpoint=wait_for_transfer,
     )
     assert probe(str(render)), probe.verification_failure
-    assert len(reads) >= 4  # Before opening, each 1 MB read, and EOF.
-    read_count = len(reads)
+    assert transfer_started.is_set()
+    assert transfer_waits == [False]  # Only before opening the source.
+    assert len(cancellations) >= 4  # Hash chunks and EOF remain cancellable.
+    assert all(handle.closed for handle in handles)
     assert probe.recheck(str(render))
-    assert len(reads) == read_count
-    assert cancellations
+    assert transfer_waits == [False]  # No transfer wait under the reader guard.
+    wait_for_transfer()  # The next cleanup checkpoint can yield safely.
+    assert transfer_waits == [False, True]
 
 
 def _pipeline(path, ids):

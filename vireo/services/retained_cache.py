@@ -98,8 +98,9 @@ def _source_hash(handle: BinaryIO, checkpoint: Callable[[], object]) -> str:
 def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], object] = lambda: None,
                     *, read_checkpoint: Callable[[], object] | None = None) -> SourceVerifier:
     """Fail closed unless independent catalog sources can be read in full."""
-    # Full reads can yield to transfers. The final guarded recheck only polls
-    # cancellation, so it never parks while holding a renderer's reader guard.
+    # Yield before opening each source. Hashing only polls cancellation: a
+    # transfer must never wait for a Windows source handle we parked with open.
+    # The guarded final recheck likewise never waits under a renderer lock.
     read_checkpoint = checkpoint if read_checkpoint is None else read_checkpoint
     generated = media_root(config["THUMB_CACHE_DIR"])
     excluded = [*roots(config).values(), *[os.path.join(generated, name) for name in (
@@ -156,7 +157,7 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
                         return reject("catalog-metadata-mismatch", expected_size=expected_size,
                                       actual_size=before.st_size, expected_mtime=expected_mtime,
                                       actual_mtime=before.st_mtime)
-                    digest = _source_hash(handle, read_checkpoint)
+                    digest = _source_hash(handle, checkpoint)
                     after = os.fstat(handle.fileno())
                     if _identity(before) != _identity(after):
                         return reject("source-changed-during-read", before=_identity(before), after=_identity(after))
