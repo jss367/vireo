@@ -55,8 +55,9 @@ def test_feature_rows_whole_workspace_and_staged_scope(db, catalog):
     rows = features.feature_rows(ws, scoped=False)
     assert [r["id"] for r in rows] == photos
     assert rows[0]["dino_subject_embedding"] is None
-    features.stage_scope_photo_ids([photos[2], photos[0]])
-    assert not db.in_transaction  # the staging commits the TEMP write it opened
+    with db.transaction(join=True):
+        features.stage_scope_photo_ids([photos[2], photos[0]])
+    assert not db.in_transaction  # the joined unit commits the TEMP write it opened
     assert [r["id"] for r in features.feature_rows(ws, scoped=True)] == [photos[0], photos[2]]
     features.stage_scope_photo_ids([photos[1]])
     assert [r["id"] for r in features.feature_rows(ws, scoped=True)] == [photos[1]]
@@ -65,7 +66,8 @@ def test_feature_rows_whole_workspace_and_staged_scope(db, catalog):
 def test_staging_inside_an_outer_transaction_leaves_it_open(db, catalog):
     ws, photos, _dets = catalog
     db.begin()
-    db.pipeline_features.stage_scope_photo_ids([photos[0]])
+    with db.transaction(join=True):
+        db.pipeline_features.stage_scope_photo_ids([photos[0]])
     assert db.in_transaction
     db.rollback()
 

@@ -31,6 +31,7 @@ def masked_photo(live_server, tmp_path):
         (0.0, 0.0, 0.5, 1.0),
     )
     subject_masks.set_active_mask_variant(db, photo_id, 'sam2-small')
+    db.commit()
     return photo_id
 
 
@@ -146,6 +147,7 @@ def test_feather_only_does_not_freeze_an_obsolete_active_mask(
         masked_photo, 'sam2-small', str(replacement), 'megadetector-v6',
         (0.0, 0.0, 0.5, 1.0),
     )
+    db.commit()
     with page.expect_response(lambda r: '/edit-mask-preview?' in r.url and 'feather=61' in r.url) as live:
         page.locator('#featherRange').evaluate("el => {el.value='61'; el.dispatchEvent(new Event('input', {bubbles:true}));}")
     live_alpha = np.asarray(Image.open(io.BytesIO(live.value.body())))[..., 3]

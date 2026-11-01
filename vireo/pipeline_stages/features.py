@@ -1220,10 +1220,9 @@ class _MaskPass:
                 phash_crop=features.pop("phash_crop", None),
                 noise_estimate=features.pop("noise_estimate", None),
             ),
-            _commit=False,
         )
         subject_masks.set_active_mask_variant(
-            thread_db, photo_id, self.sam2_variant, _commit=False,
+            thread_db, photo_id, self.sam2_variant,
             weak_rescue_min_conf=self.rescue_floor_by_photo.get(photo_id),
         )
         # Remaining (non-mask) per-photo features still land
@@ -1233,18 +1232,17 @@ class _MaskPass:
         # intentionally NOT passed here.
         if features:
             thread_db.masks_features.update_pipeline_features(
-                photo_id, PipelineFeatures(**features), _commit=False,
+                photo_id, PipelineFeatures(**features),
             )
         if analysis_report is not None:
             thread_db.masks_features.save_subject_raw_analysis(
-                entry["detection_id"], analysis_report, _commit=False,
+                entry["detection_id"], analysis_report,
             )
         thread_db.masks_features.update_embeddings(
             photo_id,
             dino_subject_embedding=subj_emb_blob,
             dino_global_embedding=global_emb_blob,
             variant=self.dinov2_variant,
-            _commit=False,
         )
         # Publish a new immutable PNG, then atomically move
         # the mask row, active denormalized fields, quality

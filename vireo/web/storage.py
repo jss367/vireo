@@ -415,7 +415,8 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
             return json_error("variant required")
         db = get_db()
         try:
-            n = db.masks_features.delete_for_variant(variant)
+            with db.transaction():
+                n = db.masks_features.delete_for_variant(variant)
         except ValueError as e:
             return json_error(str(e), 400)
         log.info("Deleted %d masks for variant %s", n, variant)
@@ -425,7 +426,8 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
     def api_storage_masks_delete_inactive() -> ResponseReturnValue:
         """Delete all non-active variant masks across all photos."""
         db = get_db()
-        n = db.masks_features.delete_inactive()
+        with db.transaction():
+            n = db.masks_features.delete_inactive()
         log.info("Deleted %d inactive-variant masks", n)
         return jsonify({"ok": True, "deleted": n})
 

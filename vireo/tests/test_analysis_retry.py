@@ -415,6 +415,7 @@ def test_quality_only_preserves_mask_and_embeddings_while_remask_invalidates(ret
     subject = np.arange(768, dtype=np.float32).tobytes()
     background = np.arange(768, dtype=np.float32)[::-1].tobytes()
     db.masks_features.update_embeddings(ids[0], subject, background, variant="vit-b14")
+    db.commit()
     if quality_only:
         db.conn.execute("UPDATE photos SET subject_clip_low=NULL WHERE id=?", (ids[0],))
     else:

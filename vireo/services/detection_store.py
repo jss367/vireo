@@ -187,6 +187,7 @@ def upsert_photo_embedding(
     """
     if verify_workspace:
         db._verify_photo_in_workspace(photo_id)
-    db.masks_features.upsert_embedding(
-        photo_id, model, embedding_bytes, variant,
-    )
+    with db.transaction():
+        db.masks_features.upsert_embedding(
+            photo_id, model, embedding_bytes, variant,
+        )

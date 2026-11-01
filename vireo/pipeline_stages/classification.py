@@ -499,7 +499,8 @@ class _ClassifyPass:
         if img is not None and self.raw_session is not None and detection is not None:
             report = img.info.get("_vireo_raw_analysis")
             if report is not None:
-                self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
+                with self.thread_db.transaction():
+                    self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
         return img, folder_path, image_path
 
     def _should_stop(self) -> bool | str | None:

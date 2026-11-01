@@ -316,8 +316,10 @@ class _FeatureLoad:
             # Stage the scope in a connection-local temp table instead of inline
             # placeholders — a large collection exceeds SQLite's bound-parameter
             # cap (999 on legacy builds), and this scope is applied to the
-            # subject and prediction queries too.
-            features.stage_scope_photo_ids(sorted(scoped_photo_ids))
+            # subject and prediction queries too. Joined: the staging must not
+            # leave a transaction open across the reads below.
+            with self.db.transaction(join=True):
+                features.stage_scope_photo_ids(sorted(scoped_photo_ids))
         self.rows = features.feature_rows(self.ws_id, scoped=scoped)
         self.scoped = scoped
 
@@ -381,9 +383,10 @@ class _FeatureLoad:
         """
         self.weak_floor = None
         if self.weak_candidate_ids:
-            self.db.pipeline_features.stage_weak_detection_photo_ids(
-                self.weak_candidate_ids,
-            )
+            with self.db.transaction(join=True):
+                self.db.pipeline_features.stage_weak_detection_photo_ids(
+                    self.weak_candidate_ids,
+                )
             self.weak_floor = self.weak_confidence
 
     def _below_floor(self, photo_id, det):
@@ -499,7 +502,8 @@ class _FeatureLoad:
             for d in detections:
                 d["predictions"] = []
                 by_detection[d["id"]] = d
-        self.db.pipeline_features.stage_continuity_detection_ids(sorted(by_detection))
+        with self.db.transaction(join=True):
+            self.db.pipeline_features.stage_continuity_detection_ids(sorted(by_detection))
         resolver = SpeciesResolver(db=self.db)
         for pr in self._query_predictions(continuity_only=True):
             identity = resolver.prediction(pr)
@@ -2369,16 +2373,17 @@ def _mark_eye_attempted_without_eye(db, photo_id):
     # the photo out of future runs even after the user lowers the gate
     # or adds the missing model — a functional regression. Those photos
     # remain on the to-do list and are cheaply re-skipped on each run.
-    db.masks_features.update_pipeline_features(
-        photo_id,
-        PipelineFeatures(
-            eye_x=None,
-            eye_y=None,
-            eye_conf=None,
-            eye_tenengrad=None,
-            eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
-        ),
-    )
+    with db.transaction():
+        db.masks_features.update_pipeline_features(
+            photo_id,
+            PipelineFeatures(
+                eye_x=None,
+                eye_y=None,
+                eye_conf=None,
+                eye_tenengrad=None,
+                eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+            ),
+        )
 
 
 def _current_primary_mask_for_eye(db, row, iw, ih):
@@ -2548,16 +2553,17 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
         # the un-oriented sensor tag so the math goes wrong on orientation
         # 6/8; (b) this matches the detection-box storage convention
         # (box_x/box_y are also normalized 0-1).
-        db.masks_features.update_pipeline_features(
-            row["id"],
-            PipelineFeatures(
-                eye_x=best["x"] / float(iw),
-                eye_y=best["y"] / float(ih),
-                eye_conf=best["conf"],
-                eye_tenengrad=best_score,
-                eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
-            ),
-        )
+        with db.transaction():
+            db.masks_features.update_pipeline_features(
+                row["id"],
+                PipelineFeatures(
+                    eye_x=best["x"] / float(iw),
+                    eye_y=best["y"] / float(ih),
+                    eye_conf=best["conf"],
+                    eye_tenengrad=best_score,
+                    eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+                ),
+            )
 
 
 def _eye_keypoint_stage_photos(db, collection_id, exclude_photo_ids):

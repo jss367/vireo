@@ -148,6 +148,7 @@ def readiness_photo(db, tmp_path):
     mask_path.write_bytes(b"scratch-mask")
     quality = {key: complete_photo()[key] for key in REQUIRED_QUALITY_FIELDS}
     db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path=str(mask_path), **{k: v for k, v in quality.items() if k != "subject_size"}))
+    db.commit()
     db.photos.update_quality(pid, subject_size=quality["subject_size"])
     return pid, mask_path, MaskQuality(**quality)
 
@@ -197,6 +198,7 @@ def _seed_detection_and_mask(db, readiness_photo):
     db.masks_features.upsert_mask(pid, "sam2-small", str(mask_path), "megadetector-v6",
                                  (.1, .1, .4, .4), quality)
     db.masks_features.set_active_variant(pid, "sam2-small", .2)
+    db.commit()
 
 
 def test_loader_does_not_infer_detection_from_old_mask(db, readiness_photo):
@@ -232,6 +234,7 @@ def test_loader_checks_current_mask_inputs_and_settings(db, readiness_photo, cha
     elif changed == "prompt":
         db.masks_features.upsert_mask(pid, "sam2-small", str(mask_path), "megadetector-v6",
                                      (.2, .1, .4, .4), quality)
+        db.commit()
     elif changed == "file":
         mask_path.unlink()
     elif changed == "source":

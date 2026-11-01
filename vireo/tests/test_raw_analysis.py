@@ -313,6 +313,7 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
     db.commit()
     for index, det in enumerate(detection_store.get_detections(db, photo)):
         db.masks_features.save_subject_raw_analysis(det["id"], {"recipe": ra.RECIPE, "exposure_ev": index})
+        db.commit()
     rows = db.conn.execute("SELECT report_json FROM subject_raw_analysis").fetchall()
     assert sorted(json.loads(row[0])["exposure_ev"] for row in rows) == [0, 1]
     db.conn.execute("DELETE FROM detections WHERE photo_id=?", (photo,))

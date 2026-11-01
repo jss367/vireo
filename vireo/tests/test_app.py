@@ -16469,6 +16469,7 @@ def _seed_masks(db, tmp_path):
             detector_model="megadetector-v6",
             prompt=(0, 0, 10, 10),
         )
+        db.commit()
     # Both photos get an active variant set: this mirrors what the
     # pipeline always does after upsert_photo_mask, so the seed reflects
     # realistic state. delete_inactive_masks now skips photos with NULL
@@ -16476,6 +16477,7 @@ def _seed_masks(db, tmp_path):
     # entirely-inactive.
     subject_masks.set_active_mask_variant(db, p1, "sam2-small")
     subject_masks.set_active_mask_variant(db, p2, "sam2-small")
+    db.commit()
     return masks_dir, p1, p2
 
 
@@ -16587,6 +16589,7 @@ def test_api_storage_masks_delete_stale(app_and_db, tmp_path):
         detector_model="megadetector-v6",
         prompt=(999, 999, 10, 10),
     )
+    db.commit()
     client = app.test_client()
     r = client.post("/api/storage/masks/delete-stale")
     assert r.status_code == 200
@@ -16634,6 +16637,7 @@ def test_storage_masks_uses_global_threshold_not_active_workspace(
         detector_model="megadetector-v6",
         prompt=(0.10, 0.10, 0.10, 0.10),
     )
+    db.commit()
     db.conn.commit()
     permissive = db.create_workspace(
         "permissive", config_overrides={"detector_confidence": 0.1}
@@ -16733,6 +16737,7 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
                 dino_subject_embedding=embedding_to_blob(emb),
                 dino_global_embedding=embedding_to_blob(emb),
             )
+            db.commit()
             db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
             det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
@@ -16835,6 +16840,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
                 dino_subject_embedding=embedding_to_blob(emb),
                 dino_global_embedding=embedding_to_blob(emb),
             )
+            db.commit()
             db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
             det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},

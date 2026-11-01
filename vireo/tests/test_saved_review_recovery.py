@@ -33,6 +33,7 @@ def _analyze(db, tmp_path, pid, **changes):
     db.masks_features.update_pipeline_features(pid, PipelineFeatures(
         mask_path=str(mask), **{k: v for k, v in quality.items() if k != "subject_size"},
     ))
+    db.commit()
     db.photos.update_quality(pid, subject_size=quality["subject_size"])
     db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .4, "h": .4},
                               "confidence": .9, "category": "animal"}], detector_model="megadetector-v6")
@@ -41,6 +42,7 @@ def _analyze(db, tmp_path, pid, **changes):
     db.masks_features.upsert_mask(pid, "sam2-small", str(mask), "megadetector-v6",
                                  (.1, .1, .4, .4), MaskQuality(**quality))
     db.masks_features.set_active_variant(pid, "sam2-small", .2)
+    db.commit()
 
 
 def _old_review(ids):

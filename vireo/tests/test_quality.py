@@ -351,6 +351,7 @@ def test_compute_all_features_compatible_with_db(tmp_path):
     features = compute_all_quality_features(img, mask)
     # Should not raise — all keys match DB column names
     db.masks_features.update_pipeline_features(pid, PipelineFeatures(**features))
+    db.commit()
 
     row = db.conn.execute(
         "SELECT subject_tenengrad, bg_tenengrad, subject_clip_high, "

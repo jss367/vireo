@@ -101,6 +101,7 @@ def test_stage_finds_eye_on_reference_mammal(tmp_path):
     from repositories.masks_features import PipelineFeatures
 
     db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path=str(mask_path)))
+    db.commit()
 
     # Bbox covers the subject area of the fixture — loose enough to include
     # the eye. If your fixture's subject is in a different region, tune this.
