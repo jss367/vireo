@@ -60,6 +60,7 @@ def test_dashboard_collection_drill_down_is_explicitly_composable(live_server, p
         "Two seasons",
         json.dumps([{"field": "photo_ids", "value": [photo_ids[0], photo_ids[3]]}]),
     )
+    db.commit()
 
     page.goto(f"{live_server['url']}/dashboard")
     page.locator("#scopeCollection").select_option(str(collection_id))
@@ -142,6 +143,7 @@ def test_dashboard_scoped_visual_collection_link_loads_visual_clause(live_server
             {"prompt": "a soaring hawk", "strength": "balanced"},
         ),
     )
+    db.commit()
 
     page.goto(
         f"{live_server['url']}/browse"
@@ -207,6 +209,7 @@ def test_scoped_dashboard_disables_workspace_wide_sync(live_server, page):
 def test_process_blocks_unavailable_dashboard_collection(live_server, page):
     """A stale Dashboard shortcut cannot fall back to a different Process source."""
     collection_id = live_server["db"].collections.add("Broken", "{not json")
+    live_server["db"].commit()
     page.goto(
         f"{live_server['url']}/pipeline?dashboard_stage=previews"
         f"&collection_id={collection_id}"

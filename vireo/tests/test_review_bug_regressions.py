@@ -218,12 +218,14 @@ def test_duplicate_keyword_suggestion_keeps_earliest_variant(app_and_db):
 def test_collection_update_reports_concurrent_deletion(app_and_db, monkeypatch):
     app, db = app_and_db
     cid = db.collections.add("Birds", "[]")
+    db.commit()
     from repositories.collections import CollectionRepository
 
     original = CollectionRepository.update
 
     def delete_then_update(self, collection_id, **kwargs):
         db.collections.delete(collection_id)
+        db.commit()
         return original(self, collection_id, **kwargs)
 
     monkeypatch.setattr(CollectionRepository, "update", delete_then_update)

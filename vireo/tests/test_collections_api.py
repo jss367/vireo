@@ -7,6 +7,7 @@ def _clear_default_collections(app, db):
     """Remove default collections so tests start from a clean slate."""
     for c in db.collections.list_all():
         db.collections.delete(c["id"])
+        db.commit()
 
 
 def test_list_collections_empty(app_and_db):
@@ -639,6 +640,7 @@ def test_cannot_add_photos_to_all_photos_default(app_and_db):
     app, db = app_and_db
     # Ensure defaults exist (including All Photos)
     db.collections.create_defaults()
+    db.commit()
     client = app.test_client()
 
     all_photos = next(c for c in db.collections.list_all() if c["name"] == "All Photos")
@@ -789,11 +791,12 @@ def _make_visual_collection(db, name="Visual", rules=None, prompt="a bird"):
     Save-as-Collection flow persists for expressions with a visual clause."""
     if rules is None:
         rules = [{"field": "rating", "op": ">=", "value": 3}]
-    return db.collections.add(
-        name,
-        json.dumps(rules),
-        visual_json=json.dumps({"prompt": prompt, "strength": "balanced"}),
-    )
+    with db.transaction():
+        return db.collections.add(
+            name,
+            json.dumps(rules),
+            visual_json=json.dumps({"prompt": prompt, "strength": "balanced"}),
+        )
 
 
 def test_list_collections_flags_visual(app_and_db):
@@ -904,6 +907,7 @@ def test_visual_collection_not_advertised_as_manual_add_target(app_and_db):
         json.dumps([]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
+    db.commit()
     client.post(
         "/api/collections",
         json={"name": "Manual", "rules": [{"field": "photo_ids", "value": []}]},
@@ -948,6 +952,7 @@ def test_list_collections_flags_degraded_visual_collection(app_and_db):
         json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
+    db.commit()
     # Degraded visual collection: rules JSON references an unresolvable
     # field so ``rules_resolvable`` returns False.
     degraded = db.collections.add(
@@ -955,6 +960,7 @@ def test_list_collections_flags_degraded_visual_collection(app_and_db):
         json.dumps([{"field": "not_a_real_field", "op": "=", "value": "x"}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
+    db.commit()
 
     by_name = {c["name"]: c for c in client.get("/api/collections").get_json()}
 
@@ -1003,6 +1009,7 @@ def test_browse_init_visual_collection_scope_returns_empty_first_paint(app_and_d
         json.dumps([]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
+    db.commit()
 
     resp = client.get(f"/api/browse/init?collection_id={visual}")
     assert resp.status_code == 200
@@ -1035,6 +1042,7 @@ def test_browse_init_visual_collection_ignores_rules_scope(app_and_db):
         json.dumps([{"field": "all"}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
+    db.commit()
 
     resp = client.get(f"/api/browse/init?collection_id={visual}")
     assert resp.status_code == 200
@@ -1061,6 +1069,7 @@ def test_browse_init_plain_collection_still_scopes_normally(app_and_db):
         "Plain",
         json.dumps([{"field": "photo_ids", "value": photo_ids[:1]}]),
     )
+    db.commit()
 
     resp = client.get(f"/api/browse/init?collection_id={plain}")
     assert resp.status_code == 200

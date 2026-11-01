@@ -1810,10 +1810,11 @@ def _collection_stage_body(
     from datetime import datetime as dt
 
     name = "Pipeline " + dt.now().strftime("%Y-%m-%d %H:%M")
-    run.collection_id = thread_db.collections.add(
-        name,
-        json.dumps([{"field": "photo_ids", "value": collected_photo_ids}]),
-    )
+    with thread_db.transaction():
+        run.collection_id = thread_db.collections.add(
+            name,
+            json.dumps([{"field": "photo_ids", "value": collected_photo_ids}]),
+        )
     run.result["collection_id"] = run.collection_id
 
 

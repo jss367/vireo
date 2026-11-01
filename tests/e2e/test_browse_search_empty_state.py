@@ -86,6 +86,7 @@ def test_folder_health_refresh_preserves_active_collection(live_server, page, tm
 
     rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
     collection_id = db.collections.add("All JPGs", rules)
+    db.commit()
 
     # Deep-link into the collection so bootstrap scopes the first paint
     # through ``activeCollectionId`` and then loads the saved expression
@@ -1312,6 +1313,7 @@ def test_load_collections_renders_older_success_after_newer_failure(
     # this new collection. A later request starts first but fails; the older
     # success is therefore the newest usable response and must be rendered.
     collection_id = db.collections.add("Fallback collection", "[]")
+    db.commit()
     page.evaluate("() => { window._failedCollectionLoad = pageModules.sidebarCollections.loadCollections(); }")
     page.wait_for_timeout(200)
     held[0].continue_()
@@ -2164,6 +2166,7 @@ def test_toolbar_history_requeries_flag_filter_and_keeps_collection(live_server,
     collection_id = db.collections.add('Rejected history test', json.dumps([
         {'field': 'flag', 'op': 'is', 'value': 'rejected'},
     ]))
+    db.commit()
     page.goto(live_server['url'] + '/browse')
     page.locator('.grid-card').first.wait_for(state='visible')
     page.evaluate("id => pageModules.contextMenus.setFlagFor(id, 'rejected')", ids[0])

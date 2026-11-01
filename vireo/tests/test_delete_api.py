@@ -98,6 +98,7 @@ def test_delete_photos_cleans_collection_rules(app_and_db):
 
     rules = [{"field": "photo_ids", "value": [pid1, pid2, 9999]}]
     cid = db.collections.add("Test Collection", json.dumps(rules))
+    db.commit()
 
     catalog_deletion.delete_photos(db, [pid1])
 

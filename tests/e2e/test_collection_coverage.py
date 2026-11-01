@@ -19,9 +19,11 @@ def test_collection_coverage_refresh_and_scope_change(live_server, page):
     assert len(ids) == 3159
     admitted = [*ids, *range(max(ids) + 1, max(ids) + 145)]
     cid = db.collections.add_import("Recorded import", admitted)
+    db.commit()
     unknown = db.collections.add("Historical import", json.dumps([
         {"field": "photo_ids", "value": ids[:1]},
     ]))
+    db.commit()
     _write_predictionless_pipeline_cache(live_server, live_server["data"]["photos"][:2])
     page.set_default_timeout(10000)
     errors = []
@@ -40,6 +42,7 @@ def test_collection_coverage_refresh_and_scope_change(live_server, page):
     db.collections.update(cid, rules_json=json.dumps([
         {"field": "photo_ids", "value": ids[:2]},
     ]))
+    db.commit()
     page.locator("#refreshCollectionCoverage").click()
     expect(counts).to_contain_text("2 current catalog members")
     expect(counts).to_contain_text("3,303 originally imported")

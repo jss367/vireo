@@ -583,6 +583,7 @@ def test_listing_collection_restriction(db, lib):
     cid = db.collections.add(
         "Just A", json.dumps([{"field": "photo_ids", "value": [lib["a"]]}]),
     )
+    db.commit()
     assert [r["id"] for r in db.photos.list_page(collection_id=cid)] == [lib["a"]]
     assert db.photos.get_ids(collection_id=cid) == [lib["a"]]
     assert db.photos.count_filtered(collection_id=cid) == 1
@@ -657,6 +658,7 @@ def test_listing_routes_through_facade_helpers(db, lib, monkeypatch):
     monkeypatch.setattr(CollectionRepository, "_build_collection_query", coll)
     monkeypatch.setattr(CollectionRepository, "_photo_sort_clause", sort)
     cid = db.collections.add("All", json.dumps([{"field": "all"}]))
+    db.commit()
     db.photos.list_page(folder_id=lib["root"], collection_id=cid, sort="name")
     db.photos.get_ids(folder_id=lib["root"], collection_id=cid)
     db.photos.count_filtered(folder_id=lib["root"], collection_id=cid)
@@ -929,21 +931,25 @@ def test_delete_photos_cleans_collection_photo_id_rules(db, lib):
     flat = db.collections.add(
         "flat", json.dumps([{"field": "photo_ids", "value": [lib["a"], lib["b"]]}]),
     )
+    db.commit()
     nested = db.collections.add("nested", json.dumps([
         {"match": "any", "rules": [
             {"field": "photo_ids", "value": [lib["a"]]},
             {"field": "rating", "op": ">=", "value": 3},
         ]},
     ]))
+    db.commit()
     odd = json.dumps([
         {"field": "photo_ids", "value": "not-a-list"},
         {"field": "photo_ids"},
         "junk",
     ])
     untouched = db.collections.add("odd", odd)
+    db.commit()
     other = db.collections.add(
         "other", json.dumps([{"field": "photo_ids", "value": [lib["c"]]}]),
     )
+    db.commit()
     # Photos are global, so a collection in another workspace is cleaned too.
     foreign = db.conn.execute(
         "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",

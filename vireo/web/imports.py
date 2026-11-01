@@ -1016,7 +1016,8 @@ class _ImportFullRun:
         if photo_ids:
             from datetime import datetime as dt
             collection_name = "Import " + dt.now().strftime("%Y-%m-%d %H:%M")
-            collection_id = self.thread_db.collections.add_import(collection_name, photo_ids)
+            with self.thread_db.transaction():
+                collection_id = self.thread_db.collections.add_import(collection_name, photo_ids)
 
         col_summary = collection_name if collection_name else "no photos"
         ctx.runner.update_step(job["id"], "collection", status="completed",

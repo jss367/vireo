@@ -3965,6 +3965,7 @@ def test_pipeline_regroup_accepts_collection_id(app_and_db):
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     photo_ids = [p["id"] for p in photos]
     cid = db.collections.add("test-pipeline", '[{"field":"photo_ids","value":' + str(photo_ids) + '}]')
+    db.commit()
 
     # The job will fail because no pipeline features exist, but the route
     # should accept collection_id without error
@@ -4037,6 +4038,7 @@ def test_compare_predictions_api(app_and_db):
     import json
     rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
     cid = db.collections.add("Test Collection", rules)
+    db.commit()
 
     # Create detections, then add predictions from two models
     det_ids_0 = db.detections.save(photo_ids[0], [
@@ -4102,6 +4104,7 @@ def test_compare_predictions_api_can_refresh_selected_photos(app_and_db):
         "Targeted comparison",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
+    db.commit()
 
     response = app.test_client().get(
         f"/api/predictions/compare?collection_id={cid}&photo_id={photo_ids[1]}"
@@ -4119,6 +4122,7 @@ def test_compare_predictions_api_limits_targeted_photo_ids(app_and_db):
 
     app, db = app_and_db
     cid = db.collections.add("Target limit", "[]")
+    db.commit()
     query = [("collection_id", str(cid))]
     query.extend(
         ("photo_id", str(photo_id))
@@ -4154,6 +4158,7 @@ def test_collection_photo_narrowing_wraps_any_rules(app_and_db):
             ],
         }),
     )
+    db.commit()
 
     rows = db.collections.get_photos(cid, photo_ids=[photo_ids[1]])
 
@@ -4179,6 +4184,7 @@ def test_compare_predictions_api_preserves_unclassified_subject(app_and_db):
         "Unclassified Subject",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     response = app.test_client().get(
         f"/api/predictions/compare?collection_id={cid}"
@@ -4206,6 +4212,7 @@ def test_compare_predictions_api_exposes_miss_flags(app_and_db):
 
     rules = json.dumps([{"field": "photo_ids", "value": [p_miss, p_clean]}])
     cid = db.collections.add("Miss Flag Collection", rules)
+    db.commit()
 
     resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
     assert resp.status_code == 200
@@ -4229,6 +4236,7 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     db.tag_photo(photo_id, species_id)
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Single Photo", rules)
+    db.commit()
 
     det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
@@ -4272,6 +4280,7 @@ def test_compare_flags_pending_match_as_needs_review(app_and_db):
     db.tag_photo(photo_id, species_id)
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Pending Match", rules)
+    db.commit()
 
     det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
@@ -4299,6 +4308,7 @@ def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
     db.tag_photo(photo_id, species_id)
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Accepted Matches", rules)
+    db.commit()
 
     det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
@@ -4355,6 +4365,7 @@ def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
 
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Alias Compare", rules)
+    db.commit()
     det_id = db.detections.save(
         photo_id,
         [{
@@ -7210,6 +7221,7 @@ def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
         "Search Scope",
         json.dumps([{"field": "photo_ids", "value": [p2, p3, missing_pid]}]),
     )
+    db.commit()
     collection_resp = client.get(
         f"/api/photos/search?q=bird&threshold=-1&collection_id={cid}"
     )
@@ -16598,6 +16610,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
         "robins-only",
         _json.dumps([{"field": "photo_ids", "value": collection_pids}]),
     )
+    db.commit()
     db.close()
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
@@ -16846,9 +16859,11 @@ def test_collections_list_survives_one_unresolvable_rule(app_and_db):
     good = db.collections.add(
         "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
     )
+    db.commit()
     bad = db.collections.add(
         "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
     )
+    db.commit()
 
     resp = client.get("/api/collections")
     assert resp.status_code == 200
@@ -16880,9 +16895,11 @@ def test_browse_init_flags_degraded_without_counting(app_and_db, monkeypatch):
     good = db.collections.add(
         "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
     )
+    db.commit()
     bad = db.collections.add(
         "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
     )
+    db.commit()
 
     # If browse init still ran a full count per collection, this monkeypatch
     # would blow up the request. The endpoint must derive the count_error
@@ -16944,6 +16961,7 @@ def test_collections_list_surfaces_non_rule_failures(app_and_db, monkeypatch):
     db.collections.add(
         "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
     )
+    db.commit()
 
     # Patch the class so the per-request Database instance built by
     # _get_db() is affected too — the route does not share the fixture's
@@ -16974,6 +16992,7 @@ def test_collection_photos_returns_400_for_unresolvable_rule(app_and_db):
     bad = db.collections.add(
         "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
     )
+    db.commit()
 
     resp = client.get(f"/api/collections/{bad}/photos")
     assert resp.status_code == 400
@@ -17053,6 +17072,7 @@ def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch
             {"field": "nonexistent_field", "op": "is", "value": 1},
         ]),
     )
+    db.commit()
 
     resp = client.get("/api/collections")
     assert resp.status_code == 200
@@ -24985,6 +25005,7 @@ def test_compare_canonical_key_collapses_hierarchy_aliases(app_and_db, tmp_path)
     cid = db.collections.add(
         "Aliases", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     # Taxonomy that indexes neither spelling — the text-fallback path.
     tax_path = tmp_path / "taxonomy.json"
@@ -25030,6 +25051,7 @@ def test_compare_payload_carries_canonical_species(app_and_db, tmp_path):
     cid = db.collections.add(
         "Canonical", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
 
     entry = {
         "taxon_id": 1289388,
@@ -25135,6 +25157,7 @@ def test_compare_canonical_display_prefers_db_canonical_for_aliases(
         "AliasDisplay",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
     tax_path = tmp_path / "taxonomy.json"
     tax_path.write_text(json.dumps(
         {"taxa_by_common": {}, "taxa_by_scientific": {}}
@@ -25205,6 +25228,7 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
         "CaseFallback",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    db.commit()
     tax_path = tmp_path / "taxonomy.json"
     tax_path.write_text(json.dumps(
         {"taxa_by_common": {}, "taxa_by_scientific": {}}
@@ -26377,6 +26401,7 @@ def test_compare_keeps_native_scientific_identities_with_shared_common_name(app_
     path.write_text(json.dumps({"taxa_by_common": {}, "ambiguous_common_names": ["shared name"],
                                 "taxa_by_scientific": {e["scientific_name"].lower(): e for e in entries}}))
     cid = db.collections.add("Native identities", json.dumps([{"field": "photo_ids", "value": [photo_id]}]))
+    db.commit()
     with patch("taxonomy.load_local_taxonomy", return_value=Taxonomy(path)):
         response = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
     assert response.status_code == 200
@@ -26414,6 +26439,7 @@ def test_compare_preserves_exact_keyword_match_with_incomplete_taxonomy(
                                     entries if taxonomy_state == "scientific_only" else {}}))
         tax = Taxonomy(path)
     cid = db.collections.add("Exact keyword", json.dumps([{"field": "photo_ids", "value": [photo_id]}]))
+    db.commit()
     with patch("taxonomy.load_local_taxonomy", return_value=tax):
         response = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
     assert response.status_code == 200

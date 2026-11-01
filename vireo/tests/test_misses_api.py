@@ -142,6 +142,7 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
             "value": [ids["no_subject"], ids["clipped"]],
         }]),
     )
+    db.commit()
     db.photo_review.set_rating(ids["no_subject"], 2)
     db.photo_review.set_rating(ids["clipped"], 5)
     db.photo_labels.set(ids["clipped"], "red")
@@ -193,6 +194,7 @@ def test_api_misses_forwards_collection_to_rule_and_visual_queries(
             "value": [ids["clipped"]],
         }]),
     )
+    db.commit()
     from repositories.collections import CollectionRepository
 
     original = CollectionRepository.query_photo_ids
@@ -280,6 +282,7 @@ def test_api_misses_reject_and_recompute_honor_collection_filter(
         "Only clipped",
         json.dumps([{"field": "photo_ids", "value": [ids["clipped"]]}]),
     )
+    db.commit()
 
     recompute = client.post(
         "/api/misses/recompute",
@@ -760,6 +763,7 @@ def test_api_misses_rejects_visual_collection(client, db_with_misses):
         "Visual", json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
+    db.commit()
 
     r = client.get(f"/api/misses?collection_id={visual_cid}")
     assert r.status_code == 400

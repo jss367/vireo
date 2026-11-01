@@ -1041,6 +1041,7 @@ def test_collection_crud(tmp_path):
     db.set_active_workspace(ws_id)
     rules = [{"field": "rating", "op": ">=", "value": 4}]
     cid = db.collections.add('Best Photos', json.dumps(rules))
+    db.commit()
     assert cid is not None
 
     colls = db.collections.list_all()
@@ -1064,6 +1065,7 @@ def test_collection_photos_rating_rule(tmp_path):
 
     rules = [{"field": "rating", "op": ">=", "value": 4}]
     cid = db.collections.add('Best', json.dumps(rules))
+    db.commit()
 
     photos = db.collections.get_photos(cid)
     assert len(photos) == 1
@@ -1088,6 +1090,7 @@ def test_collection_photos_date_sort_puts_missing_timestamps_last(tmp_path):
 
     rules = [{"field": "rating", "op": ">=", "value": 0}]
     cid = db.collections.add('All', json.dumps(rules))
+    db.commit()
 
     photos = db.collections.get_photos(cid)
     assert [p['filename'] for p in photos] == ['older.jpg', 'newer.jpg', 'undated.jpg']
@@ -1124,6 +1127,7 @@ def test_collection_photo_ids_honors_sort(tmp_path):
 
     rules = [{"field": "rating", "op": ">=", "value": 0}]
     cid = db.collections.add('All', json.dumps(rules))
+    db.commit()
 
     assert db.collections.get_photo_ids(cid) == [p_b, p_c, p_a]
     assert db.collections.get_photo_ids(cid, sort="date") == [p_b, p_c, p_a]
@@ -1185,6 +1189,7 @@ def test_collection_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path)
 
     rules = [{"field": "rating", "op": ">=", "value": 0}]
     cid = db.collections.add('All', json.dumps(rules))
+    db.commit()
 
     # Baseline: without projection the low-quality burst frame leads under
     # sort=name, so Select-all-matching would seed from a hidden member.
@@ -1478,6 +1483,7 @@ def test_collection_photos_keyword_rule(tmp_path):
 
     rules = [{"field": "keyword", "op": "contains", "value": "hawk"}]
     cid = db.collections.add('Hawks', json.dumps(rules))
+    db.commit()
 
     photos = db.collections.get_photos(cid)
     assert len(photos) == 1
@@ -1608,6 +1614,7 @@ def test_collection_untagged_rule(tmp_path):
 
     rules = [{"field": "keyword_count", "op": "equals", "value": 0}]
     cid = db.collections.add('Untagged', json.dumps(rules))
+    db.commit()
 
     photos = db.collections.get_photos(cid)
     assert len(photos) == 1
@@ -1635,6 +1642,7 @@ def test_collection_recent_days_rule(tmp_path):
 
     rules = [{"field": "timestamp", "op": "recent_days", "value": 30}]
     cid = db.collections.add('Recent', json.dumps(rules))
+    db.commit()
 
     photos = db.collections.get_photos(cid)
     assert len(photos) == 1
@@ -1663,6 +1671,7 @@ def test_collection_timestamp_between_subsec(tmp_path):
     bare_rules = [{"field": "timestamp", "op": "between",
                    "value": ["2024-06-15", "2024-06-15"]}]
     cid_bare = db.collections.add('June 15 bare', json.dumps(bare_rules))
+    db.commit()
     assert len(db.collections.get_photos(cid_bare)) == 2
 
     # A precise-instant upper ``2024-06-15T23:59:59`` is treated as
@@ -1672,6 +1681,7 @@ def test_collection_timestamp_between_subsec(tmp_path):
     precise_rules = [{"field": "timestamp", "op": "between",
                       "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
     cid_precise = db.collections.add('June 15 precise', json.dumps(precise_rules))
+    db.commit()
     matched = {p['filename'] for p in db.collections.get_photos(cid_precise)}
     assert matched == {'b.jpg'}
 
@@ -1714,6 +1724,7 @@ def test_collection_timestamp_rules_match_ui_shape(tmp_path):
         "value": ["2024-06-10", "2024-06-20"],
     }]
     cid_between = db.collections.add('Mid June', json.dumps(between_rules))
+    db.commit()
     matched = {p['filename'] for p in db.collections.get_photos(cid_between)}
     assert matched == {'start.jpg', 'middle.jpg', 'end.jpg'}
 
@@ -1728,6 +1739,7 @@ def test_collection_timestamp_rules_match_ui_shape(tmp_path):
 
     recent_rules = [{"field": "timestamp", "op": "recent_days", "value": 7}]
     cid_recent = db.collections.add('Last week', json.dumps(recent_rules))
+    db.commit()
     matched_recent = {p['filename'] for p in db.collections.get_photos(cid_recent)}
     assert 'days_recent.jpg' in matched_recent
     assert 'days_old.jpg' not in matched_recent
@@ -1754,6 +1766,7 @@ def test_collection_has_species_rule(tmp_path):
     # Needs classification: no species keyword
     rules = [{"field": "has_species", "op": "equals", "value": 0}]
     cid = db.collections.add('Needs Classification', json.dumps(rules))
+    db.commit()
 
     photos = db.collections.get_photos(cid)
     filenames = {p['filename'] for p in photos}
@@ -1786,6 +1799,7 @@ def test_has_subject_rule_matches_photos_without_subject_keywords(tmp_path, monk
         "Needs Subject",
         json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
     )
+    db.commit()
     photos = db.collections.get_photos(cid, per_page=999)
     pids = {p["id"] for p in photos}
     assert pids == {p2}
@@ -1810,6 +1824,7 @@ def test_collection_wildlife_excluded_rule(tmp_path):
         "Wildlife Only",
         json.dumps([{"field": "wildlife_excluded", "op": "equals", "value": 0}]),
     )
+    db.commit()
     pids = {p["id"] for p in db.collections.get_photos(cid, per_page=999)}
     assert pids == {p1}
 
@@ -1837,6 +1852,7 @@ def test_default_needs_identification_excludes_not_wildlife(tmp_path, monkeypatc
     db.tag_photo(identified, genre_kid)
 
     db.collections.create_defaults()
+    db.commit()
     cid = next(c["id"] for c in db.collections.list_all()
                if c["name"] == "Needs Identification")
     rules = json.loads(next(c["rules"] for c in db.collections.list_all()
@@ -1873,6 +1889,7 @@ def test_has_subject_rule_value_one_matches_identified_photos(tmp_path, monkeypa
         "Has Subject",
         json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
     )
+    db.commit()
     photos = db.collections.get_photos(cid, per_page=999)
     pids = {p["id"] for p in photos}
     assert pids == {p1}
@@ -1903,6 +1920,7 @@ def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_pa
         "Has Subject (empty types)",
         json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
     )
+    db.commit()
     photos = db.collections.get_photos(cid, per_page=999)
     assert photos == []
 
@@ -1949,6 +1967,7 @@ def test_has_subject_rule_counts_legacy_is_species_when_taxonomy_in_subject_type
         "Needs Identification",
         json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
     )
+    db.commit()
     pids_unident = {p["id"] for p in db.collections.get_photos(cid_unident, per_page=999)}
     assert pids_unident == {p2}, (
         "has_subject==0 with 'taxonomy' in subject_types must exclude photos "
@@ -1961,6 +1980,7 @@ def test_has_subject_rule_counts_legacy_is_species_when_taxonomy_in_subject_type
         "Identified",
         json.dumps([{"field": "has_subject", "op": "equals", "value": 1}]),
     )
+    db.commit()
     pids_ident = {p["id"] for p in db.collections.get_photos(cid_ident, per_page=999)}
     assert pids_ident == {p1}
 
@@ -1998,6 +2018,7 @@ def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_p
         "Needs Identification",
         json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
     )
+    db.commit()
     pids = {p["id"] for p in db.collections.get_photos(cid, per_page=999)}
     assert pids == {p1}, (
         "When 'taxonomy' is excluded from subject_types, an is_species=1 "
@@ -2055,6 +2076,7 @@ def test_has_subject_rule_empty_subject_types_value_zero_matches_all(tmp_path, m
         "Missing Subject (empty types)",
         json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
     )
+    db.commit()
     photos = db.collections.get_photos(cid, per_page=999)
     assert len(photos) == 2
 
@@ -3702,6 +3724,7 @@ def test_default_collections_created(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     db.collections.create_defaults()
+    db.commit()
 
     colls = db.collections.list_all()
     names = {c['name'] for c in colls}
@@ -3720,7 +3743,9 @@ def test_default_collections_idempotent(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     db.collections.create_defaults()
+    db.commit()
     db.collections.create_defaults()
+    db.commit()
 
     colls = db.collections.list_all()
     assert len(colls) == 6
@@ -3736,7 +3761,9 @@ def test_default_collections_adds_missing(tmp_path):
     db.set_active_workspace(ws_id)
     # Create just one collection manually
     db.collections.add('Flagged', json.dumps([{"field": "flag", "op": "equals", "value": "flagged"}]))
+    db.commit()
     db.collections.create_defaults()
+    db.commit()
 
     colls = db.collections.list_all()
     names = {c['name'] for c in colls}
@@ -3792,6 +3819,7 @@ def test_default_collection_uses_has_subject_for_new_workspaces(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     db.collections.create_defaults()
+    db.commit()
 
     cols = {c["name"]: json.loads(c["rules"]) for c in db.collections.list_all()}
     assert "Needs Identification" in cols
@@ -3831,6 +3859,7 @@ def test_default_gps_without_location_keyword_collection_matches_expected_photos
     db.tag_photo(has_location, loc_kw)
 
     db.collections.create_defaults()
+    db.commit()
     cid = next(c["id"] for c in db.collections.list_all()
                if c["name"] == "GPS Without Location Keyword")
 
@@ -3873,6 +3902,7 @@ def test_has_location_keyword_rule_and_no_location_information_definition(tmp_pa
     db.tag_photo(gps_with_keyword, loc_kw)
 
     cid = db.collections.add("No Location Information", json.dumps(NO_LOCATION_INFORMATION_RULES))
+    db.commit()
 
     pids = {p["id"] for p in db.collections.get_photos(cid, per_page=999)}
     assert pids == {no_location}
@@ -3914,6 +3944,7 @@ def test_all_photos_collection_returns_all_photos(tmp_path):
     photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
 
     db.collections.create_defaults()
+    db.commit()
     all_photos = next(c for c in db.collections.list_all() if c['name'] == 'All Photos')
 
     photos = db.collections.get_photos(all_photos['id'])
@@ -4047,6 +4078,7 @@ def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
         "June picks",
         json.dumps([{"field": "photo_ids", "value": [march, june_park, june_yard]}]),
     )
+    db.commit()
 
     scope = {
         "collection_id": collection_id,
@@ -4100,6 +4132,7 @@ def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
         "All photos",
         json.dumps([{"field": "photo_ids", "value": [visible, offline]}]),
     )
+    db.commit()
 
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_folder,),
@@ -14919,6 +14952,7 @@ def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
     # count_collection_photos (used by /api/collections) must not raise.
     import json
     cid = db.collections.add("Legacy Folder", json.dumps(legacy_is))
+    db.commit()
     assert db.collections.count_photos(cid) == 2
 
 
@@ -15619,6 +15653,7 @@ def test_collection_color_label_rule(tmp_path):
 
     rules = json.dumps([{"field": "color_label", "op": "equals", "value": "red"}])
     cid = db.collections.add("Reds", rules)
+    db.commit()
     photos = db.collections.get_photos(cid)
     assert len(photos) == 1
     assert photos[0]['filename'] == 'a.jpg'
@@ -15639,6 +15674,7 @@ def test_collection_color_label_not_equals_rule(tmp_path):
 
     rules = json.dumps([{"field": "color_label", "op": "is not", "value": "red"}])
     cid = db.collections.add("Not Red", rules)
+    db.commit()
     photos = db.collections.get_photos(cid)
     filenames = {p['filename'] for p in photos}
     assert 'a.jpg' not in filenames
@@ -15669,6 +15705,7 @@ def test_collection_group_any_and_none_rules(tmp_path):
         ],
     }
     cid = db.collections.add("Five or Pick", json.dumps(any_rules))
+    db.commit()
     assert [p["filename"] for p in db.collections.get_photos(cid, per_page=10)] == [
         "five.jpg",
         "pick.jpg",
@@ -15682,6 +15719,7 @@ def test_collection_group_any_and_none_rules(tmp_path):
         ],
     }
     cid = db.collections.add("Neither", json.dumps(none_rules))
+    db.commit()
     assert [p["filename"] for p in db.collections.get_photos(cid, per_page=10)] == [
         "other.jpg",
     ]
@@ -15739,6 +15777,7 @@ def test_collection_vireo_native_fields(tmp_path):
         ],
     }
     cid = db.collections.add("Vireo Native", json.dumps(rules))
+    db.commit()
     photos = db.collections.get_photos(cid, per_page=10)
     assert [p["filename"] for p in photos] == ["match.jpg"]
 
@@ -22538,12 +22577,14 @@ def test_collection_extension_rule_matches_case_insensitively(tmp_path):
     cid = db.collections.add(
         'JPGs', json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
     )
+    db.commit()
     names = sorted(p['filename'] for p in db.collections.get_photos(cid))
     assert names == ['lower.jpg', 'upper.JPG']
 
     cid_not = db.collections.add(
         'NotJPG', json.dumps([{"field": "extension", "op": "is not", "value": ".jpg"}])
     )
+    db.commit()
     names_not = sorted(p['filename'] for p in db.collections.get_photos(cid_not))
     assert names_not == ['raw.nef']
 
@@ -22799,6 +22840,7 @@ def test_collection_photo_ids_rule_supports_large_selection(tmp_path):
     cid = db.collections.add(
         'Big selection', json.dumps([{"field": "photo_ids", "value": ids}])
     )
+    db.commit()
 
     _cap_sqlite_vars(db)
     assert db.collections.count_photos(cid) == 2
@@ -22868,6 +22910,7 @@ def test_edit_presets_crud_strips_geometry(tmp_path):
             "adjustments": {"exposure": 0.5, "noise_reduction": 40},
         },
     )
+    db.commit()
     assert preset["name"] == "High-ISO forest"
     assert preset["recipe"] == {
         "version": 1,
@@ -22885,9 +22928,11 @@ def test_edit_preset_upserts_by_trimmed_name(tmp_path):
     db = Database(str(tmp_path / "test.db"))
 
     first = db.edits.save_preset("Backlit  ", {"adjustments": {"exposure": 1}})
+    db.commit()
     second = db.edits.save_preset(
         " Backlit", {"adjustments": {"shadows": 30}}
     )
+    db.commit()
 
     assert first["name"] == "Backlit"
     assert second["id"] == first["id"]
@@ -22901,6 +22946,7 @@ def test_edit_presets_list_sorted_by_name(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     for name in ("zebra dusk", "Backlit", "high-ISO forest"):
         db.edits.save_preset(name, {"adjustments": {"contrast": 10}})
+        db.commit()
 
     names = [p["name"] for p in db.edits.list_presets()]
     assert names == sorted(names, key=str.casefold)
@@ -22913,10 +22959,13 @@ def test_edit_preset_rejects_empty_or_geometry_only(tmp_path):
 
     with pytest.raises(ValueError):
         db.edits.save_preset("Nothing", {})
+        db.commit()
     with pytest.raises(ValueError):
         db.edits.save_preset("Geometry only", {"rotation": 90})
+        db.commit()
     with pytest.raises(ValueError):
         db.edits.save_preset("Zeroed", {"adjustments": {"exposure": 0}})
+        db.commit()
     assert db.edits.list_presets() == []
 
 
@@ -22927,14 +22976,17 @@ def test_edit_preset_rejects_blank_or_overlong_name(tmp_path):
 
     with pytest.raises(ValueError):
         db.edits.save_preset("   ", {"adjustments": {"exposure": 1}})
+        db.commit()
     with pytest.raises(ValueError):
         db.edits.save_preset("x" * 200, {"adjustments": {"exposure": 1}})
+        db.commit()
 
 
 def test_delete_edit_preset(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     preset = db.edits.save_preset("Doomed", {"adjustments": {"exposure": 1}})
+    db.commit()
 
     assert db.edits.delete_preset(preset["id"]) is True
     assert db.edits.delete_preset(preset["id"]) is False

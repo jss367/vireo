@@ -2827,13 +2827,14 @@ class _PipelineLaunch:
                 pending_folder_collection["leaf"],
                 _dt.now().strftime("%Y-%m-%d %H:%M"),
             )
-            self.collection_id = db.collections.add(
-                self.collection_name,
-                json.dumps([{
-                    "field": "photo_ids",
-                    "value": pending_folder_collection["photo_ids"],
-                }]),
-            )
+            with db.transaction():
+                self.collection_id = db.collections.add(
+                    self.collection_name,
+                    json.dumps([{
+                        "field": "photo_ids",
+                        "value": pending_folder_collection["photo_ids"],
+                    }]),
+                )
             params.collection_id = self.collection_id
         elif self.collection_id is not None:
             self.collection_name = next(

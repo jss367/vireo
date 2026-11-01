@@ -1344,6 +1344,7 @@ def test_collection_coverage_counts_real_unresolved_state_with_unrelated_confirm
     other = db.add_keyword('Great Egret', is_species=True)
     db.tag_photo(1, other)
     collection = db.collections.add('Photos to inspect', json.dumps([{'field': 'photo_ids', 'value': [1, 2]}]))
+    db.commit()
     assert save(client, [1, 3]).status_code == 200
     review = collection_coverage(db, collection, {})['review']
     assert review['denominator'] == 2

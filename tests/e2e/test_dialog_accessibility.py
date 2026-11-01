@@ -244,6 +244,7 @@ def test_batch_keyword_dialog_returns_focus_without_clearing_selection(live_serv
 
 def test_batch_collection_choices_work_with_keyboard_and_restore_opener(live_server, page):
     collection_id = live_server["db"].collections.add("Keyboard picks", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     opener = page.locator("#batchBar").get_by_role("button", name="+ Collection", exact=True)
     opener.click()
@@ -279,6 +280,7 @@ def test_edit_rules_context_menu_restores_focus_to_collection_row(live_server, p
     # a captured return target the editor falls back to document.body, so Esc
     # cannot restore focus to the row that launched it.
     collection_id = live_server["db"].collections.add("Right-click target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     row = page.locator(
         f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
@@ -298,6 +300,7 @@ def test_confirm_batch_collection_moves_focus_to_grid_not_hidden_opener(live_ser
     # opener an invisible focus target. Codex P2: focus must land on a stable
     # page control instead.
     collection_id = live_server["db"].collections.add("Pick target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     opener = page.locator("#batchBar").get_by_role("button", name="+ Collection", exact=True)
     opener.click()
@@ -320,6 +323,7 @@ def test_confirm_batch_collection_preserves_focus_moved_during_pending_add(live_
     # steal focus unconditionally. It must now only run when focus landed in
     # the batch bar (invalidated by display:none) or on document.body.
     live_server["db"].collections.add("Pick target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     # Install a JS-level fetch interceptor that stalls the add-photos
     # response until we flip _releasePending. page.route would block the
@@ -436,6 +440,7 @@ def test_add_to_collection_dismisses_palette_opened_during_pending_fetch(live_se
     # palette before opening the dialog so the dialog is the only visible
     # overlay once the fetch resolves.
     live_server["db"].collections.add("Pick target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     # Stall /api/collections at the safeFetch layer until released, mirroring
     # the pending-add helper above. Only the collections GET from
@@ -527,6 +532,7 @@ def test_add_to_collection_dismisses_help_opened_during_pending_fetch(live_serve
     # command-palette dismissal below, so the dialog is the only visible
     # overlay once the fetch resolves.
     live_server["db"].collections.add("Pick target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     page.evaluate("""() => {
       const savedSafeFetch = window.safeFetch;
@@ -578,6 +584,7 @@ def test_add_to_collection_dismisses_report_opened_during_pending_fetch(live_ser
     # dismissals, so the dialog is the only visible overlay once the
     # fetch resolves.
     live_server["db"].collections.add("Pick target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     page.evaluate("""() => {
       const savedSafeFetch = window.safeFetch;
@@ -626,6 +633,7 @@ def test_save_collection_refocuses_replacement_row_after_refresh(live_server, pa
     # the replacement row that renders for the same collection id so
     # keyboard users don't lose their place after every successful edit.
     collection_id = live_server["db"].collections.add("Edit focus target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     row = page.locator(
         f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
@@ -653,6 +661,7 @@ def test_save_collection_preserves_focus_moved_during_pending_refresh(live_serve
     # pending, the row refocus must not steal that choice back. It only
     # runs when activeElement has been orphaned to body or a detached node.
     collection_id = live_server["db"].collections.add("Keep user focus", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     page.evaluate("""() => {
       const savedSafeFetch = window.safeFetch;
@@ -716,6 +725,7 @@ def test_add_to_collection_dismisses_lightbox_opened_during_pending_fetch(live_s
     # addToCollection must dismiss the lightbox before opening the dialog
     # so the dialog is the only visible overlay once the fetch resolves.
     live_server["db"].collections.add("Pick target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     # Stall /api/collections at the safeFetch layer until released,
     # mirroring the pending-help and pending-palette helpers above.
@@ -771,6 +781,7 @@ def test_save_collection_restores_focus_after_superseding_render(live_server, pa
     # path. The row-refocus must watch for subsequent child-list mutations
     # on #collectionList and run again once the newer render arrives.
     collection_id = live_server["db"].collections.add("Supersede target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     # Install a safeFetch wrapper that lets the first /api/collections GET
     # (the one saveCollection will fire) run normally, but holds a second
@@ -836,7 +847,9 @@ def test_save_collection_preserves_focus_moved_to_sibling_row_during_pending_ref
     # body-focus as the opener being orphaned and jerk focus back to the
     # edited row — a focusin tracker captures the user's intervening move.
     first_id = live_server["db"].collections.add("Sibling source", "[]")
+    live_server["db"].commit()
     second_id = live_server["db"].collections.add("Sibling target", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     page.evaluate("""() => {
       const savedSafeFetch = window.safeFetch;
@@ -900,6 +913,7 @@ def test_save_collection_restores_focus_after_slow_superseding_render(live_serve
     # collectionLoadGen > collectionRenderDecisionGen (not wall-clock),
     # so it survives slow fetches up to a 30s hard safety cap.
     collection_id = live_server["db"].collections.add("Slow supersede", "[]")
+    live_server["db"].commit()
     open_browse(page, live_server)
     page.evaluate("""() => {
       const savedSafeFetch = window.safeFetch;

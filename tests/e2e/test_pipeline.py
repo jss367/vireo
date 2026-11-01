@@ -25,6 +25,7 @@ def test_pipeline_plan_requires_source_and_clears_counts(live_server, page, sour
     collection_id = live_server["db"].collections.add(
         "All test photos", json.dumps({"mode": "all", "rules": []}),
     )
+    live_server["db"].commit()
     requests = []
     page.on("request", lambda request: requests.append(request.post_data_json)
             if request.url.endswith("/api/pipeline/plan") else None)

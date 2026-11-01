@@ -132,7 +132,7 @@ class CollectionRepository:
         )
 
     def _insert(self, name, rules_json, visual_json, original_import_count):
-        """Commit a collection and its import snapshot atomically."""
+        """Insert a collection and its import snapshot together (no commit)."""
         cur = self.conn.execute(
             "INSERT INTO collections (name, rules, workspace_id, visual_json, "
             "original_import_count, import_recorded_at) "
@@ -140,7 +140,6 @@ class CollectionRepository:
             (name, rules_json, self.workspace_id, visual_json,
              original_import_count, original_import_count),
         )
-        self.conn.commit()
         return cur.lastrowid
 
     def list_all(self):
@@ -184,7 +183,7 @@ class CollectionRepository:
 
     def update(self, collection_id, *, name=UNSET, rules_json=UNSET,
                visual_json=UNSET):
-        """Set the given columns of a workspace collection, and commit.
+        """Set the given columns of a workspace collection (no commit).
 
         Only the arguments passed are written, in the order ``name``,
         ``rules``, ``visual_json``; with none passed nothing runs. An id
@@ -210,7 +209,6 @@ class CollectionRepository:
             "WHERE id = ? AND workspace_id = ?",
             params,
         )
-        self.conn.commit()
         return cur.rowcount > 0
 
     def delete(self, collection_id):
@@ -219,7 +217,6 @@ class CollectionRepository:
             "DELETE FROM collections WHERE id = ? AND workspace_id = ?",
             (collection_id, self.workspace_id),
         )
-        self.conn.commit()
 
     def rename(self, collection_id, new_name):
         """Rename a collection within the active workspace.
@@ -233,7 +230,6 @@ class CollectionRepository:
         )
         if cur.rowcount == 0:
             raise ValueError("collection not found")
-        self.conn.commit()
 
     def duplicate(self, collection_id):
         """Copy a collection (name + rules + visual clause) within the active workspace.
@@ -272,7 +268,6 @@ class CollectionRepository:
             "INSERT INTO collections (name, rules, workspace_id, visual_json) VALUES (?, ?, ?, ?)",
             (new_name, row["rules"], ws, row["visual_json"]),
         )
-        self.conn.commit()
         return cur.lastrowid
 
     def _build_collection_query(self, collection_id, include_offline_folders=False):
@@ -1743,7 +1738,6 @@ class CollectionRepository:
                     "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
                     (name, json.dumps(rules), ws_id),
                 )
-        self.conn.commit()
 
     def visual_source_row(self, collection_id: int) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -1987,7 +1981,7 @@ def _photo_ids_without_rows(conn, ids):
     return missing | (wanted - present)
 
 
-def prune_collection_ids_of_missing_photos(conn, *, commit):
+def prune_collection_ids_of_missing_photos(conn):
     """Remove every ``photo_ids`` entry that names a photo no longer cataloged.
 
     Such an entry shows nothing today (the rules engine compiles the list to
@@ -1997,8 +1991,7 @@ def prune_collection_ids_of_missing_photos(conn, *, commit):
     Only the dangling entries are removed, through
     ``remap_collection_photo_ids``; every other rule, and every id that
     still has a photo, is left alone. No photo, file or other table is
-    touched. ``commit(conn)`` (``db.commit_with_retry``) runs only when
-    something was removed.
+    touched, and nothing is committed: the caller's unit of work owns that.
 
     Returns one ``{"collection_id", "workspace_id", "name", "removed"}``
     dict per collection rewritten, ``removed`` counting entries (a rule that
@@ -2027,7 +2020,6 @@ def prune_collection_ids_of_missing_photos(conn, *, commit):
                 "removed": removed,
             })
     remap_collection_photo_ids(conn, dict.fromkeys(missing))
-    commit(conn)
     return pruned
 
 

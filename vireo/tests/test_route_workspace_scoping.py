@@ -220,9 +220,10 @@ def test_audit_import_untracked_accepts_file_symlink(scoped, tmp_path, nested):
 
 
 def _static_collection(db):
-    return db.collections.add(
-        "Static", '[{"field": "photo_ids", "value": []}]',
-    )
+    with db.transaction():
+        return db.collections.add(
+            "Static", '[{"field": "photo_ids", "value": []}]',
+        )
 
 
 def test_collection_add_photos_refuses_foreign_and_unknown_ids(scoped):

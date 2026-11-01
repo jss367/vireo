@@ -219,7 +219,8 @@ class StartupTasks:
         db = self._init_db
         started_at = time.time()
         try:
-            pruned = db.prune_collection_ids_of_missing_photos()
+            with db.transaction():
+                pruned = db.prune_collection_ids_of_missing_photos()
         except Exception:
             log.exception("Could not check collections for deleted photos")
             db.rollback()

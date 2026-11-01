@@ -218,7 +218,6 @@ class EditsRepository:
                    updated_at = excluded.updated_at""",
             (name, recipe_json),
         )
-        self.conn.commit()
         row = self.conn.execute(
             "SELECT id, name, recipe_json, updated_at FROM edit_presets "
             "WHERE name = ?",
@@ -238,5 +237,4 @@ class EditsRepository:
         cur = self.conn.execute(
             "DELETE FROM edit_presets WHERE id = ?", (preset_id,)
         )
-        self.conn.commit()
         return cur.rowcount > 0

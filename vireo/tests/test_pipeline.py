@@ -2023,6 +2023,7 @@ def test_load_photo_features_collection_scoped(tmp_path):
     # Create a static collection with only p1
     rules = json.dumps([{"field": "photo_ids", "value": [p1]}])
     cid = db.collections.add("test-coll", rules)
+    db.commit()
 
     # Without collection_id — returns both
     all_photos = load_photo_features(db)
@@ -2590,6 +2591,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         "fox set",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
+    db.commit()
 
     captured = {}
     orig = subject_masks.list_photos_for_eye_keypoint_stage
@@ -2763,6 +2765,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         "both",
         json.dumps([{"field": "photo_ids", "value": [pid, other_pid]}]),
     )
+    db.commit()
 
     captured = {}
     orig = subject_masks.list_photos_for_eye_keypoint_stage

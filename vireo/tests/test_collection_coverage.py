@@ -27,10 +27,12 @@ def _collection(db, photos, original=None):
     if original is not None:
         # Admission can include records that are no longer in the catalog.
         absent = [max(photos, default=0) + i + 1 for i in range(original - len(photos))]
-        return db.collections.add_import("Imported photos", [*photos, *absent])
-    return db.collections.add(
-        "Imported photos", json.dumps([{"field": "photo_ids", "value": photos}]),
-    )
+        with db.transaction():
+            return db.collections.add_import("Imported photos", [*photos, *absent])
+    with db.transaction():
+        return db.collections.add(
+            "Imported photos", json.dumps([{"field": "photo_ids", "value": photos}]),
+        )
 
 
 def _prediction(db, photo, status, individual=None):
@@ -63,10 +65,12 @@ def test_import_total_survives_removed_members_and_rule_changes(db, tmp_path):
     db.collections.update(cid, rules_json=json.dumps([
         {"field": "photo_ids", "value": [photos[0]]},
     ]))
+    db.commit()
     narrowed = collection_coverage(db, cid, {})
     assert narrowed["original_import"] == original
     assert narrowed["review"]["denominator"] == 1
     copied = db.collections.duplicate(cid)
+    db.commit()
     assert collection_coverage(db, copied, {})["original_import"]["count"] is None
 
 
@@ -169,11 +173,13 @@ def test_explicitly_unresolved_is_independent_of_existing_species_and_scope(db, 
 def test_coverage_endpoint_rejects_cross_workspace_and_visual_scope(app_and_db):
     app, db = app_and_db
     cid = db.collections.add("Saved", "[]")
+    db.commit()
     client = app.test_client()
     result = client.get(f"/api/collections/{cid}/coverage")
     assert result.status_code == 200
     assert result.json["original_import"]["count"] is None
     visual = db.collections.add("Visual", "[]", visual_json='{"prompt":"bird"}')
+    db.commit()
     assert client.get(f"/api/collections/{visual}/coverage").status_code == 400
     assert client.get("/api/collections/999999/coverage").status_code == 404
     assert client.get("/api/collections/9223372036854775808/coverage").status_code == 400
@@ -186,6 +192,7 @@ def test_migration_does_not_guess_historical_total_from_rules(tmp_path):
     path = str(tmp_path / "historical.db")
     db = Database(path)
     cid = db.collections.add("Import 2026-10-17", '[{"field":"photo_ids","value":[1,2,3]}]')
+    db.commit()
     db.close()
     with sqlite3.connect(path) as conn:
         conn.execute("ALTER TABLE collections DROP COLUMN original_import_count")
@@ -221,6 +228,7 @@ def test_prediction_decisions_require_decision_in_every_any_rule_branch(db, tmp_
             {"field": "photo_ids", "value": [photos[1]]},
         ],
     }))
+    db.commit()
     # Neither a pending prediction nor an automatic taxonomy match proves
     # an explicit decision, regardless of which OR branch includes the photo.
     _prediction(db, photos[0], "pending")

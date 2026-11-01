@@ -36,9 +36,10 @@ def _give_photos_working_copies(app, db):
 
 
 def _all_photos_collection(db, photo_ids):
-    return db.collections.add(
-        "All", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
-    )
+    with db.transaction():
+        return db.collections.add(
+            "All", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+        )
 
 
 def _classify_patches():

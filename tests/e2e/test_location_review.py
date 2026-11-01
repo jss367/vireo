@@ -269,6 +269,7 @@ def test_location_review_is_a_navigable_collection_page(live_server, page):
         "San Diego Field Notes",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
+    live_server["db"].commit()
 
     page.route("https://unpkg.com/**", _stub_leaflet)
     page.goto(f"{live_server['url']}/locations/review")
@@ -2167,6 +2168,7 @@ def test_time_review_reuses_saved_location_and_preserves_scope(live_server, page
     collection_id = db.collections.add("Morning outing", json.dumps([
         {"field": "photo_ids", "value": photo_ids[:3]},
     ]))
+    db.commit()
     page.goto(f"{live_server['url']}/locations/review?collection_id={collection_id}")
     page.locator("#locationReviewMode").select_option("time")
     expect(page.locator("#locationReviewGroupTitle")).to_have_text("3 photos")
