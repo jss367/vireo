@@ -1119,7 +1119,7 @@ def create_predictions_blueprint(
             explicit = resolver.explicit_source(expected_species) is not None
             # add_keyword returns the new or existing keyword's id.
             keyword_id = cast(int, db.add_keyword(
-                identity.display_name, is_species=True, _commit=False,
+                identity.display_name, is_species=True,
                 source_taxon_id=identity.taxon_id if explicit else None,
             ))
             species = db.keywords.name_of(keyword_id)
@@ -1127,7 +1127,7 @@ def create_predictions_blueprint(
         for photo_id in all_photo_ids:
             if photo_id in already_tagged:
                 continue
-            db.tag_photo(photo_id, keyword_id, source="manual", _commit=False)
+            db.tag_photo(photo_id, keyword_id, source="manual")
             items.append({
                 "photo_id": photo_id,
                 "old_value": json.dumps({"keyword_only": True}),
@@ -1936,7 +1936,7 @@ def create_predictions_blueprint(
         try:
             if local_species:
                 kid = db.add_keyword(
-                    local_species, is_species=True, _commit=False,
+                    local_species, is_species=True,
                 )
                 # Queue/record the stored spelling (see api_add_keyword).
                 stored_name = db.keywords.name_of(kid)
@@ -1950,7 +1950,7 @@ def create_predictions_blueprint(
                     db.photo_review.set_flag(pid, "flagged")
                     if pid in already_has_species:
                         continue
-                    db.tag_photo(pid, kid, source="manual", _commit=False)
+                    db.tag_photo(pid, kid, source="manual")
                     db.queue_change(
                         pid, "keyword_add", local_species,
                     )

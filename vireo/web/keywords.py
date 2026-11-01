@@ -392,7 +392,8 @@ def create_keywords_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint
             return json_error(invalid, 400)
         # Apply the update first — if it raises, no sidecar changes are queued
         try:
-            effective_id = db.update_keyword(keyword_id, **body)
+            with db.transaction():
+                effective_id = db.update_keyword(keyword_id, **body)
         except ValueError as e:
             return json_error(str(e), 400)
         # Queue sidecar updates only after a successful DB update, using the

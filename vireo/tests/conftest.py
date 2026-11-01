@@ -319,6 +319,7 @@ def app_and_db(tmp_path, monkeypatch):
     k2 = db.add_keyword('Sparrow')
     db.tag_photo(p1, k1)
     db.tag_photo(p2, k2)
+    db.commit()
 
     for pid in [p1, p2, p3]:
         Image.new('RGB', (100, 100)).save(os.path.join(thumb_dir, f"{pid}.jpg"))

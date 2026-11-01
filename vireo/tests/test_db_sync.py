@@ -1097,6 +1097,7 @@ def test_count_queued_location_photos(lib):
     db.tag_photo(lib["a"], place)
     db.tag_photo(lib["b"], plain)
     db.tag_photo(lib["c"], place)
+    db.commit()
     _insert(db, lib["a"], "location", "x", ws)
     _insert(db, lib["a"], "location", "y", ws)
     _insert(db, lib["b"], "location", "x", ws)

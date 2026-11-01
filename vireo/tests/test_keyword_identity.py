@@ -37,6 +37,7 @@ def species_pair(db):
     parent = db.add_keyword('Imported birds')
     root = db.add_keyword('Test bird', is_species=True)
     leaf = db.add_keyword('Test Bird', parent_id=parent, is_species=True)
+    db.commit()
     db.conn.execute('UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)', (taxon, root, leaf))
     db.conn.commit()
     return root, leaf
@@ -45,6 +46,7 @@ def species_pair(db):
 def place_pair(db, name='Lake Hodges', nested=False):
     parent = db.add_keyword('Imported places') if nested else None
     source = db.add_keyword(name, parent_id=parent, kw_type='general')
+    db.commit()
     target = db.upsert_place_chain({
         'place_id': 'test-place', 'name': name, 'lat': 33.06, 'lng': -117.11,
         'address_components': [{'name': 'San Diego', 'types': ['locality']}],
@@ -59,6 +61,7 @@ def test_identity_counts_filters_and_paths(catalog):
     db.tag_photo(photos[0], leaf)
     db.tag_photo(photos[1], root)
     db.tag_photo(photos[2], leaf)
+    db.commit()
     group = next(g for g in grouped_keywords(db) if g['identity'] == 'inat:123')
     assert group['photo_count'] == 3
     assert {m['id'] for m in group['members']} == {root, leaf}
@@ -83,12 +86,14 @@ def test_unproven_same_names_and_conflicting_source_taxa_stay_separate(catalog):
     db.conn.execute('UPDATE keywords SET source_taxon_id = 999 WHERE id = ?', (leaf,))
     for photo, kid in zip(photos, [root, leaf, db.add_keyword('Test bird', kw_type='general')], strict=True):
         db.tag_photo(photo, kid)
+        db.commit()
     assert len(dashboard_stats.get_dashboard_stats(db)['top_keywords']) == 3
     parent = db.add_keyword('Another place')
     a = db.add_keyword('Springfield', kw_type='location')
     b = db.add_keyword('Springfield', parent_id=parent, kw_type='location')
     db.tag_photo(photos[0], a)
     db.tag_photo(photos[0], b)
+    db.commit()
     assert len([k for k in dashboard_stats.get_dashboard_stats(db)['top_keywords'] if k['name'] == 'Springfield']) == 2
 
 
@@ -97,6 +102,7 @@ def test_dashboard_uses_a_label_tagged_in_the_selected_date_range(catalog):
     root, leaf = species_pair(db)
     db.tag_photo(photos[0], root)
     db.tag_photo(photos[2], leaf)
+    db.commit()
     entry, = dashboard_stats.get_dashboard_stats(db, date_from='2024-07-01')['top_keywords']
     assert entry['name'] == 'Test Bird'
     assert entry['id'] == leaf
@@ -108,12 +114,14 @@ def test_dashboard_does_not_borrow_species_labels_from_other_workspaces(catalog)
     workspace = db._ws_id()
     root, leaf = species_pair(db)
     db.tag_photo(photos[0], leaf)
+    db.commit()
     other = db.create_workspace('Another vocabulary')
     db.set_active_workspace(other)
     folder = workspace_folders.add_folder(db, '/other-vocabulary', name='Other')
     workspace_folders.add_workspace_folder(db, other, folder)
     photo = photo_ingest.add_photo(db, folder_id=folder, filename='other.jpg', extension='.jpg', file_size=10, file_mtime=1)
     db.tag_photo(photo, root)
+    db.commit()
     db.set_active_workspace(workspace)
     entry, = dashboard_stats.get_dashboard_stats(db)['top_keywords']
     assert entry['id'] == leaf
@@ -129,6 +137,7 @@ def test_location_reconciliation_preserves_provenance_and_import_path(catalog, n
     db.tag_photo(photos[0], target, source='accept')
     db.tag_photo(photos[1], source)
     db.tag_photo(photos[2], target)
+    db.commit()
     preview = location_candidates(db)
     assert len(preview) == 1
     assert preview[0]['source_count'] == 2
@@ -155,6 +164,7 @@ def test_reconciliation_rejects_changed_or_out_of_workspace_candidates(catalog):
     source, target, _ = place_pair(db)
     db.tag_photo(photos[0], source)
     child = db.add_keyword('A sublocation', parent_id=source)
+    db.commit()
     with pytest.raises(ValueError):
         reconcile_location(db, source, target)
     assert db.conn.execute('SELECT COUNT(*) FROM keyword_import_aliases').fetchone()[0] == 0
@@ -170,6 +180,7 @@ def test_reconciliation_rolls_back_alias_and_tags_if_queueing_fails(catalog, mon
     db, photos = catalog
     source, target, _ = place_pair(db)
     db.tag_photo(photos[0], source)
+    db.commit()
     def fail(*args, **kwargs):
         raise RuntimeError('queue failed')
     monkeypatch.setattr(db, 'queue_change', fail)
@@ -207,6 +218,7 @@ def test_identity_and_reconciliation_api(app_and_db):
     photos = [r['id'] for r in db.conn.execute('SELECT id FROM photos ORDER BY id LIMIT 2')]
     source, target, _ = place_pair(db)
     db.tag_photo(photos[0], source)
+    db.commit()
     assert client.get('/api/keywords/identities').status_code == 200
     preview = client.get('/api/keywords/location-matches').get_json()
     assert any(c['source_id'] == source for c in preview)
@@ -224,6 +236,7 @@ def test_reconciliation_accepts_an_existing_descendant_location(catalog):
     db.conn.execute('UPDATE keywords SET parent_id = ? WHERE id = ?', (target, child))
     db.conn.commit()
     db.tag_photo(photos[0], source)
+    db.commit()
     db.set_photo_location(photos[0], child)
     assert location_candidates(db)[0]['conflicting_photo_count'] == 0
     reconcile_location(db, source, target)
@@ -237,6 +250,7 @@ def test_reconciliation_does_not_override_a_different_assigned_place(catalog):
     other = db.upsert_place_chain({'name': 'Another lake', 'place_id': 'another-place',
                                   'lat': 40, 'lng': -100, 'address_components': []})
     db.tag_photo(photos[0], source)
+    db.commit()
     db.set_photo_location(photos[0], other)
     assert location_candidates(db)[0]['conflicting_photo_count'] == 1
     with pytest.raises(ValueError, match='different linked place'):
@@ -256,8 +270,10 @@ def test_rescanning_and_syncing_renamed_place_keep_confirmed_import_alias(catalo
     db, photos = catalog
     source, target, parent = place_pair(db, nested=nested)
     db.tag_photo(photos[0], source)
+    db.commit()
     reconcile_location(db, source, target)
     db.update_keyword(target, name='Lake Hodges Preserve')
+    db.commit()
     folder = Path(db.conn.execute('SELECT path FROM folders LIMIT 1').fetchone()[0])
     folder.mkdir()
     sidecar = folder / '0.xmp'
@@ -268,6 +284,7 @@ def test_rescanning_and_syncing_renamed_place_keep_confirmed_import_alias(catalo
     sync_from_xmp(db, [photos[0]])
     assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target}
     db.untag_photo(photos[0], target)
+    db.commit()
     sync_from_xmp(db, [photos[0]])
     assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target}
 
@@ -277,9 +294,11 @@ def test_manual_keyword_addition_does_not_resolve_import_aliases(catalog, nested
     db, photos = catalog
     source, target, parent = place_pair(db, nested=nested)
     db.tag_photo(photos[0], source)
+    db.commit()
     reconcile_location(db, source, target)
     manual = db.add_keyword('Lake Hodges', parent_id=parent)
     db.tag_photo(photos[1], manual)
+    db.commit()
     assert manual != target
     keyword = db.conn.execute('SELECT type, place_id FROM keywords WHERE id = ?', (manual,)).fetchone()
     assert keyword['type'] == 'general'
@@ -303,6 +322,7 @@ def test_api_add_keyword_does_not_attach_reconciled_place_for_homonym(app_and_db
         )
     ]
     db.tag_photo(seed_photo, source)
+    db.commit()
     reconcile_location(db, source, target)
     before = {k['id'] for k in db.photo_keywords.get_for_photo(target_photo)}
     response = client.post(
@@ -328,9 +348,11 @@ def test_leaf_import_alias_does_not_reparent_new_subtrees(catalog):
     db, photos = catalog
     source, target, _ = place_pair(db)
     db.tag_photo(photos[0], source)
+    db.commit()
     reconcile_location(db, source, target)
     imported_parent = db.add_keyword('Lake Hodges', _resolve_alias=False)
     child = db.add_keyword('Picnic area', parent_id=imported_parent)
+    db.commit()
     assert imported_parent != target
     assert db.conn.execute('SELECT parent_id FROM keywords WHERE id = ?', (child,)).fetchone()[0] == imported_parent
 
@@ -339,11 +361,13 @@ def test_linking_a_place_to_an_existing_place_preserves_import_aliases(catalog):
     db, photos = catalog
     source, target, parent = place_pair(db, nested=True)
     db.tag_photo(photos[0], source)
+    db.commit()
     reconcile_location(db, source, target)
     details = {'name': 'Lake Hodges Preserve', 'place_id': 'corrected-place',
                'lat': 33, 'lng': -117, 'address_components': []}
     survivor = db.upsert_place_chain(details)
     result = db.keyword_provenance.link_keyword_to_place(target, details)
+    db.commit()
     assert result == {'keyword_id': survivor, 'merged': True}
     assert db.conn.execute('SELECT keyword_id FROM keyword_import_aliases').fetchone()[0] == survivor
     assert db.add_keyword('Lake Hodges', parent_id=parent, _resolve_alias=True) == survivor
@@ -365,15 +389,19 @@ def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(cat
     for index, state in enumerate(['Illinois', 'Missouri']):
         parent = db.add_keyword(state)
         source = db.add_keyword('Springfield', parent_id=parent)
+        db.commit()
         target = db.upsert_place_chain({'name': 'Springfield', 'place_id': f'springfield-{index}',
                                         'lat': 38 + index, 'lng': -90, 'address_components': []})
         db.tag_photo(photos[index], source)
+        db.commit()
         reconcile_location(db, source, target)
         targets.append(target)
     original = db.add_keyword('Original keyword')
     db.tag_photo(photos[2], original)
+    db.commit()
     if existing_place:
         db.tag_photo(photos[2], targets[0])
+        db.commit()
     before = {k['id'] for k in db.photo_keywords.get_for_photo(photos[2])}
     hierarchy = {'Missouri|Springfield'} if existing_place else {'Illinois|Springfield', 'Missouri|Springfield'}
     # Including Springfield keeps an existing same-name location during
@@ -503,6 +531,7 @@ def test_manual_merge_preview_and_cross_workspace_sidecar_updates(catalog):
     db.tag_photo(photos[0], target, source='accept')
     db.tag_photo(photos[1], source)
     db.tag_photo(photos[2], target)
+    db.commit()
     ws = db._ws_id()
     other = db.create_workspace('Shared photos')
     folder = db.conn.execute('SELECT folder_id FROM photos WHERE id = ?', (photos[0],)).fetchone()[0]
@@ -532,6 +561,7 @@ def test_manual_merge_general_into_linked_place_remembers_import(catalog):
     source, target, parent = place_pair(db, name='Whatcom Falls Park', nested=True)
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
     assert db.add_keyword('Whatcom Falls Park', parent_id=parent, _resolve_alias=True) == target
@@ -543,8 +573,10 @@ def test_manual_merge_multiple_keywords_and_coordinate_pair(catalog):
     ids = [db.add_keyword(name, kw_type='location') for name in ('Short', 'Long', 'Alternative')]
     for photo, kid in zip(photos, ids, strict=True):
         db.tag_photo(photo, kid)
+        db.commit()
     db.update_keyword(ids[0], latitude=99)
     db.update_keyword(ids[1], latitude=32, longitude=-117)
+    db.commit()
     preview = preview_keyword_merge(db, ids, ids[0])
     assert (preview['latitude'], preview['longitude']) == (32, -117)
     merge_keywords(db, ids, ids[0], preview['preview_token'])
@@ -558,9 +590,11 @@ def test_manual_merge_stale_preview_and_rollback(catalog, monkeypatch):
     source, target, _ = place_pair(db)
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     ids = [source, target]
     preview = preview_keyword_merge(db, ids, target)
     db.tag_photo(photos[2], source)
+    db.commit()
     with pytest.raises(ValueError, match='changed'):
         merge_keywords(db, ids, target, preview['preview_token'])
     preview = preview_keyword_merge(db, ids, target)
@@ -580,12 +614,14 @@ def test_manual_merge_rejects_unsafe_selection(catalog, case):
     source, target, _ = place_pair(db)
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     if case == 'species':
         db.conn.execute('UPDATE keywords SET is_species = 1 WHERE id = ?', (source,))
     elif case in ('photo_conflict', 'alias'):
         other = db.upsert_place_chain({'place_id': 'other-place', 'name': 'Other lake', 'lat': 34, 'lng': -116, 'address_components': []})
         if case == 'photo_conflict':
             db.tag_photo(photos[0], other)
+            db.commit()
         else:
             from keyword_identity import path_key
             db.conn.execute('INSERT INTO keyword_import_aliases VALUES (?, ?, ?)', (path_key(['Lake Hodges']), '["Lake Hodges"]', other))
@@ -609,6 +645,7 @@ def _nested_place_branches(db):
     trailhead = db.add_keyword('Trailhead', parent_id=road, kw_type='location')
     county = db.add_keyword('San Diego County', kw_type='location')
     kept = db.add_keyword('Borrego Springs', parent_id=county, kw_type='location')
+    db.commit()
     return stray, kept, road, trailhead
 
 
@@ -621,6 +658,7 @@ def test_manual_merge_reparents_a_whole_subtree(catalog):
     stray, kept, road, trailhead = _nested_place_branches(db)
     db.tag_photo(photos[0], trailhead)
     db.tag_photo(photos[1], kept)
+    db.commit()
     preview = preview_keyword_merge(db, [stray, kept], kept)
 
     assert [(c['id'], c['outcome'], c['to_path']) for c in preview['children']] == [
@@ -660,12 +698,14 @@ def test_manual_merge_child_collisions_match_the_write_path(catalog):
     twin_new = db.add_keyword('Trail', parent_id=new, kw_type='location')
     place_old = db.add_keyword('Overlook', parent_id=old, kw_type='location')
     place_new = db.add_keyword('Overlook', parent_id=new, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-aaaaaaaa' WHERE id = ?", (place_old,))
     db.conn.execute("UPDATE keywords SET place_id = 'place-bbbbbbbb' WHERE id = ?", (place_new,))
     db.conn.commit()
     db.tag_photo(photos[0], twin_old)
     db.tag_photo(photos[1], twin_new)
     db.tag_photo(photos[2], place_old)
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     outcomes = {c['id']: (c['outcome'], c['new_name']) for c in preview['children']}
@@ -692,16 +732,21 @@ def test_manual_merge_at_the_root_collapses_a_whole_duplicate_chain(catalog):
     reporting a destination it no longer has."""
     db, photos = catalog
     junk = db.add_keyword('92004', kw_type='location')
+    db.commit()
     stray = junk
     for name in ('United States', 'California', 'Borrego Springs'):
         stray = db.add_keyword(name, parent_id=stray, kw_type='location')
+        db.commit()
     trailhead = db.add_keyword('Trailhead', parent_id=stray, kw_type='location')
+    db.commit()
     kept = None
     for name in ('United States', 'California', 'Borrego Springs'):
         kept = db.add_keyword(name, parent_id=kept, kw_type='location')
+        db.commit()
     trail = db.add_keyword('Nature Trail', parent_id=kept, kw_type='location')
     db.tag_photo(photos[0], trailhead)
     db.tag_photo(photos[1], trail)
+    db.commit()
     stray_root = db.conn.execute(
         "SELECT id FROM keywords WHERE name = 'United States' AND parent_id = ?",
         (junk,)).fetchone()[0]
@@ -749,6 +794,7 @@ def test_merging_parents_keeps_same_named_children_of_different_species(catalog)
     new = db.add_keyword('Trip B')
     old_bird = db.add_keyword('Hummingbird', parent_id=old, is_species=True)
     new_bird = db.add_keyword('Hummingbird', parent_id=new, is_species=True)
+    db.commit()
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
                     (anna, old_bird))
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
@@ -756,6 +802,7 @@ def test_merging_parents_keeps_same_named_children_of_different_species(catalog)
     db.conn.commit()
     db.tag_photo(photos[0], old_bird)
     db.tag_photo(photos[1], new_bird)
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     assert [(c['name'], c['outcome']) for c in preview['children']] == [
@@ -783,6 +830,7 @@ def test_merging_parents_still_collapses_children_of_the_same_species(catalog):
     new = db.add_keyword('Trip B')
     old_bird = db.add_keyword('Hummingbird', parent_id=old, is_species=True)
     new_bird = db.add_keyword('Hummingbird', parent_id=new, is_species=True)
+    db.commit()
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', source_taxon_id = 5112 WHERE id = ?",
                     (old_bird,))
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
@@ -790,6 +838,7 @@ def test_merging_parents_still_collapses_children_of_the_same_species(catalog):
     db.conn.commit()
     db.tag_photo(photos[0], old_bird)
     db.tag_photo(photos[1], new_bird)
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     assert [(c['name'], c['outcome']) for c in preview['children']] == [
@@ -813,6 +862,7 @@ def test_child_collapse_folds_source_taxon_id_onto_unlinked_survivor(catalog):
     new = db.add_keyword('Trip B')
     old_bird = db.add_keyword('Hummingbird', parent_id=old, is_species=True)
     new_bird = db.add_keyword('Hummingbird', parent_id=new, is_species=True)
+    db.commit()
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', source_taxon_id = 5112 WHERE id = ?",
                     (old_bird,))
     db.conn.execute("UPDATE keywords SET type = 'taxonomy' WHERE id = ?",
@@ -820,6 +870,7 @@ def test_child_collapse_folds_source_taxon_id_onto_unlinked_survivor(catalog):
     db.conn.commit()
     db.tag_photo(photos[0], old_bird)
     db.tag_photo(photos[1], new_bird)
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     assert [(c['name'], c['outcome']) for c in preview['children']] == [
@@ -845,6 +896,7 @@ def test_merge_conflict_guard_covers_photos_tagged_only_on_a_moved_descendant(ca
     stray = db.add_keyword('Stray', kw_type='location')
     leaf = db.add_keyword('Leaf', parent_id=stray, kw_type='location')
     kept = db.add_keyword('Kept', kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'keep-place' WHERE id = ?", (kept,))
     elsewhere = db.upsert_place_chain({
         'place_id': 'other-place', 'name': 'Elsewhere', 'lat': 50, 'lng': 10,
@@ -853,6 +905,7 @@ def test_merge_conflict_guard_covers_photos_tagged_only_on_a_moved_descendant(ca
     db.tag_photo(photos[0], leaf)
     db.tag_photo(photos[0], elsewhere)
     db.tag_photo(photos[1], kept)
+    db.commit()
 
     with pytest.raises(ValueError, match='different linked place'):
         preview_keyword_merge(db, [stray, kept], kept)
@@ -871,6 +924,7 @@ def test_merge_rewrites_sidecars_for_children_collapsed_by_recursion(catalog):
     new_lake = db.add_keyword('Lake', parent_id=new, kw_type='location')
     db.tag_photo(photos[0], old_lake)
     db.tag_photo(photos[1], new_lake)
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     assert [(c['name'], c['outcome']) for c in preview['children']] == [('Lake', 'merge')]
@@ -904,6 +958,7 @@ def test_merge_rewrites_the_survivors_own_hierarchy_when_the_chooser_renames_it(
     kept = db.add_keyword('Borrego', parent_id=county, kw_type='location')
     db.tag_photo(photos[0], kept)
     db.tag_photo(photos[1], stray)
+    db.commit()
 
     overrides = {'name': 'Borrego Springs'}
     preview = preview_keyword_merge(db, [stray, kept], kept, overrides)
@@ -930,6 +985,7 @@ def test_merging_a_location_away_resyncs_even_when_the_result_is_general(catalog
     general = db.add_keyword('Wing Cyn', kw_type='general')
     db.tag_photo(photos[0], location)
     db.tag_photo(photos[1], general)
+    db.commit()
 
     preview = preview_keyword_merge(db, [location, general], general)
     assert preview['resolved']['type'] == 'general'
@@ -948,14 +1004,17 @@ def test_merge_allows_a_linked_descendant_to_collapse_into_an_unlinked_twin(cata
     valid subtree merge."""
     db, photos = catalog
     kept = db.add_keyword('Park', kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'kept-place' WHERE id = ?", (kept,))
     kept_lake = db.add_keyword('Lake', parent_id=kept, kw_type='location')
     stray = db.add_keyword('Parc', kw_type='location')
     stray_lake = db.add_keyword('Lake', parent_id=stray, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'lake-place' WHERE id = ?", (stray_lake,))
     db.conn.commit()
     db.tag_photo(photos[0], stray_lake)
     db.tag_photo(photos[1], kept_lake)
+    db.commit()
 
     preview = preview_keyword_merge(db, [stray, kept], kept)
     assert [(c['name'], c['outcome']) for c in preview['children']] == [('Lake', 'merge')]
@@ -980,6 +1039,7 @@ def _two_hummingbird_branches(db):
     new = db.add_keyword('Trip B')
     old_bird = db.add_keyword('Hummingbird', parent_id=old, is_species=True)
     new_bird = db.add_keyword('Hummingbird', parent_id=new, is_species=True)
+    db.commit()
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
                     (anna, old_bird))
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
@@ -997,6 +1057,7 @@ def test_disambiguated_child_carries_its_dependent_names(catalog):
     old, new, old_bird, new_bird = _two_hummingbird_branches(db)
     db.tag_photo(photos[0], old_bird)
     db.tag_photo(photos[1], new_bird)
+    db.commit()
     db.queue_change(photos[0], 'keyword_add', 'Hummingbird')
     db.commit()
 
@@ -1023,6 +1084,7 @@ def test_disambiguation_skips_a_name_that_is_already_taken(catalog):
     db.tag_photo(photos[0], old_bird)
     db.tag_photo(photos[1], new_bird)
     db.tag_photo(photos[2], squatter)
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     planned = next(c['new_name'] for c in preview['children'] if c['id'] == old_bird)
@@ -1050,13 +1112,16 @@ def test_merge_keeps_a_legacy_species_flag_a_retype_cleared(catalog):
         "INSERT INTO taxa(name, common_name, rank, inat_id) "
         "VALUES ('Calypte anna', 'Anna bird', 'species', 5112)").lastrowid
     legacy = db.add_keyword('Hummer', kw_type='general')
+    db.commit()
     db.conn.execute('UPDATE keywords SET is_species = 1 WHERE id = ?', (legacy,))
     taxonomy = db.add_keyword('Hummingbird', is_species=True)
+    db.commit()
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
                     (anna, taxonomy))
     db.conn.commit()
     db.tag_photo(photos[0], taxonomy)
     db.tag_photo(photos[1], legacy)
+    db.commit()
 
     preview = preview_keyword_merge(db, [taxonomy, legacy], legacy)
     assert preview['resolved']['taxon_id'] == anna
@@ -1075,12 +1140,14 @@ def test_merge_does_not_give_a_chosen_place_another_places_coordinates(catalog):
     db, photos = catalog
     unlocated = db.add_keyword('Overlook', kw_type='location')
     located = db.add_keyword('Overlook Point', kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-a' WHERE id = ?", (unlocated,))
     db.conn.execute("UPDATE keywords SET place_id = 'place-b', latitude = 48.0, "
                     "longitude = 11.0 WHERE id = ?", (located,))
     db.conn.commit()
     db.tag_photo(photos[0], unlocated)
     db.tag_photo(photos[1], located)
+    db.commit()
 
     preview = preview_keyword_merge(db, [unlocated, located], located, {'place_id': 'place-a'})
     assert preview['resolved']['place_id'] == 'place-a'
@@ -1103,11 +1170,13 @@ def test_planner_folds_absorbed_identity_for_a_third_branch(catalog):
     first_lake = db.add_keyword('Lake', parent_id=first, kw_type='location')
     second_lake = db.add_keyword('Lake', parent_id=second, kw_type='location')
     kept_lake = db.add_keyword('Lake', parent_id=kept, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'lake-a' WHERE id = ?", (first_lake,))
     db.conn.execute("UPDATE keywords SET place_id = 'lake-b' WHERE id = ?", (second_lake,))
     db.conn.commit()
     for photo, keyword in zip(photos, (first_lake, second_lake, kept_lake), strict=True):
         db.tag_photo(photo, keyword)
+        db.commit()
 
     preview = preview_keyword_merge(db, [first, second, kept], kept)
     predicted = {c['id']: c['outcome'] for c in preview['children']}
@@ -1134,6 +1203,7 @@ def test_species_options_group_by_resolved_identity(catalog):
         "VALUES ('Calypte anna', 'Anna bird', 'species', 5112)").lastrowid
     by_local = db.add_keyword('Hummer A', is_species=True)
     by_inat = db.add_keyword('Hummer B', is_species=True)
+    db.commit()
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
                     (anna, by_local))
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', source_taxon_id = 5112 WHERE id = ?",
@@ -1141,6 +1211,7 @@ def test_species_options_group_by_resolved_identity(catalog):
     db.conn.commit()
     db.tag_photo(photos[0], by_local)
     db.tag_photo(photos[1], by_inat)
+    db.commit()
 
     preview = preview_keyword_merge(db, [by_local, by_inat], by_local)
     assert len(preview['options']['species']) == 1
@@ -1160,6 +1231,7 @@ def test_merge_refuses_to_steal_an_alias_owned_by_an_unrelated_keyword(catalog):
     db.tag_photo(photos[0], leaf)
     db.tag_photo(photos[1], kept)
     db.tag_photo(photos[2], unrelated)
+    db.commit()
     db.conn.execute(
         'INSERT INTO keyword_import_aliases VALUES (?, ?, ?)',
         (path_key(['Stray', 'Leaf']), json.dumps(['Stray', 'Leaf']), unrelated))
@@ -1178,6 +1250,7 @@ def _collapsing_into_a_linked_child(db, photos, unrelated_place):
     kept = db.add_keyword('Trip B', kw_type='location')
     source_child = db.add_keyword('Lake', parent_id=stray, kw_type='location')
     kept_child = db.add_keyword('Lake', parent_id=kept, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'lake-x', latitude = 10.0, "
                     "longitude = 20.0 WHERE id = ?", (kept_child,))
     if unrelated_place:
@@ -1185,9 +1258,11 @@ def _collapsing_into_a_linked_child(db, photos, unrelated_place):
             'place_id': 'other-place', 'name': 'Elsewhere', 'lat': 50, 'lng': 10,
             'address_components': []})
         db.tag_photo(photos[0], elsewhere)
+        db.commit()
     db.conn.commit()
     db.tag_photo(photos[0], source_child)
     db.tag_photo(photos[1], kept_child)
+    db.commit()
     return stray, kept, kept_child
 
 
@@ -1234,6 +1309,7 @@ def test_conflict_guard_leaves_non_location_merges_alone(catalog):
     db.add_keyword('Sub', parent_id=second)
     db.tag_photo(photos[0], first)
     db.tag_photo(photos[1], second)
+    db.commit()
 
     preview = preview_keyword_merge(db, [first, second], second)
     assert [(c['name'], c['outcome']) for c in preview['children']] == [('Sub', 'merge')]
@@ -1250,6 +1326,7 @@ def test_conflict_guard_treats_sibling_branches_as_rival_places(catalog):
     source_child = db.add_keyword('Balboa Park', parent_id=stray, kw_type='location')
     balboa = db.add_keyword('Balboa Park', parent_id=kept, kw_type='location')
     torrey = db.add_keyword('Torrey Pines', parent_id=kept, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-A', latitude = 32.73, "
                     "longitude = -117.14 WHERE id = ?", (balboa,))
     db.conn.execute("UPDATE keywords SET place_id = 'place-B', latitude = 32.92, "
@@ -1258,6 +1335,7 @@ def test_conflict_guard_treats_sibling_branches_as_rival_places(catalog):
     db.tag_photo(photos[0], source_child)
     db.tag_photo(photos[0], torrey)
     db.tag_photo(photos[1], balboa)
+    db.commit()
 
     with pytest.raises(ValueError, match='different linked place'):
         preview_keyword_merge(db, [stray, kept], kept)
@@ -1272,12 +1350,14 @@ def test_conflict_guard_allows_a_photo_on_one_place_chain(catalog):
     source_child = db.add_keyword('Balboa Park', parent_id=stray, kw_type='location')
     balboa = db.add_keyword('Balboa Park', parent_id=kept, kw_type='location')
     trail = db.add_keyword('Palm Trail', parent_id=balboa, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-A' WHERE id = ?", (balboa,))
     db.conn.execute("UPDATE keywords SET place_id = 'place-T' WHERE id = ?", (trail,))
     db.conn.commit()
     db.tag_photo(photos[0], source_child)
     db.tag_photo(photos[0], trail)      # trail sits under balboa: one chain
     db.tag_photo(photos[1], balboa)
+    db.commit()
 
     preview = preview_keyword_merge(db, [stray, kept], kept)
     assert [(c['name'], c['outcome']) for c in preview['children']] == [
@@ -1303,6 +1383,7 @@ def test_merge_does_not_alias_a_retired_path_a_survivor_still_lives_at(catalog):
     beta = db.add_keyword('Beta')
     alpha_bird = db.add_keyword('Bird', parent_id=alpha, is_species=True)
     beta_bird = db.add_keyword('Bird', parent_id=beta, is_species=True)
+    db.commit()
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
                     (first, alpha_bird))
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
@@ -1310,6 +1391,7 @@ def test_merge_does_not_alias_a_retired_path_a_survivor_still_lives_at(catalog):
     db.conn.commit()
     db.tag_photo(photos[0], alpha_bird)
     db.tag_photo(photos[1], beta_bird)
+    db.commit()
 
     overrides = {'name': 'Alpha'}
     preview = preview_keyword_merge(db, [alpha, beta], beta, overrides)
@@ -1330,14 +1412,17 @@ def test_conflict_guard_ignores_pre_existing_locations_on_a_general_merge(catalo
     db, photos = catalog
     first = db.add_keyword('Genre A', kw_type='general')
     second = db.add_keyword('Genre B', kw_type='general')
+    db.commit()
     for index, place in enumerate(('p1', 'p2')):
         keyword = db.upsert_place_chain({
             'place_id': place, 'name': f'Park {index}', 'lat': index + 1,
             'lng': index + 1, 'address_components': []})
         db.tag_photo(photos[0], keyword)
+        db.commit()
     db.conn.commit()
     db.tag_photo(photos[0], first)
     db.tag_photo(photos[1], second)
+    db.commit()
 
     preview = preview_keyword_merge(db, [first, second], second)
     assert preview['resolved']['type'] == 'general'
@@ -1361,6 +1446,7 @@ def test_merge_writes_no_alias_when_two_retired_paths_share_one_key(catalog):
     first = db.conn.execute("INSERT INTO keywords(name) VALUES ('Trip A')").lastrowid
     second = db.conn.execute("INSERT INTO keywords(name) VALUES ('trip a')").lastrowid
     kept = db.add_keyword('Keep')
+    db.commit()
     children = [db.conn.execute(
         "INSERT INTO keywords(name, parent_id, is_species, type, taxon_id) "
         "VALUES ('Bird', ?, 1, 'taxonomy', ?)", (parent, taxon)).lastrowid
@@ -1368,6 +1454,7 @@ def test_merge_writes_no_alias_when_two_retired_paths_share_one_key(catalog):
     db.conn.commit()
     for photo, child in zip(photos, children, strict=True):
         db.tag_photo(photo, child)
+        db.commit()
 
     rows = [dict(r) for r in db.conn.execute('SELECT * FROM keywords')]
     retired = keyword_paths(rows)[children[0]]
@@ -1399,6 +1486,7 @@ def test_conflict_guard_stops_a_place_chain_at_a_non_location_ancestor(catalog):
     park = db.add_keyword('Park', parent_id=collection, kw_type='location')
     stray = db.add_keyword('Stray', parent_id=park, kw_type='location')
     kept = db.add_keyword('Keep', parent_id=park, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-c' WHERE id = ?", (country,))
     db.conn.execute("UPDATE keywords SET place_id = 'place-p' WHERE id = ?", (park,))
     db.conn.commit()
@@ -1406,6 +1494,7 @@ def test_conflict_guard_stops_a_place_chain_at_a_non_location_ancestor(catalog):
     db.tag_photo(photos[0], country)
     db.tag_photo(photos[0], park)
     db.tag_photo(photos[1], kept)
+    db.commit()
     # The app's own walk cuts off at Collection, so Country is not part of
     # this photo's exported chain even though it is an ancestor in the tree.
     exported = photo_locations.get_photo_location_paths(db, [photos[0]])[photos[0]]
@@ -1426,10 +1515,12 @@ def test_source_alias_yields_to_an_unrelated_live_path(catalog):
     unrelated = db.conn.execute(
         "INSERT INTO keywords(name, type) VALUES ('trip a', 'general')").lastrowid
     kept = db.add_keyword('Keep')
+    db.commit()
     db.conn.commit()
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], kept)
     db.tag_photo(photos[2], unrelated)
+    db.commit()
 
     preview = preview_keyword_merge(db, [source, kept], kept)
     merge_keywords(db, [source, kept], kept, preview['preview_token'])
@@ -1451,9 +1542,11 @@ def test_case_variant_sources_still_alias_to_their_shared_target(catalog):
     second = db.conn.execute(
         "INSERT INTO keywords(name, type) VALUES ('trip a', 'general')").lastrowid
     kept = db.add_keyword('Keep')
+    db.commit()
     db.conn.commit()
     for photo, keyword in zip(photos, (first, second, kept), strict=True):
         db.tag_photo(photo, keyword)
+        db.commit()
 
     preview = preview_keyword_merge(db, [first, second, kept], kept)
     assert preview['ambiguous_alias_keys'] == []
@@ -1475,6 +1568,7 @@ def test_demoting_the_survivor_out_of_location_keeps_its_flat_keyword(catalog):
     kept = db.add_keyword('Wing Canyon', kw_type='location')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], kept)      # carries ONLY the survivor
+    db.commit()
 
     overrides = {'type': 'general'}
     preview = preview_keyword_merge(db, [source, kept], kept, overrides)
@@ -1498,13 +1592,16 @@ def test_conflict_guard_ignores_photos_that_get_no_location_change(catalog):
     stray = db.add_keyword('Trip A', kw_type='location')
     kept = db.add_keyword('Trip B', kw_type='location')
     notes = db.add_keyword('Notes', parent_id=stray, kw_type='general')
+    db.commit()
     for index, place in enumerate(('p1', 'p2')):
         db.tag_photo(photos[0], db.upsert_place_chain({
             'place_id': place, 'name': f'Park {index}', 'lat': index + 1,
             'lng': index + 1, 'address_components': []}))
+        db.commit()
     db.conn.commit()
     db.tag_photo(photos[0], notes)
     db.tag_photo(photos[1], kept)
+    db.commit()
 
     preview = preview_keyword_merge(db, [stray, kept], kept)
     merge_keywords(db, [stray, kept], kept, preview['preview_token'])
@@ -1527,6 +1624,7 @@ def test_moving_a_location_under_a_general_ancestor_is_not_a_location_change(cat
     kept = db.add_keyword('Trip B', kw_type='general')
     notes = db.add_keyword('Notes', parent_id=stray, kw_type='general')
     park = db.add_keyword('Park', parent_id=notes, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-p' WHERE id = ?", (park,))
     elsewhere = db.upsert_place_chain({
         'place_id': 'other', 'name': 'Elsewhere', 'lat': 9, 'lng': 9,
@@ -1535,6 +1633,7 @@ def test_moving_a_location_under_a_general_ancestor_is_not_a_location_change(cat
     db.tag_photo(photos[0], park)
     db.tag_photo(photos[0], elsewhere)     # independent location tag
     db.tag_photo(photos[1], kept)
+    db.commit()
 
     preview = preview_keyword_merge(db, [stray, kept], kept)
     assert park not in preview['location_change_ids']
@@ -1558,10 +1657,12 @@ def test_moving_a_location_under_a_location_ancestor_still_resyncs(catalog):
     stray = db.add_keyword('Region A', kw_type='location')
     kept = db.add_keyword('Region B', kw_type='location')
     park = db.add_keyword('Park', parent_id=stray, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-p' WHERE id = ?", (park,))
     db.conn.commit()
     db.tag_photo(photos[0], park)
     db.tag_photo(photos[1], kept)
+    db.commit()
 
     preview = preview_keyword_merge(db, [stray, kept], kept)
     assert park in preview['location_change_ids']
@@ -1583,10 +1684,12 @@ def test_collapsing_into_a_later_source_follows_the_landing_chain(catalog):
     first = db.add_keyword('S1')
     under_target = db.add_keyword('S2', parent_id=kept)
     colliding = db.add_keyword('S2', parent_id=first)
+    db.commit()
     db.conn.commit()
     db.tag_photo(photos[0], colliding)
     db.tag_photo(photos[1], under_target)
     db.tag_photo(photos[2], kept)
+    db.commit()
 
     preview = preview_keyword_merge(db, [first, under_target, kept], kept)
     entry = next(c for c in preview['children'] if c['id'] == colliding)
@@ -1616,6 +1719,7 @@ def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
         'address_components': []})
     db.tag_photo(photos[0], other)
     db.tag_photo(photos[1], second)
+    db.commit()
 
     preview = preview_keyword_merge(db, [other, second], second)
     assert preview['requires_choice'] == ['place']
@@ -1641,6 +1745,7 @@ def test_manual_merge_asks_which_species_link_to_keep(catalog):
     source, target = species_pair(db)[:2]
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     db.conn.execute('UPDATE keywords SET source_taxon_id = 999 WHERE id = ?', (source,))
     db.conn.commit()
 
@@ -1665,11 +1770,13 @@ def test_manual_merge_mixes_spelling_and_place_across_rows(catalog):
     whole point of the chooser."""
     db, photos = catalog
     plain = db.add_keyword('Borrego Palm Cyn.', kw_type='location')
+    db.commit()
     linked = db.upsert_place_chain({
         'place_id': 'trailhead', 'name': 'Borrego Palm Canyon Trailhead',
         'lat': 33.27, 'lng': -116.42, 'address_components': []})
     db.tag_photo(photos[0], plain)
     db.tag_photo(photos[1], linked)
+    db.commit()
 
     overrides = {'name': 'Borrego Palm Cyn.', 'parent_id': None}
     preview = preview_keyword_merge(db, [plain, linked], linked, overrides)
@@ -1700,6 +1807,7 @@ def test_manual_merge_rename_carries_pending_edits_and_curation(catalog):
     target = db.add_keyword('Wing Street Canyon', kw_type='location')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     db.queue_change(photos[1], 'keyword_add', 'Wing Street Canyon')
     db.commit()
 
@@ -1731,6 +1839,7 @@ def test_manual_merge_rejects_unusable_overrides(catalog, overrides, message):
     target = db.add_keyword('Wing Street Canyon', kw_type='location')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     with pytest.raises(ValueError, match=message):
         preview_keyword_merge(db, [source, target], target, overrides)
 
@@ -1742,6 +1851,7 @@ def test_manual_merge_coordinates_are_editable_and_clearable(catalog):
     db.update_keyword(target, latitude=32.7447, longitude=-117.2186)
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
 
     overrides = {'coordinates': {'latitude': 33.0, 'longitude': -116.0}}
     preview = preview_keyword_merge(db, [source, target], target, overrides)
@@ -1759,6 +1869,7 @@ def test_manual_merge_preview_token_covers_the_chooser(catalog):
     target = db.add_keyword('Wing Street Canyon', kw_type='location')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     preview = preview_keyword_merge(db, [source, target], target)
     with pytest.raises(ValueError, match='changed'):
         merge_keywords(db, [source, target], target, preview['preview_token'],
@@ -1772,6 +1883,7 @@ def test_manual_merge_api_validation_and_revalidation(app_and_db):
     ids = [db.add_keyword(name, kw_type='general') for name in ('Merge first', 'Merge second')]
     for photo, kid in zip(photos, ids, strict=True):
         db.tag_photo(photo, kid)
+        db.commit()
     for invalid in (None, [], {}, {'keyword_ids': [True, ids[1]], 'target_id': ids[1]},
                     {'keyword_ids': ids, 'target_id': True},
                     {'keyword_ids': [ids[0], ids[0]], 'target_id': ids[0]},
@@ -1794,6 +1906,7 @@ def test_manual_merge_count_includes_retained_children_and_other_workspaces(cata
     child = db.add_keyword('Child', parent_id=target)
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], child)
+    db.commit()
     ws = db._ws_id()
     other = db.create_workspace('Other workspace')
     db.set_active_workspace(other)
@@ -1801,6 +1914,7 @@ def test_manual_merge_count_includes_retained_children_and_other_workspaces(cata
     workspace_folders.add_workspace_folder(db, other, folder)
     photo = photo_ingest.add_photo(db, folder_id=folder, filename='elsewhere.jpg', extension='.jpg', file_size=1, file_mtime=1)
     db.tag_photo(photo, source)
+    db.commit()
     db.set_active_workspace(ws)
     preview = preview_keyword_merge(db, [source, target], target)
     assert preview['combined_count'] == 3
@@ -1825,6 +1939,7 @@ def test_manual_merge_sidecar_sync_keeps_unrelated_tags(catalog, tmp_path):
     target = db.add_keyword('Wing Street Canyon', kw_type='location')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
     changes = [r['id'] for r in db.pending_changes.list_all() if r['photo_id'] == photos[0]]
@@ -1850,6 +1965,7 @@ def test_manual_merge_same_name_hierarchy_survives_sync_and_rescan(catalog, tmp_
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[0], unrelated)
     db.tag_photo(photos[1], target)
+    db.commit()
     directory = tmp_path / 'photos'
     directory.mkdir()
     Image.new('RGB', (2, 2)).save(directory / '0.jpg')
@@ -1874,11 +1990,13 @@ def test_manual_merge_import_aliases_keep_types_and_manual_additions_distinct(ca
     target = db.add_keyword('Retained label')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
     assert db.add_keyword('Imported label', _resolve_alias=True) == target
     assert db.add_keyword('Imported label') != target
     typed = db.add_keyword('Imported label', kw_type='location', _resolve_alias=True)
+    db.commit()
     assert typed != target
     assert db.conn.execute('SELECT type FROM keywords WHERE id = ?', (typed,)).fetchone()[0] == 'location'
     path = db.conn.execute('PRAGMA database_list').fetchone()['file']
@@ -1898,6 +2016,7 @@ def test_catalog_import_resolves_multiple_non_location_merge_aliases(catalog, mo
         target = db.add_keyword(name, parent_id=new_parent)
         db.tag_photo(photos[0], source)
         db.tag_photo(photos[1], target)
+        db.commit()
         preview = preview_keyword_merge(db, [source, target], target)
         merge_keywords(db, [source, target], target, preview['preview_token'])
         expected.add(target)
@@ -1905,6 +2024,7 @@ def test_catalog_import_resolves_multiple_non_location_merge_aliases(catalog, mo
     place = db.upsert_place_chain({'place_id': 'real-place', 'name': 'A place', 'lat': 33, 'lng': -117,
                                    'address_components': []})
     db.tag_photo(photos[0], place)
+    db.commit()
     expected.add(place)
     row = db.conn.execute('SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?',
                           (photos[0],)).fetchone()
@@ -1962,6 +2082,7 @@ def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp
     db.tag_photo(photos[1], source)
     db.tag_photo(photos[1], target)
     db.untag_photo(photos[1], source)
+    db.commit()
     ws = db._ws_id()
     other = db.create_workspace('Shared sidecar')
     folder = db.conn.execute('SELECT folder_id FROM photos WHERE id = ?', (photos[1],)).fetchone()[0]
@@ -2004,6 +2125,7 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[0], unrelated)
     db.tag_photo(photos[1], target)
+    db.commit()
     directory = tmp_path / 'photos'
     directory.mkdir()
     Image.new('RGB', (2, 2)).save(directory / '0.jpg')
@@ -2022,6 +2144,7 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
         sync_from_xmp(db, [photos[0]])
         assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target, unrelated}
     db.untag_photo(photos[0], target)
+    db.commit()
     db.remove_pending_changes(photos[0], 'keyword_add', 'New leaf')
     db.commit()
     db.queue_change(photos[0], 'keyword_remove', 'New leaf')
@@ -2054,14 +2177,17 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
     old_parent = db.add_keyword('Old parent')
     new_parent = db.add_keyword('New parent')
     source = db.add_keyword('Old leaf', parent_id=old_parent)
+    db.commit()
     target_name = 'Old leaf' if same_name else 'New leaf'
     target = db.add_keyword(target_name, parent_id=new_parent)
     db.tag_photo(photo, source)
     db.tag_photo(1, target)
+    db.commit()
     sidecar = str(directory / 'photo.xmp')
     write_sidecar(sidecar, {'Old leaf'}, {'Old parent|Old leaf'})
     if target_present:
         db.tag_photo(photo, target)
+        db.commit()
         write_sidecar(sidecar, {target_name}, {'New parent|' + target_name})
     body = {'keyword_ids': [source, target], 'target_id': target}
     response = client.post('/api/keywords/merge-preview', json=body)
@@ -2111,9 +2237,11 @@ def test_cancel_unrelated_homonym_add_preserves_existing_hierarchy(app_and_db, t
     target = db.add_keyword('Robin', kw_type='taxonomy')
     db.tag_photo(1, source)
     db.tag_photo(1, target)
+    db.commit()
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
     db.tag_photo(photo, individual)
+    db.commit()
     sidecar = str(directory / 'photo.xmp')
     write_sidecar(sidecar, {'Robin'}, {'People|Robin'})
     assert client.post(f'/api/photos/{photo}/keywords', json={'keyword_id': target}).status_code == 200
@@ -2138,6 +2266,7 @@ def test_chained_merges_sync_together_when_only_latest_add_is_selected(catalog, 
         parent = db.add_keyword(name + ' parent')
         keyword = db.add_keyword(name, parent_id=parent)
         db.tag_photo(photos[0], keyword)
+        db.commit()
         ids.append(keyword)
     sidecar = str(directory / '0.xmp')
     write_sidecar(sidecar, {'First'}, {'First parent|First'})
@@ -2164,6 +2293,7 @@ def test_flat_only_import_resolves_unambiguous_merged_nested_leaf(catalog, tmp_p
     target = db.add_keyword('Retained leaf')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
     directory = tmp_path / 'photos'
@@ -2194,11 +2324,13 @@ def test_flat_merge_alias_does_not_override_ambiguous_live_identity(catalog):
     target = db.add_keyword('Bird', kw_type='taxonomy')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
     assert resolve_import_path(db, ['Robin']) == target
     people = db.add_keyword('People', kw_type='individual')
     db.add_keyword('Robin', parent_id=people, kw_type='individual')
+    db.commit()
     assert resolve_import_path(db, ['Robin']) is None
     assert resolve_import_path(db, ['Robin'], kw_type='taxonomy') == target
     assert resolve_import_path(db, ['Old parent', 'Robin']) == target
@@ -2216,6 +2348,7 @@ def test_manual_merge_rejects_case_insensitive_sibling_collision(catalog):
     parent = db.add_keyword('Parent')
     source = db.add_keyword('foo', parent_id=parent)
     target = db.add_keyword('bar', parent_id=parent)
+    db.commit()
     # Bypass ``add_keyword``'s ``COLLATE NOCASE`` dedupe to plant a same-key
     # sibling; the underlying table constraint permits it.
     squatter = db.conn.execute(
@@ -2225,6 +2358,7 @@ def test_manual_merge_rejects_case_insensitive_sibling_collision(catalog):
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
     db.tag_photo(photos[2], squatter)
+    db.commit()
 
     for override in ('foo', 'FOO'):
         with pytest.raises(ValueError, match='Another keyword already sits'):
@@ -2247,6 +2381,7 @@ def test_manual_merge_rejects_non_scalar_choice_payloads(catalog):
     target = db.add_keyword('Wing Street Canyon', kw_type='location')
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     for bad_type in ({}, [], 5):
         with pytest.raises(ValueError, match='types'):
             preview_keyword_merge(db, [source, target], target, {'type': bad_type})
@@ -2267,6 +2402,7 @@ def test_species_option_preserves_complementary_taxon_links(catalog):
         "VALUES ('Calypte anna', 'Anna bird', 'species', 5112)").lastrowid
     by_local = db.add_keyword('Hummer A', is_species=True)
     by_inat = db.add_keyword('Hummer B', is_species=True)
+    db.commit()
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
                     (anna, by_local))
     db.conn.execute("UPDATE keywords SET type = 'taxonomy', source_taxon_id = 5112 WHERE id = ?",
@@ -2274,6 +2410,7 @@ def test_species_option_preserves_complementary_taxon_links(catalog):
     db.conn.commit()
     db.tag_photo(photos[0], by_local)
     db.tag_photo(photos[1], by_inat)
+    db.commit()
 
     preview = preview_keyword_merge(db, [by_local, by_inat], by_local)
     (option,) = preview['options']['species']
@@ -2299,6 +2436,7 @@ def test_merge_resyncs_photos_on_a_metadata_folded_child(catalog):
     stray = db.add_keyword('Park B', kw_type='location')
     kept_lake = db.add_keyword('Lake', parent_id=kept, kw_type='location')
     stray_lake = db.add_keyword('Lake', parent_id=stray, kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'lake-place', "
                     "latitude = 33.06, longitude = -117.11 WHERE id = ?", (stray_lake,))
     db.conn.commit()
@@ -2306,6 +2444,7 @@ def test_merge_resyncs_photos_on_a_metadata_folded_child(catalog):
     db.tag_photo(photos[0], kept_lake)
     # Photo 1 is tagged with the collapsing sibling that supplies the place.
     db.tag_photo(photos[1], stray_lake)
+    db.commit()
 
     preview = preview_keyword_merge(db, [stray, kept], kept)
     assert kept_lake in preview['metadata_folded_ids']
@@ -2337,6 +2476,7 @@ def test_manual_merge_case_variant_child_collapses_into_destination_sibling(cata
     old = db.add_keyword('Trip A', kw_type='general')
     new = db.add_keyword('Trip B', kw_type='general')
     old_bird = db.add_keyword('heron', parent_id=old, kw_type='general')
+    db.commit()
     # Bypass ``add_keyword``'s ``COLLATE NOCASE`` dedupe to plant a
     # case-variant sibling; the underlying table constraint is BINARY so it
     # permits the raw INSERT.
@@ -2347,6 +2487,7 @@ def test_manual_merge_case_variant_child_collapses_into_destination_sibling(cata
     db.conn.commit()
     db.tag_photo(photos[0], old_bird)
     db.tag_photo(photos[1], new_bird)
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     outcomes = {c['id']: (c['outcome'], c['new_name']) for c in preview['children']}
@@ -2376,6 +2517,7 @@ def test_manual_merge_case_variant_child_disambiguates_when_taxa_differ(catalog)
         "VALUES ('Calypte costae', 'Costa bird', 'species', 5113)").lastrowid
     old = db.add_keyword('Trip A')
     new = db.add_keyword('Trip B')
+    db.commit()
     # Raw INSERTs to bypass ``add_keyword``'s casing normalization: this
     # test needs the two branches to hold the case-variant spellings the
     # BINARY UNIQUE(name, parent_id) index still permits.
@@ -2392,6 +2534,7 @@ def test_manual_merge_case_variant_child_disambiguates_when_taxa_differ(catalog)
     db.conn.commit()
     db.tag_photo(photos[0], old_bird)
     db.tag_photo(photos[1], new_bird)
+    db.commit()
 
     preview = preview_keyword_merge(db, [old, new], new)
     outcomes = {c['id']: (c['outcome'], c['new_name']) for c in preview['children']}
@@ -2428,6 +2571,7 @@ def test_manual_merge_resyncs_descendants_when_survivor_crosses_location_boundar
     stray = db.add_keyword('Yard', kw_type='general')
     db.tag_photo(photos[0], trail)
     db.tag_photo(photos[1], stray)
+    db.commit()
 
     preview = preview_keyword_merge(db, [kept, stray], kept, {'type': 'general'})
     assert preview['resolved']['type'] == 'general'
@@ -2469,8 +2613,10 @@ def test_location_merge_rename_preserves_sidecar_ownership(
     parent = db.add_keyword('County', kw_type='location')
     kept = db.add_keyword('Old Lake', parent_id=parent, kw_type='location')
     source = db.add_keyword('Alternate Lake', kw_type='location')
+    db.commit()
     for pid, kid, old_name in ((photos[0], kept, 'Old Lake'), (photos[1], source, 'Alternate Lake')):
         db.tag_photo(pid, kid)
+        db.commit()
         path = folder / f'{photos.index(pid)}.xmp'
         flat = {'New Lake'} if existing_manual_term else set()
         if not enabled:
@@ -2487,6 +2633,7 @@ def test_location_merge_rename_preserves_sidecar_ownership(
         path = folder / f'{index}.xmp'
         assert read_keywords(str(path)) == {'New Lake'}
         db.untag_photo(pid, kept)
+        db.commit()
         db.queue_change(pid, 'location', 'effective')
         db.commit()
     assert sync_to_xmp(db)['failed'] == 0
@@ -2510,12 +2657,15 @@ def test_location_merge_preserves_directly_tagged_ancestor(catalog, tmp_path, mo
     monkeypatch.setattr(cfg, 'load_strict', lambda: settings)
     target = db.add_keyword('Old County', kw_type='location')
     source = db.add_keyword('Alternate County', kw_type='location')
+    db.commit()
     ancestor = source if tag_source else target
     db.tag_photo(photos[1], target if tag_source else source)
     leaf = db.add_keyword('Lake', parent_id=ancestor, kw_type='location')
+    db.commit()
     photo = photos[0]
     db.tag_photo(photo, ancestor, source='manual')
     db.tag_photo(photo, leaf, source='manual')
+    db.commit()
     folder = tmp_path / 'photos'
     folder.mkdir()
     sidecar = str(folder / '0.xmp')
@@ -2533,6 +2683,7 @@ def test_location_merge_preserves_directly_tagged_ancestor(catalog, tmp_path, mo
     assert {k['id'] for k in db.photo_keywords.get_for_photo(photo)} == {target, leaf}
     # Clearing the exported leaf must leave the separately assigned ancestor.
     db.untag_photo(photo, leaf)
+    db.commit()
     db.queue_change(photo, 'location', 'effective')
     db.commit()
     assert sync_to_xmp(db)['failed'] == 0

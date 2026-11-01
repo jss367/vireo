@@ -26,6 +26,7 @@ def _seed_large_hawk_life_list(live_server, count=101):
     db = live_server["db"]
     folder_id = live_server["data"]["folders"][0]
     keyword_id = db.add_keyword("Red-tailed Hawk", is_species=True)
+    db.commit()
     for i in range(count):
         photo_id = photo_ingest.add_photo(
             db, folder_id=folder_id,
@@ -36,6 +37,7 @@ def _seed_large_hawk_life_list(live_server, count=101):
             timestamp=f"2024-03-10T09:{i // 60:02d}:{i % 60:02d}",
         )
         db.tag_photo(photo_id, keyword_id)
+        db.commit()
 
 
 def test_browse_menu_sets_representative(live_server, page):
@@ -222,6 +224,7 @@ def test_life_list_pick_badge_and_live_promotion(live_server, page):
         "SELECT id FROM keywords WHERE name = 'Red-tailed Hawk'"
     ).fetchone()["id"]
     db.tag_photo(hawk2, hawk_keyword)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET quality_score = CASE id WHEN ? THEN 0.9 ELSE 0.1 END "
         "WHERE id IN (?, ?)",
@@ -286,6 +289,7 @@ def test_alphabetical_sort_ignores_leading_okina(live_server, page):
 
     for i, species in enumerate(("Hutton's vireo", "\u02bbapapane", "Java sparrow")):
         keyword_id = db.add_keyword(species, is_species=True)
+        db.commit()
         photo_id = photo_ingest.add_photo(
             db, folder_id=folder_id,
             filename=f"okina-sort-{i}.jpg",
@@ -295,6 +299,7 @@ def test_alphabetical_sort_ignores_leading_okina(live_server, page):
             timestamp=f"2024-07-{i + 1:02d}T09:00:00",
         )
         db.tag_photo(photo_id, keyword_id)
+        db.commit()
 
     page.goto(f"{live_server['url']}/life-list")
     page.locator(".species-card").first.wait_for(state="visible")
@@ -344,6 +349,7 @@ def test_taxonomic_group_and_identification_level_filters(live_server, page):
     for name, taxon_id in (("Accipiter", accipiter_taxon),
                            ("Red Fox", fox_taxon)):
         keyword_id = db.add_keyword(name, kw_type="taxonomy")
+        db.commit()
         db.conn.execute(
             "UPDATE keywords SET taxon_id = ? WHERE id = ?",
             (taxon_id, keyword_id),
@@ -357,6 +363,7 @@ def test_taxonomic_group_and_identification_level_filters(live_server, page):
             timestamp="2024-06-01T12:00:00",
         )
         db.tag_photo(photo_id, keyword_id)
+        db.commit()
     db.conn.commit()
 
     page.goto(f"{live_server['url']}/life-list")
@@ -446,6 +453,7 @@ def test_life_list_merges_aliases_and_opens_same_named_taxa_independently(live_s
         "INSERT INTO taxa (name, rank) VALUES (?, 'species')", (name,),
     ).lastrowid for name in ("Ardea ibis", "Distinctus species")]
     parent = db.add_keyword("Other taxon")
+    db.commit()
     for photo, name, taxon, parent_id in zip(
         photos,
         ("Western Cattle-Egret", "Western Cattle Egret", "Western Cattle-Egret"),
@@ -453,6 +461,7 @@ def test_life_list_merges_aliases_and_opens_same_named_taxa_independently(live_s
         (None, None, parent), strict=True,
     ):
         keyword = db.add_keyword(name, parent_id=parent_id, is_species=True)
+        db.commit()
         db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
         db.tag_photo(photo, keyword)
     db.commit()
@@ -475,6 +484,7 @@ def test_unlinked_life_list_card_pages_its_own_same_named_photos(live_server, pa
     unlinked = db.add_keyword(
         "Shared Bird", parent_id=db.add_keyword("Unlinked hierarchy"), is_species=True,
     )
+    db.commit()
     taxon = db.conn.execute(
         "INSERT INTO taxa (name, rank) VALUES ('Linkedus bird', 'species')",
     ).lastrowid
@@ -490,6 +500,7 @@ def test_unlinked_life_list_card_pages_its_own_same_named_photos(live_server, pa
                 timestamp=f"{year}-01-01T08:{i // 60:02d}:{i % 60:02d}",
             )
             db.tag_photo(photo, keyword)
+            db.commit()
             if keyword == unlinked:
                 expected.append(photo)
     db.commit()

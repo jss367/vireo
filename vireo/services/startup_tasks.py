@@ -196,7 +196,8 @@ class StartupTasks:
         # After the location repair, which retypes place nodes that legacy
         # marking had made taxonomy, so a restored place is no longer a twin.
         try:
-            init_db.merge_taxonomy_root_twins()
+            with init_db.transaction(immediate=True):
+                init_db.merge_taxonomy_root_twins()
         except Exception:
             log.exception("Could not merge top-level species keyword twins")
         workspace_config.create_default_collections_for_all_workspaces(init_db)

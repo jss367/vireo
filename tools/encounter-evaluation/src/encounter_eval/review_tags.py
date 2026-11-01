@@ -56,10 +56,10 @@ def _apply_tags(db, photo, answer, marker):
                 continue
             if taxon['inat_id']:
                 kid = db.add_keyword(taxon['common_name'] or taxon['name'], is_species=True,
-                                     source_taxon_id=taxon['inat_id'], _commit=False)
+                                     source_taxon_id=taxon['inat_id'])
             else:
                 # Scientific names avoid common-name homonyms for local-only taxa.
-                kid = db.add_keyword(taxon['name'], is_species=True, _commit=False)
+                kid = db.add_keyword(taxon['name'], is_species=True)
                 linked = db.conn.execute('SELECT taxon_id FROM keywords WHERE id=?', (kid,)).fetchone()
                 if linked['taxon_id'] != taxon['id']:
                     raise ValueError(f'Could not safely resolve local species {key}; no tags were changed')
@@ -68,12 +68,12 @@ def _apply_tags(db, photo, answer, marker):
         existing = {r['id'] for r in rows}
         removed = [r for r in rows if r['id'] not in desired and db.keyword_taxa.is_species(r['id'])] if answer['status'] == 'complete' else []
         for row in removed:
-            db.untag_photo(pid, row['id'], _commit=False)
+            db.untag_photo(pid, row['id'])
             queue_keyword_remove(db, pid, row['name'])
             db.record_edit('keyword_remove', f'Species review: removed "{row["name"]}"', str(row['id']),
                            [{'photo_id': pid, 'old_value': str(row['id']), 'new_value': ''}], _commit=False)
         for kid in sorted(desired):
-            db.tag_photo(pid, kid, source='manual', _commit=False)
+            db.tag_photo(pid, kid, source='manual')
             if kid not in existing:
                 name = db.conn.execute('SELECT name FROM keywords WHERE id=?', (kid,)).fetchone()['name']
                 queue_keyword_add(db, pid, name)

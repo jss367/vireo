@@ -195,6 +195,7 @@ def seed(db):
     db.tag_photo(p1, park)
     db.tag_photo(p3, park)
     db.tag_photo(p4, park)
+    db.commit()
 
     best = db.collections.add(
         "Best", json.dumps([{"field": "rating", "op": ">=", "value": 5}]),

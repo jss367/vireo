@@ -110,6 +110,7 @@ def test_apply_resolution_merges_keywords(tmp_path):
     # Reset hook's auto-rejection so apply_duplicate_resolution sees both.
     _reset_flags(db, "H")
     kw_id = db.add_keyword("bird")
+    db.commit()
     db.conn.execute(
         "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
         (p2, kw_id),
@@ -582,6 +583,7 @@ def test_auto_resolve_after_xmp_import_merges_loser_keywords(tmp_path):
 
     # Simulate XMP import: link a keyword to the loser ONLY.
     kw_id = db.add_keyword("bird")
+    db.commit()
     db.conn.execute(
         "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
         (loser_id, kw_id),

@@ -497,6 +497,7 @@ def test_missing_tag_shortcuts_combine_and_distinguish_gps(live_server, page):
     # A named place without coordinates counts as tagged; GPS alone does not.
     db.tag_photo(photos[0], place)
     db.tag_photo(photos[1], place)
+    db.commit()
     with db.conn:
         db.conn.execute(
             "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id=?",
@@ -578,6 +579,7 @@ def test_missing_shortcuts_preserve_multiple_existing_clauses(live_server, page,
     place = db.add_keyword("City Park", kw_type="location")
     db.tag_photo(photos[0], place)
     db.tag_photo(photos[1], place)
+    db.commit()
     _open_browse(page, live_server)
     missing_species = {"field": "has_species", "op": "is", "value": 0}
     original = {"mode": "all", "rules": [

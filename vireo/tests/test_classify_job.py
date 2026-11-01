@@ -5126,6 +5126,7 @@ def _setup_two_photo_classify_workspace(tmp_path):
     # Tag p1 with a genre keyword so it should be filtered out by the skip-gate.
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
+    db.commit()
 
     col_id = db.collections.add(
         "static",
@@ -5379,6 +5380,7 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
     # Tag p1 with a genre keyword so the skip-gate filters it out.
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
+    db.commit()
     col_id = db.collections.add(
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
@@ -5457,6 +5459,7 @@ def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
     # Tag with a genre keyword so the subject-skip gate filters it out.
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
+    db.commit()
     col_id = db.collections.add(
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),

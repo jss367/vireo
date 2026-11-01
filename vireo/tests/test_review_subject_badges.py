@@ -30,6 +30,7 @@ def _two_subject_photo(db, filename="redshank-egret.jpg"):
     db.predictions.add(egret_det, "Little Egret", 0.9, "bioclip",
                       category="disagreement", labels_fingerprint="fp1")
     db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
+    db.commit()
     return photo_id
 
 
@@ -58,6 +59,7 @@ def test_disagreement_names_only_this_subjects_keywords(app_and_db):
     app, db = app_and_db
     photo_id = _two_subject_photo(db)
     db.tag_photo(photo_id, db.add_keyword("Grey Heron", is_species=True))
+    db.commit()
 
     egret = _row(app.test_client(), photo_id, "Little Egret")
 

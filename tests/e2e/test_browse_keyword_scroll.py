@@ -19,6 +19,7 @@ from e2e.stack_seed import seed_browse_stack
 def _seed_filtered_library(db, folder_id, count=160):
     """Photos that all match one keyword, so a keyword filter is scrollable."""
     kw = db.add_keyword("Marsh")
+    db.commit()
     for i in range(count):
         pid = photo_ingest.add_photo(
             db, folder_id=folder_id,
@@ -29,6 +30,7 @@ def _seed_filtered_library(db, folder_id, count=160):
             timestamp=f"2024-05-01T{i // 60:02d}:{i % 60:02d}:00",
         )
         db.tag_photo(pid, kw)
+        db.commit()
     return kw
 
 
@@ -154,11 +156,13 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
     db = live_server["db"]
     _seed_filtered_library(db, live_server["data"]["folders"][0])
     old_keyword = db.add_keyword("Needs identification")
+    db.commit()
     photo_ids = [row[0] for row in db.conn.execute(
         "SELECT id FROM photos WHERE filename LIKE 'marsh%'"
     )]
     for photo_id in photo_ids:
         db.tag_photo(photo_id, old_keyword)
+        db.commit()
         detection = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
             "confidence": 0.95, "category": "animal",

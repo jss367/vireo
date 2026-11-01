@@ -12,6 +12,7 @@ def test_species_evidence_editor_persists_and_links_supporting_frames(live_serve
         'reviewer': 'Field reviewer', 'supporting_photo_ids': [support],
         'confidence': None, 'confidence_meaning': 'No calibrated probability is available',
     })
+    db.commit()
     page.goto(live_server['url'] + f'/browse?photo_id={pid}')
     page.locator(f'.grid-card[data-id="{pid}"]').click()
     panels = page.locator('#detailKeywords .species-provenance')

@@ -231,6 +231,7 @@ class Checks(unittest.TestCase):
         c.commit()
         self.assertEqual(r.taxonomy_root_twins(), [])
         merged = d.merge_taxonomy_root_twins()
+        c.commit()
         self.assertEqual(merged, 0, "conflicting explicit source identities must remain for review")
 
     def test_exact_spelling_case_ambiguity_and_conflict_boundaries(self):
@@ -328,7 +329,8 @@ class Checks(unittest.TestCase):
             return real(src, dst, **kwargs)
 
         d._merge_keyword_into = merge
-        with self.assertRaisesRegex(RuntimeError, "invented merge failure"):
+        # The startup repair owns the unit; a failure part-way rolls it back.
+        with self.assertRaisesRegex(RuntimeError, "invented merge failure"), d.transaction(immediate=True):
             d.merge_taxonomy_root_twins()
         self.assertEqual(list(c.iterdump()), before)
         self.assertFalse(c.in_transaction)
@@ -346,6 +348,7 @@ class Checks(unittest.TestCase):
             repair_stale_folder_parents=lambda: events.append("folders"),
             repair_misclassified_location_ancestors=lambda: events.append("locations") or 0,
             merge_taxonomy_root_twins=fail,
+            transaction=lambda **_options: contextlib.nullcontext(),
         )
         ns["workspace_config"] = types.SimpleNamespace(
             create_default_collections_for_all_workspaces=lambda db: events.append("defaults"),

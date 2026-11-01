@@ -880,6 +880,7 @@ def test_merged_metadata_updates_do_not_make_one_source_taxon_ambiguous(tmp_path
 def test_acceptance_binds_source_ids_without_reassigning_same_name_keywords(db, tmp_path, source_backed):
     db.conn.execute("UPDATE taxa SET common_name = 'Shared parrot' WHERE inat_id IN (18976, 18997)")
     existing = db.add_keyword("Shared parrot", is_species=True)
+    db.commit()
     original = dict(db.conn.execute("SELECT * FROM keywords WHERE id = ?", (existing,)).fetchone())
     accepted = []
     for i, tid in enumerate([18976, 18997]):
@@ -967,6 +968,7 @@ def test_review_keeps_homonymous_predictions_and_confirmed_tags_distinct(db, tmp
             "SELECT ?, 1, 'taxonomy', id, inat_id FROM taxa WHERE inat_id = ?", (display, tid),
         ).lastrowid
         db.tag_photo(pid, kid)
+        db.commit()
     data = payload()
     assert data["encounters"][0]["species_confirmed"] == same_taxon
     rapid = (Path(__file__).parents[1] / "static/pipeline-rapid-review/queue-filters.js").read_text(encoding="utf-8")
@@ -986,10 +988,12 @@ def _confirmed_species_photo(db, tmp_path, entry, name="photo.jpg"):
     """
     pid, _ = _photo(db, tmp_path, name)
     keyword_id = db.add_keyword(entry["common_name"], is_species=True)
+    db.commit()
     local = db.conn.execute("SELECT id FROM taxa WHERE inat_id = ?", (entry["taxon_id"],)).fetchone()["id"]
     db.conn.execute("UPDATE keywords SET taxon_id = ?, source_taxon_id = ? WHERE id = ?",
                     (local, entry["taxon_id"], keyword_id))
     db.tag_photo(pid, keyword_id)
+    db.commit()
     return pid
 
 
@@ -1133,6 +1137,7 @@ def test_partially_confirmed_encounter_keeps_a_same_name_taxon_visible(db, tmp_p
         "SELECT ?, 1, 'taxonomy', id, inat_id FROM taxa WHERE inat_id = ?", (display, 18976),
     ).lastrowid
     db.tag_photo(pids[0], keyword_id)
+    db.commit()
 
     photos = load_photo_features(db)
     data = serialize_results({"photos": photos, "summary": {}, "encounters": [

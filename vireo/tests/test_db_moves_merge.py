@@ -469,7 +469,7 @@ def test_move_location_state_tags_through_the_facade(db, two_photos, monkeypatch
 
     monkeypatch.setattr(db, "tag_photo", recorder)
     db._move_location_state_for_merge(loser, survivor)
-    assert calls == [((survivor, here), {"_commit": False})]
+    assert calls == [((survivor, here), {})]
 
 
 # -- keyword reconciliation --------------------------------------------------
@@ -562,8 +562,8 @@ def test_carry_keyword_associations_add_and_remove(db, two_photos, monkeypatch):
         untagged.append((a, k)), real_untag(*a, **k))[1])
 
     assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
-    assert tagged == [((survivor, heron), {"source": "manual", "_commit": False})]
-    assert untagged == [((survivor, egret), {"_commit": False})]
+    assert tagged == [((survivor, heron), {"source": "manual"})]
+    assert untagged == [((survivor, egret), {})]
     assert _kw_ids(db, survivor) == [heron]
 
 
@@ -2226,8 +2226,8 @@ def test_collision_refuses_conflicting_identity_without_losing_evidence(db, tmp_
         if conflict == "decision":
             save_alternatives(db, [survivor], ["Heron", "Ibis"], "Other evidence", "Wings")
         else:
-            kid = db.add_keyword("Heron", is_species=True, _commit=False)
-            db.tag_photo(survivor, kid, source="manual", _commit=False)
+            kid = db.add_keyword("Heron", is_species=True)
+            db.tag_photo(survivor, kid, source="manual")
     before = db.identity_alternatives.for_photos(include_resolved=True)
     history = [tuple(r) for r in db.conn.execute("SELECT * FROM edit_history_items")]
     pending = _pending(db, loser, survivor)

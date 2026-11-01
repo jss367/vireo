@@ -2818,6 +2818,7 @@ def test_renaming_a_non_location_keyword_does_not_queue_location(
     _enable_location_keyword_writes(db)
     kw_id = db.add_keyword("SomeSpecies", is_species=True)
     db.tag_photo(photo_id, kw_id)
+    db.commit()
     _drop_all_pending(db)
 
     client = app.test_client()
@@ -3030,6 +3031,7 @@ def test_removing_a_non_location_tag_does_not_queue_a_location_change(
     _enable_location_keyword_writes(db)
     kw_id = db.add_keyword("SomeSpecies", is_species=True)
     db.tag_photo(photo_id, kw_id)
+    db.commit()
     _drop_all_pending(db)
 
     client = app.test_client()

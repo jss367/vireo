@@ -159,6 +159,7 @@ def cur(db):
     db.tag_photo(p["plain"], k["mystery"])  # unmatched
     db.tag_photo(p["rejected"], k["cardinal"])
     db.tag_photo(p["outside"], k["cardinal"])
+    db.commit()
     return {"ws": ws, "fid": fid, "sub": sub, "p": p, "k": k}
 
 
@@ -299,6 +300,7 @@ def test_life_list_candidates_species_filter_follows_taxon_root(db, cur):
     _link(db, leaf, 4)
     db.conn.commit()
     db.tag_photo(p["card2"], leaf)
+    db.commit()
     rows = db.species_curation.get_life_list_candidates(species="American Robin")
     assert [(r["species"], r["id"]) for r in rows] == [
         ("American Robin", p["robin1"]),
@@ -355,6 +357,7 @@ def test_uncounted_identifications_route_class_lookup_through_facade(db, cur, mo
 def test_uncounted_filter_token_keeps_non_ascii(db, cur):
     kid = db.add_keyword("Mésange", is_species=True)
     db.tag_photo(cur["p"]["card2"], kid)
+    db.commit()
     names = {g["name"]: g for g in db.species_curation.get_life_list_uncounted_identifications()}
     assert names["Mésange"]["filter_token"] == '{"name":"Mésange","taxon_id":null}'
 
@@ -462,6 +465,7 @@ def test_photo_life_list_species_canonicalizes_leaves_to_root(db, cur):
     db.tag_photo(p["card2"], orphan_leaf)
     db.tag_photo(p["card2"], upper)
     db.tag_photo(p["card2"], lower)
+    db.commit()
     assert db.species_curation.get_photo_life_list_species(p["card2"]) == [
         "Alpha", "American Robin", "orphan leaf", "zeta",
     ]
@@ -476,6 +480,7 @@ def test_life_list_locations(db, cur):
     }
     assert db.species_curation.get_life_list_locations(species="Northern Cardinal") == {}
     db.tag_photo(cur["p"]["card1"], cur["k"]["loc"])
+    db.commit()
     assert db.species_curation.get_life_list_locations(species="Northern Cardinal") == {
         "Northern Cardinal": ["Backyard"],
     }
@@ -605,6 +610,7 @@ def test_representative_lists_eligible_only(db, cur):
     _link(db, leaf, 4)
     db.conn.commit()
     db.tag_photo(p["puma"], leaf)
+    db.commit()
     db.set_species_representative("American Robin", p["puma"])
     assert db.species_curation.get_representative_lists(eligible_only=True) == {
         "American Robin": [p["puma"], p["robin1"]],
@@ -1460,6 +1466,7 @@ def test_life_list_preference_eligibility(db, cur):
     leaf = _leaf(db, "robin (leaf)", k["sunset"])
     _link(db, leaf, 4)
     db.tag_photo(p["card1"], leaf)
+    db.commit()
     assert eligible("American Robin", p["card1"])
     assert eligible("robin (leaf)", p["card1"])
     assert not db.conn.in_transaction

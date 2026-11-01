@@ -98,6 +98,7 @@ def test_stale_create_form_cannot_edit_a_new_active_workspace(live_server, page)
     db = live_server['db']
     kid = db.add_keyword('Tropical Kingbird', is_species=True)
     db.tag_photo(ids[0], kid)
+    db.commit()
     before = db.photo_species.get_species_for_photos(ids)
     other = db.create_workspace('Another shared workspace')
     workspace_folders.add_workspace_folder(db, other, db.photos.get(ids[0])['folder_id'])
@@ -116,6 +117,7 @@ def test_merged_single_candidate_stays_unconfirmed_until_explicit_resolution(liv
     before_species = db.photo_species.get_species_for_photos(ids)
     source = db.add_keyword('Tropical Kingbird', is_species=True)
     survivor = db.add_keyword("Couch's Kingbird", is_species=True)
+    db.commit()
     target_name = db.keywords.name_of(survivor)
     page.locator('#identitySave').click()
     group = page.locator('#identityAlternativesGroups article')
@@ -212,6 +214,7 @@ def test_same_species_aliases_are_rejected_without_losing_form_or_confirmation(l
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88001,88001,'Tyrannus melancholicus','Tropical Kingbird','species')")
     scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
     db.tag_photo(ids[0], scientific, source='accept')
+    db.commit()
     db.photo_review.set_flag(ids[0], 'rejected')
     db.commit()
     history = [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items')]

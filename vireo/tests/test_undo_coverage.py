@@ -18,6 +18,7 @@ def test_location_history_restores_mixed_originals_and_provenance(app_and_db, ro
     old_ids = [db.get_or_create_text_location(name) for name in ['Old place', 'Other place']]
     db.tag_photo(pids[0], old_ids[0], source=None)
     db.tag_photo(pids[0], old_ids[1], source='accept')
+    db.commit()
     db.locations.save_gps_reviews([(pids[0], 'kept-gps')])
     db.commit()
     before = [db.edit_history.photo_location_state(pid) for pid in pids]

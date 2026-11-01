@@ -1113,7 +1113,8 @@ class Database:
         # Idempotent default-keyword seed. Cheap warm-path (single
         # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace
         # above.
-        self.keywords.ensure_default_genres()
+        with self.transaction():
+            self.keywords.ensure_default_genres()
         from species_identity_repair import repair_on_upgrade
         repaired = repair_on_upgrade(self)
         if repaired:
@@ -1910,7 +1911,7 @@ class Database:
             # generated and delete. A queued ``location`` change originates
             # in set_photo_location, so the intent riding along is
             # user-authored.
-            self.tag_photo(surviving_id, kw_id, _commit=False)
+            self.tag_photo(surviving_id, kw_id)
         return True
 
     def _carry_keyword_associations_for_merge(
@@ -1955,12 +1956,12 @@ class Database:
                         losing_id, match_key):
                     source = keyword_source_max(
                         self.moves_merge.photo_keyword_source(losing_id, kw_id))
-                    self.tag_photo(surviving_id, kw_id, source=source, _commit=False)
+                    self.tag_photo(surviving_id, kw_id, source=source)
                     self.species_provenance.carry(losing_id, surviving_id, keyword_id=kw_id)
             elif newest_loser["change_type"] == "keyword_remove":
                 for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         surviving_id, match_key):
-                    self.untag_photo(surviving_id, kw_id, _commit=False)
+                    self.untag_photo(surviving_id, kw_id)
 
     # -- Photos --
 
@@ -2083,7 +2084,7 @@ class Database:
                     loser_keyword_evidence[kw_id] = evidence_for_photo_copy(row["species_provenance"], row["photo_id"])
             for kw_id, merged_source in loser_keyword_sources.items():
                 self.tag_photo(
-                    winner_id, kw_id, source=merged_source, _commit=False,
+                    winner_id, kw_id, source=merged_source,
                     species_provenance=loser_keyword_evidence.get(kw_id),
                 )
             # Rejected losers remain in the catalog and can be reopened.
@@ -2997,10 +2998,10 @@ class Database:
             name, prefer_species=prefer_species, species_only=species_only,
         )
 
-    def _add_source_species_keyword(self, name, source_taxon_id, parent_id=None, _commit=True):
-        """Bind accepted source evidence without reassigning same-name tags."""
+    def _add_source_species_keyword(self, name, source_taxon_id, parent_id=None):
+        """Bind accepted source evidence without reassigning same-name tags (no commit)."""
         return self._keyword_repository().add_source_species(
-            name, source_taxon_id, parent_id=parent_id, _commit=_commit,
+            name, source_taxon_id, parent_id=parent_id,
         )
 
     def add_keyword(
@@ -3009,11 +3010,10 @@ class Database:
         parent_id: int | None = None,
         is_species: bool = False,
         kw_type: str | None = None,
-        _commit: bool = True,
         source_taxon_id: int | None = None,
         _resolve_alias: bool = False,
     ) -> int:
-        """Insert a keyword. Returns existing id if duplicate (case-insensitive).
+        """Insert a keyword (no commit). Returns existing id if duplicate (case-insensitive).
 
         If a keyword with the same name but different casing exists, reuses
         the existing one rather than creating a duplicate.
@@ -3026,8 +3026,6 @@ class Database:
                      ``KEYWORD_TYPES`` if provided. When ``None``, the type is
                      auto-detected (``taxonomy`` for species or names matching
                      a known taxon, otherwise ``general``).
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
             source_taxon_id: Explicit iNaturalist ID for a species keyword;
                      bypass common-name inference and reuse only that identity.
             _resolve_alias: Import callers opt in for leaf keywords only.
@@ -3035,7 +3033,8 @@ class Database:
                      and a leaf alias must not relocate a new parent chain.
         """
         return self._keyword_repository().add(
-            name, parent_id=parent_id, is_species=is_species, kw_type=kw_type, _commit=_commit, source_taxon_id=source_taxon_id, _resolve_alias=_resolve_alias,
+            name, parent_id=parent_id, is_species=is_species, kw_type=kw_type,
+            source_taxon_id=source_taxon_id, _resolve_alias=_resolve_alias,
         )
 
     def _restore_misclassified_location_ancestor(
@@ -3077,17 +3076,15 @@ class Database:
 
         The pairs are ``KeywordTreeRepository.taxonomy_root_twins``. Both rows
         carry the same name, so the sidecars already hold the survivor's
-        flat keyword and the merge queues no XMP change. All-or-nothing;
-        returns the number of rows merged away.
+        flat keyword and the merge queues no XMP change. All-or-nothing within
+        the caller's unit of work (the startup repair takes it immediate);
+        returns the number of rows merged away. Does not commit.
         """
         merged = 0
-        with self.transaction():
-            if not self.in_transaction:
-                self.begin_immediate()
-            for root_id, placed_id in self.keyword_tree.taxonomy_root_twins():
-                merged += self._merge_keyword_into(
-                    root_id, placed_id, pending_source_only=True,
-                )
+        for root_id, placed_id in self.keyword_tree.taxonomy_root_twins():
+            merged += self._merge_keyword_into(
+                root_id, placed_id, pending_source_only=True,
+            )
         if merged:
             log.info("merged %d top-level species keyword twin(s)", merged)
         return merged
@@ -3303,7 +3300,7 @@ class Database:
             # the association is user-authored.
             self.tag_photo(
                 photo_id, leaf_keyword_id,
-                source=KEYWORD_SOURCE_MANUAL, _commit=False,
+                source=KEYWORD_SOURCE_MANUAL,
             )
 
     def get_or_create_text_location(self, name: str | None) -> int:
@@ -3474,7 +3471,6 @@ class Database:
         photo_id: int,
         keyword_id: int,
         source: str | None = KEYWORD_SOURCE_MANUAL,
-        _commit: bool = True,
         *,
         provenance: dict[str, Any] | None = None,
         species_provenance: str | None = None,
@@ -3513,19 +3509,17 @@ class Database:
                     keeps the surviving row's evidence over the incoming
                     one, so the loser's row is only applied when the winner
                     had none.
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
+
+        Does not commit: the caller's unit of work owns the transaction.
         """
         if provenance is not None and _record_provenance:
             self.species_provenance.remember_before(photo_id, keyword_id, force=True)
         self._keyword_provenance_repository().tag(
             photo_id, keyword_id, source=source,
-            species_provenance=species_provenance, _commit=False,
+            species_provenance=species_provenance,
         )
         if provenance is not None:
             self.species_provenance.set(photo_id, keyword_id, provenance)
-        if _commit:
-            self.commit()
 
     def _meta_repository(self) -> MetaRepository:
         """Build the (catalog-wide) db_meta repository on this connection."""
@@ -3612,7 +3606,7 @@ class Database:
         return SpeciesProvenanceRepository(self.conn, self._species_provenance_before)
 
     def untag_photo(
-        self, photo_id: int, keyword_id: int, _commit: bool = True, *, _record_history: bool = False
+        self, photo_id: int, keyword_id: int, *, _record_history: bool = False
     ) -> None:
         """Remove a keyword association from a photo.
 
@@ -3620,9 +3614,9 @@ class Database:
         guards that keep keyword re-tagging on the façade (moves/merge,
         species curation, predictions) find both writers by these names.
 
+        Does not commit: the caller's unit of work owns the transaction.
+
         Args:
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
             _record_history: Opt in only when the caller will record an
                      undoable keyword/species edit. Reconciliation, merge and
                      replay writers leave this false so no stale snapshots
@@ -3630,7 +3624,7 @@ class Database:
         """
         if _record_history:
             self.species_provenance.remember_before(photo_id, keyword_id)
-        return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
+        return self._photo_keyword_repository().untag(photo_id, keyword_id)
 
     def get_photos_with_equivalent_species(
         self,
@@ -3836,7 +3830,6 @@ class Database:
                         self._merge_keyword_into(
                             keyword_id, peer["id"], pending_source_only=True,
                         )
-                        self._keyword_tree_repository().commit()
                         return peer["id"]
                     self._refuse_cross_type_rename(new_name, parent_id, keyword_id)
 
@@ -4653,7 +4646,7 @@ class Database:
             if row is not None and row['type'] == 'location':
                 self.tag_photo(
                     pid, link['keyword_id'],
-                    source=keyword_source_max(link['source']), _commit=False,
+                    source=keyword_source_max(link['source']),
                 )
         self.locations.delete_gps_review(pid)
         if state.get('gps_review') is not None:

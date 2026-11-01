@@ -2,9 +2,9 @@
 
 The tests go through the public ``Database`` façade only, so they hold
 whether the SQL lives in ``db.py`` or in ``repositories/keywords.py``. They
-pin the ``_commit=False`` nested-transaction seams (the caller's
-transaction stays open and nothing is committed), commit visibility, the
-all-or-nothing rollbacks of the one-shot sweeps, species-name resolution and
+pin that the writers leave the commit to the caller (the caller's
+transaction stays open and nothing is committed until its unit of work
+ends), the all-or-nothing rollbacks of the one-shot sweeps, species-name resolution and
 case conventions, taxon lookup, the source-taxon species path, the rename
 and duplicate-merge flows (which still run through the provenance-pinned
 ``_merge_keyword_into`` on the façade), and that composition still routes
@@ -91,11 +91,12 @@ def lib(db, case):
     return {"ws": ws, "fid": fid, "p": photos}
 
 
-# -- add_keyword and the _commit seams ----------------------------------------------------
+# -- add_keyword and the caller-owned commit ----------------------------------------------
 
 
-def test_add_keyword_inserts_and_commits(db, lib):
-    kid = db.add_keyword("Driftwood")
+def test_add_keyword_inserts_and_commits_with_the_callers_unit(db, lib):
+    with db.transaction():
+        kid = db.add_keyword("Driftwood")
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT name, type FROM keywords WHERE id = ?", (kid,)) == [
         ("Driftwood", "general")
@@ -105,7 +106,7 @@ def test_add_keyword_inserts_and_commits(db, lib):
 
 
 def test_add_keyword_without_commit_leaves_transaction_open(db, lib):
-    kid = db.add_keyword("Driftwood", _commit=False)
+    kid = db.add_keyword("Driftwood")
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM keywords WHERE id = ?", (kid,)) == [(0,)]
     db.conn.commit()
@@ -132,12 +133,19 @@ def _race_add(db, monkeypatch, insert):
     return other, state
 
 
+def _committed_add(other, *args, **kwargs):
+    """The concurrent writer's own unit of work: insert and commit."""
+    with other.transaction():
+        return other.add_keyword(*args, **kwargs)
+
+
 def test_add_keyword_race_reuses_concurrent_top_level_row(db, lib, monkeypatch):
     # UNIQUE(name, parent_id) never fires for NULL parents, so without the
     # write-locked re-check both callers would insert a root "Sunrise".
-    other, state = _race_add(db, monkeypatch, lambda o: o.add_keyword("Sunrise"))
+    other, state = _race_add(db, monkeypatch, lambda o: _committed_add(o, "Sunrise"))
     try:
-        kid = db.add_keyword("sunrise")
+        with db.transaction():
+            kid = db.add_keyword("sunrise")
     finally:
         other.close()
     assert kid == state["winner"]
@@ -150,12 +158,14 @@ def test_add_keyword_race_reuses_concurrent_top_level_row(db, lib, monkeypatch):
 def test_add_keyword_race_reuses_concurrent_child_row(db, lib, monkeypatch):
     # With a parent the UNIQUE index does fire; the loser must reuse the
     # winner's row instead of raising IntegrityError.
-    birds = db.add_keyword("Birds")
+    with db.transaction():
+        birds = db.add_keyword("Birds")
     other, state = _race_add(
-        db, monkeypatch, lambda o: o.add_keyword("Heron", parent_id=birds),
+        db, monkeypatch, lambda o: _committed_add(o, "Heron", parent_id=birds),
     )
     try:
-        kid = db.add_keyword("Heron", parent_id=birds)
+        with db.transaction():
+            kid = db.add_keyword("Heron", parent_id=birds)
     finally:
         other.close()
     assert kid == state["winner"]
@@ -165,15 +175,15 @@ def test_add_keyword_race_reuses_concurrent_child_row(db, lib, monkeypatch):
     ) == [(1,)]
 
 
-def test_add_keyword_race_reuses_concurrent_top_level_row_commit_false(db, lib, monkeypatch):
-    # ``_commit=False`` is the first mutation on caller-managed connections
-    # (sync.py, web/encounters.py, web/highlights.py, the import job at
+def test_add_keyword_race_reuse_leaves_the_callers_transaction_open(db, lib, monkeypatch):
+    # ``add_keyword`` is often the first write of a caller's unit (sync.py,
+    # web/encounters.py, web/highlights.py, the import job at
     # web/imports.py). Without the write-locked re-check both callers would
     # commit a root "Sunrise" — SQLite treats NULL parents as distinct in
     # UNIQUE(name, parent_id), so IntegrityError never fires.
-    other, state = _race_add(db, monkeypatch, lambda o: o.add_keyword("Sunrise"))
+    other, state = _race_add(db, monkeypatch, lambda o: _committed_add(o, "Sunrise"))
     try:
-        kid = db.add_keyword("sunrise", _commit=False)
+        kid = db.add_keyword("sunrise")
         # The recursion at the ``existing`` fast path must leave the caller's
         # transaction open — the caller (encounters, highlights, import, sync)
         # commits later with its own follow-up writes.
@@ -192,15 +202,17 @@ def test_add_keyword_race_reuses_concurrent_top_level_row_commit_false(db, lib, 
     {"kw_type": "genre"},
     {"kw_type": "taxonomy"},
 ])
-def test_add_keyword_promotions_respect_commit_flag(db, lib, kwargs):
-    kid = db.add_keyword("Heron")
-    db.add_keyword("Heron", _commit=False, **kwargs)
+def test_add_keyword_promotions_leave_commit_to_caller(db, lib, kwargs):
+    with db.transaction():
+        kid = db.add_keyword("Heron")
+    db.add_keyword("Heron", **kwargs)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT type, is_species FROM keywords WHERE id = ?", (kid,)) == [
         ("general", 0)
     ]
     db.conn.rollback()
-    got = db.add_keyword("Heron", **kwargs)
+    with db.transaction():
+        got = db.add_keyword("Heron", **kwargs)
     assert got == kid
     assert not db.conn.in_transaction
     want_type = kwargs.get("kw_type", "taxonomy")
@@ -210,11 +222,12 @@ def test_add_keyword_promotions_respect_commit_flag(db, lib, kwargs):
 def test_add_keyword_auto_promotes_general_taxon_match(db, lib):
     kid = _raw_kw(db, "American Robin")
     db.conn.commit()
-    assert db.add_keyword("American Robin", _commit=False) == kid
+    assert db.add_keyword("American Robin") == kid
     assert db.conn.in_transaction
     assert _visible(db, "SELECT type FROM keywords WHERE id = ?", (kid,)) == [("general",)]
     db.conn.rollback()
-    assert db.add_keyword("American Robin") == kid
+    with db.transaction():
+        assert db.add_keyword("American Robin") == kid
     assert _visible(db, "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
                     (kid,)) == [("taxonomy", 1, 3)]
 
@@ -287,9 +300,8 @@ def test_add_keyword_routes_lookup_and_source_path_through_facade(db, lib, monke
     src = []
     monkeypatch.setattr(db, "_add_source_species_keyword",
                         lambda *a: src.append(a) or 99)
-    assert db.add_keyword("Robin", is_species=True, source_taxon_id=12727,
-                          _commit=False) == 99
-    assert src == [("Robin", 12727, None, False)]
+    assert db.add_keyword("Robin", is_species=True, source_taxon_id=12727) == 99
+    assert src == [("Robin", 12727, None)]
 
 
 # -- source-taxon species keywords ---------------------------------------------------------
@@ -304,7 +316,7 @@ def test_add_source_species_keyword_validates_id(db, lib):
 def test_add_source_species_keyword_rebinds_existing(db, lib):
     kid = _raw_kw(db, "Robin", kw_type="general", taxon_id=3)
     db.conn.commit()
-    got = db._add_source_species_keyword("Robin", 12727, _commit=False)
+    got = db._add_source_species_keyword("Robin", 12727)
     assert got == kid
     assert db.conn.in_transaction
     assert _kw(db, kid)[2:] == ("taxonomy", 1, 3, 12727)
@@ -331,7 +343,8 @@ def test_add_source_species_keyword_suffixes_same_name_rows(db, lib, monkeypatch
     _raw_kw(db, "Cougar", kw_type="location")
     _raw_kw(db, "Cougar (taxon 42007)", kw_type="location")
     db.conn.commit()
-    kid = db._add_source_species_keyword("Cougar (taxon 42007)", 42007)
+    with db.transaction():
+        kid = db._add_source_species_keyword("Cougar (taxon 42007)", 42007)
     assert not db.conn.in_transaction
     assert _kw(db, kid) == ("Cougar (taxon 42007) (2)", None, "taxonomy", 1, 5, 42007)
     assert resolver_dbs == [db]
@@ -449,18 +462,20 @@ def test_lookup_taxon_id_for_keyword(db, lib):
 # -- tagging -------------------------------------------------------------------------------
 
 
-def test_tag_and_untag_commit_flags(db, lib):
+def test_tag_and_untag_leave_commit_to_caller(db, lib):
     p = lib["p"][0]
-    kid = db.add_keyword("Sunset")
-    db.tag_photo(p, kid, _commit=False)
+    with db.transaction():
+        kid = db.add_keyword("Sunset")
+    db.tag_photo(p, kid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
     db.conn.commit()
-    db.untag_photo(p, kid, _commit=False)
+    db.untag_photo(p, kid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(1,)]
     db.conn.rollback()
-    db.untag_photo(p, kid)
+    with db.transaction():
+        db.untag_photo(p, kid)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
 
@@ -660,16 +675,17 @@ def test_search_species_keyword_names_matches_species_rows_only(db, lib):
     ]
 
 
-def test_delete_keyword_detaches_children_unlinks_photos_and_commits(db, lib):
+def test_delete_keyword_detaches_children_unlinks_photos_with_the_callers_unit(db, lib):
     p0, p1, _, _ = lib["p"]
     parent = _raw_kw(db, "France", kw_type="location")
     child = _raw_kw(db, "Paris", parent_id=parent, kw_type="location")
     db.conn.commit()
     db.tag_photo(p0, parent)
     db.tag_photo(p1, child)
-    # A statement the caller left open shares the delete's commit.
+    # Writes the caller left open join the unit and share the delete's commit.
     db.queue_change(p1, "location", "effective")
-    db.keyword_tree.delete(parent)
+    with db.transaction():
+        db.keyword_tree.delete(parent)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT id FROM keywords WHERE id = ?", (parent,)) == []
     assert _visible(db, "SELECT parent_id FROM keywords WHERE id = ?", (child,)) == [(None,)]
@@ -983,9 +999,10 @@ def test_update_keyword_noop_and_invalid(db, lib):
         db.update_keyword(kid, name="'")
 
 
-def test_update_keyword_plain_fields_commit(db, lib):
-    kid = db.add_keyword("Sunset")
-    assert db.update_keyword(kid, latitude=1.5, longitude=2.5) == kid
+def test_update_keyword_plain_fields_commit_with_the_callers_unit(db, lib):
+    with db.transaction():
+        kid = db.add_keyword("Sunset")
+        assert db.update_keyword(kid, latitude=1.5, longitude=2.5) == kid
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT latitude, longitude FROM keywords WHERE id = ?",
                     (kid,)) == [(1.5, 2.5)]
@@ -1023,7 +1040,8 @@ def test_update_keyword_merges_into_same_slot_peer(db, lib, monkeypatch):
         return real(src, dst, **kwargs)
 
     monkeypatch.setattr(db, "_merge_keyword_into", recording)
-    assert db.update_keyword(dup, name="heron") == keep
+    with db.transaction():
+        assert db.update_keyword(dup, name="heron") == keep
     assert merges == [(dup, keep)]
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT keyword_id FROM photo_keywords") == [(keep,)]
@@ -1106,7 +1124,7 @@ def test_update_keyword_missing_row(db, lib):
 # -- duplicate merge and normalization sweeps ---------------------------------------------
 
 
-def test_merge_duplicate_keywords_merges_and_commits(db, lib, monkeypatch):
+def test_merge_duplicate_keywords_merges_with_the_callers_unit(db, lib, monkeypatch):
     p0, p1 = lib["p"][:2]
     a = _raw_kw(db, "Heron")
     b = _raw_kw(db, "heron")
@@ -1119,7 +1137,8 @@ def test_merge_duplicate_keywords_merges_and_commits(db, lib, monkeypatch):
     real = db._merge_keyword_into
     monkeypatch.setattr(db, "_merge_keyword_into",
                         lambda s, d, **kw: merges.append((s, d)) or real(s, d, **kw))
-    total = db.keyword_tree.merge_duplicates()
+    with db.transaction():
+        total = db.keyword_tree.merge_duplicates()
     assert total >= 1
     assert all(dst == a for _src, dst in merges)
     assert not db.conn.in_transaction
@@ -1133,13 +1152,14 @@ def test_merge_duplicate_keywords_rolls_back_on_failure(db, lib, monkeypatch):
     db.conn.commit()
     db.tag_photo(p0, a)
     db.tag_photo(p1, b)
+    db.commit()
 
     def boom(src, dst, **kwargs):
         db.conn.execute("UPDATE keywords SET name = 'changed' WHERE id = ?", (dst,))
         raise RuntimeError("merge failed")
 
     monkeypatch.setattr(db, "_merge_keyword_into", boom)
-    with pytest.raises(RuntimeError, match="merge failed"):
+    with pytest.raises(RuntimeError, match="merge failed"), db.transaction(immediate=True):
         db.keyword_tree.merge_duplicates()
     assert not db.conn.in_transaction
     assert _kw(db, a)[0] == "Heron"
@@ -1582,16 +1602,16 @@ def test_keyword_facade_signatures_unchanged():
            for n in _DELEGATING_KEYWORD_METHODS}
     assert sig["add_keyword"] == (
         "(self, name, parent_id=None, is_species=False, kw_type=None, "
-        "_commit=True, source_taxon_id=None, _resolve_alias=False)"
+        "source_taxon_id=None, _resolve_alias=False)"
     )
     assert sig["resolve_species_display_name"].startswith(
         "(self, name, apply_case_convention=True, case_convention=<object object"
     )
     assert sig["_add_source_species_keyword"] == (
-        "(self, name, source_taxon_id, parent_id=None, _commit=True)"
+        "(self, name, source_taxon_id, parent_id=None)"
     )
     assert sig["untag_photo"] == (
-        "(self, photo_id, keyword_id, _commit=True, *, _record_history=False)"
+        "(self, photo_id, keyword_id, *, _record_history=False)"
     )
     assert sig["update_keyword"] == "(self, keyword_id, **kwargs)"
     assert sig["_lookup_taxon_id_for_keyword"] == (
@@ -1737,7 +1757,8 @@ def test_merge_taxonomy_root_twins_folds_top_level_rows_into_tree(db, lib):
     db.commit()
     pending = _visible(db, "SELECT photo_id, change_type, value FROM pending_changes")
 
-    assert db.merge_taxonomy_root_twins() == 1
+    with db.transaction(immediate=True):
+        assert db.merge_taxonomy_root_twins() == 1
 
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT id FROM keywords WHERE id = ?", (twin,)) == []
@@ -1758,13 +1779,14 @@ def test_merge_taxonomy_root_twins_rolls_back_on_failure(db, lib, monkeypatch):
     twin = _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=3)
     db.conn.commit()
     db.tag_photo(lib["p"][0], twin)
+    db.commit()
 
     def boom(src, dst, **kwargs):
         db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (src,))
         raise RuntimeError("merge failed")
 
     monkeypatch.setattr(db, "_merge_keyword_into", boom)
-    with pytest.raises(RuntimeError, match="merge failed"):
+    with pytest.raises(RuntimeError, match="merge failed"), db.transaction(immediate=True):
         db.merge_taxonomy_root_twins()
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",

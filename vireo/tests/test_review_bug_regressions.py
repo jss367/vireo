@@ -183,6 +183,7 @@ def test_location_detail_and_sync_preview_choose_exported_location(client_with_p
     coordless = _keyword(db, "Other place", parent=root)
     for kid in (first, chosen, coordless):
         db.tag_photo(pid, kid)
+        db.commit()
     assert photo_locations.get_photo_location_keyword_ids(db, [pid]) == {pid: chosen}
     assert serialize_photo_location(db, pid)["keyword_id"] == chosen
     db.queue_change(pid, "location", "effective")
@@ -199,6 +200,7 @@ def test_location_breadcrumb_stops_at_general_parent(app_and_db):
     country = _keyword(db, "France", parent=general)
     city = _keyword(db, "Paris", parent=country)
     db.tag_photo(pid, city)
+    db.commit()
     assert serialize_photo_location(db, pid)["parent_chain"] == [{"id": country, "name": "France"}]
     assert photo_locations.get_photo_location_paths(db, [pid]) == {pid: ["France", "Paris"]}
 
@@ -217,6 +219,7 @@ def test_duplicate_keyword_suggestion_keeps_earliest_variant(app_and_db):
     later = _keyword(db, "woodland", kind="general", keyword_id=32)
     db.tag_photo(pid, later)
     db.tag_photo(pid, first)
+    db.commit()
     group = app.test_client().get("/api/keywords/duplicates").get_json()[0]
     assert [row["id"] for row in group["variants"]] == [first, later]
     assert group["keep"] == "Woodland"
@@ -261,6 +264,7 @@ def test_prediction_suggestions_count_all_keywords_for_same_identity(app_and_db)
     _keyword(db, "Bald Eagle", kind="taxonomy", source_id=5305)
     linked = _keyword(db, "Bald Eagle", kind="taxonomy", taxon_id=taxon)
     db.tag_photo(pid, linked)
+    db.commit()
     did = db.detections.save(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                                    "confidence": 0.9, "category": "animal"}], detector_model="MDV6")[0]
     db.predictions.add(did, "Bald Eagle", 0.9, "bioclip", labels_fingerprint="fp1")

@@ -135,6 +135,7 @@ def test_prediction_decisions_do_not_imply_inspection_or_species_resolution(db, 
     _prediction(db, photos[2], "pending")
     species = db.add_keyword("Confirmed bird", is_species=True)
     db.tag_photo(photos[1], species)
+    db.commit()
     review = collection_coverage(db, cid, {})["review"]
     assert review["denominator"] == 3
     assert review["prediction_decision_count"] == 1
@@ -157,6 +158,7 @@ def test_explicitly_unresolved_is_independent_of_existing_species_and_scope(db, 
     cid = _collection(db, photos[:2])
     species = db.add_keyword("Confirmed bird", is_species=True)
     db.tag_photo(photos[0], species)
+    db.commit()
     monkeypatch.setattr(Database, "identity_alternatives", property(lambda _db: None), raising=False)
     assert collection_coverage(db, cid, {})["review"]["unresolved_identity_count"] is None
     # The identity-alternatives workflow ships separately. Exercise its

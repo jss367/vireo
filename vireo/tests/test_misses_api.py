@@ -150,6 +150,7 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
     db.photo_labels.set(ids["clipped"], "red")
     keyword_id = db.add_keyword("keeper")
     db.tag_photo(ids["clipped"], keyword_id)
+    db.commit()
 
     r = client.get(
         f"/api/misses?collection_id={collection_id}&rating_min=4"

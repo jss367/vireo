@@ -190,8 +190,10 @@ def _tag_all(live_server, photo_ids, species):
     so /group/state reports has_species_keyword=True for the whole burst."""
     db = live_server["db"]
     kid = db.add_keyword(species, is_species=True)
+    db.commit()
     for pid in photo_ids:
         db.tag_photo(pid, kid)
+        db.commit()
     return kid
 
 
@@ -410,6 +412,7 @@ def test_smart_default_species_checked_when_frame_missing_keyword(live_server, p
     kid = db.add_keyword(species, is_species=True)
     db.tag_photo(photo_ids[0], kid)
     db.tag_photo(photo_ids[1], kid)
+    db.commit()
     # photo_ids[2] intentionally left untagged.
 
     _open_burst_modal(page, live_server)
@@ -673,6 +676,7 @@ def test_keyword_summary_counts_discarded_removals(live_server, page):
     kid = db.add_keyword(species, is_species=True)
     db.tag_photo(photo_ids[0], kid)
     db.tag_photo(photo_ids[1], kid)
+    db.commit()
     # photo_ids[2] intentionally untagged.
 
     _open_burst_modal(page, live_server)

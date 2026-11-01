@@ -695,12 +695,12 @@ def apply_grouping_photo_edit(
         new_ids = [int(item["new_value"])] if item["new_value"] else []
         remove_ids, add_ids = (new_ids, old_ids) if undo else (old_ids, new_ids)
         for kid in remove_ids:
-            db.untag_photo(pid, kid, _commit=False)
+            db.untag_photo(pid, kid)
             name = db.edit_history.keyword_name(kid)
             if name and db.remove_pending_changes(pid, 'keyword_add', name) == 0:
                 db.queue_change(pid, 'keyword_remove', name)
         for kid in add_ids:
-            db.tag_photo(pid, kid, source='manual', _commit=False)
+            db.tag_photo(pid, kid, source='manual')
             name = db.edit_history.keyword_name(kid)
             if name and db.remove_pending_changes(pid, 'keyword_remove', name) == 0:
                 db.queue_change(pid, 'keyword_add', name)

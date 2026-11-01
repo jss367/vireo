@@ -302,9 +302,11 @@ def backfill_embedded_keywords(db: Database) -> int:
             continue
         before = _photo_keyword_count(db, row["id"])
         try:
-            offered = _import_embedded_keywords_for_photo(
-                db, row["id"], file_meta, raise_on_conflict=True,
-            )
+            # Durable boundary: one photo's embedded keywords, as before.
+            with db.transaction():
+                offered = _import_embedded_keywords_for_photo(
+                    db, row["id"], file_meta, raise_on_conflict=True,
+                )
         except ValueError:
             complete = False
             continue

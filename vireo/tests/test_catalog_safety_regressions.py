@@ -126,6 +126,7 @@ def test_remove_absent_keyword_has_no_history(app_and_db):
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("Absent tag")
+    db.commit()
     response = app.test_client().delete(f"/api/photos/{pid}/keywords/{kid}")
     assert response.status_code == 200
     assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
@@ -139,6 +140,7 @@ def test_deleted_keyword_does_not_block_undo(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("Removed then deleted")
     db.tag_photo(pid, kid)
+    db.commit()
     client = app.test_client()
     assert client.delete(f"/api/photos/{pid}/keywords/{kid}").status_code == 200
     assert client.delete(f"/api/keywords/{kid}").status_code == 200
@@ -500,6 +502,7 @@ def test_batch_keyword_rolls_back_failed_write(app_and_db, monkeypatch):
     app, db = app_and_db
     ids = [p["id"] for p in db.photos.list_page()]
     kid = db.add_keyword("Atomic batch")
+    db.commit()
     original = Database.tag_photo
 
     def fail_second(self, photo_id, keyword_id, *args, **kwargs):

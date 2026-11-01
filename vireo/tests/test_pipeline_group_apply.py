@@ -169,6 +169,7 @@ def test_apply_skips_keyword_when_already_applied(app_and_db):
     pid = pids[0]
     kid = db.add_keyword('Coyote', is_species=True)
     db.tag_photo(pid, kid)
+    db.commit()
     client = app.test_client()
 
     resp = client.post('/api/pipeline/group/apply', json={
@@ -344,6 +345,7 @@ def test_state_endpoint_returns_current_flags_and_keyword_status(app_and_db):
     db.commit()
     kid = db.add_keyword('Coyote', is_species=True)
     db.tag_photo(flagged_id, kid)
+    db.commit()
     client = app.test_client()
 
     resp = client.post('/api/pipeline/group/state', json={
@@ -413,6 +415,7 @@ def test_state_endpoint_ignores_homonym_non_species_keyword(app_and_db):
     # Pre-existing 'individual' tag named like the species we're about to type.
     individual_kid = db.add_keyword('Robin', kw_type='individual')
     db.tag_photo(pid, individual_kid)
+    db.commit()
 
     client = app.test_client()
     resp = client.post('/api/pipeline/group/state', json={
@@ -444,6 +447,7 @@ def test_state_endpoint_gates_representative_on_current_eligibility(app_and_db):
     db.tag_photo(live_id, kid_live)
     db.tag_photo(rejected_id, kid_rejected)
     db.tag_photo(untagged_id, kid_untagged)
+    db.commit()
     db.set_species_representative('Coyote Live', live_id)
     db.set_species_representative('Coyote Rejected', rejected_id)
     db.set_species_representative('Coyote Untagged', untagged_id)
@@ -453,6 +457,7 @@ def test_state_endpoint_gates_representative_on_current_eligibility(app_and_db):
     db.photo_review.set_flag(rejected_id, 'rejected')
     db.commit()
     db.untag_photo(untagged_id, kid_untagged)
+    db.commit()
 
     client = app.test_client()
 
@@ -493,6 +498,7 @@ def test_state_endpoint_reports_each_listed_species(app_and_db):
     db.tag_photo(both_id, teal)
     db.tag_photo(both_id, wigeon)
     db.tag_photo(teal_only_id, teal)
+    db.commit()
     client = app.test_client()
 
     resp = client.post('/api/pipeline/group/state', json={

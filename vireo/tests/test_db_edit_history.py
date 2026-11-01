@@ -422,6 +422,7 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
     pid = pids[0]
     kid = db.add_keyword("Robin", is_species=True)
     db.tag_photo(pid, kid)
+    db.commit()
     p = _predictions(db, pid)
     _set_status(db, p["a_top"], "rejected")
     curation_calls = []
@@ -457,6 +458,7 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
 
 def test_keyword_remove_redo_untags_again(db, pids):
     kid = db.add_keyword("Hawk")
+    db.commit()
     db.record_edit(
         "keyword_remove", "Removed Hawk", str(kid),
         [{"photo_id": pids[0], "old_value": str(kid), "new_value": ""}],
@@ -620,6 +622,7 @@ def test_retire_stale_grouping_entry_does_not_commit(db):
 
 def test_keyword_name_and_prediction_scope(db, pids):
     kid = db.add_keyword("Heron")
+    db.commit()
     assert db.edit_history.keyword_name(kid) == "Heron"
     assert db.edit_history.keyword_name(kid + 1000) is None
 
@@ -655,6 +658,7 @@ def test_prediction_accept_flat_removals_restore_only_live_workspaces(db, pids):
     db.set_active_workspace(ws)
     kid = db.add_keyword("Hawk")
     db.tag_photo(pids[0], kid)
+    db.commit()
     old_value = json.dumps({
         "keyword_only": True,
         "flat_removals": [
@@ -851,6 +855,7 @@ def test_prediction_accept_undo_redo_round_trip(db, pids):
     p = _predictions(db, pids[0])
     kid = db.add_keyword("Finch", is_species=True)
     db.tag_photo(pids[0], kid)
+    db.commit()
     _set_status(db, p["a_mid"], "accepted")
     _set_status(db, p["a_top"], "rejected")
     _set_status(db, p["a_low"], "rejected")
@@ -1094,6 +1099,7 @@ def test_species_replace_undo_redo_moves_curation(db, pids):
     old_kid = db.add_keyword("Old Bird", is_species=True)
     new_kid = db.add_keyword("New Bird", is_species=True)
     db.tag_photo(p0, new_kid)
+    db.commit()
     _hl(db, ws, "New Bird", p0, 1)
     db.conn.commit()
     old_value = json.dumps({
@@ -1272,6 +1278,7 @@ def test_workspace_reads_raise_before_any_sql_without_a_workspace(db, pids):
 def test_id_keyed_reads_need_no_workspace(db, pids):
     edit = _raw_edit(db, "keyword_add", items=[(pids[0], "", "1")])
     kid = db.add_keyword("Heron")
+    db.commit()
     db.set_active_workspace(None)
     history = db.edit_history
     assert history.action_and_new_value(edit)["action_type"] == "keyword_add"

@@ -53,6 +53,7 @@ def _alias(db, kind):
         left, right = db.add_keyword('Common hierarchy'), db.add_keyword('Scientific hierarchy')
         common = db.add_keyword('Common alias', parent_id=left, is_species=True, source_taxon_id=88001)
         alias = db.add_keyword('Scientific alias', parent_id=right, is_species=True, source_taxon_id=88001)
+        db.commit()
         return db.keywords.name_of(common), alias
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88001,?,'Tyrannus melancholicus','Tropical Kingbird','species')", (None if kind == 'local_only' else 88001,))
     db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES (88001,'Yellow Kingbird')")
@@ -79,16 +80,18 @@ def test_drained_alias_confirmation_survives_collision_sync_reimport_and_history
         candidate, alias = _alias(db, alias_kind)
         db.conn.execute("INSERT INTO taxa(id,name,rank) VALUES (88002,'Higher family','family')")
         higher = db.add_keyword('Higher family', kw_type='taxonomy')
+        db.commit()
         db.conn.execute('UPDATE keywords SET taxon_id=88002 WHERE id=?', (higher,))
         note = db.add_keyword('Unrelated note')
         db.tag_photo(survivor, higher, source='manual')
         db.tag_photo(survivor, note, source='manual')
+        db.commit()
         db.photo_review.set_flag(survivor, 'rejected')
         db.commit()
         with db.transaction():
             save_alternatives(db, [losing], [candidate, 'Uncataloged other bird'], 'Retain the call evidence', 'Audio')
             # Normal resolution retains an already attached equivalent spelling.
-            db.tag_photo(losing, alias, source='accept', _commit=False)
+            db.tag_photo(losing, alias, source='accept')
             edit = resolve_alternatives(db, [losing], candidate)
         alias_name = db.keywords.name_of(alias)
         state = db.identity_alternatives.for_photos([losing], include_resolved=True)[losing]

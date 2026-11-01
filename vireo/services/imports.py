@@ -928,7 +928,7 @@ class ImportService:
                 break
             try:
                 keyword_id = thread_db.add_keyword(
-                    requested_name, kw_type="general", _commit=False,
+                    requested_name, kw_type="general",
                 )
                 stored = thread_db.keywords.import_tag_row(keyword_id)
                 keyword_name = (
@@ -943,7 +943,7 @@ class ImportService:
                     if exists is not None:
                         continue
                     thread_db.tag_photo(
-                        photo_id, keyword_id, source="manual", _commit=False,
+                        photo_id, keyword_id, source="manual",
                     )
                     self._queue_import_keyword_add(
                         thread_db, photo_id, keyword_name, workspace_id,

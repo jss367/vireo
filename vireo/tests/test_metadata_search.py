@@ -54,6 +54,7 @@ def catalog(tmp_path, monkeypatch):
     db.tag_photo(ids["hawk"], db.add_keyword("Perched"))
     db.tag_photo(ids["owl"], db.add_keyword("Perched"))
     db.tag_photo(ids["owl"], db.add_keyword("Barn Owl", is_species=True))
+    db.commit()
     taxon_id = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank) VALUES ('Tyto alba', 'Western Barn Owl', 'species')"
     ).lastrowid
@@ -218,6 +219,7 @@ def test_metadata_search_sees_edits_and_scopes(catalog):
     rules[0]["value"] = "Resting"
     assert set(db.collections.query_photo_ids(rules)) == {ids["hawk"], ids["owl"]}
     db.untag_photo(ids["hawk"], keyword_id)
+    db.commit()
     assert db.collections.query_photo_ids(rules) == [ids["owl"]]
     collection = db.collections.add("Resting birds", json.dumps(rules))
     db.commit()
@@ -283,11 +285,13 @@ def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
     through a stray "Least Grebe" box)."""
     db, ids = catalog
     genus = db.add_keyword("Tyto", is_species=True)
+    db.commit()
     genus_taxon = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank) VALUES ('Tyto', 'Masked owls', 'genus')"
     ).lastrowid
     db.conn.execute("UPDATE keywords SET taxon_id=? WHERE id=?", (genus_taxon, genus))
     db.tag_photo(ids["robin"], genus)
+    db.commit()
     for name in ("owl", "hawk", "robin", "empty"):
         det = db.detections.save(ids[name], [
             {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},

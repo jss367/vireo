@@ -560,15 +560,15 @@ def test_set_photo_location_tags_through_facade_in_one_transaction(
     _link(db, pid, old)
     calls = []
 
-    def boom(photo_id, keyword_id, source=None, _commit=True, **kwargs):
-        calls.append((photo_id, keyword_id, source, _commit))
+    def boom(photo_id, keyword_id, source=None, **kwargs):
+        calls.append((photo_id, keyword_id, source))
         assert db.conn.in_transaction
         raise RuntimeError("tag failed")
 
     monkeypatch.setattr(db, "tag_photo", boom)
     with pytest.raises(RuntimeError, match="tag failed"):
         db.set_photo_location(pid, new)
-    assert calls == [(pid, new, KEYWORD_SOURCE_MANUAL, False)]
+    assert calls == [(pid, new, KEYWORD_SOURCE_MANUAL)]
     # The DELETE rolled back with the failed tag.
     rows = db.conn.execute(
         "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,),
@@ -818,6 +818,7 @@ def test_link_keyword_to_place_requires_place_id(db):
     kid = _kw(db, "Somewhere")
     with pytest.raises(ValueError, match=r"requires details\['place_id'\]"):
         db.keyword_provenance.link_keyword_to_place(kid, {"name": "x"})
+        db.commit()
 
 
 def test_link_keyword_to_place_disambiguates_under_a_parent(db):
@@ -828,6 +829,7 @@ def test_link_keyword_to_place_disambiguates_under_a_parent(db):
         "place_id": "ChIJ-abcdefgh12345678", "name": "Mara",
         "address_components": [{"long_name": "Kenya", "types": ["country"]}],
     })
+    db.commit()
     assert result == {"keyword_id": kid, "merged": False}
     row = db.conn.execute(
         "SELECT name, parent_id FROM keywords WHERE id = ?", (kid,),
@@ -986,6 +988,7 @@ def test_get_first_linked_location_keywords_picks_lowest_rowid(db, fid):
     db.tag_photo(p0, later)
     db.tag_photo(p1, later)
     db.tag_photo(p2, general)
+    db.commit()
     leaves = db.locations.get_first_linked_leaves([p0, p1, p2])
     assert set(leaves) == {p0, p1}
     assert leaves[p0]["id"] == first
@@ -997,6 +1000,7 @@ def test_get_first_linked_location_keywords_chunks_by_400(db, fid):
     place = _kw(db, "Pond")
     pid = _photo(db, fid, "a.jpg")
     db.tag_photo(pid, place)
+    db.commit()
     statements = _trace(db)
     leaves = db.locations.get_first_linked_leaves(list(range(100_000, 100_400)) + [pid])
     db.conn.set_trace_callback(None)
@@ -1199,6 +1203,7 @@ def test_location_leaf_remains_coherent_during_keyword_change(db, fid, monkeypat
             return
         if operation == 'delete':
             writer.keyword_tree.delete(selected)
+            writer.commit()
         else:
             writer._merge_keyword_into(selected, remaining)
             writer.commit()

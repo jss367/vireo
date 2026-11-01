@@ -543,6 +543,7 @@ def test_listing_filters_agree(db, lib):
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
     db.tag_photo(lib["b"], kid)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id = ?",
         (lib["c"],),
@@ -880,6 +881,7 @@ def test_delete_photos_removes_rows_and_dependents(db, lib, cache, monkeypatch):
     monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
+    db.commit()
     db.queue_change(lib["a"], "keyword_add", "Heron")
     db.commit()
     _detect(db, lib["a"], 0.9, "Heron")
@@ -1050,6 +1052,7 @@ def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache,
     monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
+    db.commit()
     db.conn.execute(
         "CREATE TEMP TRIGGER block_photo_delete BEFORE DELETE ON photos "
         "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
@@ -1068,6 +1071,7 @@ def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache,
 def test_delete_photos_commit_false_error_leaves_rollback_to_caller(db, lib, cache):
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
+    db.commit()
     db.conn.execute(
         "CREATE TEMP TRIGGER block_photo_delete BEFORE DELETE ON photos "
         "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
@@ -1087,6 +1091,7 @@ def test_delete_photos_resolves_workspace_mid_transaction(db, lib, cache):
     missing workspace fails inside the transaction and rolls it back."""
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
+    db.commit()
     db.set_active_workspace(None)
     statements = _trace(db)
     with pytest.raises(RuntimeError):

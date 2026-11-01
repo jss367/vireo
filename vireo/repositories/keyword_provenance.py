@@ -1086,7 +1086,7 @@ class KeywordProvenanceRepository:
         return self._resolve_workspace_id()
 
     def tag(
-        self, photo_id, keyword_id, *, source, species_provenance=None, _commit=True,
+        self, photo_id, keyword_id, *, source, species_provenance=None,
     ):
         """Associate a keyword with a photo.
 
@@ -1113,8 +1113,8 @@ class KeywordProvenanceRepository:
                     folds it in only when the surviving row has no evidence of
                     its own, so a user-recorded identification on the winner
                     is never overwritten by a loser's.
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
+
+        Does not commit: the caller's unit of work owns the transaction.
         """
         self.conn.execute(
             "INSERT INTO photo_keywords "
@@ -1122,8 +1122,6 @@ class KeywordProvenanceRepository:
             "VALUES (?, ?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
             (photo_id, keyword_id, source, species_provenance),
         )
-        if _commit:
-            self.conn.commit()
 
     def carry_companion_keywords(self, companion_id, primary_id):
         """Copy a companion row's keyword associations onto its primary.
@@ -1367,82 +1365,81 @@ class KeywordProvenanceRepository:
         lng = details.get("lng")
         components = details.get("address_components") or []
 
-        with self.conn:
-            chain = self._upsert_location_parent_chain(
-                components,
-                leaf_name=new_name,
-                leaf_types=details.get("types"),
-            )
-            parent_id = chain[-1] if chain else None
+        chain = self._upsert_location_parent_chain(
+            components,
+            leaf_name=new_name,
+            leaf_types=details.get("types"),
+        )
+        parent_id = chain[-1] if chain else None
 
-            # If the chain itself reused this very keyword anywhere — as the
-            # deepest parent OR as a non-leaf ancestor (e.g. a free-text
-            # "United States" promoted into the country slot while deeper
-            # levels like NY/Manhattan were also discovered) — the UPDATE
-            # below would create a cycle by reparenting the row onto a
-            # descendant of itself. Guard by checking the full visited chain.
-            if keyword_id in chain:
-                # The keyword we were asked to "link" got reused inside the
-                # chain. Nothing to merge from photo_keywords (it is already
-                # the canonical row for its slot), so just return it.
-                return {"keyword_id": keyword_id, "merged": False}
+        # If the chain itself reused this very keyword anywhere — as the
+        # deepest parent OR as a non-leaf ancestor (e.g. a free-text
+        # "United States" promoted into the country slot while deeper
+        # levels like NY/Manhattan were also discovered) — the UPDATE
+        # below would create a cycle by reparenting the row onto a
+        # descendant of itself. Guard by checking the full visited chain.
+        if keyword_id in chain:
+            # The keyword we were asked to "link" got reused inside the
+            # chain. Nothing to merge from photo_keywords (it is already
+            # the canonical row for its slot), so just return it.
+            return {"keyword_id": keyword_id, "merged": False}
 
-            update_sql = (
-                "UPDATE keywords SET "
-                "  place_id = ?, "
-                "  latitude = ?, "
-                "  longitude = ?, "
-                "  name = ?, "
-                "  parent_id = ? "
-                "WHERE id = ?"
+        update_sql = (
+            "UPDATE keywords SET "
+            "  place_id = ?, "
+            "  latitude = ?, "
+            "  longitude = ?, "
+            "  name = ?, "
+            "  parent_id = ? "
+            "WHERE id = ?"
+        )
+        try:
+            self.conn.execute(
+                update_sql,
+                (place_id, lat, lng, new_name, parent_id, keyword_id),
             )
+            return {"keyword_id": keyword_id, "merged": False}
+        except sqlite3.IntegrityError:
+            # Two distinct constraints can fail here:
+            #   (a) UNIQUE(place_id) — another row already has this
+            #       place_id → merge case.
+            #   (b) UNIQUE(name, parent_id) — another row already
+            #       owns this (name, parent_id) slot with a different
+            #       (or NULL) place_id → name-collision case.
+            # Disambiguate by checking which.
+            canonical = self.conn.execute(
+                "SELECT id FROM keywords WHERE place_id = ?", (place_id,),
+            ).fetchone()
+            if canonical is not None and canonical["id"] != keyword_id:
+                # Case (a): merge.
+                return self._absorb_into_canonical_place(
+                    keyword_id, canonical["id"],
+                )
+
+            # Case (b): name collision — a *different* keyword already
+            # holds the (new_name, parent_id) slot. Disambiguate the
+            # name by appending a short place_id suffix and retry.
+            # Same approach as _upsert_one_keyword's leaf-collision path.
+            name_clash = self._place_link_name_clash(
+                new_name, parent_id, keyword_id,
+            )
+            if name_clash is None:
+                # Neither place_id nor name conflict — shouldn't happen
+                # but re-raise rather than swallow.
+                raise
+            suffix = place_id[-8:]
+            disambiguated = f"{new_name} ({suffix})"
             try:
                 self.conn.execute(
                     update_sql,
-                    (place_id, lat, lng, new_name, parent_id, keyword_id),
+                    (place_id, lat, lng, disambiguated, parent_id, keyword_id),
                 )
                 return {"keyword_id": keyword_id, "merged": False}
-            except sqlite3.IntegrityError:
-                # Two distinct constraints can fail here:
-                #   (a) UNIQUE(place_id) — another row already has this
-                #       place_id → merge case.
-                #   (b) UNIQUE(name, parent_id) — another row already
-                #       owns this (name, parent_id) slot with a different
-                #       (or NULL) place_id → name-collision case.
-                # Disambiguate by checking which.
-                canonical = self.conn.execute(
-                    "SELECT id FROM keywords WHERE place_id = ?", (place_id,),
-                ).fetchone()
-                if canonical is not None and canonical["id"] != keyword_id:
-                    # Case (a): merge.
-                    return self._absorb_into_canonical_place(
-                        keyword_id, canonical["id"],
-                    )
-
-                # Case (b): name collision — a *different* keyword already
-                # holds the (new_name, parent_id) slot. Disambiguate the
-                # name by appending a short place_id suffix and retry.
-                # Same approach as _upsert_one_keyword's leaf-collision path.
-                name_clash = self._place_link_name_clash(
-                    new_name, parent_id, keyword_id,
-                )
-                if name_clash is None:
-                    # Neither place_id nor name conflict — shouldn't happen
-                    # but re-raise rather than swallow.
-                    raise
-                suffix = place_id[-8:]
-                disambiguated = f"{new_name} ({suffix})"
-                try:
-                    self.conn.execute(
-                        update_sql,
-                        (place_id, lat, lng, disambiguated, parent_id, keyword_id),
-                    )
-                    return {"keyword_id": keyword_id, "merged": False}
-                except sqlite3.IntegrityError as inner_err:
-                    raise RuntimeError(
-                        f"keyword '{new_name}' (parent_id={parent_id}) "
-                        f"collides with an existing row even after disambiguation"
-                    ) from inner_err
+            except sqlite3.IntegrityError as inner_err:
+                raise RuntimeError(
+                    f"keyword '{new_name}' (parent_id={parent_id}) "
+                    f"collides with an existing row even after disambiguation"
+                ) from inner_err
 
     def _claim_location_component_for_place(
         self, name, parent_id, place_id, latitude, longitude,
@@ -1816,7 +1813,7 @@ class KeywordProvenanceRepository:
         changed_tag = not already_has_species
         if changed_tag:
             self.tag_photo(
-                photo_id, kid, source="manual", _commit=False,
+                photo_id, kid, source="manual",
             )
             self.queue_change(photo_id, "keyword_add", species)
         return _affected_entry(
@@ -1896,7 +1893,7 @@ class KeywordProvenanceRepository:
 
             self.db.predictions.require_identifiable_subjects([pred_id for _, pred_id in targets])
             source_args = {"source_taxon_id": source_taxon_id} if source_taxon_id is not None else {}
-            kid = self.add_keyword(species, is_species=True, _commit=False, **source_args)
+            kid = self.add_keyword(species, is_species=True, **source_args)
             species = _stored_keyword_name(self.conn, kid, species)
             # list of {"photo_id", "prediction_id", "old_species"}
             affected = []

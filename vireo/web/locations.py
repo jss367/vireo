@@ -251,14 +251,13 @@ def _record_place_link(db: Database, keyword_id: int, details: JsonDict, result:
         [],
     )
 
-    photo_rows = db.photo_keywords.photo_workspaces_tagged_with(result["keyword_id"])
-    for row in photo_rows:
+    # The caller's unit of work commits the audit entry and the queue
+    # rows together with the link.
+    for row in db.photo_keywords.photo_workspaces_tagged_with(result["keyword_id"]):
         queue_location_sync_if_enabled(
             db, row["photo_id"],
             workspace_id=row["workspace_id"],
         )
-    if photo_rows:
-        db.commit()
 
 
 def _serialize_keyword(db: Database, keyword_id: int) -> JsonDict | None:
@@ -640,7 +639,11 @@ def create_locations_blueprint(
 
         db = get_db()
         try:
-            result = db.keyword_provenance.link_keyword_to_place(keyword_id, details)
+            # The link, its audit entry and its photos' location sync land
+            # together.
+            with db.transaction():
+                result = db.keyword_provenance.link_keyword_to_place(keyword_id, details)
+                _record_place_link(db, keyword_id, details, result)
         except ValueError as err:
             # Database raises ValueError both for "missing id" and "wrong
             # type". Distinguish so callers can tell a 404 from a 400.
@@ -662,8 +665,6 @@ def create_locations_blueprint(
             # build hits an existing keyword of a different type at the same
             # (name, parent_id). Surface the message for debugging.
             return location_name_conflict_response(err)
-
-        _record_place_link(db, keyword_id, details, result)
 
         return jsonify({
             "keyword": _serialize_keyword(db, result["keyword_id"]),

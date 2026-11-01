@@ -179,7 +179,7 @@ def prepare_photo_merge(db: Database, losing: int, survivor: int) -> None:
     kept = {link['keyword_id'] for link in db.identity_alternatives.candidate_links([survivor], names).get(survivor, [])}
     for link in db.identity_alternatives.candidate_links([losing], names).get(losing, []):
         if link['keyword_id'] not in kept:
-            db.untag_photo(losing, link['keyword_id'], _commit=False)
+            db.untag_photo(losing, link['keyword_id'])
 
 def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str,
                          batch: _IdentityBatch | None = None, *, record_history: bool = False) -> None:
@@ -190,11 +190,11 @@ def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement
     old_links = {link['keyword_id']: link for link in before['links']}
     new_links = {link['keyword_id']: link for link in after['links']}
     for kid in old_links.keys() - new_links.keys():
-        db.untag_photo(photo_id, kid, _commit=False, _record_history=record_history)
+        db.untag_photo(photo_id, kid, _record_history=record_history)
     for kid in new_links.keys() - old_links.keys():
         name = db.keywords.name_of(kid)
         if name:
-            db.tag_photo(photo_id, kid, source=keyword_source_max(new_links[kid]['source']), _commit=False)
+            db.tag_photo(photo_id, kid, source=keyword_source_max(new_links[kid]['source']))
     names = [name for data in (before, after) if data['identity']
              and data['identity']['status'] == 'unresolved' for name in data['identity']['candidates']]
     names.extend(name for kid in old_links.keys() | new_links.keys() if (name := db.keywords.name_of(kid)))
@@ -262,7 +262,7 @@ def resolve_alternatives(db: Database, photo_ids: Sequence[int], species: str) -
     if any(key not in {keyword_match_key(n) for n in states[pid]['candidates']} for pid in photo_ids):
         raise ValueError('Choose one of the recorded alternative species')
     # Use the normal species keyword resolver and provenance/XMP queue.
-    kid = db.add_keyword(species, is_species=True, _commit=False)
+    kid = db.add_keyword(species, is_species=True)
     batch = _IdentityBatch(db)
     names = [name for state in states.values() for name in state['candidates']]
     old_links = batch.links(photo_ids, names)

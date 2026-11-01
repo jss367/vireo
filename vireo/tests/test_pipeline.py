@@ -1695,8 +1695,10 @@ def test_load_photo_features_confirmed_species(tmp_path):
     db, ids = _setup_db_with_photos(tmp_path)
     # Confirm species for first encounter's photos
     kid = db.add_keyword("Robin", is_species=True)
+    db.commit()
     for pid in ids[0]:
         db.tag_photo(pid, kid)
+        db.commit()
 
     photos = load_photo_features(db)
     confirmed = [p for p in photos if p["confirmed_species"] is not None]
@@ -1717,6 +1719,7 @@ def test_load_photo_features_includes_taxonomy_type_without_species_flag(tmp_pat
     db, ids = _setup_db_with_photos(tmp_path)
     pid = ids[0][0]
     keyword_id = db.add_keyword("Verdin")
+    db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 0 "
         "WHERE id = ?",
@@ -1724,6 +1727,7 @@ def test_load_photo_features_includes_taxonomy_type_without_species_flag(tmp_pat
     )
     db.conn.commit()
     db.tag_photo(pid, keyword_id)
+    db.commit()
 
     photo = next(p for p in load_photo_features(db) if p["id"] == pid)
     assert photo["confirmed_species"] == "Verdin"
@@ -1744,9 +1748,11 @@ def test_load_photo_features_ignores_taxonomy_ancestors_as_species(tmp_path):
     birds = db.add_keyword("1Birds")
     family = db.add_keyword("Penduline tits", parent_id=birds)
     species = db.add_keyword("Verdin", parent_id=family)
+    db.commit()
     pid = ids[0][0]
     db.tag_photo(pid, family)
     db.tag_photo(pid, species)
+    db.commit()
 
     photo = next(p for p in load_photo_features(db) if p["id"] == pid)
     assert photo["confirmed_species"] == "Verdin"
@@ -1764,6 +1770,7 @@ def test_confirmed_species_deterministic_with_multiple_tags(tmp_path):
     k_blue = db.add_keyword("Blue Jay", is_species=True)
     db.tag_photo(pid, k_zebra)
     db.tag_photo(pid, k_blue)
+    db.commit()
 
     # Run twice to confirm determinism
     for _ in range(2):
@@ -1798,6 +1805,7 @@ def test_confirmed_species_canonicalizes_same_taxon_across_encounter(tmp_path):
 
     # Canonical top-level root, linked to the species taxon.
     root_kid = db.add_keyword("Verdin", is_species=True)
+    db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = 2912 WHERE id = ?",
         (root_kid,),
@@ -1807,6 +1815,7 @@ def test_confirmed_species_canonicalizes_same_taxon_across_encounter(tmp_path):
     # it detaches the redundant root association from that photo.
     birds = db.add_keyword("Birds")
     leaf_kid = db.add_keyword("verdin", parent_id=birds)
+    db.commit()
     db.conn.execute(
         "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
         "taxon_id = 2912 WHERE id = ?",
@@ -1819,8 +1828,10 @@ def test_confirmed_species_canonicalizes_same_taxon_across_encounter(tmp_path):
     # Half the encounter still carries the root; the other half was
     # migrated to the hierarchy leaf spelling.
     db.tag_photo(enc_ids[0], root_kid)
+    db.commit()
     for pid in enc_ids[1:]:
         db.tag_photo(pid, leaf_kid)
+        db.commit()
 
     photos = load_photo_features(db)
     tagged = {p["id"]: p for p in photos if p["id"] in enc_ids}
@@ -1850,8 +1861,10 @@ def test_serialize_results_includes_species_predictions(tmp_path):
     db, ids = _setup_db_with_photos(tmp_path)
     # Confirm species for first encounter
     kid = db.add_keyword("Robin", is_species=True)
+    db.commit()
     for pid in ids[0]:
         db.tag_photo(pid, kid)
+        db.commit()
 
     photos = load_photo_features(db)
     results = run_full_pipeline(photos)
@@ -2145,8 +2158,10 @@ def test_serialize_results_partial_confirmation_not_marked_confirmed(tmp_path):
     # Confirm species on only some photos of the first encounter — the other
     # photos in the same encounter remain unconfirmed.
     kid = db.add_keyword("Robin", is_species=True)
+    db.commit()
     for pid in ids[0][:1]:  # tag only the first photo
         db.tag_photo(pid, kid)
+        db.commit()
 
     photos = load_photo_features(db)
     results = run_full_pipeline(photos)
@@ -2180,6 +2195,7 @@ def test_serialize_results_mixed_species_not_marked_confirmed(tmp_path):
     db.tag_photo(ids[0][0], robin_kid)
     db.tag_photo(ids[0][1], robin_kid)
     db.tag_photo(ids[0][2], eagle_kid)
+    db.commit()
 
     photos = load_photo_features(db)
     results = run_full_pipeline(photos)
@@ -2214,6 +2230,7 @@ def test_serialize_results_mixed_fallback_species_is_deterministic(tmp_path):
     db.tag_photo(ids[0][0], eagle_kid)
     db.tag_photo(ids[0][1], robin_kid)
     db.tag_photo(ids[0][2], robin_kid)
+    db.commit()
 
     photos = load_photo_features(db)
     results = run_full_pipeline(photos)
@@ -2244,6 +2261,7 @@ def test_serialize_results_mixed_fallback_species_tiebreaks_by_first_photo(tmp_p
     # at 1 each, so the earlier photo's species (Eagle) wins the tiebreak.
     db.tag_photo(ids[0][0], eagle_kid)
     db.tag_photo(ids[0][1], robin_kid)
+    db.commit()
 
     photos = load_photo_features(db)
     results = run_full_pipeline(photos)
@@ -2267,8 +2285,10 @@ def test_serialize_results_uniformly_confirmed_remains_confirmed(tmp_path):
 
     db, ids = _setup_db_with_photos(tmp_path)
     kid = db.add_keyword("Robin", is_species=True)
+    db.commit()
     for pid in ids[0]:
         db.tag_photo(pid, kid)
+        db.commit()
 
     photos = load_photo_features(db)
     results = run_full_pipeline(photos)
@@ -2293,8 +2313,10 @@ def test_serialize_results_burst_override_derived_from_photos(tmp_path):
 
     db, ids = _setup_db_with_photos(tmp_path)
     kid = db.add_keyword("Robin", is_species=True)
+    db.commit()
     for pid in ids[0]:
         db.tag_photo(pid, kid)
+        db.commit()
 
     photos = load_photo_features(db)
     results = run_full_pipeline(photos)
@@ -3695,9 +3717,11 @@ def test_serialize_results_two_species_burst_is_confirmed_with_list(tmp_path):
     db, ids = _setup_db_with_photos(tmp_path)
     teal = db.add_keyword("Green-winged Teal", is_species=True)
     wigeon = db.add_keyword("American Wigeon", is_species=True)
+    db.commit()
     for pid in ids[0]:
         db.tag_photo(pid, teal)
         db.tag_photo(pid, wigeon)
+        db.commit()
 
     photos = load_photo_features(db)
     tagged = {p["id"]: p for p in photos if p["id"] in set(ids[0])}
@@ -3734,9 +3758,12 @@ def test_serialize_results_partial_second_species_confirmed_as_shared(tmp_path):
     db, ids = _setup_db_with_photos(tmp_path)
     teal = db.add_keyword("Green-winged Teal", is_species=True)
     wigeon = db.add_keyword("American Wigeon", is_species=True)
+    db.commit()
     for pid in ids[0]:
         db.tag_photo(pid, teal)
+        db.commit()
     db.tag_photo(ids[0][0], wigeon)
+    db.commit()
 
     serialized = serialize_results(run_full_pipeline(load_photo_features(db)))
     burst_ids = set(ids[0])
@@ -3764,9 +3791,12 @@ def test_serialize_results_mixed_encounter_baseline_is_shared_species(tmp_path):
     db, ids = _setup_db_with_photos(tmp_path)
     teal = db.add_keyword("Green-winged Teal", is_species=True)
     wigeon = db.add_keyword("American Wigeon", is_species=True)
+    db.commit()
     for pid in ids[0]:
         db.tag_photo(pid, teal)
+        db.commit()
     db.tag_photo(ids[0][0], wigeon)
+    db.commit()
 
     serialized = serialize_results(run_full_pipeline(load_photo_features(db)))
     burst_ids = set(ids[0])
@@ -3795,8 +3825,10 @@ def test_serialize_results_preserves_explicit_empty_burst_after_regroup(tmp_path
     # Photos in encounter 0 are untagged (the "explicitly cleared" burst);
     # encounter 1's photos are tagged as Teal so regrouping is unaffected.
     teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.commit()
     for pid in ids[1]:
         db.tag_photo(pid, teal)
+        db.commit()
 
     # Prior cache marks encounter-0's photos as explicit-empty.
     prior = {
@@ -3853,11 +3885,14 @@ def test_serialize_results_disjoint_tagged_burst_gets_empty_override(tmp_path):
     db, ids = _setup_db_with_photos(tmp_path)
     gadwall = db.add_keyword("Gadwall", is_species=True)
     wigeon = db.add_keyword("American Wigeon", is_species=True)
+    db.commit()
     burst = ids[0]
     assert len(burst) >= 2
     db.tag_photo(burst[0], gadwall)
+    db.commit()
     for pid in burst[1:]:
         db.tag_photo(pid, wigeon)
+        db.commit()
 
     serialized = serialize_results(run_full_pipeline(load_photo_features(db)))
     burst_ids = set(burst)

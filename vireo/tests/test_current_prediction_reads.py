@@ -104,6 +104,7 @@ def test_highlight_eligibility_tracks_ranking_but_keeps_saved_choices_and_keywor
     # A user's accepted keyword remains eligible even when all detector evidence is hidden.
     keyword = db.add_keyword("Current", is_species=True)
     db.tag_photo(pid, keyword, source="manual")
+    db.commit()
     assert db.species_curation.get_highlights(eligible_only=True) == {"Current": {pid: 1}}
 
 

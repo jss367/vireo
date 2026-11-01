@@ -1026,6 +1026,7 @@ def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_s
 
     perch_kid = db.add_keyword("Perched portrait")
     db.tag_photo(data["photos"][1], perch_kid)
+    db.commit()
     db.conn.commit()
 
     _goto_highlights(page, live_server["url"])

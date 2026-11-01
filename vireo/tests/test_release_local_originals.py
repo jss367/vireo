@@ -44,6 +44,7 @@ def test_release_preserves_sources_metadata_and_generated_assets(client_with_pho
     db.commit()
     keyword = db.add_keyword("Hawk")
     db.tag_photo(pid, keyword)
+    db.commit()
     before = dict(db.photos.get(pid))
     thumb = Path(app.config["THUMB_CACHE_DIR"]) / f"{pid}.jpg"
     thumb.write_bytes(b"keep thumbnail")

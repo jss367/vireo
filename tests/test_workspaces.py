@@ -813,6 +813,7 @@ def test_count_keywords_scoped_by_workspace(db):
     k2 = db.add_keyword("Jay")
     db.tag_photo(pid_a, k1)
     db.tag_photo(pid_a, k2)
+    db.commit()
 
     # Workspace B with a different folder and photo
     ws_b = db.create_workspace("B")
@@ -822,6 +823,7 @@ def test_count_keywords_scoped_by_workspace(db):
                          file_size=100, file_mtime=1.0)
     k3 = db.add_keyword("Hawk")
     db.tag_photo(pid_b, k3)
+    db.commit()
 
     db.set_active_workspace(ws_a)
     assert db.keywords.count() == 2
@@ -834,6 +836,7 @@ def test_count_keywords_empty_workspace(db):
     """A workspace with no photos returns 0 keywords."""
     ws = db.create_workspace("Empty")
     db.add_keyword("Robin")  # global keyword, no photos in this workspace
+    db.commit()
     db.set_active_workspace(ws)
     assert db.keywords.count() == 0
 
@@ -847,6 +850,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
     k1 = db.add_keyword("Robin")
     db.tag_photo(pid_a, k1)
+    db.commit()
 
     ws_b = db.create_workspace("B")
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
@@ -855,6 +859,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
     k2 = db.add_keyword("Hawk")
     db.tag_photo(pid_b, k2)
+    db.commit()
 
     db.set_active_workspace(ws_a)
     stats = dashboard_stats.get_dashboard_stats(db)
@@ -880,6 +885,7 @@ def test_keyword_tree_scoped_by_workspace(db):
     k2 = db.add_keyword("Jay")
     db.tag_photo(pid_a, k1)
     db.tag_photo(pid_a, k2)
+    db.commit()
 
     ws_b = db.create_workspace("B")
     fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
@@ -888,6 +894,7 @@ def test_keyword_tree_scoped_by_workspace(db):
                          file_size=100, file_mtime=1.0)
     k3 = db.add_keyword("Hawk")
     db.tag_photo(pid_b, k3)
+    db.commit()
 
     db.set_active_workspace(ws_a)
     tree = db.keyword_tree.get_tree()
@@ -908,6 +915,7 @@ def test_keyword_tree_empty_workspace(db):
     """Empty workspace returns no keywords even if keywords exist globally."""
     ws = db.create_workspace("Empty")
     db.add_keyword("Robin")
+    db.commit()
     db.set_active_workspace(ws)
     tree = db.keyword_tree.get_tree()
     assert len(tree) == 0
@@ -996,10 +1004,12 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
     # Tag Sparrow/sparrow on photos in workspace B
     db.tag_photo(pid_b, k_sparrow)
     db.tag_photo(pid_b, k_sparrow_lc)
+    db.commit()
 
     # Merge in workspace A — should only merge Cardinal pair
     db.set_active_workspace(ws_a)
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
     assert merged == 1  # only Cardinal/cardinal
 
     # Sparrow/sparrow should still exist as two separate keywords
@@ -1012,6 +1022,7 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
 def test_add_keyword_normalizes_stray_edge_quotes(db):
     """New keywords should not preserve accidental leading/trailing quote marks."""
     keyword_id = db.add_keyword("\u2018apapane'")
+    db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
@@ -1025,6 +1036,7 @@ def test_add_keyword_preserves_leading_okina(db):
     species names like \u02bbApapane and must not be stripped."""
     for name in ("\u02bbApapane", "\u02bcHawai\u02bbi", "\u02bbI\u02bbiwi"):
         keyword_id = db.add_keyword(name)
+        db.commit()
         row = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
@@ -1039,6 +1051,7 @@ def test_add_keyword_normalizes_acute_accent_edge_variant(db):
     stranded leading combining acute (`́apapane`) that survives the
     post-NFKC strip and creates a nearly-invisible distinct keyword."""
     kid = db.add_keyword("´apapane")
+    db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (kid,)
@@ -1054,6 +1067,7 @@ def test_add_keyword_normalizes_acute_accent_with_leading_whitespace(db):
     NFKC decomposes it to a leading combining mark U+0301 that survives
     the later strip and produces a nearly-invisible variant."""
     kid = db.add_keyword(" ´apapane")
+    db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (kid,)
@@ -1074,6 +1088,7 @@ def test_add_keyword_folds_internal_typographic_apostrophe(db):
     keyword_match_key in lockstep with the SQL dedupe.
     """
     kid = db.add_keyword("Say's phoebe", is_species=True)
+    db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (kid,)
@@ -1089,6 +1104,7 @@ def test_add_keyword_folds_internal_typographic_apostrophe(db):
 def test_add_keyword_folds_curly_apostrophe_when_curly_arrives_first(db):
     """Fold direction must not depend on insertion order."""
     kid = db.add_keyword("Cassin\u2019s kingbird", is_species=True)
+    db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (kid,)
@@ -1104,6 +1120,7 @@ def test_add_keyword_preserves_okina_against_apostrophe_folding(db):
     for name in ("Hawai\u02bbi \u02bbamakihi", "\u02bbI\u02bbiwi",
                  "Lili\u02bbuokalani Gardens", "Hawai\u02bci"):
         kid = db.add_keyword(name)
+        db.commit()
         row = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (kid,)
         ).fetchone()
@@ -1115,6 +1132,7 @@ def test_add_keyword_preserves_okina_against_apostrophe_folding(db):
 def test_add_keyword_preserves_internal_acute_accent(db):
     """U+00B4 should be stripped only at the edges, not inside a keyword."""
     keyword_id = db.add_keyword("O\u00b4Brien")
+    db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
@@ -1128,6 +1146,7 @@ def test_add_keyword_preserves_private_use_area_character(db):
     for U+00B4 protection, which meant a lone U+E000 in the input round-tripped
     as U+00B4 (data corruption)."""
     keyword_id = db.add_keyword("a\ue000b")
+    db.commit()
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
     ).fetchone()
@@ -1136,6 +1155,7 @@ def test_add_keyword_preserves_private_use_area_character(db):
     # A lone U+E000 keyword should also survive intact (no accidental
     # substitution to U+00B4 by the sentinel round-trip).
     keyword_id = db.add_keyword("\ue000")
+    db.commit()
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
     ).fetchone()
@@ -1168,6 +1188,7 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     ).fetchone()[0]
     db.tag_photo(pid_a, quoted)
     db.tag_photo(pid_b, clean)
+    db.commit()
 
     # Queue an unsynced keyword_add under the legacy spelling. Simulates a
     # tag applied before this normalization pass landed.
@@ -1182,6 +1203,7 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     db.commit()
 
     db.keyword_tree.merge_duplicates()
+    db.commit()
 
     add_values = sorted(
         (row["photo_id"], row["value"]) for row in db.conn.execute(
@@ -1198,6 +1220,7 @@ def test_add_keyword_rejects_name_that_normalizes_to_empty(db):
     for empty in ("'", '"', "\u2018", "\u201c\u201d", "'\"'"):
         try:
             db.add_keyword(empty)
+            db.commit()
         except ValueError:
             pass
         else:
@@ -1235,6 +1258,7 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     db.tag_photo(pid_b, clean)
 
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
 
     assert merged == 1
     rows = db.conn.execute(
@@ -1282,6 +1306,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     ).fetchone()[0]
     db.tag_photo(pid_a, quoted)
     db.tag_photo(pid_b, ascii_variant)
+    db.commit()
 
     # Seed curation under the legacy spelling on both variants: a
     # highlight rank, a life-list preference, and a global representative
@@ -1311,6 +1336,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     db.conn.commit()
 
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
 
     assert merged == 1
     # Surviving keyword row was canonicalized to the clean spelling.
@@ -1383,6 +1409,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     ).fetchone()[0]
     db.tag_photo(pid_survivor, survivor_id)
     db.tag_photo(pid_legacy, legacy_id)
+    db.commit()
 
     # Curation keyed on the legacy source spelling for the photo tagged with
     # the legacy row. After the merge the tag moves to ``survivor_id`` /
@@ -1413,6 +1440,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     db.conn.commit()
 
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
 
     assert merged == 1
     # Survivor keeps its clean name; the legacy source row was deleted.
@@ -1494,6 +1522,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     ).fetchone()[0]
     db.tag_photo(pid_a, a_quoted)
     db.tag_photo(pid_a, a_ascii)
+    db.commit()
 
     # A SEPARATE legacy keyword row that is only tagged in workspace B. Cleanup
     # in A must not touch it -- keywords are global but B's photo is not
@@ -1507,6 +1536,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     ).fetchone()[0]
     assert b_quoted not in (a_quoted, a_ascii)
     db.tag_photo(pid_b, b_quoted)
+    db.commit()
 
     # Seed curation in BOTH workspaces under the legacy spelling and a
     # pending keyword_add in each workspace.
@@ -1550,6 +1580,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     db.conn.commit()
 
     db.keyword_tree.merge_duplicates()
+    db.commit()
 
     # Workspace A's curation and pending change should be canonicalized.
     a_hl = db.conn.execute(
@@ -1608,11 +1639,13 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
 
     masse_id = db.add_keyword("Masse")
     masze_id = db.add_keyword("Maße")
+    db.commit()
     assert masse_id != masze_id
     db.tag_photo(pid_a, masse_id)
     db.tag_photo(pid_b, masze_id)
 
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
 
     assert merged == 0
     remaining = {
@@ -1653,11 +1686,13 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
 
     upper_id = db.add_keyword("Éclair")
     lower_id = db.add_keyword("éclair")
+    db.commit()
     assert upper_id != lower_id
     db.tag_photo(pid_a, upper_id)
     db.tag_photo(pid_b, lower_id)
 
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
 
     assert merged == 0
     remaining = {
@@ -1706,8 +1741,10 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
         "SELECT id FROM keywords WHERE name IN ('Springfield', 'Macro', 'macro')"
     ).fetchall():
         db.tag_photo(pid, row[0])
+        db.commit()
 
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
     assert merged == 0
 
     assert db.conn.execute(
@@ -1746,6 +1783,7 @@ def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
     db.conn.commit()
     db.tag_photo(pid_species, species_id)
     db.tag_photo(pid_plain, plain_id)
+    db.commit()
 
     assert db.keyword_tree.merge_duplicates() == 0
     rows = db.conn.execute(
@@ -1790,8 +1828,10 @@ def test_merge_duplicate_keywords_reparents_children(db):
         "SELECT id FROM keywords WHERE LOWER(name) = 'heron'"
     ).fetchall():
         db.tag_photo(pid, row[0])
+        db.commit()
 
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
     assert merged == 2  # Birds/birds, then Heron/heron once same-parent
 
     birds = db.conn.execute(
@@ -1840,6 +1880,7 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
     db.tag_photo(pid2, h2)
 
     merged = db.keyword_tree.merge_duplicates()
+    db.commit()
     assert merged == 2  # birds into Birds, then its Heron into Birds' Heron
 
     herons = db.conn.execute(
@@ -1887,6 +1928,7 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
         "SELECT id FROM keywords WHERE LOWER(name) = 'heron'"
     ).fetchall():
         db.tag_photo(pid, row[0])
+        db.commit()
 
     # Keep every child in the same species-bearing slot; this test exercises
     # stale recursive groups, not the distinct species/plain homonym boundary.
@@ -1902,6 +1944,7 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
 
     # Must not raise; converges to one Birds with one Heron child.
     db.keyword_tree.merge_duplicates()
+    db.commit()
 
     birds = db.conn.execute(
         "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
@@ -1964,6 +2007,7 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     db.tag_photo(pid_genre, m_genre)
 
     db.keyword_tree.merge_duplicates()
+    db.commit()
 
     # Birds/birds collapsed to one parent.
     birds = db.conn.execute(
@@ -2030,6 +2074,7 @@ def test_keyword_tree_includes_ancestors(db):
 
     # Only tag the leaf (mimics scanner behavior)
     db.tag_photo(pid, hawk)
+    db.commit()
 
     db.set_active_workspace(ws)
     tree = db.keyword_tree.get_tree()

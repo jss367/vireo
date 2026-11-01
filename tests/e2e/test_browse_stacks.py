@@ -482,6 +482,7 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     # A general keyword narrows the view to one member without splitting the
     # stack: only species and location keywords are part of a burst's identity.
     db.tag_photo(burst_ids[0], db.add_keyword("Portfolio", kw_type="general"))
+    db.commit()
     with db.conn:
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",

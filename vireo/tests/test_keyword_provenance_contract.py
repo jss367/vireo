@@ -431,6 +431,7 @@ def test_unstamped_tag_photo_is_recorded_as_manual(prov_db):
     kid = prov_db.add_keyword("Wildlife", kw_type="genre")
 
     prov_db.tag_photo(pid, kid)
+    prov_db.commit()
 
     row = prov_db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
@@ -451,6 +452,7 @@ def test_sidecar_import_leaves_provenance_unknown(prov_db):
     kid = prov_db.add_keyword("Wildlife", kw_type="genre")
 
     prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_UNKNOWN)
+    prov_db.commit()
 
     row = prov_db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
@@ -482,6 +484,7 @@ def test_duplicate_merge_carries_manual_provenance_to_the_winner(prov_db):
     prov_db.tag_photo(loser, scanned, source=KEYWORD_SOURCE_UNKNOWN)
     prov_db.tag_photo(loser, shared)
     prov_db.tag_photo(loser, owned, source=KEYWORD_SOURCE_UNKNOWN)
+    prov_db.commit()
 
     prov_db._apply_winner_loser_merge(winner, [loser])
 
@@ -540,6 +543,7 @@ def test_keyword_merge_folds_provenance_on_overlapping_photos(prov_db):
     prov_db.tag_photo(strong_dst, src, source=KEYWORD_SOURCE_ACCEPT)
     prov_db.tag_photo(mid_dst, dst, source=KEYWORD_SOURCE_UNKNOWN)
     prov_db.tag_photo(mid_dst, src, source=KEYWORD_SOURCE_ACCEPT)
+    prov_db.commit()
 
     prov_db._merge_keyword_into(src, dst)
 
@@ -572,6 +576,7 @@ def test_tag_photo_never_moves_provenance_down_the_lattice(prov_db):
 
     fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
     kid = prov_db.add_keyword("Wildlife", kw_type="genre")
+    prov_db.commit()
 
     def _stamp(first, second):
         pid = photo_ingest.add_photo(
@@ -580,6 +585,7 @@ def test_tag_photo_never_moves_provenance_down_the_lattice(prov_db):
         )
         prov_db.tag_photo(pid, kid, source=first)
         prov_db.tag_photo(pid, kid, source=second)
+        prov_db.commit()
         return prov_db.conn.execute(
             "SELECT source FROM photo_keywords "
             "WHERE photo_id = ? AND keyword_id = ?",
@@ -602,6 +608,7 @@ def test_setting_a_photo_location_records_manual_provenance(prov_db):
         file_size=10, file_mtime=1.0,
     )
     leaf = prov_db.add_keyword("Yosemite", kw_type="location")
+    prov_db.commit()
 
     prov_db.set_photo_location(pid, leaf)
 
@@ -625,6 +632,7 @@ def test_manual_stamp_survives_a_later_neutral_retag(prov_db):
 
     prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_MANUAL)
     prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_UNKNOWN)
+    prov_db.commit()
 
     row = prov_db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
