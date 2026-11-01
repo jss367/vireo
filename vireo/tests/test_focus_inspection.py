@@ -2,7 +2,7 @@
 import io
 
 import pytest
-from focus_crop import focus_point, valid_subject_box, validate_raster_geometry
+from focus_crop import focus_evidence_headers, focus_point, valid_subject_box, validate_raster_geometry
 from PIL import Image
 from services import workspace_folders
 from test_burst_evidence import _working_copy
@@ -106,6 +106,26 @@ def test_overlapping_boxes_do_not_authorize_unbound_legacy_eye(app_and_db):
     response = client.get(f'/photos/{pid}/focus-crop')
     assert response.status_code == 200
     assert response.headers['X-Vireo-Focus-Basis'] == 'subject'
+    assert response.headers['X-Vireo-Focus-Eye-Status'] == 'unbound'
+    assert response.headers['X-Vireo-Focus-Subject-Box'] == '0.1,0.1,0.6,0.6'
+    assert response.headers['X-Vireo-Focus-Detection-Id']
+
+
+@pytest.mark.parametrize('status', ['disabled', 'model_unavailable', 'identity_unavailable', 'not_located'])
+def test_focus_evidence_reports_missing_eye_reason_and_exact_subject(status):
+    box = dict(id=42, detector_confidence=.052, category='animal', detector_model='test',
+               box_x=.1, box_y=.1, box_w=.2, box_h=.2)
+    photo = dict(eye_x=None, eye_y=None, eye_tenengrad=None, eye_status=status)
+    headers = focus_evidence_headers(photo, [box], bound=True)
+    assert headers['X-Vireo-Focus-Eye-Status'] == status
+    assert headers['X-Vireo-Focus-Detection-Id'] == '42'
+    assert headers['X-Vireo-Focus-Detection-Confidence'] == '0.052'
+    photo.update(eye_x=.2, eye_y=.2, eye_tenengrad=50, eye_status='measured')
+    assert focus_evidence_headers(photo, [box], bound=True)['X-Vireo-Focus-Eye-Status'] == 'located'
+    # A legacy eye or a sibling's eye cannot authorize an automatic head view.
+    assert focus_evidence_headers(photo, [box])['X-Vireo-Focus-Eye-Status'] == 'unbound'
+    photo.update(eye_x=.8, eye_y=.8)
+    assert focus_evidence_headers(photo, [box], bound=True)['X-Vireo-Focus-Eye-Status'] == 'not_located'
 
 
 def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_db, monkeypatch):
@@ -125,6 +145,36 @@ def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_d
     response = app.test_client().get(f'/photos/{pid}/focus-crop')
     assert response.status_code == 404
     assert 'changed while decoding' in response.get_json()['error']
+
+
+def test_native_body_window_can_omit_head_and_manual_head_view_preserves_photo(app_and_db):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    path = _working_copy(app, db, pid, size=(2400, 1600))
+    image = Image.new('RGB', (2400, 1600), 'blue')
+    image.paste('red', (350, 250, 550, 450))  # Head is far from the body box center.
+    image.save(path, quality=95)
+    db.detections.save(pid, [
+        {'box': {'x': .1, 'y': .1, 'w': .6, 'h': .8}, 'confidence': .9, 'category': 'animal'},
+        {'box': {'x': .8, 'y': .3, 'w': .1, 'h': .2}, 'confidence': .7, 'category': 'animal'},
+    ], detector_model='test')
+    db.commit()
+    before = dict(db.photos.get(pid))
+    client = app.test_client()
+    body = client.get(f'/photos/{pid}/focus-crop?size=512&source=working')
+    assert body.status_code == 200
+    assert body.headers['X-Vireo-Focus-Basis'] == 'subject'
+    assert body.headers['X-Vireo-Focus-Eye-Status'] == 'unbound'
+    head = client.get(f'/photos/{pid}/focus-crop?size=512&source=working&center=.1875,.21875')
+    assert head.status_code == 200
+    for response, expected in ((body, 'blue'), (head, 'red')):
+        crop = Image.open(io.BytesIO(response.data))
+        assert crop.size == (512, 512)
+        red, _, blue = crop.getpixel((256, 256))
+        assert (red > 200 and blue < 40) if expected == 'red' else (blue > 200 and red < 40)
+    after = dict(db.photos.get(pid))
+    assert (after['flag'], after['rating']) == (before['flag'], before['rating'])
+    assert db.subjects.choice(pid) is None
 
 
 @pytest.mark.parametrize('basis', ['frame', 'Frame', ' frame ', ' FRAME '])

@@ -23,6 +23,7 @@ function renderReviewQueue() {
     reviewQueue.current = null;
     ++reviewQueue.sequence;
     rqClearCrop();
+    rqElement('rqSubjectBox').hidden = true;
     /** @type {HTMLImageElement} */ (rqElement('rqFull')).removeAttribute('src');
     rqElement('rqFilename').textContent = 'No photos in this inspection queue.';
     rqElement('rqFlag').textContent = '';
@@ -57,6 +58,7 @@ async function rqOpenPhoto(photo) {
   var sequence = ++reviewQueue.sequence;
   reviewQueue.current = null;
   reviewQueue.subjects = [];
+  rqElement('rqSubjectBox').hidden = true;
   rqClearCrop();
   rqSave();
   rqElement('rqFilename').textContent = photo.filename;
@@ -164,7 +166,7 @@ function bindReviewQueue() {
   rqElement('rqManual').addEventListener('click', function() {
     reviewQueue.manual = !reviewQueue.manual;
     rqElement('rqManual').setAttribute('aria-pressed', String(reviewQueue.manual));
-    rqElement('rqFullStatus').textContent = reviewQueue.manual ? 'Click the eye or animal in the full frame to center the native crop.' : 'Manual center placement off.';
+    rqElement('rqFullStatus').textContent = reviewQueue.manual ? 'Click the intended animal’s head or eye in the full frame for a head-centered native crop.' : 'Manual center placement off.';
   });
   rqElement('rqResetCenter').addEventListener('click', function() {
     if (!reviewQueue.current) return;

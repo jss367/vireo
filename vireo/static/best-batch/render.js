@@ -67,14 +67,15 @@ export function inspectPhoto(photoId) {
 
 /** @param {BestBatchCard} card */
 function focusCardHtml(card) {
-  var hasEye = Boolean(card.subject && card.focus_crop_url && hasEyeKeypoint(card));
+  var hasEye = Boolean(card.subject && card.focus_crop_url && card.eye_status === 'measured' && hasEyeKeypoint(card));
   return '<div class="focus-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
     '<div class="focus-crop native">' +
       '<img src="' + escapeAttr(card.focus_crop_url || card.crop_url || previewUrl(card.id, 1920)) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
-      (hasEye ? '<span class="crosshair"></span>' : '') +
     '</div>' +
     '<div class="focus-meta">' +
-      '<div class="score">' + (card.focus_crop_url ? 'Native source window' : 'Context preview · inspect focus below') + '</div>' +
+      '<div class="score">' + (card.focus_crop_url ? (hasEye ? 'Eye-centered window' :
+        'Subject/frame center · head may be outside crop') : 'Context preview · inspect focus below') + '</div>' +
+      (!hasEye ? '<div class="score">No verified eye evidence in this crop</div>' : '') +
       '<div class="role ' + escapeAttr(card.role || '') + '">' + escapeHtml(rankLabel(card)) + '</div>' +
       '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
       '<div class="score">' + escapeHtml(scoreText(card)) + '</div>' +
@@ -116,7 +117,7 @@ export function renderBatch(data) {
   byId('bestSubtitle').textContent =
     data.count + ' photos' + (data.comparison ? ' · Comparing ' + (data.comparison.requested_species || 'chosen subjects') + ' · ' + cards.filter(function(c) { return c.rank != null; }).length + ' ranked' : '') + (data.sequence_range ? ' · #' + data.sequence_range[0] + '-' + data.sequence_range[1] : '');
 
-  byId('focusNote').textContent = (data.keep_review_message ? data.keep_review_message + ' ' : '') + 'Verify the model box in the full frame. Use manual placement when the suggested subject is wrong; source and scale are shown in the inspection panel.';
+  byId('focusNote').textContent = (data.keep_review_message ? data.keep_review_message + ' ' : '') + 'Default crops can show the body, background, or another animal. Verify the model box in the full frame and use Inspect head / eye. Do not reject a whole photo from its default crop alone.';
 
   byId('focusGrid').classList.toggle('comparison', !!data.comparison);
   byId('focusGrid').innerHTML = cards.map(focusCardHtml).join('');

@@ -210,6 +210,8 @@ def test_selected_mask_focus_and_measurements_share_generation(comparison_librar
     assert focus.status_code == 200
     assert focus.headers["X-Vireo-Detection-Id"] == str(ids[card["id"]][0])
     assert focus.headers["X-Vireo-Focus-Basis"] == "subject"
+    assert focus.headers["X-Vireo-Focus-Detection-Id"] == str(ids[card["id"]][0])
+    assert focus.headers["X-Vireo-Focus-Eye-Status"] == "disabled"
     # Foreign detection ids and a different generation cannot borrow the primary mask.
     assert client.get(card["mask_url"].replace(card["subject"]["analysis_key"], "wrong")).status_code == 404
     assert client.get(card["focus_crop_url"].replace(f"detection_id={ids[card['id']][0]}", f"detection_id={ids[pids[0]][1]}&unused=1")).status_code == 404
@@ -523,6 +525,7 @@ def test_focus_eye_uses_detection_generation_and_rejects_changed_identity(compar
     response = app.test_client().get(url)
     assert response.status_code == 200
     assert response.headers['X-Vireo-Focus-Basis'] == 'eye'
+    assert response.headers['X-Vireo-Focus-Eye-Status'] == 'located'
     assert response.headers['X-Vireo-Focus-Center'] == '0.2000,0.5000'
     prediction = db.conn.execute('SELECT id FROM predictions WHERE detection_id=?', (ids[card['id']][0],)).fetchone()
     db.update_prediction_status(prediction['id'], 'rejected')

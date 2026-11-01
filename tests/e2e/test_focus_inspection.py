@@ -37,7 +37,9 @@ def test_manual_focus_center_and_subject_inspection_preserve_decisions(page, liv
     expect(page.locator('#inspectImg')).to_have_attribute('src', f'/photos/{pids[0]}/preview?size=1920&view=source')
     page.wait_for_function('document.getElementById("inspectImg").naturalWidth > 0')
     expect(page.locator('#focusRasterStatus')).to_contain_text('Selected subject evidence is unavailable')
-    page.locator('#manualFocusBtn').click()
+    page.locator('#headFocusBtn').click()
+    expect(page.locator('#focusSelectionStatus')).to_contain_text('head-centered view')
+    expect(page.locator('#focusEvidenceStatus')).to_contain_text('before rejecting the photo')
     bounds = page.locator('#inspectImg').bounding_box()
     assert abs(bounds['width'] / bounds['height'] - image_size[0] / image_size[1]) < .01
     page.locator('#inspectImg').click(position={'x': bounds['width'] * .75, 'y': bounds['height'] * .25})
@@ -46,6 +48,7 @@ def test_manual_focus_center_and_subject_inspection_preserve_decisions(page, liv
     x, y = map(float, center_text.split(', '))
     assert abs(x - .75) < .005 and abs(y - .25) < .005
     expect(page.locator('#focusRasterStatus')).to_contain_text('Basis: point')
+    expect(page.locator('#focusEvidenceStatus')).to_contain_text('Manual inspection center')
     expect(page.locator('#focusRasterStatus')).to_contain_text('source: original')
     expect(page.locator('#focusRasterStatus')).to_contain_text(f'raster: {image_size[0]},{image_size[1]}')
     expect(page.locator('#focusCenter')).to_be_visible()
@@ -71,6 +74,7 @@ def test_manual_focus_center_and_subject_inspection_preserve_decisions(page, liv
     bounds = page.locator('#inspectImg').bounding_box()
     page.locator('#inspectImg').click(position={'x': bounds['width'] * .75, 'y': bounds['height'] * .25})
     expect(page.locator('#focusRasterStatus')).to_contain_text('Basis: point')
+    expect(page.locator('#focusSubjectBox')).to_be_visible()
     for pid in pids:
         after = dict(db.photos.get(pid))
         assert after['flag'] == before[pid][0]['flag']
