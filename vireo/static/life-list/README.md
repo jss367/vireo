@@ -63,7 +63,8 @@ Keep these request-ordering rules intact when changing this code:
   dropped, not rendered.
 - `loadMoreLifeListPhotos()` keeps one in-flight page per taxon (or unlinked name) in
   `state.lifeListLoadPromises`. Cards and paging requests carry `taxon_id` so
-  distinct taxa sharing a name stay separate. The lightbox prefetch and the navigation-boundary
+  distinct taxa sharing a name stay separate; `taxon_id=none` explicitly pages
+  the unlinked entry, while omitting the parameter keeps legacy name-only loads. The lightbox prefetch and the navigation-boundary
   listener share that promise, and the boundary only advances if
   `vireoLightboxSession.requestedPhotoId()` is still the photo it started from.
 - `refreshPublishPreflight()` owns `state.publishPreflightSequence`. Any settings

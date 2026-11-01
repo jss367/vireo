@@ -467,3 +467,43 @@ def test_life_list_merges_aliases_and_opens_same_named_taxa_independently(live_s
     page.wait_for_function(
         "pid => vireoLightboxSession.requestedPhotoId() === pid", arg=photos[2],
     )
+
+
+def test_unlinked_life_list_card_pages_its_own_same_named_photos(live_server, page):
+    db = live_server["db"]
+    linked = db.add_keyword("Shared Bird", is_species=True)
+    unlinked = db.add_keyword(
+        "Shared Bird", parent_id=db.add_keyword("Unlinked hierarchy"), is_species=True,
+    )
+    taxon = db.conn.execute(
+        "INSERT INTO taxa (name, rank) VALUES ('Linkedus bird', 'species')",
+    ).lastrowid
+    db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, linked))
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (unlinked,))
+    expected = []
+    for keyword, year in ((linked, 2024), (unlinked, 2025)):
+        for i in range(102):
+            photo = photo_ingest.add_photo(
+                db, folder_id=live_server["data"]["folders"][0],
+                filename=f"same-name-{keyword}-{i}.jpg", extension=".jpg",
+                file_size=1000, file_mtime=1000.0 + keyword * 200 + i,
+                timestamp=f"{year}-01-01T08:{i // 60:02d}:{i % 60:02d}",
+            )
+            db.tag_photo(photo, keyword)
+            if keyword == unlinked:
+                expected.append(photo)
+    db.commit()
+    page.goto(f"{live_server['url']}/life-list")
+    card = page.locator('.species-card[data-species="Shared Bird"][data-taxon-id=""]')
+    expect(card).to_have_count(1)
+    with page.expect_response(lambda response: "/api/life-list/species?" in response.url) as response:
+        card.locator(".lifelist-load-more").click()
+    assert "taxon_id=none" in response.value.url
+    assert response.value.json()["photo_count"] == 102
+    page.wait_for_function("""() => lifeListState.currentData.species.some(
+        entry => entry.species === 'Shared Bird' && entry.taxon_id === null
+            && entry.photos.length === 102 && !entry.has_more)""")
+    loaded = page.evaluate("""() => lifeListState.currentData.species.find(
+        entry => entry.species === 'Shared Bird' && entry.taxon_id === null
+    ).photos.map(photo => photo.id)""")
+    assert set(loaded) == set(expected)

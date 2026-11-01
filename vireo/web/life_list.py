@@ -306,6 +306,15 @@ def create_life_list_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprin
         species = (request.args.get("species") or "").strip()
         if not species:
             return json_error("species required")
+        # Omission preserves legacy name-only loads; "none" selects the
+        # unlinked identity rather than a linked homonym with the same name.
+        taxon_arg = request.args.get("taxon_id")
+        taxon_id = None
+        if taxon_arg not in (None, "none"):
+            try:
+                taxon_id = int(taxon_arg)
+            except ValueError:
+                return json_error("taxon_id must be an integer or 'none'")
         offset = max(0, request.args.get("offset", 0, type=int))
         limit = max(1, min(request.args.get("limit", 100, type=int), 500))
         payload = build_life_list_payload(
@@ -313,7 +322,8 @@ def create_life_list_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprin
             photos_per_species=limit,
             photo_offset=offset,
             species_filter=species,
-            taxon_id=request.args.get("taxon_id", type=int),
+            taxon_id=taxon_id,
+            unlinked_only=taxon_arg == "none",
         )
         if not payload["species"]:
             return json_error("species not found", 404)

@@ -77,8 +77,8 @@ export const LIFE_LIST_PAGE_SIZE = 100;
     species: entry.species,
     offset: String((entry.photos || []).length),
     limit: String(LIFE_LIST_PAGE_SIZE),
+    taxon_id: String(entry.taxon_id ?? 'none'),
   });
-  if (entry.taxon_id != null) params.set('taxon_id', String(entry.taxon_id));
   /** @type {Promise<{photos?:LifePhoto[];loaded_count?:number;has_more?:boolean}>} */ var request = safeFetch('/api/life-list/species?' + params.toString());
   var promise = request.then(function(data) {
       var seen = new Set((entry.photos || []).map(function(photo) { return photo.id; }));

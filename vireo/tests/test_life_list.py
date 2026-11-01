@@ -1725,3 +1725,58 @@ def test_life_list_pages_same_named_taxa_by_identity(life_app):
         page = response.get_json()
         assert page["photo_count"] == 1
         assert [item["id"] for item in page["photos"]] == [photo]
+
+
+
+def test_life_list_pages_unlinked_homonym_without_appending_linked_photos(life_app):
+    """The linked bucket sorts first, but offset 100 stays in the unlinked one."""
+    app, db, ids = life_app
+    linked = db.add_keyword("Shared Bird", parent_id=db.add_keyword("Linked parent"), is_species=True)
+    unlinked = db.add_keyword("Shared Bird", parent_id=db.add_keyword("Unlinked parent"), is_species=True)
+    taxon = db.conn.execute(
+        "INSERT INTO taxa (name, rank) VALUES ('Linkedus bird', 'species')",
+    ).lastrowid
+    db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, linked))
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (unlinked,))
+    expected = {}
+    for keyword, count, year in ((linked, 103, 2024), (unlinked, 102, 2025)):
+        expected[keyword] = set()
+        for i in range(count):
+            photo = photo_ingest.add_photo(
+                db, folder_id=ids["folder"], filename=f"identity-{keyword}-{i}.jpg", extension=".jpg",
+                file_size=1000, file_mtime=1000.0 + keyword * 200 + i,
+                timestamp=f"{year}-01-01T08:{i // 60:02d}:{i % 60:02d}",
+            )
+            db.tag_photo(photo, keyword)
+            expected[keyword].add(photo)
+    entries = [entry for entry in _get_life_list(app)["species"] if entry["species"] == "Shared Bird"]
+    assert [entry["taxon_id"] for entry in entries] == [taxon, None]
+    client = app.test_client()
+    for discriminator, keyword in (("none", unlinked), (str(taxon), linked)):
+        response = client.get("/api/life-list/species", query_string={
+            "species": "Shared Bird", "taxon_id": discriminator, "offset": 100,
+        })
+        assert response.status_code == 200
+        page = response.get_json()
+        assert page["photo_count"] == len(expected[keyword])
+        assert page["loaded_count"] == len(expected[keyword])
+        assert page["has_more"] is False
+        first_page = next(entry for entry in entries if entry["taxon_id"] == (
+            None if discriminator == "none" else taxon
+        ))
+        loaded = {photo["id"] for photo in first_page["photos"] + page["photos"]}
+        assert loaded == expected[keyword]
+        assert loaded.isdisjoint(expected[linked if keyword == unlinked else unlinked])
+    # Existing callers without an identity discriminator keep their name-only behavior.
+    legacy = client.get("/api/life-list/species", query_string={"species": "Shared Bird"})
+    assert legacy.status_code == 200
+    assert legacy.get_json()["photo_count"] == 103
+
+
+@pytest.mark.parametrize("taxon_id", ["", "invalid", "1.5"])
+def test_life_list_species_page_rejects_invalid_taxon_discriminator(life_app, taxon_id):
+    app, _, _ = life_app
+    response = app.test_client().get("/api/life-list/species", query_string={
+        "species": "Northern Cardinal", "taxon_id": taxon_id,
+    })
+    assert response.status_code == 400
