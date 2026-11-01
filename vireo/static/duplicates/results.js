@@ -384,6 +384,7 @@ export function clearResults() {
   // duplicate groups and their bulk/apply actions.
   state.lastScanResult = null;
   state.sameShotVisibleLimit = 50;
+  state.sameShotDifferingVisibleLimit = 50;
   /** @type {HTMLElement} */ (document.getElementById('sameShotResults')).innerHTML = '';
   /** @type {HTMLElement} */ (document.getElementById('results')).innerHTML = '';
   /** @type {HTMLElement} */ (document.getElementById('summary')).style.display = 'none';

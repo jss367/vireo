@@ -101,9 +101,56 @@ def test_same_shot_review_has_no_cleanup_actions_and_respects_filters(live_serve
       pageModules.results.renderResults(result);
     }""")
     expect(section.locator(".same-shot-group")).to_have_count(50)
-    expect(section).to_contain_text("Showing 50 of 51 matching groups")
+    expect(section).to_contain_text("Showing 50 of 51 likely groups")
     section.locator("[data-same-shot-more]").click()
     expect(section.locator(".same-shot-group")).to_have_count(51)
+
+
+def _add_photo(db, folder, name, file_hash, *, timestamp, exif=None, phash=None):
+    folder.mkdir(exist_ok=True)
+    fid = workspace_folders.add_folder(db, str(folder))
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg", file_size=4000,
+                                file_mtime=100.0, file_hash=file_hash, timestamp=timestamp)
+    db.conn.execute("UPDATE photos SET exif_data=?, phash=? WHERE id=?",
+                    (json.dumps(exif) if exif else None, phash, pid))
+    return pid
+
+
+def test_top_stat_leads_to_likely_copies_and_reused_counts_stay_collapsed(live_server, page, tmp_path):
+    """Exact-copy results fill the top of the page; the same-shot list sits below them."""
+    db = live_server["db"]
+    seed_same_shot_review(db, tmp_path)
+    _add_photo(db, tmp_path / "exact-a", "copy.jpg", "exact", timestamp="2024-05-01T10:00:00")
+    _add_photo(db, tmp_path / "exact-b", "copy.jpg", "exact", timestamp="2024-05-01T10:00:00")
+    reused = {"EXIF": {"Make": "Nikon", "Model": "D850", "SerialNumber": "3066996"},
+              "MakerNotes": {"ShutterCount": 27930}}
+    _add_photo(db, tmp_path / "Costa Rica", "D85_7699.jpg", "trip", timestamp="2020-01-08T05:57:43",
+               exif=reused, phash="91c7797c061f6538")
+    _add_photo(db, tmp_path / "USA", "_D850037.jpg", "home", timestamp="2020-03-07T17:19:11",
+               exif=reused, phash="84817b7d240b7b75")
+    db.commit()
+    result = run_duplicate_scan({}, db)
+    db.conn.execute("UPDATE job_history SET result=? WHERE id='same-shot-e2e'", (json.dumps(result),))
+    db.commit()
+
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(f"{live_server['url']}/duplicates")
+    stat = page.locator("#summary a.summary-stat-link")
+    expect(stat).to_contain_text("1")
+    expect(stat).to_contain_text("Same-shot to review")
+    stat.click()
+    section = page.locator("#sameShotResults")
+    expect(section).to_be_in_viewport()
+    expect(section.locator(".same-shot-group")).to_have_count(1)
+    expect(section).to_contain_text("Showing 1 of 1 likely group")
+    expect(section).to_contain_text("1 more group with a matching shutter count but different images and capture times")
+    expect(section).not_to_contain_text("Shutter count 27930")
+    section.get_by_role("button", name="Show these groups").click()
+    expect(section.locator(".same-shot-group")).to_have_count(2)
+    expect(section.locator(".same-shot-group").last).to_contain_text("Shutter count 27930")
+
+    section.locator(".same-shot-group").first.get_by_role("button", name="Keep all copies").click()
+    expect(stat.locator(".num")).to_have_text("0")
 
 
 def test_scan_discovers_camera_matches_without_an_exact_duplicate(live_server, page, tmp_path):

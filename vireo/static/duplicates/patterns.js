@@ -5,6 +5,7 @@ import { state } from './state.js';
 import { DuplicateCategories } from './categories.js';
 import { duplicateRequestError } from './cleanup.js';
 import { pruneResolvedHashesFromScan } from './resolved.js';
+import { sameShotLikelyToReview } from './same-shot.js';
 import { clearResults, renderResults } from './results.js';
 import { formatCount } from './trash-progress.js';
 import { escapeHtml, formatBytes, safeFetch, showToast } from './shared.js';
@@ -81,6 +82,10 @@ export function renderSummaryBar(result, unresolved, resolved) {
       '<div class="label">Need review</div></div>' +
     '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + extras + '</div>' +
       '<div class="label">Extras to reject</div></div>';
+  if (result.same_shot_scanned && !result.catalog_cleanup) html +=
+    '<a class="summary-stat summary-stat-link" href="#sameShotResults">' +
+      '<div class="num" id="sameShotLikelyToReview">' + sameShotLikelyToReview(result).toLocaleString() + '</div>' +
+      '<div class="label">Same-shot to review</div></a>';
   if (resolved.length > 0 || result.catalog_cleanup) {
     html +=
       '<div class="summary-stat"><div class="num">' + resolved.length + '</div>' +

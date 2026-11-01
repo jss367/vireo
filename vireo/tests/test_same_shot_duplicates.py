@@ -97,6 +97,33 @@ def test_visual_evidence_is_reported_without_claiming_identical_bytes(catalog, t
     assert group["visual_evidence"] == evidence
 
 
+def _pair(db, folder, count, *, phash_b, times):
+    exif = metadata(count=count)
+    seed(db, folder / "a", f"{count}a.jpg", f"{count}a", exif=exif, timestamp=times[0])
+    seed(db, folder / "b", f"{count}b.jpg", f"{count}b", exif=exif, phash=phash_b, timestamp=times[1])
+
+
+def test_a_reused_shutter_count_is_flagged_and_listed_after_likely_copies(catalog, tmp_path):
+    """A counter reset makes different photos share a count months apart.
+
+    Neither signal alone tells them from copies: a denoised or exported
+    derivative has a different visual hash but the same capture time, and a
+    capture-time correction moves the time but keeps the image.
+    """
+    other_image = "ffffffffffffffff"
+    _pair(catalog, tmp_path, 1, phash_b=other_image, times=("2020-01-08T05:57:43.69", "2020-03-07T17:19:11"))
+    _pair(catalog, tmp_path, 2, phash_b=other_image, times=("2016-07-26T16:27:10.5", "2016-07-26T16:27:10"))
+    _pair(catalog, tmp_path, 3, phash_b=None, times=("2023-01-01T00:07:35.91", "2026-04-03T12:06:25.91"))
+    _pair(catalog, tmp_path, 4, phash_b="123456789abcdef0", times=("2023-01-01T00:00:08", "2026-04-03T12:12:32"))
+    _pair(catalog, tmp_path, 5, phash_b=other_image, times=("2020-01-08T05:57:43", None))
+
+    result = run_duplicate_scan({}, catalog)
+    flags = [(group["shutter_count"], group["images_and_times_differ"]) for group in result["same_shot_groups"]]
+    assert flags == [(4, False), (3, False), (2, False), (5, False), (1, True)]
+    restored = revalidate_scan_result(catalog, {**result, "same_shot_groups": result["same_shot_groups"][::-1]})
+    assert [group["shutter_count"] for group in restored["same_shot_groups"]] == [4, 3, 2, 5, 1]
+
+
 def test_identical_hashes_and_rejected_or_empty_photos_are_excluded(catalog, tmp_path):
     seed(catalog, tmp_path, "a.jpg", "same")
     b = seed(catalog, tmp_path, "b.jpg", "same")

@@ -4,26 +4,75 @@ import { duplicatesEl, state } from './state.js';
 import { escapeHtml, formatBytes, revealLabel, thumbnailUrl } from './shared.js';
 import { closeSameShotComparison, reviewControls } from './same-shot-review.js';
 
+/** @param {SameShotGroup} group */
+function matchesPhotoFilter(group) {
+  return !state.filterMatchedIds || group.photos.some(function(photo) { return state.filterMatchedIds?.has(photo.id); });
+}
+
+/**
+ * Likely copies still waiting for a decision under the active photo filters.
+ * Groups whose images and capture times both differ are not counted: they are
+ * most likely a reused shutter count, not a copy.
+ * @param {DuplicateScan} result @returns {number}
+ */
+export function sameShotLikelyToReview(result) {
+  return (result.same_shot_groups || []).filter(function(group) {
+    return !group.images_and_times_differ && !group.review_decision && matchesPhotoFilter(group);
+  }).length;
+}
+
+function refreshSameShotStat() {
+  var stat = document.getElementById('sameShotLikelyToReview');
+  if (stat && state.lastScanResult) stat.textContent = sameShotLikelyToReview(state.lastScanResult).toLocaleString();
+}
+
+/** @param {number} n @returns {string} */
+function groupsWord(n) { return n === 1 ? 'group' : 'groups'; }
+
+/** @param {SameShotGroup[]} groups @param {number} limit @param {string} more @returns {string} */
+function renderGroupList(groups, limit, more) {
+  var shown = groups.slice(0, limit);
+  var html = shown.map(renderSameShotGroup).join('');
+  if (shown.length < groups.length) html += '<button type="button" class="btn-secondary" data-same-shot-more="' + more + '">' +
+    'Show ' + Math.min(50, groups.length - shown.length) + ' more groups</button>';
+  return html;
+}
+
+/** @param {SameShotGroup[]} differing @returns {string} */
+function renderDifferingSection(differing) {
+  if (!differing.length) return '';
+  var html = '<div class="section-header same-shot-differing"><div><h3>' + differing.length.toLocaleString() +
+    ' more ' + groupsWord(differing.length) + ' with a matching shutter count but different images and capture times</h3>' +
+    '<p class="section-sub">Their stored visual hashes differ and their capture times are more than a minute apart. ' +
+    'That usually means the camera reused shutter counts, for example after a service reset the counter, ' +
+    'so these are most likely different photos rather than copies.</p>' +
+    '<button type="button" class="btn-secondary" data-same-shot-toggle-differing>' +
+    (state.sameShotShowDiffering ? 'Hide these groups' : 'Show these groups') + '</button></div></div>';
+  if (state.sameShotShowDiffering) html += renderGroupList(differing, state.sameShotDifferingVisibleLimit, 'differing');
+  return html;
+}
+
 /** @param {DuplicateScan} result */
 export function renderSameShotResults(result) {
   var panel = duplicatesEl('sameShotResults');
   if (!result.same_shot_scanned) {
     panel.innerHTML = result.catalog_cleanup ? '' :
       '<p class="section-sub">Scan again to check for possible same-shot copies after metadata changes.</p>';
+    refreshSameShotStat();
     return;
   }
   var all = result.same_shot_groups || [];
-  var matching = all.filter(function(group) {
-    return !state.filterMatchedIds || group.photos.some(function(photo) { return state.filterMatchedIds?.has(photo.id); });
-  });
+  var matching = all.filter(matchesPhotoFilter);
   var reviewed = matching.filter(function(group) { return !!group.review_decision; }).length;
   var groups = matching.filter(function(group) { return state.sameShotShowReviewed || !group.review_decision; });
   if (state.sameShotComparison && !groups.some(function(group) { return group.review_key === state.sameShotComparison?.review_key; })) {
     closeSameShotComparison();
   }
-  var shown = groups.slice(0, state.sameShotVisibleLimit);
+  var likely = groups.filter(function(group) { return !group.images_and_times_differ; });
+  var differing = groups.filter(function(group) { return !!group.images_and_times_differ; });
+  var shownLikely = Math.min(likely.length, state.sameShotVisibleLimit);
   var html = '<div class="section-header"><div><h2>Possible same-shot copies</h2>' +
-    '<p class="section-sub">Showing ' + shown.length + ' of ' + groups.length + ' matching group' + (groups.length === 1 ? '' : 's') +
+    '<p class="section-sub">Showing ' + shownLikely + ' of ' + likely.length + ' likely ' + groupsWord(likely.length) +
     '. Camera body serial and shutter count match; catalog file hashes differ. ' +
     'Review the images, dates and edits before deciding what to keep. ' +
     'These candidates are never automatically rejected or included in duplicate cleanup.</p>' +
@@ -35,14 +84,15 @@ export function renderSameShotResults(result) {
     'Changes found on reload or a new scan need review again.</p>' +
     '<button type="button" class="btn-secondary" data-same-shot-toggle-reviewed>' +
     (state.sameShotShowReviewed ? 'Hide reviewed groups' : 'Show reviewed groups') + '</button></div></div>';
-  if (!groups.length) html += '<p class="no-results">' + (all.length
-    ? (matching.length ? 'All matching groups have saved review decisions. Show reviewed groups to reopen them.'
+  if (!likely.length) html += '<p class="no-results">' + (all.length
+    ? (matching.length
+      ? (groups.length ? 'No likely copies need review.'
+        : 'All matching groups have saved review decisions. Show reviewed groups to reopen them.')
       : 'No possible same-shot groups match the active photo filters.')
     : 'No possible same-shot copies found within this check’s coverage.') + '</p>';
-  shown.forEach(function(group) { html += renderSameShotGroup(group); });
-  if (shown.length < groups.length) html += '<button type="button" class="btn-secondary" data-same-shot-more>' +
-    'Show ' + Math.min(50, groups.length - shown.length) + ' more groups</button>';
+  html += renderGroupList(likely, state.sameShotVisibleLimit, 'likely') + renderDifferingSection(differing);
   panel.innerHTML = html;
+  refreshSameShotStat();
 }
 
 /** @param {SameShotGroup} group */

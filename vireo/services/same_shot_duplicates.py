@@ -4,6 +4,15 @@ Metadata edits change a whole-file hash. Camera identity and shutter count
 can still connect the two versions. These are clues, never permission to
 reject a photo, skip an import or delete bytes. Stored perceptual hashes
 provide additional visual evidence, not proof of identical originals.
+
+A shutter counter can also repeat: a camera service can set it back, after
+which new exposures reuse counts already in the catalog. Those pairs are
+different photos, and their images and capture times both disagree. Neither
+signal alone separates them from real copies: an edited derivative (a
+denoised DNG, an exported JPEG) has a different visual hash but the same
+capture time, and a capture-time correction changes the time but not the
+image. A group where both disagree is reported as
+``images_and_times_differ`` and listed after the likely copies.
 """
 from __future__ import annotations
 
@@ -12,6 +21,7 @@ import os
 import re
 from collections import defaultdict
 from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from services.same_shot_reviews import attach_same_shot_reviews
@@ -25,6 +35,10 @@ if TYPE_CHECKING:
 ShotIdentity = tuple[str, str, str, int]
 _PHASH = re.compile(r"[0-9a-f]{16}", re.IGNORECASE)
 _UNKNOWN = {"", "unknown", "none", "null", "n/a", "not available", "0"}
+# Copies of one exposure keep its capture time to the second; derivative
+# files can round it, so allow a minute before calling two times different.
+_SAME_CAPTURE_SECONDS = 60
+_VISUAL_ORDER = {"matching": 0, "unavailable": 1, "different": 2}
 
 
 def _text(value: object) -> str:
@@ -76,6 +90,23 @@ def _photo(row: sqlite3.Row) -> JsonDict:
     }
 
 
+def _capture_times_differ(photos: list[JsonDict]) -> bool:
+    """True only when every time parses and two are more than a minute apart."""
+    times = []
+    for photo in photos:
+        try:
+            times.append(datetime.fromisoformat(photo["timestamp"]).replace(tzinfo=None))
+        except (TypeError, ValueError):
+            return False
+    return (max(times) - min(times)).total_seconds() > _SAME_CAPTURE_SECONDS
+
+
+def same_shot_sort_key(group: JsonDict) -> tuple[bool, int, list[object]]:
+    """Likely copies first, the strongest visual evidence first among them."""
+    return (bool(group.get("images_and_times_differ")),
+            _VISUAL_ORDER.get(group["visual_evidence"], 1), group["identity"])
+
+
 def _group(identity: ShotIdentity, photos: list[JsonDict]) -> JsonDict | None:
     if len(photos) < 2 or len({p["file_hash"] for p in photos}) < 2:
         return None  # The exact-byte workflow already covers identical hashes.
@@ -88,6 +119,7 @@ def _group(identity: ShotIdentity, photos: list[JsonDict]) -> JsonDict | None:
         "identity": list(identity), "camera": f"{make} {model}".upper(),
         "serial_number": serial, "shutter_count": count,
         "visual_evidence": visual, "photos": sorted(photos, key=lambda p: p["path"]),
+        "images_and_times_differ": visual == "different" and _capture_times_differ(photos),
     }
 
 
@@ -141,7 +173,7 @@ def scan_same_shot_candidates(
             if identity in duplicated_ids:
                 by_identity[identity].append(_photo(row))
     groups = [group for identity, photos in by_identity.items() if (group := _group(identity, photos))]
-    groups.sort(key=lambda group: (group["visual_evidence"] != "matching", group["identity"]))
+    groups.sort(key=same_shot_sort_key)
     _attach_photo_context(db, groups)
     return {
         "same_shot_scanned": True, "same_shot_groups": groups,
@@ -166,6 +198,7 @@ def revalidate_same_shot_groups(db: Database, groups: list[JsonDict]) -> list[Js
                 photos.append(photo)
         if refreshed := _group(identity, photos):
             current.append(refreshed)
+    current.sort(key=same_shot_sort_key)
     _attach_photo_context(db, current)
     return current
 

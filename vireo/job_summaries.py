@@ -838,13 +838,28 @@ def _duplicate_scan(result: dict, config: dict) -> tuple[str, list[str]]:
     proposals = result.get("proposals")
     if not isinstance(proposals, list):
         return _generic(result, config)
-    if not proposals:
+    same_shot = result.get("same_shot_groups")
+    same_shot = [g for g in same_shot if isinstance(g, dict)] if isinstance(same_shot, list) else []
+    differing = sum(1 for g in same_shot if g.get("images_and_times_differ"))
+    likely = len(same_shot) - differing
+    if not proposals and not same_shot:
         return "No duplicates found", []
-    resolved = sum(1 for p in proposals if isinstance(p, dict) and p.get("status") == "resolved")
-    summary = _n(len(proposals), "duplicate group") + " found"
-    if resolved:
-        summary += f", {resolved:,} resolved"
-    return summary, []
+    if proposals:
+        resolved = sum(1 for p in proposals if isinstance(p, dict) and p.get("status") == "resolved")
+        summary = _n(len(proposals), "duplicate group") + " found"
+        if resolved:
+            summary += f", {resolved:,} resolved"
+    else:
+        summary = "No exact duplicates found"
+    if likely:
+        summary += f"; {_n(likely, 'possible same-shot group')}"
+    details = []
+    if differing:
+        verbs = ("shares", "differs") if differing == 1 else ("share", "differ")
+        label = "more same-shot group" if likely else "same-shot group"
+        details.append(_n(differing, label) + f" {verbs[0]} a shutter count "
+                       f"but {verbs[1]} in image and capture time")
+    return summary, details
 
 
 def _move(result: dict, config: dict) -> tuple[str, list[str]]:
