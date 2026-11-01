@@ -68,57 +68,34 @@ class JobHistoryRepository:
 
     def terminal(
         self, workspace_id: int | None, statuses: Sequence[str], limit: int,
+        origin: str | None = None,
     ) -> list[sqlite3.Row]:
-        """Newest-first rows in ``statuses``, of one workspace or (``None``) every one.
+        """Up to ``limit`` newest-first rows in ``statuses``.
 
-        A workspace's rows include the global ones (``workspace_id`` NULL:
-        storage maintenance, model downloads), which belong to every
-        workspace; leaving them out hid Vireo's own maintenance from the
-        Jobs page entirely.
+        Of one workspace or (``None``) every one. A workspace's rows include
+        the global ones (``workspace_id`` NULL: storage maintenance, model
+        downloads), which belong to every workspace; leaving them out hid
+        Vireo's own maintenance from the Jobs page entirely.
 
-        The limit is applied per ``origin``: pruning already keeps a
-        separate quota of user and system operations, and the Jobs page
-        applies its "Started by" filter after the fetch, so a single
-        combined limit would let a burst of newer system/global outcomes
-        crowd user operations out of the response (hiding retained user
-        rows behind "Started by you" with an empty list). Each origin
-        gets its own newest-first window of up to ``limit`` rows.
+        ``origin`` (``user`` / ``system``) narrows the window to one origin.
+        ``limit`` is always the total row cap; a caller that shows one
+        origin asks for it here, so newer rows of the other origin cannot
+        fill the window and hide older retained ones (pruning keeps the
+        two quotas apart for the same reason).
         """
         placeholders = ",".join(["?"] * len(statuses))
+        clauses = [f"status IN ({placeholders})"]
+        params: list[object] = list(statuses)
         if workspace_id is not None:
-            return self.conn.execute(
-                f"SELECT * FROM ("
-                f"  SELECT * FROM job_history "
-                f"  WHERE (workspace_id = ? OR workspace_id IS NULL) "
-                f"    AND status IN ({placeholders}) "
-                f"    AND origin = 'user' "
-                f"  ORDER BY started_at DESC LIMIT ? "
-                f") "
-                f"UNION ALL "
-                f"SELECT * FROM ("
-                f"  SELECT * FROM job_history "
-                f"  WHERE (workspace_id = ? OR workspace_id IS NULL) "
-                f"    AND status IN ({placeholders}) "
-                f"    AND origin = 'system' "
-                f"  ORDER BY started_at DESC LIMIT ? "
-                f") "
-                f"ORDER BY started_at DESC",
-                (workspace_id, *statuses, limit, workspace_id, *statuses, limit),
-            ).fetchall()
+            clauses.append("(workspace_id = ? OR workspace_id IS NULL)")
+            params.append(workspace_id)
+        if origin is not None:
+            clauses.append("origin = ?")
+            params.append(origin)
         return self.conn.execute(
-            f"SELECT * FROM ("
-            f"  SELECT * FROM job_history "
-            f"  WHERE status IN ({placeholders}) AND origin = 'user' "
-            f"  ORDER BY started_at DESC LIMIT ? "
-            f") "
-            f"UNION ALL "
-            f"SELECT * FROM ("
-            f"  SELECT * FROM job_history "
-            f"  WHERE status IN ({placeholders}) AND origin = 'system' "
-            f"  ORDER BY started_at DESC LIMIT ? "
-            f") "
-            f"ORDER BY started_at DESC",
-            (*statuses, limit, *statuses, limit),
+            f"SELECT * FROM job_history WHERE {' AND '.join(clauses)} "
+            f"ORDER BY started_at DESC LIMIT ?",
+            (*params, limit),
         ).fetchall()
 
     def analysis_retry_results(self, workspace_id: int) -> list[sqlite3.Row]:

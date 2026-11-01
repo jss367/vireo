@@ -179,42 +179,40 @@ def test_terminal_is_newest_first_and_scoped_only_when_asked(history_db):
     assert [r["id"] for r in db.job_history.terminal(None, terminal, 1)] == ["b"]
 
 
-def test_terminal_limits_per_origin_so_system_cannot_crowd_user(history_db):
-    """The newest 100 Vireo/global outcomes must not hide retained user rows.
+def test_terminal_limit_is_a_total_cap_and_origin_reads_one_window(history_db):
+    """``limit`` caps the rows; ``origin`` reads one origin's own window.
 
-    Pruning already keeps a separate quota of user and system operations
-    (``prune_operations``), and the Jobs page applies its ``Started by``
-    filter after the fetch; a single combined ``LIMIT`` would let a burst
-    of newer system outcomes (hourly maintenance, missing-originals checks)
-    leave "Started by you" empty despite the per-origin pruning quota.
+    Ten newer Vireo outcomes fill a mixed window, so the Jobs page asks for
+    ``origin='user'`` when "Started by you" is chosen and still reaches the
+    older retained user rows, global rows included.
     """
     db = history_db
     ws = db.require_workspace_id()
     for i in range(10):
-        _insert(db, f"sys{i}", status="completed", workspace_id=ws)
+        _insert(db, f"sys{i}", status="completed", workspace_id=ws if i % 2 else None)
         db.conn.execute(
             "UPDATE job_history SET started_at = ?, origin = 'system' WHERE id = ?",
             (f"2026-02-{i + 1:02d}", f"sys{i}"),
         )
-    for job_id, started in (("user_old_1", "2026-01-10"), ("user_old_2", "2026-01-11")):
-        _insert(db, job_id, status="completed", workspace_id=ws)
+    for job_id, started, workspace in (
+        ("user_old_1", "2026-01-10", ws), ("user_old_2", "2026-01-11", None),
+    ):
+        _insert(db, job_id, status="completed", workspace_id=workspace)
         db.conn.execute(
             "UPDATE job_history SET started_at = ?, origin = 'user' WHERE id = ?",
             (started, job_id),
         )
     db.commit()
     terminal = ("completed", "failed", "cancelled")
-    rows = [r["id"] for r in db.job_history.terminal(ws, terminal, 5)]
-    # Each origin gets its own newest-first window of up to the limit.
-    assert sum(1 for r in rows if r.startswith("sys")) == 5
-    assert sum(1 for r in rows if r.startswith("user")) == 2
-    assert rows == [
-        "sys9", "sys8", "sys7", "sys6", "sys5", "user_old_2", "user_old_1",
+    assert [r["id"] for r in db.job_history.terminal(ws, terminal, 1)] == ["sys9"]
+    assert [r["id"] for r in db.job_history.terminal(ws, terminal, 5)] == [
+        "sys9", "sys8", "sys7", "sys6", "sys5",
     ]
-    # And the no-workspace path applies the same per-origin quota.
-    rows = [r["id"] for r in db.job_history.terminal(None, terminal, 5)]
-    assert sum(1 for r in rows if r.startswith("sys")) == 5
-    assert sum(1 for r in rows if r.startswith("user")) == 2
+    assert [r["id"] for r in db.job_history.terminal(ws, terminal, 5, "user")] == [
+        "user_old_2", "user_old_1",
+    ]
+    assert [r["id"] for r in db.job_history.terminal(None, terminal, 1, "user")] == ["user_old_2"]
+    assert len(db.job_history.terminal(ws, terminal, 3, "system")) == 3
 
 
 # -- structure ------------------------------------------------------------------

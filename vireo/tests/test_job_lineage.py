@@ -407,9 +407,49 @@ def test_newer_system_rows_do_not_hide_older_user_operations(runner_db):
         _insert(db, f"check-{i}", ws_id=ws_id if i % 2 else None,
                 started_at=f"2026-02-01T00:{i // 60:02d}:{i % 60:02d}", origin="system")
     db.conn.commit()
-    rows = runner.get_history(db, limit=100)
-    ids = [r["id"] for r in rows]
-    assert {"users-import", "users-process"} <= set(ids)
-    assert sum(1 for r in rows if r["origin"] == "system") == 100
-    assert any(r["workspace_id"] is None for r in rows)
-    assert ids == [r["id"] for r in sorted(rows, key=lambda r: r["started_at"], reverse=True)]
+    # A mixed window is the newest rows of either origin, capped at limit.
+    mixed = runner.get_history(db, limit=100)
+    assert len(mixed) == 100 and all(r["origin"] == "system" for r in mixed)
+    assert len(runner.get_history(db, limit=1)) == 1
+    # "Started by you" reads the user's own window, follow-up included.
+    users = runner.get_history(db, limit=100, origin="user")
+    assert [r["id"] for r in users] == ["users-process", "users-import"]
+    vireos = runner.get_history(db, limit=100, origin="system")
+    assert len(vireos) == 100 and any(r["workspace_id"] is None for r in vireos)
+
+
+def test_history_api_reads_one_origin_and_rejects_others(tmp_path, monkeypatch):
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    db_path = str(tmp_path / "api.db")
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    _insert(db, "users-scan", ws_id=ws_id, started_at="2026-01-01T00:00:00")
+    _insert(db, "vireo-check", ws_id=None, started_at="2026-01-02T00:00:00", origin="system")
+    db.conn.commit()
+    db.close()
+    app = create_app(db_path=db_path, thumb_cache_dir=str(tmp_path / "thumbs"))
+    client = app.test_client()
+    assert [r["id"] for r in client.get("/api/jobs/history?limit=1").get_json()] == ["vireo-check"]
+    assert [r["id"] for r in client.get(
+        "/api/jobs/history?limit=1&origin=user").get_json()] == ["users-scan"]
+    assert client.get("/api/jobs/history?origin=robot").status_code == 400
+
+
+def test_automatic_new_images_walk_that_skipped_local_copies_is_kept():
+    from web.workspaces import _new_images_walk_job_payload
+
+    found_nothing = {"checked": 40, "found": 0}
+    assert _new_images_walk_job_payload(found_nothing, {})["noop"] is True
+    assert _new_images_walk_job_payload(
+        found_nothing, {"local_copy_excluded": ["/Volumes/NAS/trip"]},
+    )["noop"] is False
+    assert _new_images_walk_job_payload(
+        found_nothing, {"unreachable_roots": ["/Volumes/NAS"]},
+    )["noop"] is False

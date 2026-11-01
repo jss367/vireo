@@ -5,6 +5,7 @@ import { renderHistoryOverview, renderMainPane } from './detail.js';
 import { activeProgress, formatElapsed, isLiveStatus, progressPct, timeAgo } from './format.js';
 import { jobCollectionText } from './job-card.js';
 import { findJob, followUpText, groupOperations, isSystemJob, matchesOriginFilter, repeatText } from './lineage.js';
+import { fetchHistory } from './polling.js';
 import { selectJob } from './selection.js';
 import { escapeHtml, formatJobType } from './shared.js';
 
@@ -26,11 +27,24 @@ export function applyFilters() {
   if (state.currentView === 'history') renderHistoryOverview();
 }
 
-// The history rows the type, status and origin filters let through.
+// The "Started by" choice: '', 'user' or 'system'. History is fetched for it.
+export function selectedOriginFilter() {
+  return jobsElement('filterOrigin', HTMLSelectElement).value;
+}
+
+// Refetch history for the new "Started by" choice, then re-render.
+export function applyOriginFilter() {
+  applyFilters();
+  fetchHistory();
+}
+
+// The history rows the type, status and origin filters let through. The
+// origin filter also applies here so a stale snapshot never shows the
+// other origin while the new one loads.
 export function filteredHistory() {
   var typeFilter = jobsElement('filterType', HTMLSelectElement).value;
   var statusFilter = jobsElement('filterStatus', HTMLSelectElement).value;
-  var originFilter = jobsElement('filterOrigin', HTMLSelectElement).value;
+  var originFilter = selectedOriginFilter();
   var filtered = state.historyJobs;
   if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
   if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });

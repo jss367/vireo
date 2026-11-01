@@ -549,7 +549,7 @@ class JobHistory:
     # Reads
     # ------------------------------------------------------------------
 
-    def get_history(self, db, limit=10):
+    def get_history(self, db, limit=10, origin=None):
         """Get recent job history from the database.
 
         Only TERMINAL rows (completed/failed/cancelled) are returned —
@@ -562,6 +562,7 @@ class JobHistory:
         Args:
             db: Database instance (must be from the calling thread)
             limit: max number of rows
+            origin: ``user`` or ``system`` to read only that origin's rows
 
         Raises:
             JobHistoryUnavailable: the rows could not be read.
@@ -569,7 +570,7 @@ class JobHistory:
         try:
             ws_id = db.active_workspace_id
             terminal = ("completed", "failed", "cancelled")
-            rows = db.job_history.terminal(ws_id, terminal, limit)
+            rows = db.job_history.terminal(ws_id, terminal, limit, origin)
             result = []
             for r in rows:
                 d = dict(r)

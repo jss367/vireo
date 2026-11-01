@@ -343,8 +343,12 @@ def _new_images_walk_job_payload(progress_state: JsonDict, result: JsonDict) -> 
     payload = {
         "files_checked": progress_state["checked"],
         "new_count": progress_state["found"],
-        # Nothing new and every folder reachable: a routine all-clear.
-        "noop": not progress_state["found"] and not unreachable,
+        # Nothing new, every folder reachable and none left out as a staged
+        # local copy: a routine all-clear. A skipped folder is a caveat.
+        "noop": (
+            not progress_state["found"] and not unreachable
+            and not result.get("local_copy_excluded")
+        ),
         # Which folders this walk read from disk and which it
         # reused unchanged since the last look.
         "folders_read": result.get("folders_read", 0),
