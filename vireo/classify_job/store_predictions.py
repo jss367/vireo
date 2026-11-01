@@ -48,16 +48,18 @@ def _record_match_scores(db: Database, raw_results: list[RawResult], model_name:
             continue
         seen.add(det_id)
         try:
-            db.model_runs.record_classifier_match_score(
-                det_id,
-                model_name,
-                labels_fingerprint,
-                max_match_score=match["max_match_score"],
-                match_margin=match.get("match_margin"),
-                top_species=match.get("top_species"),
-                label_count=match.get("label_count"),
-                score_kind=match.get("score_kind"),
-            )
+            # Batch boundary: one detection's match summary.
+            with db.transaction():
+                db.model_runs.record_classifier_match_score(
+                    det_id,
+                    model_name,
+                    labels_fingerprint,
+                    max_match_score=match["max_match_score"],
+                    match_margin=match.get("match_margin"),
+                    top_species=match.get("top_species"),
+                    label_count=match.get("label_count"),
+                    score_kind=match.get("score_kind"),
+                )
         except Exception:
             # broad: diagnostic data must never fail a classification run.
             log.warning(
@@ -531,19 +533,19 @@ def _store_single_prediction(
 def _release_stored_classifier_runs(
     db: Database, raw_results: list[RawResult], model_name: str, labels_fingerprint: str,
 ) -> None:
-    """Mark this run's freshly stored classifier_runs reusable, then commit.
+    """Mark this run's freshly stored classifier_runs reusable, in one unit.
 
     A flush only reserves a run. It becomes reusable once its predictions
     were actually stored. Cancellation before this point leaves an explicit
     cache miss instead of an empty 'legacy' cache hit.
     """
-    for item in raw_results:
-        did = item.get("detection_id")
-        if did is not None and not item.get("_existing"):
-            db.model_runs.release_incomplete_classifier_run(
-                did, model_name, labels_fingerprint,
-            )
-    db.commit()
+    with db.transaction():
+        for item in raw_results:
+            did = item.get("detection_id")
+            if did is not None and not item.get("_existing"):
+                db.model_runs.release_incomplete_classifier_run(
+                    did, model_name, labels_fingerprint,
+                )
 
 
 def _store_grouped_predictions(
@@ -603,21 +605,26 @@ def _store_grouped_predictions(
 
     for group in groups:
         if len(group) == 1:
-            stored, matched = _store_single_prediction(
-                db, group[0], model_name, labels_fingerprint, tax,
-                comparison_name, read_keywords,
-            )
+            # Batch boundary: one photo's predictions, review state and
+            # candidate cleanup land together.
+            with db.transaction():
+                stored, matched = _store_single_prediction(
+                    db, group[0], model_name, labels_fingerprint, tax,
+                    comparison_name, read_keywords,
+                )
         else:
             group_count += 1
             group_namespace = hashlib.sha256(
                 json.dumps([job_id, model_name, labels_fingerprint]).encode()
             ).hexdigest()[:16]
             gid = f"g{group_namespace}-{group_count:04d}"
-            stored, matched = _store_burst_group(
-                db, group, gid, model_name, labels_fingerprint, tax,
-                identity_for, comparison_name, consensus_prediction,
-                read_keywords,
-            )
+            # Batch boundary: one burst group, consensus and members together.
+            with db.transaction():
+                stored, matched = _store_burst_group(
+                    db, group, gid, model_name, labels_fingerprint, tax,
+                    identity_for, comparison_name, consensus_prediction,
+                    read_keywords,
+                )
         predictions_stored += stored
         skipped_match += matched
 

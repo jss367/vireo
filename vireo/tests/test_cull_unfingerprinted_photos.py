@@ -144,6 +144,7 @@ def test_cull_job_result_names_the_photo(app_and_db, tmp_path):
             {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
         ], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
+        db.commit()
     db.conn.commit()
     client = app.test_client()
 

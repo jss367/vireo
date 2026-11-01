@@ -62,7 +62,8 @@ def clear_miss_flag(db: Database, photo_id: int, category: str) -> None:
     that `/api/misses/<id>/unflag` can't touch another workspace's photos.
     """
     db._verify_photo_in_workspace(photo_id)
-    db.detections.clear_miss_flag(photo_id, category)
+    with db.transaction():
+        db.detections.clear_miss_flag(photo_id, category)
 
 
 def bulk_reject_miss_category(

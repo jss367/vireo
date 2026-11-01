@@ -475,6 +475,7 @@ def _photo_mid_process(db):
     db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .6, "h": .6},
                               "confidence": .9, "category": "animal"}], "megadetector-v6")
     db.model_runs.record_detector_run(pid, "megadetector-v6", 1)
+    db.commit()
     db.conn.execute("UPDATE photos SET quality_score = 0.4 WHERE id = ?", (pid,))
     db.commit()
     return pid

@@ -36,6 +36,7 @@ def compare_collection(app_and_db):
                           0.9 - index / 10, "model-a")
         db.predictions.add(det_ids[0], "Cardinal" if index == 0 else "Sparrow",
                           0.8 - index / 10, "model-b")
+        db.commit()
     cid = db.collections.add(
         "Everything", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -183,6 +184,7 @@ def test_refresh_photo_id_picks_up_a_sibling_that_just_joined(app_and_db):
             "category": "animal",
         }], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Bird", 0.9, "model-a")
+        db.commit()
     cid = db.collections.add(
         "Birds",
         json.dumps([{"field": "keyword", "op": "equals", "value": "Bird"}]),
@@ -297,10 +299,12 @@ def test_a_joining_sibling_that_carries_a_new_model_reassesses(app_and_db):
             "category": "animal",
         }], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Bird", 0.9, "model-a")
+        db.commit()
         # Only the photo still outside the collection was run through this
         # model, so nothing in the first snapshot knows it exists.
         if photo_id == photo_ids[2]:
             db.predictions.add(det_ids[0], "Sparrow", 0.7, "model-z")
+            db.commit()
     cid = db.collections.add(
         "Birds",
         json.dumps([{"field": "keyword", "op": "equals", "value": "Bird"}]),
@@ -357,8 +361,10 @@ def test_a_widening_refresh_shows_every_model_it_advertises(app_and_db):
             "category": "animal",
         }], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Bird", 0.9, "model-a")
+        db.commit()
         if photo_id == photo_ids[1]:
             db.predictions.add(det_ids[0], "Sparrow", 0.7, "model-z")
+            db.commit()
     cid = db.collections.add(
         "Birds",
         json.dumps([{"field": "keyword", "op": "equals", "value": "Bird"}]),
@@ -401,8 +407,10 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
             "category": "animal",
         }], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Bird", 0.9, "model-a")
+        db.commit()
         if photo_id == photo_ids[1]:
             db.predictions.add(det_ids[0], "Sparrow", 0.7, "model-z")
+            db.commit()
     cid = db.collections.add(
         "Birds",
         json.dumps([{"field": "keyword", "op": "equals", "value": "Bird"}]),

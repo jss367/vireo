@@ -516,46 +516,48 @@ class _DetectPass:
                 # detect stage; keep full_input=None so
                 # the surrounding write still runs.
                 full_input = None
-        existing_full = detection_store.get_detections(
-            thread_db, photo_id, detector_model="full-image",
-            min_conf=0,
-        )
-        if not existing_full:
-            thread_db.detections.save(
-                photo_id,
-                [{
-                    "box": {"x": 0, "y": 0, "w": 1, "h": 1},
-                    "confidence": 0,
-                    "category": "animal",
-                }],
-                detector_model="full-image",
-                runtime_fingerprint=full_runtime,
+        # Batch boundary: the photo's full-image detection and its detector
+        # run land together.
+        with thread_db.transaction():
+            existing_full = detection_store.get_detections(
+                thread_db, photo_id, detector_model="full-image",
+                min_conf=0,
             )
-        else:
-            # Promote a legacy full-image detection so
-            # its runtime_fingerprint matches the run
-            # we're about to record. exportable_artifacts
-            # reads the detector runtime from
-            # ``detections`` — leaving it at 'legacy'
-            # makes future exports emit an empty
-            # full-image detection artifact for this
-            # photo, dropping the attached classifier
-            # run.
-            thread_db.detections.promote_full_image_runtime(
-                photo_id, full_runtime,
+            if not existing_full:
+                thread_db.detections.save(
+                    photo_id,
+                    [{
+                        "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                        "confidence": 0,
+                        "category": "animal",
+                    }],
+                    detector_model="full-image",
+                    runtime_fingerprint=full_runtime,
+                )
+            else:
+                # Promote a legacy full-image detection so
+                # its runtime_fingerprint matches the run
+                # we're about to record. exportable_artifacts
+                # reads the detector runtime from
+                # ``detections`` — leaving it at 'legacy'
+                # makes future exports emit an empty
+                # full-image detection artifact for this
+                # photo, dropping the attached classifier
+                # run.
+                thread_db.detections.promote_full_image_runtime(
+                    photo_id, full_runtime,
+                )
+            # ``full_runtime`` is never None, so a missing run and a run with
+            # no recorded runtime both differ from it.
+            existing_runtime = thread_db.model_runs.detector_runtime_fingerprint(
+                photo_id, "full-image",
             )
-            thread_db.commit()
-        # ``full_runtime`` is never None, so a missing run and a run with
-        # no recorded runtime both differ from it.
-        existing_runtime = thread_db.model_runs.detector_runtime_fingerprint(
-            photo_id, "full-image",
-        )
-        if existing_runtime != full_runtime:
-            thread_db.model_runs.record_detector_run(
-                photo_id, "full-image", box_count=1,
-                runtime_fingerprint=full_runtime,
-                input_fingerprint=full_input,
-            )
+            if existing_runtime != full_runtime:
+                thread_db.model_runs.record_detector_run(
+                    photo_id, "full-image", box_count=1,
+                    runtime_fingerprint=full_runtime,
+                    input_fingerprint=full_input,
+                )
 
     def _known_classifier_runtimes(self, full_runtime: str) -> set[str]:
         """Compute expected classifier runtimes for any

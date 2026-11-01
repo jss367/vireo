@@ -310,6 +310,7 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
         {"box": {"x": x, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.9, "category": "animal"}
         for x in (0.1, 0.6)
     ], detector_model="megadetector-v6")
+    db.commit()
     for index, det in enumerate(detection_store.get_detections(db, photo)):
         db.masks_features.save_subject_raw_analysis(det["id"], {"recipe": ra.RECIPE, "exposure_ev": index})
     rows = db.conn.execute("SELECT report_json FROM subject_raw_analysis").fetchall()
@@ -338,16 +339,19 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
     }], detector_model="megadetector-v6")[0]
     db.predictions.add(detection, "Robin", 0.2, "model", status="accepted",
                       taxonomy={"genus": "old"}, labels_fingerprint="labels")
+    db.commit()
     original_id = db.conn.execute("SELECT id FROM predictions").fetchone()[0]
     other_workspace = db.create_workspace("Other")
     workspace_folders.add_workspace_folder(db, other_workspace, folder)
     db.set_active_workspace(other_workspace)
     db.predictions.add(detection, "Robin", 0.2, "model", status="rejected", labels_fingerprint="labels")
+    db.commit()
     db.set_active_workspace(workspace)
     db.predictions.add(detection, "Stale species", 0.99, "model", labels_fingerprint="labels")
     db.predictions.add(detection, "Other labels", 0.7, "model", labels_fingerprint="other-labels")
     db.predictions.add(detection, "Other model", 0.7, "other-model", labels_fingerprint="labels")
     db.model_runs.record_classifier_run(detection, "model", "labels", prediction_count=2)
+    db.commit()
     item = {
         "detection_id": detection, "prediction": "Robin", "confidence": 0.9,
         "taxonomy": {"genus": "Turdus", "scientific_name": "Turdus migratorius"},
@@ -412,6 +416,7 @@ def test_reinference_refreshes_burst_metadata(tmp_path, status, new_group):
     }], detector_model="megadetector-v6")[0]
     db.predictions.add(detection, "Robin", 0.2, "model", status=status,
                       group_id="old-burst", vote_count=3, total_votes=4, individual='{"Robin":3}')
+    db.commit()
     item = {"detection_id": detection, "prediction": "Robin", "confidence": 0.9,
             "_replace_prediction_outputs": True}
     _store_pending_detection_prediction(
@@ -442,6 +447,7 @@ def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
     db.predictions.add(detection, "Robin", 0.9, "model", status=status)
     db.model_runs.record_classifier_run(detection, "model", "legacy", 1,
                              runtime_fingerprint="raw-runtime", input_recipe=ra.RECIPE)
+    db.commit()
     from classify_job.cache_coverage import _all_photos_cache_satisfied
 
     assert not _all_photos_cache_satisfied(db, [photo], classifier_model="model", labels_fingerprint="legacy")
@@ -451,6 +457,7 @@ def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
     assert classify_preflight.get_classifier_run_cache_hits(db, [photo], "model", "legacy") == set()
     # Normal runtime changes keep the existing manual-review exception.
     db.model_runs.record_classifier_run(detection, "model", "legacy", 1, runtime_fingerprint="normal-runtime")
+    db.commit()
     assert db.model_runs.get_classifier_run_key_gate(detection, "new-normal-runtime") == ({("model", "legacy")}, set())
     assert classify_preflight.get_classifier_run_cache_hits(db, [photo], "model", "legacy") == {photo}
     db.close()

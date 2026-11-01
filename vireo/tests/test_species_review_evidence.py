@@ -34,6 +34,7 @@ def test_disagreement_is_bound_to_each_subject_and_read_is_nonmutating(app_and_d
     db.predictions.add(first, "Robin", .9999, "model A", labels_fingerprint=fp)
     db.predictions.add(first, "Mallard", .8, "model B", labels_fingerprint=fp)
     db.predictions.add(second, "Mallard", .9, "model A", labels_fingerprint=fp)
+    db.commit()
     db.photo_review.set_flag(1, "flagged")
     db.commit()
     before = db.conn.total_changes
@@ -66,8 +67,10 @@ def test_changed_region_selection_exposes_old_run_without_reusing_it(app_and_db,
     wa.write_text("Mallard")
     original_fp = compute_fingerprint(["Robin", "Mallard"])
     db.model_runs.upsert_labels_fingerprint(original_fp, "California + Washington", [str(ca), str(wa)], 2)
+    db.commit()
     det = detect(db)
     db.predictions.add(det, "Robin", .99, "model A", labels_fingerprint=original_fp)
+    db.commit()
     result = packet(app, [1])
     assert result["current_label_selection"]["source"] == "workspace"
     assert result["current_label_selection"]["fingerprint"] == fp
@@ -85,6 +88,7 @@ def test_historical_alternatives_remain_visible_but_are_not_candidates(app_and_d
     det = detect(db)
     db.predictions.add(det, "Old wrong bird", 1, "model A", labels_fingerprint="old")
     db.predictions.add(det, "Robin", .7, "model A", labels_fingerprint=fp)
+    db.commit()
     result = packet(app, [1])
     predictions = result["photos"][0]["subjects"][0]["predictions"]
     old = next(p for p in predictions if p["species"] == "Old wrong bird")
@@ -97,8 +101,10 @@ def test_full_image_and_deferred_evidence_do_not_hide_uncertainty(app_and_db, tm
     fp, _ = region(db, tmp_path, monkeypatch)
     fallback = detect(db, model="full-image", score=0)
     db.predictions.add(fallback, "Robin", 1, "model A", labels_fingerprint=fp)
+    db.commit()
     det = detect(db, photo=2)
     db.predictions.add(det, "Mallard", .99, "model A", labels_fingerprint=fp)
+    db.commit()
     db.predictions.set_evidence_review(det, "not_enough_evidence")
     db.commit()
     result = packet(app, [1, 2])

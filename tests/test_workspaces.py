@@ -418,6 +418,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids1[0], "Robin", 0.95, "bioclip")
+    db.commit()
 
     # Second workspace with a different folder + photo.
     ws2 = db.create_workspace("Other")
@@ -429,6 +430,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids2[0], "Sparrow", 0.8, "bioclip")
+    db.commit()
 
     # Each workspace sees only predictions on its own folders' photos.
     preds_ws2 = db.predictions.get_rows()
@@ -502,6 +504,7 @@ def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip",
                       taxonomy={"order": "Passeriformes"})
+    db.commit()
     rules = json.dumps([{"field": "taxonomy_order", "op": "equals", "value": "Passeriformes"}])
     cid = db.collections.add("Passerines", rules)
     db.commit()
@@ -2098,6 +2101,7 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip")
+    db.commit()
     db.queue_change(photo_id, "keyword_add", "Robin")
     db.commit()
 

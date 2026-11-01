@@ -600,6 +600,7 @@ def test_endpoint_merged_fingerprint_not_stale(app_and_db, tmp_path, monkeypatch
         sources=[paths["birds"], paths["reptiles"]],
         label_count=len(merged),
     )
+    db.commit()
 
     client = app.test_client()
     resp = client.get("/api/workspace/classification-inventory")
@@ -657,6 +658,7 @@ def test_inventory_matches_source_identity_fingerprints(app_and_db, tmp_path, mo
     _record_run(db, detection_id, "BioCLIP-2.5", fingerprint)
     _add_prediction(db, detection_id, "BioCLIP-2.5", fingerprint, labels[0], .9)
     db.model_runs.upsert_labels_fingerprint(fingerprint, "Parrots", paths, len(labels))
+    db.commit()
     response = app.test_client().get("/api/workspace/classification-inventory")
     assert response.status_code == 200
     inventory = response.get_json()

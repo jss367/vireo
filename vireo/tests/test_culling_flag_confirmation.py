@@ -291,6 +291,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
                  "confidence": .9, "category": "animal"},
             ], detector_model="synthetic-fixture")
             self.db.predictions.add(detections[0], "Robin", .9, "synthetic-fixture")
+            self.db.commit()
         self.service = PhotoReviewService(self.db)
 
     def test_real_catalog_undo_redo_preserves_confirmation(self):

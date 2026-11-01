@@ -98,6 +98,7 @@ def test_overlapping_boxes_do_not_authorize_unbound_legacy_eye(app_and_db):
         {'box': {'x': .1, 'y': .1, 'w': .6, 'h': .6}, 'confidence': .9, 'category': 'animal'},
         {'box': {'x': .2, 'y': .2, 'w': .6, 'h': .6}, 'confidence': .8, 'category': 'animal'},
     ], detector_model='test')
+    db.commit()
     db.conn.execute('UPDATE photos SET eye_x=.5,eye_y=.5,eye_tenengrad=999 WHERE id=?', (pid,))
     db.commit()
     client = app.test_client()
@@ -134,6 +135,7 @@ def test_frame_basis_normalization_never_revalidates_unused_subjects(app_and_db,
     _working_copy(app, db, pid)
     db.detections.save(pid, [{'box': {'x': .1, 'y': .2, 'w': .2, 'h': .2},
                               'confidence': .9, 'category': 'animal'}], detector_model='test')
+    db.commit()
     if stale_mask:
         db.conn.execute('UPDATE photos SET mask_path=? WHERE id=?', ('stale-mask.png', pid))
     db.commit()

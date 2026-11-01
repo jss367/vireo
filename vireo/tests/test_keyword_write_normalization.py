@@ -56,6 +56,7 @@ def test_add_prediction_folds_curly_apostrophe_species(tmp_path):
             model="m1",
             labels_fingerprint="fp1",
         )
+        db.commit()
 
         stored = [
             r["species"] for r in db.conn.execute(
@@ -89,6 +90,7 @@ def test_add_prediction_folds_review_row_to_normalized_species(tmp_path):
             status="accepted",
             labels_fingerprint="fp1",
         )
+        db.commit()
 
         row = db.conn.execute(
             "SELECT p.id AS pid, p.species, pr.status "
@@ -137,6 +139,7 @@ def test_prime_symbol_not_folded_in_keywords(tmp_path):
             model="m1",
             labels_fingerprint="fp1",
         )
+        db.commit()
         stored = db.conn.execute(
             "SELECT species FROM predictions WHERE detection_id = ?", (det,)
         ).fetchone()["species"]

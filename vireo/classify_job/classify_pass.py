@@ -622,13 +622,14 @@ class _ClassifyPhotosPass:
         # prior fingerprint on those boxes would stay "newest" for their
         # detections and surface alongside the fallback output.
         if self.reclassify:
-            self.db.predictions.clear(
-                model=self.model.model_name,
-                collection_photo_ids=[photo["id"]],
-                labels_fingerprint=(
-                    self.fp if self.detection_map.get(photo["id"]) else None
-                ),
-            )
+            with self.db.transaction():
+                self.db.predictions.clear(
+                    model=self.model.model_name,
+                    collection_photo_ids=[photo["id"]],
+                    labels_fingerprint=(
+                        self.fp if self.detection_map.get(photo["id"]) else None
+                    ),
+                )
 
         self._report_progress(i, photo)
 
@@ -644,7 +645,8 @@ class _ClassifyPhotosPass:
             # its predictions, classifier_runs and match-score rows in
             # one transaction, and the call is a no-op when nothing
             # was there.
-            self.db.detections.clear(photo["id"], detector_model="full-image")
+            with self.db.transaction():
+                self.db.detections.clear(photo["id"], detector_model="full-image")
             return
 
         folder_path = self.folders.get(photo["folder_id"], "")
@@ -957,13 +959,15 @@ def _record_batch_classifier_runs(
         n = counts.get(did, 0)
         if n <= 0:
             continue
-        db.model_runs.record_classifier_run(
-            did, model_name, labels_fingerprint,
-            prediction_count=n,
-            runtime_fingerprint="incomplete",
-            labels_fingerprint_full=labels_fingerprint_full,
-            input_recipe=entry.get("input_recipe"),
-        )
+        # Batch boundary: one detection's run reservation.
+        with db.transaction():
+            db.model_runs.record_classifier_run(
+                did, model_name, labels_fingerprint,
+                prediction_count=n,
+                runtime_fingerprint="incomplete",
+                labels_fingerprint_full=labels_fingerprint_full,
+                input_recipe=entry.get("input_recipe"),
+            )
 
 
 def _publish_classifier_runs_for_raw_results(

@@ -119,6 +119,7 @@ def test_persistent_failure_is_review_and_leaves_prior_mask_generation(retry_lib
 def test_completed_negative_reruns_detection_and_explains_review(retry_library, tmp_path, monkeypatch):
     _, db, ids, calls = retry_library
     db.model_runs.record_detector_run(ids[0], "megadetector-v6", 0)
+    db.commit()
     report = explain_selected(db, [ids[0]], db.get_effective_config({}))
     assert "Detection completed" in report["photos"][0]["explanation"]
     monkeypatch.setattr("detector.detect_animals", lambda path: calls["detection"].append(path) or [])
@@ -267,6 +268,7 @@ def test_readiness_is_the_same_alone_and_within_its_encounter(retry_library, tmp
         if index == 1:
             did = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.0,
                                             "category": "animal"}], "full-image")[0]
+            db.commit()
         db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match")
     db.commit()
     effective = db.get_effective_config({})
@@ -384,6 +386,7 @@ def test_invalid_generation_survives_failed_cancelled_or_rolled_back_repair(retr
         pixels = original(*args, **kwargs)
         if failure == "inputs":
             db.predictions.add(did, "Mallard", .9, "inat21", category="match")
+            db.commit()
         cancelled.append(True)
         return pixels
     monkeypatch.setattr("quality.compute_all_quality_features", fail_quality)
@@ -571,6 +574,7 @@ def test_eye_fingerprint_records_model_attempts_without_stamping_skips(retry_lib
     did = write_detection_batch(db, pid, "megadetector-v6", [
         {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}], "legacy")[0]
     db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match", taxonomy={"class": "Aves"})
+    db.commit()
     eye = {"eye_status": eye_status, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None}
     if eye_status == "measured":
         eye.update(eye_x=.3, eye_y=.4, eye_conf=.99, eye_tenengrad=123.)
@@ -626,6 +630,7 @@ def test_changed_source_with_same_runtime_never_remasks_retained_reviewed_boxes(
     did = write_detection_batch(db, pid, "megadetector-v6", [
         {"box": {"x": .2, "y": .2, "w": .5, "h": .5}, "confidence": .9, "category": "animal"}], "legacy", previous_input)[0]
     db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match")
+    db.commit()
     pred_id = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (did,)).fetchone()[0]
     if pinned:
         db.set_review_status(pred_id, db.require_workspace_id(), "accepted")

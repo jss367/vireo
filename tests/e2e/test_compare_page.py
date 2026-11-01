@@ -50,6 +50,7 @@ def test_compare_keyword_conflict_filter_includes_non_top_predictions(live_serve
         category="conflict",
         labels_fingerprint=TOL_SENTINEL,
     )
+    db.commit()
     db.conn.commit()
 
     page.goto(f"{live_server['url']}/id-conflicts")
@@ -427,6 +428,7 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
         "iNat21",
         labels_fingerprint=TOL_SENTINEL,
     )
+    db.commit()
 
     page.goto(f"{live_server['url']}/compare")
     page.wait_for_function("() => compareState.compareData !== null")
@@ -533,6 +535,7 @@ def test_compare_row_status_surfaces_unclassified_over_pending_match(
         }],
         detector_model="test-detector-secondary",
     )
+    db.commit()
 
     page.goto(f"{live_server['url']}/compare")
     page.wait_for_function("() => compareState.compareData !== null")
@@ -593,6 +596,7 @@ def test_compare_full_load_lands_on_the_collection_when_nothing_needs_review(
         status="accepted",
         labels_fingerprint=TOL_SENTINEL,
     )
+    db.commit()
     db.conn.commit()
 
     page.evaluate("() => { compareState.activeFilter = 'needs_review'; }")

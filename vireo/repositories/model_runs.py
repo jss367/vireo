@@ -173,7 +173,6 @@ class ModelRunsRepository:
             (photo_id, detector_model, runtime_fingerprint,
              input_fingerprint, box_count),
         )
-        self.conn.commit()
 
     def get_global_detection_stats(self) -> dict[str, int]:
         """Return global (workspace-agnostic) detector-cache counts.
@@ -293,7 +292,6 @@ class ModelRunsRepository:
              labels_fingerprint_full, runtime_fingerprint,
              input_fingerprint, prediction_count, input_recipe),
         )
-        self.commit_with_retry(self.conn)
 
     def record_classifier_match_score(
         self,
@@ -334,7 +332,6 @@ class ModelRunsRepository:
              max_match_score, match_margin, top_species, label_count,
              score_kind),
         )
-        self.commit_with_retry(self.conn)
 
     def has_classifier_match_score(
         self, detection_id: int, classifier_model: str, labels_fingerprint: str,
@@ -801,7 +798,6 @@ class ModelRunsRepository:
             (fingerprint, full_fingerprint, display_name,
              json.dumps(sources or []), label_count),
         )
-        self.conn.commit()
 
     # -- classify job: run lookups and cache coverage -------------------------
     #

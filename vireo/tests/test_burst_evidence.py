@@ -218,6 +218,7 @@ def _mark_quality(db, photo_id, sharpness, *, crop_complete=1.0, eye=None):
     mask_path.write_bytes(b"scratch-mask")
     db.detections.save(photo_id, [{"box": {"x": .1, "y": .1, "w": .2, "h": .2},
                                    "confidence": .9, "category": "animal"}], detector_model="MDV6")
+    db.commit()
     db.masks_features.upsert_mask(photo_id, "sam2-small", str(mask_path), "MDV6", (.1, .1, .2, .2),
         MaskQuality(subject_tenengrad=sharpness, bg_tenengrad=5, crop_complete=crop_complete,
                     bg_separation=0, subject_clip_high=0, subject_clip_low=0,
@@ -261,6 +262,7 @@ def test_burst_evidence_get_wraps_best_batch_with_coverage_and_urls(app_and_db):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.6, "w": 0.2, "h": 0.2}, "confidence": 0.8, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/api/photos/{pids[1]}/burst-evidence")
@@ -459,6 +461,7 @@ def test_focus_crop_manual_native_scale_does_not_trust_unbound_eye(app_and_db):
     db.conn.commit()
 
     db.detections.save(pid, [{"box": {"x": .4, "y": .4, "w": .2, "h": .2}, "confidence": .9, "category": "animal"}], detector_model="MDV6")
+    db.commit()
     client = app.test_client()
     assert client.get(f"/photos/{pid}/focus-crop?size=256&basis=eye").status_code == 404
     resp = client.get(f"/photos/{pid}/focus-crop?size=256&center=.5,.5")
@@ -494,6 +497,7 @@ def test_focus_crop_falls_back_to_subject_then_frame(app_and_db):
     db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
     resp = client.get(f"/photos/{pid}/focus-crop?size=128")
     assert resp.headers["X-Vireo-Focus-Basis"] == "subject"
     assert resp.headers["X-Vireo-Focus-Center"] == "0.2000,0.3000"
@@ -534,6 +538,7 @@ def test_focus_crop_shades_outside_the_mask(app_and_db):
     mask_path = os.path.join(masks_dir, f"{pid}.png")
     mask.save(mask_path)
     db.detections.save(pid, [{"box": {"x": .4, "y": .4, "w": .2, "h": .2}, "confidence": .9, "category": "animal"}], detector_model="MDV6")
+    db.commit()
     db.masks_features.upsert_mask(pid, "test", mask_path, "MDV6", (.4, .4, .2, .2))
     db.conn.execute("UPDATE photos SET mask_path = ?, active_mask_variant='test' WHERE id = ?", (mask_path, pid))
     db.conn.commit()
@@ -617,6 +622,7 @@ def test_focus_crop_center_puts_the_window_where_the_reviewer_chose(app_and_db):
     db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
     client = app.test_client()
     resp = client.get(f"/photos/{pid}/focus-crop?size=128&center=0.75,0.25")
     assert resp.status_code == 200

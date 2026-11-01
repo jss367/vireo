@@ -21,6 +21,7 @@ def _seed_predictions(db):
                       confidence=0.95, model='test-model', category='new', group_id='g1')
     db.predictions.add(detection_id=det1, species='House Sparrow',
                       confidence=0.80, model='test-model', category='new', group_id='g1')
+    db.commit()
     return photos
 
 
@@ -100,6 +101,7 @@ def test_prediction_lists_honor_detector_floor_and_current_labels(app_and_db):
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
             "confidence": confidence, "category": "animal",
         }], detector_model=model)[0]
+        db.commit()
     for name, species, confidence, fingerprint in [
         ("high", "Stale Species", 0.99, "old"),
         ("high", "Current Species", 0.6, "new"),
@@ -108,6 +110,7 @@ def test_prediction_lists_honor_detector_floor_and_current_labels(app_and_db):
     ]:
         db.predictions.add(detections[name], species, confidence, "test-model",
                            labels_fingerprint=fingerprint)
+        db.commit()
     db.conn.execute("UPDATE predictions SET created_at = '2026-01-01'")
     db.commit()
     cid = db.collections.add("All photos", "[]")
@@ -135,6 +138,7 @@ def test_accept_prediction(app_and_db):
     det2 = _make_detection(db, photos[2]['id'])
     db.predictions.add(detection_id=det2, species='Blue Jay', confidence=0.90,
                       model='test-model', category='new', group_id=None)
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
     ).fetchone()
@@ -162,6 +166,7 @@ def _burst_pair(db, group_id, species, photo_indexes=(0, 1)):
         db.predictions.add(detection_id=det, species=species,
                           confidence=0.95 - 0.05 * offset, model='test-model',
                           category='new', group_id=group_id)
+        db.commit()
         pred_ids.append(db.conn.execute(
             "SELECT id FROM predictions WHERE detection_id = ?", (det,)
         ).fetchone()['id'])
@@ -251,6 +256,7 @@ def test_mark_prediction_reviewed(app_and_db):
     det = _make_detection(db, photos[2]['id'])
     db.predictions.add(detection_id=det, species='Blue Jay', confidence=0.90,
                       model='test-model', category='new', group_id=None)
+    db.commit()
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
     ).fetchone()
@@ -275,6 +281,7 @@ def test_mark_prediction_reviewed_rejects_non_pending(app_and_db):
     det_acc = _make_detection(db, photos[2]['id'])
     db.predictions.add(detection_id=det_acc, species='Blue Jay', confidence=0.90,
                       model='test-model', category='new', group_id=None)
+    db.commit()
     accepted = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
     ).fetchone()
@@ -506,6 +513,7 @@ def test_predictions_include_alternatives(app_and_db):
     det_ids = db.detections.save(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
+    db.commit()
     det_id = det_ids[0]
     db.predictions.add(detection_id=det_id, species='Robin', confidence=0.85,
                       model='test-model')
@@ -513,6 +521,7 @@ def test_predictions_include_alternatives(app_and_db):
                       model='test-model')
     db.predictions.add(detection_id=det_id, species='Finch', confidence=0.05,
                       model='test-model')
+    db.commit()
     # Mark alternatives in the prediction_review table for this workspace
     for sp in ('Sparrow', 'Finch'):
         row = db.conn.execute(
@@ -553,6 +562,7 @@ def test_predictions_alternatives_survive_row_level_rules(app_and_db):
     det_ids = db.detections.save(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
+    db.commit()
     det_id = det_ids[0]
     db.predictions.add(detection_id=det_id, species='Robin', confidence=0.95,
                       model='test-model')
@@ -560,6 +570,7 @@ def test_predictions_alternatives_survive_row_level_rules(app_and_db):
                       model='test-model')
     db.predictions.add(detection_id=det_id, species='Finch', confidence=0.05,
                       model='test-model')
+    db.commit()
     for sp in ('Sparrow', 'Finch'):
         row = db.conn.execute(
             "SELECT id FROM predictions WHERE species = ?", (sp,)
@@ -587,11 +598,13 @@ def test_accept_alternative_prediction(app_and_db):
     det_ids = db.detections.save(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
+    db.commit()
     det_id = det_ids[0]
     db.predictions.add(detection_id=det_id, species='Robin', confidence=0.85,
                       model='test-model')
     db.predictions.add(detection_id=det_id, species='Sparrow', confidence=0.10,
                       model='test-model')
+    db.commit()
 
     ws_id = db._active_workspace_id
     # Mark Sparrow as an alternative in the workspace's review table.
@@ -637,6 +650,7 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     db.predictions.add(detection_id=det_untagged, species='Coyote Untagged',
                       confidence=0.90, model='test-model', category='new',
                       group_id=None)
+    db.commit()
 
     # Tag each photo with its own species so failure modes are independent.
     kid_live = db.add_keyword('Coyote Live', is_species=True)
@@ -687,6 +701,7 @@ def test_get_predictions_species_rule_keeps_disagreement_rows(app_and_db):
     det = _make_detection(db, photos[0]['id'])
     db.predictions.add(detection_id=det, species='Sparrow', confidence=0.9,
                       model='test-model', category='new')
+    db.commit()
 
     rules = [{'field': 'species', 'op': 'is', 'value': 'Robin'}]
     preds = db.predictions.get_rows(rules=rules)
@@ -713,6 +728,7 @@ def test_get_predictions_none_group_mixes_metadata_and_prediction(app_and_db):
                       model='test-model', category='new')
     db.predictions.add(detection_id=det, species='B', confidence=0.05,
                       model='test-model', category='new')
+    db.commit()
 
     rules = {
         'mode': 'none',
@@ -744,6 +760,7 @@ def test_get_predictions_all_group_still_narrows_by_prediction_confidence(app_an
                       model='test-model', category='new')
     db.predictions.add(detection_id=det, species='Low', confidence=0.10,
                       model='test-model', category='new')
+    db.commit()
 
     rules = [
         {'field': 'rating', 'op': '>=', 'value': 3},
@@ -775,6 +792,7 @@ def test_get_predictions_any_group_mixes_metadata_and_prediction(app_and_db):
                       model='test-model', category='new')
     db.predictions.add(detection_id=det, species='Low', confidence=0.10,
                       model='test-model', category='new')
+    db.commit()
 
     rules = {
         'mode': 'any',
@@ -809,6 +827,7 @@ def test_get_predictions_any_group_none_prediction_branch_broadens(app_and_db):
     det = _make_detection(db, photo_id)
     db.predictions.add(detection_id=det, species='Low', confidence=0.10,
                       model='test-model', category='new')
+    db.commit()
 
     rules = {
         'mode': 'any',
@@ -845,6 +864,7 @@ def test_get_predictions_any_group_none_mixed_subgroup_broadens(app_and_db):
     det = _make_detection(db, photo_id)
     db.predictions.add(detection_id=det, species='Low', confidence=0.10,
                       model='test-model', category='new')
+    db.commit()
 
     rules = {
         'mode': 'any',
@@ -889,6 +909,7 @@ def test_get_predictions_status_is_not_keeps_pending_siblings(app_and_db):
                       model='test-model', category='new')
     db.predictions.add(detection_id=det, species='RejectedPick', confidence=0.5,
                       model='test-model', category='new')
+    db.commit()
     rejected = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
         (det,),
@@ -923,6 +944,7 @@ def test_get_predictions_status_not_in_keeps_pending_siblings(app_and_db):
                       model='test-model', category='new')
     db.predictions.add(detection_id=det, species='RejectedPick', confidence=0.5,
                       model='test-model', category='new')
+    db.commit()
     rejected = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
         (det,),
@@ -956,6 +978,7 @@ def test_get_predictions_needs_review_no_keeps_non_pending_siblings(app_and_db):
                       model='test-model', category='new')
     db.predictions.add(detection_id=det, species='RejectedPick', confidence=0.5,
                       model='test-model', category='new')
+    db.commit()
     rejected = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
         (det,),
@@ -992,6 +1015,7 @@ def test_get_predictions_classifier_model_is_not_keeps_other_model_siblings(app_
                       model='model-a', category='new')
     db.predictions.add(detection_id=det, species='PickB', confidence=0.5,
                       model='model-b', category='new')
+    db.commit()
 
     rules = [{'field': 'classifier_model', 'op': 'is not', 'value': 'model-a'}]
     preds = db.predictions.get_rows(rules=rules)
@@ -1018,6 +1042,7 @@ def _one_prediction(db, species='Blue Jay', photo_index=2, model='test-model'):
     det = _make_detection(db, photo_id)
     db.predictions.add(detection_id=det, species=species, confidence=0.90,
                       model=model, category='new', group_id=None)
+    db.commit()
     row = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, species),
@@ -1108,6 +1133,7 @@ def test_group_apply_records_decisions_under_the_lock(app_and_db):
                       model='test-model', category='new', group_id='gapply')
     db.predictions.add(detection_id=det_b, species='Azure Jay', confidence=0.8,
                       model='test-model', category='new', group_id='gapply')
+    db.commit()
     pred_a = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_a,)
     ).fetchone()['id']
@@ -1165,6 +1191,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
                       model='test-model', category='new', group_id=None)
     db.predictions.add(detection_id=det_b, species='Azure Jay', confidence=0.8,
                       model='test-model', category='new', group_id=None)
+    db.commit()
     pred_a = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_a,)
     ).fetchone()['id']
@@ -1231,6 +1258,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     db.predictions.add(detection_id=det_c, species='Azure Jay',
                       confidence=0.7, model='test-model',
                       category='new', group_id=None)
+    db.commit()
     pred_c = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_c,)
     ).fetchone()['id']
@@ -1256,6 +1284,7 @@ def _seed_burst_group(db, group_id='gbaseline'):
         db.predictions.add(detection_id=det, species='Azure Jay',
                           confidence=0.9, model='test-model',
                           category='new', group_id=group_id)
+        db.commit()
         pred_id = db.conn.execute(
             "SELECT id FROM predictions WHERE detection_id = ?", (det,)
         ).fetchone()['id']
@@ -1451,6 +1480,7 @@ def test_group_apply_treats_regenerated_predictions_as_stale(app_and_db):
         model='test-model', category='new',
         labels_fingerprint='rerun-v2',
     )
+    db.commit()
     new_pred_a = db.conn.execute(
         """SELECT id FROM predictions
              WHERE detection_id = ? AND classifier_model = ? AND species = ?""",
@@ -1584,6 +1614,7 @@ def test_group_apply_pick_accepts_only_its_member_and_undo_restores_it(
     db.predictions.add(detection_id=det_reject, species='Canada Jay',
                       confidence=0.8, model='test-model', category='new',
                       group_id='galt')
+    db.commit()
 
     def _pred(det, species):
         return db.conn.execute(
@@ -1707,6 +1738,7 @@ def test_group_apply_repick_rejects_accepted_sibling_and_undo_restores(app_and_d
     db.predictions.add(detection_id=det, species='Steller Jay',
                       confidence=0.4, model='test-model', category='new',
                       status='alternative')
+    db.commit()
     alt = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
         (det, 'Steller Jay'),

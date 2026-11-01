@@ -87,6 +87,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
             det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
+            db.commit()
 
             # Seed an active photo_masks row aligned with the primary
             # detection's prompt so the tightened eye-stage readiness
@@ -116,6 +117,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
                 category="match",
                 taxonomy={"class": "Aves"},
             )
+            db.commit()
 
             enc_ids.append(pid)
         all_ids.append(enc_ids)
@@ -275,6 +277,7 @@ def test_load_photo_features_rescues_bracketed_weak_grackle_run(
         detection_ids[-1], "Great-tailed Grackle", 0.9026, "inat21",
         category="match",
     )
+    db.commit()
 
     photos = load_photo_features(db)
     by_id = {photo["id"]: photo for photo in photos}
@@ -335,6 +338,7 @@ def test_load_photo_features_does_not_rescue_conflicting_species_anchors(
         detection_ids.append(detection_id)
     db.predictions.add(detection_ids[0], "Grackle", 0.9, "inat21")
     db.predictions.add(detection_ids[2], "Cowbird", 0.9, "inat21")
+    db.commit()
 
     middle = {p["id"]: p for p in load_photo_features(db)}[ids[1]]
     assert middle["subject_uncertain"] is False
@@ -1258,6 +1262,7 @@ def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_pa
             {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
         ])
         db.predictions.add(det_ids[0], "robin", 0.9, "bioclip", category="match")
+        db.commit()
         db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path=f"/masks/{pid}.png"))
         db.masks_features.update_embeddings(
             pid,
@@ -1300,6 +1305,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
         det_ids[0], "robin", 0.9, "bioclip", category="match",
         taxonomy={"class": "Aves"},
     )
+    db.commit()
     emb = np.ones(768, dtype=np.float32)
     emb = emb / np.linalg.norm(emb)
     db.masks_features.update_pipeline_features(
@@ -1354,6 +1360,7 @@ def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
         det_ids[0], "subject", species_conf, "bioclip", category="match",
         taxonomy={"class": taxonomy_class} if taxonomy_class else None,
     )
+    db.commit()
     db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path=f"/masks/{pid}.png"))
     # The eye-stage readiness counts (count_eye_keypoint_eligible /
     # _attemptable) require an active photo_masks row whose prompt
@@ -1950,6 +1957,7 @@ def test_load_photo_features_preserves_subject_boxes_and_predictions(tmp_path):
         detection_ids[0], "American Wigeon", 0.98, "bioclip",
         category="match",
     )
+    db.commit()
 
     photo = load_photo_features(db)[0]
     assert [s["detection_id"] for s in photo["subjects"]] == detection_ids
@@ -1965,6 +1973,7 @@ def test_load_photo_features_preserves_subject_boxes_and_predictions(tmp_path):
         detection_ids[1], "Blue-winged Teal", 0.91, "bioclip",
         category="match",
     )
+    db.commit()
     photo = load_photo_features(db)[0]
     assert photo["subjects"][1]["predictions"] == [
         ("Blue-winged Teal", 0.91, "bioclip", "name:blue-winged teal"),
@@ -1996,6 +2005,7 @@ def test_load_photo_features_filters_to_latest_fingerprint(tmp_path):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95, "category": "animal"}],
         detector_model="MDV6",
     )
+    db.commit()
     # Older fingerprint row (stale label set) — Robin.
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
@@ -2475,6 +2485,7 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
             "scientific_name": "Vulpes vulpes",
         },
     )
+    db.commit()
     # Register the mask through the mask-variant path so the stale-mask
     # predicate can confirm the row matches the primary detection.
     db.masks_features.upsert_mask(
@@ -2597,6 +2608,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
     )
+    db.commit()
     db.masks_features.upsert_mask(
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
@@ -2609,6 +2621,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         model="bioclip-2.5", category="match",
         taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
     )
+    db.commit()
 
     cid = db.collections.add(
         "fox set",
@@ -2681,6 +2694,7 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         model="bioclip-2.5", category="match",
         taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
     )
+    db.commit()
     db.masks_features.upsert_mask(
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
@@ -2771,6 +2785,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
     )
+    db.commit()
     db.masks_features.upsert_mask(
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
@@ -2783,6 +2798,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         model="bioclip-2.5", category="match",
         taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
     )
+    db.commit()
 
     cid = db.collections.add(
         "both",
@@ -2868,6 +2884,7 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
           "confidence": 0.95}],
         detector_model="MegaDetector",
     )
+    db.commit()
     # Register the mask through the same path production uses, so
     # ``list_photos_for_eye_keypoint_stage``'s stale-mask predicate
     # can confirm the mask row matches the primary detection's prompt.
@@ -2890,6 +2907,7 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
             "scientific_name": "Vulpes vulpes",
         },
     )
+    db.commit()
 
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -3168,6 +3186,7 @@ def test_eye_stage_persists_when_state_lags_current_primary(tmp_path, monkeypatc
             "scientific_name": "Vulpes vulpes",
         },
     )
+    db.commit()
     # Simulate a peer workspace (or an earlier floor) having pinned the
     # cached subject to the SECOND detection. Under the current floor
     # (0.2), primary_order_sql still ranks the first (conf=0.95) ahead of
@@ -3497,6 +3516,7 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
         {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.3},
          "confidence": 0.95, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
 
     # At the default workspace threshold (0.2), only the high-conf box wins
     # as primary detection.
@@ -4098,6 +4118,7 @@ def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkey
             fallback_detection_id = did
         db.predictions.add(did, 'Common Yellowthroat', 0.9984 if middle else 0.9998,
                           'BioCLIP-2.5', taxonomy={'taxon_id':9721})
+        db.commit()
     try:
         disabled = {'pipeline':{'weak_detection_rescue_enabled':False}}
         before = run_grouping(load_photo_features(db, effective_config=disabled))
@@ -4118,6 +4139,7 @@ def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkey
         # matching old fallback. Explicit fingerprint selection still works.
         db.predictions.add(fallback_detection_id, 'Song Sparrow', 0.99, 'BioCLIP-2.5',
                           taxonomy={'taxon_id':1}, labels_fingerprint='new-labels')
+        db.commit()
         newest = load_photo_features(db, effective_config=cfg.DEFAULTS)[11]
         assert newest['subject_absent'] and not newest['subject_uncertain']
         pinned = load_photo_features(db, effective_config=cfg.DEFAULTS, labels_fingerprint='legacy')[11]
@@ -4151,8 +4173,10 @@ def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch, detecto
                 'confidence': 0, 'category': 'animal',
             }])[0]
         db.predictions.add(did, 'Common Yellowthroat', .99, 'BioCLIP-2.5')
+        db.commit()
         if i == 1:
             db.predictions.add(did, 'Song Sparrow', .98, 'BioCLIP-2.5')
+            db.commit()
     try:
         effective = {**cfg.DEFAULTS, 'detector_confidence': detector_confidence}
         default = load_photo_features(db, config=effective, effective_config=effective)[1]

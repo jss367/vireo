@@ -414,6 +414,7 @@ def test_collection_photos_includes_detections_and_species(app_and_db):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.7, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
 
     rules = [{"field": "rating", "op": ">=", "value": 3}]
     resp = client.post("/api/collections", json={"name": "Rated", "rules": rules})

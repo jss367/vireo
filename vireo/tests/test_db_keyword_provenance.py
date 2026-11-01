@@ -582,6 +582,7 @@ def _det(db, pid, x=0.1):
 
 def _pred(db, det, species, model="m1"):
     db.predictions.add(det, species, 0.9, model)
+    db.commit()
     return db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ? "
         "AND classifier_model = ?",
@@ -798,6 +799,7 @@ def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
             det, "m1", "g1", 3, 3, json.dumps({"Robin": 3}),
             labels_fingerprint="legacy",
         )
+        db.commit()
     db.update_prediction_status(preds[2], "rejected")
     db.conn.commit()
     with db.transaction():

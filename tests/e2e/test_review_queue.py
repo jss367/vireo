@@ -24,9 +24,11 @@ def seed_queue(live_server, tmp_path):
             {'box': {'x': .1, 'y': .1, 'w': .2, 'h': .2}, 'confidence': .95, 'category': 'animal'},
             {'box': {'x': .65, 'y': .1, 'w': .2, 'h': .3}, 'confidence': .85, 'category': 'animal'},
         ], detector_model='test-detector')
+        db.commit()
         for detection in detections:
             db.predictions.add(detection_id=detection, species='American Robin', confidence=.92,
                                model='BioCLIP-2', labels_fingerprint='queue-test')
+            db.commit()
         pids.append(pid)
         subjects.append(detections)
     db.photo_review.set_flag(pids[0], 'flagged')

@@ -715,6 +715,7 @@ def test_api_photos_includes_all_detections(app_and_db):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.7, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
 
     client = app.test_client()
     resp = client.get('/api/photos')
@@ -749,6 +750,7 @@ def test_api_photos_detections_honor_workspace_threshold(app_and_db):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.05, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
 
     client = app.test_client()
 
@@ -842,6 +844,7 @@ def _mark_best_batch_quality(db, photo_id, sharpness):
     mask_path.write_bytes(b"scratch-mask")
     db.detections.save(photo_id, [{"box": {"x": .1, "y": .1, "w": .2, "h": .2},
                                    "confidence": .9, "category": "animal"}], detector_model="MDV6")
+    db.commit()
     db.masks_features.upsert_mask(photo_id, "sam2-small", str(mask_path), "MDV6", (.1, .1, .2, .2),
         MaskQuality(subject_tenengrad=sharpness, bg_tenengrad=5, crop_complete=1,
                     bg_separation=0, subject_clip_high=0, subject_clip_low=0,
@@ -1474,6 +1477,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
             0.92 - idx * 0.05,
             "bioclip",
         )
+        db.commit()
     db.set_photo_edit_recipe(ordered_ids[0], {"rotation": 90})
     db.commit()
 
@@ -1756,6 +1760,7 @@ def test_api_photos_geo_species_filter(app_and_db):
     det3 = db.detections.save(3, [{"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}], detector_model="MDV6")
     db.predictions.add(det1[0], 'Cardinal', 0.9, 'bioclip')
     db.predictions.add(det3[0], 'Sparrow', 0.8, 'bioclip')
+    db.commit()
     preds = db.predictions.get_rows(photo_ids=[1, 3])
     for pr in preds:
         db.accept_prediction(pr['id'])
@@ -1776,6 +1781,7 @@ def test_api_species_list(app_and_db):
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=1")
     det_ids = db.detections.save(1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Cardinal', 0.9, 'bioclip')
+    db.commit()
     preds = db.predictions.get_rows(photo_ids=[1])
     db.accept_prediction(preds[0]['id'])
     db.commit()
@@ -11809,6 +11815,7 @@ def test_api_detections_rejects_cross_workspace_photo(app_and_db):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
+    db.commit()
     client = app.test_client()
     resp = client.get(f'/api/detections/{hidden_pid}')
     assert resp.status_code == 404
@@ -12563,6 +12570,7 @@ def _seed_prediction_confidences(db, by_filename):
             "confidence": 0.9, "category": "animal",
         }], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Robin", confidence, "test")
+        db.commit()
     db.conn.commit()
 
 
@@ -12663,6 +12671,7 @@ def test_api_photos_query_stack_badge_is_the_score_that_placed_it(app_and_db):
             "confidence": 0.9, "category": "animal",
         }], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Robin", confidence, "test")
+        db.commit()
     db.conn.commit()
 
     response = app.test_client().post("/api/photos/query", json={
@@ -12695,6 +12704,7 @@ def test_api_photos_query_unsorted_stack_badge_is_the_covers_own_score(app_and_d
             "confidence": 0.9, "category": "animal",
         }], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Robin", confidence, "test")
+        db.commit()
     db.conn.commit()
 
     response = app.test_client().post("/api/photos/query", json={
@@ -13862,6 +13872,7 @@ def _seed_browse_summary_analysis(db):
     db.model_runs.record_detector_run(photos["bird1.jpg"], "MDV6", 2)
     db.model_runs.record_detector_run(photos["bird2.jpg"], "MDV6", 2)
     db.model_runs.record_detector_run(photos["bird3.jpg"], "full-image", 1)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET subject_tenengrad = 12.5, eye_tenengrad = 3.0, "
         "miss_computed_at = '2026-10-17T00:00:00' WHERE id = ?",
@@ -14060,6 +14071,7 @@ def test_api_photos_query_visual_stack_never_claims_confidence_order(
             "confidence": 0.9, "category": "animal",
         }], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Robin", confidence, "test")
+        db.commit()
     db.conn.commit()
 
     payload = app.test_client().post("/api/photos/query", json={
@@ -14407,6 +14419,7 @@ def test_api_predictions_accepts_rules(app_and_db):
             detection_id=det_ids[0], species=species, confidence=0.9,
             model="TestModel", labels_fingerprint=TOL_SENTINEL,
         )
+        db.commit()
 
     client = app.test_client()
     resp = client.get('/api/predictions')
@@ -14446,6 +14459,7 @@ def test_api_predictions_filters_prediction_rows_by_confidence(app_and_db):
     db.predictions.add(detection_id=det_ids[1], species="Sparrow",
                       confidence=0.10, model="M1",
                       labels_fingerprint=TOL_SENTINEL)
+    db.commit()
 
     client = app.test_client()
     resp = client.get('/api/predictions')
@@ -14493,6 +14507,7 @@ def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_
     db.predictions.add(detection_id=det2[0], species="Sparrow",
                       confidence=0.9, model="M1",
                       labels_fingerprint=TOL_SENTINEL)
+    db.commit()
     pred2 = db.conn.execute(
         "SELECT id FROM predictions WHERE species='Sparrow'"
     ).fetchone()["id"]
@@ -14547,6 +14562,7 @@ def test_photos_query_classifier_model_is_not_includes_photos_without_prediction
     db.predictions.add(detection_id=det[0], species="Cardinal",
                       confidence=0.9, model="model-a",
                       labels_fingerprint=TOL_SENTINEL)
+    db.commit()
 
     rules = [{"field": "classifier_model", "op": "is not",
               "value": "model-a"}]
@@ -14679,6 +14695,7 @@ def test_api_predictions_surfaces_visual_status(app_and_db, monkeypatch):
             detection_id=det_ids[0], species=species, confidence=0.9,
             model="TestModel", labels_fingerprint=TOL_SENTINEL,
         )
+        db.commit()
 
     client = app.test_client()
     visual = _json.dumps({"prompt": "a bird", "strength": "balanced"})

@@ -43,6 +43,7 @@ def classify(db, pid, confidence, species="Bluebird", score=0.99, model="megadet
         ],
     )[0]
     db.predictions.add(did, species, score, "classifier")
+    db.commit()
     return did
 
 
@@ -95,6 +96,7 @@ def test_additional_evidence_respects_latest_and_pinned_label_sets(sequence_db):
     db, ids = sequence_db
     detections = [classify(db, pid, 0.06 if i == 1 else 0.8) for i, pid in enumerate(ids)]
     db.predictions.add(detections[1], "Other bird", 0.99, "classifier", labels_fingerprint="new")
+    db.commit()
     assert load_photo_features(db, effective_config={})[1]["subject_absent"]
     assert load_photo_features(db, effective_config={}, labels_fingerprint="legacy")[1]["subject_uncertain"]
 
@@ -108,6 +110,7 @@ def test_hidden_agreeing_crop_model_vetoes_isolated_repair(sequence_db, top_k):
         did = classify(db, pid, 0.7, "Chickadee" if i == 1 else "Nuthatch", 0.828 if i == 1 else 0.99)
         if i == 1:
             db.predictions.add(did, "Chickadee", 0.827, "independent-classifier")
+            db.commit()
     photos = load_photo_features(db, config={"top_k_predictions": top_k}, effective_config={})
     assert "isolated_species_context" not in photos[1]
     assert photos[1]["species_top5"][0][0] == "Chickadee"
@@ -158,6 +161,7 @@ def test_conflicting_independent_evidence_vetoes_new_weak_crop_rescue(sequence_d
         )
         db.predictions.add(did, "Bluebird", 0.99, "classifier")
         db.predictions.add(second, "Other bird", 0.99, "classifier")
+        db.commit()
     assert load_photo_features(db, effective_config={})[1]["subject_absent"]
 
 

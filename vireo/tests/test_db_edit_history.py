@@ -690,6 +690,7 @@ def _predictions(db, pid):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
+    db.commit()
     rows = {}
     for key, model, fp, species, conf in (
         ("a_top", "m1", "fpA", "Robin", 0.9),
