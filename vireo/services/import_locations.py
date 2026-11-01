@@ -85,6 +85,10 @@ NEARBY_RADIUS_M = 5000
 # within this distance of each other, directly or through a chain of cells,
 # are one outing. Two outings in one county must not share a nearby place.
 OUTING_LINK_M = 2000
+# Cell-to-cell distance checks the outing split may make before the preview
+# is refused, as previews over the group limit are. Ordinary cards make a few
+# thousand; dense spots near a pole could otherwise make billions.
+MAX_OUTING_COMPARISONS = 2_000_000
 MAX_NEARBY_PLACES = 6
 # Nearby lookups are made once per bucket of this many degrees (about 2 km),
 # from its center, not once per ~110 m cell: one walk spans dozens of cells.
@@ -468,9 +472,9 @@ _EARTH_RADIUS_M = 6_371_000
 def _earth_point(lat: float, lng: float) -> tuple[float, float, float]:
     """A point's Earth-centered coordinates in meters.
 
-    Straight-line distance never exceeds distance along the surface, so two
-    points within ``d`` meters of each other on the map are within ``d`` here
-    too, at the poles and across the antimeridian alike.
+    Straight-line distance never exceeds distance along the surface, and at
+    the link distance the two differ by microns, so it measures closeness the
+    same way at the poles and across the antimeridian as anywhere else.
     """
     phi, lam = math.radians(lat), math.radians(lng)
     return (_EARTH_RADIUS_M * math.cos(phi) * math.cos(lam),
@@ -478,14 +482,52 @@ def _earth_point(lat: float, lng: float) -> tuple[float, float, float]:
             _EARTH_RADIUS_M * math.sin(phi))
 
 
+class OutingWorkLimit(Exception):
+    """Splitting into outings would take more than :data:`MAX_OUTING_COMPARISONS`."""
+
+
+# Cube side for the outing index: any two points in one cube are within the
+# link distance of each other (the cube's diagonal), so a cube is linked
+# whole, and points within the link distance are at most two cubes apart.
+_OUTING_CUBE_M = OUTING_LINK_M / math.sqrt(3)
+_CUBE_REACH = math.ceil(math.sqrt(3))
+# Each unordered pair of neighboring cubes is visited once, from the cube
+# that sorts first.
+_FORWARD_CUBES = [
+    (dx, dy, dz)
+    for dx in range(-_CUBE_REACH, _CUBE_REACH + 1)
+    for dy in range(-_CUBE_REACH, _CUBE_REACH + 1)
+    for dz in range(-_CUBE_REACH, _CUBE_REACH + 1)
+    if (dx, dy, dz) > (0, 0, 0)
+]
+
+
+type _CubeMembers = list[tuple[str, tuple[float, float, float]]]
+
+
+def _cubes_link(members: _CubeMembers, others: _CubeMembers, budget: int) -> tuple[bool, int]:
+    """Whether any point of one cube is within the link distance of the other's,
+    stopping at the first, and the comparison budget left."""
+    for _, a in members:
+        for _, b in others:
+            budget -= 1
+            if budget < 0:
+                raise OutingWorkLimit
+            if math.dist(a, b) <= OUTING_LINK_M:
+                return True, budget
+    return False, budget
+
+
 def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[str]]:
     """Split cells into chains of cells within :data:`OUTING_LINK_M` of each other.
 
-    Single linkage over a grid of link-sized cubes in Earth-centered space
-    (:func:`_earth_point`), so each cell is only compared with the cells in
-    its own and the 26 neighboring cubes, and any two cells within the link
-    distance share or neighbor a cube wherever they are on Earth. The exact
-    map distance decides each link. Outings come back in the order of their
+    Distance is straight-line between Earth-centered points
+    (:func:`_earth_point`), indexed in cubes small enough that each cube's
+    cells are linked without measuring. Two cubes are measured against each
+    other only while their outings are still apart, and only until the first
+    link, so dense spots (many cells collapse into a few cubes near a pole)
+    cost one pass. Raises :class:`OutingWorkLimit` past
+    :data:`MAX_OUTING_COMPARISONS`. Outings come back in the order of their
     first cell.
     """
     parent = {key: key for key in keys}
@@ -496,20 +538,24 @@ def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[st
             key = parent[key]
         return key
 
-    grid: dict[tuple[int, int, int], list[str]] = {}
-    neighbors = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
+    cubes: dict[tuple[int, int, int], _CubeMembers] = {}
     for key in keys:
-        cell = cells[key]
-        x, y, z = _earth_point(cell["lat"], cell["lng"])
-        cube = (math.floor(x / OUTING_LINK_M), math.floor(y / OUTING_LINK_M),
-                math.floor(z / OUTING_LINK_M))
-        here = {"latitude": cell["lat"], "longitude": cell["lng"]}
-        for dx, dy, dz in neighbors:
-            for other in grid.get((cube[0] + dx, cube[1] + dy, cube[2] + dz), ()):
-                there = {"latitude": cells[other]["lat"], "longitude": cells[other]["lng"]}
-                if distance_meters(here, there) <= OUTING_LINK_M:
-                    parent[root(other)] = root(key)
-        grid.setdefault(cube, []).append(key)
+        point = _earth_point(cells[key]["lat"], cells[key]["lng"])
+        cube = cubes.setdefault((math.floor(point[0] / _OUTING_CUBE_M),
+                                 math.floor(point[1] / _OUTING_CUBE_M),
+                                 math.floor(point[2] / _OUTING_CUBE_M)), [])
+        if cube:
+            parent[root(key)] = root(cube[0][0])
+        cube.append((key, point))
+    budget = MAX_OUTING_COMPARISONS
+    for (x, y, z), members in cubes.items():
+        for dx, dy, dz in _FORWARD_CUBES:
+            others = cubes.get((x + dx, y + dy, z + dz))
+            if not others or root(members[0][0]) == root(others[0][0]):
+                continue
+            linked, budget = _cubes_link(members, others, budget)
+            if linked:
+                parent[root(others[0][0])] = root(members[0][0])
     outings: dict[str, list[str]] = {}
     for key in keys:
         outings.setdefault(root(key), []).append(key)
@@ -572,6 +618,7 @@ class ImportLocationSuggester:
         self._nearby_over_limit = False
         self._named: dict[str, tuple[JsonDict | None, str | None, bool]] = {}
         self._outings_split = False
+        self._outing_work_exceeded = False
         self.cell_keys = list(self._cells)
 
     def name_cell(self, key: str) -> None:
@@ -604,7 +651,12 @@ class ImportLocationSuggester:
         self._outings_split = True
         regrouped: dict[str, JsonDict] = {}
         for key, group in self._groups.items():
-            outings = _outings(self._cells, group["broad_cells"]) if group["broad_cells"] else []
+            try:
+                outings = _outings(self._cells, group["broad_cells"]) if group["broad_cells"] else []
+            except OutingWorkLimit:
+                # Refused in result(), before any Nearby Search.
+                self._outing_work_exceeded = True
+                return
             if len(outings) == 1 and len(outings[0]) == len(group["cells"]):
                 regrouped[key] = group
                 continue
@@ -632,7 +684,7 @@ class ImportLocationSuggester:
         one group of many spread cells :meth:`result` would accept.
         """
         self._split_outings()
-        if len(self._groups) > MAX_CHOICES:
+        if len(self._groups) > MAX_CHOICES or self._outing_work_exceeded:
             return []
         buckets: list[_NearbyKey] = []
         seen: set[_NearbyKey] = set()
@@ -692,6 +744,14 @@ class ImportLocationSuggester:
 
     def result(self) -> JsonDict:
         self._split_outings()
+        if getattr(self, "_outing_work_exceeded", False):
+            return {
+                "groups": [], "file_cells": {},
+                "work_limit_error": (
+                    "These photos' GPS spots are too densely packed for Vireo to group "
+                    "into outings. Preview fewer files, or turn off GPS location suggestions."
+                ),
+            }
         if len(self._groups) > MAX_CHOICES or getattr(self, "_nearby_over_limit", False):
             return {
                 "groups": [], "file_cells": {},

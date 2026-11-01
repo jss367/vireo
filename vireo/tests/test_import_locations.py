@@ -546,6 +546,29 @@ def test_cells_just_past_the_link_distance_stay_separate_outings(pair):
     assert len(import_locations._outings(cells, list(cells))) == 2
 
 
+@pytest.mark.parametrize("lat", [90.0, 89.995, -89.9999])
+def test_dense_cells_near_a_pole_group_without_pairwise_measuring(monkeypatch, lat):
+    """Distinct-longitude cells near a pole collapse into a few cubes; they
+    must link in one pass, not by comparing every pair (billions at 100,000)."""
+    monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", 1000)
+    cells = {f"{lat},{i}": {"lat": lat, "lng": -180 + i * 0.072} for i in range(5000)}
+
+    assert import_locations._outings(cells, list(cells)) == [list(cells)]
+
+
+def test_a_preview_past_the_outing_work_budget_is_refused_before_nearby_lookups(db, monkeypatch):
+    monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", 0)
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked up nearby for a refused preview"))
+    walk = [(32.8750, -116.4640), (32.8900, -116.4640)]  # 1.7 km: two cubes to measure
+
+    result = suggest_import_locations(db, _files(walk), api_key="KEY", language="en")
+
+    assert result["groups"] == []
+    assert "too densely packed" in result["work_limit_error"]
+
+
 def test_an_outing_across_the_antimeridian_is_offered_places_not_called_spread_out(db, monkeypatch):
     """Longitudes 179.99 and -179.99 are 1.1 km apart, not half the planet."""
     walk = [(-16.5, 179.995), (-16.5, -179.995)]
