@@ -61,6 +61,12 @@ bucket card pinned above the results while its Keep-for-all runs:
   and say "No thumbnail" on `error`, both listened for in the capture phase
   because those events do not bubble.
 
+Cards use `data-thumbnail-src`, consumed by the shared
+`vireo-thumbnail-queue.js` inside `#duplicateThumbnailGrid`. The queue uses
+the window viewport here, keeps at most two downloads in flight, prioritizes
+visible cards over a 200px runway, and cancels downloads when cards leave
+that runway or are replaced. Comparison dialog images load directly.
+
 A disabled button dispatches no click, as with the old inline handlers.
 
 ## Tests

@@ -2,19 +2,27 @@
 import re
 from pathlib import Path
 
+import pytest
 from playwright.sync_api import expect
 
 QUEUE = Path(__file__).resolve().parents[2] / "vireo/static/vireo-thumbnail-queue.js"
 
 
-def setup_queue(page):
+def setup_queue(page, document_viewport=False):
+    if document_viewport:
+        page.set_viewport_size({"width": 300, "height": 200})
     page.set_content('''
         <style>
+          body { margin: 0; }
           #gridContainer { height: 200px; width: 300px; overflow: auto; }
           img { display: block; width: 280px; height: 100px; }
         </style>
-        <div id="gridContainer"><div id="grid"></div></div>
-    ''')
+        <div id="ROOT"><div id="grid"></div></div>
+    '''.replace("ROOT", "duplicateThumbnailGrid" if document_viewport else "gridContainer"))
+    page.evaluate('''documentViewport => {
+      window.scrollQueue = top => documentViewport
+        ? window.scrollTo(0, top) : (gridContainer.scrollTop = top);
+    }''', document_viewport)
     page.evaluate('''() => {
       grid.innerHTML = Array.from({length: 30}, (_, i) =>
         `<img id="photo${i}" data-thumbnail-src="/thumbnails/${i}.jpg">`).join('');
@@ -41,12 +49,13 @@ def setup_queue(page):
     page.wait_for_function("requests.length === 2")
 
 
-def test_scroll_cancels_old_requests_and_prioritizes_visible_photos(page):
-    setup_queue(page)
+@pytest.mark.parametrize("document_viewport", [False, True], ids=["browse", "duplicates"])
+def test_scroll_cancels_old_requests_and_prioritizes_visible_photos(page, document_viewport):
+    setup_queue(page, document_viewport)
     assert page.evaluate("requests.map(r => r.url)") == [
         "/thumbnails/0.jpg", "/thumbnails/1.jpg",
     ]
-    page.evaluate("gridContainer.scrollTop = 2000")
+    page.evaluate("scrollQueue(2000)")
     page.wait_for_function("requests.length === 4")
     assert page.evaluate("requests.slice(0, 2).every(r => r.aborted)")
     assert page.evaluate("requests.slice(2).map(r => r.url)") == [
@@ -57,12 +66,13 @@ def test_scroll_cancels_old_requests_and_prioritizes_visible_photos(page):
     page.evaluate("requests.slice(2).forEach(r => r.finish())")
     page.wait_for_function("document.querySelectorAll('img[src^=\"blob:\"]').length === 2")
     assert page.evaluate("requests.filter(r => !r.done && !r.aborted).length") <= 2
-    page.evaluate("gridContainer.scrollTop = 0")
+    page.evaluate("scrollQueue(0)")
     page.wait_for_function("requests.filter(r => r.url === '/thumbnails/0.jpg').length === 2")
 
 
-def test_replacement_aborts_downloads_and_releases_decoded_images(page):
-    setup_queue(page)
+@pytest.mark.parametrize("document_viewport", [False, True], ids=["browse", "duplicates"])
+def test_replacement_aborts_downloads_and_releases_decoded_images(page, document_viewport):
+    setup_queue(page, document_viewport)
     page.evaluate("requests[0].finish()")
     page.wait_for_function("photo0.complete && photo0.naturalWidth > 0")
     old_url = page.locator('#photo0').get_attribute('src')
