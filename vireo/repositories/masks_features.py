@@ -891,6 +891,23 @@ class MasksFeaturesRepository:
             (photo_id, model, variant, embedding_bytes),
         )
 
+    def clear_detection_embeddings(self, photo_id: int, detection_id: int) -> None:
+        """Retire a replaced crop and its unprovenanced photo-level projections.
+
+        Caller owns the transaction. Other detections' vectors and unrelated
+        models remain available; the default vector has no source-detection key.
+        """
+        variant = f"det:{detection_id}"
+        models = self.conn.execute(
+            "SELECT model FROM photo_embeddings WHERE photo_id=? AND variant=?",
+            (photo_id, variant),
+        ).fetchall()
+        for row in models:
+            self.conn.execute(
+                "DELETE FROM photo_embeddings WHERE photo_id=? AND model=? AND variant IN ('', ?)",
+                (photo_id, row["model"], variant),
+            )
+
     def photos_with_embedding(
         self, model: str, variant: str = '', photo_ids: Sequence[int] | None = None,
         include_offline_folders: bool = False,

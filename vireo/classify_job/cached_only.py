@@ -339,6 +339,7 @@ def _cached_only_raw_results(
             raw_results.append({
                 "photo": photo,
                 "detection_id": detection["id"],
+                "_reviewer_box": detection_store.reviewer_box_snapshot(dict(detection)),
                 "folder_path": folder_path,
                 "image_path": image_path,
                 "prediction": top["species"],

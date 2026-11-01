@@ -1204,3 +1204,16 @@ def test_write_miss_flags_updates_each_photo_without_committing(db):
         "SELECT miss_computed_at FROM photos WHERE id = ?", (a,),
     ).fetchone()[0] is None
     db.rollback()
+
+
+def test_snapshot_excludes_only_requested_model_in_nullable_legacy_storage():
+    # Fresh schema requires a model; an older nullable table must still expose
+    # unknown-model rows to stale-output cleanup instead of hiding them.
+    with sqlite3.connect(':memory:') as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('CREATE TABLE detections(id INTEGER, photo_id INTEGER, detector_model TEXT)')
+        conn.executemany('INSERT INTO detections VALUES (?, 1, ?)', [
+            (1, None), (2, 'megadetector-v6'), (3, 'reviewer-selected')])
+        repo = DetectionsRepository(conn, commit_with_retry=lambda connection: connection.commit())
+        assert repo.get_ids_for_photos([1]) == {1: {1, 2, 3}}
+        assert repo.get_ids_for_photos([1], exclude_model='reviewer-selected') == {1: {1, 2}}

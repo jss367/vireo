@@ -485,6 +485,7 @@ PUT          /api/color-label-descriptions/<color>
 PUT          /api/keywords/<int:keyword_id>
 PUT          /api/move-rules/<int:rule_id>
 PUT          /api/photos/<int:photo_id>/primary-subject
+PUT          /api/photos/<int:photo_id>/subjects/reviewer-box
 PUT          /api/processes/<int:process_id>
 PUT          /api/workspaces/<int:ws_id>
 PUT          /api/workspaces/<int:ws_id>/subject-types

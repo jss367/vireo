@@ -199,7 +199,7 @@ interface LightboxApi {
   vireoRememberPhotoRenderKey(photoId: LightboxPhotoId | null, key: string | null | undefined, options?: {skipIfLocallyWritten: boolean}): void;
 }
 interface LightboxMaskVariant { variant: string; url: string; created_at?: string }
-interface LightboxDetection { box_x: number | null; box_y: number | null; box_w: number; box_h: number; category?: string; detector_confidence?: number }
+interface LightboxDetection { detector_model?: string; box_x: number | null; box_y: number | null; box_w: number; box_h: number; category?: string; detector_confidence?: number }
 interface LightboxCurationEntry { species: string; is_current_photo?: boolean; is_species_representative?: boolean; is_highlighted?: boolean }
 interface LightboxPhoto { life_list?: LightboxCurationEntry[]; highlight_list?: LightboxCurationEntry[]; species?: string | string[] }
 interface LightboxCurationOptions {getPhoto?: (id: number) => LightboxPhoto | null | undefined; photoById?: Record<string, LightboxPhoto>; showFetchFallback?: boolean}

@@ -12,6 +12,7 @@ import numpy as np
 from services import detection_store
 
 ANALYSIS_VERSION = 1
+REVIEWER_MODEL = "reviewer-selected"
 
 
 def retained(db, photo_id, min_conf=None, *, detector_model=None):
@@ -75,12 +76,16 @@ def analyze_image(image, detections):
     return results
 
 
-def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None):
+def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None, detection_id=None):
     """Backfill on cached detection runs too; failed/offline reads remain retryable."""
     from image_loader import load_image
     from pipeline_locks import acquire_photo_mask
 
     detections = retained(db, photo_id, min_conf)
+    if detection_id is not None:
+        detections = [d for d in detections if d["id"] == detection_id]
+        if not detections:
+            raise ValueError("Chosen subject is no longer available")
     if not detections:
         # Migrated catalogs have legacy subject-derived fields on ``photos``
         # without any ``photo_subject_state`` row. Triggering ``sync_primary``
@@ -116,11 +121,23 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
     with acquire_photo_mask(photo_id):
         if checkpoint:
             checkpoint()
-        # The detector may have been replaced while the image was decoded.
-        db.subjects.save_analyses(source_key, results)
-        sync_primary(db, photo_id, min_conf=min_conf)
-        db.commit_with_retry()
+        with db.transaction(immediate=True):
+            results = _current_analysis_results(db, photo_id, pending, results, detection_id, min_conf)
+            db.subjects.save_analyses(source_key, results)
+            sync_primary(db, photo_id, min_conf=min_conf)
     return len(results)
+
+
+def _current_analysis_results(db, photo_id, pending, results, detection_id, min_conf):
+    """Recheck every measured box under the publication writer transaction."""
+    current = {d["id"]: d for d in retained(db, photo_id, min_conf)}
+    # IDs quantize coordinates: both scoped and unscoped work must compare
+    # the exact geometry, including edits that retain the same detection ID.
+    valid = {d["id"] for d in pending if d["id"] in current
+             and all(current[d["id"]]["box_" + k] == d["box_" + k] for k in "xywh")}
+    if detection_id is not None and detection_id not in valid:
+        raise ValueError("Chosen subject changed during analysis; select it again")
+    return [r for r in results if r["detection_id"] in valid]
 
 
 def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
@@ -183,9 +200,49 @@ def payload(db, photo_id):
         detection["analysis"] = ({"crop": json.loads(analysis["crop"]),
             "quality_score": analysis["quality_score"], "exposure_ev": analysis["exposure_ev"],
             "basis": "detection_box", "source_key": analysis["source_key"]} if analysis else None)
+        detection["evidence_basis"] = "reviewer_box" if detection["detector_model"] == REVIEWER_MODEL else "detector_box"
         detection["predictions"] = grouped.get(detection["id"], [])
         detection["is_primary"] = detection is detections[0]
     primary_id = detections[0]["id"] if detections else None
-    return {"photo_id": photo_id, "subjects": detections, "primary_detection_id": primary_id,
+    full_image_ids = {d["id"] for d in detection_store.get_detections(db, photo_id, min_conf=0)
+                      if d["detector_model"] == "full-image"}
+    return {"photo_id": photo_id, "subjects": detections,
+            "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])], "primary_detection_id": primary_id,
             "selection": "manual" if choice else "automatic",
             "choice_unavailable": bool(choice and choice["detection_id"] != primary_id)}
+
+
+def select_reviewer_box(db, photo_id, box):
+    """Save an explicit human region separately from model output, then select it.
+
+    Coordinates use the upright, unedited source frame. The stored confidence
+    of 1 keeps the explicit choice above detector thresholds; it is not a
+    model probability. No detector run or species prediction is manufactured.
+    Caller holds the photo lock.
+    """
+    if not isinstance(box, dict) or set(box) != set("xywh"):
+        raise ValueError("box must contain x, y, w and h")
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in box.values()):
+        raise ValueError("Box coordinates must be finite numbers")
+    try:
+        finite = all(math.isfinite(v) for v in box.values())
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise ValueError("Box coordinates must be finite numbers")
+    x, y, w, h = (box[k] for k in "xywh")
+    if min(x, y) < 0 or min(w, h) <= 0 or x + w > 1 or y + h > 1:
+        raise ValueError("Choose a nonempty box inside the source image")
+    with db.transaction(immediate=True):
+        for previous in detection_store.get_detections(db, photo_id, min_conf=0, detector_model=REVIEWER_MODEL):
+            db.masks_features.clear_detection_embeddings(photo_id, previous["id"])
+        # Clear previous measurements even if a legacy catalog lacks primary state.
+        db.subjects.clear_primary_features(photo_id)
+        ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [
+            {"box": box, "confidence": 1.0, "category": "animal"}], "reviewer-v1")
+        # Re-saving an identical or quantization-equivalent box reuses its ID.
+        # Retire that ID's cached box analysis before sync_primary can project it.
+        db.subjects.clear_analysis(ids[0])
+        db.subjects.set_choice(photo_id, ids[0])
+        sync_primary(db, photo_id)
+    return ids[0]

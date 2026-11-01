@@ -1,4 +1,5 @@
 /* Per-detection suggestions are previews. Only explicit Use actions edit a photo. */
+import { openSubjectBox } from './lightbox/subject-box.js';
 import { lbState } from './lightbox/shared-state.js';
 import { _lbGuardReadOnly, _lbPhotoDataByPhoto, vireoLightboxSession } from './lightbox/state.js';
 import {
@@ -26,6 +27,8 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
   const automatic = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectAutomatic'));
   const cropButton = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectUseCrop'));
   const analyzeButton = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectAnalyze'));
+  const drawButton = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectDraw'));
+  const retryButton = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectRetry'));
   const exposureButton = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectUseExposure'));
 
   function primary() { return data && data.subjects.find(s => s.is_primary); }
@@ -37,7 +40,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
   function render() {
     list.replaceChildren();
     details.replaceChildren();
-    panel.hidden = !data || !data.subjects.length;
+    panel.hidden = !data;
     if (panel.hidden || !data) return;
     // Scoped Pipeline Review views open the lightbox with _lbReadOnly to
     // freeze mutating writes. Every subject control here reaches a
@@ -49,6 +52,17 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     const readOnly = typeof lbState.readOnly !== 'undefined' && lbState.readOnly;
     const readOnlyTitle = readOnly && typeof lbState.readOnlyMessage === 'string' ? lbState.readOnlyMessage : null;
     /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectSummary')).textContent = 'Subjects (' + data.subjects.length + ')';
+    drawButton.disabled = busy || readOnly;
+    retryButton.disabled = busy || readOnly || !primary();
+    if (!data.subjects.length) {
+      analyzeButton.hidden = true;
+      automatic.disabled = corrected.disabled = cropButton.disabled = exposureButton.disabled = true;
+      const names = (data.full_image_predictions || []).map(p => p.species).join(', ');
+      status.textContent = 'No localized subject region. This does not establish animal absence. '
+        + (names ? 'Full-image classification only: ' + names + '. ' : '')
+        + 'Draw a subject box to measure the visible animal.';
+      return;
+    }
     // Stable spatial order keeps thumbnails from jumping when primary changes.
     data.subjects.slice().sort((a, b) => a.box_x - b.box_x || a.box_y - b.box_y || a.id - b.id).forEach((subject, index) => {
       const button = document.createElement('button');
@@ -76,13 +90,21 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     const description = document.createElement('div');
     const species = document.createElement('strong');
     const prediction = subject.predictions[0];
-    species.textContent = prediction ? prediction.species + ' · ' + Math.round(prediction.confidence * 100) + '%' : 'Species not predicted';
+    species.textContent = (subject.evidence_basis === 'reviewer_box' ? 'Reviewer-selected region · ' : 'Localized detector region · ') + (prediction ? prediction.species + ' · ' + Math.round(prediction.confidence * 100) + '%' : 'Species not predicted');
     const quality = document.createElement('p');
-    quality.textContent = subject.analysis ? 'Quality ' + Math.round(subject.analysis.quality_score * 100) + '/100 · Exposure '
+    quality.textContent = subject.analysis ? 'Box quality ' + Math.round(subject.analysis.quality_score * 100) + '/100 · Exposure '
       + (subject.analysis.exposure_ev >= 0 ? '+' : '') + subject.analysis.exposure_ev.toFixed(2) + ' EV' : 'Analyze subjects to compute quality and exposure.';
-    quality.title = 'Quality is measured within this detection box, before exposure correction.';
-    description.append(species, quality);
+    quality.title = 'Measured within this box at up to 1024 pixels on the long edge. These are box measurements; mask and eye analysis readiness is separate.';
+    const scope = document.createElement('p');
+    scope.textContent = 'Box measurements only. Mask and eye analysis readiness is separate.';
+    description.append(species, quality, scope);
     details.append(img, description);
+    if (data.full_image_predictions?.length) {
+      const fallback = document.createElement('p');
+      fallback.textContent = 'Full-image classification (not localized to this subject): '
+        + data.full_image_predictions.map(p => p.species).join(', ');
+      details.append(fallback);
+    }
     analyzeButton.hidden = data.subjects.every(s => s.analysis);
     analyzeButton.disabled = busy || readOnly;
     automatic.disabled = busy || data.selection === 'automatic' || readOnly;
@@ -209,7 +231,8 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
       if (data?.photo_id === vireoLightboxSession.requestedPhotoId()) render();
     }
   }
-  analyzeButton.onclick = async () => {
+  /** @param {number | null} detectionId */
+  async function analyze(detectionId = null) {
     if (!data || busy || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Analyze subjects enqueues a job that writes detection_subjects and
     // can flip the primary via sync_primary (clearing mask, embedding
@@ -219,9 +242,9 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     const photoId = data.photo_id;
     const seq = generation;
     busy = true; render();
-    status.textContent = 'Analyzing retained subjects…';
+    status.textContent = detectionId ? 'Analyzing selected subject box…' : 'Analyzing retained subjects…';
     try {
-      /** @type {{job_id: string}} */ const job = await safeFetch('/api/photos/' + photoId + '/subjects/analyze', {method: 'POST'}, {toast: false});
+      /** @type {{job_id: string}} */ const job = await safeFetch('/api/photos/' + photoId + '/subjects/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({detection_id: detectionId})}, {toast: false});
       while (generation === seq && vireoLightboxSession.requestedPhotoId() === photoId) {
         /** @type {{status: string; error?: string}} */ const progress = await safeFetch('/api/jobs/' + job.job_id, {}, {toast: false});
         if (progress.status === 'completed') { await load(photoId); break; }
@@ -235,6 +258,24 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
       busy = false;
       if (data?.photo_id === photoId) render();
     }
+  };
+  analyzeButton.onclick = () => analyze();
+  retryButton.onclick = () => { const subject = primary(); if (subject) analyze(subject.id); };
+  drawButton.onclick = () => {
+    if (!data || busy || _lbGuardReadOnly()) return;
+    const photoId = data.photo_id, seq = generation;
+    openSubjectBox(photoId, result => {
+      if (generation !== seq || vireoLightboxSession.requestedPhotoId() !== photoId) return;
+      data = result;
+      const photo = _lbPhotoDataByPhoto[photoId];
+      if (photo) {
+        /** @type {const} */ (['eye_x', 'eye_y', 'eye_conf', 'eye_tenengrad']).forEach(key => { photo[key] = null; });
+        _lbRenderEyeCrosshair(photo);
+      }
+      _lbResetMaskOverlay(); _lbLoadDetections(photoId); _lbLoadMaskVariants(photoId);
+      document.dispatchEvent(new CustomEvent('vireo:primary-subject-changed', {detail: {photoId}}));
+      render();
+    });
   };
   automatic.onclick = () => choose(null);
   corrected.onchange = render;

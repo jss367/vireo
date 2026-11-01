@@ -25,6 +25,7 @@
     "../vireo/static/lightbox/shared-state.js",
     "../vireo/static/lightbox/source-loading.js",
     "../vireo/static/lightbox/state.js",
+    "../vireo/static/lightbox/subject-box.js",
     "../vireo/static/lightbox/viewport.js",
     "../vireo/static/navbar-boot.js",
     "../vireo/static/navbar-command-palette-open.js",
