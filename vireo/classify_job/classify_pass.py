@@ -222,8 +222,11 @@ def _flush_batch(
             all_preds, embedding = result
 
             valid = [entry]
-            with detection_store.guard_reviewer_results(db, valid):
-                if not valid:
+            with (
+                detection_store.guard_reviewer_results(db, valid),
+                db.transaction(immediate=entry.get("_reviewer_box") is not None),
+            ):
+                if not valid or not detection_store.reviewer_result_is_current(db, entry):
                     continue
                 if embedding is not None:
                     _store_batch_embedding(db, entry, model_name, embedding)
@@ -970,7 +973,9 @@ def _record_batch_classifier_runs(
             if n <= 0:
                 continue
             # Batch boundary: one detection's run reservation.
-            with db.transaction():
+            with db.transaction(immediate=entry.get("_reviewer_box") is not None):
+                if not detection_store.reviewer_result_is_current(db, entry):
+                    continue
                 db.model_runs.record_classifier_run(
                     did, model_name, labels_fingerprint,
                     prediction_count=n,

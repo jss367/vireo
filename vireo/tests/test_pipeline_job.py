@@ -4478,6 +4478,8 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
             verify_db, current, classifier_model='BioCLIP')
         assert all(p['confidence'] != .9 for p in predictions)
         assert ('BioCLIP', 'legacy') not in verify_db.model_runs.get_classifier_run_keys(current)
+        assert verify_db.masks_features.get_embedding(photo_id, 'BioCLIP', f'det:{chosen}') is None
+        assert verify_db.masks_features.get_embedding(photo_id, 'BioCLIP', f'det:{fresh_ids[0]}') is not None
         assert verify_db.get_photo_edit_recipe(photo_id) == recipe
         return
     if reviewer_box:

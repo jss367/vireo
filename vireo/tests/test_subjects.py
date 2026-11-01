@@ -600,3 +600,41 @@ def test_classification_publication_blocks_reviewer_redraw(app_and_db):
         assert len(entries) == 1
         assert client.put(url, json={'box': dict(x=.6, y=.1, w=.2, h=.2)}).status_code == 409
     assert client.put(url, json={'box': dict(x=.6, y=.1, w=.2, h=.2)}).status_code == 200
+
+
+@pytest.mark.parametrize('replacement_x', [.10001, .6])
+def test_reviewer_redraw_invalidates_classifier_embeddings(db, subject_photo, replacement_x):
+    from subjects import select_reviewer_box
+    pid, automatic_ids, _ = subject_photo
+    chosen = select_reviewer_box(db, pid, dict(x=.1, y=.1, w=.2, h=.2))
+    for variant in ('', f'det:{chosen}', f'det:{automatic_ids[0]}'):
+        db.masks_features.upsert_embedding(pid, 'BioCLIP', b'old-crop', variant)
+    db.masks_features.upsert_embedding(pid, 'Unrelated model', b'other')
+    select_reviewer_box(db, pid, dict(x=replacement_x, y=.1, w=.2, h=.2))
+    assert db.masks_features.get_embedding(pid, 'BioCLIP') is None
+    assert db.masks_features.get_embedding(pid, 'BioCLIP', f'det:{chosen}') is None
+    assert db.masks_features.get_embedding(pid, 'BioCLIP', f'det:{automatic_ids[0]}') == b'old-crop'
+    assert db.masks_features.get_embedding(pid, 'Unrelated model') == b'other'
+
+
+@pytest.mark.parametrize('replacement_x', [.10001, .6])
+def test_cached_only_reviewer_results_reject_redraw(db, subject_photo, monkeypatch, replacement_x):
+    from classify_job import cached_only
+    from classify_job.store_predictions import _store_grouped_predictions
+    from subjects import select_reviewer_box
+    pid, _, _ = subject_photo
+    chosen = select_reviewer_box(db, pid, dict(x=.1, y=.1, w=.2, h=.2))
+    db.predictions.add(chosen, 'Robin', .8, 'BioCLIP')
+    db.commit()
+    monkeypatch.setattr(cached_only, '_cached_only_identity', lambda *a: ('BioCLIP', 'legacy'))
+    detections = detection_store.get_detections(db, pid, min_conf=0, detector_model='reviewer-selected')
+    raw, _, _ = cached_only._cached_only_raw_results(
+        db, [db.photos.get(pid)], {}, {pid: detections}, 'BioCLIP', 'legacy')
+    assert len(raw) == 1
+    assert raw[0]['_reviewer_box'] == (.1, .1, .2, .2)
+    select_reviewer_box(db, pid, dict(x=replacement_x, y=.1, w=.2, h=.2))
+    before = tuple(db.conn.iterdump())
+    result = _store_grouped_predictions(raw, 'cached', 'BioCLIP', 10, .85, None, db)
+    assert result['predictions_stored'] == 0
+    assert raw == []
+    assert tuple(db.conn.iterdump()) == before

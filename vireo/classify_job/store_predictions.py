@@ -50,7 +50,9 @@ def _record_match_scores(db: Database, raw_results: list[RawResult], model_name:
         seen.add(det_id)
         try:
             # Batch boundary: one detection's match summary.
-            with db.transaction():
+            with db.transaction(immediate=result.get("_reviewer_box") is not None):
+                if not detection_store.reviewer_result_is_current(db, result):
+                    continue
                 db.model_runs.record_classifier_match_score(
                     det_id,
                     model_name,
@@ -449,6 +451,12 @@ def _store_burst_group(
     Returns ``(stored, already_labeled)``; both are 0 when the group has no
     consensus.
     """
+    current = [(item, category) for item, category in zip(group, member_categories, strict=True)
+               if detection_store.reviewer_result_is_current(db, item)]
+    if not current:
+        return 0, 0
+    group = [item for item, _ in current]
+    member_categories = [category for _, category in current]
     # Vote on identity, retaining the first display spelling for
     # each key. Synonymous prompts must not split a unanimous vote.
     display_by_key = {}
@@ -519,6 +527,8 @@ def _store_single_prediction(
     Returns ``(stored, already_labeled)``: ``(0, 1)`` when it auto-accepted
     as a match, ``(1, 0)`` when it went to review.
     """
+    if not detection_store.reviewer_result_is_current(db, item):
+        return 0, 0
     if auto_accept:
         _store_match_prediction(
             db, item, model_name, labels_fingerprint, tax,
@@ -540,8 +550,10 @@ def _release_stored_classifier_runs(
     were actually stored. Cancellation before this point leaves an explicit
     cache miss instead of an empty 'legacy' cache hit.
     """
-    with db.transaction():
+    with db.transaction(immediate=any(r.get("_reviewer_box") is not None for r in raw_results)):
         for item in raw_results:
+            if not detection_store.reviewer_result_is_current(db, item):
+                continue
             did = item.get("detection_id")
             if did is not None and not item.get("_existing"):
                 db.model_runs.release_incomplete_classifier_run(
@@ -625,7 +637,7 @@ def _store_current_predictions(
             for item in group
         ]
         if len(group) == 1:
-            with db.transaction():  # one photo's predictions land together
+            with db.transaction(immediate=group[0].get("_reviewer_box") is not None):  # one photo's predictions land together
                 stored, matched = _store_single_prediction(
                     db, group[0], model_name, labels_fingerprint, tax,
                     *member_categories[0],
@@ -636,7 +648,7 @@ def _store_current_predictions(
                 json.dumps([job_id, model_name, labels_fingerprint]).encode()
             ).hexdigest()[:16]
             gid = f"g{group_namespace}-{group_count:04d}"
-            with db.transaction():  # one burst group, consensus + members
+            with db.transaction(immediate=any(r.get("_reviewer_box") is not None for r in group)):  # one burst group, consensus + members
                 stored, matched = _store_burst_group(
                     db, group, gid, model_name, labels_fingerprint, tax,
                     identity_for, consensus_prediction, member_categories,

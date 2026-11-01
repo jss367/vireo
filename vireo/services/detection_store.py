@@ -113,6 +113,17 @@ def reviewer_box_snapshot(detection: Mapping[str, Any]) -> tuple[float, ...] | N
     return tuple(detection[key] for key in ("box_x", "box_y", "box_w", "box_h"))
 
 
+def reviewer_result_is_current(db: Database, entry: Mapping[str, Any]) -> bool:
+    """Validate a captured crop inside the caller's short write transaction."""
+    snapshot = entry.get("_reviewer_box")
+    if snapshot is None:
+        return True
+    return any(d["id"] == entry.get("detection_id")
+               and reviewer_box_snapshot(dict(d)) == snapshot
+               for d in get_detections(db, entry["photo"]["id"], min_conf=0,
+                                       detector_model="reviewer-selected"))
+
+
 @contextmanager
 def guard_reviewer_results[Entry: Mapping[str, Any]](
     db: Database, entries: list[Entry],

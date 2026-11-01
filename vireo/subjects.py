@@ -227,6 +227,8 @@ def select_reviewer_box(db, photo_id, box):
     if min(x, y) < 0 or min(w, h) <= 0 or x + w > 1 or y + h > 1:
         raise ValueError("Choose a nonempty box inside the source image")
     with db.transaction(immediate=True):
+        for previous in detection_store.get_detections(db, photo_id, min_conf=0, detector_model=REVIEWER_MODEL):
+            db.masks_features.clear_detection_embeddings(photo_id, previous["id"])
         # Clear previous measurements even if a legacy catalog lacks primary state.
         db.subjects.clear_primary_features(photo_id)
         ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [

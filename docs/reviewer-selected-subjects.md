@@ -23,7 +23,9 @@ confidence filtering; it is not a model probability. The lightbox labels the
 region as reviewer-selected instead of displaying a detector percentage.
 
 Saving a box, including re-saving the same coordinates, clears its cached box
-analysis and previous subject measurements, mask, embedding, and eye state. Box measurements use the existing subject-analysis path at up to 1024
+analysis and previous subject measurements, mask, embedding, and eye state.
+It also retires classifier vectors for the previous reviewer crop and their
+photo-level projections; sibling detection vectors and unrelated models survive. Box measurements use the existing subject-analysis path at up to 1024
 pixels on the long edge: sharpness, area, clipping, median brightness, quality,
 and an exposure suggestion. They include background inside the rectangle.
 They do not constitute segmentation or eye analysis, and do not mark the Full
