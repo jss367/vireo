@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from services import prediction_decisions
+from services.edit_history import redo_last_undo, undo_last_edit
 from services.render_cache import queue_edit_recipe_sync
 
 if TYPE_CHECKING:
@@ -205,7 +206,7 @@ def create_history_blueprint(
                 latest = db.edit_history.latest_undoable()
                 if latest is None or latest["id"] != body["edit_id"]:
                     return json_error("This edit is no longer the latest undoable edit", 409)
-            entry = db.undo_last_edit()
+            entry = undo_last_edit(db)
             if entry is None:
                 return json_error("nothing to undo")
             undone.append(entry)
@@ -255,7 +256,7 @@ def create_history_blueprint(
         redone = []
 
         def _apply() -> ErrorResponse | None:
-            entry = db.redo_last_undo()
+            entry = redo_last_undo(db)
             if entry is None:
                 return json_error("nothing to redo")
             redone.append(entry)

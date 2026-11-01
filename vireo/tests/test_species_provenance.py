@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 from db import Database
 from services import catalog_deletion, moves_merge, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 
 
 def confirm(client, species, photos=(1,), **kwargs):
@@ -191,10 +192,10 @@ def test_history_replays_after_reopening_catalog(app_and_db):
     confirm(client, 'Robin', provenance={'method': 'adjacent_frames', 'reason': 'Same bird'})
     original = assignments(client)['Robin']
     with Database(db._db_path) as reopened:
-        reopened.undo_last_edit()
+        undo_last_edit(reopened)
         assert not reopened.species_provenance.assignments(1)
     with Database(db._db_path) as reopened:
-        reopened.redo_last_undo()
+        redo_last_undo(reopened)
     assert assignments(client)['Robin'] == original
 
 
@@ -521,7 +522,7 @@ def test_intermediate_commit_does_not_discard_an_explicit_undo_snapshot(app_and_
     assert db._species_provenance_before
     db.record_edit('keyword_remove', 'Removed Robin', str(kid),
                    [{'photo_id': 1, 'old_value': '', 'new_value': str(kid)}])
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert db.species_provenance.state(1, kid) == before
 
 
@@ -560,7 +561,7 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
     save_alternatives(db, [1, 2], [candidate, other], 'Need calls', 'Audio')
     db.commit()
     if direction == 'redo':
-        db.undo_last_edit()
+        undo_last_edit(db)
     else:
         resolve_alternatives(db, [1, 2], candidate)
         db.commit()
@@ -579,7 +580,7 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
     db.commit()
     before = db.species_provenance.state(1, kid)
     with pytest.raises(expected_error):
-        (db.undo_last_edit if direction == 'undo' else db.redo_last_undo)()
+        ((lambda: undo_last_edit(db)) if direction == 'undo' else (lambda: redo_last_undo(db)))()
     assert db.species_provenance.state(1, kid) == before
     assert db._species_provenance_before == {}
     # The evidence-only endpoint uses another connection; the later keyword
@@ -592,5 +593,5 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
     db.record_edit('keyword_add', 'Independent edit', str(independent), [
         {'photo_id': 1, 'old_value': '', 'new_value': str(independent)},
     ])
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert assignments(client)[candidate]['reason'] == 'New evidence'

@@ -3,6 +3,7 @@
 import pytest
 from location_review import time_review_groups
 from services import moves_merge, photo_ingest, workspace_folders
+from services.edit_history import undo_last_edit
 
 
 def photo(index, timestamp, lat=None, lng=None):
@@ -190,7 +191,7 @@ def test_keep_is_remembered_but_coordinate_changes_require_review(discrepancy_ca
     assert len(discrepancy_preview(client, include_reviewed=True)) == 3
     assert db.pending_changes.list_all() == []
     assert len(db.edit_history.list_recent()) == 1
-    assert db.undo_last_edit() is None
+    assert undo_last_edit(db) is None
     db.conn.execute('UPDATE keywords SET latitude=32.85 WHERE id=?', (keyword,))
     db.conn.commit()
     assert len(discrepancy_preview(client)) == len(photo_ids)

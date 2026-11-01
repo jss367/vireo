@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from typing import TYPE_CHECKING, Any  # Dynamic request JSON and history item mappings.
 
@@ -70,41 +69,3 @@ def validate_provenance(db: Database, photo_ids: list[int], value: Any, *,
         result['subject_photo_id'] = origin
     result['detection_id'] = detection_id
     return result
-
-
-def remember_before(db: Database, photo_id: int, keyword_id: int, *, force: bool = False) -> None:
-    """Track assignment attribution before mutation; record_edit consumes the snapshot."""
-    state = db.species_provenance.state(photo_id, keyword_id)
-    if not force and (state is None or not state['is_species']):
-        return
-    db._species_provenance_before.setdefault((photo_id, keyword_id), state)
-
-
-def history_items(db: Database, action: str, items: Any) -> list[dict[str, Any]]:
-    """Attach evidence snapshots to species/keyword edits, preserving other payloads."""
-    items = [dict(item) for item in items]
-    if action not in {'keyword_add', 'keyword_remove', 'species_replace', 'prediction_accept',
-                      'identity_alternatives'}:
-        return items
-    pending = db._species_provenance_before
-    by_photo = {}
-    for (pid, keyword_id), before in pending.items():
-        by_photo.setdefault(pid, {})[keyword_id] = before
-    for item in items:
-        pid = item['photo_id']
-        changes = {}
-        for keyword_id, before in by_photo.pop(pid, {}).items():
-            changes[str(keyword_id)] = {'before': before,
-                'after': db.species_provenance.state(pid, keyword_id)}
-            pending.pop((pid, keyword_id))
-        if changes:
-            item['species_provenance'] = json.dumps(changes, sort_keys=True)
-    return items
-
-
-def replay_history(db: Database, items: Any, *, undo: bool, restore_source: bool = True) -> None:
-    """Restore attribution after the normal association and sidecar handlers."""
-    for item in items:
-        db.species_provenance.replay(item['photo_id'], dict(item).get('species_provenance'),
-                                     undo=undo, restore_source=restore_source)
-    db._species_provenance_before = {}

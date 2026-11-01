@@ -2,6 +2,7 @@
 import json
 
 from page_scripts import page_with_scripts
+from services.edit_history import redo_last_undo, undo_last_edit
 
 _DET = {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
 
@@ -1740,7 +1741,7 @@ def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
 
     monkeypatch.setattr(type(db), '_undo_prediction_accept_statuses', spying)
     db.conn.execute('BEGIN IMMEDIATE')
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert seen_in_transaction and all(seen_in_transaction), (
         'a replay step committed and ended the transaction early'
     )
@@ -1749,7 +1750,7 @@ def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
     assert db.predictions.get_review_status(pred_b, ws) == 'pending'
 
     # A failure after the first photo's replay rolls the whole undo back.
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
     assert db.predictions.get_review_status(pred_b, ws) == 'accepted'
     real_untag = type(db)._untag_for_edit
@@ -1763,7 +1764,7 @@ def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
 
     monkeypatch.setattr(type(db), '_untag_for_edit', failing_untag)
     try:
-        db.undo_last_edit()
+        undo_last_edit(db)
     except RuntimeError:
         pass
     else:

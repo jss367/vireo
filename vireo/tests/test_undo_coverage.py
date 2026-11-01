@@ -3,6 +3,7 @@
 import sqlite3
 
 import pytest
+from services.edit_history import redo_last_undo, undo_last_edit
 
 
 def _location_ids(db, pid):
@@ -169,7 +170,8 @@ def test_recorded_action_literals_have_replay_or_explicit_exclusion():
     assert set(Database._UNDO_HANDLERS) == set(Database._REDO_HANDLERS)
     supported = (
         set(Database._EDIT_FIELD_SETTERS) | set(Database._UNDO_HANDLERS)
-        | {'pipeline_grouping', 'species_confirm_cache'} | set(Database._NON_UNDOABLE)
+        | {'pipeline_grouping', 'species_confirm_cache', 'identity_alternatives'}
+        | set(Database._NON_UNDOABLE)
     )
     root = Path(__file__).parents[1]
     for directory in ('services', 'web'):
@@ -207,9 +209,9 @@ def test_later_location_group_conflict_preserves_successful_assignments(app_and_
             })
     assert _location_ids(db, pids[0]) == {good}
     assert db.edit_history.latest_undoable() is not None
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert not _location_ids(db, pids[0])
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert _location_ids(db, pids[0]) == {good}
 
 

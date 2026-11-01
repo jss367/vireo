@@ -14,6 +14,8 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+from services.edit_history import redo_last_undo, undo_last_edit
+
 ROOT = Path(__file__).resolve().parents[1]
 if __name__ == "__main__":
     sys.path.insert(0, str(ROOT))
@@ -283,12 +285,12 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.db.photo_review.flag_ranked_candidate(pid)
         self.service.set_flag(pid, "flagged")
         self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "flagged")
-        self.db.undo_last_edit()
+        undo_last_edit(self.db)
         self.assertIsNone(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"])
-        self.db.redo_last_undo()
+        redo_last_undo(self.db)
         self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "flagged")
         self.service.set_flag(pid, "rejected")
-        self.db.undo_last_edit()
+        undo_last_edit(self.db)
         self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "flagged")
 
     def test_cached_endpoint_ignores_claimed_confirmation_without_modifying_cache(self):
@@ -394,14 +396,14 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.db.edit_history.list_recent()), history_count + 1)
         self.assertIn("category=clipped", self.db.edit_history.list_recent()[0]["description"])
         after = self.db.photo_review.flag_attributions(self.ids)
-        self.db.undo_last_edit()
+        undo_last_edit(self.db)
         self.assertEqual(self.db.photo_review.flag_attributions(self.ids), before)
         states = self.db.photo_review.culling_flag_states(self.ids)
         self.assertIsNone(self.db.photos.get(second)["flag"])
         self.assertEqual([states[pid]["flag"] for pid in self.ids], ["flagged", None, "none"])
         self.assertEqual(states[first]["confirmed_flag"], "flagged")
         self.assertIsNone(states[second]["confirmed_flag"])
-        self.db.redo_last_undo()
+        redo_last_undo(self.db)
         self.assertEqual(self.db.photo_review.flag_attributions(self.ids), after)
 
     def test_misses_bulk_reject_rolls_back_flags_and_attribution_on_history_failure(self):
@@ -436,9 +438,9 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.assertEqual(state["confirmed_flag"], "flagged")
         self.assertIsNone(self.db.photo_review.flag_attributions([pid])[pid]["workspace_id"])
         self.service.set_flag(pid, "rejected")
-        self.db.undo_last_edit()
+        undo_last_edit(self.db)
         self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "flagged")
-        self.db.redo_last_undo()
+        redo_last_undo(self.db)
         self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "rejected")
 
     def test_replay_of_snapshot_from_deleted_workspace_retains_confirmation(self):
@@ -452,7 +454,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.db.set_active_workspace(other)
         self.service.set_flag(pid, "rejected")
         workspace_lifecycle.delete_workspace(self.db, origin)
-        self.db.undo_last_edit()
+        undo_last_edit(self.db)
         self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "flagged")
         self.assertIsNone(self.db.photo_review.flag_attributions([pid])[pid]["workspace_id"])
 
@@ -602,11 +604,11 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         states = self.db.photo_review.culling_flag_states(self.ids)
         self.assertEqual([states[pid]["confirmed_flag"] for pid in self.ids],
                          ["flagged", "rejected", "none"])
-        self.db.undo_last_edit()
+        undo_last_edit(self.db)
         states = self.db.photo_review.culling_flag_states(self.ids)
         self.assertEqual([states[pid]["flag"] for pid in self.ids], ["flagged", "none", "none"])
         self.assertTrue(all(states[pid]["confirmed_flag"] is None for pid in self.ids))
-        self.db.redo_last_undo()
+        redo_last_undo(self.db)
         states = self.db.photo_review.culling_flag_states(self.ids)
         self.assertEqual([states[pid]["confirmed_flag"] for pid in self.ids],
                          ["flagged", "rejected", "none"])
@@ -645,7 +647,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
             self.assertEqual(upgraded.photo_review.culling_flag_states([pid])[pid]["flag"], "flagged")
             self.assertIsNone(upgraded.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"])
             PhotoReviewService(upgraded).set_flag(pid, "flagged")
-            upgraded.undo_last_edit()
+            undo_last_edit(upgraded)
             self.assertIsNone(upgraded.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"])
         finally:
             upgraded.close()

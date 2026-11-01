@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from PIL import Image
 from scanner import ScanControl, ScanHooks, ScanOptions
 from services import catalog_deletion, dashboard_stats, photo_ingest, workspace_folders
+from services.edit_history import undo_last_edit
 
 requires_exiftool = pytest.mark.skipif(
     shutil.which("exiftool") is None,
@@ -3356,7 +3357,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     ).fetchone()
     assert history_item["photo_id"] == photo["id"]
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert db.get_photo_edit_recipe(photo["id"]) is None
 

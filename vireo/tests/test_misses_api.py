@@ -10,6 +10,7 @@ import os
 import pytest
 from PIL import Image
 from services import photo_ingest, workspace_folders
+from services.edit_history import undo_last_edit
 
 
 @pytest.fixture
@@ -689,7 +690,7 @@ def test_api_bulk_reject_undo_restores_original_null_flag(client, db_with_misses
         "SELECT flag FROM photos WHERE id=?", (pid,)
     ).fetchone()["flag"] == "rejected"
 
-    entry = db.undo_last_edit()
+    entry = undo_last_edit(db)
     assert entry is not None
 
     after = db.conn.execute(

@@ -24,6 +24,7 @@ from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.workspace_folders import WorkspaceFolderRepository
 from services import moves_merge, photo_ingest, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 
 
 @pytest.fixture
@@ -995,8 +996,8 @@ def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_p
         assert db.conn.execute('SELECT 1 FROM pending_changes WHERE photo_id=?', (survivor,)).fetchone()
     assert unrelated in _kw_ids(db, survivor)
     assert db.photos.get(survivor)['flag'] == 'rejected'
-    assert db.undo_last_edit()['id'] == edit_id
-    assert db.redo_last_undo()['id'] == edit_id
+    assert undo_last_edit(db)['id'] == edit_id
+    assert redo_last_undo(db)['id'] == edit_id
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == state
     assert unrelated in _kw_ids(db, survivor)
     assert db.photos.get(survivor)['flag'] == 'rejected'
@@ -2200,12 +2201,12 @@ def test_collision_preserves_identity_decision_history_and_sharing(db, tmp_path,
     # survivor was; a real collision carries staged visibility to the archive.
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == before
     db.set_active_workspace(ws)
-    assert db.undo_last_edit() is not None
+    assert undo_last_edit(db) is not None
     if resolved:
         assert db.identity_alternatives.for_photos([survivor])[survivor]["status"] == "unresolved"
     else:
         assert db.identity_alternatives.for_photos([survivor], include_resolved=True) == {}
-    assert db.redo_last_undo() is not None
+    assert redo_last_undo(db) is not None
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == before
 
 
@@ -2251,14 +2252,14 @@ def test_collision_deduplicates_batch_identity_history_and_preserves_redo(db, tm
         if resolved:
             edit = resolve_alternatives(db, [loser, survivor], "Heron")
     if undone:
-        db.undo_last_edit()
+        undo_last_edit(db)
     moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert [r[0] for r in db.conn.execute("SELECT photo_id FROM edit_history_items WHERE edit_id=?", (edit,))] == [survivor]
     if undone:
-        db.redo_last_undo()
+        redo_last_undo(db)
     else:
-        db.undo_last_edit()
-        db.redo_last_undo()
+        undo_last_edit(db)
+        redo_last_undo(db)
     state = db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor]
     assert state["reason"] == "Shared evidence"
     assert state['status'] == ('resolved' if resolved else 'unresolved')
@@ -2280,9 +2281,9 @@ def test_intra_staged_collision_preserves_identity_evidence(db, tmp_path, monkey
     counts = moves_merge.merge_staged_tree_into_archive(db, stage, str(arch))
     assert second in counts["dropped_photo_ids"]
     assert db.identity_alternatives.for_photos([first])[first]["reason"] == "Case alias evidence"
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert db.identity_alternatives.for_photos([first]) == {}
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert first in db.identity_alternatives.for_photos()
 
 
@@ -2321,10 +2322,10 @@ def test_collision_preserves_incompatible_batch_history_by_rolling_back(db, tmp_
         moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert db.identity_alternatives.for_photos() == before
     assert db.conn.execute("SELECT COUNT(*) FROM edit_history_items WHERE edit_id=?", (edit,)).fetchone()[0] == 2
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert _kw_ids(db, t["staged"]) == [kid]
     assert _kw_ids(db, t["survivor"]) == []
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert db.identity_alternatives.for_photos() == before
 
 
@@ -2341,19 +2342,19 @@ def test_same_resolution_batch_collapses_with_deduplicated_replay(db, tmp_path, 
         saved = save_alternatives(db, ids, ['Heron', 'Egret'], 'Same silhouette', 'Bill')
         resolved = resolve_alternatives(db, ids, 'Heron')
     if undone:
-        db.undo_last_edit()
+        undo_last_edit(db)
     moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     for edit in (saved, resolved):
         assert [r[0] for r in db.conn.execute('SELECT photo_id FROM edit_history_items WHERE edit_id=?', (edit,))] == [survivor]
     if undone:
-        assert db.redo_last_undo()['id'] == resolved
+        assert redo_last_undo(db)['id'] == resolved
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor]['status'] == 'resolved'
-    assert db.undo_last_edit()['id'] == resolved
+    assert undo_last_edit(db)['id'] == resolved
     assert db.identity_alternatives.for_photos([survivor])[survivor]['reason'] == 'Same silhouette'
-    assert db.undo_last_edit()['id'] == saved
+    assert undo_last_edit(db)['id'] == saved
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True) == {}
-    assert db.redo_last_undo()['id'] == saved
-    assert db.redo_last_undo()['id'] == resolved
+    assert redo_last_undo(db)['id'] == saved
+    assert redo_last_undo(db)['id'] == resolved
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor]['status'] == 'resolved'
 
 
@@ -2378,9 +2379,9 @@ def test_collision_keeps_higher_rank_taxonomy_outside_species_decision(db, tmp_p
     moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
     assert db.identity_alternatives.for_photos([survivor])[survivor]['reason'] == 'Uncertain species'
     assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (survivor, keyword)).fetchone()[0] == 'manual'
-    assert db.undo_last_edit()['id'] == edit
+    assert undo_last_edit(db)['id'] == edit
     assert keyword in _kw_ids(db, survivor)
-    assert db.redo_last_undo()['id'] == edit
+    assert redo_last_undo(db)['id'] == edit
     assert keyword in _kw_ids(db, survivor)
 
 
@@ -2432,7 +2433,7 @@ def test_higher_rank_homonym_collision_rollback_survives_sync_and_history(db, tm
     for action in (None, 'undo', 'redo'):
         db.set_active_workspace(ws)
         if action:
-            result = db.undo_last_edit() if action == 'undo' else db.redo_last_undo()
+            result = undo_last_edit(db) if action == 'undo' else redo_last_undo(db)
             assert result['id'] == edit
         db.set_active_workspace(sharing)
         assert sync_to_xmp(db)['failed'] == 0
