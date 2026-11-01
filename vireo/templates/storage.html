@@ -199,6 +199,12 @@ dialog.modal-overlay::backdrop { background: transparent; }
     <div class="section">
       <div class="section-title">Preview Cache</div>
       <div class="setting-row">
+        <div class="setting-label">Thumbnail records<small>Check cached thumbnail presence across all workspaces and update recorded coverage. Missing thumbnails regenerate when opened.</small></div>
+        <div class="setting-control">
+          <button id="recheckThumbnailsBtn" class="btn btn-secondary" data-storage-on="click:recheckThumbnails">Recheck thumbnails</button>
+        </div>
+      </div>
+      <div class="setting-row">
         <div class="setting-label">Thumbnail size<small>Maximum generated thumbnail dimension.</small></div>
         <div class="setting-control">
           <input type="range" id="cfgThumbSize" min="200" max="800" step="50" value="400"

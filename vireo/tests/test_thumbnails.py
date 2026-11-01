@@ -670,49 +670,6 @@ def test_backfill_thumb_paths_skips_when_already_synced(tmp_path):
     assert result["cleared"] == 0
 
 
-def test_thumb_path_backfill_candidate_count_zero_when_synced(tmp_path):
-    """Startup gate count: returns 0 when nothing needs work, so the kickoff
-    can skip spawning a job entirely."""
-    from db import Database
-    from thumbnails import thumb_path_backfill_candidate_count
-
-    db = Database(str(tmp_path / "test.db"))
-    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
-    photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension='.jpg',
-                 file_size=100, file_mtime=1.0)
-    db.conn.execute("UPDATE photos SET thumb_path='1.jpg' WHERE id=1")
-    db.conn.commit()
-
-    cache_dir = str(tmp_path / "thumbs")
-    os.makedirs(cache_dir)
-    Image.new('RGB', (50, 50)).save(str(tmp_path / "thumbs" / "1.jpg"))
-
-    assert thumb_path_backfill_candidate_count(db, cache_dir) == 0
-
-
-def test_thumb_path_backfill_candidate_count_counts_unsynced(tmp_path):
-    """Both stale-NULL (file exists but column empty) and stale-NOT-NULL
-    (column set but file missing) photos count as candidates."""
-    from db import Database
-    from thumbnails import thumb_path_backfill_candidate_count
-
-    db = Database(str(tmp_path / "test.db"))
-    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
-    for name in ['a.jpg', 'b.jpg']:
-        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
-                     file_size=100, file_mtime=1.0)
-
-    cache_dir = str(tmp_path / "thumbs")
-    os.makedirs(cache_dir)
-    # Photo 1: file exists, column NULL  -> needs setting.
-    Image.new('RGB', (50, 50)).save(str(tmp_path / "thumbs" / "1.jpg"))
-    # Photo 2: column set, file missing  -> needs clearing.
-    db.conn.execute("UPDATE photos SET thumb_path='2.jpg' WHERE id=2")
-    db.conn.commit()
-
-    assert thumb_path_backfill_candidate_count(db, cache_dir) == 2
-
-
 # -- Route-level self-heal tests --
 #
 # The /thumbnails/<id>.jpg route must regenerate on miss instead of
@@ -730,7 +687,6 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     monkeypatch.setenv("HOME", str(tmp_path))
     import config as cfg
     import models
-    import thumbnails as _thumbnails_module
     from app import create_app
     from db import Database
 
@@ -740,13 +696,6 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     )
     monkeypatch.setattr(
         models, "CONFIG_PATH", str(tmp_path / "models.json"),
-    )
-
-    # Keep thumbnail-path startup maintenance out of these route tests.
-    monkeypatch.setattr(
-        _thumbnails_module,
-        "thumb_path_backfill_candidate_count",
-        lambda *a, **kw: 0,
     )
 
     photos_dir = tmp_path / "photos"

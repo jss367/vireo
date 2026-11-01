@@ -1,7 +1,7 @@
 """Shared helpers for the preview_cache LRU.
 
 The eviction pass is called from three places: the Flask request path
-(``_serve_preview``), the startup migration in ``create_app``, and the
+(``_serve_preview``), background startup maintenance, and the
 pipeline job's preview stage. Keeping the logic here avoids having the
 pipeline import from ``app`` (which would be circular) or duplicating
 the loop in two modules.
@@ -827,67 +827,109 @@ def _delete_preview_entries(db, rows):
     )
 
 
-def evict_if_over_quota(db, vireo_dir):
-    """Evict ordinary and paired previews under one preview_cache_max_mb LRU.
+def _current_preview_entry(db, row):
+    if row["paired"]:
+        return db.caches.paired_preview_get(row["filename"])
+    return db.caches.preview_get(row["photo_id"], row["size"])
 
-    Missing files lose their rows too. Failed unlinks keep their rows, so
-    bytes remain accounted for and a later eviction can retry. A paired
-    artifact's source-state key replaces time-based expiration; disk quota,
-    source changes, photo deletion and Clear Cache govern its lifetime.
+
+def _same_preview_entry(current, snapshot):
+    return current is not None and all(
+        current[key] == snapshot[key] for key in ("bytes", "last_access_at")
+    )
+
+
+def evict_if_over_quota(db, vireo_dir, *, checkpoint=None):
+    """Evict ordinary and paired previews under their shared disk quota.
+
+    Recheck each candidate under the publication writer lock. Concurrent
+    eviction or publication must not remove a replacement or its accounting.
+    Failed unlinks keep their rows so a later eviction can retry.
     """
     import config as cfg
 
     max_bytes = int(config_value(cfg.load(), "preview_cache_max_mb")) * 1024 * 1024
     total = db.caches.preview_total_bytes()
     if total <= max_bytes:
-        return
+        return 0
     preview_dir = os.path.join(vireo_dir, "previews")
-    to_delete = []
+    removed = 0
     freed_bytes = 0
     for row in _preview_entries(db):
+        if checkpoint:
+            checkpoint()
         if total <= max_bytes:
             break
         path = _entry_path(preview_dir, row)
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            log.warning("Failed to remove preview cache file %s: %s", path, e)
-            continue
-        to_delete.append(row)
-        total -= row["bytes"]
-        freed_bytes += row["bytes"]
-    if to_delete:
-        _delete_preview_entries(db, to_delete)
+        with db.transaction(immediate=True):
+            current = _current_preview_entry(db, row)
+            if current is None:
+                # Another evictor already accounted for this candidate.
+                total -= row["bytes"]
+                continue
+            if not _same_preview_entry(current, row):
+                continue
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                os.stat(preview_dir)
+            except OSError as e:
+                log.warning("Failed to remove preview cache file %s: %s", path, e)
+                if checkpoint is not None:
+                    raise  # Background jobs must report failed quota enforcement.
+                continue
+            _delete_preview_entries(db, [row])
+            total -= row["bytes"]
+            freed_bytes += row["bytes"]
+            removed += 1
+    if removed:
         log.info("Preview cache eviction: removed %d entries, freed %.1f MB",
-                 len(to_delete), freed_bytes / 1024 / 1024)
+                 removed, freed_bytes / 1024 / 1024)
+    return removed
 
 
-def reconcile_preview_cache(db, vireo_dir):
-    """Remove missing-file rows and untracked paired files at startup.
+def _preview_file_missing(path, preview_dir):
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        os.stat(preview_dir)
+        return True
+    return False
 
-    Untracked paired files include pre-migration shadow previews and files
-    left by interrupted publications or failed deletion cleanup. They are
-    never adopted as cache hits and must not grow outside the disk quota.
+
+def reconcile_preview_cache(db, vireo_dir, *, checkpoint=None):
+    """Reconcile records and orphan paired files while publishers may run.
+
+    Returns the number of missing-file records and orphan files removed.
+    Discovery remains linear; no filesystem work is required to launch it.
     """
     preview_dir = os.path.join(vireo_dir, "previews")
     entries = _preview_entries(db)
-    to_delete = [row for row in entries
-                 if not os.path.exists(_entry_path(preview_dir, row))]
-    if to_delete:
-        _delete_preview_entries(db, to_delete)
-        log.info("Preview cache reconcile: dropped %d ghost rows", len(to_delete))
+    removed = 0
+    for row in entries:
+        if checkpoint:
+            checkpoint()
+        path = _entry_path(preview_dir, row)
+        if not _preview_file_missing(path, preview_dir):
+            continue
+        with db.transaction(immediate=True):
+            if (_same_preview_entry(_current_preview_entry(db, row), row)
+                    and _preview_file_missing(path, preview_dir)):
+                _delete_preview_entries(db, [row])
+                removed += 1
     tracked = {row["filename"] for row in entries if row["paired"]}
-    for path in _glob.glob(os.path.join(preview_dir, "paired", "*.jpg")):
-        if os.path.basename(path) not in tracked:
-            try:
-                # Another app may publish after the startup snapshot. Use
-                # the publisher's writer lock and recheck before unlinking.
-                with db.transaction(immediate=True):
-                    if db.caches.paired_preview_get(os.path.basename(path)) is None:
-                        os.remove(path)
-            except OSError:
-                log.warning("Could not remove untracked paired preview %s", path,
-                            exc_info=True)
-    return len(to_delete)
+    for path in _glob.iglob(os.path.join(preview_dir, "paired", "*.jpg")):
+        if checkpoint:
+            checkpoint()
+        if os.path.basename(path) in tracked:
+            continue
+        try:
+            with db.transaction(immediate=True):
+                if db.caches.paired_preview_get(os.path.basename(path)) is None:
+                    os.remove(path)
+                    removed += 1
+        except FileNotFoundError:
+            pass  # Another cleanup already removed this orphan.
+    if removed:
+        log.info("Preview reconciliation: removed %d missing-file records or orphan files", removed)
+    return removed

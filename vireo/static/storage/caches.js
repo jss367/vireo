@@ -3,7 +3,7 @@
 
 import { storageEscapeAttr, storageEscapeHtml, storageFormatBytes } from './format.js';
 import { loadStoragePanel } from './panel.js';
-import { safeEventSource, safeFetch } from './shared.js';
+import { safeEventSource, safeFetch, showToast } from './shared.js';
 
 export async function loadPreviewCacheStatus() {
   var statusEl = /** @type {HTMLElement} */ (document.getElementById('previewCacheStatus'));
@@ -153,4 +153,18 @@ export async function precomputeEmbeddings(modelId, labelsFile) {
       },
     });
   } catch(e) {}
+}
+
+/** Start a catalog-wide record check; detailed progress stays in Jobs. */
+export async function recheckThumbnails() {
+  var button = /** @type {HTMLButtonElement} */ (document.getElementById('recheckThumbnailsBtn'));
+  button.disabled = true;
+  try {
+    var result = /** @type {{job_id: string, joined: boolean, cancelling?: boolean}} */ (
+      await safeFetch('/api/thumbnail-cache/recheck', {method: 'POST'}));
+    showToast(result.cancelling ? 'Thumbnail recheck is stopping. Start another check after it finishes.' :
+      result.joined ? 'Thumbnail recheck is already running. See Jobs for progress.' :
+      'Thumbnail recheck started. See Jobs for progress.', 'info');
+  } catch (_) { /* safeFetch reports the request error. */ }
+  finally { button.disabled = false; }
 }

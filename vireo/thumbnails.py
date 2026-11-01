@@ -536,28 +536,15 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
     return result
 
 
-def thumb_path_backfill_candidate_count(db, cache_dir):
-    """Count photos that ``backfill_thumb_paths`` would actually update.
-
-    A photo is a candidate when its ``thumb_path`` does not match disk
-    reality:
-
-    * ``thumb_path IS NULL`` but ``<cache_dir>/<id>.jpg`` exists, or
-    * ``thumb_path IS NOT NULL`` but the file no longer exists (drift after
-      a manual cache wipe).
-
-    Used by the startup gate in ``app.py`` to skip spawning a backfill job
-    when nothing needs work, and after a backfill run for "remaining"
-    reporting.
-    """
-    rows = db.caches.thumbnail_path_rows()
-    candidates = 0
-    for row in rows:
-        photo_id = row["id"]
-        on_disk = os.path.exists(os.path.join(cache_dir, f"{photo_id}.jpg"))
-        if row["thumb_path"] is None and on_disk or row["thumb_path"] is not None and not on_disk:
-            candidates += 1
-    return candidates
+def _thumbnail_present(cache_dir, photo_id):
+    """Only a missing file on reachable cache storage proves absence."""
+    try:
+        os.stat(os.path.join(cache_dir, f"{photo_id}.jpg"))
+    except FileNotFoundError:
+        # A removed/offline cache root must not clear the entire catalog.
+        os.stat(cache_dir)
+        return False
+    return True
 
 
 def backfill_thumb_paths(db, cache_dir, progress_callback=None,
@@ -575,12 +562,18 @@ def backfill_thumb_paths(db, cache_dir, progress_callback=None,
       clear the column — otherwise the dashboard claims coverage that no
       longer exists after a manual cache wipe.
 
-    Returns a summary dict ``{"set": N, "cleared": M, "remaining": K}``.
+    Returns checked, corrected and unchecked counts from this pass.
+    Unchecked records are not a known count of required repairs.
 
     Sequential by design — each row is a stat() plus at most one tiny
     UPDATE, so single-threaded throughput is fine even on tens of
     thousands of photos.
     """
+    from volume_reachability import VolumeReachability
+
+    if not VolumeReachability().check(cache_dir)[1]:
+        raise OSError(f"Thumbnail cache storage is unavailable: {cache_dir}")
+    os.stat(cache_dir)
     rows = db.caches.thumbnail_path_rows()
     total = len(rows)
     if status_callback:
@@ -588,6 +581,7 @@ def backfill_thumb_paths(db, cache_dir, progress_callback=None,
 
     set_count = 0
     cleared_count = 0
+    checked = 0
     BATCH = 500
     pending_set = []
     pending_clear = []
@@ -605,7 +599,7 @@ def backfill_thumb_paths(db, cache_dir, progress_callback=None,
         if cancel_check is not None and cancel_check():
             break
         photo_id = row["id"]
-        on_disk = os.path.exists(os.path.join(cache_dir, f"{photo_id}.jpg"))
+        on_disk = _thumbnail_present(cache_dir, photo_id)
         if row["thumb_path"] is None and on_disk:
             pending_set.append((f"{photo_id}.jpg", photo_id))
             set_count += 1
@@ -613,6 +607,7 @@ def backfill_thumb_paths(db, cache_dir, progress_callback=None,
             pending_clear.append((photo_id,))
             cleared_count += 1
 
+        checked += 1
         if (len(pending_set) + len(pending_clear)) >= BATCH:
             _flush()
         if progress_callback is not None:
@@ -627,7 +622,10 @@ def backfill_thumb_paths(db, cache_dir, progress_callback=None,
     return {
         "set": set_count,
         "cleared": cleared_count,
-        "remaining": thumb_path_backfill_candidate_count(db, cache_dir),
+        "checked": checked,
+        "unchecked": total - checked,
+        "summary": (f"Checked {checked:,} thumbnail records; recorded {set_count:,}, "
+                    f"cleared {cleared_count:,}; {total - checked:,} unchecked"),
     }
 
 

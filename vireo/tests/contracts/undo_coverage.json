@@ -281,6 +281,7 @@
       "POST /api/storage/retained/clear",
       "POST /api/storage/retention",
       "POST /api/system/install-exiftool",
+      "POST /api/thumbnail-cache/recheck",
       "POST /api/v1/photos/analysis-retry",
       "POST /api/workspaces/active/local-folders/discard",
       "POST /api/workspaces/active/local-folders/stage",

@@ -113,7 +113,7 @@
   "services/prediction_ambiguity.py": 1,
   "services/preview_workers.py": 2,
   "services/scan_work.py": 3,
-  "services/startup_tasks.py": 15,
+  "services/startup_tasks.py": 13,
   "services/visual_scope.py": 2,
   "site_export.py": 2,
   "site_publish.py": 2,

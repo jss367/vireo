@@ -2,7 +2,7 @@
 // binds the template's controls and the delegated listeners on rendered
 // markup, and loads the page.
 
-import { clearEmbeddingCache, clearPreviewCache } from './caches.js';
+import { clearEmbeddingCache, clearPreviewCache, recheckThumbnails } from './caches.js';
 import { loadStorageConfig, saveStorageConfig, updateWorkingCopyLimitState } from './config.js';
 import {
   closeStorageModal, deleteAllFiles, deleteSelectedFiles, openStorageModal, selectAllFiles,
@@ -52,6 +52,7 @@ const STORAGE_HANDLERS = {
   },
   saveStorageConfig: function() { saveStorageConfig(); },
   clearPreviewCache: function() { return clearPreviewCache(); },
+  recheckThumbnails: function() { return recheckThumbnails(); },
   updateWorkingCopyLimitState: function() { updateWorkingCopyLimitState(); },
   applyWorkingCopyLimit: function() { return applyWorkingCopyLimit(); },
   clearEmbeddingCache: function() { return clearEmbeddingCache(); },
