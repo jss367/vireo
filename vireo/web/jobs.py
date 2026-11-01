@@ -1043,14 +1043,16 @@ def _stamp_regroup_state(
         thread_db, ctx.workspace_id, collection_id,
         snapshot_photo_ids=snapshot_photo_ids,
     ):
-        thread_db.workspaces.set_group_state(
-            workspace_id=workspace_id,
-            fingerprint=pipeline_fns.compute_group_fingerprint(effective_cfg),
-            when_ts=int(time.time()),
-        )
+        with thread_db.transaction():
+            thread_db.workspaces.set_group_state(
+                workspace_id=workspace_id,
+                fingerprint=pipeline_fns.compute_group_fingerprint(effective_cfg),
+                when_ts=int(time.time()),
+            )
     else:
-        thread_db.workspaces.set_group_state(
-            workspace_id=workspace_id,
-            fingerprint=None,
-            when_ts=None,
-        )
+        with thread_db.transaction():
+            thread_db.workspaces.set_group_state(
+                workspace_id=workspace_id,
+                fingerprint=None,
+                when_ts=None,
+            )

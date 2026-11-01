@@ -487,6 +487,7 @@ def test_get_folder_workspaces_direct_inherited_and_removed(db, tree):
     alpha = db.create_workspace("Alpha")
     pinned = db.create_workspace("pinned")
     db.workspaces.update(pinned, pinned_at="2026-01-01 00:00:00")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws, p)            # root covering b
     workspace_folders.add_workspace_folder_exact(db, zed, b)     # direct non-root
     workspace_folders.add_workspace_folder_exact(db, alpha, b, is_root=True)

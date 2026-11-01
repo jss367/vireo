@@ -12,6 +12,7 @@ def catalog(db, tmp_path, monkeypatch):
     # A deliberately different global floor catches readers ignoring workspace config.
     cfg.save({"detector_confidence": 0.95})
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.5})
+    db.commit()
     folder = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(db, folder, "bird.jpg", ".jpg", 100, 1.0)
     return pid, folder
@@ -67,8 +68,10 @@ def test_threshold_changes_and_full_image_anchors(db, catalog):
     _prediction(db, pid, "Visible", 0.6, floor=0.8)
     assert _ranked(db, pid) == ("Visible",) * 3
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.2})
+    db.commit()
     assert _ranked(db, pid) == ("Low",) * 3
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.9})
+    db.commit()
     assert _ranked(db, pid) == (None,) * 3
     _prediction(db, pid, "Full image", 0.5, floor=0, detector="full-image")
     assert _ranked(db, pid) == ("Full image",) * 3
@@ -78,6 +81,7 @@ def test_threshold_changes_and_full_image_anchors(db, catalog):
     import config as cfg
     cfg.save({})
     db.workspaces.update(db.active_workspace_id, config_overrides={})
+    db.commit()
     assert _ranked(db, pid) == ("Low",) * 3
 
 
@@ -94,6 +98,7 @@ def test_highlight_eligibility_tracks_ranking_but_keeps_saved_choices_and_keywor
     db.set_review_status(current, other, "rejected")
     assert _ranked(db, pid) == ("Current",) * 3
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.9})
+    db.commit()
     assert db.species_curation.get_highlights(eligible_only=True) == {}
     assert db.species_curation.get_highlights() == {"Current": {pid: 1}}
     # A user's accepted keyword remains eligible even when all detector evidence is hidden.
@@ -131,6 +136,7 @@ def test_highlights_confirmation_uses_the_same_current_visible_prediction(app_an
     app, db = app_and_db
     pid = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()[0]
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.5})
+    db.commit()
     detection, old = _prediction(db, pid, "Old bird", 0.99, fingerprint="old")
     _, current = _prediction(db, pid, "Current bird", 0.7, detection=detection)
     _, hidden = _prediction(db, pid, "Hidden bird", 1.0, floor=0.1)

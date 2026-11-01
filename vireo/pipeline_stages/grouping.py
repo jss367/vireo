@@ -155,11 +155,12 @@ def _run_species_review(run: PipelineRun) -> None:
         # longer contains any triage output. Invalidate the
         # stamp so a subsequent full run is correctly shown
         # as will-run.
-        thread_db.workspaces.set_group_state(
-            workspace_id=run.workspace_id,
-            fingerprint=None,
-            when_ts=None,
-        )
+        with thread_db.transaction():
+            thread_db.workspaces.set_group_state(
+                workspace_id=run.workspace_id,
+                fingerprint=None,
+                when_ts=None,
+            )
         run.result["stages"]["review"] = results.get("summary", {})
 
     run.stages["regroup"]["status"] = "completed"
@@ -270,11 +271,12 @@ def _stamp_group_state(run: PipelineRun, thread_db: Database, effective_cfg: dic
         and not per_run_eye_override_differs
     )
     if covered_full_workspace:
-        thread_db.workspaces.set_group_state(
-            workspace_id=run.workspace_id,
-            fingerprint=compute_group_fingerprint(effective_cfg),
-            when_ts=int(time.time()),
-        )
+        with thread_db.transaction():
+            thread_db.workspaces.set_group_state(
+                workspace_id=run.workspace_id,
+                fingerprint=compute_group_fingerprint(effective_cfg),
+                when_ts=int(time.time()),
+            )
     else:
         # Partial run — save_results just clobbered
         # pipeline_results_ws*.json with subset output, so any
@@ -282,11 +284,12 @@ def _stamp_group_state(run: PipelineRun, thread_db: Database, effective_cfg: dic
         # no longer reflects the full workspace. Invalidate so
         # the pipeline page surfaces the staleness as will-run
         # instead of falsely reporting done-prior.
-        thread_db.workspaces.set_group_state(
-            workspace_id=run.workspace_id,
-            fingerprint=None,
-            when_ts=None,
-        )
+        with thread_db.transaction():
+            thread_db.workspaces.set_group_state(
+                workspace_id=run.workspace_id,
+                fingerprint=None,
+                when_ts=None,
+            )
 
 
 def miss_stage(run: PipelineRun) -> None:

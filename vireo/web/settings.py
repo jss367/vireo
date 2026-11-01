@@ -230,10 +230,11 @@ def read_workspace_overrides(db: Database) -> JsonDict:
     return parsed if isinstance(parsed, dict) else {}
 
 def write_workspace_overrides(db: Database, overrides: JsonDict) -> None:
-    db.workspaces.update(
-        db.require_workspace_id(),
-        config_overrides=overrides if overrides else None,
-    )
+    with db.transaction():
+        db.workspaces.update(
+            db.require_workspace_id(),
+            config_overrides=overrides if overrides else None,
+        )
 
 
 def _validate_config_snapshot(body: JsonDict) -> str | None:

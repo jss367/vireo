@@ -90,6 +90,7 @@ def test_raw_match_uses_exact_run_and_model_scale(app_and_db):
     db.workspaces.update(db.require_workspace_id(), config_overrides={
         'match_thresholds': {'BioCLIP-2.5': {'threshold': .3, 'score_kind': 'cosine'}},
     })
+    db.commit()
     row = evidence_rows(app)[0]
     assert row['species'] == 'Current species'
     assert row['evidence']['score']['raw_value'] == .12

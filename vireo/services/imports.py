@@ -1058,7 +1058,8 @@ class ImportService:
             with db.transaction():
                 db.collections.create_defaults(workspace_id=ws_id)
             db.set_active_workspace(ws_id)
-            db.workspaces.update(ws_id, last_opened_at=datetime.now().isoformat())
+            with db.transaction():
+                db.workspaces.update(ws_id, last_opened_at=datetime.now().isoformat())
             ws = db.workspaces.get(ws_id)
             return (
                 ws_id,

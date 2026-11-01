@@ -83,7 +83,9 @@ def test_restore_prefers_most_recently_opened_then_lowest_id(tmp_path):
         a = first.create_workspace("A")
         b = first.create_workspace("B")
         first.workspaces.update(a, last_opened_at="2026-01-01T00:00:00")
+        first.commit()
         first.workspaces.update(b, last_opened_at="2026-02-01T00:00:00")
+        first.commit()
     with Database(path, initialize_schema=False) as reopened:
         assert reopened._ws_id() == b
     with Database(path, initialize_schema=False) as reopened:
@@ -144,6 +146,7 @@ def test_get_workspaces_orders_pinned_first_then_case_insensitive_name(db):
     db.create_workspace("gamma")
     zulu = db.create_workspace("Zulu")
     db.workspaces.update(zulu, pinned_at="2026-01-01T00:00:00")
+    db.commit()
     names = [row["name"] for row in db.workspaces.list_all()]
     assert names[0] == "Zulu"
     assert names[1:] == sorted(names[1:], key=str.lower)
@@ -161,6 +164,7 @@ def test_update_workspace_sets_and_clears_fields(db):
         last_opened_at="2026-03-03T00:00:00",
         pinned_at="2026-03-04T00:00:00",
     )
+    db.commit()
     with _reader(db) as other:
         row = other.execute(
             "SELECT * FROM workspaces WHERE id = ?", (ws_id,)
@@ -172,6 +176,7 @@ def test_update_workspace_sets_and_clears_fields(db):
     assert row["pinned_at"] == "2026-03-04T00:00:00"
 
     db.workspaces.update(ws_id, config_overrides=None, ui_state=None, pinned_at=None)
+    db.commit()
     row = db.workspaces.get(ws_id)
     assert row["config_overrides"] is None
     assert row["ui_state"] is None
@@ -233,6 +238,7 @@ def test_ensure_default_workspace_returns_existing_or_creates(db):
     ).fetchone()[0]
     assert db.ensure_default_workspace() == existing
     db.workspaces.update(existing, name="Renamed")
+    db.commit()
     created = db.ensure_default_workspace()
     assert created != existing
     assert db.workspaces.get(created)["name"] == "Default"
@@ -242,6 +248,7 @@ def test_ensure_default_workspace_returns_existing_or_creates(db):
 def test_set_workspace_group_state_commits(db):
     ws_id = db.create_workspace("Grouped")
     db.workspaces.set_group_state(ws_id, "fp-1", "2026-04-01T00:00:00")
+    db.commit()
     with _reader(db) as other:
         row = other.execute(
             "SELECT last_grouped_at, last_group_fingerprint FROM workspaces "
@@ -257,6 +264,7 @@ def test_set_workspace_group_state_commits(db):
 
 def test_get_effective_config_deep_merges_overrides(db):
     db.workspaces.update(db._ws_id(), config_overrides={"pipeline": {"w_focus": 0.5}})
+    db.commit()
     merged = db.get_effective_config({"pipeline": {"w_focus": 0.1, "w_species": 1}, "k": 2})
     assert merged == {"pipeline": {"w_focus": 0.5, "w_species": 1}, "k": 2}
 
@@ -270,11 +278,13 @@ def test_get_effective_config_falls_back_to_global(db, raw):
 
 def test_browse_stack_settings_without_config_uses_defaults(db):
     db.workspaces.update(db._ws_id(), config_overrides={"browse_stack_time_gap": 9})
+    db.commit()
     assert workspace_config.browse_stack_settings(db) == normalize_browse_stack_config(None)
 
 
 def test_browse_stack_settings_applies_workspace_override(db):
     db.workspaces.update(db._ws_id(), config_overrides={"browse_stack_time_gap": 9})
+    db.commit()
     settings = workspace_config.browse_stack_settings(db, {"browse_stack_time_gap": 3})
     assert settings == normalize_browse_stack_config({"browse_stack_time_gap": 9})
 
@@ -310,11 +320,13 @@ def test_get_subject_types_filters_to_known_string_types(db, isolated_config):
         db._ws_id(),
         config_overrides={"subject_types": ["taxonomy", "bogus", 3, ["x"], "genre"]},
     )
+    db.commit()
     assert db.get_subject_types() == {"taxonomy", "genre"}
 
 
 def test_get_subject_types_non_list_falls_back_to_default(db, isolated_config):
     db.workspaces.update(db._ws_id(), config_overrides={"subject_types": "taxonomy"})
+    db.commit()
     assert db.get_subject_types() == set(SUBJECT_TYPES_DEFAULT)
 
 
@@ -344,7 +356,8 @@ def test_forget_label_file_removes_from_every_workspace(db):
     for name, raw in [("bad-json", "{"), ("list", "[1]"), ("not-list", '{"active_labels": "a.txt"}')]:
         _raw_overrides(db, db.create_workspace(name), raw)
 
-    assert db.workspaces.forget_label_file("a.txt") == 1
+    with db.transaction():
+        assert db.workspaces.forget_label_file("a.txt") == 1
     assert not db.conn.in_transaction
     with _reader(db) as other:
         rows = {
@@ -390,13 +403,18 @@ def test_get_tabs_for_missing_workspace_row_returns_defaults(db):
 def test_set_tabs_validates_input(db):
     with pytest.raises(ValueError, match="must be a list"):
         db.workspaces.set_tabs("browse")
+        db.commit()
     with pytest.raises(ValueError, match="must be a string"):
         db.workspaces.set_tabs([1])
+        db.commit()
     with pytest.raises(ValueError, match="not a known nav id"):
         db.workspaces.set_tabs(["nope"])
+        db.commit()
     with pytest.raises(ValueError, match="more than once"):
         db.workspaces.set_tabs(["browse", "browse"])
-    assert db.workspaces.set_tabs(["browse"]) == ["browse"]
+        db.commit()
+    with db.transaction():
+        assert db.workspaces.set_tabs(["browse"]) == ["browse"]
     with _reader(db) as other:
         stored = other.execute(
             "SELECT tabs FROM workspaces WHERE id = ?", (db._ws_id(),)
@@ -406,14 +424,17 @@ def test_set_tabs_validates_input(db):
 
 def test_pin_and_unpin_tab(db):
     db.workspaces.set_tabs(["browse"])
+    db.commit()
     assert db.workspaces.pin_tab("map") == ["browse", "map"]
     assert db.workspaces.pin_tab("map") == ["browse", "map"]
     assert db.workspaces.unpin_tab("browse") == ["map"]
     assert db.workspaces.unpin_tab("browse") == ["map"]
     with pytest.raises(ValueError, match="not a known nav id"):
         db.workspaces.pin_tab("nope")
+        db.commit()
     with pytest.raises(ValueError, match="not a known nav id"):
         db.workspaces.unpin_tab("nope")
+        db.commit()
 
 
 def test_tabs_require_an_active_workspace(db):
@@ -427,6 +448,7 @@ def test_tabs_require_an_active_workspace(db):
 
 def test_new_images_snapshot_round_trip_dedupes_and_sorts(db):
     snap_id = db.workspaces.create_new_images_snapshot(["/b.jpg", "/a.jpg", "/b.jpg"])
+    db.commit()
     snap = db.workspaces.get_new_images_snapshot(snap_id)
     assert snap["id"] == snap_id
     assert snap["workspace_id"] == db._ws_id()
@@ -437,6 +459,7 @@ def test_new_images_snapshot_round_trip_dedupes_and_sorts(db):
 
 def test_new_images_snapshot_allows_empty_paths(db):
     snap_id = db.workspaces.create_new_images_snapshot(None)
+    db.commit()
     snap = db.workspaces.get_new_images_snapshot(snap_id)
     assert snap["file_count"] == 0
     assert snap["file_paths"] == []
@@ -444,6 +467,7 @@ def test_new_images_snapshot_allows_empty_paths(db):
 
 def test_new_images_snapshot_is_workspace_scoped(db):
     snap_id = db.workspaces.create_new_images_snapshot(["/a.jpg"])
+    db.commit()
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
     assert db.workspaces.get_new_images_snapshot(snap_id) is None
@@ -463,6 +487,7 @@ def test_create_new_images_snapshot_requires_active_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
         db.workspaces.create_new_images_snapshot(["/a.jpg"])
+        db.commit()
 
 
 def test_invalidate_new_images_cache_for_folders_empty_is_noop(db, cache):
@@ -632,6 +657,7 @@ def test_active_workspace_methods_raise_before_anything_without_a_workspace(db):
     """
     ws = db.require_workspace_id()
     db.workspaces.set_tabs(["browse"])
+    db.commit()
     db.set_active_workspace(None)
     repo = db.workspaces
     statements = []
@@ -683,8 +709,10 @@ def test_active_workspace_methods_follow_the_workspace_active_at_each_call(db):
     other = db.create_workspace("Other")
     held = db.workspaces
     db.workspaces.set_tabs(["browse"])
+    db.commit()
     db.set_active_workspace(other)
     db.workspaces.set_tabs(["review"])
+    db.commit()
     assert held.pin_tab("logs") == ["review", "logs"]
     snap = held.create_new_images_snapshot(["/o.jpg"])
     assert db.workspaces.get_new_images_snapshot(snap)["workspace_id"] == other

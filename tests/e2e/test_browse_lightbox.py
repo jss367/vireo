@@ -2768,6 +2768,7 @@ def test_browse_lightbox_does_not_preload_when_full_already_uses_original(
         db._active_workspace_id,
         config_overrides={"preview_max_size": 0},
     )
+    db.commit()
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'

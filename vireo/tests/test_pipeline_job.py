@@ -7423,6 +7423,7 @@ def test_pipeline_snapshot_resolution_failure_does_not_hang(tmp_path, monkeypatc
     workspace_folders.add_folder(db, str(folder))
     path = _drop_jpeg(str(folder), "IMG_001.JPG")
     snap_id = db.workspaces.create_new_images_snapshot([path])
+    db.commit()
 
     real_database = pipeline_job.Database
 
@@ -7658,6 +7659,7 @@ def test_pipeline_with_snapshot_scans_only_snapshot_folders(tmp_path):
     _drop_jpeg(str(folder_b), "IMG_002.JPG")
 
     snap_id = db.workspaces.create_new_images_snapshot([str(folder_a / "IMG_001.JPG")])
+    db.commit()
 
     params = PipelineParams(
         source_snapshot_id=snap_id,
@@ -7716,6 +7718,7 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
         str(folder / "IMG_early.JPG")
     )
     snap_id = db.workspaces.create_new_images_snapshot([str(folder / "IMG_early.JPG")])
+    db.commit()
 
     # "Late" file — arrives after the snapshot but before the pipeline runs.
     # The scanner must NOT catalog it — it lives in the same folder as the
@@ -7865,6 +7868,7 @@ def test_pipeline_snapshot_collapses_overlapping_scan_roots(tmp_path, monkeypatc
     _drop_jpeg(str(sub), "b.jpg")
 
     snap_id = db.workspaces.create_new_images_snapshot([str(top_path), str(sub_path)])
+    db.commit()
 
     # Spy on scanner.scan to count how many distinct roots it walks.
     import scanner as scanner_mod
@@ -8281,6 +8285,7 @@ def test_pipeline_regroup_invalidates_stamp_on_partial_run(tmp_path, monkeypatch
     db.workspaces.set_group_state(
         ws_id, fingerprint="pre-existing-from-full-run", when_ts=1714579200,
     )
+    db.commit()
 
     import pipeline as pipeline_mod
     monkeypatch.setattr(
@@ -8351,6 +8356,7 @@ def test_pipeline_regroup_does_not_stamp_when_eye_override_differs(
     db.workspaces.set_group_state(
         ws_id, fingerprint="pre-existing-default-off", when_ts=1714579200,
     )
+    db.commit()
 
     import pipeline as pipeline_mod
     monkeypatch.setattr(

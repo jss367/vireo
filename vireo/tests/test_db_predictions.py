@@ -359,6 +359,7 @@ def test_get_predictions_detector_floor_and_current_labels(db, cat, floor, scope
     threshold = 0.2 if floor is None else floor
     if floor is not None:
         db.workspaces.update(cat["ws"], config_overrides={"detector_confidence": floor})
+        db.commit()
     high = _det(db, pid, conf=0.9, model="md-high")
     boundary = _det(db, pid, conf=threshold, model="md-boundary")
     low = _det(db, pid, conf=0.1, model="md-low")
@@ -383,6 +384,7 @@ def test_get_predictions_detector_floor_and_current_labels(db, cat, floor, scope
         "Full Image", "Boundary", "Current",
     ]
     db.workspaces.update(cat["ws"], config_overrides={"detector_confidence": 0})
+    db.commit()
     assert [r["species"] for r in db.predictions.get_rows(photo_ids=photo_ids)] == [
         "Hidden", "Full Image", "Boundary", "Current",
     ]

@@ -703,6 +703,7 @@ def _workspace_switcher(db):
         nonlocal sequence
         sequence += 1
         db.workspaces.update(workspace, last_opened_at=f'2099-01-01T00:00:{sequence:02}')
+        db.commit()
         db.set_active_workspace(workspace)
     return switch
 
@@ -1381,6 +1382,7 @@ def test_workspace_switch_before_writer_lock_rejects_shared_photo_edits(app_and_
         assert request_db.require_workspace_id() == original_ws
         with Database(str(tmp_path / 'test.db')) as other:
             other.workspaces.update(other_ws, last_opened_at='2099-01-01T00:00:00')
+            other.commit()
         # The request connection still caches the old id here. The writer
         # must read persisted activation after BEGIN IMMEDIATE, too.
         assert request_db.require_workspace_id() == original_ws

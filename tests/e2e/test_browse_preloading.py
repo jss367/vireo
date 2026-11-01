@@ -337,6 +337,7 @@ def test_small_photo_does_not_lower_workspace_preview_limit(live_server, page, p
     db.conn.execute("UPDATE photos SET width=800, height=533 WHERE id=?", (ids[0],))
     db.conn.commit()
     db.workspaces.update(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
+    db.commit()
     requested = []
 
     def serve(route):
@@ -378,6 +379,7 @@ def test_navigation_uses_workspace_limit_before_metadata(live_server, page, prev
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
     db.workspaces.update(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
+    db.commit()
     requested = []
     held_metadata = []
     page.route(re.compile(r"/api/photos/\d+$"), lambda route: held_metadata.append(route))

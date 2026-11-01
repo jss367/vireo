@@ -497,14 +497,21 @@ def create_workspace_blueprint(
         nav_id, error = _nav_id()
         if error:
             return error
-        return jsonify({"ok": True, "tabs": get_db().workspaces.pin_tab(nav_id)})
+        db = get_db()
+        # Read-modify-write of the tab list: hold the lock across both.
+        with db.transaction(immediate=True):
+            tabs = db.workspaces.pin_tab(nav_id)
+        return jsonify({"ok": True, "tabs": tabs})
 
     @blueprint.post("/api/workspace/tabs/unpin")
     def unpin_tab() -> ResponseReturnValue:
         nav_id, error = _nav_id()
         if error:
             return error
-        return jsonify({"ok": True, "tabs": get_db().workspaces.unpin_tab(nav_id)})
+        db = get_db()
+        with db.transaction(immediate=True):
+            tabs = db.workspaces.unpin_tab(nav_id)
+        return jsonify({"ok": True, "tabs": tabs})
 
     @blueprint.post("/api/workspace/tabs/reorder")
     def reorder_tabs() -> ResponseReturnValue:
@@ -512,8 +519,10 @@ def create_workspace_blueprint(
         tabs = body.get("tabs")
         if not isinstance(tabs, list):
             return json_error("tabs must be a list", 400)
+        db = get_db()
         try:
-            result = get_db().workspaces.set_tabs(tabs)
+            with db.transaction():
+                result = db.workspaces.set_tabs(tabs)
         except ValueError as exc:
             return json_error(str(exc), 400)
         return jsonify({"ok": True, "tabs": result})
@@ -752,7 +761,8 @@ def create_workspace_blueprint(
                 LOCATION_KEYWORDS_SETTING,
             )
         try:
-            db.workspaces.update(ws_id, **kwargs)
+            with db.transaction():
+                db.workspaces.update(ws_id, **kwargs)
         except sqlite3.IntegrityError:
             # A concurrent rename took the name after the check above.
             db.rollback()
@@ -831,13 +841,15 @@ def create_workspace_blueprint(
                 except (json.JSONDecodeError, TypeError):
                     ui = {}
                 ui["last_path"] = current_path
-                db.workspaces.update(db.active_workspace_id, ui_state=ui)
+                with db.transaction():
+                    db.workspaces.update(db.active_workspace_id, ui_state=ui)
 
         # Activate the new workspace
         db.set_active_workspace(ws_id)
         with db.transaction():
             db.collections.create_defaults(workspace_id=ws_id)
-        db.workspaces.update(ws_id, last_opened_at=datetime.now().isoformat())
+        with db.transaction():
+            db.workspaces.update(ws_id, last_opened_at=datetime.now().isoformat())
 
         # Return the target workspace's saved page path
         restore_path = None
@@ -861,10 +873,11 @@ def create_workspace_blueprint(
         if not isinstance(pinned, bool):
             return json_error("`pinned` must be a boolean")
         from datetime import datetime
-        db.workspaces.update(
-            ws_id,
-            pinned_at=datetime.now().isoformat() if pinned else None,
-        )
+        with db.transaction():
+            db.workspaces.update(
+                ws_id,
+                pinned_at=datetime.now().isoformat() if pinned else None,
+            )
         # update() above refused an unknown workspace.
         return jsonify(dict(cast("Row", db.workspaces.get(ws_id))))
 
@@ -1149,7 +1162,8 @@ def create_workspace_blueprint(
                     existing.pop(k, None)
                 else:
                     existing[k] = v
-            db.workspaces.update(db.require_workspace_id(), config_overrides=existing if existing else None)
+            with db.transaction():
+                db.workspaces.update(db.require_workspace_id(), config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
     @blueprint.route("/api/workspaces/active/subject-types", methods=["GET"])
@@ -1212,7 +1226,8 @@ def create_workspace_blueprint(
             if not isinstance(existing, dict):
                 existing = {}
             existing["subject_types"] = cleaned
-            db.workspaces.update(ws_id, config_overrides=existing)
+            with db.transaction():
+                db.workspaces.update(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
     def _new_images_walk_fns(db: Database, ws_id: int, *, requested: bool) -> tuple[Callable[..., JsonDict], Callable[..., Callable[..., None]], Callable[[], bool]]:
@@ -1477,7 +1492,8 @@ def create_workspace_blueprint(
 
         def create_snapshot_from_result(result: JsonDict) -> Response:
             file_paths = list(result.get("sample") or [])
-            snap_id = db.workspaces.create_new_images_snapshot(file_paths)
+            with db.transaction():
+                snap_id = db.workspaces.create_new_images_snapshot(file_paths)
             folders = sorted({os.path.dirname(p) for p in file_paths})
             return jsonify({
                 "snapshot_id": snap_id,

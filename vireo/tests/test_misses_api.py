@@ -626,6 +626,7 @@ def test_api_misses_recompute_preserves_custom_derived_thresholds(
             "miss_bbox_area_min_singleton": 0.001,
         }
     })
+    db.commit()
 
     r = client.post(
         "/api/misses/recompute",

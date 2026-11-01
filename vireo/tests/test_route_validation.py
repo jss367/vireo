@@ -105,6 +105,7 @@ def test_stored_bad_workspace_override_inherits_global(app_and_db):
         db._active_workspace_id,
         config_overrides={"detector_confidence": "abc"},
     )
+    db.commit()
     effective = db.get_effective_config(cfg.load())
     assert effective["detector_confidence"] == cfg.load()["detector_confidence"]
     assert app.test_client().get("/api/browse/init").status_code == 200
@@ -154,6 +155,7 @@ def test_workspace_config_round_trips_a_previously_stored_value(app_and_db):
         db._active_workspace_id,
         config_overrides={"classification_threshold": "abc"},
     )
+    db.commit()
     resp = app.test_client().post(
         "/api/workspaces/active/config",
         json={"classification_threshold": "abc", "review_min_confidence": 30},

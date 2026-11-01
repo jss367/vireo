@@ -92,6 +92,7 @@ def _set_floor(db, value):
     db.workspaces.update(
         db._ws_id(), config_overrides={"detector_confidence": value},
     )
+    db.commit()
 
 
 # -- detector runs ------------------------------------------------------------

@@ -625,7 +625,8 @@ def create_pipeline_blueprint(
             pipeline_section.update(pipeline_updates)
             current_overrides["pipeline"] = pipeline_section
 
-            db.workspaces.update(db.require_workspace_id(), config_overrides=current_overrides)
+            with db.transaction():
+                db.workspaces.update(db.require_workspace_id(), config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
 

@@ -150,7 +150,7 @@ class WorkspaceRepository:
     def update(self, workspace_id: int, name: str | None = None,
                config_overrides: Any = UNSET, ui_state: Any = UNSET,
                last_opened_at: str | None = None, pinned_at: Any = UNSET) -> None:
-        """Update the provided fields and commit; nothing given, nothing written.
+        """Update the provided fields (no commit); nothing given, nothing written.
 
         For ``config_overrides``, ``ui_state`` and ``pinned_at``, pass None to
         clear the column (set it NULL), or omit the argument to leave it
@@ -179,7 +179,6 @@ class WorkspaceRepository:
         self.conn.execute(
             f"UPDATE workspaces SET {', '.join(updates)} WHERE id = ?", params
         )
-        self.conn.commit()
 
     def delete(self, workspace_id: int) -> None:
         """Delete a workspace (cascading its scoped rows) and commit.
@@ -210,7 +209,7 @@ class WorkspaceRepository:
     def set_group_state(self, workspace_id: int, fingerprint: str | None,
                         when_ts: int | None) -> None:
         """Record that grouping completed for ``workspace_id`` at ``when_ts``
-        with the given ``fingerprint``, and commit. The pipeline page treats
+        with the given ``fingerprint`` (no commit). The pipeline page treats
         a fingerprint mismatch as "Outdated" so the user knows a regroup is
         pending.
         """
@@ -219,7 +218,6 @@ class WorkspaceRepository:
             "WHERE id = ?",
             (when_ts, fingerprint, workspace_id),
         )
-        self.conn.commit()
 
     # -- config overrides ----------------------------------------------------
 
@@ -230,7 +228,7 @@ class WorkspaceRepository:
         list, but a workspace override pointing at it used to survive: a
         selection naming a file that no longer exists, which no checkbox can
         clear because the UI only lists files it can find. Returns the number
-        of workspaces changed; commits only if any did.
+        of workspaces changed; does not commit.
         """
         rows = self.conn.execute(
             "SELECT id, config_overrides FROM workspaces "
@@ -255,15 +253,13 @@ class WorkspaceRepository:
                 (json.dumps(overrides), row["id"]),
             )
             changed += 1
-        if changed:
-            self.conn.commit()
         return changed
 
     # -- active workspace: new-images snapshots ------------------------------
 
     def create_new_images_snapshot(self, file_paths: Iterable[str] | None) -> int:
         """Persist a deduplicated, sorted snapshot of paths for the active
-        workspace, and commit. Returns its id."""
+        workspace (no commit). Returns its id."""
         ws_id = self.workspace_id_fn()
         unique_paths = sorted(set(file_paths or []))
         cur = self.conn.execute(
@@ -277,7 +273,6 @@ class WorkspaceRepository:
                 "INSERT INTO new_image_snapshot_files (snapshot_id, file_path) VALUES (?, ?)",
                 [(snap_id, p) for p in unique_paths],
             )
-        self.conn.commit()
         return snap_id
 
     def get_new_images_snapshot(self, snapshot_id: int) -> dict[str, Any] | None:
@@ -360,8 +355,8 @@ class WorkspaceRepository:
 
         Validates every entry against ``allowed_nav_ids`` and rejects
         duplicates (``ValueError``), so the UI invariant "each pinned page
-        appears exactly once" is enforced at the storage layer. Commits and
-        returns the new list.
+        appears exactly once" is enforced at the storage layer. Returns the
+        new list (no commit).
         """
         workspace_id = self.workspace_id_fn()
         if not isinstance(tabs, list):
@@ -384,7 +379,7 @@ class WorkspaceRepository:
         """Append ``nav_id`` to the active workspace's tabs if not present.
 
         Raises ``ValueError`` if ``nav_id`` is not a known nav id. Returns the
-        new list (committing only when it changed).
+        new list (writing only when it changed; no commit).
         """
         workspace_id = self.workspace_id_fn()
         self._validate_nav_id(nav_id)
@@ -398,7 +393,7 @@ class WorkspaceRepository:
         """Remove ``nav_id`` from the active workspace's tabs if present.
 
         Raises ``ValueError`` if ``nav_id`` is not a known nav id. Returns the
-        new list (committing only when it changed).
+        new list (writing only when it changed; no commit).
         """
         workspace_id = self.workspace_id_fn()
         self._validate_nav_id(nav_id)
@@ -417,7 +412,6 @@ class WorkspaceRepository:
             "UPDATE workspaces SET tabs=? WHERE id=?",
             (json.dumps(tabs), workspace_id),
         )
-        self.conn.commit()
 
     def _chunks(self, values):
         values = list(values)

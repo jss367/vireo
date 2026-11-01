@@ -78,6 +78,7 @@ def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import
     Image.new("RGB", (32, 32), "red").save(selected)
     workspace_folders.add_folder(db, str(source), name="photos")
     snapshot_id = db.workspaces.create_new_images_snapshot([str(selected)])
+    db.commit()
     scanner.scan(str(source), db, options=ScanOptions(incremental=True))
     Image.new("RGB", (32, 32), "blue").save(source / "unselected.jpg")
     process_id = db.processes.create("After import")
@@ -118,6 +119,7 @@ def test_restart_snapshot_keeps_left_out_folders_out(import_service, tmp_path):
     snapshot_id = db.workspaces.create_new_images_snapshot(
         [str(kept), str(left_out)],
     )
+    db.commit()
     parent_id = _interrupted_in_place(db, {
         "sources": [str(source)], "source_snapshot_id": snapshot_id,
         "exclude_folders": [str(trip)], "after_import": None,
@@ -394,6 +396,7 @@ def test_snapshot_replay_without_flask_context(import_service, tmp_path):
     Image.new("RGB", (32, 32), "blue").save(photo)
     workspace_folders.add_folder(db, str(source), name="registered")
     snapshot_id = db.workspaces.create_new_images_snapshot([str(photo)])
+    db.commit()
     body = {"source_snapshot_id": snapshot_id, "after_import": None}
 
     def launch():

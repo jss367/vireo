@@ -896,6 +896,7 @@ def test_query_move_rule_matches_reads_config_only_for_has_predictions(
     # A workspace override above the detection's confidence hides it.
     db.workspaces.update(db._active_workspace_id,
                         config_overrides={"detector_confidence": 0.6})
+    db.commit()
     assert moves_merge.query_move_rule_matches(db, {"has_predictions": True}) == []
     assert p["hi"] in moves_merge.query_move_rule_matches(db, {"has_predictions": False})
 

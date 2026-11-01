@@ -74,6 +74,10 @@ class _Catalog:
     def require_workspace_id(self):
         return self.active_workspace_id
 
+    @contextlib.contextmanager
+    def transaction(self, **_options):
+        yield
+
     def get(self, workspace_id):
         if self.saved and self.name_error:
             raise self.name_error

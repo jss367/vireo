@@ -4748,6 +4748,7 @@ def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
     db.workspaces.update(db._active_workspace_id, config_overrides={
         "detector_confidence": 0.0,
     })
+    db.commit()
     det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0, "category": "animal"},
@@ -8352,6 +8353,7 @@ def test_pipeline_page_init_includes_workspace_overrides(app_and_db):
     app, db = app_and_db
     # Set a workspace override first
     db.workspaces.update(db._active_workspace_id, config_overrides={"review_min_confidence": 25})
+    db.commit()
     with app.test_client() as c:
         resp = c.get("/api/pipeline/page-init")
         assert resp.status_code == 200
@@ -8386,6 +8388,7 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
     db.workspaces.update(db._active_workspace_id,
                         config_overrides={"active_labels": ["/path/to/birds.txt"],
                                           "classification_threshold": 0.5})
+    db.commit()
     with app.test_client() as c:
         # POST only review_min_confidence
         resp = c.post("/api/workspaces/active/config",
@@ -9891,6 +9894,7 @@ def test_put_subject_types_preserves_other_overrides(app_and_db):
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-5")
     db.workspaces.update(ws_id, config_overrides={"classification_threshold": 0.42})
+    db.commit()
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -9955,6 +9959,7 @@ def test_put_subject_types_normalizes_non_dict_config_overrides(app_and_db):
     # Plant a list-shaped config_overrides directly via workspaces.update,
     # which json.dumps()es whatever it receives.
     db.workspaces.update(ws_id, config_overrides=["unexpected", "list"])
+    db.commit()
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -10809,6 +10814,7 @@ def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, 
     # Override the active workspace to include genre too
     ws_id = db._active_workspace_id
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy", "genre"]})
+    db.commit()
     client = app.test_client()
     resp = client.get("/api/workspaces/active/subject-types")
     assert resp.status_code == 200
@@ -19282,6 +19288,7 @@ def test_selection_prediction_suggestions_applies_confidence_threshold(app_and_d
 
     ws_id = db.workspaces.list_all()[0]["id"]
     db.workspaces.update(ws_id, config_overrides={"classifier_confidence": 0.5})
+    db.commit()
 
     resp = client.post(
         "/api/selection/prediction-suggestions",
@@ -19974,6 +19981,7 @@ def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_t
     app, db = app_and_db
     ws_id = db.workspaces.list_all()[0]["id"]
     db.workspaces.update(ws_id, config_overrides={"classifier_confidence": 0.80})
+    db.commit()
 
     client = app.test_client()
     folder_id = db.folders.tree()[0]["id"]

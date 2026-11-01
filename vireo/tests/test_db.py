@@ -1907,6 +1907,7 @@ def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_pa
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": []})
+    db.commit()
 
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
@@ -1942,6 +1943,7 @@ def test_has_subject_rule_counts_legacy_is_species_when_taxonomy_in_subject_type
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy"]})
+    db.commit()
 
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
@@ -1998,6 +2000,7 @@ def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_p
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["genre"]})
+    db.commit()
 
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
@@ -2041,6 +2044,7 @@ def test_has_subject_rule_rejects_invalid_op_when_subject_types_empty(tmp_path, 
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": []})
+    db.commit()
 
     with pytest.raises(ValueError):
         db._build_query_from_rules(
@@ -2065,6 +2069,7 @@ def test_has_subject_rule_empty_subject_types_value_zero_matches_all(tmp_path, m
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": []})
+    db.commit()
 
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
@@ -15529,6 +15534,7 @@ def test_color_label_description_preserves_other_workspace_config(tmp_path):
         ws_id,
         config_overrides={"detector_confidence": 0.15, "active_labels": ["birds.txt"]},
     )
+    db.commit()
 
     db.photo_labels.set_description("blue", "Waterbirds")
     overrides = json.loads(db.workspaces.get(ws_id)["config_overrides"])
@@ -16582,6 +16588,7 @@ def test_create_and_get_new_images_snapshot(tmp_path):
     ws_id = db._active_workspace_id
     paths = ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
     snap_id = db.workspaces.create_new_images_snapshot(paths)
+    db.commit()
     assert isinstance(snap_id, int)
 
     snap = db.workspaces.get_new_images_snapshot(snap_id)
@@ -16597,6 +16604,7 @@ def test_create_new_images_snapshot_file_count_matches_unique_paths(tmp_path):
     paths = ["/tmp/a/IMG_001.JPG", "/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
 
     snap_id = db.workspaces.create_new_images_snapshot(paths)
+    db.commit()
     snap = db.workspaces.get_new_images_snapshot(snap_id)
 
     assert snap["file_count"] == 2
@@ -16609,6 +16617,7 @@ def test_get_snapshot_from_different_workspace_returns_none(tmp_path):
     other_ws = db.create_workspace("Other")
     paths = ["/tmp/a/IMG_001.JPG"]
     snap_id = db.workspaces.create_new_images_snapshot(paths)
+    db.commit()
     db.set_active_workspace(other_ws)
     assert db.workspaces.get_new_images_snapshot(snap_id) is None
 
@@ -16619,6 +16628,7 @@ def test_snapshot_deleted_with_workspace(tmp_path):
     throwaway_ws = db.create_workspace("Throwaway")
     db.set_active_workspace(throwaway_ws)
     snap_id = db.workspaces.create_new_images_snapshot(["/tmp/a.jpg"])
+    db.commit()
     workspace_lifecycle.delete_workspace(db, throwaway_ws)
     row = db.conn.execute(
         "SELECT id FROM new_image_snapshots WHERE id = ?", (snap_id,)
@@ -16630,6 +16640,7 @@ def test_create_snapshot_empty_paths(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     snap_id = db.workspaces.create_new_images_snapshot([])
+    db.commit()
     snap = db.workspaces.get_new_images_snapshot(snap_id)
     assert snap["file_count"] == 0
     assert snap["file_paths"] == []
@@ -16907,6 +16918,7 @@ def test_get_subject_types_honors_workspace_override(tmp_path, monkeypatch):
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy"]})
+    db.commit()
     assert db.get_subject_types() == {"taxonomy"}
 
 
@@ -16919,6 +16931,7 @@ def test_get_subject_types_drops_unknown_values(tmp_path, monkeypatch):
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy", "alien"]})
+    db.commit()
     assert db.get_subject_types() == {"taxonomy"}
 
 
@@ -17019,6 +17032,7 @@ def test_get_subject_types_drops_non_string_entries(tmp_path, monkeypatch):
     db.workspaces.update(ws_id, config_overrides={
         "subject_types": ["taxonomy", ["nested"], {"obj": 1}, 42, None, "genre"],
     })
+    db.commit()
     # Must not raise. Returns the string-and-valid subset.
     assert db.get_subject_types() == {"taxonomy", "genre"}
 
@@ -22466,6 +22480,7 @@ def test_set_workspace_group_state(tmp_path):
     ws_id = db._active_workspace_id
     assert ws_id is not None
     db.workspaces.set_group_state(ws_id, fingerprint="abc123", when_ts=1714579200)
+    db.commit()
     row = db.conn.execute(
         "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
         (ws_id,),
@@ -22480,7 +22495,9 @@ def test_set_workspace_group_state_overwrites(tmp_path):
     db = Database(str(tmp_path / "v.db"))
     ws_id = db._active_workspace_id
     db.workspaces.set_group_state(ws_id, fingerprint="old", when_ts=1)
+    db.commit()
     db.workspaces.set_group_state(ws_id, fingerprint="new", when_ts=2)
+    db.commit()
     row = db.conn.execute(
         "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
         (ws_id,),
@@ -22891,6 +22908,7 @@ def test_workspace_active_labels_survive_non_dict_overrides(tmp_path):
 
     for bad in (["not", "a", "dict"], "just a string", 42):
         db.workspaces.update(ws_id, config_overrides=bad)
+        db.commit()
         assert workspace_config.get_workspace_active_labels(db) is None
         # Setter must replace the junk rather than crash on item assignment.
         workspace_config.set_workspace_active_labels(db, ["birds.txt"])
@@ -23005,6 +23023,7 @@ def test_import_tab_in_nav_registries(tmp_path):
 
     db = Database(str(tmp_path / "t.db"))
     db.workspaces.set_tabs(["import", "browse"])
+    db.commit()
     assert db.workspaces.get_tabs()[:2] == ["import", "browse"]
 
 
@@ -25963,6 +25982,7 @@ def test_browse_stack_settings_apply_workspace_overrides(tmp_path):
             "browse_stack_split_mode": "partition",
         },
     )
+    db.commit()
     assert workspace_config.browse_stack_settings(db, {"browse_stack_time_gap": 3.0}) == {
         "time_gap": 0.5, "split_mode": "partition",
     }
