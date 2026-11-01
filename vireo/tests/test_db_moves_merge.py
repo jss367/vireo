@@ -2051,9 +2051,9 @@ def test_merge_wires_every_callback_to_the_facade():
     call = next(
         node for node in ast.walk(_service_ast("merge_staged_tree_into_archive"))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "merge_staged_tree_into_archive"
+        and node.func.attr == "prepare_staged_tree_merge"
     )
-    assert ast.unparse(call.func) == "db.moves_merge.merge_staged_tree_into_archive"
+    assert ast.unparse(call.func) == "db.moves_merge.prepare_staged_tree_merge"
     wired = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
     assert wired == {
         "workspace_id_fn": "db.require_workspace_id",
@@ -2065,8 +2065,6 @@ def test_merge_wires_every_callback_to_the_facade():
         "add_workspace_folder_no_commit": "partial(workspace_folders.add_workspace_folder_no_commit, db)",
         "case_insensitive_root": "case_insensitive_root",
         "move_location_state": "db._move_location_state_for_merge",
-        "invalidate_new_images": "db.invalidate_new_images_cache_for_workspaces",
-        "update_folder_counts": "db.folders.update_counts",
         "KEYWORD_SOURCE_CONFLICT_SQL": "KEYWORD_SOURCE_CONFLICT_SQL",
     }
 

@@ -527,4 +527,5 @@ class _ScanRun:
             db.rollback()
             raise
         finally:
-            db.folders.update_counts()
+            with db.transaction():
+                db.folders.update_counts()

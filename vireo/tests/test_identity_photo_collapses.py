@@ -62,6 +62,7 @@ def test_folder_merge_keeps_resolved_tags_provenance_pending_and_history(catalog
     if not active:
         db.set_active_workspace(None)
     db.folders.merge_into_existing(source, target, path)
+    db.commit()
     assert db.active_workspace_id == (first if active else None)
     db.set_active_workspace(first)
     assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == before
@@ -94,6 +95,7 @@ def test_folder_merge_conflict_rolls_back_earlier_duplicate_and_all_pending(cata
     before = rows(db)
     with pytest.raises(IdentityMergeConflict, match='conflicting identity'):
         db.folders.merge_into_existing(source, target, path)
+        db.commit()
     assert not db.conn.in_transaction
     assert rows(db) == before
     assert db.photos.get(losing) is not None and db.photos.get(survivor) is not None
@@ -163,6 +165,7 @@ def test_collapse_does_not_reintroduce_candidate_outvoted_by_newer_visible_revie
         save_alternatives(db, [survivor], CANDIDATES, 'Newer uncertain review', 'Audio')
     if kind == 'folder':
         db.folders.merge_into_existing(source, target, path)
+        db.commit()
     else:
         assert _pair_raw_jpeg_companions(db) == {losing: survivor}
     assert not db.identity_alternatives.candidate_links([survivor], CANDIDATES)
@@ -196,6 +199,7 @@ def test_folder_collapse_repairs_alias_intents_in_both_visible_workspaces(catalo
     db.conn.execute("UPDATE pending_changes SET sync_started=1 WHERE change_token=?", (old_token,))
     db.commit()
     db.folders.merge_into_existing(source, target, path)
+    db.commit()
     assert not db.conn.execute('SELECT 1 FROM pending_changes WHERE change_token=?', (old_token,)).fetchone()
     assert not db.conn.execute("SELECT 1 FROM pending_changes WHERE photo_id=? AND change_type='keyword_add' AND value=?", (survivor, CANDIDATES[0])).fetchone()
     assert {row[0] for row in db.conn.execute("SELECT workspace_id FROM pending_changes WHERE photo_id=? AND change_type='keyword_add' AND value=? AND sync_started=1", (survivor, scientific_name))} == {first, second}

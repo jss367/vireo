@@ -21,7 +21,7 @@ from app_paths import media_root
 from db import Database
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
-from services import saved_processes
+from services import saved_processes, workspace_folders
 from services.imports import ImportFailure, import_photos_ok
 from services.local_folder import local_copy_scan_conflict, stage_pending_source_paths
 from services.local_workspace import stage_boundary_lock
@@ -905,7 +905,7 @@ class _InPlaceImportRun:
     def _start(self, cfg: ModuleType) -> None:
         thread_db = self.thread_db
         thread_db.set_active_workspace(self.plan.active_ws)
-        if thread_db.folders.check_health():
+        if workspace_folders.check_folder_health(thread_db):
             self.plan.service.invalidate_missing_originals()
         effective_cfg = thread_db.get_effective_config(cfg.load())
         self.pipeline_cfg = effective_cfg.get("pipeline", {})

@@ -37,6 +37,7 @@ from db import _SQLITE_PARAM_CHUNK_SIZE as SQLITE_PARAM_CHUNK_SIZE
 from db import Database, MissingPhotosCancelled
 from job_runner.lineage import JobLineage
 from photo_payload import attach_nested_edit_recipes
+from services import workspace_folders
 from sidecar_identity import photo_sidecars
 
 if TYPE_CHECKING:
@@ -931,7 +932,8 @@ class MissingOriginals:
                     time.sleep(30)
                     continue
                 health_db = Database(self.db_path)
-                changed = health_db.folders.check_health(checkpoint=self._folder_health_checkpoint)
+                changed = workspace_folders.check_folder_health(
+                    health_db, checkpoint=self._folder_health_checkpoint)
                 if changed:
                     log.info("Folder health check: %d folder(s) changed status", changed)
                     # A background ok↔missing flip would otherwise leave a

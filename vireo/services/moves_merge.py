@@ -47,8 +47,9 @@ def prune_ws_nonroot_links_outside_roots(db: Database, workspace_id: int, path: 
     the caller pruned them, defeating a scoped merge into a workspace
     rooted at ``/archive/USA/2026``.
     """
-    prune_ids = db.workspace_folders.prune_nonroot_links_outside_roots(
-        workspace_id, path)
+    with db.transaction():
+        prune_ids = db.workspace_folders.prune_nonroot_links_outside_roots(
+            workspace_id, path)
     if prune_ids:
         db.invalidate_new_images_cache_for_workspace(workspace_id)
 
@@ -174,7 +175,7 @@ def merge_staged_tree_into_archive(db: Database, staged_root_id: int, archive_pa
         from move import _case_insensitive_root
         return _case_insensitive_root(path)
 
-    return db.moves_merge.merge_staged_tree_into_archive(
+    prepared = db.moves_merge.prepare_staged_tree_merge(
         staged_root_id, archive_path,
         workspace_id_fn=db.require_workspace_id,
         root_ancestor_exists=db.workspace_folders.root_ancestor_exists,
@@ -185,10 +186,30 @@ def merge_staged_tree_into_archive(db: Database, staged_root_id: int, archive_pa
         add_workspace_folder_no_commit=partial(workspace_folders.add_workspace_folder_no_commit, db),
         case_insensitive_root=case_insensitive_root,
         move_location_state=db._move_location_state_for_merge,
-        invalidate_new_images=db.invalidate_new_images_cache_for_workspaces,
-        update_folder_counts=db.folders.update_counts,
         KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
     )
+    return _fold_prepared_staged_tree(db, prepared)
+
+
+def _fold_prepared_staged_tree(db: Database, prepared: Any) -> JsonDict:
+    """Fold a prepared staged tree in one unit; refresh caches and counts.
+
+    The preparation committed through its own units (a valid state a retry
+    can build on); partial reparenting is not, so the fold is one unit.
+    """
+    if prepared is None:
+        return {"new_photos": 0, "new_folders": 0,
+                "merged_folders": 0, "already_present": 0,
+                "dropped_photo_ids": [],
+                "preserved_edit_count": 0,
+                "preserved_off_staging_identities": []}
+    merge, staged_folders = prepared
+    with db.transaction():
+        counts = db.moves_merge.fold_staged_tree(merge, staged_folders)
+    db.invalidate_new_images_cache_for_workspaces([merge.ws])
+    with db.transaction():
+        db.folders.update_counts()
+    return counts
 
 
 def query_move_rule_matches(db: Database, criteria: Mapping[str, Any]) -> list[int]:

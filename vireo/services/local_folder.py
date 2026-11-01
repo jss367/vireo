@@ -1352,7 +1352,7 @@ def _restore_catalog(db: Database, root_folder_id: int) -> None:
             conflict = db.local_folders.path_conflict(mapping["source_path"], mapping["folder_id"])
             if conflict and conflict["id"] not in mapped_ids:
                 db.folders.merge_into_existing(
-                    conflict["id"], mapping["folder_id"], mapping["source_path"], commit=False
+                    conflict["id"], mapping["folder_id"], mapping["source_path"]
                 )
         for mapping in mappings:
             db.local_folders.set_catalog_path(f"__vireo_local_folder_restore__/{root_folder_id}/{mapping['folder_id']}", mapping["folder_id"])
@@ -1368,7 +1368,7 @@ def _restore_catalog(db: Database, root_folder_id: int) -> None:
             )
             existing = db.local_folders.path_conflict(target, row["id"])
             if existing:
-                db.folders.merge_into_existing(row["id"], existing["id"], target, commit=False)
+                db.folders.merge_into_existing(row["id"], existing["id"], target)
             else:
                 db.local_folders.set_catalog_path(target, row["id"])
                 relinked.append(row["id"])

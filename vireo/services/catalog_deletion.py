@@ -177,12 +177,15 @@ def delete_folder(db: Database, folder_id: int) -> JsonDict:
     def delete_chunk(chunk: Iterable[int], **kwargs: Any) -> JsonDict:
         return delete_photos(db, chunk, **kwargs)
 
-    deleted_ids, files = db.folders.delete(
-        folder_id,
-        active_ws,
-        delete_photos=delete_chunk,
-        remember_removals=partial(workspace_folders.remember_workspace_folder_removals, db),
-    )
+    # One unit: a failure part-way cannot commit the photo deletes while
+    # leaving the folder rows behind.
+    with db.transaction():
+        deleted_ids, files = db.folders.delete(
+            folder_id,
+            active_ws,
+            delete_photos=delete_chunk,
+            remember_removals=partial(workspace_folders.remember_workspace_folder_removals, db),
+        )
     prune_pipeline_cache_for_ids(db, deleted_ids)
 
     # delete_photos' finally-clause invalidation only covers folders that

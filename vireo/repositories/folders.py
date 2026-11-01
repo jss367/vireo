@@ -76,12 +76,11 @@ class FolderRepository:
             yield values[idx:idx + self.chunk_size]
 
     def add(self, path, name=None, parent_id=None):
-        """Insert the folder (or backfill a missing parent_id); return its id."""
+        """Insert the folder (or backfill a missing parent_id); return its id. No commit."""
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO folders (path, name, parent_id) VALUES (?, ?, ?)",
             (path, name, parent_id),
         )
-        self.commit_with_retry(self.conn)
         if cur.rowcount > 0:
             folder_id = cur.lastrowid
         else:
@@ -98,7 +97,6 @@ class FolderRepository:
                     "UPDATE folders SET parent_id = ? WHERE id = ?",
                     (parent_id, folder_id),
                 )
-                self.commit_with_retry(self.conn)
         return folder_id
 
     def get(self, folder_id):
@@ -342,7 +340,7 @@ class FolderRepository:
         ).fetchall()
 
     def update_counts(self):
-        """Recompute photo_count for every folder and commit."""
+        """Recompute photo_count for every folder (no commit)."""
         self.conn.execute(
             """
             UPDATE folders SET photo_count = (
@@ -350,7 +348,6 @@ class FolderRepository:
             )
         """
         )
-        self.conn.commit()
 
     def nearest_ancestor_id(self, path, exclude_id=None):
         """Return the id of the longest stored proper ancestor of path, or None."""
@@ -409,47 +406,47 @@ class FolderRepository:
             "UPDATE folders SET parent_id = ? WHERE id = ?",
             updates,
         )
-        self.conn.commit()
 
     def repair_stale_parents(self):
         """Repair parent links that contradict stored paths; return the updates.
 
-        ``nearest_ancestor_id`` runs inside the ``BEGIN IMMEDIATE`` snapshot.
+        No commit. The caller runs it under ``db.transaction(immediate=True)``
+        so the read and the repair share one snapshot: a concurrent move or
+        local-copy activation must not change paths after the links are
+        validated (``nearest_ancestor_id`` reads inside that snapshot too).
         """
-        with self.conn:
-            # Read and repair one snapshot: a concurrent move or local-copy
-            # activation must not change paths after we validate the links.
-            self.conn.execute("BEGIN IMMEDIATE")
-            managed_ids = {
-                row[0] for row in self.conn.execute(
-                    "SELECT folder_id FROM local_folder_mappings "
-                    "UNION SELECT folder_id FROM local_workspace_folders"
-                )
-            }
-            rows = self.conn.execute(
-                "SELECT id, path, parent_id FROM folders"
-            ).fetchall()
-            paths = {row["id"]: self.path_for_subtree_match(row["path"]) for row in rows}
-            updates = []
-            for row in rows:
-                fid, parent_id = row["id"], row["parent_id"]
-                if parent_id is None or fid in managed_ids or parent_id in managed_ids:
-                    continue
-                parent_path = paths.get(parent_id)
-                if parent_path is not None and paths[fid].startswith(parent_path + "/"):
-                    continue
-                updates.append((self.nearest_ancestor_id(row["path"], exclude_id=fid), fid))
-            self.conn.executemany(
-                "UPDATE folders SET parent_id = ? WHERE id = ?", updates,
+        managed_ids = {
+            row[0] for row in self.conn.execute(
+                "SELECT folder_id FROM local_folder_mappings "
+                "UNION SELECT folder_id FROM local_workspace_folders"
             )
+        }
+        rows = self.conn.execute(
+            "SELECT id, path, parent_id FROM folders"
+        ).fetchall()
+        paths = {row["id"]: self.path_for_subtree_match(row["path"]) for row in rows}
+        updates = []
+        for row in rows:
+            fid, parent_id = row["id"], row["parent_id"]
+            if parent_id is None or fid in managed_ids or parent_id in managed_ids:
+                continue
+            parent_path = paths.get(parent_id)
+            if parent_path is not None and paths[fid].startswith(parent_path + "/"):
+                continue
+            updates.append((self.nearest_ancestor_id(row["path"], exclude_id=fid), fid))
+        self.conn.executemany(
+            "UPDATE folders SET parent_id = ? WHERE id = ?", updates,
+        )
         return updates
 
     def check_health(self, *, checkpoint: Callable[[], object] = lambda: None) -> int:
-        """Refresh folder status; an interrupted pass publishes no changes.
+        """Refresh folder status (no commit); return the number changed.
 
-        Probe outside a write transaction, then apply observations together.
-        The optional checkpoint may abort before/after a probe or during the
-        commit, so automatic checks can yield without retaining writer locks.
+        Probes run before the first write, so under the caller's lazily begun
+        unit of work no writer lock is held across filesystem access; the
+        observations are then applied together, and an interrupted pass
+        (the optional checkpoint may abort before/after a probe or between
+        writes) rolls back with the caller's unit and publishes nothing.
         """
         rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
         updates = []
@@ -480,25 +477,24 @@ class FolderRepository:
         # status flip so a rollback restores both together.
         if not updates:
             return 0
-        with self.conn:
-            for status, fid, path, old_status in updates:
-                checkpoint()
-                updated = self.conn.execute(
-                    "UPDATE folders SET status = ? WHERE id = ? AND path = ? AND status = ?",
-                    (status, fid, path, old_status),
-                ).rowcount
-                changed += updated
-                if updated and status == "missing" and path:
-                    newly_missing_paths.append(path)
-            for chunk in self._chunks(newly_missing_paths):
-                checkpoint()
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"UPDATE photos SET last_move_source_folder_path = NULL "
-                    f"WHERE last_move_source_folder_path IN ({placeholders})",
-                    chunk,
-                )
+        for status, fid, path, old_status in updates:
             checkpoint()
+            updated = self.conn.execute(
+                "UPDATE folders SET status = ? WHERE id = ? AND path = ? AND status = ?",
+                (status, fid, path, old_status),
+            ).rowcount
+            changed += updated
+            if updated and status == "missing" and path:
+                newly_missing_paths.append(path)
+        for chunk in self._chunks(newly_missing_paths):
+            checkpoint()
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE photos SET last_move_source_folder_path = NULL "
+                f"WHERE last_move_source_folder_path IN ({placeholders})",
+                chunk,
+            )
+        checkpoint()
         return changed
 
     def missing(self):
@@ -580,7 +576,7 @@ class FolderRepository:
         return cascaded
 
     def relocate(self, folder_id, new_path):
-        """Update folder path and set status to 'ok'; commit.
+        """Update folder path and set status to 'ok' (no commit).
 
         Also checks if missing child folders exist at corresponding paths
         under new_path. If they do, relocates them too.
@@ -603,11 +599,13 @@ class FolderRepository:
             if source_row and source_row["status"] == "missing":
                 # Revalidate: if original path came back, refresh status instead
                 if os.path.isdir(source_row["path"]):
+                    # The caller's unit keeps this refresh even though the
+                    # relocate itself is refused (it catches the ValueError
+                    # inside the unit).
                     self.conn.execute(
                         "UPDATE folders SET status = 'ok' WHERE id = ?",
                         (folder_id,),
                     )
-                    self.conn.commit()
                     raise ValueError(
                         f"Path is already tracked as folder {conflict['id']}"
                     )
@@ -653,7 +651,6 @@ class FolderRepository:
             )
 
         self.relink_parents_by_path([folder_id] + [c["id"] for c in cascaded])
-        self.conn.commit()
         return cascaded
 
     def _fold_source_photos(
@@ -772,16 +769,12 @@ class FolderRepository:
                     (link["workspace_id"], target_folder_id),
                 )
 
-    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *, commit=True):
-        """Collapse folder duplicates atomically, preserving shared identity."""
+    def merge_into_existing(self, source_folder_id, target_folder_id, new_path):
+        """Collapse folder duplicates atomically, preserving shared identity (no commit)."""
         with identity_merge_transaction(self.conn):
-            result = self._merge_into_existing(source_folder_id, target_folder_id, new_path, commit=False)
-        if commit:
-            self.conn.commit()
-        return result
+            return self._merge_into_existing(source_folder_id, target_folder_id, new_path)
 
-    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
-                             commit=True):
+    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path):
         """Merge photos from a missing folder into an existing folder at the same path.
 
         - Photos with matching filenames in the target are dropped from source
@@ -869,8 +862,6 @@ class FolderRepository:
             )
 
         self.relink_parents_by_path([c["id"] for c in cascaded])
-        if commit:
-            self.conn.commit()
         return cascaded
 
     def linked_in_other_workspace(self, folder_ids, active_ws):
@@ -1010,53 +1001,48 @@ class FolderRepository:
 
         photo_ids = self._photo_ids_in_folders(ordered_delete_ids)
 
-        # One outer transaction so a failure partway can't commit the photo
-        # deletes while leaving the folder rows behind. ``commit=False`` also
-        # defers delete_photos' pipeline-cache prune (a non-transactional
-        # file write) until after the commit succeeds.
+        # No commit: the caller's one unit of work keeps a failure partway
+        # from committing the photo deletes while leaving the folder rows
+        # behind. ``commit=False`` also defers delete_photos' pipeline-cache
+        # prune (a non-transactional file write) until after that commit.
         files = []
         deleted_ids = []
-        try:
-            for chunk in self._chunks(photo_ids):
-                inner = delete_photos(chunk, commit=False)
-                files.extend(inner.get("files", []))
-                deleted_ids.extend(inner.get("ids", []))
-            # Reparent kept subtree heads before any folder DELETE — their
-            # parent_id points at a row being deleted, and the FK has no ON
-            # DELETE action.
-            for chunk in self._chunks(kept_head_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"UPDATE folders SET parent_id = NULL "
-                    f"WHERE id IN ({placeholders})",
-                    chunk,
-                )
-            self._unlink_kept_subtrees(active_ws, kept_subtree_ids, remember_removals)
-            for chunk in self._chunks(ordered_delete_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"DELETE FROM workspace_folders WHERE folder_id IN ({placeholders})",
-                    chunk,
-                )
-                self.conn.execute(
-                    f"DELETE FROM folders WHERE id IN ({placeholders})",
-                    chunk,
-                )
-            # Clear stale move provenance that would otherwise let a new
-            # unrelated folder appearing at one of these deleted paths bypass
-            # the same-stem developed-render collision guard in
-            # ``move_photos``. Run after the folder DELETEs (nothing left in
-            # this transaction can re-populate it) and inside the same outer
-            # transaction so a rollback restores both together.
-            for chunk in self._chunks(deleted_folder_paths):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"UPDATE photos SET last_move_source_folder_path = NULL "
-                    f"WHERE last_move_source_folder_path IN ({placeholders})",
-                    chunk,
-                )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        for chunk in self._chunks(photo_ids):
+            inner = delete_photos(chunk, commit=False)
+            files.extend(inner.get("files", []))
+            deleted_ids.extend(inner.get("ids", []))
+        # Reparent kept subtree heads before any folder DELETE — their
+        # parent_id points at a row being deleted, and the FK has no ON
+        # DELETE action.
+        for chunk in self._chunks(kept_head_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE folders SET parent_id = NULL "
+                f"WHERE id IN ({placeholders})",
+                chunk,
+            )
+        self._unlink_kept_subtrees(active_ws, kept_subtree_ids, remember_removals)
+        for chunk in self._chunks(ordered_delete_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"DELETE FROM workspace_folders WHERE folder_id IN ({placeholders})",
+                chunk,
+            )
+            self.conn.execute(
+                f"DELETE FROM folders WHERE id IN ({placeholders})",
+                chunk,
+            )
+        # Clear stale move provenance that would otherwise let a new
+        # unrelated folder appearing at one of these deleted paths bypass
+        # the same-stem developed-render collision guard in
+        # ``move_photos``. Run after the folder DELETEs (nothing left in
+        # this transaction can re-populate it) and inside the same outer
+        # transaction so a rollback restores both together.
+        for chunk in self._chunks(deleted_folder_paths):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE photos SET last_move_source_folder_path = NULL "
+                f"WHERE last_move_source_folder_path IN ({placeholders})",
+                chunk,
+            )
         return deleted_ids, files

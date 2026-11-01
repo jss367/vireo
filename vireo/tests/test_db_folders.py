@@ -164,16 +164,10 @@ def test_add_folder_existing_path_returns_id_and_backfills_missing_parent(db, mo
     child = workspace_folders.add_folder(db, "/p/c")
     assert _folder_row(db, child)["parent_id"] is None
 
-    commits = []
-    real = db_module.commit_with_retry
-
-    def recording(conn, *a, **kw):
-        commits.append(conn)
-        return real(conn, *a, **kw)
-
-    monkeypatch.setattr(db_module, "commit_with_retry", recording)
+    commits = _unit_commit_recorder(monkeypatch)
     assert workspace_folders.add_folder(db, "/p/c", parent_id=parent) == child
-    assert len(commits) == 2  # INSERT OR IGNORE, then the parent backfill
+    # The INSERT OR IGNORE and the parent backfill land in add_folder's one unit.
+    assert len(commits) == 1
     with _reader(db) as r:
         assert r.execute("SELECT parent_id FROM folders WHERE id = ?", (child,)).fetchone()[0] == parent
 
@@ -184,18 +178,44 @@ def test_add_folder_existing_path_returns_id_and_backfills_missing_parent(db, mo
     assert _folder_row(db, child)["parent_id"] == parent
     assert workspace_folders.add_folder(db, "/o", parent_id=other) == other
     assert _folder_row(db, other)["parent_id"] is None
-    assert len(commits) == 2  # only the two INSERT OR IGNORE commits
+    assert len(commits) == 2  # one unit per add_folder call
+
+
+def _unit_commit_recorder(monkeypatch):
+    """Record each unit-of-work commit (the data layer itself never commits)."""
+    import unit_of_work
+
+    commits = []
+    real = unit_of_work._commit
+    monkeypatch.setattr(
+        unit_of_work, "_commit", lambda conn: (commits.append(conn), real(conn))[1],
+    )
+    return commits
+
+
+def test_add_folder_keeps_the_row_and_its_workspace_link_together(db, monkeypatch):
+    """The folder row and its workspace link are one unit of work.
+
+    The row used to commit before the link was written, so a failure while
+    linking left a catalog folder no workspace could see.
+    """
+    from repositories.workspace_folders import WorkspaceFolderRepository
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(WorkspaceFolderRepository, "add_subtree", fail)
+    with pytest.raises(sqlite3.OperationalError):
+        workspace_folders.add_folder(db, "/linked")
+    assert not db.conn.in_transaction
+    with _reader(db) as r:
+        assert r.execute("SELECT COUNT(*) FROM folders WHERE path = '/linked'").fetchone()[0] == 0
 
 
 def test_add_folder_new_row_commits_once(db, monkeypatch):
-    commits = []
-    real = db_module.commit_with_retry
-    monkeypatch.setattr(
-        db_module, "commit_with_retry",
-        lambda conn, *a, **kw: (commits.append(1), real(conn, *a, **kw))[1],
-    )
+    commits = _unit_commit_recorder(monkeypatch)
     workspace_folders.add_folder(db, "/new", link_to_workspace=False)
-    assert commits == [1]
+    assert len(commits) == 1
 
 
 # -- folders.get / folders.tree / get_folder_subtree_ids --------------------
@@ -359,6 +379,7 @@ def test_repair_missing_folder_parents(db):
     orphan = _raw_folder(db, "/zz/c")
     root = _raw_folder(db, "/")
     db.folders.repair_missing_parents()
+    db.commit()
     with _reader(db) as r:
         rows = dict(r.execute("SELECT id, parent_id FROM folders").fetchall())
     assert rows[child] == top
@@ -367,6 +388,7 @@ def test_repair_missing_folder_parents(db):
     assert rows[root] is None  # "/" has no parent path; never self-parented
     # No-op: nothing to update, no transaction left open.
     db.folders.repair_missing_parents()
+    db.commit()
     assert not db.conn.in_transaction
 
 
@@ -395,7 +417,7 @@ def test_repair_stale_folder_parents(db, monkeypatch, caplog):
             calls.append((path, exclude_id)), real(self, path, exclude_id=exclude_id)
         )[1],
     )
-    with caplog.at_level(logging.INFO, logger=db_module.log.name):
+    with caplog.at_level(logging.INFO, logger=db_module.log.name), db.transaction(immediate=True):
         assert db.repair_stale_folder_parents() == 1
     assert calls == [("/a/stale", stale)]
     assert "Repaired 1 stale folder parent links" in caplog.text
@@ -407,7 +429,7 @@ def test_repair_stale_folder_parents(db, monkeypatch, caplog):
     assert rows[lwf] == other
     assert rows[under_managed] == top  # parent is managed: deferred, left alone
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger=db_module.log.name):
+    with caplog.at_level(logging.INFO, logger=db_module.log.name), db.transaction(immediate=True):
         assert db.repair_stale_folder_parents() == 0
     assert "Repaired" not in caplog.text
     assert not db.conn.in_transaction
@@ -439,7 +461,7 @@ def test_check_folder_health_updates_status_and_clears_provenance(db, tmp_path):
     )
     db.conn.commit()
 
-    assert db.folders.check_health() == 4
+    assert workspace_folders.check_folder_health(db) == 4
     with _reader(db) as r:
         status = dict(r.execute("SELECT id, status FROM folders").fetchall())
         prov = dict(r.execute("SELECT id, last_move_source_folder_path FROM photos").fetchall())
@@ -449,7 +471,7 @@ def test_check_folder_health_updates_status_and_clears_provenance(db, tmp_path):
     }
     assert prov == {pid: None, other: str(present)}
     # Second pass: nothing changes, nothing is left uncommitted.
-    assert db.folders.check_health() == 0
+    assert workspace_folders.check_folder_health(db) == 0
     assert not db.conn.in_transaction
 
 
@@ -470,7 +492,7 @@ def test_folder_health_interrupted_during_publish_rolls_back_status_and_provenan
             raise TransferStarted()
 
     with pytest.raises(TransferStarted):
-        db.folders.check_health(checkpoint=checkpoint)
+        workspace_folders.check_folder_health(db, checkpoint=checkpoint)
     assert not db.conn.in_transaction
     assert db.folders.get(folder)["status"] == "ok"
     assert db.conn.execute(
@@ -695,6 +717,7 @@ def test_relocate_folder_rejects_conflict_with_ok_source(db):
     b = workspace_folders.add_folder(db, "/rel/b")
     with pytest.raises(ValueError, match=f"Path is already tracked as folder {b}"):
         db.folders.relocate(a, "/rel/b")
+        db.commit()
 
 
 def test_relocate_folder_conflict_revalidates_missing_source_that_came_back(db, tmp_path):
@@ -704,7 +727,9 @@ def test_relocate_folder_conflict_revalidates_missing_source_that_came_back(db, 
     b = workspace_folders.add_folder(db, "/rel/b")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (a,))
     db.conn.commit()
-    with pytest.raises(ValueError, match=f"Path is already tracked as folder {b}"):
+    # As the relocate route does: the refusal is caught inside the unit, so
+    # the status refresh still commits.
+    with db.transaction(), pytest.raises(ValueError, match=f"Path is already tracked as folder {b}"):
         db.folders.relocate(a, "/rel/b")
     with _reader(db) as r:
         assert r.execute("SELECT status FROM folders WHERE id = ?", (a,)).fetchone()[0] == "ok"
@@ -757,6 +782,7 @@ def test_relocate_folder_moves_row_cascades_children_and_rebases(db, tmp_path, m
         lambda self, ids: (relinked.append(list(ids)), real(self, ids))[1],
     )
     cascaded = db.folders.relocate(old, str(new_root))
+    db.commit()
     assert cascaded == [
         {"id": kid, "old_path": "/old/kid", "new_path": str(new_root / "kid")},
         {"id": deep, "old_path": "/old/kid/deep", "new_path": str(new_root / "kid" / "deep")},
@@ -827,6 +853,7 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
         lambda self, ids: (relinked.append(list(ids)), real(self, ids))[1],
     )
     cascaded = db.folders.merge_into_existing(source, target, str(target_dir))
+    db.commit()
     assert cascaded == [{"id": kid, "old_path": "/src/kid", "new_path": str(target_dir / "kid")}]
     assert transfers == [(dup, survivor)]
     assert relinked == [[kid]]
@@ -871,6 +898,7 @@ def test_merge_into_existing_repoints_collection_photo_ids(db, tmp_path):
     db.conn.commit()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
+    db.commit()
 
     rules = json.loads(db.conn.execute(
         "SELECT rules FROM collections WHERE id = ?", (coll,),
@@ -879,12 +907,12 @@ def test_merge_into_existing_repoints_collection_photo_ids(db, tmp_path):
     assert rules == [{"field": "photo_ids", "value": [survivor]}]
 
 
-def test_merge_into_existing_without_commit_leaves_transaction_open(db, tmp_path):
+def test_merge_into_existing_leaves_commit_to_caller(db, tmp_path):
     target = workspace_folders.add_folder(db, str(tmp_path))
     source = workspace_folders.add_folder(db, "/gone-src")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
     db.conn.commit()
-    assert db.folders.merge_into_existing(source, target, str(tmp_path), commit=False) == []
+    assert db.folders.merge_into_existing(source, target, str(tmp_path)) == []
     assert db.conn.in_transaction
     db.conn.rollback()
     assert _folder_row(db, source) is not None
@@ -895,6 +923,7 @@ def test_merge_into_existing_preserves_non_root_link(db, tmp_path):
     target = workspace_folders.add_folder(db, str(tmp_path), link_to_workspace=False)
     source = workspace_folders.add_folder(db, "/nr-src", workspace_root=False)
     db.folders.merge_into_existing(source, target, str(tmp_path))
+    db.commit()
     assert _links(db, target) == {(ws, 0)}
 
 
@@ -922,6 +951,7 @@ def test_merge_into_existing_moves_embedded_keyword_offered_onto_survivor(
     assert db.photo_keywords.embedded_offered_keys(survivor) == set()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
+    db.commit()
 
     with _reader(db) as r:
         offered_rows = r.execute(
@@ -953,6 +983,7 @@ def test_merge_into_existing_drops_phantom_embedded_keyword_offered(
     db.commit()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
+    db.commit()
 
     with _reader(db) as r:
         offered_rows = r.execute(
@@ -996,6 +1027,7 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
     db.conn.commit()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
+    db.commit()
 
     with _reader(db) as r:
         tag_names = {
@@ -1043,6 +1075,7 @@ def test_folder_merge_respects_embedded_keyword_removals(
             db.commit()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
+    db.commit()
 
     assert {k["name"] for k in db.photo_keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
@@ -1379,6 +1412,7 @@ def test_update_folder_counts_recomputes_and_commits(db):
     db.conn.commit()
     db.set_active_workspace(None)
     db.folders.update_counts()
+    db.commit()
     with _reader(db) as r:
         counts = dict(r.execute("SELECT id, photo_count FROM folders").fetchall())
     assert counts == {a: 2, b: 0}

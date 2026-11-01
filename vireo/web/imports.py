@@ -767,7 +767,7 @@ class _ImportFullRun:
         job = self.job
         self.thread_db = self.ctx.thread_db()
         # Check folder health before scanning to prevent duplicate imports
-        if self.thread_db.folders.check_health():
+        if workspace_folders.check_folder_health(self.thread_db):
             self.invalidate_missing_originals()
         job["_start_time"] = time.time()
 

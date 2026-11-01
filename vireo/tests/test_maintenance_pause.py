@@ -72,6 +72,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
     second = _second_photo(db, first)
     source_id = db.photos.get(first)["folder_id"]
     db.folders.update_counts()
+    db.commit()
     destination = tmp_path / "moved"
     entered, release = threading.Event(), threading.Event()
     copies = []

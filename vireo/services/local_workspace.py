@@ -1466,12 +1466,12 @@ def _restore_catalog(db: Database, workspace_id: int) -> None:
         for mapping in mappings:
             conflict = db.local_folders.path_conflict(mapping["source_path"], mapping["folder_id"])
             if conflict and conflict["id"] not in mapped_ids:
-                # ``commit=False`` keeps the whole restore in the BEGIN
-                # IMMEDIATE opened above; a failure below still rolls back
+                # The merge never commits, so the whole restore stays in the
+                # BEGIN IMMEDIATE opened above; a failure below still rolls back
                 # every merge/rebase together instead of leaving a
                 # partially-restored catalog with local-workspace state.
                 db.folders.merge_into_existing(
-                    conflict["id"], mapping["folder_id"], mapping["source_path"], commit=False
+                    conflict["id"], mapping["folder_id"], mapping["source_path"]
                 )
 
         for mapping in mappings:
@@ -1496,7 +1496,7 @@ def _restore_catalog(db: Database, workspace_id: int) -> None:
             )
             existing = db.local_folders.path_conflict(target, row["id"])
             if existing:
-                db.folders.merge_into_existing(row["id"], existing["id"], target, commit=False)
+                db.folders.merge_into_existing(row["id"], existing["id"], target)
             else:
                 db.local_folders.set_catalog_path(target, row["id"])
                 relinked.append(row["id"])

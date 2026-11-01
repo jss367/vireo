@@ -721,9 +721,9 @@ def remove_orphans(db, photo_ids):
         db: Database instance
         photo_ids: list of photo ids to remove
     """
-    db.audit.remove_orphan_rows(photo_ids)
-    db.commit()
-    db.folders.update_counts()
+    with db.transaction():
+        db.audit.remove_orphan_rows(photo_ids)
+        db.folders.update_counts()
     log.info("Removed %d orphan entries", len(photo_ids))
 
 

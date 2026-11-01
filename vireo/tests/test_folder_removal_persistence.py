@@ -23,6 +23,7 @@ def shared_tree(tmp_path):
     other = db.create_workspace("All")
     workspace_folders.add_workspace_folder(db, other, parent)
     db.folders.check_health()
+    db.commit()
     yield db, workspace, other, parent, missing, child
     db.close()
 
@@ -43,6 +44,7 @@ def test_removed_shared_folders_stay_removed_after_refresh_and_restart(shared_tr
         workspace_folders.get_workspace_root_folder_ids(db, workspace)
         workspace_folders.get_workspace_folder_roots(db, workspace)
         db.folders.check_health()
+        db.commit()
         assert db.folders.missing() == []
         assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(missing)} == {other}
         assert {f["id"] for f in workspace_folders.get_workspace_folders(db, other)} == {parent, missing, child}

@@ -319,6 +319,7 @@ def test_photo_association_moves_preserve_evidence(db, tmp_path, operation, exis
         db.keyword_provenance.carry_companion_keywords(losing, survivor)
     elif operation == 'folder_collision':
         db.folders.merge_into_existing(source_folder, target_folder, str(target_dir))
+        db.commit()
         assert db.photos.get(losing) is None
     elif operation == 'duplicate_resolution':
         db._apply_winner_loser_merge(survivor, [losing])

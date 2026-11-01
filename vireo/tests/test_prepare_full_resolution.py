@@ -1326,6 +1326,7 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
                     try:
                         folder_id = writer.photos.get(photo_id)["folder_id"]
                         writer.folders.relocate(folder_id, str(relocated))
+                        writer.commit()
                         assert writer.photos.get(photo_id)["folder_id"] == folder_id
                     finally:
                         writer.close()

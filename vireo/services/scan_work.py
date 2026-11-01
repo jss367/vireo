@@ -20,6 +20,7 @@ from db import Database
 # The canonical implementation lives in ``new_images.py``; bound here as a
 # module global so tests can swap it for the scan job alone.
 from new_images import invalidate_new_images_after_scan as _invalidate_new_images_after_scan
+from services import workspace_folders
 
 if TYPE_CHECKING:
     from jobs import JobRunner
@@ -501,7 +502,7 @@ def build_scan_work(
         thread_db = Database(db_path)
         thread_db.set_active_workspace(active_ws)
         # Check folder health before scanning to prevent duplicate imports
-        if thread_db.folders.check_health():
+        if workspace_folders.check_folder_health(thread_db):
             invalidate_missing_originals()
 
         run = _ScanJobRun(
