@@ -25,7 +25,9 @@ pipeline complete. Applying crop or exposure suggestions remains a separate
 explicit action.
 
 The catalog stores the region and its measurements; saved image edits and
-species decisions are unchanged. Existing read-only review views disable the
+species decisions are unchanged. Reviewer-box saves currently have no Undo/Redo,
+like primary-subject selection. Replacing a reviewer box cannot be reversed
+through edit history; the drawing dialog states this before saving. Existing read-only review views disable the
 new write controls. API routes verify workspace visibility, validate normalized
 coordinates, and reject a scoped retry if its region was replaced during work.
 
