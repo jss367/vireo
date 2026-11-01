@@ -22,6 +22,7 @@ from services import (
     subject_masks,
     workspace_folders,
 )
+from services.edit_history import undo_last_edit
 from testing.waits import synchronization_timeout
 
 
@@ -4175,7 +4176,7 @@ def test_bulk_apply_records_single_undoable_batch(app_and_db):
     assert recipe_entries[0]["item_count"] == len(ids)
 
     # A single undo reverts every photo in the batch.
-    db.undo_last_edit()
+    undo_last_edit(db)
     for pid in ids:
         assert db.get_photo_edit_recipe(pid) is None
 

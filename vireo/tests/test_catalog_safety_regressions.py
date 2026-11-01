@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 from scanner import ScanOptions
 from services import photo_ingest, workspace_folders
+from services.edit_history import undo_last_edit
 
 
 def seed(db, path, name="bird.jpg"):
@@ -129,7 +130,7 @@ def test_remove_absent_keyword_has_no_history(app_and_db):
     assert response.status_code == 200
     assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
     assert db.conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0] == 0
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
 
 
@@ -141,7 +142,7 @@ def test_deleted_keyword_does_not_block_undo(app_and_db):
     client = app.test_client()
     assert client.delete(f"/api/photos/{pid}/keywords/{kid}").status_code == 200
     assert client.delete(f"/api/keywords/{kid}").status_code == 200
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
 
 

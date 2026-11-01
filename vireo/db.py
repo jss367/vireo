@@ -3517,9 +3517,8 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        from services.species_provenance import remember_before
         if provenance is not None and _record_provenance:
-            remember_before(self, photo_id, keyword_id, force=True)
+            self.species_provenance.remember_before(photo_id, keyword_id, force=True)
         self._keyword_provenance_repository().tag(
             photo_id, keyword_id, source=source,
             species_provenance=species_provenance, _commit=False,
@@ -3611,7 +3610,7 @@ class Database:
     def species_provenance(self) -> SpeciesProvenanceRepository:
         """Per-species assignment evidence, independent of photographer flags."""
         from repositories.species_provenance import SpeciesProvenanceRepository
-        return SpeciesProvenanceRepository(self.conn)
+        return SpeciesProvenanceRepository(self.conn, self._species_provenance_before)
 
     def untag_photo(
         self, photo_id: int, keyword_id: int, _commit: bool = True, *, _record_history: bool = False
@@ -3630,9 +3629,8 @@ class Database:
                      replay writers leave this false so no stale snapshots
                      can accumulate or leak into a later edit.
         """
-        from services.species_provenance import remember_before
         if _record_history:
-            remember_before(self, photo_id, keyword_id)
+            self.species_provenance.remember_before(photo_id, keyword_id)
         return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photos_with_equivalent_species(
@@ -4144,7 +4142,7 @@ class Database:
         photo_ids: Collection[int] | None = None,
         prediction_ids: Collection[int] | None = None,
         _commit: bool = True,
-        species_taxonomy: Any = None,
+        species_taxonomy: Any = ...,
     ) -> dict[str, Any] | None:
         """Accept a prediction: mark as accepted and add species keyword.
 
@@ -4199,8 +4197,10 @@ class Database:
 
         ``species_taxonomy`` is the loaded taxonomy (``load_local_taxonomy()``)
         a ``replace_species`` accept uses to keep keywords a neighbouring
-        subject's prediction supports as broader/same/narrower; without it
-        only exact-name keywords are protected. The caller loads it, so the
+        subject's prediction supports as broader/same/narrower. Replacement
+        requires an explicit choice: pass the loaded taxonomy, or pass None
+        to choose exact-name protection when taxonomy is unavailable. Omitting
+        it raises ValueError before any writes. The caller loads it, so the
         data layer never reads the taxonomy file.
 
         All database changes are performed atomically in a single transaction
@@ -4560,8 +4560,7 @@ class Database:
             source, reason: the edit's provenance when the caller stated it
                      (who decided, and why); None for the user's own clicks.
         """
-        from services.species_provenance import history_items
-        items = history_items(self, action_type, items)
+        items = self.species_provenance.history_items(action_type, items)
         edit_id = self._edit_history_repository().record(
             action_type, description, new_value, items,
             is_batch=is_batch, _commit=_commit, source=source, reason=reason,
@@ -4584,148 +4583,7 @@ class Database:
         'prediction_reviewed', 'prediction_replace_species',
     )
 
-    def undo_last_edit(self) -> dict[str, Any] | None:
-        """Undo the most recent undoable edit. Returns the undone entry dict, or None.
 
-        Non-undoable entries (prediction_reject, discard) are skipped.
-        The entry is marked as undone (not deleted) so it can be redone.
-
-        Stale cache-linked actions are retired and reported without applying
-        another entry. The caller must refresh the controls so the next click
-        names the edit it will actually reverse. Retirement commits on its own;
-        valid combined photo/group edits retain the writer lock until complete.
-        """
-        found = self._edit_history_repository().next_undo()
-        if not found:
-            return None
-        entry, items = found
-        history = self._edit_history_repository()
-
-        if entry['action_type'] == 'pipeline_grouping':
-            from services.grouping_history import (
-                GroupingHistoryStale,
-                apply_grouping_photo_edit,
-                restore_grouping_edit,
-            )
-
-            try:
-                with restore_grouping_edit(self, entry, undo=True):
-                    apply_grouping_photo_edit(self, entry, items, undo=True)
-                    history.mark_undone(entry['id'])
-            except GroupingHistoryStale:
-                history.retire_stale_grouping_entry(entry['id'])
-                history.commit()
-                raise GroupingHistoryStale(
-                    'That grouping or species action was superseded by newer analysis. '
-                    'History has been refreshed; review the next action before trying again.'
-                ) from None
-        elif entry['action_type'] == 'species_confirm_cache':
-            from services.grouping_history import (
-                GroupingHistoryStale,
-                restore_species_confirm_cache_edit,
-            )
-
-            try:
-                with restore_species_confirm_cache_edit(self, entry, undo=True):
-                    history.mark_undone(entry['id'])
-            except GroupingHistoryStale:
-                history.retire_stale_grouping_entry(entry['id'])
-                history.commit()
-                raise GroupingHistoryStale(
-                    'That grouping or species action was superseded by newer analysis. '
-                    'History has been refreshed; review the next action before trying again.'
-                ) from None
-        elif entry['action_type'] == 'identity_alternatives':
-            self._replay_identity_history(entry, items, undo=True)
-        else:
-            with self.transaction():
-                self._apply_undo(entry, items)
-                history.mark_undone(entry['id'])
-        return entry
-
-    def redo_last_undo(self) -> dict[str, Any] | None:
-        """Redo the most recently undone edit. Returns the entry dict, or None.
-
-        Replays in chronological order (ASC) so sequential undos are redone
-        correctly. Stale cache-linked actions are retired and reported without
-        replaying another entry, just as in ``undo_last_edit``.
-        """
-        found = self._edit_history_repository().next_redo()
-        if not found:
-            return None
-        entry, items = found
-        history = self._edit_history_repository()
-
-        if entry['action_type'] == 'pipeline_grouping':
-            from services.grouping_history import (
-                GroupingHistoryStale,
-                apply_grouping_photo_edit,
-                restore_grouping_edit,
-            )
-
-            try:
-                with restore_grouping_edit(self, entry, undo=False):
-                    apply_grouping_photo_edit(self, entry, items, undo=False)
-                    history.mark_redone(entry['id'])
-            except GroupingHistoryStale:
-                history.retire_stale_grouping_entry(entry['id'])
-                history.commit()
-                raise GroupingHistoryStale(
-                    'That grouping or species action was superseded by newer analysis. '
-                    'History has been refreshed; review the next action before trying again.'
-                ) from None
-        elif entry['action_type'] == 'species_confirm_cache':
-            from services.grouping_history import (
-                GroupingHistoryStale,
-                restore_species_confirm_cache_edit,
-            )
-
-            try:
-                with restore_species_confirm_cache_edit(self, entry, undo=False):
-                    history.mark_redone(entry['id'])
-            except GroupingHistoryStale:
-                history.retire_stale_grouping_entry(entry['id'])
-                history.commit()
-                raise GroupingHistoryStale(
-                    'That grouping or species action was superseded by newer analysis. '
-                    'History has been refreshed; review the next action before trying again.'
-                ) from None
-        elif entry['action_type'] == 'identity_alternatives':
-            self._replay_identity_history(entry, items, undo=False)
-        else:
-            with self.transaction():
-                self._apply_redo(entry, items)
-                history.mark_redone(entry['id'])
-        return entry
-
-    def _replay_identity_history(self, entry, items, *, undo):
-        """Retire exactly this stale action while retaining the writer lock."""
-        from services.identity_alternatives import IdentityHistoryStale
-
-        history = self._edit_history_repository()
-        stale = False
-        try:
-            with self.transaction():
-                try:
-                    with history.identity_replay():
-                        if undo:
-                            self._apply_undo(entry, items)
-                            history.mark_undone(entry['id'])
-                        else:
-                            self._apply_redo(entry, items)
-                            history.mark_redone(entry['id'])
-                except IdentityHistoryStale:
-                    history.retire_superseded_identity_entry(entry['id'])
-                    stale = True
-        finally:
-            # SQL savepoint rollback cannot undo Python-side snapshots. A
-            # failed/retired replay must never contaminate a later edit.
-            self._species_provenance_before = {}
-        if stale:
-            raise IdentityHistoryStale(
-                'That identification was changed elsewhere. History has been refreshed; '
-                'review the next action before trying again.'
-            ) from None
 
     # ------------------------------------------------------------------
     # Undo / redo
@@ -4747,15 +4605,7 @@ class Database:
         self._apply_edit_items(entry, items, undo=False)
 
     def _apply_edit_items(self, entry, items, *, undo):
-        from services.species_provenance import replay_history
         action = entry['action_type']
-        if action == 'identity_alternatives':
-            from services.identity_alternatives import replay_identity_batch
-            replay_identity_batch(self, items, undo=undo)
-            # Identity snapshots already restore their retargeted authorship
-            # lattice; the extra replay only owns species evidence here.
-            replay_history(self, items, undo=undo, restore_source=False)
-            return
         setter = self._EDIT_FIELD_SETTERS.get(action)
         handlers = self._UNDO_HANDLERS if undo else self._REDO_HANDLERS
         handler = handlers.get(action)
@@ -4775,7 +4625,7 @@ class Database:
                 setter(self, item['photo_id'], item[value_key])
             elif handler is not None:
                 handler(self, entry, item)
-        replay_history(self, items, undo=undo)
+        self.species_provenance.replay_history(items, undo=undo)
 
     # -- plain per-photo fields (same setter for undo and redo) ----------
 
@@ -5121,14 +4971,6 @@ class Database:
             )
         self._reject_edit_prediction(old_meta)
 
-    def _undo_identity_alternatives(self, entry, item):
-        from services.identity_alternatives import replay_identity_edit
-        replay_identity_edit(self, item['photo_id'], item['new_value'], item['old_value'])
-
-    def _redo_identity_alternatives(self, entry, item):
-        from services.identity_alternatives import replay_identity_edit
-        replay_identity_edit(self, item['photo_id'], item['old_value'], item['new_value'])
-
     _EDIT_FIELD_SETTERS = {
         'species_provenance': _edit_set_species_provenance,
         'flag': _edit_set_flag,
@@ -5145,7 +4987,6 @@ class Database:
         'prediction_accept': _undo_keyword_add,
         'keyword_remove': _undo_keyword_remove,
         'species_replace': _undo_species_replace,
-        'identity_alternatives': _undo_identity_alternatives,
     }
     _REDO_HANDLERS = {
         'rating': _redo_rating,
@@ -5153,7 +4994,6 @@ class Database:
         'prediction_accept': _redo_keyword_add,
         'keyword_remove': _redo_keyword_remove,
         'species_replace': _redo_species_replace,
-        'identity_alternatives': _redo_identity_alternatives,
     }
 
     def _edit_old_value_meta(self, old_value: str | int | None) -> dict[str, Any]:

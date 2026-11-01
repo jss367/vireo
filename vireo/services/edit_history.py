@@ -7,7 +7,7 @@ use separate types so replay never guesses at those old entries' before-state.
 from __future__ import annotations
 
 from functools import wraps
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from services.pending_changes import queue_location_sync_if_enabled
 
@@ -89,3 +89,169 @@ def prediction_status_item(
     if old_value == new_value:
         return None
     return {'photo_id': photo_id, 'old_value': old_value, 'new_value': new_value}
+
+# -- Undo / redo ----------------------------------------------------------
+#
+# The dispatch lives here, not on ``Database``: the cache-linked actions
+# (``pipeline_grouping``, ``species_confirm_cache``) and the
+# ``identity_alternatives`` replay belong to services the data layer may not
+# import. Plain per-photo actions still replay through
+# ``Database._apply_undo`` / ``_apply_redo``.
+
+
+def undo_last_edit(db: Database) -> dict[str, Any] | None:
+    """Undo the most recent undoable edit. Returns the undone entry dict, or None.
+
+    Non-undoable entries (prediction_reject, discard) are skipped.
+    The entry is marked as undone (not deleted) so it can be redone.
+
+    Stale cache-linked actions are retired and reported without applying
+    another entry. The caller must refresh the controls so the next click
+    names the edit it will actually reverse. Retirement commits on its own;
+    valid combined photo/group edits retain the writer lock until complete.
+    """
+    found = db.edit_history.next_undo()
+    if not found:
+        return None
+    entry, items = found
+    history = db.edit_history
+
+    if entry['action_type'] == 'pipeline_grouping':
+        from services.grouping_history import (
+            GroupingHistoryStale,
+            apply_grouping_photo_edit,
+            restore_grouping_edit,
+        )
+
+        try:
+            with restore_grouping_edit(db, entry, undo=True):
+                apply_grouping_photo_edit(db, entry, items, undo=True)
+                history.mark_undone(entry['id'])
+        except GroupingHistoryStale:
+            history.retire_stale_grouping_entry(entry['id'])
+            history.commit()
+            raise GroupingHistoryStale(
+                'That grouping or species action was superseded by newer analysis. '
+                'History has been refreshed; review the next action before trying again.'
+            ) from None
+    elif entry['action_type'] == 'species_confirm_cache':
+        from services.grouping_history import (
+            GroupingHistoryStale,
+            restore_species_confirm_cache_edit,
+        )
+
+        try:
+            with restore_species_confirm_cache_edit(db, entry, undo=True):
+                history.mark_undone(entry['id'])
+        except GroupingHistoryStale:
+            history.retire_stale_grouping_entry(entry['id'])
+            history.commit()
+            raise GroupingHistoryStale(
+                'That grouping or species action was superseded by newer analysis. '
+                'History has been refreshed; review the next action before trying again.'
+            ) from None
+    elif entry['action_type'] == 'identity_alternatives':
+        _replay_identity_history(db, entry, items, undo=True)
+    else:
+        with db.transaction():
+            db._apply_undo(entry, items)
+            history.mark_undone(entry['id'])
+    return entry
+
+
+def redo_last_undo(db: Database) -> dict[str, Any] | None:
+    """Redo the most recently undone edit. Returns the entry dict, or None.
+
+    Replays in chronological order (ASC) so sequential undos are redone
+    correctly. Stale cache-linked actions are retired and reported without
+    replaying another entry, just as in ``undo_last_edit``.
+    """
+    found = db.edit_history.next_redo()
+    if not found:
+        return None
+    entry, items = found
+    history = db.edit_history
+
+    if entry['action_type'] == 'pipeline_grouping':
+        from services.grouping_history import (
+            GroupingHistoryStale,
+            apply_grouping_photo_edit,
+            restore_grouping_edit,
+        )
+
+        try:
+            with restore_grouping_edit(db, entry, undo=False):
+                apply_grouping_photo_edit(db, entry, items, undo=False)
+                history.mark_redone(entry['id'])
+        except GroupingHistoryStale:
+            history.retire_stale_grouping_entry(entry['id'])
+            history.commit()
+            raise GroupingHistoryStale(
+                'That grouping or species action was superseded by newer analysis. '
+                'History has been refreshed; review the next action before trying again.'
+            ) from None
+    elif entry['action_type'] == 'species_confirm_cache':
+        from services.grouping_history import (
+            GroupingHistoryStale,
+            restore_species_confirm_cache_edit,
+        )
+
+        try:
+            with restore_species_confirm_cache_edit(db, entry, undo=False):
+                history.mark_redone(entry['id'])
+        except GroupingHistoryStale:
+            history.retire_stale_grouping_entry(entry['id'])
+            history.commit()
+            raise GroupingHistoryStale(
+                'That grouping or species action was superseded by newer analysis. '
+                'History has been refreshed; review the next action before trying again.'
+            ) from None
+    elif entry['action_type'] == 'identity_alternatives':
+        _replay_identity_history(db, entry, items, undo=False)
+    else:
+        with db.transaction():
+            db._apply_redo(entry, items)
+            history.mark_redone(entry['id'])
+    return entry
+
+
+def _replay_identity_history(
+    db: Database, entry: dict[str, Any], items: Sequence[Any], *, undo: bool,
+) -> None:
+    """Retire exactly this stale action while retaining the writer lock."""
+    from services.identity_alternatives import IdentityHistoryStale
+
+    history = db.edit_history
+    stale = False
+    try:
+        with db.transaction():
+            try:
+                with history.identity_replay():
+                    if undo:
+                        _apply_identity_items(db, items, undo=True)
+                        history.mark_undone(entry['id'])
+                    else:
+                        _apply_identity_items(db, items, undo=False)
+                        history.mark_redone(entry['id'])
+            except IdentityHistoryStale:
+                history.retire_superseded_identity_entry(entry['id'])
+                stale = True
+    finally:
+        # SQL savepoint rollback cannot undo Python-side snapshots. A
+        # failed/retired replay must never contaminate a later edit.
+        db.species_provenance.forget_snapshots()
+    if stale:
+        raise IdentityHistoryStale(
+            'That identification was changed elsewhere. History has been refreshed; '
+            'review the next action before trying again.'
+        ) from None
+
+
+def _apply_identity_items(db: Database, items: Sequence[Any], *, undo: bool) -> None:
+    """Replay an ``identity_alternatives`` entry's photo identities and evidence."""
+    from services.identity_alternatives import replay_identity_batch
+
+    replay_identity_batch(db, items, undo=undo)
+    # Identity snapshots already restore their retargeted authorship
+    # lattice; the extra replay only owns species evidence here.
+    db.species_provenance.replay_history(items, undo=undo, restore_source=False)

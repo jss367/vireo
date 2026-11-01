@@ -135,6 +135,13 @@ def test_entry_points_import_config_before_opening_a_database():
     ("def f(p):\n    configure_repo(); return Database(p)\n", []),
     ("async def f(p):\n    import config\n    return Database(p)\n", []),
     ("def f(p=Database(p)):\n    import config\n", [1]),
+    # Direct bootstrap is required even when helper invocation ordering could
+    # make the code safe at runtime. Bare async calls cannot bootstrap either.
+    ("def f():\n    return Database('x')\nf()\nimport config\n", [2]),
+    ("def f():\n    return Database('x')\nimport config\nf()\n", [2]),
+    ("async def boot():\n    import config\nboot()\nDatabase('x')\n", [4]),
+    ("async def boot():\n    import config\nasync def main():\n    boot()\n    Database('x')\n", [5]),
+    ("async def boot():\n    import config\nasync def main():\n    await boot()\n    Database('x')\n", [5]),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines

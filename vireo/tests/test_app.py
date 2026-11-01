@@ -18,6 +18,7 @@ from services import (
     workspace_config,
     workspace_folders,
 )
+from services.edit_history import redo_last_undo, undo_last_edit
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -2534,7 +2535,7 @@ def test_encounter_species_replacement_undo_restores_previous(app_and_db):
                 json={"species": "Blue Jay", "photo_ids": photo_ids})
 
     # One undo should swap the photos back to Sparrow.
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert undone['action_type'] == 'pipeline_grouping'
 
@@ -2570,7 +2571,7 @@ def test_encounter_species_replacement_undo_after_sync_queues_swap(app_and_db):
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert undone['action_type'] == 'pipeline_grouping'
 
@@ -2596,8 +2597,8 @@ def test_encounter_species_replacement_redo_reapplies(app_and_db):
     client.post("/api/encounters/species",
                 json={"species": "Blue Jay", "photo_ids": photo_ids})
 
-    db.undo_last_edit()
-    redone = db.redo_last_undo()
+    undo_last_edit(db)
+    redone = redo_last_undo(db)
     assert redone is not None
     assert redone['action_type'] == 'pipeline_grouping'
 
@@ -2705,7 +2706,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
 
     # Undo reverses the review-status flip without untagging the
     # pre-existing hierarchical keyword.
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert undone["action_type"] == "prediction_accept"
     assert db.conn.execute(
@@ -2721,7 +2722,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     assert names_after_undo.count("Verdin") == 1
 
     # Redo re-flips the review status without tagging the root Verdin.
-    redone = db.redo_last_undo()
+    redone = redo_last_undo(db)
     assert redone is not None
     assert redone["action_type"] == "prediction_accept"
     assert db.conn.execute(
@@ -2795,7 +2796,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
 
     # Undo reverses the status flip without untagging the hierarchy leaf
     # or attaching the root spelling.
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert undone["action_type"] == "prediction_accept"
     assert db.conn.execute(
@@ -2886,7 +2887,7 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
 
     # Undo must reset BOTH classifier scopes. Without iterating every
     # recorded prediction id, the inat scope stays accepted.
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert undone["action_type"] == "prediction_accept"
 
@@ -2998,7 +2999,7 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
 
     # Undo must reset BOTH classifier scopes AND untag the species that
     # was actually added by the first accept in the loop.
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert undone["action_type"] == "prediction_accept"
     assert "Verdin" not in {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
@@ -3042,7 +3043,7 @@ def test_encounter_species_records_only_newly_tagged(app_and_db):
 
     # Undoing removes the species only from the photos that were newly tagged;
     # the pre-tagged photo keeps it.
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert "Blue Jay" in {k["name"] for k in db.photo_keywords.get_for_photo(photo_ids[0])}
     for pid in photo_ids[1:]:
         assert "Blue Jay" not in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
@@ -3181,7 +3182,7 @@ def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db)
     history = db.edit_history.list_recent()
     assert history[0]["action_type"] == "pipeline_grouping"
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     names = {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert "Verdin" in names
     assert "Blue Jay" not in names
@@ -3189,7 +3190,7 @@ def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db)
     assert nested in tagged_ids
     assert alternate_nested in tagged_ids
 
-    db.redo_last_undo()
+    redo_last_undo(db)
     names = {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert "Verdin" not in names
     assert "Blue Jay" in names
@@ -3261,12 +3262,12 @@ def test_encounter_species_replacement_retags_same_taxon_alias(app_and_db):
     history = db.edit_history.list_recent()
     assert history[0]["action_type"] == "pipeline_grouping"
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     restored = _species_names_on(photo_id)
     assert "Verdin" in restored
     assert "Auriparus flaviceps" not in restored
 
-    db.redo_last_undo()
+    redo_last_undo(db)
     redone = _species_names_on(photo_id)
     assert redone == ["Auriparus flaviceps"]
 
@@ -13723,7 +13724,7 @@ def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
     assert resp.status_code == 200
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "rejected"
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone["action_type"] == "species_replace"
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "pending"
     keywords = {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
@@ -13731,7 +13732,7 @@ def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
     assert "Haliaeetus" in keywords
     assert "House Sparrow" not in keywords
 
-    redone = db.redo_last_undo()
+    redone = redo_last_undo(db)
     assert redone["action_type"] == "species_replace"
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "rejected"
     keywords = {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
@@ -13775,7 +13776,7 @@ def test_highlights_relabel_prediction_only_undo_restores_prediction(app_and_db)
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "rejected"
     assert db.edit_history.list_recent(limit=1)[0]["action_type"] == "keyword_add"
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone["action_type"] == "keyword_add"
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "pending"
     assert "House Sparrow" not in {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
@@ -13955,7 +13956,7 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
         "Golden Eagle", {}
     )
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert undone["action_type"] == "species_replace"
     reps = db.get_species_representatives()
@@ -13965,7 +13966,7 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
     assert pid in (hl.get("Bald Eagle") or {})
     assert "Golden Eagle" not in hl
 
-    redone = db.redo_last_undo()
+    redone = redo_last_undo(db)
     assert redone is not None
     assert redone["action_type"] == "species_replace"
     reps_redo = db.get_species_representatives()
@@ -14017,7 +14018,7 @@ def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
     )
     assert resp.status_code == 200
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
 
     restored = db.species_curation.get_highlights("Old Rank Bird")["Old Rank Bird"]
@@ -14072,7 +14073,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
         "New Species", {}
     )
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert undone["action_type"] == "keyword_add"
     reps = db.get_species_representatives()
@@ -14082,7 +14083,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
     assert pid in (hl.get("Predicted Bird") or {})
     assert "New Species" not in hl
 
-    redone = db.redo_last_undo()
+    redone = redo_last_undo(db)
     assert redone is not None
     assert redone["action_type"] == "keyword_add"
     reps_redo = db.get_species_representatives()
@@ -14130,7 +14131,7 @@ def test_highlights_relabel_undo_preserves_existing_destination_highlight(app_an
         "Both Bird B", {}
     )
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     hl = db.species_curation.get_highlights()
     # Old bucket restored AND destination row survives — before the fix
@@ -14180,7 +14181,7 @@ def test_highlights_relabel_undo_restores_representative_over_collision(app_and_
     assert "Rep Old" not in reps_after
     assert reps_after.get("Rep New") == p_incumbent
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     reps = db.get_species_representatives()
     # Before the fix, the old-species representative stayed stranded
@@ -14230,7 +14231,7 @@ def test_highlights_relabel_undo_preserves_preexisting_target_representative(
     assert "Rep Both A" not in reps_after
     assert reps_after.get("Rep Both B") == pid
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     reps_undone = db.species_curation.get_representative_lists()
     # Both reps must be present after undo: A is restored from pref_prev,
@@ -14294,13 +14295,13 @@ def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
 
     # Undo/redo round-trips the global rep even when there's no local
     # pref row to piggyback on.
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     reps_undone = db.get_species_representatives()
     assert reps_undone.get("Bald Eagle") == pid
     assert "Golden Eagle" not in reps_undone
 
-    redone = db.redo_last_undo()
+    redone = redo_last_undo(db)
     assert redone is not None
     reps_redone = db.get_species_representatives()
     assert reps_redone.get("Golden Eagle") == pid
@@ -14975,7 +14976,7 @@ def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
     assert resp.status_code == 200
     assert db.species_curation.get_representative_lists()["Order Bird"] == [p_primary]
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     # Before the fix, undo called species_curation.set_global_representative and
     # p_secondary landed at MAX(selected_order)+1 — jumping it ahead of
@@ -15035,13 +15036,13 @@ def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
     # migrated p_source lands as a secondary rep, not the primary.
     assert after_relabel == [p_target_primary, p_source]
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     assert db.species_curation.get_representative_lists()["Redo Other Bird"] == [
         p_target_primary,
     ]
 
-    redone = db.redo_last_undo()
+    redone = redo_last_undo(db)
     assert redone is not None
     # Before the fix, redo called species_curation.set_global_representative and
     # p_source landed at MAX(selected_order)+1, promoting it above
@@ -15382,7 +15383,7 @@ def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
     hl = db.species_curation.get_highlights()
     assert pid in (hl.get("robin") or {})
 
-    undone = db.undo_last_edit()
+    undone = undo_last_edit(db)
     assert undone is not None
     hl_after_undo = db.species_curation.get_highlights()
     # The pre-existing `robin` highlight must survive the undo — before
@@ -18921,7 +18922,7 @@ def test_batch_accept_records_single_undo_entry(app_and_db):
     ]
     assert len(accept_rows) == 1
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     statuses = {
         row["photo_id"]: row["status"]
         for row in db.predictions.get_rows(photo_ids=[photo_a, photo_b])
@@ -18967,12 +18968,12 @@ def test_batch_accept_on_all_tags_full_selection_with_one_undo(app_and_db):
     assert edits[0]["description"].startswith('Accepted prediction: added "Bald Eagle"')
     # Repeating the click must not create a second undo entry.
     assert client.post("/api/predictions/batch-accept", json=payload).json["accepted"] == 0
-    db.undo_last_edit()
+    undo_last_edit(db)
     for pid in (predicted, other, unclassified):
         assert "Bald Eagle" not in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(existing)}
     assert all(p["status"] == "pending" for p in db.predictions.get_rows(photo_ids=selection))
-    db.redo_last_undo()
+    redo_last_undo(db)
     for pid in selection:
         assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
 
@@ -18989,7 +18990,7 @@ def test_batch_accept_on_all_without_acceptable_predictions(app_and_db):
     assert {k["name"] for k in db.photo_keywords.get_for_photo(photo)} == {"Bald Eagle", "Osprey"}
     assert db.predictions.get_rows(photo_ids=[photo])[0]["status"] == "pending"
     assert db.edit_history.list_recent()[0]["description"] == 'Added species "Bald Eagle"'
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert {k["name"] for k in db.photo_keywords.get_for_photo(photo)} == {"Osprey"}
 
 
@@ -19020,11 +19021,11 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
         pending_changes.clear_pending(db, [row["id"] for row in db.pending_changes.list_all()])
     sidecar_has_keyword = pending_removal or sync_after_accept
     for _ in range(2):
-        db.undo_last_edit()
+        undo_last_edit(db)
         assert "Bald Eagle" not in {k["name"] for k in db.photo_keywords.get_for_photo(photo)}
         assert pending_types() == (["keyword_remove"] if sidecar_has_keyword else [])
         assert db.predictions.get_rows(photo_ids=[photo])[0]["status"] == "pending"
-        db.redo_last_undo()
+        redo_last_undo(db)
         assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(photo)}
         assert pending_types() == ([] if sidecar_has_keyword else ["keyword_add"])
         assert db.predictions.get_rows(photo_ids=[photo])[0]["status"] == ("accepted" if with_prediction else "pending")
@@ -19063,10 +19064,10 @@ def test_batch_accept_on_all_undo_restores_flat_removals(app_and_db, delete_othe
     else:
         expected.add((other_ws, "bald eagle"))
     for _ in range(2):
-        db.undo_last_edit()
+        undo_last_edit(db)
         assert flat_removals() == expected
         assert "Bald Eagle" not in {k["name"] for k in db.photo_keywords.get_for_photo(photo)}
-        db.redo_last_undo()
+        redo_last_undo(db)
         assert flat_removals() == {(active_ws, "Osprey")}
         assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(photo)}
 
@@ -21627,7 +21628,7 @@ def test_batch_accept_does_not_re_enter_rows_a_grouped_accept_covered(app_and_db
     }
     assert item_photos == set(photos)
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     for pid in photos:
         names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Bald Eagle" not in names
@@ -26483,7 +26484,7 @@ def test_selection_prediction_species_identity_merges_names_and_accepts(
     assert tagged[0][0]["id"] == tagged[1][0]["id"]
     assert len(tagged[2]) == (1 if on_all else 0)
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=photos[:2])} == {"accepted"}
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert all(not db.photo_keywords.get_for_photo(p) for p in photos[1:])
     assert [k["id"] for k in db.photo_keywords.get_for_photo(photos[0])] == ([existing_kid] if already_tagged else [])
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=photos[:2])} == {"pending"}
@@ -26847,7 +26848,7 @@ def test_batch_accept_on_all_qualified_species_without_predictions(app_and_db):
     assert response.get_json()["accepted"] == 1
     keyword = db.photo_keywords.get_for_photo(photo)[0]
     assert db.conn.execute("SELECT source_taxon_id FROM keywords WHERE id = ?", (keyword["id"],)).fetchone()[0] == 42
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert not db.photo_keywords.get_for_photo(photo)
 
 

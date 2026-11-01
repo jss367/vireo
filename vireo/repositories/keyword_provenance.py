@@ -1831,7 +1831,7 @@ class KeywordProvenanceRepository:
         photo_ids=None,
         prediction_ids=None,
         _commit=True,
-        species_taxonomy=None,
+        species_taxonomy=...,
     ):
         """Accept a prediction: mark as accepted and add species keyword.
 
@@ -1845,6 +1845,7 @@ class KeywordProvenanceRepository:
         list carries the ``old_species`` names that were stripped from that
         photo (empty when ``replace_species`` is False).
 
+        Replacement requires explicit ``species_taxonomy`` (None opts out).
         ``photo_ids`` limits a grouped accept to matching group members;
         ``prediction_ids`` is the stricter, row-level form of the same limit.
         Independently of either, group expansion only ever *discovers*
@@ -1961,6 +1962,11 @@ def _replacement_taxonomy(replace_species, species_taxonomy):
     prediction supports as broader/same/narrower; ``(None, None)`` protects
     exact-name keywords only.
     """
+    if replace_species and species_taxonomy is Ellipsis:
+        raise ValueError(
+            "replace_species requires species_taxonomy; pass a loaded taxonomy "
+            "or explicitly pass None for exact-name protection only"
+        )
     if replace_species and species_taxonomy is not None:
         return species_taxonomy, compare_prediction_to_keywords
     return None, None

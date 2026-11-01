@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 from repositories.folders import FolderRepository
 from services import pending_changes, photo_ingest, photo_locations, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 
 
 def _setup_photo_with_xmp(tmp_path, db, keywords=None):
@@ -47,9 +48,9 @@ def test_rating_return_to_previous_value_syncs_latest(tmp_path, db, batch, histo
         else:
             service.set_rating(pid, rating)
     if history != "none":
-        db.undo_last_edit()
+        undo_last_edit(db)
     if history == "redo":
-        db.redo_last_undo()
+        redo_last_undo(db)
 
     expected_rating = 2 if history == "undo" else 1
     assert db.photos.get(pid)["rating"] == expected_rating
@@ -3338,10 +3339,10 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
             patch.setattr(sync, '_write_photo_sync', lost_ack)
         result = sync.sync_to_xmp(db)
         assert result['failed'] == (0 if first_sync == 'success' else 1)
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert not db.photo_keywords.get_for_photo(pid)
     if redo:
-        db.redo_last_undo()
+        redo_last_undo(db)
         assert [k['id'] for k in db.photo_keywords.get_for_photo(pid)] == [keyword]
     assert sync.sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == ({'Osprey'} if redo else set())

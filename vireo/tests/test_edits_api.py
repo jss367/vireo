@@ -3,6 +3,7 @@ import os
 
 import pytest
 from services import pending_changes, photo_ingest, photo_locations, workspace_folders
+from services.edit_history import undo_last_edit
 
 
 def test_editor_crop_ratio_persists_in_config(app_and_db):
@@ -2245,7 +2246,7 @@ def test_history_isolated_between_workspaces(app_and_db):
     assert len(db.edit_history.list_recent()) == 0
 
     # Undo in new workspace finds nothing
-    result = db.undo_last_edit()
+    result = undo_last_edit(db)
     assert result is None
 
     # Original workspace still has its history

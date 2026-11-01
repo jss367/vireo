@@ -2,6 +2,7 @@
 import pytest
 from db import Database
 from services import photo_ingest, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
 
@@ -20,7 +21,7 @@ def test_identity_batch_bounds_full_keyword_scans(tmp_path, operation):
             with db.transaction():
                 resolve_alternatives(db, photos, 'Heron')
         if operation == 'redo':
-            db.undo_last_edit()
+            undo_last_edit(db)
         scans = []
         db.conn.set_trace_callback(lambda sql: scans.append(sql) if "FROM keywords k " in sql and "k.is_species=1 OR k.type='taxonomy'" in sql else None)
         if operation == 'save':
@@ -30,9 +31,9 @@ def test_identity_batch_bounds_full_keyword_scans(tmp_path, operation):
             with db.transaction():
                 resolve_alternatives(db, photos, 'Heron')
         elif operation == 'undo':
-            db.undo_last_edit()
+            undo_last_edit(db)
         else:
-            db.redo_last_undo()
+            redo_last_undo(db)
         db.conn.set_trace_callback(None)
         assert len(scans) <= 10, f'{operation}: {len(scans)} full scans for 20 photos and 2000 species'
     finally:
@@ -57,7 +58,7 @@ def test_resolution_refreshes_identity_after_keyword_creation_in_same_transactio
         # Resolution must see the newly authoritative identity and retain its
         # existing scientific association rather than attach a redundant root.
         assert [row['keyword_id'] for row in db.conn.execute('SELECT keyword_id FROM photo_keywords WHERE photo_id=?', (photo,))] == [alias]
-        for action in (db.undo_last_edit, db.redo_last_undo):
+        for action in ((lambda: undo_last_edit(db)), (lambda: redo_last_undo(db))):
             action()
             assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (photo, alias)).fetchone()[0] == 'accept'
     finally:
@@ -117,7 +118,7 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
         for action in (None, 'undo', 'redo'):
             db.set_active_workspace(first)
             if action:
-                result = db.undo_last_edit() if action == 'undo' else db.redo_last_undo()
+                result = undo_last_edit(db) if action == 'undo' else redo_last_undo(db)
                 assert result['id'] == saved
             db.set_active_workspace(second)
             assert sync_to_xmp(db)['failed'] == 0

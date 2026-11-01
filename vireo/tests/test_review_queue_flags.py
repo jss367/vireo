@@ -1,6 +1,7 @@
 """Queue resume never replays flags; explicit changes compare the displayed flag."""
 import pytest
 from services import workspace_folders
+from services.edit_history import undo_last_edit
 from services.photo_review import FlagConflict, PhotoReviewService
 
 
@@ -32,7 +33,7 @@ def test_matching_flag_allows_explicit_change_and_undo(client_with_photo):
     latest = db.edit_history.list_recent()[0]
     assert latest['action_type'] == 'flag'
     assert db.conn.execute('SELECT old_value FROM edit_history_items WHERE edit_id=?', (latest['id'],)).fetchone()[0] == 'rejected'
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert db.photos.get(photo_id)['flag'] == 'rejected'
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from services import photo_ingest, workspace_folders
+from services.edit_history import undo_last_edit
 
 from encounter_eval.common import write_json
 from encounter_eval.library import prepare
@@ -76,8 +77,8 @@ def test_complete_review_replaces_species_preserves_other_tags_and_queues_xmp(wr
         assert sync_review_tags(conn, pid)['status'] == 'applied'
     assert len(db.edit_history.list_recent()) == 2
     # Each change uses existing undo handlers.
-    assert db.undo_last_edit()
-    assert db.undo_last_edit()
+    assert undo_last_edit(db)
+    assert undo_last_edit(db)
     assert keywords(db, pid) == preserved | {old}
 
 

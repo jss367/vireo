@@ -625,6 +625,24 @@ def test_accept_prediction_without_commit_leaves_transaction_open(db, lib):
     assert db.conn.execute("SELECT COUNT(*) FROM photo_keywords").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("commit", [True, False])
+def test_replace_species_requires_explicit_taxonomy_before_writes(db, lib, commit):
+    p0 = lib["p"][0]
+    old_keyword = db.add_keyword("Jay", is_species=True)
+    db.tag_photo(p0, old_keyword)
+    prediction = _pred(db, _det(db, p0), "Robin")
+    db.conn.commit()
+    before = db.conn.total_changes
+
+    with pytest.raises(ValueError, match="explicitly pass None"):
+        db.accept_prediction(prediction, replace_species=True, _commit=commit)
+
+    assert db.conn.total_changes == before
+    assert not db.conn.in_transaction
+    assert _visible(db, "SELECT keyword_id FROM photo_keywords") == [(old_keyword,)]
+    assert _visible(db, "SELECT COUNT(*) FROM pending_changes") == [(0,)]
+
+
 def test_accept_prediction_rolls_back_when_queueing_fails(db, lib, monkeypatch):
     p0 = lib["p"][0]
     pid = _pred(db, _det(db, p0), "Robin")
@@ -690,8 +708,8 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     prefs = _spy(monkeypatch, db, "rename_photo_preferences_species")
     configs = _spy(monkeypatch, db, "get_effective_config")
 
-    r0 = db.accept_prediction(pred0, replace_species=True)
-    r1 = db.accept_prediction(pred1, replace_species=True)
+    r0 = db.accept_prediction(pred0, replace_species=True, species_taxonomy=None)
+    r1 = db.accept_prediction(pred1, replace_species=True, species_taxonomy=None)
 
     assert r0["affected"][0]["old_species"] == ["Jay"]
     assert r1["affected"][0]["old_species"] == ["Wren"]
@@ -1086,7 +1104,7 @@ def test_keyword_provenance_facade_signatures_unchanged():
         "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",
         "accept_prediction": (
             "(self, prediction_id, replace_species=False, photo_ids=None, "
-            "prediction_ids=None, _commit=True, species_taxonomy=None)"
+            "prediction_ids=None, _commit=True, species_taxonomy=Ellipsis)"
         ),
     }
     from repositories.keyword_provenance import KeywordProvenanceRepository

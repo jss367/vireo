@@ -26,6 +26,7 @@ from services import (
     workspace_folders,
     workspace_lifecycle,
 )
+from services.edit_history import redo_last_undo, undo_last_edit
 
 
 def test_create_tables(tmp_path):
@@ -6301,7 +6302,7 @@ def test_undo_last_edit_rating(tmp_path):
     db.record_edit('rating', 'Set rating to 5', '5',
                    [{'photo_id': pid, 'old_value': str(original_rating), 'new_value': '5'}])
 
-    result = db.undo_last_edit()
+    result = undo_last_edit(db)
     assert result is not None
     assert result['description'] == 'Set rating to 5'
     assert db.photos.get(pid)['rating'] == original_rating
@@ -6317,7 +6318,7 @@ def test_undo_last_edit_flag(tmp_path):
     db.record_edit('flag', 'Set flag to flagged', 'flagged',
                    [{'photo_id': pid, 'old_value': 'none', 'new_value': 'flagged'}])
 
-    result = db.undo_last_edit()
+    result = undo_last_edit(db)
     assert db.photos.get(pid)['flag'] == 'none'
 
 
@@ -6330,11 +6331,11 @@ def test_undo_last_edit_keyword_add(tmp_path):
     db.record_edit('keyword_add', 'Added keyword "Eagle"', str(kid),
                    [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}])
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     keywords = db.photo_keywords.get_for_photo(pid)
     assert not any(k['name'] == 'Eagle' for k in keywords)
 
-    db.redo_last_undo()
+    redo_last_undo(db)
     source = db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
         (pid, kid),
@@ -6353,7 +6354,7 @@ def test_undo_last_edit_keyword_remove(tmp_path):
     db.record_edit('keyword_remove', 'Removed keyword "Hawk"', str(kid),
                    [{'photo_id': pid, 'old_value': str(kid), 'new_value': ''}])
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     keywords = db.photo_keywords.get_for_photo(pid)
     assert any(k['id'] == kid for k in keywords)
     source = db.conn.execute(
@@ -6376,7 +6377,7 @@ def test_undo_last_edit_batch(tmp_path):
         items.append({'photo_id': pid, 'old_value': str(old_r), 'new_value': '5'})
     db.record_edit('rating', 'Set rating to 5 on 2 photos', '5', items, is_batch=True)
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     for pid, old_r in original_ratings.items():
         assert db.photos.get(pid)['rating'] == old_r
 
@@ -6384,7 +6385,7 @@ def test_undo_last_edit_batch(tmp_path):
 def test_undo_last_edit_empty(tmp_path):
     """undo_last_edit returns None when no history exists."""
     db, pids = _make_db_with_photos(tmp_path)
-    assert db.undo_last_edit() is None
+    assert undo_last_edit(db) is None
 
 
 def test_photos_has_file_hash_and_companion_path(tmp_path):
@@ -7243,7 +7244,7 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True)
+    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     root = result["keyword_id"]
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
@@ -7284,7 +7285,7 @@ def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True)
+    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     # Even though no new tag was added (hierarchy leaf already satisfies the
     # target), the stale Sparrow removal must be visible in ``affected`` so
@@ -7371,7 +7372,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True)
+    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Cactus Wren" in names
@@ -7465,7 +7466,7 @@ def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True)
+    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert european in tagged, (
@@ -7537,7 +7538,7 @@ def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
     # becomes the resolved accept target ``kid``. The replace-species
     # branch must recognise that the linked ``robin`` on the photo is a
     # distinct species, not the unlinked target — and untag it.
-    db.accept_prediction(prediction_id, replace_species=True)
+    db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
 
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert legacy_target in tagged, (
@@ -7651,7 +7652,7 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
         if r["detection_id"] == d_teal
     )
 
-    result = db.accept_prediction(teal_pred["id"], replace_species=True)
+    result = db.accept_prediction(teal_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names        # this subject's corrected ID
@@ -7718,7 +7719,7 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -7782,7 +7783,7 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -7843,7 +7844,7 @@ def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
         if r["detection_id"] == d_target and r["status"] != "alternative"
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -7901,7 +7902,7 @@ def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True)
+    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -7960,7 +7961,7 @@ def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    db.accept_prediction(target_pred["id"], replace_species=True)
+    db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -15752,7 +15753,7 @@ def test_undo_color_label(tmp_path):
     db.record_edit('color_label', 'Set color to red', 'red',
                    [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
 
-    result = db.undo_last_edit()
+    result = undo_last_edit(db)
     assert result is not None
     assert db.photo_labels.get(pid) is None
 
@@ -15767,10 +15768,10 @@ def test_redo_color_label(tmp_path):
     db.record_edit('color_label', 'Set color to red', 'red',
                    [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
 
-    db.undo_last_edit()
+    undo_last_edit(db)
     assert db.photo_labels.get(pid) is None
 
-    db.redo_last_undo()
+    redo_last_undo(db)
     assert db.photo_labels.get(pid) == 'red'
 
 
@@ -18352,7 +18353,7 @@ def test_location_edits_are_non_undoable(db):
 
     # Undo MUST step over the three location_* entries straight to the
     # rating edit, even though they're newer.
-    entry = db.undo_last_edit()
+    entry = undo_last_edit(db)
     assert entry is not None
     assert entry['action_type'] == 'rating', (
         "undo must skip location_* entries; "
@@ -20138,7 +20139,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
 
         # End-to-end: undo the edit and confirm the pre-existing survivor
         # tag on pid_had_both is preserved.
-        db.undo_last_edit()
+        undo_last_edit(db)
         keep_tags_had_both = {
             r["id"] for r in db.photo_keywords.get_for_photo(pid_had_both)
         }
@@ -20216,12 +20217,12 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tm
 
         # Undo (tags with entry.new_value=dst_id; no-op for pid_had_both
         # because survivor was already there).
-        db.undo_last_edit()
+        undo_last_edit(db)
         assert keep_id in {
             r["id"] for r in db.photo_keywords.get_for_photo(pid_had_both)
         }
         # Redo (would untag survivor from pid_had_both without the fix).
-        db.redo_last_undo()
+        redo_last_undo(db)
         assert keep_id in {
             r["id"] for r in db.photo_keywords.get_for_photo(pid_had_both)
         }, "redo of keyword_remove stripped the pre-existing survivor tag"
@@ -20289,7 +20290,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept
         ).fetchone()[0]
         assert json.loads(retained) == {"prediction_ids": [42], "no_tag": True}
 
-        db.undo_last_edit()
+        undo_last_edit(db)
         assert keep_id in {
             r["id"] for r in db.photo_keywords.get_for_photo(pid_had_both)
         }, "undo of prediction_accept stripped the pre-existing survivor tag"
@@ -24641,7 +24642,7 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
         (detection_id,),
     ).fetchone()["id"]
 
-    db.accept_prediction(pred_id, replace_species=True)
+    db.accept_prediction(pred_id, replace_species=True, species_taxonomy=None)
 
     # Both stale Robin rows must have been detached.
     tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}

@@ -11,6 +11,7 @@ from db import Database
 from PIL import Image
 from scanner import companions
 from services import photo_ingest, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
 
 
 @pytest.fixture
@@ -91,7 +92,7 @@ def test_pairing_preserves_masks_without_enumerating_directory(catalog, monkeypa
     _assert_masks(catalog, catalog.raw)
     assert catalog.db.photos.get(catalog.jpeg) is None
     # Undo and redo must actually load the historically referenced masks.
-    for action, color in ((catalog.db.undo_last_edit, 150), (catalog.db.redo_last_undo, 250)):
+    for action, color in (((lambda: undo_last_edit(catalog.db)), 150), ((lambda: redo_last_undo(catalog.db)), 250)):
         assert action() is not None
         recipe = catalog.db.get_photo_edit_recipe(catalog.raw)
         with local_masks.load_snapshot(catalog.root, catalog.raw, recipe) as mask:

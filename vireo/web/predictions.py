@@ -115,6 +115,11 @@ def _species_replacement_taxonomy() -> Any:
             exc_info=True,
         )
         return None
+    if taxonomy is None:
+        log.warning(
+            "No readable taxonomy for species replacement; "
+            "protecting only exact-name keywords",
+        )
     return taxonomy
 
 
