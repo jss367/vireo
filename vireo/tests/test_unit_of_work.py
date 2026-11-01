@@ -288,3 +288,58 @@ def test_closing_over_an_open_transaction_is_reported(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "catalog.db"))
     database.close()
     assert len(reported) == 1
+
+
+
+def test_after_commit_follows_a_legacy_with_conn_savepoint(db):
+    # A legacy ``with conn:`` inside a unit is a savepoint, so callbacks
+    # registered in it share its fate, including from a unit nested in it.
+    seen = []
+    with db.transaction():
+        db.after_commit(lambda: seen.append("outer"))
+        with pytest.raises(RuntimeError), db.conn:
+            _write(db, "failed")
+            db.after_commit(lambda: seen.append("failed legacy block"))
+            with db.transaction():
+                db.after_commit(lambda: seen.append("nested in failed block"))
+            raise RuntimeError("boom")
+        with db.conn:
+            _write(db, "kept")
+            with db.transaction():
+                db.after_commit(lambda: seen.append("nested in kept block"))
+            db.after_commit(lambda: seen.append("kept legacy block"))
+    assert _committed(db) == ["kept"]
+    assert seen == ["outer", "nested in kept block", "kept legacy block"]
+
+
+def test_a_refused_immediate_unit_leaves_the_callers_snapshot(db):
+    # The caller's open legacy transaction and its provenance snapshot both
+    # survive a refused ``immediate`` entry, for the caller to record.
+    _write(db, "caller")
+    db._species_provenance_before[(5, 6)] = {"before": "caller"}
+    with pytest.raises(sqlite3.OperationalError), db.transaction(immediate=True):
+        pass
+    assert db._species_provenance_before == {(5, 6): {"before": "caller"}}
+    assert db.in_transaction
+    db.commit()
+    assert _committed(db) == ["caller"]
+
+
+class _CustomFollowUpError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("error", [AttributeError, AssertionError, _CustomFollowUpError])
+def test_any_ordinary_after_commit_failure_is_contained(db, caplog, error):
+    seen = []
+
+    def fail():
+        raise error("follow-up failed")
+
+    with caplog.at_level(logging.ERROR, logger="unit_of_work"), db.transaction():
+        _write(db, "durable")
+        db.after_commit(fail)
+        db.after_commit(lambda: seen.append("later"))
+    assert _committed(db) == ["durable"]
+    assert seen == ["later"]
+    assert "after_commit callback" in caplog.text

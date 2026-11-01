@@ -99,6 +99,7 @@ DATA_MODULES = frozenset({
     "new_images_cache",
     "catalog_result_files",
     "species_identity_repair",
+    "unit_of_work",
 })
 
 WEB_PACKAGES = ("web",)

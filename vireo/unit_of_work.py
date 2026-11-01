@@ -127,6 +127,10 @@ class HoldingConnection(sqlite3.Connection):
 
     commit_holds = 0
     doomed_at: int | None = None
+    # The outermost open unit, set while it holds this connection, so a
+    # legacy ``with conn:`` savepoint owns ``after_commit`` callbacks the
+    # way a nested unit does.
+    unit: UnitOfWork | None = None
 
     def commit(self) -> None:
         if self.commit_holds:
@@ -148,6 +152,8 @@ class HoldingConnection(sqlite3.Connection):
             name = f"uow_with_{len(savepoints)}"
             self.execute(f"SAVEPOINT {name}")
             savepoints.append(name)
+            if self.unit is not None:
+                self.unit.push_frame()
         else:
             savepoints.append(None)
         return super().__enter__()
@@ -161,6 +167,8 @@ class HoldingConnection(sqlite3.Connection):
         name = self.__dict__["_with_savepoints"].pop()
         if name is None:
             return super().__exit__(exc_type, exc, tb)
+        if self.unit is not None:
+            self.unit.pop_frame(keep=exc_type is None)
         if exc_type is None:
             _release(self, name)
         else:
@@ -190,6 +198,16 @@ class UnitOfWork:
             return self._nested(conn, retry_busy=retry_busy)
         return self._outermost(conn, immediate=immediate, retry_busy=retry_busy)
 
+    def push_frame(self) -> None:
+        """Open a callback frame for a savepoint inside the open unit."""
+        self._callbacks.append([])
+
+    def pop_frame(self, *, keep: bool) -> None:
+        """Close a savepoint's frame: hand its callbacks up, or drop them."""
+        inner = self._callbacks.pop()
+        if keep:
+            self._callbacks[-1].extend(inner)
+
     def after_commit(self, callback: Callable[[], object]) -> None:
         """Run ``callback`` once the outermost unit commits (now, if none is open)."""
         if not self.depth:
@@ -209,6 +227,7 @@ class UnitOfWork:
         # the unit adopts it, as ``with conn:`` always did. A migration rule.
         if isinstance(conn, HoldingConnection):
             conn.doomed_at = None
+            conn.unit = self
         self.depth = 1
         self._retry_busy = retry_busy
         self._callbacks = [[]]
@@ -247,14 +266,14 @@ class UnitOfWork:
         for callback in callbacks:
             try:
                 callback()
-            except (OSError, ValueError, KeyError, TypeError, RuntimeError, sqlite3.Error):
-                # The transaction is committed: a failed follow-up is
-                # reported, and neither fails the unit nor skips the rest.
+            except Exception:  # broad: the unit is committed; a failed follow-up is logged and must neither report the commit as failed nor skip the callbacks after it
                 log.exception("after_commit callback %r failed", callback)
 
     def _leave(self, conn: sqlite3.Connection) -> None:
         self.depth = 0
         self._callbacks = []
+        if isinstance(conn, HoldingConnection):
+            conn.unit = None
         _hold(conn, -1)
 
     @contextlib.contextmanager
@@ -267,15 +286,14 @@ class UnitOfWork:
         self.depth += 1
         name = f"uow_{self.depth}"
         conn.execute(f"SAVEPOINT {name}")
-        self._callbacks.append([])
+        self.push_frame()
         finished = False
         try:
             yield
             finished = True
         finally:
             self.depth -= 1
-            inner = self._callbacks.pop()
+            self.pop_frame(keep=finished)
             if not finished:
                 _roll_back_to(conn, name)
-        self._callbacks[-1].extend(inner)
         _release(conn, name)

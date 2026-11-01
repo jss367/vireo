@@ -1268,15 +1268,20 @@ class Database:
         ``with conn:`` did; that is a migration rule.
         """
         provenance = dict(self._species_provenance_before)
+        entered = finished = False
         try:
             with self._unit.enter(self.conn, immediate=immediate, retry_busy=retry_busy):
+                entered = True
                 yield
-        except BaseException:
+            finished = True
+        finally:
             # Python-side state follows the savepoint: a nested rollback
             # restores the snapshot taken at its start, an outermost one
-            # (like ``rollback()``) drops everything.
-            self._species_provenance_before = provenance if self._unit.depth else {}
-            raise
+            # (like ``rollback()``) drops everything. A block refused at entry
+            # (``immediate`` over a caller's open transaction) took nothing,
+            # so the caller's snapshot stays with the caller's transaction.
+            if entered and not finished:
+                self._species_provenance_before = provenance if self._unit.depth else {}
 
     def after_commit(self, callback: Callable[[], object]) -> None:
         """Run ``callback`` once the open unit of work commits.
