@@ -422,6 +422,25 @@ def test_after_commit_is_refused_in_a_nested_unit_inside_a_joined_one(db):
     assert _committed(db) == []
 
 
+def test_a_failed_joined_unit_keeps_the_callers_provenance_snapshot(db):
+    # A joined rollback releases its savepoint but leaves the caller's SQL
+    # transaction (and the writes it already made) alive. The caller's
+    # ``_species_provenance_before`` entries describe those earlier writes
+    # and must survive the failed service call so the caller can still
+    # record their history correctly.
+    db.begin_immediate()
+    _write(db, "caller")
+    db._species_provenance_before[(5, 6)] = {"before": "caller"}
+    with pytest.raises(RuntimeError), db.transaction(immediate=True, join=True):
+        db._species_provenance_before[(7, 8)] = {"before": "joined service"}
+        _write(db, "service")
+        raise RuntimeError("boom")
+    assert db._species_provenance_before == {(5, 6): {"before": "caller"}}
+    assert db.in_transaction
+    db.commit()
+    assert _committed(db) == ["caller"]
+
+
 def test_after_commit_still_runs_for_a_joined_unit_with_no_owner(db):
     # ``join=True`` entered with nothing open falls through to an owned
     # outermost unit, so its ``after_commit`` runs at the owned commit as

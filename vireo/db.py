@@ -1284,8 +1284,12 @@ class Database:
             # (like ``rollback()``) drops everything. A block refused at entry
             # (``immediate`` over a caller's open transaction) took nothing,
             # so the caller's snapshot stays with the caller's transaction.
+            # A joined rollback is also a savepoint rollback: the caller's SQL
+            # transaction and its earlier writes survive, so the snapshot the
+            # caller recorded for those writes must survive too.
             if entered and not finished:
-                self._species_provenance_before = provenance if self._unit.depth else {}
+                survives = self._unit.depth or self.conn.in_transaction
+                self._species_provenance_before = provenance if survives else {}
 
     def after_commit(self, callback: Callable[[], object]) -> None:
         """Run ``callback`` once the open unit of work commits.

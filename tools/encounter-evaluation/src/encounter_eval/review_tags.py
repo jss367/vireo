@@ -69,14 +69,14 @@ def _apply_tags(db, photo, answer, marker):
         removed = [r for r in rows if r['id'] not in desired and db.keyword_taxa.is_species(r['id'])] if answer['status'] == 'complete' else []
         for row in removed:
             db.untag_photo(pid, row['id'], _commit=False)
-            queue_keyword_remove(db, pid, row['name'], _commit=False)
+            queue_keyword_remove(db, pid, row['name'])
             db.record_edit('keyword_remove', f'Species review: removed "{row["name"]}"', str(row['id']),
                            [{'photo_id': pid, 'old_value': str(row['id']), 'new_value': ''}], _commit=False)
         for kid in sorted(desired):
             db.tag_photo(pid, kid, source='manual', _commit=False)
             if kid not in existing:
                 name = db.conn.execute('SELECT name FROM keywords WHERE id=?', (kid,)).fetchone()['name']
-                queue_keyword_add(db, pid, name, _commit=False)
+                queue_keyword_add(db, pid, name)
                 db.record_edit('keyword_add', f'Species review: added "{name}"', str(kid),
                                [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}], _commit=False)
         result = {'added': len(desired - existing), 'removed': len(removed)}
