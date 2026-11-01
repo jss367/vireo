@@ -169,10 +169,9 @@ def test_restart_in_place_does_not_duplicate_processing(import_service, tmp_path
         "after_import_owner": "earlier-import", "skip_after_import": True,
     })
     db.conn.execute(
-        "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
-        "VALUES ('prior-processing', 'pipeline', 'failed', ?, ?, ?)",
-        (json.dumps({"chained_from": "earlier-import"}), json.dumps({"never_started": never_started}),
-         db.active_workspace_id),
+        "INSERT INTO job_history (id, type, status, parent_job_id, result, workspace_id) "
+        "VALUES ('prior-processing', 'pipeline', 'failed', 'earlier-import', ?, ?)",
+        (json.dumps({"never_started": never_started}), db.active_workspace_id),
     )
     db.commit()
     service.enqueue_process_job.return_value = ("new-processing", None, None)

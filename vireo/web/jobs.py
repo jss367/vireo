@@ -131,8 +131,13 @@ def create_jobs_blueprint(
     def api_job_history() -> ResponseReturnValue:
         db = get_db()
         limit = min(max(1, request.args.get("limit", 10, type=int)), 1000)
+        # The Jobs page's "Started by" filter reads one origin's window, so
+        # newer jobs of the other origin cannot push older ones out of it.
+        origin = request.args.get("origin") or None
+        if origin not in (None, "user", "system"):
+            return json_error("origin must be user or system")
         try:
-            return jsonify(get_runner().get_history(db, limit=limit))
+            return jsonify(get_runner().get_history(db, limit=limit, origin=origin))
         except JobHistoryUnavailable as exc:
             # The Jobs page shows this text in its history error state.
             return json_error(str(exc), 503, code="job_history_unavailable")

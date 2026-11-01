@@ -13,6 +13,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageCms
 
+# The sRGB ICC profile every save embeds, built once at import. LittleCMS
+# stamps a profile with its creation time, so building one per save made two
+# encodes of the same pixels differ whenever they crossed a second boundary.
+# Built eagerly (not lazily cached) so concurrent first saves on worker
+# threads can never each build their own.
+SRGB_PROFILE: bytes = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+
 
 class FloatImage:
     mode = "RGB"
@@ -125,7 +132,7 @@ class FloatImage:
         """Encode rendered pixels; TIFF preserves 16 bits per channel."""
         if format is None and isinstance(output, (str, Path)):
             format = Image.registered_extensions().get(Path(output).suffix.lower())
-        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        profile = SRGB_PROFILE
         if format and format.upper() in ("TIFF", "TIF"):
             import tifffile
 

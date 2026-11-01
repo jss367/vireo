@@ -4,7 +4,7 @@ import { state } from './state.js';
 import { renderActiveOverview, renderDetail, renderHistoryDetail, renderHistoryOverview } from './detail.js';
 import { jobConfig } from './format.js';
 import { importChainProcessJobIds } from './import-retry.js';
-import { populateTypeFilter, updateList, updateRunningBadge } from './list.js';
+import { populateTypeFilter, selectedOriginFilter, updateList, updateRunningBadge } from './list.js';
 import { canRetryImportDirectToNas } from './shared.js';
 
 export function renderJobsPollWarning() {
@@ -152,7 +152,7 @@ export async function jobsServerError(response) {
     return !state.historyJobs.some(function(row) { return row.id === id; });
   });
   // No receipt can mean the checkpoint preceded the processing handoff.
-  // The server also searches pipelines by chained_from in that crash window.
+  // The server also searches pipelines by parent_job_id in that crash window.
   if (!directCandidate && !missing && ids.length) return;
   job.import_resume_pending = !!interrupted;
   job.import_direct_pending = directCandidate;
@@ -214,7 +214,11 @@ export async function jobsServerError(response) {
     if (state.historyRefreshSelectionId !== state.selectedJobId) background = false;
     state.historyRefreshSelectionId = state.selectedJobId;
   }
-  return fetchJobsSnapshot('history', '/api/jobs/history?limit=100', validateJobRows, function(data) {
+  // "Started by" is applied on the server: a window of the newest 100 rows
+  // of every origin would let newer jobs of one origin hide the other's.
+  var origin = selectedOriginFilter();
+  var url = '/api/jobs/history?limit=100' + (origin ? '&origin=' + encodeURIComponent(origin) : '');
+  return fetchJobsSnapshot('history', url, validateJobRows, function(data) {
     state.historyJobs = data || [];
     state.historyJobs.forEach(function(j) {
       if (typeof j.tree === 'string') {

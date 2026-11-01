@@ -1902,21 +1902,23 @@ def test_job_history_prunes_to_100(tmp_path):
     assert count <= 100
 
 
-def test_discovery_history_does_not_evict_user_jobs(tmp_path):
+def test_system_history_does_not_evict_user_jobs(tmp_path):
+    """Vireo's own recurring checks keep a quota separate from the user's jobs."""
     from db import Database
-    from jobs import JobRunner
+    from jobs import JobLineage, JobRunner
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
     for job_type in ("pipeline", "new_images_walk", "missing_originals_scan"):
+        origin = "user" if job_type == "pipeline" else "system"
         for i in range(101):
             db.conn.execute(
                 """INSERT INTO job_history
-                   (id, type, status, started_at, workspace_id)
-                   VALUES (?, ?, 'completed', ?, ?)""",
-                (f"{job_type}-{i}", job_type, f"2026-01-01T00:00:{i:03d}", ws_id),
+                   (id, type, status, started_at, workspace_id, origin)
+                   VALUES (?, ?, 'completed', ?, ?, ?)""",
+                (f"{job_type}-{i}", job_type, f"2026-01-01T00:00:{i:03d}", ws_id, origin),
             )
     db.conn.execute(
         """INSERT INTO job_history (id, type, status, started_at, workspace_id)
@@ -1924,7 +1926,10 @@ def test_discovery_history_does_not_evict_user_jobs(tmp_path):
         (ws_id,),
     )
     db.conn.commit()
-    job_id = runner.start("new_images_walk", lambda _: {}, workspace_id=ws_id)
+    job_id = runner.start(
+        "new_images_walk", lambda _: {}, workspace_id=ws_id,
+        lineage=JobLineage.system("Regular check"),
+    )
     wait_for_job_via_runner(runner, job_id, wait_for_history=True)
     counts = dict(db.conn.execute(
         """SELECT type, COUNT(*) FROM job_history

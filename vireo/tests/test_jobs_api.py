@@ -5466,9 +5466,9 @@ def test_recovery_options_reads_pipeline_outside_history_window(
 ):
     app, db = app_and_db
     db.conn.execute(
-        "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) "
+        "INSERT INTO job_history (id,type,status,started_at,parent_job_id,result,workspace_id) "
         "VALUES ('old-pipeline','pipeline',?,'2020-01-01',?,?,?)",
-        (pipeline_status, json.dumps({"chained_from": "interrupted-import"}),
+        (pipeline_status, "interrupted-import",
          json.dumps(pipeline_result) if pipeline_result is not None else None,
          db.active_workspace_id),
     )
@@ -7774,7 +7774,8 @@ def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
     for mid in move_ids:
         mj = wait_for_job_via_client(client, mid)
         assert mj["status"] == "completed", mj
-        assert _job_config(client, mid)["chained_from"] == import_job["result"]["process_job_id"]
+        assert mj["parent_job_id"] == import_job["result"]["process_job_id"]
+        assert mj["origin"] == "user"
     # merge + allow_tracked_merge: re-importing into an existing shoot
     # folder chains a move onto the tracked NAS copy of that folder — the
     # chain must opt into move_folder's exact-overlap reconciliation or the
@@ -7877,7 +7878,7 @@ def test_chain_moves_when_process_preblocked_on_missing_labels(
     for mid in move_ids:
         mj = wait_for_job_via_client(client, mid)
         assert mj["status"] == "completed", mj
-        assert _job_config(client, mid)["chained_from"] == import_job["id"]
+        assert mj["parent_job_id"] == import_job["id"]
     # move_folder was actually called (via the stub) — the chain didn't
     # just enqueue placeholder jobs.
     assert stub_move
@@ -11827,7 +11828,8 @@ def test_import_chains_process_job(app_and_db, tmp_path):
 
         pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
         assert pj["config"]["process_id"] == quick_look_id
-        assert pj["config"].get("chained_from") == job_id
+        assert pj["parent_job_id"] == job_id
+        assert pj["origin"] == "user"
         col_id = pj["config"]["collection_id"]
         assert res["collection_id"] == col_id
         assert res["collection_name"].startswith("Import ")
@@ -12180,7 +12182,7 @@ def _interrupt_import_row(app, db, job_id, result, *, chained=False):
     with runner._lock:
         chained_ids = [
             jid for jid, j in runner._jobs.items()
-            if (j.get("config") or {}).get("chained_from") == job_id
+            if j.get("parent_job_id") == job_id
         ]
     # Let each chained run land its final history row first, or it could
     # write it back after the delete below.
@@ -12193,8 +12195,7 @@ def _interrupt_import_row(app, db, job_id, result, *, chained=False):
                 runner._jobs.pop(other_id, None)
     if not chained:
         db.conn.execute(
-            "DELETE FROM job_history "
-            "WHERE json_extract(config, '$.chained_from') = ?",
+            "DELETE FROM job_history WHERE parent_job_id = ?",
             (job_id,),
         )
     db.conn.execute(
@@ -12600,11 +12601,11 @@ def test_resume_allows_a_parent_whose_chained_pipeline_never_started(
         # same ``chained_from``, same ``never_started`` on the result.
         db.conn.execute(
             "INSERT INTO job_history "
-            "(id, type, status, config, result, workspace_id) "
+            "(id, type, status, parent_job_id, result, workspace_id) "
             "VALUES (?, 'pipeline', 'failed', ?, ?, ?)",
             (
                 f"never-started-{parent_id}",
-                json.dumps({"chained_from": parent_id}),
+                parent_id,
                 json.dumps({
                     "error": "Interrupted by Vireo restart",
                     "interrupted": True,
@@ -12962,9 +12963,9 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
     if chain_paid:
         original["result"]["process_job_id"] = "original-process"
         db.conn.execute(
-            "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
+            "INSERT INTO job_history (id, type, status, parent_job_id, result, workspace_id) "
             "VALUES ('original-process', 'pipeline', 'queued', ?, '{}', ?)",
-            (json.dumps({"chained_from": original_id}), db.active_workspace_id),
+            (original_id, db.active_workspace_id),
         )
     db.conn.execute("UPDATE job_history SET result=?, config=? WHERE id=?", (
         json.dumps(original["result"]), json.dumps(original["config"]), original_id,
@@ -13310,7 +13311,7 @@ def test_import_pauses_chained_classification_when_labels_are_missing(
         history = client.get("/api/jobs/history").get_json()
         chained = [
             item for item in history
-            if item.get("config", {}).get("chained_from") == job_id
+            if item.get("parent_job_id") == job_id
         ]
         assert chained == []
 

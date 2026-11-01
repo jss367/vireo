@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
-const scripts = ['state.js', 'format.js', 'import-retry.js', 'job-card.js', 'actions.js'];
+const scripts = ['state.js', 'format.js', 'import-retry.js', 'lineage.js', 'job-card.js', 'actions.js'];
 let clickHandler;
 let fetchCount = 0;
 let resolveRequest;
