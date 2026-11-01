@@ -8,10 +8,22 @@ gamma-encoded pixels. Neither resizing nor copying changes that encoding.
 
 from __future__ import annotations
 
+from functools import cache
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageCms
+
+
+@cache
+def _srgb_profile() -> bytes:
+    """The sRGB ICC profile every save embeds, built once per process.
+
+    LittleCMS stamps a new profile with its creation time, so building one
+    per save made two encodes of the same pixels differ by a timestamp
+    whenever they crossed a second boundary.
+    """
+    return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
 
 
 class FloatImage:
@@ -125,7 +137,7 @@ class FloatImage:
         """Encode rendered pixels; TIFF preserves 16 bits per channel."""
         if format is None and isinstance(output, (str, Path)):
             format = Image.registered_extensions().get(Path(output).suffix.lower())
-        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        profile = _srgb_profile()
         if format and format.upper() in ("TIFF", "TIF"):
             import tifffile
 

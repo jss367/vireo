@@ -446,3 +446,26 @@ def test_background_optical_cache_handles_disappearing_folder(database, app_and_
         target = _PreviewTarget(str(cache), 256, str(tmp_path), 90)
         assert _preview_photo(db, photo, {}, target) == "cached"
         assert path.is_file()
+
+
+def test_float_image_encodes_identically_across_a_second_boundary(monkeypatch):
+    """The embedded sRGB profile must not carry a per-save creation time."""
+    import float_image
+    from float_image import FloatImage
+    from PIL import ImageCms
+
+    created = []
+    real = ImageCms.createProfile
+
+    def counting(*args, **kwargs):
+        created.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(float_image.ImageCms, "createProfile", counting)
+    float_image._srgb_profile.cache_clear()
+    image = FloatImage(np.full((4, 4, 3), 0.25, dtype=np.float32))
+    first, second = io.BytesIO(), io.BytesIO()
+    image.save(first, format="JPEG", quality=90)
+    image.save(second, format="JPEG", quality=90)
+    assert first.getvalue() == second.getvalue()
+    assert len(created) <= 1
