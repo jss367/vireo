@@ -49,6 +49,7 @@ _WIN_ERROR_MODE_LOCK = threading.Lock()
 
 
 def _application_version() -> str:
+    """Read packaged release metadata, or resolve the source installation's version."""
     # Frozen builds ship the release's synchronized manifest at the extraction
     # root. Prefer it to distribution metadata, which can be absent or stale
     # in the build environment. This also backs startup's runtime.json write.

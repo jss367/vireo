@@ -24,6 +24,7 @@ def test_frozen_version_uses_bundled_manifest(monkeypatch, tmp_path):
 def test_unreadable_frozen_manifest_never_uses_source_or_installed_version(
     monkeypatch, tmp_path, contents,
 ):
+    """A damaged bundle must not claim the version of a different installation."""
     if contents is not None:
         (tmp_path / "pyproject.toml").write_bytes(
             contents if isinstance(contents, bytes) else contents.encode()

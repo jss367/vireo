@@ -81,6 +81,7 @@ def get_target_triple():
 
 
 def main():
+    """Bundle and sign the server with the synchronized release manifest."""
     parser = argparse.ArgumentParser(description="Build sidecar binary")
     parser.add_argument(
         "--ci", action="store_true",

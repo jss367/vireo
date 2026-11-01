@@ -2566,6 +2566,7 @@ def _open_browser_when_ready(port):
 
 
 def main():
+    """Start the selected server mode and publish its runtime identity."""
     args = _parse_main_args()
     if args.migrate_storage:
         from services.storage_migration import run_cli

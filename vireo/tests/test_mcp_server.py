@@ -124,6 +124,7 @@ def test_status_reports_version_workspace_and_count(mcp, monkeypatch):
 
 
 def test_frozen_status_and_api_versions_match_release_manifest(mcp, monkeypatch, tmp_path):
+    """API and connector versions must identify the same packaged desktop release."""
     server, _, transport = mcp
     # A sidecar extracts this synchronized manifest at its PyInstaller root.
     # Distribution metadata from the build environment can be stale.
