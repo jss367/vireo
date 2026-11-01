@@ -486,6 +486,18 @@ class OutingWorkLimit(Exception):
     """Splitting into outings would take more than :data:`MAX_OUTING_COMPARISONS`."""
 
 
+class _ComparisonBudget:
+    """The distance checks one preview's outing split may still make."""
+
+    def __init__(self) -> None:
+        self.left = MAX_OUTING_COMPARISONS
+
+    def spend(self) -> None:
+        self.left -= 1
+        if self.left < 0:
+            raise OutingWorkLimit
+
+
 # Cube side for the outing index: any two points in one cube are within the
 # link distance of each other (the cube's diagonal), so a cube is linked
 # whole, and points within the link distance are at most two cubes apart.
@@ -505,20 +517,20 @@ _FORWARD_CUBES = [
 type _CubeMembers = list[tuple[str, tuple[float, float, float]]]
 
 
-def _cubes_link(members: _CubeMembers, others: _CubeMembers, budget: int) -> tuple[bool, int]:
+def _cubes_link(members: _CubeMembers, others: _CubeMembers, budget: _ComparisonBudget) -> bool:
     """Whether any point of one cube is within the link distance of the other's,
-    stopping at the first, and the comparison budget left."""
+    stopping at the first."""
     for _, a in members:
         for _, b in others:
-            budget -= 1
-            if budget < 0:
-                raise OutingWorkLimit
+            budget.spend()
             if math.dist(a, b) <= OUTING_LINK_M:
-                return True, budget
-    return False, budget
+                return True
+    return False
 
 
-def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[str]]:
+def _outings(
+    cells: Mapping[str, JsonDict], keys: Sequence[str], budget: _ComparisonBudget,
+) -> list[list[str]]:
     """Split cells into chains of cells within :data:`OUTING_LINK_M` of each other.
 
     Distance is straight-line between Earth-centered points
@@ -526,8 +538,9 @@ def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[st
     cells are linked without measuring. Two cubes are measured against each
     other only while their outings are still apart, and only until the first
     link, so dense spots (many cells collapse into a few cubes near a pole)
-    cost one pass. Raises :class:`OutingWorkLimit` past
-    :data:`MAX_OUTING_COMPARISONS`. Outings come back in the order of their
+    cost one pass. Each check spends from ``budget``, which one preview shares
+    across all its groups, and raises :class:`OutingWorkLimit` once spent.
+    Outings come back in the order of their
     first cell.
     """
     parent = {key: key for key in keys}
@@ -547,14 +560,12 @@ def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[st
         if cube:
             parent[root(key)] = root(cube[0][0])
         cube.append((key, point))
-    budget = MAX_OUTING_COMPARISONS
     for (x, y, z), members in cubes.items():
         for dx, dy, dz in _FORWARD_CUBES:
             others = cubes.get((x + dx, y + dy, z + dz))
             if not others or root(members[0][0]) == root(others[0][0]):
                 continue
-            linked, budget = _cubes_link(members, others, budget)
-            if linked:
+            if _cubes_link(members, others, budget):
                 parent[root(others[0][0])] = root(members[0][0])
     outings: dict[str, list[str]] = {}
     for key in keys:
@@ -650,9 +661,11 @@ class ImportLocationSuggester:
             return
         self._outings_split = True
         regrouped: dict[str, JsonDict] = {}
+        budget = _ComparisonBudget()
         for key, group in self._groups.items():
             try:
-                outings = _outings(self._cells, group["broad_cells"]) if group["broad_cells"] else []
+                outings = (_outings(self._cells, group["broad_cells"], budget)
+                           if group["broad_cells"] else [])
             except OutingWorkLimit:
                 # Refused in result(), before any Nearby Search.
                 self._outing_work_exceeded = True

@@ -532,7 +532,7 @@ def test_nearby_cells_are_one_outing_anywhere_on_earth(points):
         assert step < import_locations.OUTING_LINK_M
     cells = {cell_key(*p): {"lat": p[0], "lng": p[1]} for p in points}
 
-    assert import_locations._outings(cells, list(cells)) == [list(cells)]
+    assert import_locations._outings(cells, list(cells), import_locations._ComparisonBudget()) == [list(cells)]
 
 
 @pytest.mark.parametrize("pair", [
@@ -543,7 +543,7 @@ def test_nearby_cells_are_one_outing_anywhere_on_earth(points):
 def test_cells_just_past_the_link_distance_stay_separate_outings(pair):
     cells = {cell_key(*p): {"lat": p[0], "lng": p[1]} for p in pair}
 
-    assert len(import_locations._outings(cells, list(cells))) == 2
+    assert len(import_locations._outings(cells, list(cells), import_locations._ComparisonBudget())) == 2
 
 
 @pytest.mark.parametrize("lat", [90.0, 89.995, -89.9999])
@@ -553,7 +553,7 @@ def test_dense_cells_near_a_pole_group_without_pairwise_measuring(monkeypatch, l
     monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", 1000)
     cells = {f"{lat},{i}": {"lat": lat, "lng": -180 + i * 0.072} for i in range(5000)}
 
-    assert import_locations._outings(cells, list(cells)) == [list(cells)]
+    assert import_locations._outings(cells, list(cells), import_locations._ComparisonBudget()) == [list(cells)]
 
 
 def test_a_preview_past_the_outing_work_budget_is_refused_before_nearby_lookups(db, monkeypatch):
@@ -567,6 +567,65 @@ def test_a_preview_past_the_outing_work_budget_is_refused_before_nearby_lookups(
 
     assert result["groups"] == []
     assert "too densely packed" in result["work_limit_error"]
+
+
+def _two_broad_groups_each_needing_one_comparison(monkeypatch):
+    """Two broad names (county, state), each with a 1.7 km pair in two cubes:
+    one distance check per group, two for the preview."""
+    state = {**_COUNTY, "place_id": "california", "name": "California",
+             "types": ["administrative_area_level_1", "political"]}
+    county_walk = [(32.8750, -116.4640), (32.8900, -116.4640)]
+    state_walk = [(36.0000, -118.0000), (36.0150, -118.0000)]
+    answers = {cell_key(*p): _COUNTY for p in county_walk}
+    answers.update({cell_key(*p): state for p in state_walk})
+    monkeypatch.setattr(places, "reverse_geocode",
+                        lambda lat, lng, *a, **k: dict(answers[cell_key(lat, lng)]))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked up nearby for a refused preview"))
+    spent = []
+    original = import_locations._ComparisonBudget.spend
+
+    def counting(self):
+        spent.append(1)
+        original(self)
+
+    monkeypatch.setattr(import_locations._ComparisonBudget, "spend", counting)
+    return [*county_walk, *state_walk], spent
+
+
+@pytest.mark.parametrize("limit, refused", [(1, True), (2, False)])
+def test_the_outing_budget_is_shared_by_every_group_in_a_preview(db, monkeypatch, limit, refused):
+    """Each group alone fits in a budget of one check; together they need two."""
+    points, spent = _two_broad_groups_each_needing_one_comparison(monkeypatch)
+    monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", limit)
+    if not refused:
+        monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [])
+
+    result = suggest_import_locations(db, _files(points), api_key="KEY", language="en")
+
+    assert len(spent) <= limit + 1
+    if refused:
+        assert result["groups"] == []
+        assert "too densely packed" in result["work_limit_error"]
+    else:
+        assert len(result["groups"]) == 2 and "work_limit_error" not in result
+
+
+def test_a_streamed_preview_past_the_shared_outing_budget_is_refused_before_nearby_lookups(
+        db, monkeypatch, exiftool_present):
+    points, spent = _two_broad_groups_each_needing_one_comparison(monkeypatch)
+    monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", 1)
+    paths = [f"/card/{i}.NEF" for i in range(len(points))]
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda paths: dict(zip(paths, points, strict=True)))
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    assert len(spent) == 2
+    assert not [f for f in frames if "nearby" in f]
+    assert frames[-1]["groups"] == []
+    assert "too densely packed" in frames[-1]["work_limit_error"]
 
 
 def test_an_outing_across_the_antimeridian_is_offered_places_not_called_spread_out(db, monkeypatch):
