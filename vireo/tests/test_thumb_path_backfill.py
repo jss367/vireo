@@ -137,3 +137,23 @@ def test_cancelled_recheck_keeps_singleton_until_worker_finishes(client_with_pho
     assert third['joined'] is False
     assert wait_for_job_via_runner(app._job_runner, third['job_id'])['status'] == 'completed'
     assert calls == [1, 1]
+
+
+def test_thumbnail_recheck_preserves_metadata_redo(client_with_photo):
+    app, db, pid = client_with_photo
+    client = app.test_client()
+    assert client.post(f'/api/photos/{pid}/rating', json={'rating': 3}).status_code == 200
+    assert client.post('/api/undo').status_code == 200
+    assert client.get('/api/redo/status').json['available'] is True
+    history_before = db.edit_history.list_recent()
+    cache = Path(app.config['THUMB_CACHE_DIR'])
+    (cache / f'{pid}.jpg').write_bytes(b'cached')
+    response = client.post('/api/thumbnail-cache/recheck')
+    job = wait_for_job_via_runner(app._job_runner, response.json['job_id'])
+    assert job['status'] == 'completed', job
+    assert db.photos.get(pid)['thumb_path'] == f'{pid}.jpg'
+    assert db.edit_history.list_recent() == history_before
+    assert client.get('/api/redo/status').json['available'] is True
+    assert client.post('/api/redo').status_code == 200
+    assert db.photos.get(pid)['rating'] == 3
+    assert db.photos.get(pid)['thumb_path'] == f'{pid}.jpg'
