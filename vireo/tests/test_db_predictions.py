@@ -1272,7 +1272,7 @@ def test_prediction_facade_signatures_unchanged():
     )
     assert sig["repo.clear"] == (
         "(self, model=None, collection_photo_ids=None, labels_fingerprint=None, "
-        "clear_run_keys=True)"
+        "clear_run_keys=True, exclude_detector_model=None)"
     )
     assert sig["update_prediction_status"] == "(self, prediction_id, status)"
     assert sig["update_predictions_status_by_photo"] == "(self, photo_id, status)"
@@ -1284,3 +1284,22 @@ def test_prediction_facade_signatures_unchanged():
     assert sig["repo.get_rows"] == (
         "(self, photo_ids=None, model=None, status=None, rules=None)"
     )
+
+
+@pytest.mark.parametrize('clear_run_keys', [False, True])
+def test_clear_can_preserve_reviewer_outputs_and_companion_state(db, cat, clear_run_keys):
+    pid = cat['p'][0]
+    ordinary = _det(db, pid)
+    reviewer = _det(db, pid, model='reviewer-selected')
+    for det in (ordinary, reviewer):
+        db.predictions.add(det, 'Robin', .5, 'm1', labels_fingerprint='fp1', status='accepted')
+        _seed_runs(db, det)
+    db.commit()
+    reviewer_prediction = _pred_id(db, reviewer, 'Robin')
+    db.predictions.clear(model='m1', collection_photo_ids=[pid], labels_fingerprint='fp1',
+                         clear_run_keys=clear_run_keys, exclude_detector_model='reviewer-selected')
+    assert _visible(db, 'SELECT detection_id FROM predictions') == [(reviewer,)]
+    assert _review(db, reviewer_prediction)[0] == 'accepted'
+    assert _visible(db, 'SELECT detection_id FROM classifier_match_scores') == [(reviewer,)]
+    runs = {row[0] for row in _visible(db, 'SELECT detection_id FROM classifier_runs')}
+    assert runs == ({reviewer} if clear_run_keys else {ordinary, reviewer})

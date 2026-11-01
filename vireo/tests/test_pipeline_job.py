@@ -4309,7 +4309,7 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
     ) == []
 
 
-@pytest.mark.parametrize('reviewer_box', [False, True])
+@pytest.mark.parametrize('reviewer_box', [None, 'accepted', 'rejected'])
 def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, reviewer_box):
     """On reclassify, prior-run detection rows must be deleted after model 1
     re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
@@ -4353,6 +4353,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
         chosen = select_reviewer_box(db, photo_id, dict(x=.2, y=.2, w=.2, h=.2))
         analyze_photo(db, photo_id, os.path.join(folder_path, "test.jpg"), detection_id=chosen)
         db.predictions.add(chosen, 'Ruby-crowned Kinglet', .9, 'reviewed-classifier', status='accepted')
+        db.predictions.add(chosen, 'Robin', .4, 'BioCLIP', labels_fingerprint='legacy', status=reviewer_box)
         recipe = db.set_photo_edit_recipe(photo_id, {'adjustments': {'exposure': .5}})
         db.commit()
 
@@ -4363,12 +4364,14 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+    import labels_fingerprint
+    monkeypatch.setattr(labels_fingerprint, 'compute_fingerprint', lambda *a, **k: 'legacy')
 
     # _detect_batch stub: reclassify finds no animals this time (false pos fixed).
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None, vireo_dir=None):
-        return {}, 0, {p["id"] for p in batch}
+        return {p["id"]: [] for p in batch}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
@@ -4400,6 +4403,11 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
         assert result['subjects'][0]['analysis'] is not None
         assert any(p['species'] == 'Ruby-crowned Kinglet' and p['status'] == 'accepted'
                    for p in result['subjects'][0]['predictions'])
+        active = detection_store.get_predictions_for_detection(verify_db, chosen, classifier_model='BioCLIP')
+        assert len(active) == 1
+        assert active[0]['species'] == 'Robin'
+        assert active[0]['confidence'] == .9  # fresh inference replaced the .4 score
+        assert verify_db.predictions.current_status(active[0]['id']) == reviewer_box  # human decision survived
         assert verify_db.get_photo_edit_recipe(photo_id) == recipe
         return
     assert remaining == [], (
@@ -5254,7 +5262,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
     clear_calls = []
 
     def wrapped_clear(self, model=None, collection_photo_ids=None,
-                     labels_fingerprint=None, clear_run_keys=True):
+                     labels_fingerprint=None, clear_run_keys=True, exclude_detector_model=None):
         before = self.conn.execute(
             "SELECT COUNT(*) FROM classifier_runs"
         ).fetchone()[0]
@@ -5263,6 +5271,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
             collection_photo_ids=collection_photo_ids,
             labels_fingerprint=labels_fingerprint,
             clear_run_keys=clear_run_keys,
+            exclude_detector_model=exclude_detector_model,
         )
         after = self.conn.execute(
             "SELECT COUNT(*) FROM classifier_runs"

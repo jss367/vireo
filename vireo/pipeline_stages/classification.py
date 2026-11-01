@@ -201,6 +201,7 @@ def _stored_animal_boxes(
             "box_h": d["box_h"],
             "confidence": d["detector_confidence"],
             "category": d["category"],
+            "detector_model": d["detector_model"],
         }
         for d in detection_store.get_detections(
             thread_db, photo_id, min_conf=min_conf, detector_model=detector_model,
@@ -1045,7 +1046,12 @@ class _ClassifyPass:
                     d.get("id", 0),
                 ),
             )[:1]
-        return photo_dets
+        # The detector cache cannot reproduce human regions. Read their live
+        # coordinates separately, including when the fresh detector found none.
+        reviewer_boxes = _stored_animal_boxes(self.thread_db, photo_id, 0, "reviewer-selected")
+        reviewer_ids = {d["id"] for d in reviewer_boxes}
+        return [d for d in photo_dets if d.get("detector_model") != "reviewer-selected"
+                and d["id"] not in reviewer_ids] + reviewer_boxes
 
     def _has_confident_non_animal(self, photo_id: int) -> bool:
         if photo_id in self.cached_detections:
@@ -1704,6 +1710,7 @@ class _ClassifyPass:
                     collection_photo_ids=clear_ids,
                     labels_fingerprint=spec.fp,
                     clear_run_keys=False,
+                    exclude_detector_model="reviewer-selected",
                 )
 
         group_result = self.classify_job._store_grouped_predictions(

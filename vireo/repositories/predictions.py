@@ -603,7 +603,7 @@ class PredictionRepository:
             [ws, *cms_params],
         )
 
-    def _clear_classifier_run_keys(self, ws, id_chunks, model, labels_fingerprint):
+    def _clear_classifier_run_keys(self, ws, id_chunks, model, labels_fingerprint, exclude_detector_model=None):
         """Delete the ``classifier_runs`` keys of the cleared predictions."""
         # Also clear matching classifier_runs rows so the next pass actually
         # re-runs the classifier. Without this, the skip gate at
@@ -622,6 +622,9 @@ class PredictionRepository:
         # fingerprint) gate would treat them as already classified).
         base_run_conds = []
         base_run_params = []
+        if exclude_detector_model is not None:
+            base_run_conds.append("(d.detector_model IS NULL OR d.detector_model != ?)")
+            base_run_params.append(exclude_detector_model)
         if model is not None:
             base_run_conds.append("cr.classifier_model = ?")
             base_run_params.append(model)
@@ -660,7 +663,7 @@ class PredictionRepository:
             )
 
     def clear(self, model=None, collection_photo_ids=None,
-                          labels_fingerprint=None, clear_run_keys=True):
+                          labels_fingerprint=None, clear_run_keys=True, exclude_detector_model=None):
         """Clear predictions, optionally filtered by model, photo set, and fingerprint.
 
         The ``predictions`` table is now global (no workspace_id).  This
@@ -686,6 +689,8 @@ class PredictionRepository:
         would force the next non-reclassify pass to re-infer the entire
         collection.  Default ``True`` matches the long-standing safety
         behavior — only opt out if the caller guarantees fresh run keys.
+        ``exclude_detector_model`` preserves that model's regions and all their
+        companion output/run state so fresh storage can update them in place.
         """
         ws = self.workspace_id
         # Build a reusable (cond, params) pair for the predictions subquery.
@@ -720,6 +725,12 @@ class PredictionRepository:
         if labels_fingerprint is not None:
             cms_extra_conds.append("cms.labels_fingerprint = ?")
             cms_extra_params.append(labels_fingerprint)
+        # Reviewer regions refresh outputs in place so matching candidates retain
+        # their review state. The deferred reclassify clear must not cascade it.
+        if exclude_detector_model is not None:
+            for conditions, parameters in ((extra_conds, extra_params), (cms_extra_conds, cms_extra_params)):
+                conditions.append("(d.detector_model IS NULL OR d.detector_model != ?)")
+                parameters.append(exclude_detector_model)
 
         for chunk in id_chunks:
             self._clear_prediction_chunk(
@@ -731,7 +742,7 @@ class PredictionRepository:
             self.conn.commit()
             return
 
-        self._clear_classifier_run_keys(ws, id_chunks, model, labels_fingerprint)
+        self._clear_classifier_run_keys(ws, id_chunks, model, labels_fingerprint, exclude_detector_model)
         # ``classifier_match_scores`` is already cleared alongside the
         # predictions above, whether or not classifier_runs is being wiped
         # here — see the companion delete inside the predictions loop.
