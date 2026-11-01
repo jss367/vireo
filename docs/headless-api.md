@@ -40,6 +40,17 @@ thumbnail or the detected subject as an image), `burst`, `set_flag`,
 `apply_species_assignment`; see [species review evidence](species-review-evidence.md).
 `view_photo(view="subject", detection_id=...)` addresses the exact animal region,
 and `get_photo` includes saved `species_assignments` and their provenance.
+For linked taxa, photo-detail keywords and assignments also share `display_name`
+(the catalog's preferred common name, falling back to the scientific name),
+`synonyms` (alternate saved keyword names for that taxon), `scientific_name`,
+`taxon_id` (local catalog ID), and `source_taxon_id` (iNaturalist ID).
+The detail panel shows the preferred name with visible synonyms. Stored
+`keywords[].name`, `species_assignments[].species`, and the legacy `species`
+summary retain their export/curation spellings. For example, a summary of
+“Common starling” and a saved “European starling” keyword refer to one assignment
+when their display metadata identifies the same *Sturnus vulgaris* taxon;
+alternate names do not create extra assignments. Unlinked labels keep their
+stored names without an inferred taxon or synonym relationship.
 Every photo row (`get_photo`, `search_photos`, `find_photos_by_text`) carries
 the app's own analysis readiness, read from
 `POST /api/photos/analysis-readiness` (one call per returned page):

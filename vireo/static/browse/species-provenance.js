@@ -8,15 +8,22 @@ const methods = {
   imported_unknown: 'Imported / unknown'
 };
 
+export function speciesDisplayLabel(/** @type {BrowseSpeciesNames} */ names, /** @type {string} */ fallback) {
+  const preferred = names.display_name || fallback;
+  return preferred + (names.synonyms?.length ? ' (also known as ' + names.synonyms.join(', ') + ')' : '');
+}
+
 export function renderSpeciesProvenance(/** @type {BrowsePhoto} */ photo, /** @type {HTMLElement} */ container) {
   (photo.species_assignments || []).forEach(assignment => {
     const panel = document.createElement('details');
     panel.className = 'species-provenance';
     panel.style.cssText = 'margin-top:8px;white-space:normal;';
     const label = methods[/** @type {keyof typeof methods} */ (assignment.method)] || assignment.method;
-    panel.innerHTML = '<summary>' + escapeHtml(assignment.species) + ': ' + escapeHtml(label) + '</summary>';
+    panel.innerHTML = '<summary>' + escapeHtml(speciesDisplayLabel(assignment, assignment.species)) + ': ' + escapeHtml(label) + '</summary>';
     const evidence = document.createElement('div');
-    const notes = [assignment.reviewer && 'Reviewer: ' + assignment.reviewer,
+    const notes = [assignment.scientific_name && 'Taxon: ' + assignment.scientific_name +
+        ' (catalog ID ' + assignment.taxon_id + ')',
+      assignment.reviewer && 'Reviewer: ' + assignment.reviewer,
       assignment.reason && 'Reason: ' + assignment.reason,
       assignment.evidence_source && 'Evidence: ' + assignment.evidence_source,
       assignment.detection_id && 'Subject detection: ' + assignment.detection_id +
