@@ -94,7 +94,6 @@ COMMIT_FLAG_LIMITS: dict[str, int] = {
 # Transaction control inside the data layer, per module. Same rules.
 DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {
     "vireo/db.py": 1,
-    "vireo/repositories/identity_alternatives.py": 4,
 }
 
 

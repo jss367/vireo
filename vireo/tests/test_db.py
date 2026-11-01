@@ -10347,7 +10347,8 @@ def test_relocate_folder_merge_into_existing(tmp_path):
 
 
 def test_relocate_folder_merge_revalidates_source_path(tmp_path):
-    """folders.relocate rejects merge if source path came back on disk."""
+    """relocate_folder refuses the merge if the source path came back on disk,
+    and keeps the folder's refreshed status."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10366,9 +10367,18 @@ def test_relocate_folder_merge_revalidates_source_path(tmp_path):
     db.conn.commit()
 
     import pytest
-    with pytest.raises(ValueError, match="already tracked"):
+    from repositories.folders import OriginalPathReturned
+    from services.folder_relocation import relocate_folder
+
+    # The repository refuses without writing anything.
+    with pytest.raises(OriginalPathReturned, match="already tracked"):
         db.folders.relocate(fid_source, target_path)
-        db.commit()
+    assert not db.conn.in_transaction
+
+    cascaded, refusal = relocate_folder(db, fid_source, target_path)
+    assert cascaded == []
+    assert isinstance(refusal, OriginalPathReturned)
+    assert not db.conn.in_transaction
 
     # Source should be refreshed to ok, not deleted
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_source,)).fetchone()

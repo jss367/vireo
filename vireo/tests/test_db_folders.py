@@ -728,10 +728,15 @@ def test_relocate_folder_conflict_revalidates_missing_source_that_came_back(db, 
     b = workspace_folders.add_folder(db, "/rel/b")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (a,))
     db.conn.commit()
-    # As the relocate route does: the refusal is caught inside the unit, so
-    # the status refresh still commits.
-    with db.transaction(), pytest.raises(ValueError, match=f"Path is already tracked as folder {b}"):
-        db.folders.relocate(a, "/rel/b")
+    from repositories.folders import OriginalPathReturned
+    from services.folder_relocation import relocate_folder
+
+    # The repository refuses without writing; the relocate service refreshes
+    # the status in the unit that reports the refusal.
+    cascaded, refusal = relocate_folder(db, a, "/rel/b")
+    assert cascaded == []
+    assert isinstance(refusal, OriginalPathReturned)
+    assert str(refusal) == f"Path is already tracked as folder {b}"
     with _reader(db) as r:
         assert r.execute("SELECT status FROM folders WHERE id = ?", (a,)).fetchone()[0] == "ok"
 

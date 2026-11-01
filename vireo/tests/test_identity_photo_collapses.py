@@ -94,9 +94,8 @@ def test_folder_merge_conflict_rolls_back_earlier_duplicate_and_all_pending(cata
         save_alternatives(db, [losing2], CANDIDATES, 'Other evidence', 'Audio')
         save_alternatives(db, [survivor2], CANDIDATES, 'Distinct evidence', 'Video')
     before = rows(db)
-    with pytest.raises(IdentityMergeConflict, match='conflicting identity'):
+    with pytest.raises(IdentityMergeConflict, match='conflicting identity'), db.transaction():
         db.folders.merge_into_existing(source, target, path)
-        db.commit()
     assert not db.conn.in_transaction
     assert rows(db) == before
     assert db.photos.get(losing) is not None and db.photos.get(survivor) is not None

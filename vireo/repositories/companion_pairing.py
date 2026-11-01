@@ -30,7 +30,6 @@ from contextlib import contextmanager
 
 from canonical_schema import EXIF_SUMMARY_COLUMNS
 from repositories.identity_alternatives import (
-    identity_merge_transaction,
     merge_candidate_names,
     remap_identity_keyword_intents,
 )
@@ -270,8 +269,8 @@ class CompanionPairingRepository:
 
     @contextmanager
     def row_deletion(self):
-        """Keep companion collapse atomic when shared identity rejects a pair."""
-        with identity_merge_transaction(self.conn), photo_row_deletion(self.conn) as rows:
+        """The pairing pass's photo-row deletion; its caller owns the unit."""
+        with photo_row_deletion(self.conn) as rows:
             yield rows
 
     # -- attaching a companion without a row ---------------------------------

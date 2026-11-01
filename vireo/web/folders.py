@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from burst_evidence import (
     DEFAULT_CLOSE_CALL_MARGIN,
@@ -22,6 +22,7 @@ from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
 from services import catalog_deletion, missing_originals, workspace_folders
+from services.folder_relocation import relocate_folder
 from services.local_folder import (
     local_copy_scan_conflict,
     local_root_for_folder,
@@ -36,22 +37,6 @@ if TYPE_CHECKING:
     from services.service_types import JsonError
     from web.background_jobs import JobLaunch
     from web.web_types import BuildScanWork, CleanupCachedFiles, GetDb, GetRunner, InvalidateMissingOriginals
-
-
-def _relocate_in_one_unit(
-    db: Database, folder_id: int, new_path: str,
-) -> tuple[list[dict[str, Any]], ValueError | None]:
-    """Relocate in one unit of work; return ``(cascaded, refusal)``.
-
-    A refused relocate is caught inside the unit, so the status refresh
-    relocate makes when a missing folder's original path came back still
-    commits, as it always did.
-    """
-    with db.transaction():
-        try:
-            return db.folders.relocate(folder_id, new_path), None
-        except ValueError as exc:
-            return [], exc
 
 
 def create_folders_blueprint(
@@ -319,7 +304,7 @@ def create_folders_blueprint(
             old_row = db.folders.get(folder_id)
             old_path = old_row["path"] if old_row else ""
 
-            cascaded, relocate_error = _relocate_in_one_unit(db, folder_id, new_path)
+            cascaded, relocate_error = relocate_folder(db, folder_id, new_path)
             if relocate_error is not None:
                 e = relocate_error
                 if old_row and old_row["status"] == "missing":
