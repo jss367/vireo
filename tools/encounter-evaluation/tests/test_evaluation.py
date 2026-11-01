@@ -122,6 +122,61 @@ def test_reader_is_read_only_and_hides_labels_before_feature_preparation(library
     assert bundle["photos"][0]["evidence"][0]["sources"][0]["predictions"][0]["taxon"] == "inat:101"
 
 
+def test_legacy_catalog_without_subject_verdicts_still_loads(library, tmp_path):
+    """A catalog captured before ``detections.subject_verdict`` existed is overlaid, not migrated.
+
+    The production floor requires a NULL verdict; a real schema-31 catalog
+    has no such column, so ``open_library`` projects it as NULL (no region
+    there was ever rejected) through the connection-local view and leaves
+    the photographer's file byte-identical.
+    """
+    from pipeline import load_photo_features
+
+    with sqlite3.connect(library) as writer:
+        writer.execute("ALTER TABLE detections DROP COLUMN subject_verdict")
+    before = library.read_bytes()
+    conn = open_library(library)
+    assert "subject_verdict" not in {r["name"] for r in conn.execute("PRAGMA main.table_info(detections)")}
+    features = load_photo_features(FeatureReader(conn, 1), photo_ids=list(range(1, 13)), effective_config={})
+    assert features[0]["detection_box"]["x"] == pytest.approx(.1)
+    assert FeatureReader(conn, 1).get_for_photos([1], 0)[1][0]["id"] == 1
+    conn.close()
+    manifest = prepare(library, tmp_path / "run")
+    bundle = read_bundle(tmp_path / "run", manifest["sessions"][0])
+    first = next(p for p in bundle["photos"] if p["id"] == 1)
+    assert first["evidence"][0]["sources"][0]["predictions"][0]["taxon"] == "inat:101"
+    assert library.read_bytes() == before
+
+
+def test_rejected_region_is_excluded_from_features_and_evidence(library, tmp_path):
+    """A region the reviewer rejected as background is not evidence, as in production.
+
+    Photo 1 gains a stronger box the reviewer marked ``not_animal`` carrying a
+    confident Glossy Ibis: it must not become the detection box, must not
+    put the ibis into ``species_top5``, and must not be serialized into the
+    experiment's evidence.
+    """
+    from pipeline import load_photo_features
+
+    with sqlite3.connect(library) as writer:
+        writer.execute("INSERT INTO detections VALUES(100, 1, 'megadetector-v6', 'runtime', .6, .1, .3, .3, .99,"
+                       " 'animal', 'not_animal')")
+        writer.execute("INSERT INTO predictions VALUES(100, 100, 'Glossy Ibis', NULL, .98, 'model-a',"
+                       " 'labels-1', '2026-01-03')")
+    conn = open_library(library)
+    reader = FeatureReader(conn, 1)
+    assert [d["id"] for d in reader.get_for_photos([1], 0)[1]] == [1]
+    first = load_photo_features(reader, photo_ids=[1], effective_config={})[0]
+    assert first["detection_box"]["x"] == pytest.approx(.1)
+    assert [entry[0] for entry in first["species_top5"]] == ["Spotted Redshank"]
+    conn.close()
+    manifest = prepare(library, tmp_path / "run")
+    bundle = read_bundle(tmp_path / "run", manifest["sessions"][0])
+    first = next(p for p in bundle["photos"] if p["id"] == 1)
+    assert [subject["id"] for subject in first["evidence"]] == [1]
+    assert {p["taxon"] for s in first["evidence"][0]["sources"] for p in s["predictions"]} == {"inat:101"}
+
+
 @pytest.mark.parametrize("flag", ["flagged", "picked", "rejected", "none"])
 def test_real_loader_blinds_confirmed_flags_without_reading_attribution(library, flag):
     from canonical_schema import create_current_flag_attribution
