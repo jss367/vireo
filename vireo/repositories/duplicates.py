@@ -69,14 +69,6 @@ class DuplicatesRepository:
         self.conn = conn
         self.chunk_size = chunk_size
 
-    def transaction(self) -> sqlite3.Connection:
-        """The connection as a context manager: commit on success, roll back on error."""
-        return self.conn
-
-    def begin_review_write(self) -> None:
-        """Serialize the catalog snapshot check and its review note write."""
-        self.conn.execute("BEGIN IMMEDIATE")
-
     def same_shot_reviews(self, keys: Sequence[str]) -> dict[str, sqlite3.Row]:
         reviews = {}
         for batch in chunked(keys):
@@ -345,14 +337,13 @@ class DuplicatesRepository:
         can promote the survivor. Rows the user rejected by hand (no
         ``duplicate_rejections`` row) stay rejected.
         """
-        with self.conn:
-            cur = self.conn.execute(
-                "UPDATE photos SET flag = 'none' "
-                "WHERE file_hash = ? AND flag = 'rejected' "
-                "AND id IN (SELECT photo_id FROM duplicate_rejections)",
-                (file_hash,),
-            )
-            return cur.rowcount
+        cur = self.conn.execute(
+            "UPDATE photos SET flag = 'none' "
+            "WHERE file_hash = ? AND flag = 'rejected' "
+            "AND id IN (SELECT photo_id FROM duplicate_rejections)",
+            (file_hash,),
+        )
+        return cur.rowcount
 
     # -- resolution plans -----------------------------------------------------
 

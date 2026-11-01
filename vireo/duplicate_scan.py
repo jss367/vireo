@@ -516,7 +516,8 @@ def _build_resolved_proposal(db, group):
         r["duplicate_rejected"] and info_by_id[r["id"]]["exists"]
         for r in rejected
     ):
-        db.duplicates.reopen(group["file_hash"])
+        with db.transaction():
+            db.duplicates.reopen(group["file_hash"])
         return _build_unresolved_proposal(db, group)
 
     candidates = [_candidate(r, info_by_id[r["id"]]) for r in rows]
