@@ -137,13 +137,15 @@ def _verify_batches(source, remote, files, progress, control):
         # rsync owns the order within the batch; don't claim its first
         # manifest entry is the file currently being read on the NAS.
         progress(offset, total, "", "Verifying copy on NAS")
-        # NUL-separated paths preserve spaces, newlines and option-like names.
+        # NUL separation preserves whitespace. The ./ prefix also prevents
+        # rsync treating root names starting with # or ; as list comments,
+        # even with --from0, and silently skipping their checksums.
         # Close before rsync opens it (also required on Windows).
         fd, manifest = tempfile.mkstemp(prefix="vireo-verify-", suffix=".files")
         try:
             with os.fdopen(fd, "wb") as stream:
                 for name in batch:
-                    stream.write(os.fsencode(name.replace(os.sep, "/")) + b"\0")
+                    stream.write(b"./" + os.fsencode(name.replace(os.sep, "/")) + b"\0")
             mismatch = _remote_verify_complete(
                 remote["rsync_bin"], source, rsync_dest_spec(remote, remote["verify_path"]),
                 remote, files_from=manifest, control=control,

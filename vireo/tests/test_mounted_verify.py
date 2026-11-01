@@ -89,7 +89,7 @@ def test_batches_preserve_paths_count_only_verified_files_and_never_read_mount(t
     monkeypatch.setattr(builtins, 'open', no_mounted_photo_reads)
     monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
     assert run_verify(trees, progress=lambda *a: events.append(a)) == (True, None)
-    assert set(calls) == {'photo.nef', 'day one/photo.xmp', '-odd\nname.jpg'}
+    assert set(calls) == {'./photo.nef', './day one/photo.xmp', './-odd\nname.jpg'}
     assert len(manifests) == 2
     assert all(not os.path.exists(p) for p in manifests)
     assert not list(dest.glob('.vireo-verify-*'))
@@ -199,21 +199,28 @@ def test_manifest_rsync_command_checks_contents_not_smb_metadata(monkeypatch):
     assert '--files-from=/tmp/file list' in cmd
 
 
-def test_real_rsync_checks_same_size_corruption_and_ignores_timestamp_changes(trees, monkeypatch):
+@pytest.mark.parametrize('name', [
+    'photo.nef', '#photo.nef', ';photo.nef', '#shoot/photo.nef', ';shoot/photo.nef',
+])
+def test_real_rsync_checks_same_size_corruption_and_ignores_timestamp_changes(trees, monkeypatch, name):
     binary = mv.resolve_rsync_bin()
     if binary is None:
         pytest.skip('GNU rsync is not installed')
     source, dest, remote = trees
     remote['rsync_bin'] = binary
+    (source / name).parent.mkdir(parents=True, exist_ok=True)
+    (dest / name).parent.mkdir(parents=True, exist_ok=True)
+    (source / name).write_bytes(b'original photo bytes')
+    (dest / name).write_bytes(b'original photo bytes')
     # Exercise real rsync checksum + NUL manifest semantics using local trees;
     # only the transport is replaced. No NAS or SSH service is needed in CI.
     monkeypatch.setattr(mv, 'rsync_dest_spec', lambda *a: str(dest))
-    os.utime(dest / 'photo.nef', (1, 1))
+    os.utime(dest / name, (1, 1))
     assert run_verify(trees) == (True, None)
-    original = (source / 'photo.nef').read_bytes()
-    (dest / 'photo.nef').write_bytes(b'x' * len(original))
+    original = (source / name).read_bytes()
+    (dest / name).write_bytes(b'x' * len(original))
     handled, mismatch = run_verify(trees)
-    assert handled and mismatch == 'photo.nef'
+    assert handled and mismatch == name
 
 
 def test_ssh_probe_quotes_destination_and_requires_exact_nonce(monkeypatch):
