@@ -67,46 +67,86 @@ def _opens_database(node: ast.AST) -> bool:
     )
 
 
+class _BootstrapCheck:
+    """Track definite imports in a scope and inspect direct helper invocations.
+
+    Function bodies are deferred until called, unlike defaults and decorators.
+    Uncalled functions are also checked using their enclosing scope's final
+    state, since entry-point functions can be invoked by an external caller.
+    Conditional imports never establish readiness outside their own branch.
+    This is a bounded source guard, not a general Python interpreter.
+    """
+
+    def __init__(self):
+        self.offenders = set()
+        self.active = set()
+
+    def block(self, statements, ready, functions):
+        functions = dict(functions)
+        deferred = []
+        for statement in statements:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for decorator in statement.decorator_list:
+                    ready = self.node(decorator, ready, functions)
+                ready = self.node(statement.args, ready, functions)
+                functions[statement.name] = statement
+                deferred.append(statement)
+            else:
+                ready = self.node(statement, ready, functions)
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                break
+        for function in deferred:
+            self.function(function, ready, functions)
+        return ready
+
+    def function(self, function, ready, functions):
+        if id(function) in self.active:
+            return ready
+        self.active.add(id(function))
+        try:
+            return self.block(function.body, ready, functions)
+        finally:
+            self.active.remove(id(function))
+
+    def node(self, node, ready, functions):
+        if isinstance(node, ast.If):
+            ready = self.node(node.test, ready, functions)
+            yes = self.block(node.body, ready, functions)
+            no = self.block(node.orelse, ready, functions)
+            return yes and no
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return ready
+        if isinstance(node, ast.ClassDef):
+            for expression in [*node.decorator_list, *node.bases, *node.keywords]:
+                ready = self.node(expression, ready, functions)
+            return self.block(node.body, ready, functions)
+        # Loops, try blocks, with blocks and match arms can be skipped or fail.
+        # Check their bodies but do not credit their imports to the outer scope.
+        for _field, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                self.block(value, ready, functions)
+            elif isinstance(value, list):
+                for child in value:
+                    if isinstance(child, ast.AST):
+                        ready = self.node(child, ready, functions)
+            elif isinstance(value, ast.AST):
+                ready = self.node(value, ready, functions)
+        if _opens_database(node) and not ready:
+            self.offenders.add(node.lineno)
+        if _bootstraps(node):
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            function = functions.get(node.func.id)
+            if function is not None:
+                return self.function(function, ready, functions)
+        return ready
+
+
 def unbootstrapped_database_opens(source: str) -> list[int]:
-    """Line numbers of ``Database(...)`` calls with no earlier config import."""
-    tree = ast.parse(source)
-    # The earliest module-level bootstrap statement, in execution order; a
-    # later `import config` cannot rescue a `Database(...)` call that already
-    # ran at module load.
-    module_bootstrap_line = next(
-        (node.lineno for node in tree.body if _bootstraps(node)),
-        None,
-    )
-    scopes = [node for node in ast.walk(tree)
-              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    in_functions = {id(n) for scope in scopes for n in ast.walk(scope)}
-    offenders = []
-    for scope in scopes:
-        for node in ast.walk(scope):
-            if not _opens_database(node):
-                continue
-            # Any enclosing function may have imported config before this call,
-            # or a module-level bootstrap must precede the outermost enclosing
-            # function's def so loading the module installs it first.
-            enclosing = [s for s in scopes if s.lineno <= node.lineno <= (s.end_lineno or s.lineno)]
-            outer_fn_line = min((s.lineno for s in enclosing), default=node.lineno)
-            if any(
-                _bootstraps(n) and n.lineno <= node.lineno
-                for s in enclosing for n in ast.walk(s)
-            ):
-                continue
-            if module_bootstrap_line is not None and module_bootstrap_line < outer_fn_line:
-                continue
-            offenders.append(node.lineno)
-    # Module-level opens outside any function.
-    for n in ast.walk(tree):
-        if (
-            _opens_database(n)
-            and id(n) not in in_functions
-            and (module_bootstrap_line is None or module_bootstrap_line > n.lineno)
-        ):
-            offenders.append(n.lineno)
-    return sorted(set(offenders))
+    """Line numbers of database opens lacking a definite earlier bootstrap."""
+    check = _BootstrapCheck()
+    check.block(ast.parse(source).body, False, {})
+    return sorted(check.offenders)
 
 
 def test_entry_points_import_config_before_opening_a_database():
@@ -136,6 +176,17 @@ def test_entry_points_import_config_before_opening_a_database():
     # already ran at module load.
     ("from db import Database\nDB = Database(':memory:')\nimport config\n", [2]),
     ("import config\nfrom db import Database\nDB = Database(':memory:')\n", []),
+    ("def f():\n    return Database('x')\nimport config\nf()\n", []),
+    ("def f():\n    return Database('x')\nf()\nimport config\n", [2]),
+    ("def f():\n    if False:\n        import config\n    return Database('x')\n", [4]),
+    ("def f():\n    def unused():\n        import config\n    return Database('x')\n", [4]),
+    ("if False:\n    import config\nDatabase('x')\n", [3]),
+    ("configure_repo()\nDatabase('x')\n", []),
+    ("def f():\n    if False:\n        configure_repo()\n    return Database('x')\n", [4]),
+    ("def f():\n    def g():\n        return Database('x')\n    import config\n    return g()\n", []),
+    ("def f():\n    def g():\n        return Database('x')\n    g()\n    import config\nf()\n", [3]),
+    ("def f(db=Database('x')):\n    pass\nimport config\n", [1]),
+    ("def f():\n    return Database('x')\ndef g():\n    return f()\ng()\nimport config\n", [2]),
 ])
 def test_unbootstrapped_database_opens(source, lines):
     assert unbootstrapped_database_opens(source) == lines
