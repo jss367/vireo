@@ -509,6 +509,32 @@ def test_a_county_keyword_group_keeps_your_photos_cells_and_splits_off_broad_out
     assert [p["place_id"] for p in broad["nearby_places"]] == ["lagoon-park"]
 
 
+@pytest.mark.parametrize("points", [
+    [(60.0, -120.0), (60.016, -120.0)],          # ~1.8 km due north
+    [(60.016, -120.0), (60.0, -120.0)],          # the same pair, reversed
+    [(60.0, -120.0), (60.012, -120.02), (60.024, -120.04)],  # a ~1.7 km-step chain
+    [(60.024, -120.04), (60.012, -120.02), (60.0, -120.0)],
+])
+def test_nearby_cells_far_from_the_equator_and_prime_meridian_are_one_outing(points):
+    """Every cell must share one longitude grid: per-latitude widths put cells
+    1.8 km apart at 60°N, 120°W into non-adjacent buckets, splitting a walk."""
+    from location_review import distance_meters
+    for (a_lat, a_lng), (b_lat, b_lng) in zip(points, points[1:], strict=False):
+        step = distance_meters({"latitude": a_lat, "longitude": a_lng},
+                               {"latitude": b_lat, "longitude": b_lng})
+        assert step < import_locations.OUTING_LINK_M
+    cells = {cell_key(*p): {"lat": p[0], "lng": p[1]} for p in points}
+
+    assert import_locations._outings(cells, list(cells)) == [list(cells)]
+
+
+def test_cells_just_past_the_link_distance_stay_separate_outings():
+    far_pair = {cell_key(60.0, -120.0): {"lat": 60.0, "lng": -120.0},
+                cell_key(60.019, -120.0): {"lat": 60.019, "lng": -120.0}}  # ~2.1 km
+
+    assert len(import_locations._outings(far_pair, list(far_pair))) == 2
+
+
 def test_a_place_out_of_reach_of_any_photo_in_the_outing_is_not_offered(db, monkeypatch):
     """Cells 1.5 km apart chain into one 6 km outing; a pin 0.5 km past one
     end is 5.5 km from the other, so picking it would name far photos."""

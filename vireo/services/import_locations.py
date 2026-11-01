@@ -466,6 +466,9 @@ def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[st
 
     Single linkage over a grid of link-sized buckets, so each cell is only
     compared with the cells in its own and the eight neighboring buckets.
+    The grid has one longitude width, sized for the cells' highest latitude
+    (where a degree of longitude is shortest), so any two cells within the
+    link distance land in the same or adjacent buckets wherever they are.
     Outings come back in the order of their first cell.
     """
     parent = {key: key for key in keys}
@@ -477,10 +480,11 @@ def _outings(cells: Mapping[str, JsonDict], keys: Sequence[str]) -> list[list[st
         return key
 
     lat_deg = OUTING_LINK_M / _M_PER_DEG_LAT
+    max_abs_lat = min(89.0, max((abs(cells[key]["lat"]) for key in keys), default=0.0))
+    lng_deg = lat_deg / max(0.01, math.cos(math.radians(max_abs_lat)))
     grid: dict[tuple[int, int], list[str]] = {}
     for key in keys:
         cell = cells[key]
-        lng_deg = lat_deg / max(0.01, math.cos(math.radians(cell["lat"])))
         bucket = (math.floor(cell["lat"] / lat_deg), math.floor(cell["lng"] / lng_deg))
         here = {"latitude": cell["lat"], "longitude": cell["lng"]}
         for dlat in (-1, 0, 1):
