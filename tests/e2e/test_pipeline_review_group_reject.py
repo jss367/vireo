@@ -7,6 +7,7 @@ import time
 
 import pytest
 from playwright.sync_api import expect
+from services.photo_review import PhotoReviewService
 
 pytestmark = pytest.mark.usefixtures("saved_pipeline_suggestions")
 
@@ -235,6 +236,8 @@ def _write_mixed_label_pipeline_cache(live_server, photo_ids):
     """Encounter with a single burst whose photos carry mixed labels so
     changing the label filter hides some frames inside the burst."""
     db = live_server["db"]
+    # KEEP labels require a persisted photographer decision, not a cache claim.
+    PhotoReviewService(db).set_flags(photo_ids[:2], "flagged")
     placeholders = ",".join("?" for _ in photo_ids)
     rows = db.conn.execute(
         f"SELECT id, filename, timestamp, flag FROM photos "
@@ -314,7 +317,7 @@ def test_burst_reject_respects_active_label_filter(live_server, page):
     expect(burst_button).to_have_attribute("aria-label", "Clear rejects")
     # The hidden KEEP frames must be untouched; only the visible REVIEW frames
     # are rejected.
-    assert _flags(db, photo_ids) == ["none", "none", "rejected", "rejected"]
+    assert _flags(db, photo_ids) == ["flagged", "flagged", "rejected", "rejected"]
 
 
 def test_clear_rejects_reads_live_db_flags(live_server, page):
@@ -632,7 +635,7 @@ def test_encounter_reject_respects_active_label_filter(live_server, page):
 
     expect(page.locator("#undoMsg")).to_have_text("Set flag to rejected on 2 photos")
     expect(encounter_button).to_have_attribute("aria-label", "Clear rejects")
-    assert _flags(db, photo_ids) == ["none", "none", "rejected", "rejected"]
+    assert _flags(db, photo_ids) == ["flagged", "flagged", "rejected", "rejected"]
 
     encounter_button.click()
 
@@ -640,7 +643,7 @@ def test_encounter_reject_respects_active_label_filter(live_server, page):
     expect(page.locator("#undoMsg")).to_have_text(
         "Set flag to none on 2 photos"
     )
-    assert _flags(db, photo_ids) == ["none"] * 4
+    assert _flags(db, photo_ids) == ["flagged", "flagged", "none", "none"]
 
 
 def test_photo_context_menu_exposes_review_and_organization_actions(
@@ -2844,8 +2847,6 @@ def test_text_undo_does_not_undo_photos(live_server, page):
 
 
 def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
-    from services.photo_review import PhotoReviewService
-
     db = live_server['db']
     ids = live_server['data']['photos'][:4]
     # A saved photographer choice includes attribution; a raw flag is only
@@ -2865,6 +2866,7 @@ def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
     # the page shows it as a keeper instead of the fresh REJECT suggestion,
     # and applying leaves the flag alone rather than overwriting it.
     expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\bkeep\b'))
+    page.locator(f'.cull-card[data-photo-id="{ids[1]}"]').get_by_role('button', name='Add favorite', exact=True).click()
     for pid in ids[2:]:
         page.locator(f'.cull-card[data-photo-id="{pid}"]').get_by_role('button', name='Reject', exact=True).click()
     page.locator('#applyBtn').click()
@@ -2875,10 +2877,10 @@ def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
     expect(page.locator('#cullStatus')).to_contain_text('Undone: Culling')
     assert page.url.endswith('/cull')
     assert _flags(db, ids) == ['flagged', 'none', 'none', 'none']
-    # Undo took the flags back off, so every card except the still-flagged
-    # ids[0] falls back to what this run's analysis suggests.
+    # Undo removes the new decisions; a cached KEEP claim cannot replace the
+    # photographer's choice. Only the preexisting confirmed pick remains kept.
     expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\bkeep\b'))
-    expect(page.locator(f'.cull-card[data-photo-id="{ids[1]}"]')).to_have_class(re.compile(r'\bkeep\b'))
+    expect(page.locator(f'.cull-card[data-photo-id="{ids[1]}"]')).to_have_class(re.compile(r'\breview\b'))
     for pid in ids[2:]:
         expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\breview\b'))
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
@@ -2888,6 +2890,7 @@ def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
 
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Undone: Culling')
+    page.locator(f'.cull-card[data-photo-id="{ids[1]}"]').get_by_role('button', name='Add favorite', exact=True).click()
     for pid in ids[2:]:
         page.locator(f'.cull-card[data-photo-id="{pid}"]').get_by_role('button', name='Reject', exact=True).click()
     page.locator('#applyBtn').click()
