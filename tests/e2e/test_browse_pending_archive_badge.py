@@ -47,11 +47,16 @@ def test_browse_badges_folders_waiting_for_transfer(live_server, page, tmp_path)
     row = page.locator(f'.tree-item[data-folder-id="{day_id}"]')
     row.wait_for(state="visible")
     badge = row.locator(".folder-archive-status-slot .folder-local-status")
-    expect(badge).to_have_text("KEPT LOCALLY", timeout=10000)
+    # The menu's decorative arrow is hidden from assistive technology.
+    expect(badge).to_have_text(re.compile(r"^KEPT LOCALLY\s*▾$"), timeout=10000)
+    expect(badge.locator('span[aria-hidden="true"]')).to_have_text("▾")
     # The badge has to name where the files still have to go, or it is just
     # another opaque label.
     expect(badge).to_have_attribute(
         "aria-label", re.compile(re.escape("/Volumes/Photography/USA/2026"))
+    )
+    expect(badge).to_have_accessible_name(
+        re.compile(r"^NAS transfer options: Kept locally .*" + re.escape("/Volumes/Photography/USA/2026"))
     )
     # Hovering the name resolves "12" to the directory it actually is.
     expect(row.locator(".folder-name")).to_have_attribute("title", str(day))
