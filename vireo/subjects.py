@@ -122,8 +122,11 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         if checkpoint:
             checkpoint()
         # The detector may have been replaced while the image was decoded.
-        if detection_id is not None and not any(d["id"] == detection_id for d in retained(db, photo_id, min_conf)):
-            raise ValueError("Chosen subject changed during analysis; select it again")
+        if detection_id is not None:
+            current = next((d for d in retained(db, photo_id, min_conf) if d["id"] == detection_id), None)
+            # Detection IDs quantize coordinates; an exact box edit may reuse an ID.
+            if current is None or any(current["box_" + k] != detections[0]["box_" + k] for k in "xywh"):
+                raise ValueError("Chosen subject changed during analysis; select it again")
         db.subjects.save_analyses(source_key, results)
         sync_primary(db, photo_id, min_conf=min_conf)
         db.commit_with_retry()

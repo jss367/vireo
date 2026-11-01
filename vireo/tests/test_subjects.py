@@ -464,14 +464,17 @@ def test_invalid_reviewer_box_preserves_previous_analysis(db, subject_photo, box
     assert payload(db, photo_id) == before
 
 
-def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monkeypatch):
+@pytest.mark.parametrize('replacement_x', [.7, .10001])
+def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monkeypatch, replacement_x):
     import subjects
     photo_id, ids, path = subject_photo
     chosen = subjects.select_reviewer_box(db, photo_id, dict(x=.1, y=.1, w=.1, h=.1))
     original = subjects.analyze_image
     def replace(image, detections):
         results = original(image, detections)
-        subjects.select_reviewer_box(db, photo_id, dict(x=.7, y=.1, w=.1, h=.1))
+        replacement = subjects.select_reviewer_box(db, photo_id, dict(x=replacement_x, y=.1, w=.1, h=.1))
+        if replacement_x == .10001:
+            assert replacement == chosen
         return results
     monkeypatch.setattr(subjects, 'analyze_image', replace)
     with pytest.raises(ValueError, match='changed during analysis'):
