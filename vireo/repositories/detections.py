@@ -450,7 +450,7 @@ class DetectionsRepository:
             rows = self.conn.execute(
                 f"SELECT id, photo_id FROM detections "
                 f"WHERE photo_id IN ({placeholders})"
-                + (" AND detector_model != ?" if exclude_model is not None else ""),
+                + (" AND (detector_model IS NULL OR detector_model != ?)" if exclude_model is not None else ""),
                 (*chunk, exclude_model) if exclude_model is not None else tuple(chunk),
             ).fetchall()
             for row in rows:
