@@ -278,11 +278,15 @@ def _lookup_nearby(
     bucket: _NearbyKey, api_key: str, language: str | None,
 ) -> list[JsonDict] | str:
     """The named places around a bucket's center, or an unresolved reason."""
+    # Only an API key makes a cached result usable: clicking a nearby place
+    # fetches its details through Google at import time (see
+    # :func:`_google_details`), which would fail without a key, so a key
+    # removed since the lookup must suppress the cached buttons too.
+    if not api_key:
+        return "no_api_key"
     cached = _cached_nearby(bucket, language)
     if cached is not None:
         return cached
-    if not api_key:
-        return "no_api_key"
     lat = (bucket[0] + 0.5) * _NEARBY_BUCKET_DEG
     lng = (bucket[1] + 0.5) * _NEARBY_BUCKET_DEG
     try:
@@ -378,8 +382,10 @@ def _group_key(suggestion: JsonDict | None) -> str:
 def _cells_of(gps_by_path: Mapping[str, tuple[float, float]]) -> dict[str, JsonDict]:
     cells: dict[str, JsonDict] = {}
     for path, (lat, lng) in gps_by_path.items():
-        cell = cells.setdefault(cell_key(lat, lng), {"paths": [], "lat": 0.0, "lng": 0.0})
+        cell = cells.setdefault(
+            cell_key(lat, lng), {"paths": [], "points": [], "lat": 0.0, "lng": 0.0})
         cell["paths"].append(path)
+        cell["points"].append((lat, lng))
         cell["lat"] += lat
         cell["lng"] += lng
     for cell in cells.values():
@@ -472,6 +478,7 @@ class ImportLocationSuggester:
         self._grid_cache: dict = {}
         self._groups: dict[str, JsonDict] = {}
         self._nearby_found: dict[_NearbyKey, list[JsonDict] | str] = {}
+        self._nearby_over_limit = False
         self.cell_keys = list(self._cells)
 
     def name_cell(self, key: str) -> None:
@@ -490,12 +497,30 @@ class ImportLocationSuggester:
             group["broad_cells"].append(key)
 
     def nearby_keys(self) -> list[_NearbyKey]:
-        """The buckets to look up after naming: those of cells Google named broadly."""
-        buckets = (
-            _nearby_bucket(self._cells[key]["lat"], self._cells[key]["lng"])
-            for group in self._groups.values() for key in group["broad_cells"]
-        )
-        return list(dict.fromkeys(buckets))
+        """The buckets to look up after naming: those of cells Google named broadly.
+
+        Returns an empty list when the preview is over its work budget, so
+        :meth:`result` refuses it without paying for any provider lookups:
+        without the cap, 100,000 broad cells spread into distinct 2 km
+        buckets could still drive up to 200,000 paid Nearby Searches before
+        refusal, whether as 100,000 groups refused by :meth:`result` or as
+        one group of many spread cells :meth:`result` would accept.
+        """
+        if len(self._groups) > MAX_CHOICES:
+            return []
+        buckets: list[_NearbyKey] = []
+        seen: set[_NearbyKey] = set()
+        for group in self._groups.values():
+            for key in group["broad_cells"]:
+                bucket = _nearby_bucket(self._cells[key]["lat"], self._cells[key]["lng"])
+                if bucket in seen:
+                    continue
+                seen.add(bucket)
+                if len(seen) > MAX_CHOICES:
+                    self._nearby_over_limit = True
+                    return []
+                buckets.append(bucket)
+        return buckets
 
     def find_nearby(self, bucket: _NearbyKey) -> None:
         """Look up one bucket's named places (the only other step that may call Google)."""
@@ -512,11 +537,19 @@ class ImportLocationSuggester:
             if found is None or isinstance(found, str):
                 reasons[found or "not_looked_up"] += 1
                 continue
-            here = {"latitude": cell["lat"], "longitude": cell["lng"]}
             for place in found:
-                distance = round(distance_meters(
-                    here, {"latitude": place["lat"], "longitude": place["lng"]}))
-                if distance > NEARBY_RADIUS_M or place["place_id"] == exclude:
+                if place["place_id"] == exclude:
+                    continue
+                # Distance from the pin to the closest actual photo spot in
+                # the cell, not the cell's averaged centroid: a cell can span
+                # ~110 m, enough to flip inclusion at the 5 km boundary, and
+                # the response advertises this as a per-photo distance.
+                pin = {"latitude": place["lat"], "longitude": place["lng"]}
+                distance = round(min(
+                    distance_meters({"latitude": lat, "longitude": lng}, pin)
+                    for lat, lng in cell["points"]
+                ))
+                if distance > NEARBY_RADIUS_M:
                     continue
                 best = closest.get(place["place_id"])
                 if best is None or distance < best["distance_m"]:
@@ -530,7 +563,7 @@ class ImportLocationSuggester:
         return [], reasons.most_common(1)[0][0]
 
     def result(self) -> JsonDict:
-        if len(self._groups) > MAX_CHOICES:
+        if len(self._groups) > MAX_CHOICES or getattr(self, "_nearby_over_limit", False):
             return {
                 "groups": [], "file_cells": {},
                 "work_limit_error": (

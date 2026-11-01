@@ -216,6 +216,24 @@ test('a clicked nearby place becomes a Google choice only while the box names it
   assert.equal(h.choices()[0].place_id, 'lake', 'back to the picked name is the picked place');
 });
 
+test('a clicked nearby place wins over a same-named broad suggestion', () => {
+  // A county and a park can share a normalized name; the clicked place
+  // must still submit its own place_id instead of the broad suggestion's.
+  const h = harness();
+  h.ctx.data.groups[0].suggestion = {kind: 'google', source: 'google_area',
+    place_id: 'county', name: 'Laguna', summary: 'Laguna · California'};
+  h.ctx.data.groups[0].nearby_places = [
+    {place_id: 'park', name: 'Laguna', type: 'park', distance_m: 500}];
+  h.run(`importLocations.data = data;
+    globalThis.row = renderImportLocationGroup(data.groups[0]);
+    globalThis.body = row.children[2];
+    globalThis.input = body.children[1];
+    globalThis.nearby = body.children[4];`);
+  assert.equal(h.choices()[0].place_id, 'county', 'default is the broad suggestion');
+  h.run('nearby.children[1].children[0].handlers.click();');
+  assert.equal(h.choices()[0].place_id, 'park', 'clicking the same-named park submits the park');
+});
+
 test('a broadly named group says why it has no nearby places', () => {
   const h = harness();
   h.ctx.data.groups[0].nearby_places = [];

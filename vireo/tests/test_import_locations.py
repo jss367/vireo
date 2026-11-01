@@ -398,6 +398,19 @@ def test_a_cached_county_without_an_api_key_says_why_nothing_is_nearby(db, broad
     assert len(broad_google) == asked
 
 
+def test_cached_nearby_results_are_suppressed_after_the_api_key_is_removed(db, broad_google):
+    """Clicking a cached button would fail at import time without a key, so
+    the preview must hide the cached buttons instead of promising them."""
+    suggest_import_locations(db, _files(LAGUNA[:1]), api_key="KEY", language="en")
+    asked = len(broad_google)
+
+    [group] = suggest_import_locations(db, _files(LAGUNA[:1]), api_key="", language="en")["groups"]
+
+    assert group["nearby_places"] == []
+    assert group["nearby_unresolved"] == "no_api_key"
+    assert len(broad_google) == asked  # no new provider calls either
+
+
 def test_choosing_a_nearby_place_tags_it_and_keeps_the_photos_measured_gps(db, fid, monkeypatch):
     """The place's pin becomes the keyword's point; no photo is moved to it."""
     pids = [_photo(db, fid, f"new{i}.jpg", p) for i, p in enumerate(LAGUNA)]
@@ -421,6 +434,44 @@ def test_choosing_a_nearby_place_tags_it_and_keeps_the_photos_measured_gps(db, f
         row = db.conn.execute(
             "SELECT latitude, longitude FROM photos WHERE id = ?", (pid,)).fetchone()
         assert (row["latitude"], row["longitude"]) == point
+
+
+def test_an_over_limit_preview_refuses_before_paying_for_any_nearby_lookups(db, monkeypatch):
+    """100,000 broad cells in distinct 2 km buckets must not drive 200,000 paid calls."""
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked up nearby for an over-limit preview"))
+    # 0.03-degree steps so each cell lives in its own 0.02-degree bucket.
+    points = [(10.0 + i * 0.03, 20.0) for i in range(import_locations.MAX_CHOICES + 1)]
+    assert len({import_locations._nearby_bucket(*p) for p in points}) == len(points)
+
+    result = suggest_import_locations(db, _files(points), api_key="KEY", language="en")
+
+    assert result["groups"] == []
+    assert "work_limit_error" in result
+
+
+def test_nearby_distance_is_from_the_closest_photo_in_the_cell(db, monkeypatch):
+    """For multiple photos in one reverse-geocode cell, pick the per-photo
+    minimum: a place just inside 5 km of one photo must not be excluded when
+    the cell's averaged centroid falls outside."""
+    # Two photos ~55 m apart in one reverse-geocode cell: the centroid is
+    # between them. The pin at (32.9205, -116.5440) is ~1 m north of photo A
+    # but ~110 m north of the centroid.
+    photo_a = (32.9205, -116.5440)
+    photo_b = (32.9195, -116.5440)
+    assert cell_key(*photo_a) == cell_key(*photo_b)
+    pin = (32.9206, -116.5440)
+    nearby_place = {"place_id": "spot", "name": "Spot", "type": "park",
+                    "lat": pin[0], "lng": pin[1]}
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [nearby_place])
+
+    [group] = suggest_import_locations(
+        db, _files([photo_a, photo_b]), api_key="KEY", language="en")["groups"]
+
+    assert len(group["nearby_places"]) == 1
+    assert group["nearby_places"][0]["distance_m"] < 60  # not the ~110 m centroid distance
 
 
 def test_stream_reports_nearby_lookups_after_naming(db, monkeypatch, broad_google, exiftool_present):

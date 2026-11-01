@@ -174,16 +174,19 @@ function importLocationTarget(group) {
   if (!value) return { kind: 'skip', reason: 'Type a name to tag these photos, or leave it blank to skip them.' };
   const suggestion = group.suggestion;
   const folded = value.toLocaleLowerCase();
+  // A nearby place the user clicked, for as long as the box still says it.
+  // Checked before the suggestion-name branch: a nearby park can share its
+  // normalized name with the broad suggestion's county but have a different
+  // place_id, so matching on name alone would submit the wrong place.
+  const picked = (group.nearby_places || []).find(p => p.place_id === state?.pick);
+  if (picked && folded === picked.name.toLocaleLowerCase()) {
+    return { kind: 'google', place_id: picked.place_id, name: picked.name };
+  }
   if (suggestion && folded === importLocationSuggestedValue(group).toLocaleLowerCase()) {
     if (suggestion.kind === 'keyword') {
       return { kind: 'keyword', keyword_id: suggestion.keyword_id, name: suggestion.name };
     }
     return { kind: 'google', place_id: suggestion.place_id, name: suggestion.name };
-  }
-  // A nearby place the user clicked, for as long as the box still says it.
-  const picked = (group.nearby_places || []).find(p => p.place_id === state?.pick);
-  if (picked && folded === picked.name.toLocaleLowerCase()) {
-    return { kind: 'google', place_id: picked.place_id, name: picked.name };
   }
   const options = importLocations.data?.location_options || [];
   // Labels are unique; a bare name may be shared by several saved places.
