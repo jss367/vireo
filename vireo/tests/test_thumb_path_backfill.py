@@ -1,167 +1,110 @@
-"""Startup self-healing for photos.thumb_path.
+"""Thumbnail presence is maintained on writes and rechecked explicitly."""
 
-The dashboard's coverage card reads ``thumb_path IS NOT NULL`` to count how
-many photos have a generated thumbnail. Until PR #6xx the column was never
-populated by production code, so the dashboard always reported "0 of N
-thumbnails made" even when 40k JPEGs sat on disk in ``~/.vireo/thumbnails/``.
+import threading
+from pathlib import Path
+from unittest.mock import Mock
 
-These tests exercise the ephemeral startup job that:
-
-* sets ``thumb_path`` for legacy photos whose JPEG already exists on disk, and
-* clears ``thumb_path`` if the file has since been deleted (drift correction).
-"""
-
-import os
-import sys
-import time
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
-from PIL import Image
-from services import photo_ingest, workspace_folders
+import pytest
+from repositories.caches import CachesRepository
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_runner
 
 
-def _make_jpeg(path, w=200, h=150):
-    Image.new("RGB", (w, h), (100, 100, 100)).save(str(path), "JPEG", quality=85)
+def test_startup_never_schedules_thumbnail_scan(client_with_photo, monkeypatch):
+    from app import _schedule_startup_backfills
+    from services.startup_tasks import StartupTasks
+
+    app, db, _ = client_with_photo
+    startup = StartupTasks(app, db._db_path, db)
+    scheduled = []
+    monkeypatch.delenv('VIREO_DISABLE_STARTUP_BACKFILL_TIMERS')
+    monkeypatch.setattr(threading, 'Timer', lambda delay, fn: scheduled.append(fn) or Mock())
+    monkeypatch.setattr(CachesRepository, 'thumbnail_path_rows', Mock(side_effect=AssertionError('scan')))
+    startup.kickoff_label_identity_backfill = Mock()
+    startup.kickoff_exif_search_backfill = Mock()
+    _schedule_startup_backfills(app, startup)
+    for launch in scheduled:
+        launch()
+    assert scheduled == [startup.kickoff_label_identity_backfill, startup.kickoff_exif_search_backfill]
+    assert not any(j['type'] == 'thumb_path_backfill' for j in app._job_runner.list_jobs())
 
 
-def _wait_for_job(runner, job_type, deadline_s=5):
-    deadline = time.time() + deadline_s
-    while time.time() < deadline:
-        jobs = [j for j in runner.list_jobs() if j["type"] == job_type]
-        if jobs and jobs[0]["status"] in ("completed", "failed"):
-            return jobs[0]
-        time.sleep(0.05)
-    return None
+def test_explicit_recheck_is_one_pass_and_keeps_user_history(client_with_photo, monkeypatch):
+    import thumbnails
+
+    app, db, pid = client_with_photo
+    cache = Path(app.config['THUMB_CACHE_DIR'])
+    (cache / f'{pid}.jpg').write_bytes(b'cached')
+    reads = []
+    checks = []
+    original_rows = CachesRepository.thumbnail_path_rows
+    original_present = thumbnails._thumbnail_present
+    def rows(repo):
+        reads.append(1)
+        return original_rows(repo)
+    def present(root, photo_id):
+        checks.append(photo_id)
+        return original_present(root, photo_id)
+    monkeypatch.setattr(CachesRepository, 'thumbnail_path_rows', rows)
+    monkeypatch.setattr(thumbnails, '_thumbnail_present', present)
+    response = app.test_client().post('/api/thumbnail-cache/recheck')
+    assert response.status_code == 202
+    job = wait_for_job_via_runner(app._job_runner, response.json['job_id'], wait_for_history=True)
+    assert job['status'] == 'completed', job
+    assert job['origin'] == 'user'
+    assert job['workspace_id'] is None
+    assert job['result']['set'] == 1
+    assert job['result']['checked'] == 1
+    assert job['result']['unchecked'] == 0
+    assert 'remaining' not in job['result']
+    assert reads == [1] and checks == [pid]
+    assert db.photos.get(pid)['thumb_path'] == f'{pid}.jpg'
+    assert db.conn.execute("SELECT origin FROM job_history WHERE id=?", (job['id'],)).fetchone()[0] == 'user'
 
 
-def test_startup_thumb_path_backfill_skips_when_synced(tmp_path, monkeypatch):
-    """If every photo's thumb_path matches disk reality, no ephemeral
-    thumb_path_backfill job is started — steady-state restarts pay nothing."""
-    import config as cfg
-    import models
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
-    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
-    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+def test_thumbnail_recheck_joins_active_job(client_with_photo, monkeypatch):
+    import thumbnails
 
-    from app import create_app
-    from db import Database
-
-    db_path = str(tmp_path / "test.db")
-    thumb_dir = str(tmp_path / "thumbs")
-    os.makedirs(thumb_dir)
-    Database(db_path)  # create empty DB with workspace
-
-    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
-    app._kickoff_thumb_path_backfill()
-
-    backfill_jobs = [
-        j for j in app._job_runner.list_jobs()
-        if j["type"] == "thumb_path_backfill"
-    ]
-    assert backfill_jobs == []
+    app, _, _ = client_with_photo
+    entered, release = threading.Event(), threading.Event()
+    def recheck(*args, **kwargs):
+        entered.set()
+        assert release.wait(synchronization_timeout(5))
+        return {'checked': 0}
+    monkeypatch.setattr(thumbnails, 'backfill_thumb_paths', recheck)
+    try:
+        first = app.test_client().post('/api/thumbnail-cache/recheck').json
+        assert entered.wait(synchronization_timeout(5))
+        second = app.test_client().post('/api/thumbnail-cache/recheck').json
+        assert second == {'job_id': first['job_id'], 'joined': True}
+    finally:
+        release.set()
+    assert wait_for_job_via_runner(app._job_runner, first['job_id'])['status'] == 'completed'
 
 
-def test_startup_thumb_path_backfill_sets_unsynced_rows(tmp_path, monkeypatch):
-    """A photo with NULL thumb_path whose JPEG exists in the cache must have
-    its column populated by the startup ephemeral job. This is the production
-    repair path: 40k thumbnails on disk reported as 0/40k forever."""
-    import config as cfg
-    import models
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
-    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
-    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+def test_cancelled_recheck_reports_unchecked_records(client_with_photo):
+    from thumbnails import backfill_thumb_paths
 
-    from app import create_app
-    from db import Database
-
-    photos_dir = tmp_path / "photos"
-    photos_dir.mkdir()
-    src = photos_dir / "a.jpg"
-    _make_jpeg(str(src))
-
-    db_path = str(tmp_path / "test.db")
-    thumb_dir = tmp_path / "thumbs"
-    thumb_dir.mkdir()
-
-    db = Database(db_path)
-    folder_id = workspace_folders.add_folder(db, str(photos_dir))
-    pid = photo_ingest.add_photo(
-        db, folder_id, "a.jpg", ".jpg",
-        file_size=os.path.getsize(str(src)),
-        file_mtime=os.path.getmtime(str(src)),
-        width=200, height=150,
-    )
-    # Pre-existing on-disk thumbnail (the legacy state).
-    _make_jpeg(thumb_dir / f"{pid}.jpg")
-    db.close()
-
-    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t")
-    app._kickoff_thumb_path_backfill()
-
-    job = _wait_for_job(app._job_runner, "thumb_path_backfill")
-    assert job is not None, "backfill job should have been started"
-    assert job["status"] == "completed", f"job: {job}"
-    assert job["origin"] == "system" and job["reason"], job
-
-    db2 = Database(db_path)
-    row = db2.conn.execute(
-        "SELECT thumb_path FROM photos WHERE id=?", (pid,)
-    ).fetchone()
-    assert row["thumb_path"] == f"{pid}.jpg"
+    app, db, _ = client_with_photo
+    result = backfill_thumb_paths(db, app.config['THUMB_CACHE_DIR'], cancel_check=lambda: True)
+    assert result['checked'] == 0
+    assert result['unchecked'] == 1
+    assert 'remaining' not in result
 
 
-def test_startup_thumb_path_backfill_records_a_system_history_row(tmp_path, monkeypatch):
-    """A run that repaired rows is history worth keeping, marked as Vireo's.
+@pytest.mark.parametrize('failure', [FileNotFoundError, PermissionError, OSError])
+def test_unavailable_thumbnail_cache_preserves_records(client_with_photo, monkeypatch, failure):
+    import thumbnails
 
-    It used to be ephemeral and never written, so a crash mid-backfill left
-    no trace. Now its row is written at start like any job; only a run that
-    changed nothing is dropped (see JobHistory.system_disposition).
-    """
-    import config as cfg
-    import models
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
-    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
-    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
-
-    from app import create_app
-    from db import Database
-
-    photos_dir = tmp_path / "photos"
-    photos_dir.mkdir()
-    src = photos_dir / "a.jpg"
-    _make_jpeg(str(src))
-
-    db_path = str(tmp_path / "test.db")
-    thumb_dir = tmp_path / "thumbs"
-    thumb_dir.mkdir()
-
-    db = Database(db_path)
-    folder_id = workspace_folders.add_folder(db, str(photos_dir))
-    pid = photo_ingest.add_photo(
-        db, folder_id, "a.jpg", ".jpg",
-        file_size=os.path.getsize(str(src)),
-        file_mtime=os.path.getmtime(str(src)),
-        width=200, height=150,
-    )
-    _make_jpeg(thumb_dir / f"{pid}.jpg")
-    db.close()
-
-    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t")
-    app._kickoff_thumb_path_backfill()
-
-    job = _wait_for_job(app._job_runner, "thumb_path_backfill")
-    job = wait_for_job_via_runner(app._job_runner, job["id"], wait_for_history=True)
-    assert job["status"] == "completed", job
-    db2 = Database(db_path)
-    rows = db2.conn.execute(
-        "SELECT origin, reason, status FROM job_history WHERE type='thumb_path_backfill'"
-    ).fetchall()
-    assert len(rows) == 1, rows
-    assert rows[0]["origin"] == "system"
-    assert "did not match" in rows[0]["reason"]
-    assert rows[0]["status"] == "completed"
+    app, db, pid = client_with_photo
+    db.photos.set_thumb_path(pid, f'{pid}.jpg')
+    original = thumbnails.os.stat
+    root = app.config['THUMB_CACHE_DIR']
+    def stat(path, *args, **kwargs):
+        if str(path).startswith(root):
+            raise failure('unavailable')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(thumbnails.os, 'stat', stat)
+    with pytest.raises(OSError):
+        thumbnails.backfill_thumb_paths(db, root)
+    assert db.photos.get(pid)['thumb_path'] == f'{pid}.jpg'

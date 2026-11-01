@@ -52,6 +52,7 @@ _NO_SLEEP_ASSERTION_JOB_TYPES = frozenset({
     "missing_originals_scan",
     "working_copy_backfill",
     "thumb_path_backfill",
+    "preview-cache-maintenance",
     "label-list-species-ids",
     "exif_search_backfill",
     "verify-models",

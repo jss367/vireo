@@ -391,27 +391,33 @@ def _publish_preview(
             publication_guard() if publication_guard
             else contextlib.nullcontext()
         )
-        with guard:
-            try:
-                atomic_write_bytes(data, cache_path)
-            except Exception:  # broad: best-effort publication is the caller's choice; otherwise re-raises
-                if not publish_best_effort:
-                    raise
-                log.warning(
-                    "Failed to persist preview cache %s", cache_path,
-                    exc_info=True,
-                )
-            else:
-                published = True
-        if published:
-            try:
-                # Standalone renders (no catalog) pass db=None.
-                if db is not None:
-                    db.caches.preview_insert(photo_id, size, len(data))
-            except sqlite3.Error:
-                # The file is published; an untracked preview is adopted
-                # on its next hit. Usually the photo was deleted (FK).
-                log.debug("Could not track preview for photo %s", photo_id, exc_info=True)
+        try:
+            transaction = db.transaction(immediate=True) if db is not None else contextlib.nullcontext()
+            with transaction, guard:
+                try:
+                    atomic_write_bytes(data, cache_path)
+                except Exception:  # broad: best-effort publication is the caller's choice; otherwise re-raises
+                    if not publish_best_effort:
+                        raise
+                    log.warning(
+                        "Failed to persist preview cache %s", cache_path,
+                        exc_info=True,
+                    )
+                else:
+                    published = True
+                if published:
+                    try:
+                        # Standalone renders (no catalog) pass db=None.
+                        if db is not None:
+                            db.caches.preview_insert(photo_id, size, len(data))
+                    except sqlite3.Error:
+                        # The file is published; an untracked preview is adopted
+                        # on its next hit. Usually the photo was deleted (FK).
+                        log.debug("Could not track preview for photo %s", photo_id, exc_info=True)
+        except sqlite3.Error:
+            if not publish_best_effort:
+                raise
+            log.warning("Could not acquire or commit preview publication for %s", cache_path, exc_info=True)
     return published
 
 

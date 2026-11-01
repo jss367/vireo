@@ -7517,7 +7517,7 @@ def test_reconcile_keeps_live_rows(tmp_path):
 
 
 def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
-    """create_app must drop ghost rows so eviction sees real totals.
+    """Background maintenance must drop ghost rows so eviction sees real totals.
 
     Regression for the production drift: 2 GB of phantom rows kept
     eviction asleep while the previews dir was empty, and every
@@ -7550,10 +7550,15 @@ def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
     db.caches.preview_insert(pid, 1920, 450_000)
     db.close()
 
-    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir),
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir),
                api_token="test-token-123")
 
     db2 = Database(db_path)
+    assert db2.caches.preview_total_bytes() == 450_000
+    from wait import wait_for_job_via_runner
+    job_id = app._kickoff_preview_cache_maintenance()
+    job = wait_for_job_via_runner(app._job_runner, job_id)
+    assert job['status'] == 'completed', job
     assert db2.caches.preview_total_bytes() == 0, (
         "Startup must reconcile ghost rows so eviction operates on "
         "real bytes, not phantom accounting."
@@ -8245,8 +8250,12 @@ def test_startup_evicts_when_migration_pushes_over_quota(tmp_path, monkeypatch):
     with open(legacy, "wb") as f:
         f.write(b"\xff\xd8\xff\xe0" + b"x" * 4096)
 
-    # Creating the app runs migration (inserts row) then eviction (drains).
-    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    # Migration registers the file synchronously; the background job drains it.
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert db.caches.preview_total_bytes() > 0
+    from wait import wait_for_job_via_runner
+    job = wait_for_job_via_runner(app._job_runner, app._kickoff_preview_cache_maintenance())
+    assert job['status'] == 'completed', job
 
     assert db.caches.preview_total_bytes() == 0
     assert not legacy.exists()

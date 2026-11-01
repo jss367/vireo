@@ -35,9 +35,6 @@ from flask import (
     Flask,
 )
 from jobs import JobRunner, LogBroadcaster
-from preview_cache import (
-    reconcile_preview_cache,
-)
 from proc import no_window_kwargs
 from schema import ensure_schema
 from services import scan_work, startup_tasks
@@ -1464,26 +1461,6 @@ def _purge_edited_photo_renders(db, pid, preview_dir, thumb_dir, untracked_names
     return invalidated_previews, invalidated_thumbs, purge_failed
 
 
-def _enforce_preview_cache_quota_at_startup(app):
-    """Reconcile and evict at startup so prior runs / external deletes
-    can't leave the table out of sync or over quota.
-
-    Reconcile first: if a previous session left ghost rows (files
-    deleted while cache was under quota), eviction would see inflated
-    totals and stay asleep when it shouldn't, or wake up and run a
-    no-op pass over rows whose files don't exist.
-    """
-    from preview_cache import evict_if_over_quota
-
-    vireo_dir = media_root(app.config["THUMB_CACHE_DIR"])
-    db = Database(app.config["DB_PATH"])
-    try:
-        reconcile_preview_cache(db, vireo_dir)
-        evict_if_over_quota(db, vireo_dir)
-    finally:
-        db.close()
-
-
 def _enforce_working_copy_cache_quota_at_startup(app):
     """Apply the persistent working-copy ceiling when the app starts.
 
@@ -1593,7 +1570,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     _migrate_legacy_preview_cache(app)
     _migrate_edit_math_render_caches(app)
-    _enforce_preview_cache_quota_at_startup(app)
     _sweep_abandoned_transient_originals(app)
     _enforce_working_copy_cache_quota_at_startup(app)
 
@@ -1766,8 +1742,11 @@ def _start_app_runtime(app, db_path):
     app._log_broadcaster.install()
 
     app._cleanup_app_resources = startup.cleanup_app_resources
+    app._start_thumbnail_recheck = startup.start_thumbnail_recheck
+    app._kickoff_preview_cache_maintenance = startup.kickoff_preview_cache_maintenance
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         startup.schedule_retained_cache_maintenance()
+        startup.kickoff_preview_cache_maintenance()
 
     # Live progress of the most recent new-images walk, keyed by
     # (db_path, workspace_id). Written by the walk's progress callback and
@@ -1825,17 +1804,6 @@ def _start_missing_originals(app, db_path):
 def _schedule_startup_backfills(app, startup):
     """Expose the backfill kickoffs on ``app`` and arm their startup timers."""
     import threading
-
-    # thumb_path self-healing backfill: aligns photos.thumb_path with the
-    # thumbnails on disk (see StartupTasks.kickoff_thumb_path_backfill).
-    # Ephemeral JobRunner job, skipped entirely when a fast count check finds
-    # nothing to do.
-    app._kickoff_thumb_path_backfill = startup.kickoff_thumb_path_backfill
-
-    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
-        _thumb_backfill_timer = threading.Timer(6.0, startup.kickoff_thumb_path_backfill)
-        _thumb_backfill_timer.daemon = True
-        _thumb_backfill_timer.start()
 
     # Taxon IDs for predictions made from label lists saved before lists
     # recorded them (see StartupTasks.kickoff_label_identity_backfill).
@@ -2146,7 +2114,10 @@ def _register_job_blueprints(app, w):
         )
     )
     app.register_blueprint(
-        create_caches_blueprint(_get_db, json_error, db_path, app.config)
+        create_caches_blueprint(
+            _get_db, json_error, db_path, app.config,
+            start_thumbnail_recheck=app._start_thumbnail_recheck,
+        )
     )
     app.register_blueprint(
         create_export_blueprint(

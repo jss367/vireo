@@ -319,6 +319,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         app = Flask(__name__)
         app.register_blueprint(create_caches_blueprint(
             lambda: self.db, lambda message, status: (jsonify(error=message), status), str(self.db_path), {},
+            start_thumbnail_recheck=lambda: {},
         ))
         cache = self.root / f"culling_results_ws{self.db.active_workspace_id}.json"
         for group_key in ("scene_groups", "pose_groups"):
@@ -616,7 +617,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         app = Flask(__name__)
         app.register_blueprint(create_caches_blueprint(
             lambda: self.db, lambda message, status=400: (jsonify(error=message), status),
-            str(self.db_path), {},
+            str(self.db_path), {}, start_thumbnail_recheck=lambda: {},
         ))
         response = app.test_client().post("/api/culling/apply", json={
             "keepers": self.ids[:1], "rejects": self.ids[1:2], "unflag": self.ids[2:],
