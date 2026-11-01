@@ -29,9 +29,21 @@ def test_right_click_photo_opens_menu(live_server, page):
     expect(menu.locator(".vireo-ctx-item", has_text="Reveal in")).to_be_visible()
     expect(menu.locator(".vireo-ctx-item", has_text="Copy Path")).to_be_visible()
     expect(menu.locator(".vireo-ctx-item", has_text="Delete")).to_be_visible()
-    expect(menu.get_by_text("View on Map", exact=True)).to_be_visible()
+    expect(menu.get_by_text("View on Map", exact=True)).to_have_count(0)
     expect(menu.get_by_text("Copy Development Settings", exact=True)).to_be_visible()
-    expect(menu.get_by_text("Paste Development Settings", exact=True)).to_be_visible()
+    for label in (
+        "Paste Development Settings", "Compare", "Review Burst", "Create Panorama…",
+        "Filter to This Burst", "Filter to This Duplicate Group",
+    ):
+        expect(menu.get_by_text(label, exact=True)).to_have_count(0)
+    expect(menu.get_by_text("Edit Photo", exact=True)).to_be_visible()
+    expect(menu.locator(".vireo-ctx-disabled")).to_have_count(0)
+    assert menu.evaluate("""menu => {
+      const rows = Array.from(menu.children);
+      return rows.every((row, index) => !row.classList.contains('vireo-ctx-sep') ||
+        (index > 0 && index < rows.length - 1 &&
+         !rows[index - 1].classList.contains('vireo-ctx-sep')));
+    }""")
 
 
 def test_browse_labels_lightbox_adjustments_as_quick_adjust(live_server, page):
@@ -236,8 +248,7 @@ def test_development_settings_paste_blocks_overlapping_requests(
           return {
             requestCount: window.__pasteRequestCount,
             inFlight: pageModules.selectionPanel._browseDevelopmentPasteInFlight,
-            menuDisabled: pasteItem.disabled,
-            menuHint: pasteItem.disabledHint,
+            menuHasPaste: !!pasteItem,
           };
         }""",
         photo_id,
@@ -245,8 +256,7 @@ def test_development_settings_paste_blocks_overlapping_requests(
     assert pending_state == {
         "requestCount": 0,
         "inFlight": True,
-        "menuDisabled": True,
-        "menuHint": "A development settings paste is already running",
+        "menuHasPaste": False,
     }
 
     page.get_by_role('dialog').get_by_role('button', name='Apply selected settings').click()
@@ -305,6 +315,12 @@ def test_view_on_map_with_several_selected_photos_maps_just_those(live_server, p
     menu = page.locator(".vireo-ctx-menu")
     expect(menu).to_be_visible()
 
+    for label in ("Edit Photo", "Create Virtual Copy", "View Versions", "Find Similar"):
+        expect(menu.get_by_text(label, exact=True)).to_have_count(0)
+    for label in ("Compare", "Review Burst", "Create Panorama…"):
+        expect(menu.get_by_text(label, exact=True)).to_be_visible()
+    expect(menu.locator(".vireo-ctx-disabled")).to_have_count(0)
+
     menu.get_by_text("View on Map", exact=True).click()
     page.wait_for_url("**/map?source=selection")
     expect(page.locator("#mapStatus")).to_contain_text("Showing 2 of 2 selected photos")
@@ -315,19 +331,14 @@ def test_view_on_map_with_several_selected_photos_maps_just_those(live_server, p
     assert shown == sorted(selected)
 
 
-def test_view_on_map_context_action_disables_photo_without_coordinates(live_server, page):
-    """An unplottable loaded photo explains why the action is unavailable."""
+def test_view_on_map_context_action_hides_photo_without_coordinates(live_server, page):
+    """A loaded photo without coordinates omits the map action."""
     page.goto(f"{live_server['url']}/browse")
     card = page.locator(".grid-card").first
     card.wait_for(state="visible")
-    browse_url = page.url
     card.click(button="right")
     item = page.locator(".vireo-ctx-menu").get_by_text("View on Map", exact=True)
-    expect(item).to_have_class(re.compile(r".*disabled.*"))
-    expect(item).to_have_attribute("title", "No map coordinates: no EXIF GPS and no location linked to a place")
-    item.click(force=True)
-    page.wait_for_timeout(200)
-    assert page.url == browse_url
+    expect(item).to_have_count(0)
 
 
 @pytest.mark.parametrize("has_coordinates", [False, True])
@@ -348,7 +359,6 @@ def test_expanded_stack_member_map_action_uses_loaded_location(live_server, page
     member = page.locator(f'.browse-stack-member[data-id="{member_id}"]')
     expect(member).to_be_visible()
     assert page.evaluate("id => !browseState.photos.some(photo => photo.id === id)", member_id)
-    browse_url = page.url
     member.click(button="right")
     item = page.locator(".vireo-ctx-menu").get_by_text("View on Map", exact=True)
     if has_coordinates:
@@ -356,11 +366,7 @@ def test_expanded_stack_member_map_action_uses_loaded_location(live_server, page
         item.click()
         page.wait_for_url(f"**/map?photo_id={member_id}")
     else:
-        expect(item).to_have_class(re.compile(r".*disabled.*"))
-        expect(item).to_have_attribute("title", "No map coordinates: no EXIF GPS and no location linked to a place")
-        item.click(force=True)
-        page.wait_for_timeout(200)
-        assert page.url == browse_url
+        expect(item).to_have_count(0)
 
 
 def test_browse_selection_opens_burst_review(live_server, page):

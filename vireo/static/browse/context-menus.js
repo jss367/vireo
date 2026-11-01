@@ -256,6 +256,18 @@ function photoVersionMenuItems(photoIds, one, hint) {
   ]);
 }
 
+/** @param {BrowseMenuItem[]} items @returns {BrowseMenuItem[]} */
+function availablePhotoMenuItems(items) {
+  /** @type {BrowseMenuItem[]} */ var available = [];
+  items.forEach(function(item) {
+    if (item.disabled) return;
+    if (item.separator && (!available.length || available[available.length - 1]?.separator)) return;
+    available.push(item);
+  });
+  if (available[available.length - 1]?.separator) available.pop();
+  return available;
+}
+
 export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {number | null} */ contextPhotoId, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
   // Capture the opener now: closeContextMenu removes the clicked menu item
   // before invoking its onClick, so document.activeElement would be body
@@ -272,7 +284,7 @@ export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @typ
   var developmentSourceId = contextPhotoId != null
     ? Number(contextPhotoId)
     : (one ? Number(photoIds[0]) : null);
-  // Only a loaded photo's known status disables "View on Map"; anything else
+  // Only a loaded photo's known status hides "View on Map"; anything else
   // goes to the map, which explains a photo it cannot place. A right-click on
   // an expanded stack member finds it through browseStackMembers, not the
   // top-level photos array, so look it up through findBrowsePhoto.
@@ -315,7 +327,7 @@ export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @typ
     };
   };
 
-  return /** @type {BrowseMenuItem[]} */ ([
+  return availablePhotoMenuItems(/** @type {BrowseMenuItem[]} */ ([
     { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
     { chips: [
       colorChip(null, '\u25CB', 'No color'),
@@ -399,7 +411,7 @@ export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @typ
       onClick: function() { openPanoramaModal(photoIds); } },
     { separator: true },
     { label: 'Delete', onClick: function() { batchDelete(); } },
-  ]);
+  ]));
 }
 
 // The More button on the batch bar opens the same menu as right-click on a

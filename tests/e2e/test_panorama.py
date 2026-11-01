@@ -1,7 +1,5 @@
 """Browse selection through a real background stitch and saved image."""
 
-import re
-
 import cv2
 import numpy as np
 from PIL import Image
@@ -37,7 +35,7 @@ def test_panorama_selection_folder_picker_and_real_stitch(live_server, page, tmp
     cards = [page.locator(f'.grid-card[data-id="{pid}"]') for pid in ids]
     cards[0].click(button="right")
     item = page.locator(".vireo-ctx-menu").get_by_text("Create Panorama…", exact=True)
-    expect(item).to_have_class(re.compile("vireo-ctx-disabled"))
+    expect(item).to_have_count(0)
     page.keyboard.press("Escape")
     page.evaluate("pageModules.selection.clearSelection()")
     for card in cards:
