@@ -359,3 +359,28 @@ def test_a_failed_rollback_does_not_hide_the_failure(db, monkeypatch, caplog):
     monkeypatch.setattr(db.conn, "rollback", real_rollback)
     db.rollback()
     assert _committed(db) == []
+
+
+def test_a_joining_unit_leaves_a_callers_transaction_to_the_caller(db):
+    # ``join=True`` (a service callable from an unconverted owner): inside a
+    # transaction someone else began it is a savepoint and never commits.
+    db.begin_immediate()
+    _write(db, "caller")
+    with db.transaction(immediate=True, join=True):
+        _write(db, "service")
+    assert db.in_transaction
+    assert _committed(db) == []
+    with pytest.raises(RuntimeError), db.transaction(immediate=True, join=True):
+        _write(db, "failed")
+        raise RuntimeError("boom")
+    assert db.in_transaction
+    db.commit()
+    assert _committed(db) == ["caller", "service"]
+
+
+def test_a_joining_unit_with_nothing_open_owns_its_transaction(db):
+    with db.transaction(immediate=True, join=True):
+        assert _writer_lock_is_held(db)
+        _write(db, "own")
+    assert not db.in_transaction
+    assert _committed(db) == ["own"]

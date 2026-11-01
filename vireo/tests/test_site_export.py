@@ -178,6 +178,7 @@ def test_album_definitions_respect_location_export_option(tmp_path, monkeypatch,
 def test_site_export_applies_saved_crop(tmp_path, monkeypatch):
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     db.set_photo_edit_recipe(meta['p1'], {'crop': {'x': 0, 'y': 0, 'w': 0.5, 'h': 1}})
+    db.commit()
     job = _run_export(app, tmp_path / 'export')
     assert job['status'] == 'completed', job
     output = Path(job['result']['destination'])
@@ -198,6 +199,7 @@ def test_export_metadata_is_consistent_when_workspace_changes_during_capture(tmp
     ]))
     db.commit()
     db.set_photo_edit_recipe(pid, {'crop': {'x': 0, 'y': 0, 'w': 0.5, 'h': 1}})
+    db.commit()
     db.conn.execute('UPDATE photos SET latitude = 10, longitude = 20, exif_data = ? WHERE id = ?',
                     (json.dumps({'XMP': {'Title': 'Original title'}}), pid))
     db.conn.commit()

@@ -247,6 +247,7 @@ def test_species_tools_preview_apply_and_stale_provenance(mcp, app_and_db):
     app, _ = app_and_db
     _seed_encounter_cache(app, db, [1, 2, 3])
     db.photo_review.set_flag(1, "flagged")
+    db.commit()
     provenance = {"method": "direct_visual", "reviewer": "Test agent", "reason": "Visible plumage"}
     preview = call(server, "preview_species_assignment", photo_ids=[1], species="Robin", provenance=provenance)
     assert db.species_provenance.assignments(1) == []

@@ -100,6 +100,7 @@ def outsider(db):
 
 def test_update_photo_rating_writes_and_commits(db, photos):
     db.photo_review.set_rating(photos[0], 4)
+    db.commit()
     assert not db.conn.in_transaction
     assert _column(db, photos[0], "rating") == 4
     assert _column(db, photos[1], "rating") == 0
@@ -111,11 +112,13 @@ def test_update_photo_rating_rejects_photo_outside_workspace(db, outsider):
         match=f"Photo {outsider} does not belong to the active workspace",
     ):
         db.photo_review.set_rating(outsider, 5)
+        db.commit()
     assert _column(db, outsider, "rating") == 0
 
 
 def test_update_photo_rating_skips_check_when_asked(db, outsider):
     db.photo_review.set_rating(outsider, 3, verify_workspace=False)
+    db.commit()
     assert _column(db, outsider, "rating") == 3
 
 
@@ -123,13 +126,16 @@ def test_update_photo_rating_without_workspace(db, photos):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
         db.photo_review.set_rating(photos[0], 2)
+        db.commit()
     # The unverified path never needs the active workspace.
     db.photo_review.set_rating(photos[0], 2, verify_workspace=False)
+    db.commit()
     assert _column(db, photos[0], "rating") == 2
 
 
 def test_batch_update_photo_rating_writes_all_and_commits(db, photos):
     db.photo_review.set_ratings(photos[:2], 5)
+    db.commit()
     assert not db.conn.in_transaction
     assert [_column(db, pid, "rating") for pid in photos] == [5, 5, 0]
 
@@ -137,6 +143,7 @@ def test_batch_update_photo_rating_writes_all_and_commits(db, photos):
 def test_batch_update_photo_rating_empty_is_a_noop(db, photos):
     db.set_active_workspace(None)
     db.photo_review.set_ratings([], 5)
+    db.commit()
     assert not db.conn.in_transaction
     assert [_column(db, pid, "rating") for pid in photos] == [0, 0, 0]
 
@@ -144,8 +151,10 @@ def test_batch_update_photo_rating_empty_is_a_noop(db, photos):
 def test_batch_update_photo_rating_verifies_before_writing(db, photos, outsider):
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
         db.photo_review.set_ratings([photos[0], outsider], 4)
+        db.commit()
     assert _column(db, photos[0], "rating") == 0
     db.photo_review.set_ratings([photos[0], outsider], 4, verify_workspace=False)
+    db.commit()
     assert _column(db, photos[0], "rating") == 4
     assert _column(db, outsider, "rating") == 4
 
@@ -155,6 +164,7 @@ def test_batch_update_photo_rating_chunks(db, monkeypatch):
     ids = _add_photos(db, folder_id, 5)
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
     db.photo_review.set_ratings(ids, 1)
+    db.commit()
     assert [_column(db, pid, "rating") for pid in ids] == [1] * 5
 
 
@@ -166,10 +176,10 @@ def test_batch_update_photo_rating_rolls_back_partial_chunks(db, monkeypatch):
         "CREATE TEMP TRIGGER no_rating BEFORE UPDATE OF rating ON photos "
         f"WHEN NEW.id = {ids[2]} BEGIN SELECT RAISE(ABORT, 'blocked'); END"
     )
-    with pytest.raises(sqlite3.IntegrityError, match="blocked"):
+    with pytest.raises(sqlite3.IntegrityError, match="blocked"), db.transaction():
         db.photo_review.set_ratings(ids, 3)
     assert not db.conn.in_transaction
-    # The first two chunks were written, then rolled back.
+    # The first two chunks were written, then rolled back with the unit.
     assert [_column(db, pid, "rating") for pid in ids] == [0, 0, 0]
 
 
@@ -178,12 +188,13 @@ def test_batch_update_photo_rating_rolls_back_partial_chunks(db, monkeypatch):
 
 def test_update_photo_flag_writes_and_commits(db, photos):
     db.photo_review.set_flag(photos[0], "flagged")
+    db.commit()
     assert not db.conn.in_transaction
     assert _column(db, photos[0], "flag") == "flagged"
 
 
-def test_update_photo_flag_can_leave_commit_to_caller(db, photos):
-    db.photo_review.set_flag(photos[0], "rejected", _commit=False)
+def test_update_photo_flag_leaves_commit_to_caller(db, photos):
+    db.photo_review.set_flag(photos[0], "rejected")
     assert db.conn.in_transaction
     assert _column(db, photos[0], "flag") == "none"
     db.conn.commit()
@@ -193,13 +204,16 @@ def test_update_photo_flag_can_leave_commit_to_caller(db, photos):
 def test_update_photo_flag_rejects_photo_outside_workspace(db, outsider):
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
         db.photo_review.set_flag(outsider, "flagged")
+        db.commit()
     assert _column(db, outsider, "flag") == "none"
     db.photo_review.set_flag(outsider, "flagged", verify_workspace=False)
+    db.commit()
     assert _column(db, outsider, "flag") == "flagged"
 
 
 def test_batch_update_photo_flag_writes_all_and_commits(db, photos):
     db.photo_review.set_flags(photos[1:], "rejected")
+    db.commit()
     assert not db.conn.in_transaction
     assert [_column(db, pid, "flag") for pid in photos] == [
         "none", "rejected", "rejected",
@@ -209,13 +223,16 @@ def test_batch_update_photo_flag_writes_all_and_commits(db, photos):
 def test_batch_update_photo_flag_verifies_before_writing(db, photos, outsider):
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
         db.photo_review.set_flags([photos[0], outsider], "flagged")
+        db.commit()
     assert _column(db, photos[0], "flag") == "none"
     db.photo_review.set_flags([outsider], "flagged", verify_workspace=False)
+    db.commit()
     assert _column(db, outsider, "flag") == "flagged"
 
 
 def test_batch_update_photo_flag_empty_is_a_noop(db, photos):
     db.photo_review.set_flags([], "flagged")
+    db.commit()
     assert not db.conn.in_transaction
     assert [_column(db, pid, "flag") for pid in photos] == ["none"] * 3
 
@@ -231,6 +248,7 @@ def test_update_photo_wildlife_excluded_stores_a_bool(db, photos, value, stored)
     db.conn.execute("UPDATE photos SET wildlife_excluded = 7 WHERE id = ?", (photos[0],))
     db.conn.commit()
     db.update_photo_wildlife_excluded(photos[0], value)
+    db.commit()
     assert not db.conn.in_transaction
     assert _column(db, photos[0], "wildlife_excluded") == stored
     assert _column(db, photos[1], "wildlife_excluded") == 0
@@ -242,8 +260,10 @@ def test_update_photo_wildlife_excluded_rejects_photo_outside_workspace(db, outs
         match=f"Photo {outsider} does not belong to the active workspace",
     ):
         db.update_photo_wildlife_excluded(outsider, True)
+        db.commit()
     assert _column(db, outsider, "wildlife_excluded") == 0
     db.update_photo_wildlife_excluded(outsider, True, verify_workspace=False)
+    db.commit()
     assert _column(db, outsider, "wildlife_excluded") == 1
 
 
@@ -251,8 +271,10 @@ def test_update_photo_wildlife_excluded_without_workspace(db, photos):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
         db.update_photo_wildlife_excluded(photos[0], True)
+        db.commit()
     assert _column(db, photos[0], "wildlife_excluded") == 0
     db.update_photo_wildlife_excluded(photos[0], True, verify_workspace=False)
+    db.commit()
     assert _column(db, photos[0], "wildlife_excluded") == 1
 
 
@@ -262,14 +284,16 @@ def test_update_photo_wildlife_excluded_verifies_through_the_scope_guard(
     seen = []
     monkeypatch.setattr(db, "_verify_photo_in_workspace", seen.append)
     db.update_photo_wildlife_excluded(photos[0], True)
+    db.commit()
     assert seen == [photos[0]]
     db.update_photo_wildlife_excluded(photos[1], True, verify_workspace=False)
+    db.commit()
     assert seen == [photos[0]]
 
 
 def test_update_photo_wildlife_excluded_can_leave_the_write_uncommitted(db, photos):
     db.update_photo_wildlife_excluded(
-        photos[0], True, verify_workspace=False, _commit=False,
+        photos[0], True, verify_workspace=False,
     )
     assert db.conn.in_transaction
     assert _column(db, photos[0], "wildlife_excluded") == 0
@@ -279,6 +303,7 @@ def test_update_photo_wildlife_excluded_can_leave_the_write_uncommitted(db, phot
 
 def test_get_wildlife_excluded_states_reads_visible_photos(db, photos, outsider):
     db.update_photo_wildlife_excluded(photos[1], True)
+    db.commit()
     assert db.photo_review.wildlife_excluded_states(
         [photos[0], photos[1], outsider, 987_654]
     ) == {photos[0]: 0, photos[1]: 1}

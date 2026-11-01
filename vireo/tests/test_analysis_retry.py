@@ -157,7 +157,9 @@ def test_concurrent_flag_and_rating_survive_inference_and_refresh(retry_library,
     try:
         assert entered.wait(synchronization_timeout(5))
         db.photo_review.set_flag(ids[0], "flagged")
+        db.commit()
         db.photo_review.set_rating(ids[0], 5)
+        db.commit()
     finally:
         release.set()
         thread.join(synchronization_timeout(5))
@@ -628,7 +630,9 @@ def test_changed_source_with_same_runtime_never_remasks_retained_reviewed_boxes(
     if pinned:
         db.set_review_status(pred_id, db.require_workspace_id(), "accepted")
     db.photo_review.set_flag(pid, "rejected")
+    db.commit()
     db.photo_review.set_rating(pid, 2)
+    db.commit()
     before_boxes = [tuple(row) for row in db.conn.execute("SELECT * FROM detections WHERE photo_id=?", (pid,))]
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", ("b" * 64, pid))
     db.commit()
@@ -712,7 +716,9 @@ def test_partial_cancel_defers_busy_regroup_and_next_read_repairs_species_cache(
         lock.release()
         thread.join(synchronization_timeout(5))
     db.photo_review.set_flag(ids[0], "rejected")
+    db.commit()
     db.photo_review.set_rating(ids[0], 2)
+    db.commit()
     refreshed = load_results(str(tmp_path), ws, db=db)
     first = next(photo for photo in refreshed["photos"] if photo["id"] == ids[0])
     assert first["selection_eligible"] and first["analysis_status"] == "complete" and first["mask_path"]

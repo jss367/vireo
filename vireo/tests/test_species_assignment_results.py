@@ -32,7 +32,9 @@ def test_confirmation_contract_counts_identity_warnings_and_undo(app_and_db, mod
     kid = db.add_keyword('Blue Jay', is_species=True)
     db.tag_photo(ids[0], kid)
     db.photo_review.set_flag(ids[0], 'flagged')
+    db.commit()
     db.photo_review.set_flag(ids[1], 'rejected')
+    db.commit()
     db.detections.save(ids[1], [{'box': {'x': .1, 'y': .1, 'w': .2, 'h': .3},
                                'confidence': .01, 'category': 'animal'}], detector_model='test')
     body = {'species': 'blue jay', 'photo_ids': ids[:2], 'source_photo_ids': ids, 'add': True,
@@ -103,7 +105,9 @@ def test_bulk_distinct_and_overlapping_targets_one_undo_preserves_flags_and_subj
     if not cached:
         Path(path).unlink()
     db.photo_review.set_flag(ids[0], 'flagged')
+    db.commit()
     db.photo_review.set_flag(ids[1], 'rejected')
+    db.commit()
     dids = db.detections.save(ids[0], [
         {'box': {'x': x, 'y': .1, 'w': .2, 'h': .3}, 'confidence': .01, 'category': 'animal'}
         for x in (.1, .6)], detector_model='test')

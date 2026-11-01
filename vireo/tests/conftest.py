@@ -311,7 +311,9 @@ def app_and_db(tmp_path, monkeypatch):
                       file_size=3000, file_mtime=3.0, timestamp='2024-06-10T09:00:00')
 
     db.photo_review.set_rating(p1, 3)
+    db.commit()
     db.photo_review.set_rating(p3, 5)
+    db.commit()
 
     k1 = db.add_keyword('Cardinal')
     k2 = db.add_keyword('Sparrow')

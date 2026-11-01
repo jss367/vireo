@@ -14,6 +14,7 @@ def _seed_transition(live_server):
         db.tag_photo(pid, db.add_keyword(old, is_species=True))
     db.tag_photo(ids[1], db.add_keyword(other, is_species=True))
     db.photo_review.set_flag(ids[1], 'flagged')
+    db.commit()
     _write_single_burst_cache(live_server, ids, confirmed_species=old)
     path = _cache_path(live_server)
     with open(path) as handle:

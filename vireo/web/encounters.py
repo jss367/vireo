@@ -936,7 +936,7 @@ class _SpeciesConfirmation:
                     remove_names.append(old["name"])
             for old_name in remove_names:
                 queue_keyword_remove(
-                    self.db, pid, old_name, workspace_id=ws_id, _commit=False,
+                    self.db, pid, old_name, workspace_id=ws_id,
                 )
 
     def tag_new_species(self, ws_id: int) -> None:
@@ -944,7 +944,7 @@ class _SpeciesConfirmation:
             self.db.tag_photo(pid, cast(int, self.kid), source="manual", _commit=False,
                               provenance=self.provenance, _record_provenance=True)
             queue_keyword_add(
-                self.db, pid, self.species, workspace_id=ws_id, _commit=False,
+                self.db, pid, self.species, workspace_id=ws_id,
             )
 
         if self.provenance is not None and not self.remove_mode and not self.preserve_existing_provenance:

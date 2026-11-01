@@ -43,6 +43,7 @@ def test_manual_choice_survives_reprocessing_and_preserves_edits(db, subject_pho
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     recipe = db.set_photo_edit_recipe(photo_id, {"crop": {"x": .2, "y": .2, "w": .5, "h": .5}, "adjustments": {"exposure": 1.1}})
+    db.commit()
     select_primary(db, photo_id, ids[0])
     analyze_photo(db, photo_id, path, force=True)
     assert payload(db, photo_id)["primary_detection_id"] == ids[0]

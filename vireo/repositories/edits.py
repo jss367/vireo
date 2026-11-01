@@ -87,7 +87,7 @@ class EditsRepository:
         return out
 
     def set_photo_recipe(
-        self, photo_id: int, recipe: Mapping[str, Any] | str | None, _commit: bool = True,
+        self, photo_id: int, recipe: Mapping[str, Any] | str | None,
     ) -> dict[str, Any] | None:
         """Set or clear a photo's edit recipe; see ``Database.set_photo_edit_recipe``."""
         from edit_recipe import copy_recipe, recipe_to_json
@@ -97,8 +97,6 @@ class EditsRepository:
                 "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
                 (photo_id,),
             )
-            if _commit:
-                self.conn.commit()
             return None
         self.conn.execute(
             """INSERT INTO photo_edit_recipes (photo_id, recipe_json, updated_at)
@@ -108,8 +106,6 @@ class EditsRepository:
                    updated_at = excluded.updated_at""",
             (photo_id, recipe_json),
         )
-        if _commit:
-            self.conn.commit()
         return copy_recipe(recipe_json)
 
     def clear_photo_recipe(self, photo_id: int) -> bool:
@@ -118,7 +114,6 @@ class EditsRepository:
             "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
             (photo_id,),
         )
-        self.conn.commit()
         return cur.rowcount > 0
 
     # -- edit presets (global reusable development settings) -------------------

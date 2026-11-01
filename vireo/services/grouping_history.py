@@ -671,8 +671,8 @@ def apply_grouping_photo_edit(
     flag_items = payload.get("flag_items", []) if (payload.get("photo_edit") or {}).get("action_type") != "flag" else []
     for item in flag_items:
         value = item["old_value" if undo else "new_value"]
-        db.photo_review.set_flag(item["photo_id"], value, _commit=False)
-        db.queue_flag_change_if_enabled(item["photo_id"], value, _commit=False)
+        db.photo_review.set_flag(item["photo_id"], value)
+        db.queue_flag_change_if_enabled(item["photo_id"], value)
         db.photo_review.restore_flag_attribution_history(entry["id"], item["photo_id"], undo=undo)
     change = payload.get("photo_edit")
     if not change:
@@ -682,8 +682,8 @@ def apply_grouping_photo_edit(
         pid = item["photo_id"]
         if action == "flag":
             value = item["old_value" if undo else "new_value"]
-            db.photo_review.set_flag(pid, value, _commit=False)
-            db.queue_flag_change_if_enabled(pid, value, _commit=False)
+            db.photo_review.set_flag(pid, value)
+            db.queue_flag_change_if_enabled(pid, value)
             db.photo_review.restore_flag_attribution_history(entry["id"], pid, undo=undo)
             continue
         if action not in ("keyword_add", "species_replace"):
@@ -697,11 +697,11 @@ def apply_grouping_photo_edit(
         for kid in remove_ids:
             db.untag_photo(pid, kid, _commit=False)
             name = db.edit_history.keyword_name(kid)
-            if name and db.remove_pending_changes(pid, 'keyword_add', name, _commit=False) == 0:
-                db.queue_change(pid, 'keyword_remove', name, _commit=False)
+            if name and db.remove_pending_changes(pid, 'keyword_add', name) == 0:
+                db.queue_change(pid, 'keyword_remove', name)
         for kid in add_ids:
             db.tag_photo(pid, kid, source='manual', _commit=False)
             name = db.edit_history.keyword_name(kid)
-            if name and db.remove_pending_changes(pid, 'keyword_remove', name, _commit=False) == 0:
-                db.queue_change(pid, 'keyword_add', name, _commit=False)
+            if name and db.remove_pending_changes(pid, 'keyword_remove', name) == 0:
+                db.queue_change(pid, 'keyword_add', name)
     db.species_provenance.replay_history(items, undo=undo)

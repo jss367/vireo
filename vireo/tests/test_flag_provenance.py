@@ -197,6 +197,7 @@ def test_flag_changed_without_history_hides_a_stale_note(app_and_db):
     client.post(f"/api/photos/{pid}/flag", json={"flag": "rejected", "source": "agent", "reason": "soft"})
     # The pipeline's group apply writes flags through the repository, not the service.
     db.photo_review.set_flag(pid, "flagged")
+    db.commit()
     detail = client.get(f"/api/photos/{pid}").get_json()
     assert detail["flag"] == "flagged"
     assert detail["flag_note"] is None
@@ -339,6 +340,7 @@ def test_flag_writes_require_an_explicit_flag(app_and_db, path, extra):
     client = app.test_client()
     pid = _photo(db)["id"]
     db.photo_review.set_flag(pid, "flagged")
+    db.commit()
     url = path.format(pid=pid)
     body = {k: v for k, v in extra.items()}
     if "photo_ids" in body:

@@ -30,6 +30,7 @@ def test_mixed_species_evidence_reload_and_flags(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     db.photo_review.set_flag(1, 'flagged')
+    db.commit()
     confirm(client, 'Robin', provenance={'method': 'direct_visual', 'reviewer': 'Reviewer',
                                       'evidence_source': 'Visible plumage'})
     confirm(client, 'Mallard', provenance={'method': 'adjacent_frames', 'supporting_photo_ids': [2],
@@ -312,7 +313,7 @@ def test_photo_association_moves_preserve_evidence(db, tmp_path, operation, exis
         db._apply_winner_loser_merge(survivor, [losing])
         assert db.photos.get(losing)['flag'] == 'rejected'
     else:
-        db.queue_change(losing, 'keyword_add', 'Mallard', _commit=False)
+        db.queue_change(losing, 'keyword_add', 'Mallard')
         db.moves_merge.reconcile_conflicting_keyword_edits(losing, survivor)
     db.commit()
     copied = db.species_provenance.assignments(survivor)[0]

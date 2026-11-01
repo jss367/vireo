@@ -308,7 +308,9 @@ def test_merge_keyword_into_retargets_pending_and_curation_through_the_facade(
     db.tag_photo(p0, src)
     db.tag_photo(p1, dst)
     db.queue_change(p0, "keyword_add", "Egret", workspace_id=ws)
+    db.commit()
     db.queue_change(p1, "keyword_remove", "Egret", workspace_id=ws)
+    db.commit()
     highlights = _spy(monkeypatch, db, "rename_species_highlights_species")
     prefs = _spy(monkeypatch, db, "rename_photo_preferences_species")
 
@@ -596,7 +598,7 @@ def test_accept_prediction_tags_manual_and_queues_add_through_the_facade(
     kid = result["keyword_id"]
     assert added == [(("Robin",), {"is_species": True, "_commit": False})]
     assert tags == [((p0, kid), {"source": "manual", "_commit": False})]
-    assert queued == [((p0, "keyword_add", "Robin"), {"_commit": False})]
+    assert queued == [((p0, "keyword_add", "Robin"), {})]
     assert statuses == [((pid, "accepted"), {"_commit": False})]
     assert result["accepted_prediction_ids"] == [pid]
     assert result["affected"] == [{
@@ -695,6 +697,7 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     db.tag_photo(p0, jay)
     db.tag_photo(p1, wren)
     db.queue_change(p1, "keyword_add", "Wren", workspace_id=ws)
+    db.commit()
     db.conn.execute(
         "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
         "VALUES (?, 'Jay', ?, 1)", (ws, p0),
@@ -715,15 +718,15 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     assert r1["affected"][0]["old_species"] == ["Wren"]
     assert len(configs) == 2
     assert cancels == [
-        ((p0, "keyword_add", "Jay"), {"_commit": False}),
-        ((p1, "keyword_add", "Wren"), {"_commit": False}),
+        ((p0, "keyword_add", "Jay"), {}),
+        ((p1, "keyword_add", "Wren"), {}),
     ]
     # p0 had no pending add to cancel, so its removal is queued; p1's
     # still-pending add cancels out instead.
     assert queued == [
-        ((p0, "keyword_remove", "Jay"), {"_commit": False}),
-        ((p0, "keyword_add", "Robin"), {"_commit": False}),
-        ((p1, "keyword_add", "Robin"), {"_commit": False}),
+        ((p0, "keyword_remove", "Jay"), {}),
+        ((p0, "keyword_add", "Robin"), {}),
+        ((p1, "keyword_add", "Robin"), {}),
     ]
     assert highlights[0] == (("Jay", "Robin", [(p0, ws)]), {"_commit": False})
     assert prefs[0] == (("Jay", "Robin", [(p0, ws)]), {"_commit": False})

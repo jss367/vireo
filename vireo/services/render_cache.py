@@ -33,19 +33,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def queue_edit_recipe_sync(
-    db: Database, photo_id: int, recipe_json: str | None, *, _commit: bool = True,
-) -> None:
-    """Queue the current non-destructive edit recipe for XMP sync."""
+def queue_edit_recipe_sync(db: Database, photo_id: int, recipe_json: str | None) -> None:
+    """Queue the current non-destructive edit recipe for XMP sync (no commit)."""
     db.remove_pending_changes(
-        photo_id, "edit_recipe", workspace_id=db.require_workspace_id(), _commit=False,
+        photo_id, "edit_recipe", workspace_id=db.require_workspace_id(),
     )
     db.queue_change(
         photo_id, "edit_recipe", recipe_json or "",
-        workspace_id=db.require_workspace_id(), _commit=False,
+        workspace_id=db.require_workspace_id(),
     )
-    if _commit:
-        db.commit()
 
 
 def _drop_stale_thumbnails(db: Database, pid: int, thumb_dir: str) -> None:

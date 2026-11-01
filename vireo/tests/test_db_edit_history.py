@@ -128,6 +128,7 @@ def test_record_edit_clears_only_this_workspaces_redo_stack(db, pids):
     second = _rating_edit(db, pids[0], 1, 2)
     foreign_undone = _raw_edit(db, "rating", "3", workspace_id=other, undone=1)
     db.photo_review.set_rating(pids[0], 2)
+    db.commit()
     undo_last_edit(db)
     assert _history_rows(db, "id = ?", (second,))[0]["undone"] == 1
 
@@ -267,6 +268,7 @@ def test_undo_returns_none_when_only_non_undoable_entries(db, pids):
 
 def test_undo_skips_non_undoable_and_marks_entry_undone(db, pids):
     db.photo_review.set_rating(pids[0], 4)
+    db.commit()
     target = _rating_edit(db, pids[0], 2, 4, desc="the rating")
     for action in ("prediction_reject", "discard", "location_set",
                    "location_gps_review", "prediction_reviewed",
@@ -296,6 +298,7 @@ def test_undo_picks_latest_and_redo_replays_oldest_first(db, pids):
     second = _raw_edit(db, "rating", "2", created_at="2024-01-02 00:00:00",
                        items=[(pids[0], "1", "2")])
     db.photo_review.set_rating(pids[0], 2)
+    db.commit()
 
     assert undo_last_edit(db)["id"] == second
     assert undo_last_edit(db)["id"] == first
@@ -399,15 +402,15 @@ def test_field_setters_route_through_facade(db, pids, monkeypatch):
         ("PhotoLabelRepository.remove", (pid,), {}),
         ("update_photo_wildlife_excluded", (pid, False), {"verify_workspace": False}),
         # Flag undo batches both writes under one transaction, so each call
-        # carries ``_commit=False`` and the transaction commits at the end.
+        # runs inside the replay's unit of work, which commits at the end.
         ("PhotoReviewRepository.set_flag", (pid, "none"),
-         {"verify_workspace": False, "_commit": False}),
-        ("queue_flag_change_if_enabled", (pid, "none"), {"_commit": False}),
+         {"verify_workspace": False}),
+        ("queue_flag_change_if_enabled", (pid, "none"), {}),
     ]
     assert calls == [
         ("PhotoReviewRepository.set_flag", (pid, "flagged"),
-         {"verify_workspace": False, "_commit": False}),
-        ("queue_flag_change_if_enabled", (pid, "flagged"), {"_commit": False}),
+         {"verify_workspace": False}),
+        ("queue_flag_change_if_enabled", (pid, "flagged"), {}),
         ("update_photo_wildlife_excluded", (pid, True), {"verify_workspace": False}),
         ("PhotoLabelRepository.set", (pid, "red"), {}),
         ("set_photo_edit_recipe", (pid, '{"exposure": 1}'), {"verify_workspace": False}),

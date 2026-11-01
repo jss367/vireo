@@ -616,6 +616,7 @@ def test_enum_shortcuts_preserve_advanced_root(live_server, page, mode, field, v
     photo_id = live_server["data"]["photos"][0]
     if field == "flag":
         db.photo_review.set_flag(photo_id, value)
+        db.commit()
     else:
         db.photo_labels.set(photo_id, value)
         db.commit()

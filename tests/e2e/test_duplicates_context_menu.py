@@ -17,6 +17,7 @@ def test_duplicate_image_reveal_targets_clicked_copy(live_server, page, tmp_path
     )
     if resolved:
         db.photo_review.set_flag(losers[0], "rejected")
+        db.commit()
         row = db.conn.execute(
             "SELECT result FROM job_history WHERE id='duplicate-scan-bulk-test'"
         ).fetchone()

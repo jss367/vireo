@@ -158,6 +158,7 @@ def test_selected_subject_cards_preserve_only_confirmed_decisions(comparison_lib
         import config as cfg
         _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
     db.photo_review.flag_ranked_candidate(pids[0])
+    db.commit()
     service = PhotoReviewService(db)
     service.set_flag(pids[1], "flagged")
     service.set_flag(pids[2], "rejected")

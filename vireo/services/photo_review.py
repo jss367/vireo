@@ -75,7 +75,11 @@ class PhotoReviewService:
         return self._write_ratings(photo_ids, rating, is_batch=True)
 
     def _write_ratings(self, photo_ids: Sequence[int], rating: int, *, is_batch: bool) -> int:
-        with self.db.photo_review.review_write() as owns_transaction:
+        # The rating, its sidecar work and its undo entry are one unit. Inside
+        # a caller's unit or transaction it is a savepoint that leaves the
+        # commit (and the history prune) to that caller.
+        owns_transaction = not self.db.in_transaction
+        with self.db.transaction(immediate=True, join=True):
             photos = self.db.photos.get_by_ids(photo_ids)
             old_values = {pid: photos[pid]["rating"] for pid in photo_ids if pid in photos}
             if not old_values:
@@ -83,9 +87,9 @@ class PhotoReviewService:
                     raise ValueError("Photo not in active workspace")
                 return 0
             valid_ids = list(old_values)
-            self.db.photo_review.set_ratings(valid_ids, rating, _commit=False)
+            self.db.photo_review.set_ratings(valid_ids, rating)
             for pid in valid_ids:
-                self.db.queue_change(pid, "rating", str(rating), _commit=False)
+                self.db.queue_change(pid, "rating", str(rating))
             description = f"Set rating to {rating}"
             if is_batch:
                 description += f" on {len(photo_ids)} photos"
@@ -119,7 +123,8 @@ class PhotoReviewService:
         changed, used only for the user-visible count.
         """
         ids = list(keepers) + list(rejects) + list(unflag)
-        with self.db.photo_review.flag_write() as owns_transaction:
+        owns_transaction = not self.db.in_transaction
+        with self.db.transaction(immediate=True, join=True):
             photos = self.db.photos.get_by_ids(ids)
             if any(pid not in photos for pid in ids):
                 raise ValueError("Photo not in active workspace")
@@ -137,8 +142,8 @@ class PhotoReviewService:
                 (list(keepers), "flagged"), (list(rejects), "rejected"), (list(unflag), "none"),
             ):
                 for pid in photo_ids:
-                    self.db.photo_review.set_flag(pid, flag, _commit=False)
-                    self.db.queue_flag_change_if_enabled(pid, flag, _commit=False)
+                    self.db.photo_review.set_flag(pid, flag)
+                    self.db.queue_flag_change_if_enabled(pid, flag)
                     items.append({"photo_id": pid, "old_value": old[pid], "new_value": flag})
                 if photo_ids:
                     self.db.photo_review.set_current_flag_note(photo_ids, flag, summary)
@@ -159,7 +164,8 @@ class PhotoReviewService:
         observed_flags: dict[int, str] | None = None, observed_workspace_id: int | None = None,
         description: str | None = None,
     ) -> int:
-        with self.db.photo_review.flag_write() as owns_transaction:
+        owns_transaction = not self.db.in_transaction
+        with self.db.transaction(immediate=True, join=True):
             # Database caches its workspace when opened. Activation in another
             # request must be checked from persisted state under this writer lock.
             if observed_workspace_id is not None and (
@@ -182,9 +188,9 @@ class PhotoReviewService:
             description = description or flag_description(
                 flag, count=len(photo_ids) if is_batch else None, source=source, reason=reason,
             )
-            self.db.photo_review.set_flags(valid_ids, flag, _commit=False)
+            self.db.photo_review.set_flags(valid_ids, flag)
             for pid in valid_ids:
-                self.db.queue_flag_change_if_enabled(pid, flag, _commit=False)
+                self.db.queue_flag_change_if_enabled(pid, flag)
             edit_id = self.db.record_edit(
                 "flag", description, flag,
                 [{"photo_id": pid, "old_value": old, "new_value": flag} for pid, old in old_values.items()],

@@ -114,6 +114,7 @@ def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_pa
     if background:
         recipe, _ = _protected_background_recipe(tmp_path, pid, (144, 96))
     db.set_photo_edit_recipe(pid, recipe)
+    db.commit()
     client = app.test_client()
     vireo_dir = Path(app.config['THUMB_CACHE_DIR']).parent
     monkeypatch.setattr(subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0))
@@ -213,6 +214,7 @@ def test_exports_use_promoted_camera_fields_without_full_exif_or_metadata_embedd
     db.conn.commit()
     recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 85}}
     db.set_photo_edit_recipe(pid, recipe)
+    db.commit()
     detail_photo = db.photos.get(pid)
     bulk_photo = db.photos.get_by_ids([pid])[pid]
     assert resolve_profile(bulk_photo)['source'] == 'camera'

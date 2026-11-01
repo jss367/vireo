@@ -1447,16 +1447,18 @@ def create_photos_blueprint(
             return photo_not_found_error(legacy_error="not found")
         old_value = "1" if old["wildlife_excluded"] else "0"
         new_value = "1" if excluded else "0"
-        try:
-            db.update_photo_wildlife_excluded(photo_id, excluded)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        db.record_edit(
-            "wildlife_excluded",
-            "Excluded from wildlife classification" if excluded else "Included in wildlife classification",
-            new_value,
-            [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
-        )
+        with db.transaction():
+            try:
+                db.update_photo_wildlife_excluded(photo_id, excluded)
+            except ValueError as e:
+                # The workspace check fails before any write.
+                return json_error(str(e), 403)
+            db.record_edit(
+                "wildlife_excluded",
+                "Excluded from wildlife classification" if excluded else "Included in wildlife classification",
+                new_value,
+                [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
+            )
         return jsonify({"ok": True, "wildlife_excluded": excluded})
 
     @blueprint.route("/api/photos/sharpness/regions", methods=["POST"])

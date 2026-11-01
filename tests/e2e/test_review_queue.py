@@ -30,7 +30,9 @@ def seed_queue(live_server, tmp_path):
         pids.append(pid)
         subjects.append(detections)
     db.photo_review.set_flag(pids[0], 'flagged')
+    db.commit()
     db.photo_review.set_flag(pids[1], 'rejected')
+    db.commit()
     collection = db.collections.add('Inspection queue test', json.dumps([{'field': 'photo_ids', 'value': pids}]))
     db.commit()
     return pids, subjects, collection
@@ -104,6 +106,7 @@ def test_review_queue_missing_pixels_and_concurrent_flags_are_preserved(page, li
     expect(page.locator('#rqFull')).to_be_visible()
     assert live_server['db'].photos.get(pids[0])['flag'] == 'flagged'
     live_server['db'].photo_review.set_flag(pids[0], 'rejected')
+    live_server["db"].commit()
     page.locator('[data-rq-flag="flagged"]').click()
     expect(page.locator('#rqFlag')).to_contain_text('flag changed elsewhere')
     assert live_server['db'].photos.get(pids[0])['flag'] == 'rejected'

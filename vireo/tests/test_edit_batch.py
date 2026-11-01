@@ -60,6 +60,7 @@ def test_relative_api_preserves_individual_edits_and_undo_redo(app_and_db):
         originals[pid] = db.set_photo_edit_recipe(pid, {
             "rotation": 90 * index, "adjustments": {"exposure": index - 1, "contrast": 10 * index},
         })
+        db.commit()
     response = client.post('/api/photos/edit-recipe/apply', json={
         "photo_ids": ids + [ids[0], 999999], "recipe": {"adjustments": {"exposure": .3}},
         "fields": ["adjustments.exposure"], "mode": "relative",
@@ -86,6 +87,7 @@ def test_partial_paste_can_reset_without_overwriting_other_settings(app_and_db):
     ids = [photo["id"] for photo in db.photos.list_page()]
     for pid in ids:
         db.set_photo_edit_recipe(pid, {"rotation": 90, "adjustments": {"exposure": 1, "saturation": 10}})
+        db.commit()
     response = client.post('/api/photos/edit-recipe/apply', json={
         "photo_ids": ids, "recipe": {}, "fields": ["adjustments.exposure"],
     })
@@ -110,6 +112,7 @@ def test_summary_reports_mixed_neutral_and_common_values(app_and_db):
     app, db = app_and_db
     ids = [photo["id"] for photo in db.photos.list_page()]
     db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
+    db.commit()
     response = app.test_client().post('/api/photos/edit-recipe/summary', json={"photo_ids": ids})
     assert response.status_code == 200
     assert response.json["values"]["adjustments.exposure"] is None
@@ -161,6 +164,7 @@ def test_summary_bulk_loads_visible_recipes_without_full_metadata(app_and_db):
     ids = [photo_ingest.add_photo(db, folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
                         file_size=1, file_mtime=1) for i in range(1601)]
     db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
+    db.commit()
     original_ws = db._active_workspace_id
     other_ws = db.create_workspace('Other photos')
     db.set_active_workspace(other_ws)
@@ -168,6 +172,7 @@ def test_summary_bulk_loads_visible_recipes_without_full_metadata(app_and_db):
     hidden_id = photo_ingest.add_photo(db, folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
                              file_size=1, file_mtime=1)
     db.set_photo_edit_recipe(hidden_id, {"adjustments": {"contrast": 90}})
+    db.commit()
     db.set_active_workspace(original_ws)
     from db import Database
     from flask import g
@@ -261,6 +266,7 @@ def test_batch_slider_uses_chunked_reads_and_constant_commits(app_and_db):
     ids = [photo_ingest.add_photo(db, folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
                         file_size=1, file_mtime=1) for i in range(1601)]
     db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
+    db.commit()
     original_ws = db._active_workspace_id
     db.set_active_workspace(db.create_workspace('Hidden edits'))
     hidden_folder = workspace_folders.add_folder(db, '/hidden-edit-selection')

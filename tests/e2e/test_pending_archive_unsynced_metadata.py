@@ -48,6 +48,7 @@ def test_pending_folder_offers_nas_transfer_instead_of_another_local_copy(
     folder_id = db.photos.get(photo_ids[0])["folder_id"]
     if sync_first:
         db.queue_change(photo_ids[0], "rating", "3", workspace_id=workspace_id)
+        db.commit()
     assert page.request.post(
         f"{live_server['url']}/api/workspaces/{workspace_id}/activate"
     ).ok
@@ -167,7 +168,9 @@ def test_banner_offers_to_sync_metadata_before_sending(live_server, page, tmp_pa
     expect(banner).not_to_contain_text("not written to their sidecars")
 
     db.queue_change(photo_ids[0], "keyword_add", "Osprey", workspace_id=workspace_id)
+    db.commit()
     db.queue_change(photo_ids[1], "rating", "3", workspace_id=workspace_id)
+    db.commit()
 
     # The banner polls every 5s; the count has to name the photos, not the
     # queued rows, because "2 photos" is what the sentence claims.
@@ -214,7 +217,9 @@ def test_banner_says_which_edits_this_sync_will_not_write(live_server, page, tmp
     sibling = db.create_workspace("Sibling")
 
     db.queue_change(photo_ids[0], "keyword_add", "Osprey", workspace_id=workspace_id)
+    db.commit()
     db.queue_change(photo_ids[1], "rating", "3", workspace_id=sibling)
+    db.commit()
 
     assert page.request.post(
         f"{live_server['url']}/api/workspaces/{workspace_id}/activate"

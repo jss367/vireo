@@ -174,9 +174,9 @@ def apply_group_changes(db: Database, cached: JsonDict, group: JsonDict) -> Json
             # For old == target the UPDATE is a no-op write that still
             # fires the invalidation trigger, and set_current_flag_note
             # republishes the explicit note.
-            db.photo_review.set_flag(pid, target, _commit=False)
+            db.photo_review.set_flag(pid, target)
             if old != target:
-                db.queue_flag_change_if_enabled(pid, target, _commit=False)
+                db.queue_flag_change_if_enabled(pid, target)
             attributed_ids.append(pid)
             items.append({"photo_id": pid, "old_value": old, "new_value": target})
         if attributed_ids:

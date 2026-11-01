@@ -6,6 +6,8 @@ import sqlite3
 import types
 from pathlib import Path
 
+from unit_of_work import UnitOfWork
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -39,8 +41,8 @@ def test_no_matching_batch_ids_preserves_redo_and_avoids_writes():
     ns = load("services/photo_review.py", {"flag_description"}, {"PhotoReviewService"})
     writes = []
     db = types.SimpleNamespace(photos=types.SimpleNamespace(get_by_ids=lambda ids: {}),
-        photo_review=types.SimpleNamespace(set_flags=lambda *a: writes.append("flags"),
-                                          flag_write=lambda: contextlib.nullcontext(False)),
+        photo_review=types.SimpleNamespace(set_flags=lambda *a: writes.append("flags")),
+        in_transaction=False, transaction=lambda **kw: contextlib.nullcontext(),
         queue_flag_change_if_enabled=lambda *a, **kw: writes.append("queue"),
         record_edit=lambda *a, **kw: writes.append("history"))
     assert ns["PhotoReviewService"](db).set_flags([999], "flagged") == 0
@@ -112,6 +114,13 @@ def durable_fixture():
     class FakeDB:
         failed = False
         prunes = 0
+        _unit = UnitOfWork()
+        @property
+        def in_transaction(self):
+            return conn.in_transaction
+        def transaction(self, **options):
+            return self._unit.enter(conn, immediate=options.get("immediate", False),
+                                    retry_busy=False, join=options.get("join", False))
         @property
         def photo_review(self):
             return review_cls(conn, ws[0])
@@ -122,10 +131,8 @@ def durable_fixture():
             return {r["id"]: dict(r) for r in conn.execute(
                 "SELECT p.id,p.flag FROM photos p JOIN photo_workspace_visibility v "
                 "ON v.photo_id=p.id WHERE v.workspace_id=?", (ws[0],)) if r["id"] in ids}
-        def queue_flag_change_if_enabled(self, pid, flag, _commit=True):
+        def queue_flag_change_if_enabled(self, pid, flag):
             conn.execute("INSERT INTO invented_queue VALUES(?,?)", (pid, flag))
-            if _commit:
-                conn.commit()
         def record_edit(self, *a, **kw):
             assert kw["_commit"] is False
             if self.failed:

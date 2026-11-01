@@ -338,6 +338,7 @@ def test_gc_respects_references_history_and_grace(tmp_path, monkeypatch):
     )
     referenced = local_masks.snapshot_path(str(tmp_path), pid, mask["ref"])
     db.set_photo_edit_recipe(pid, _local_recipe(dict(mask)))
+    db.commit()
 
     # A second, unreferenced snapshot file: old enough to collect.
     orphan = local_masks.snapshot_path(str(tmp_path), pid, "0123456789ab")
@@ -358,6 +359,7 @@ def test_gc_respects_references_history_and_grace(tmp_path, monkeypatch):
 
     # Clearing the recipe keeps the ref alive through edit history.
     db.set_photo_edit_recipe(pid, None)
+    db.commit()
     history_rows = db.conn.execute(
         "SELECT COUNT(*) AS n FROM edit_history_items "
         "WHERE old_value LIKE '%' || ? || '%' OR new_value LIKE '%' || ? || '%'",

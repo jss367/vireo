@@ -44,6 +44,7 @@ def _flag(db, photo_id):
 def test_update_rating_writes_the_value(db):
     pid = _photo(db)
     db.photo_review.set_rating(pid, 4)
+    db.commit()
     assert _rating(db, pid) == 4
 
 
@@ -53,6 +54,7 @@ def test_update_rating_rejects_photo_outside_workspace(db):
     db.set_active_workspace(other)
     with pytest.raises(ValueError, match="does not belong"):
         db.photo_review.set_rating(pid, 2)
+        db.commit()
 
 
 def test_update_rating_skips_workspace_check_when_disabled(db):
@@ -60,6 +62,7 @@ def test_update_rating_skips_workspace_check_when_disabled(db):
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
     db.photo_review.set_rating(pid, 2, verify_workspace=False)
+    db.commit()
     assert _rating(db, pid) == 2
 
 
@@ -69,6 +72,7 @@ def test_update_rating_skips_workspace_check_when_disabled(db):
 def test_update_flag_writes_the_value(db):
     pid = _photo(db)
     db.photo_review.set_flag(pid, "flagged")
+    db.commit()
     assert _flag(db, pid) == "flagged"
 
 
@@ -78,6 +82,7 @@ def test_update_flag_rejects_photo_outside_workspace(db):
     db.set_active_workspace(other)
     with pytest.raises(ValueError, match="does not belong"):
         db.photo_review.set_flag(pid, "flagged")
+        db.commit()
 
 
 # -- batch --------------------------------------------------------------------
@@ -86,6 +91,7 @@ def test_update_flag_rejects_photo_outside_workspace(db):
 def test_batch_update_rating_writes_all(db):
     a, b = _photo(db, "a.jpg"), _photo(db, "b.jpg")
     db.photo_review.set_ratings([a, b], 5)
+    db.commit()
     assert _rating(db, a) == 5
     assert _rating(db, b) == 5
 
@@ -93,13 +99,16 @@ def test_batch_update_rating_writes_all(db):
 def test_batch_update_flag_writes_all(db):
     a, b = _photo(db, "a.jpg"), _photo(db, "b.jpg")
     db.photo_review.set_flags([a, b], "rejected")
+    db.commit()
     assert _flag(db, a) == "rejected"
     assert _flag(db, b) == "rejected"
 
 
 def test_batch_update_empty_input_is_a_no_op(db):
     db.photo_review.set_ratings([], 4)
+    db.commit()
     db.photo_review.set_flags([], "flagged")
+    db.commit()
 
 
 def test_batch_update_rating_rejects_photo_outside_workspace(db):
@@ -108,6 +117,7 @@ def test_batch_update_rating_rejects_photo_outside_workspace(db):
     db.set_active_workspace(other)
     with pytest.raises(ValueError, match="does not belong"):
         db.photo_review.set_ratings([a], 2)
+        db.commit()
 
 
 # -- structure ------------------------------------------------------------------
@@ -122,7 +132,7 @@ _REMOVED_PHOTO_REVIEW_WRAPPERS = (
 
 
 def test_photo_review_signatures_unchanged():
-    """``verify_workspace`` and the ``_commit=False`` handoff keep their defaults."""
+    """``verify_workspace`` keeps its default; no write takes a commit switch."""
     empty = inspect.Parameter.empty
     kw = inspect.Parameter.KEYWORD_ONLY
 
@@ -134,19 +144,19 @@ def test_photo_review_signatures_unchanged():
 
     assert params("set_rating") == [
         ("self", empty, False), ("photo_id", empty, False), ("rating", empty, False),
-        ("verify_workspace", True, True), ("_commit", True, True),
+        ("verify_workspace", True, True),
     ]
     assert params("set_ratings") == [
         ("self", empty, False), ("photo_ids", empty, False), ("rating", empty, False),
-        ("verify_workspace", True, True), ("_commit", True, True),
+        ("verify_workspace", True, True),
     ]
     assert params("set_flag") == [
         ("self", empty, False), ("photo_id", empty, False), ("flag", empty, False),
-        ("verify_workspace", True, True), ("_commit", True, True),
+        ("verify_workspace", True, True),
     ]
     assert params("set_flags") == [
         ("self", empty, False), ("photo_ids", empty, False), ("flag", empty, False),
-        ("verify_workspace", True, True), ("_commit", True, True),
+        ("verify_workspace", True, True),
     ]
 
 
@@ -175,8 +185,10 @@ def test_photo_review_follows_a_workspace_switch_between_accesses(db):
     assert db.photo_review.workspace_id == other
     with pytest.raises(ValueError, match="does not belong"):
         db.photo_review.set_rating(a, 2)
+        db.commit()
     db.set_active_workspace(home)
     db.photo_review.set_rating(a, 2)
+    db.commit()
     assert db.photos.get(a)["rating"] == 2
 
 

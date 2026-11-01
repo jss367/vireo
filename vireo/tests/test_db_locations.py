@@ -450,8 +450,10 @@ def test_has_pending_location_change_reads_across_workspaces(db, fid):
     pid = _photo(db, fid, "a.jpg")
     assert db.locations.has_pending_change(pid) is False
     db.queue_change(pid, "rating", "3")
+    db.commit()
     assert db.locations.has_pending_change(pid) is False
     db.queue_change(pid, "location", "effective")
+    db.commit()
     db.set_active_workspace(db.create_workspace("Other"))
     assert db.locations.has_pending_change(pid) is True
     db.set_active_workspace(None)
@@ -469,6 +471,7 @@ def test_queue_location_changes_backfill_commits_and_is_idempotent(db, fid):
     _link(db, a, kid)
     _link(db, b, kid)
     db.queue_change(a, "location", "effective")
+    db.commit()
 
     assert photo_locations.queue_location_changes_for_tagged_photos(db) == {
         "photos": 2, "queued": 1, "already_queued": 1,
@@ -495,8 +498,8 @@ def test_queue_location_changes_route_through_facade_queue_change(
     _link(db, a, kid)
     calls = []
 
-    def recorder(photo_id, change_type, value, workspace_id=None, _commit=True):
-        calls.append((photo_id, change_type, value, workspace_id, _commit))
+    def recorder(photo_id, change_type, value, workspace_id=None):
+        calls.append((photo_id, change_type, value, workspace_id))
         return photo_id == a
 
     monkeypatch.setattr(db, "queue_change", recorder)
@@ -504,8 +507,8 @@ def test_queue_location_changes_route_through_facade_queue_change(
         result = photo_locations.queue_location_changes_for_tagged_photos(db)
     ws = db._ws_id()
     assert calls == [
-        (a, "location", "effective", ws, False),
-        (b, "location", "effective", ws, False),
+        (a, "location", "effective", ws),
+        (b, "location", "effective", ws),
     ]
     assert result == {"photos": 2, "queued": 1, "already_queued": 1}
     assert "Queued 1 location change(s) for 2 located photo(s)" in caplog.text

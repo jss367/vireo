@@ -256,6 +256,7 @@ def test_highlights_picked_photos_show_flag_marker(live_server, page):
     _seed_quality_scores_and_species(db, data)
     picked_id = data["photos"][0]
     db.photo_review.set_flag(picked_id, "flagged")
+    db.commit()
 
     _goto_highlights(page, live_server["url"])
 

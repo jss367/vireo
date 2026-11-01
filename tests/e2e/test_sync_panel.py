@@ -183,6 +183,7 @@ def test_location_changes_are_grouped_with_plain_language_delta(
     for photo_id in photo_ids:
         db.set_photo_location(photo_id, tallahassee_id)
         db.queue_change(photo_id, "location", "effective")
+        db.commit()
 
     page.goto(f"{live_server['url']}/browse")
     page.evaluate("openSyncPreview()")
@@ -231,6 +232,7 @@ def test_location_without_gps_is_shown_as_added(live_server, page, tmp_path):
     db.conn.commit()
     db.set_photo_location(photo_id, reserve_id)
     db.queue_change(photo_id, "location", "effective")
+    db.commit()
 
     page.goto(f"{live_server['url']}/browse")
     page.evaluate("openSyncPreview()")
@@ -258,7 +260,9 @@ def test_rating_preview_responds_to_selected_sidecar_creator(
     photo_id = live_server["data"]["photos"][0]
     _make_photo_folders_accessible(live_server, tmp_path, [photo_id])
     db.queue_change(photo_id, "rating", "5")
+    db.commit()
     db.queue_change(photo_id, "keyword_add", "Raptor")
+    db.commit()
 
     page.goto(f"{live_server['url']}/browse")
     page.evaluate("openSyncPreview()")
@@ -298,8 +302,11 @@ def test_rating_preview_accounts_for_auto_included_keyword_pair(
     photo_id = live_server["data"]["photos"][0]
     _make_photo_folders_accessible(live_server, tmp_path, [photo_id])
     db.queue_change(photo_id, "rating", "5")
+    db.commit()
     db.queue_change(photo_id, "keyword_add", "Raptor")
+    db.commit()
     db.queue_change(photo_id, "keyword_remove", "Raptor")
+    db.commit()
 
     page.goto(f"{live_server['url']}/browse")
     page.evaluate("openSyncPreview()")

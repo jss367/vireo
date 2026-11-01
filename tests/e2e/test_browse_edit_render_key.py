@@ -49,6 +49,7 @@ def test_local_only_edit_changes_the_grid_thumbnail_url(live_server, page):
     )
 
     db.set_photo_edit_recipe(photo_id, _local_only_recipe(1.0))
+    db.commit()
     page.goto(live_server["url"] + "/browse")
     first = _grid_thumbnail_url(page, photo_id)
     assert _render_fingerprint(first), (
@@ -57,6 +58,7 @@ def test_local_only_edit_changes_the_grid_thumbnail_url(live_server, page):
     )
 
     db.set_photo_edit_recipe(photo_id, _local_only_recipe(-2.0))
+    db.commit()
     page.goto(live_server["url"] + "/browse")
     second = _grid_thumbnail_url(page, photo_id)
     assert _render_fingerprint(second) != _render_fingerprint(first), (

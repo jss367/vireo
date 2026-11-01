@@ -16,16 +16,15 @@ name, so a patch of ``Database.queue_change`` keeps reaching them; queue
 changes through it rather than :meth:`queue`. This repository owns the SQL.
 
 The active workspace is resolved lazily. Several of these methods only
-consult it once a row turns up (the staged sync scopes) or inside a
-``with conn:`` block (the sync claim), and the façade never resolved it
+consult it once a row turns up (the staged sync scopes or the sync
+claim), and the façade never resolved it
 earlier than that, so the repository takes the resolver
 (``Database._ws_id``) rather than an id and reads ``self.workspace_id`` at
 exactly the points the original code called ``self._ws_id()``. Methods that
 take an optional ``workspace_id`` fall back to it the same way.
 
-``_commit`` flags are carried through unchanged: ``_commit=False`` means the
-caller owns the transaction, and no method here commits unless the
-``Database`` method it backs did.
+No method here commits: the route, job or service that queues or retires
+a change owns the unit of work (``db.transaction()``).
 """
 
 import os
@@ -71,10 +70,6 @@ class SyncRepository:
     def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
-
-    def commit(self) -> None:
-        """Commit the connection's open transaction."""
-        self.conn.commit()
 
     def _chunks(self, values: Iterable[Any], size: int | None = None) -> Iterator[list[Any]]:
         size = self.chunk_size if size is None else size
@@ -334,9 +329,8 @@ class SyncRepository:
         change_type: str,
         value: str,
         workspace_id: int | None = None,
-        _commit: bool = True,
     ) -> str | None:
-        """Add a change to the sync queue, skipping redundant intents.
+        """Add a change to the sync queue, skipping redundant intents (no commit).
 
         See ``Database.queue_change``. Returns the inserted pending change
         token, or None if already queued.
@@ -396,29 +390,26 @@ class SyncRepository:
             "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) VALUES (?, ?, ?, ?, ?)",
             (photo_id, change_type, value, change_token, ws_id),
         )
-        if _commit:
-            self.conn.commit()
         return change_token
 
     def claim_for_sync(self, changes: Sequence[Mapping[str, Any]]) -> list[sqlite3.Row]:
         """Mark selected edits as possibly written and return surviving rows.
 
-        See ``pending_changes.claim_pending_changes_for_sync``. Commits (or rolls
-        back) through ``with conn:``.
+        See ``pending_changes.claim_pending_changes_for_sync``, whose unit of
+        work commits the claim. Does not commit.
         """
         claimed = {}
-        with self.conn:
-            for chunk in self._chunks(changes, size=400):
-                placeholders = ",".join("(?, ?)" for _ in chunk)
-                params = [part for c in chunk for part in (c["id"], c["change_token"] or "")]
-                rows = self.conn.execute(
-                    f"""UPDATE pending_changes SET sync_started = 1
-                        WHERE workspace_id = ?
-                          AND (id, COALESCE(change_token, '')) IN (VALUES {placeholders})
-                        RETURNING *""",
-                    [self.workspace_id, *params],
-                ).fetchall()
-                claimed.update({(c["id"], c["change_token"]): c for c in rows})
+        for chunk in self._chunks(changes, size=400):
+            placeholders = ",".join("(?, ?)" for _ in chunk)
+            params = [part for c in chunk for part in (c["id"], c["change_token"] or "")]
+            rows = self.conn.execute(
+                f"""UPDATE pending_changes SET sync_started = 1
+                    WHERE workspace_id = ?
+                      AND (id, COALESCE(change_token, '')) IN (VALUES {placeholders})
+                    RETURNING *""",
+                [self.workspace_id, *params],
+            ).fetchall()
+            claimed.update({(c["id"], c["change_token"]): c for c in rows})
         return [claimed[key] for c in changes
                 if (key := (c["id"], c["change_token"])) in claimed]
 
@@ -481,7 +472,7 @@ class SyncRepository:
         """Delete a photo's pending changes in one workspace; return the rows.
 
         Does not commit: ``Database.remove_pending_changes`` queues any
-        inverse in the same transaction and commits per its ``_commit``.
+        inverse in the same transaction.
         """
         clauses = ["photo_id = ?", "workspace_id = ?"]
         params = [photo_id, workspace_id]
@@ -506,12 +497,11 @@ class SyncRepository:
         )
 
     def remove_token(self, change_token: str) -> int:
-        """Delete a single pending change by immutable token. Returns rows removed."""
+        """Delete a single pending change by immutable token (no commit). Returns rows removed."""
         cur = self.conn.execute(
             "DELETE FROM pending_changes WHERE change_token = ? AND workspace_id = ?",
             (change_token, self.workspace_id),
         )
-        self.conn.commit()
         return cur.rowcount
 
     def delete_by_ids(
@@ -624,14 +614,14 @@ class SyncRepository:
         return synced_changes
 
     def clear_equivalent_flat_removals(
-        self, changes: Iterable[Mapping[str, Any] | sqlite3.Row], _commit: bool = True,
+        self, changes: Iterable[Mapping[str, Any] | sqlite3.Row],
     ) -> None:
         """Clear shared-sidecar flat removals represented by ``changes``.
 
         Every ``keyword_remove_flat`` change in ``changes`` drops the queued
         flat removals of the same photo and keyword (case-insensitively) in
         every workspace, since they all target the photo's one sidecar.
-        Commits only when ``_commit`` is true.
+        Does not commit.
         """
         shared_flat_removals = {
             (change["photo_id"], change["value"])
@@ -646,5 +636,3 @@ class SyncRepository:
                      AND value = ? COLLATE NOCASE""",
                 shared_flat_removals,
             )
-        if _commit:
-            self.conn.commit()

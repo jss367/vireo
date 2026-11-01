@@ -235,7 +235,6 @@ def _queue_location_path_changes(
                     "location",
                     "effective",
                     workspace_id=row["workspace_id"],
-                    _commit=False,
                 )
             db.commit()
 
@@ -400,13 +399,15 @@ def create_keywords_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint
         # STORED spelling of the surviving row — update_keyword normalizes
         # the requested name, so it can differ from the raw request value.
         new_row = db.keyword_tree.rename_state(effective_id)
-        if (
-            old_row is not None and new_row is not None
-            and old_row["name"] != new_row["name"]
-        ):
-            _queue_keyword_rename_sidecars(db, old_row, new_row, affected)
-        _queue_location_retype_add(db, old_row, new_row, affected)
-        _queue_location_path_changes(db, old_row, new_row, location_affected)
+        # The sidecar work for the rename lands as one unit.
+        with db.transaction():
+            if (
+                old_row is not None and new_row is not None
+                and old_row["name"] != new_row["name"]
+            ):
+                _queue_keyword_rename_sidecars(db, old_row, new_row, affected)
+            _queue_location_retype_add(db, old_row, new_row, affected)
+            _queue_location_path_changes(db, old_row, new_row, location_affected)
         # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
         # only when `merged` is truthy; without it the UI keeps the deleted
         # source id and its next edit/delete would 404 or hit the wrong row.
@@ -420,6 +421,12 @@ def create_keywords_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint
         kw_row = db.keywords.get_row(keyword_id)
         if kw_row is None:
             return json_error("keyword not found", 404)
+        # The sidecar removals and the delete land together.
+        with db.transaction():
+            _delete_keyword_with_sidecars(db, keyword_id, kw_row)
+        return jsonify({"ok": True})
+
+    def _delete_keyword_with_sidecars(db: Database, keyword_id: int, kw_row: Row) -> None:
         if kw_row:
             affected = db.photo_keywords.photo_workspaces_tagged_with(keyword_id)
             for row in affected:
@@ -446,9 +453,7 @@ def create_keywords_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint
                         "location",
                         "effective",
                         workspace_id=row["workspace_id"],
-                        _commit=False,
                     )
         db.keyword_tree.delete(keyword_id)
-        return jsonify({"ok": True})
 
     return blueprint

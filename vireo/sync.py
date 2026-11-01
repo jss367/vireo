@@ -675,7 +675,9 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     changes = db.pending_changes.list_all()
     if change_ids is not None:
         changes = _select_changes(changes, change_ids)
-    changes = pending_changes.claim_pending_changes_for_sync(db, changes)
+    # Durable boundary: the claim commits before any sidecar is touched.
+    with db.transaction():
+        changes = pending_changes.claim_pending_changes_for_sync(db, changes)
     if not changes:
         return _sync_result(0, [])
 
@@ -997,17 +999,19 @@ class _XmpSyncRun:
             return
         # Immutable tokens protect edits replaced while the write was in flight.
         if self.synced_tokens:
-            pending_changes.clear_pending_by_token(
-                self.db, self.synced_tokens, clear_equivalent_flat_removals=True,
-            )
+            with self.db.transaction():
+                pending_changes.clear_pending_by_token(
+                    self.db, self.synced_tokens, clear_equivalent_flat_removals=True,
+                )
             self.synced_tokens.clear()
         if self.synced_legacy_ids:
             # A legacy rowid may now name a newly queued, tokened edit.
-            pending_changes.clear_pending(
-                self.db, self.synced_legacy_ids,
-                expected_tokens=[None] * len(self.synced_legacy_ids),
-                clear_equivalent_flat_removals=True,
-            )
+            with self.db.transaction():
+                pending_changes.clear_pending(
+                    self.db, self.synced_legacy_ids,
+                    expected_tokens=[None] * len(self.synced_legacy_ids),
+                    clear_equivalent_flat_removals=True,
+                )
             self.synced_legacy_ids.clear()
         self.checkpoint += 1
         self.last_checkpoint = time.monotonic()

@@ -7,29 +7,35 @@ from services import photo_ingest, workspace_folders
 from services.pending_changes import queue_location_sync_if_enabled
 
 
-@pytest.mark.parametrize("commit", [False, True])
-def test_location_sync_rejects_photo_outside_explicit_workspace(db, tmp_path, commit):
+def test_location_sync_rejects_photo_outside_explicit_workspace(db, tmp_path):
     folder = workspace_folders.add_folder(db, str(tmp_path / "source"))
     photo = photo_ingest.add_photo(db, folder, "synthetic.jpg", ".jpg", 1, 1.0)
     other_workspace = db.create_workspace("Other workspace")
     db.queue_change(photo, "location", "existing", workspace_id=other_workspace)
+    db.commit()
     before = [tuple(row) for row in db.conn.execute("SELECT * FROM pending_changes")]
 
-    queue_location_sync_if_enabled(db, photo, workspace_id=other_workspace, _commit=commit)
+    with db.transaction():
+        queue_location_sync_if_enabled(db, photo, workspace_id=other_workspace)
 
     assert [tuple(row) for row in db.conn.execute("SELECT * FROM pending_changes")] == before
 
 
 @pytest.mark.parametrize("commit", [False, True])
-def test_location_sync_uses_explicit_workspace_and_preserves_commit_choice(db, tmp_path, commit):
+def test_location_sync_uses_explicit_workspace_and_leaves_the_commit_to_its_unit(db, tmp_path, commit):
     workspace = db.active_workspace_id
     folder = workspace_folders.add_folder(db, str(tmp_path / "source"))
     photo = photo_ingest.add_photo(db, folder, "synthetic.jpg", ".jpg", 1, 1.0)
     db.set_active_workspace(db.create_workspace("Other workspace"))
-
-    queue_location_sync_if_enabled(db, photo, workspace_id=workspace, _commit=commit)
+    db.commit()
 
     query = "SELECT workspace_id, value FROM pending_changes WHERE photo_id=? AND change_type='location'"
+    if commit:
+        with db.transaction():
+            queue_location_sync_if_enabled(db, photo, workspace_id=workspace)
+    else:
+        queue_location_sync_if_enabled(db, photo, workspace_id=workspace)
+
     assert [tuple(row) for row in db.conn.execute(query, (photo,))] == [(workspace, "effective")]
     other = sqlite3.connect(db._db_path)
     try:

@@ -63,6 +63,7 @@ def test_prepare_full_resolution_reuses_edited_render(
     app, db, photo_id = client_with_photo
     client = app.test_client()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     original_load_image = image_loader.load_image
     load_calls = []
 
@@ -124,6 +125,7 @@ def test_prepared_render_invalidates_when_companion_changes(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     original_load_image = image_loader.load_image
     load_calls = []
@@ -160,6 +162,7 @@ def test_prepared_render_invalidates_when_primary_changes_before_scan(
     app, db, photo_id = client_with_photo
     client = app.test_client()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     photo = db.photos.get(photo_id)
     folder_path = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
@@ -331,6 +334,7 @@ def test_prepared_render_rejected_when_mtime_predates_source(client_with_photo):
     # endpoint just streams the raw source file — nothing lands in
     # ``originals/`` and there's no signature-keyed cache to invalidate.
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     # Prime the cache: the first request writes the prepared render.
     primed = client.get(f"/photos/{photo_id}/original")
@@ -391,6 +395,7 @@ def test_prepared_render_not_regenerated_every_request_for_future_mtime(
     client = app.test_client()
 
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     # Put the source's mtime well ahead of the wall clock.
     future = time.time() + 86400
     db.conn.execute(
@@ -502,6 +507,7 @@ def test_preparation_skips_concurrently_deleted_photos(
         monkeypatch.setattr(offline_cache, "_copy_atomic", copy_with_deletion)
     elif deletion_stage == "during_render":
         db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+        db.commit()
         original_load = image_loader.load_image
 
         def load_with_deletion(*args, **kwargs):
@@ -557,6 +563,7 @@ def test_preparation_preserves_errors_for_existing_photos(
         os.unlink(os.path.join(folder, photo["filename"]))
     elif failure == "render_error":
         db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+        db.commit()
         monkeypatch.setattr(image_loader, "load_image", lambda *a, **kw: None)
     else:
         def fail_cache(*args, **kwargs):
@@ -666,6 +673,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
         monkeypatch.setattr(offline_cache, "_copy_atomic", publish_after_replacement)
     elif stage == "during_render":
         db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+        db.commit()
         original_load = image_loader.load_image
 
         def replace_during_render(*args, **kwargs):
@@ -892,6 +900,7 @@ def test_preparation_warms_every_lightbox_fit_preview(client_with_photo, monkeyp
     app, db, photo_id = client_with_photo
     client = app.test_client()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     started = client.post(
         "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
     )
@@ -1161,6 +1170,7 @@ def test_preview_publication_refused_when_recipe_changes_mid_render(
             other = Database(app.config["DB_PATH"])
             try:
                 other.set_photo_edit_recipe(photo_id, {"rotation": 90})
+                other.commit()
             finally:
                 other.close()
             recipe_saves.append(True)
@@ -1195,6 +1205,7 @@ def test_preparation_guard_accepts_matching_recipe(client_with_photo):
     """
     app, db, photo_id = client_with_photo
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     client = app.test_client()
 
     started = client.post(
@@ -1264,6 +1275,7 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
     # uses. This keeps the stub NEF harmless so the test can focus on
     # the paired-cache warming the finding is about.
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
 
     original_load_image = image_loader.load_image
     paired_jpeg_decodes = []

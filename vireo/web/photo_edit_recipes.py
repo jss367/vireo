@@ -279,24 +279,28 @@ def create_photo_edit_recipes_blueprint(
                     "unknown edit-mask snapshot for this photo; create one "
                     "via POST /api/photos/<id>/local-mask/snapshot first"
                 )
-        old_recipe = db.get_photo_edit_recipe(photo_id)
-        try:
-            old_value = recipe_to_json(old_recipe) or ""
-            new_recipe = db.set_photo_edit_recipe(photo_id, recipe, verify_workspace=True)
-            new_value = recipe_to_json(new_recipe) or ""
-        except RecipeError as e:
-            return json_error(str(e))
-        except ValueError as e:
-            return json_error(str(e), 403)
+        # The recipe, its sidecar work and its undo entry are one unit; the
+        # render caches are dropped once it has committed.
+        with db.transaction():
+            old_recipe = db.get_photo_edit_recipe(photo_id)
+            try:
+                old_value = recipe_to_json(old_recipe) or ""
+                new_recipe = db.set_photo_edit_recipe(photo_id, recipe, verify_workspace=True)
+                new_value = recipe_to_json(new_recipe) or ""
+            except RecipeError as e:
+                # Raised before any write, so leaving the unit commits nothing.
+                return json_error(str(e))
+            except ValueError as e:
+                return json_error(str(e), 403)
+            if old_value != new_value:
+                queue_edit_recipe_sync(db, photo_id, new_value)
+                db.record_edit(
+                    "edit_recipe",
+                    description.strip(),
+                    new_value,
+                    [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
+                )
         invalidate_photo_render_cache(db, [photo_id])
-        if old_value != new_value:
-            queue_edit_recipe_sync(db, photo_id, new_value)
-            db.record_edit(
-                "edit_recipe",
-                description.strip(),
-                new_value,
-                [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
-            )
         return jsonify({
             "ok": True,
             "recipe": new_recipe,
@@ -310,21 +314,22 @@ def create_photo_edit_recipes_blueprint(
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         from edit_recipe import recipe_to_json
-        old_recipe = db.get_photo_edit_recipe(photo_id)
-        old_value = recipe_to_json(old_recipe) or ""
-        try:
-            db.clear_photo_edit_recipe(photo_id, verify_workspace=True)
-        except ValueError as e:
-            return json_error(str(e), 403)
+        with db.transaction():
+            old_recipe = db.get_photo_edit_recipe(photo_id)
+            old_value = recipe_to_json(old_recipe) or ""
+            try:
+                db.clear_photo_edit_recipe(photo_id, verify_workspace=True)
+            except ValueError as e:
+                return json_error(str(e), 403)
+            if old_value:
+                queue_edit_recipe_sync(db, photo_id, "")
+                db.record_edit(
+                    "edit_recipe",
+                    "Cleared photo edit recipe",
+                    "",
+                    [{"photo_id": photo_id, "old_value": old_value, "new_value": ""}],
+                )
         invalidate_photo_render_cache(db, [photo_id])
-        if old_value:
-            queue_edit_recipe_sync(db, photo_id, "")
-            db.record_edit(
-                "edit_recipe",
-                "Cleared photo edit recipe",
-                "",
-                [{"photo_id": photo_id, "old_value": old_value, "new_value": ""}],
-            )
         return jsonify({"ok": True, "recipe": None})
 
     @blueprint.route("/api/photos/edit-recipe/summary", methods=["POST"])
@@ -447,8 +452,8 @@ def create_photo_edit_recipes_blueprint(
             with db.transaction():
                 for item in items:
                     pid = item["photo_id"]
-                    db.set_photo_edit_recipe(pid, applied_recipes[str(pid)], verify_workspace=False, _commit=False)
-                    queue_edit_recipe_sync(db, pid, item["new_value"], _commit=False)
+                    db.set_photo_edit_recipe(pid, applied_recipes[str(pid)], verify_workspace=False)
+                    queue_edit_recipe_sync(db, pid, item["new_value"])
                 db.record_edit("edit_recipe", description, target_json, items, is_batch=True, _commit=False)
             db._prune_edit_history()
             invalidate_photo_render_cache(db, [item["photo_id"] for item in items])

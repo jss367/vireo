@@ -1241,7 +1241,7 @@ class Database:
 
     @contextlib.contextmanager
     def transaction(
-        self, *, immediate: bool = False, retry_busy: bool = False,
+        self, *, immediate: bool = False, retry_busy: bool = False, join: bool = False,
     ) -> Iterator[None]:
         """One unit of work: commit when the block exits, roll back if it raises.
 
@@ -1265,12 +1265,16 @@ class Database:
         if a transaction is already open, as ``begin_immediate()`` does. An
         outermost plain block entered while one is open (an unconverted
         caller's ``begin_immediate()`` or uncommitted write) adopts it, as
-        ``with conn:`` did; that is a migration rule.
+        ``with conn:`` did; with ``join=True`` it instead runs as a savepoint
+        inside that transaction and leaves the commit to whoever began it.
+        Both are migration rules.
         """
         provenance = dict(self._species_provenance_before)
         entered = finished = False
         try:
-            with self._unit.enter(self.conn, immediate=immediate, retry_busy=retry_busy):
+            with self._unit.enter(
+                self.conn, immediate=immediate, retry_busy=retry_busy, join=join,
+            ):
                 entered = True
                 yield
             finished = True
@@ -2239,17 +2243,12 @@ class Database:
         return self._location_repository()
 
     def update_photo_wildlife_excluded(
-        self, photo_id: int, excluded: bool, verify_workspace: bool = True, _commit: bool = True
+        self, photo_id: int, excluded: bool, verify_workspace: bool = True,
     ) -> None:
-        """Set whether a photo is excluded from wildlife detection/classification.
-
-        ``_commit=False`` leaves the write in the caller's open transaction.
-        """
+        """Set whether a photo is excluded from wildlife detection/classification (no commit)."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
-        self._photo_review_repository().set_wildlife_excluded(
-            photo_id, excluded, _commit=_commit,
-        )
+        self._photo_review_repository().set_wildlife_excluded(photo_id, excluded)
 
     def _photo_review_repository(self) -> PhotoReviewRepository:
         from repositories.photo_review import PhotoReviewRepository
@@ -2356,22 +2355,18 @@ class Database:
         photo_id: int,
         recipe: Mapping[str, Any] | str | None,
         verify_workspace: bool = True,
-        _commit: bool = True,
     ) -> dict[str, Any] | None:
-        """Set or clear a non-destructive edit recipe for a photo.
+        """Set or clear a non-destructive edit recipe for a photo (no commit).
 
         Returns the normalized recipe dict, or None when the provided recipe is
-        a no-op and the stored row was cleared. Pass ``_commit=False`` to include
-        the write in a caller-owned batch transaction.
+        a no-op and the stored row was cleared.
         """
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
-        return self._edits_repository().set_photo_recipe(
-            photo_id, recipe, _commit=_commit
-        )
+        return self._edits_repository().set_photo_recipe(photo_id, recipe)
 
     def clear_photo_edit_recipe(self, photo_id: int, verify_workspace: bool = True) -> bool:
-        """Remove a photo's edit recipe. Returns True if a row was removed."""
+        """Remove a photo's edit recipe (no commit). Returns True if a row was removed."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
         return self._edits_repository().clear_photo_recipe(photo_id)
@@ -4408,7 +4403,6 @@ class Database:
         change_type: str,
         value: str,
         workspace_id: int | None = None,
-        _commit: bool = True,
     ) -> str | None:
         """Add a change to the sync queue, skipping redundant intents.
 
@@ -4417,12 +4411,9 @@ class Database:
         must retain the last 1 so chronological sync writes the current rating.
         If workspace_id is not provided, uses the active workspace.
 
-        Args:
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
         """
         return self._sync_repository().queue(
-            photo_id, change_type, value, workspace_id=workspace_id, _commit=_commit,
+            photo_id, change_type, value, workspace_id=workspace_id,
         )
 
     def remove_pending_changes(
@@ -4431,7 +4422,6 @@ class Database:
         change_type: str | None = None,
         value: str | None = None,
         workspace_id: int | None = None,
-        _commit: bool = True,
     ) -> int:
         """Delete matching pending changes, preserving captured keyword intents.
 
@@ -4442,9 +4432,6 @@ class Database:
         possibly written: further toggles must keep explicit repair work
         until a sync acknowledges it, even if the first write fails.
 
-        Args:
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
         """
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         repo = self._sync_repository()
@@ -4457,23 +4444,19 @@ class Database:
                 row["sync_started"] or repo.keyword_sidecar_alias(photo_id, ws_id, row["value"])
             ):
                 kind = inverse[row["change_type"]]
-                self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id, _commit=False)
+                self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id)
                 repo.mark_sync_started(photo_id, ws_id, kind, row["value"])
-        if _commit:
-            repo.commit()
         return len(removed)
 
     def queue_flag_change_if_enabled(
-        self, photo_id: int, flag: str | None, workspace_id: int | None = None, _commit: bool = True
+        self, photo_id: int, flag: str | None, workspace_id: int | None = None
     ) -> str | None:
         """Queue a flag write when the active config opts into XMP flag sync."""
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         flag = flag or "none"
-        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id, _commit=False)
+        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id)
         if flag not in {"none", "flagged", "rejected"}:
             log.warning("Not queueing invalid XMP flag value for photo %s: %r", photo_id, flag)
-            if _commit:
-                self._sync_repository().commit()
             return None
         try:
             enabled = bool(self.effective_config().get("sync_flags_to_xmp", False))
@@ -4481,15 +4464,9 @@ class Database:
             log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
             enabled = False
         if not enabled:
-            if _commit:
-                self._sync_repository().commit()
             return None
 
-        token = self.queue_change(
-            photo_id, "flag", flag, workspace_id=ws_id, _commit=False
-        )
-        if _commit:
-            self._sync_repository().commit()
+        token = self.queue_change(photo_id, "flag", flag, workspace_id=ws_id)
         return token
 
     # -- Edit History --
@@ -4613,7 +4590,7 @@ class Database:
         if setter is None and handler is None:
             raise ValueError(f'Unsupported history action: {action}')
         if action == 'flag':
-            with self.photo_review.flag_write():
+            with self.transaction():
                 for item in items:
                     self._edit_set_flag(item['photo_id'], item[value_key])
                     self.photo_review.restore_flag_attribution_history(
@@ -4635,8 +4612,8 @@ class Database:
 
     def _edit_set_flag(self, pid, value):
         # Edit history is already workspace-scoped; skip re-verification
-        self.photo_review.set_flag(pid, value, verify_workspace=False, _commit=False)
-        self.queue_flag_change_if_enabled(pid, value, _commit=False)
+        self.photo_review.set_flag(pid, value, verify_workspace=False)
+        self.queue_flag_change_if_enabled(pid, value)
 
     def _edit_set_wildlife_excluded(self, pid, value):
         self.update_photo_wildlife_excluded(
@@ -4677,7 +4654,7 @@ class Database:
         self.locations.delete_gps_review(pid)
         if state.get('gps_review') is not None:
             self.locations.save_gps_reviews([(pid, state['gps_review'])])
-        queue_location_sync_if_enabled(self, pid, _commit=False)
+        queue_location_sync_if_enabled(self, pid)
 
     def _edit_set_prediction_status(self, pid, value):
         recorded = json.loads(value)

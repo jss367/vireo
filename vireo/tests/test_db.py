@@ -456,7 +456,9 @@ def test_get_photos_filter_by_rating(tmp_path):
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p1, 3)
+    db.commit()
     db.photo_review.set_rating(p2, 5)
+    db.commit()
 
     results = db.photos.list_page(rating_min=4)
     assert len(results) == 1
@@ -478,7 +480,9 @@ def test_get_photos_filter_by_flag(tmp_path):
                  file_size=100, file_mtime=3.0,
                  timestamp='2024-01-03T10:00:00')
     db.photo_review.set_flag(picked, 'flagged')
+    db.commit()
     db.photo_review.set_flag(rejected, 'rejected')
+    db.commit()
 
     picks = db.photos.list_page(flag='flagged')
     rejects = db.photos.list_page(flag='rejected')
@@ -626,6 +630,7 @@ def test_update_photo_rating(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(pid, 4)
+    db.commit()
     photo = db.photos.get(pid)
     assert photo['rating'] == 4
 
@@ -637,6 +642,7 @@ def test_update_photo_flag(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_flag(pid, 'flagged')
+    db.commit()
     photo = db.photos.get(pid)
     assert photo['flag'] == 'flagged'
 
@@ -693,12 +699,15 @@ def test_pending_changes_queue(tmp_path):
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
     db.queue_change(pid, 'rating', '4')
+    db.commit()
     db.queue_change(pid, 'keyword_add', 'Cardinal')
+    db.commit()
 
     changes = db.pending_changes.list_all()
     assert len(changes) == 2
 
     pending_changes.clear_pending(db, [c['id'] for c in changes])
+    db.commit()
     assert len(db.pending_changes.list_all()) == 0
 
 
@@ -737,6 +746,7 @@ def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
     # An edit queued during the copy still needs to be reported: it will
     # now be over the NAS connection.
     db.queue_change(pid, "keyword_add", "Osprey")
+    db.commit()
 
     # A folder-id scan of the ORIGINAL staging folder now misses the edit
     # entirely -- this is the bug the photo-id variant fixes.
@@ -768,8 +778,11 @@ def test_staged_sync_scope_by_photos_separates_sibling_workspaces(tmp_path):
         file_size=100, file_mtime=1.0,
     )
     db.queue_change(shared, "keyword_add", "Osprey")
+    db.commit()
     db.queue_change(shared, "keyword_add", "Kestrel", workspace_id=ws2)
+    db.commit()
     db.queue_change(other_only, "keyword_add", "Egret", workspace_id=ws2)
+    db.commit()
 
     changes, here, elsewhere, overlap = db.pending_changes.staged_scope_by_photos(
         [shared, other_only],
@@ -810,6 +823,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
     )
 
     original_token = db.queue_change(pid, 'keyword_add', 'Osprey')
+    db.commit()
     (original_row,) = db.pending_changes.list_all()
     original_id = original_row['id']
     assert original_row['change_token'] == original_token
@@ -822,6 +836,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
         "DELETE FROM pending_changes WHERE id = ?", (original_id,),
     )
     replacement_token = db.queue_change(pid, 'keyword_add', 'Kestrel')
+    db.commit()
     (replacement_row,) = db.pending_changes.list_all()
     assert replacement_row['id'] == original_id, (
         "test premise: SQLite must reissue the rowid to the replacement"
@@ -832,6 +847,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
     # The sync captured (id, token) for the original -- clearing by both
     # leaves the replacement in place.
     pending_changes.clear_pending(db, [original_id], expected_tokens=[original_token])
+    db.commit()
     remaining = db.pending_changes.list_all()
     assert len(remaining) == 1
     assert remaining[0]['change_token'] == replacement_token
@@ -839,6 +855,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
 
     # Clearing with the replacement's own token drops it as expected.
     pending_changes.clear_pending(db, [original_id], expected_tokens=[replacement_token])
+    db.commit()
     assert db.pending_changes.list_all() == []
 
 
@@ -867,12 +884,14 @@ def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
     db.conn.commit()
     (legacy,) = db.pending_changes.list_all()
     tokened_token = db.queue_change(pid, 'keyword_add', 'Fresh')
+    db.commit()
     tokened_id = next(
         row['id'] for row in db.pending_changes.list_all()
         if row['change_token'] == tokened_token
     )
 
     pending_changes.clear_pending(db, [legacy['id']], expected_tokens=[None])
+    db.commit()
 
     remaining = db.pending_changes.list_all()
     assert [row['id'] for row in remaining] == [tokened_id]
@@ -901,6 +920,7 @@ def test_clear_pending_chunks_large_change_sets(tmp_path):
     change_ids = [row["id"] for row in db.pending_changes.list_all()]
 
     pending_changes.clear_pending(db, change_ids)
+    db.commit()
 
     assert len(db.pending_changes.list_all()) == 0
 
@@ -1061,7 +1081,9 @@ def test_collection_photos_rating_rule(tmp_path):
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='good.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='bad.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p1, 5)
+    db.commit()
     db.photo_review.set_rating(p2, 2)
+    db.commit()
 
     rules = [{"field": "rating", "op": ">=", "value": 4}]
     cid = db.collections.add('Best', json.dumps(rules))
@@ -1122,8 +1144,11 @@ def test_collection_photo_ids_honors_sort(tmp_path):
                        file_size=100, file_mtime=1.0,
                        timestamp='2024-03-01T00:00:00')
     db.photo_review.set_rating(p_a, 2)
+    db.commit()
     db.photo_review.set_rating(p_b, 5)
+    db.commit()
     db.photo_review.set_rating(p_c, 4)
+    db.commit()
 
     rules = [{"field": "rating", "op": ">=", "value": 0}]
     cid = db.collections.add('All', json.dumps(rules))
@@ -1507,8 +1532,11 @@ def test_count_photos_for_rules_unsaved(tmp_path):
     p3 = photo_ingest.add_photo(db, folder_id=fid, filename='bad.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p1, 5)
+    db.commit()
     db.photo_review.set_rating(p2, 4)
+    db.commit()
     db.photo_review.set_rating(p3, 1)
+    db.commit()
 
     # No rules -> matches every photo in the workspace.
     assert db.collections.count_photos_for_rules([]) == 3
@@ -1819,6 +1847,7 @@ def test_collection_wildlife_excluded_rule(tmp_path):
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='pet.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.update_photo_wildlife_excluded(p2, True)
+    db.commit()
 
     cid = db.collections.add(
         "Wildlife Only",
@@ -1848,6 +1877,7 @@ def test_default_needs_identification_excludes_not_wildlife(tmp_path, monkeypatc
     identified = photo_ingest.add_photo(db, folder_id=fid, filename='identified.jpg',
                               extension='.jpg', file_size=100, file_mtime=1.0)
     db.update_photo_wildlife_excluded(not_wildlife, True)
+    db.commit()
     genre_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(identified, genre_kid)
 
@@ -5319,7 +5349,9 @@ def _make_calendar_db(tmp_path):
                       file_size=3000, file_mtime=3.0, timestamp='2024-06-10T09:00:00')
 
     db.photo_review.set_rating(p1, 3)
+    db.commit()
     db.photo_review.set_rating(p3, 5)
+    db.commit()
 
     return db
 
@@ -5406,7 +5438,9 @@ def test_get_geolocated_photos_filters(tmp_path):
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
     db.photo_review.set_rating(p1, 2)
+    db.commit()
     db.photo_review.set_rating(p2, 5)
+    db.commit()
 
     # Metadata filtering flows exclusively through the universal-filter
     # rules tree (legacy per-field params removed in Phase 5).
@@ -6337,6 +6371,7 @@ def test_undo_last_edit_rating(tmp_path):
     original_rating = db.photos.get(pid)['rating']
 
     db.photo_review.set_rating(pid, 5)
+    db.commit()
     db.record_edit('rating', 'Set rating to 5', '5',
                    [{'photo_id': pid, 'old_value': str(original_rating), 'new_value': '5'}])
 
@@ -6353,6 +6388,7 @@ def test_undo_last_edit_flag(tmp_path):
     pid = pids[0]
 
     db.photo_review.set_flag(pid, 'flagged')
+    db.commit()
     db.record_edit('flag', 'Set flag to flagged', 'flagged',
                    [{'photo_id': pid, 'old_value': 'none', 'new_value': 'flagged'}])
 
@@ -6412,6 +6448,7 @@ def test_undo_last_edit_batch(tmp_path):
     items = []
     for pid, old_r in original_ratings.items():
         db.photo_review.set_rating(pid, 5)
+        db.commit()
         items.append({'photo_id': pid, 'old_value': str(old_r), 'new_value': '5'})
     db.record_edit('rating', 'Set rating to 5 on 2 photos', '5', items, is_batch=True)
 
@@ -10716,7 +10753,9 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
                       file_size=1000, file_mtime=1.0,
                       timestamp="2024-02-15T12:00:00")
     db.photo_review.set_rating(p1, 4)
+    db.commit()
     db.photo_review.set_rating(p2, 3)
+    db.commit()
 
     # Sanity: stats populated when folder is ok.
     stats = dashboard_stats.get_dashboard_stats(db)
@@ -11138,7 +11177,9 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     huge = [pid] + list(range(10_000_000, 10_033_000))  # > 32766 ids
 
     db.photo_review.set_ratings(huge, 4, verify_workspace=False)
+    db.commit()
     db.photo_review.set_flags(huge, "flagged", verify_workspace=False)
+    db.commit()
     # The set path inserts per-id (no IN clause); only the lookup and
     # removal paths take id lists into one statement.
     db.photo_labels.set_many([pid], "red")
@@ -12185,6 +12226,7 @@ def test_merge_staged_tree_intra_staged_after_phantom_replacement_case_alias(
     # ``UPDATE pending_changes SET photo_id = <dead phantom>``
     # trips ``pending_changes.photo_id``'s foreign key.
     db.queue_change(second_pid, "keyword_add", "Owl")
+    db.commit()
 
     # Force the merge to treat the target volume as case-insensitive so
     # the case-alias collision path fires regardless of the CI host's
@@ -15631,8 +15673,11 @@ def test_get_photos_filter_color_label_combined_with_rating(tmp_path):
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p3 = photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p1, 4)
+    db.commit()
     db.photo_review.set_rating(p2, 4)
+    db.commit()
     db.photo_review.set_rating(p3, 2)
+    db.commit()
     db.photo_labels.set(p1, 'red')
     db.photo_labels.set(p3, 'red')
 
@@ -16970,6 +17015,7 @@ def test_filter_out_wildlife_excluded_drops_marked_photos(tmp_path):
                       file_size=100, file_mtime=1.0)
 
     db.update_photo_wildlife_excluded(p1, True)
+    db.commit()
 
     assert db.photos.filter_out_wildlife_excluded([p1, p2]) == [p2]
 
@@ -17243,7 +17289,9 @@ def test_pending_keyword_removal_keys_distinguish_flat_and_hierarchical(tmp_path
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.queue_change(p1, "keyword_remove_flat", "Wildlife")
+    db.commit()
     db.queue_change(p1, "keyword_remove", "House Sparrow")
+    db.commit()
 
     assert db.pending_changes.keyword_removal_keys(p1) == {
         "wildlife", "house sparrow",
@@ -23239,6 +23287,7 @@ def test_life_list_uncounted_filter_targets_only_unsuppressed_photos(db):
     db.tag_photo(species_photo, species_kw)
     db.tag_photo(rejected_photo, family_kw)
     db.photo_review.set_flag(rejected_photo, 'rejected')
+    db.commit()
     db.conn.commit()
 
     rows = db.species_curation.get_life_list_uncounted_identifications()
@@ -23268,6 +23317,7 @@ def test_life_list_taxon_ids_excludes_rejected(db):
                     (ids['Melospiza melodia'], k))
     db.conn.commit()
     db.photo_review.set_flag(p, 'rejected')
+    db.commit()
     assert db.species_curation.get_life_list_taxon_ids() == set()
 
 
@@ -24781,7 +24831,9 @@ def test_universal_filter_numeric_fields_and_between(tmp_path):
     assert count([{"field": "shutter_speed", "op": "<", "value": 0.001}]) == 1
     # rating between rides the same generalized numeric path
     db.photo_review.set_rating(small, 2)
+    db.commit()
     db.photo_review.set_rating(big, 5)
+    db.commit()
     assert count([{"field": "rating", "op": "between", "value": [4, 5]}]) == 1
 
 
@@ -24864,6 +24916,7 @@ def test_universal_filter_empty_in_preserves_any_none_semantics(tmp_path):
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p, 5)
+    db.commit()
 
     count = db.collections.count_photos_for_rules
     # any(in [], rating >= 4): first clause false, second true -> matches
@@ -25128,6 +25181,7 @@ def test_universal_filter_workflow_fields(tmp_path):
     burst = photo_ingest.add_photo(db, folder_id=fid, filename='burst.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
     db.set_photo_edit_recipe(edited, {"rotation": 90})
+    db.commit()
     db.conn.execute(
         "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
         "VALUES (?,?,?,?)", (indexed, 'clip-vit', '', b'\x01'))
@@ -25636,6 +25690,7 @@ def test_query_photos_sort_and_paging(tmp_path):
                            file_size=100, file_mtime=1.0,
                            timestamp=f'2024-01-0{i + 1} 10:00:00')
         db.photo_review.set_rating(pid, rating)
+        db.commit()
 
     rows = db.collections.query_photos([], sort="rating")
     assert [r["filename"] for r in rows] == ['b.jpg', 'c.jpg', 'a.jpg']
@@ -25706,6 +25761,7 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
     # Filters apply before projection. Once only one burst member matches,
     # it returns as an ordinary result rather than dragging hidden members in.
     db.photo_review.set_rating(ids["burst-best.jpg"], 5)
+    db.commit()
     filtered = db.collections.query_browse_stacks([
         {"field": "rating", "op": ">=", "value": 5},
     ])
@@ -25929,7 +25985,9 @@ def test_browse_stacks_filter_before_projection_can_split_a_run(tmp_path):
     drop = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:03")
     keep_b = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:06")
     db.photo_review.set_rating(keep_a, 5)
+    db.commit()
     db.photo_review.set_rating(keep_b, 5)
+    db.commit()
     db.conn.commit()
 
     assert _stack_shape(db) == [("burst", [keep_a, drop, keep_b])]
@@ -26584,6 +26642,7 @@ def test_get_filter_field_values_counts_respect_rules(tmp_path):
         pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
         db.photo_review.set_rating(pid, rating)
+        db.commit()
         if model:
             db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
         ids.append(pid)
@@ -26641,6 +26700,7 @@ def test_get_filter_field_values_counts_wrap_or_rules(tmp_path):
         pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
         db.photo_review.set_rating(pid, rating)
+        db.commit()
         if model:
             db.conn.execute(
                 "UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
@@ -27439,6 +27499,7 @@ def test_has_pending_location_change(tmp_path):
 
     assert db.locations.has_pending_change(pid) is False
     db.queue_change(pid, "location", "effective")
+    db.commit()
     assert db.locations.has_pending_change(pid) is True
     db.close()
 

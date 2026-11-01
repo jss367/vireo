@@ -122,8 +122,10 @@ def browse_seed(db_path, thumb_dir, photos_root):
             db.conn.commit()
         if rating:
             db.photo_review.set_rating(pid, rating)
+            db.commit()
         if flag:
             db.photo_review.set_flag(pid, flag)
+            db.commit()
 
     # Add keywords and tag some photos
     k_eagle = db.add_keyword("Eagle", is_species=True)

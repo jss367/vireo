@@ -64,6 +64,7 @@ def test_exposure_preview_is_identical_after_saved_round_trip(
         live_server['db'].set_photo_edit_recipe(
             adjustment_photo, {'adjustments': {'exposure': saved_exposure}},
         )
+        live_server["db"].commit()
     _open(page, live_server, adjustment_photo)
     page.evaluate("""() => {
       window.previewFrames = [];
@@ -133,6 +134,7 @@ def test_server_preview_uses_complete_recipe_and_preserves_geometry(
     elif advanced:
         recipe['adjustments'] = {'tone_curve': {'midtones': 60}}
     live_server['db'].set_photo_edit_recipe(adjustment_photo, recipe)
+    live_server["db"].commit()
     page.goto(live_server['url'] + '/browse')
     page.evaluate("id => openLightbox(id, 'gradient.png')", adjustment_photo)
     page.wait_for_function('_lbEditRecipeLoaded')

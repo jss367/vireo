@@ -94,6 +94,7 @@ def test_pending_identity_remap_bounds_scans_for_empty_and_duplicate_alias_names
         for index in range(3):
             workspace = db.require_workspace_id() if index == 0 else db.create_workspace(f'Pending alias {index}')
             db.queue_change(photos[0], 'keyword_add', alias, workspace_id=workspace)
+            db.commit()
         before = [dict(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
         scans = []
         db.conn.set_trace_callback(lambda sql: scans.append(sql) if sql.startswith('SELECT k.name,') and 'AS identity FROM keywords k' in sql else None)

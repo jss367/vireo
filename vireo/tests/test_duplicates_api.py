@@ -774,6 +774,7 @@ def test_catalog_cleanup_shows_copies_from_other_workspaces(app_and_db):
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (rejected,))
     db.conn.commit()
     db.set_photo_edit_recipe(rejected, {"rotation": 90})
+    db.commit()
     db.set_active_workspace(original_ws)
     assert db.photos.get(rejected, verify_workspace=True) is None
 

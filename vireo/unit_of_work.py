@@ -188,6 +188,14 @@ def _roll_back_after_failure(conn: sqlite3.Connection) -> None:
         log.exception("Rollback failed after a unit of work failed")
 
 
+def _run_callbacks(callbacks: list[Callable[[], object]]) -> None:
+    for callback in callbacks:
+        try:
+            callback()
+        except Exception:  # broad: the unit is committed; a failed follow-up is logged and must neither report the commit as failed nor skip the callbacks after it
+            log.exception("after_commit callback %r failed", callback)
+
+
 def _hold(conn: sqlite3.Connection, delta: int) -> None:
     if isinstance(conn, HoldingConnection):
         conn.commit_holds += delta
@@ -203,11 +211,13 @@ class UnitOfWork:
         self._callbacks: list[list[Callable[[], object]]] = []
 
     def enter(
-        self, conn: sqlite3.Connection, *, immediate: bool, retry_busy: bool,
+        self, conn: sqlite3.Connection, *, immediate: bool, retry_busy: bool, join: bool = False,
     ) -> contextlib.AbstractContextManager[None]:
         """The context for one ``transaction()`` block on ``conn``."""
         if self.depth:
             return self._nested(conn, retry_busy=retry_busy)
+        if join and conn.in_transaction:
+            return self._joined(conn)
         return self._outermost(conn, immediate=immediate, retry_busy=retry_busy)
 
     def push_frame(self) -> None:
@@ -275,11 +285,36 @@ class UnitOfWork:
         finally:
             if not committed:
                 _roll_back_after_failure(conn)
-        for callback in callbacks:
-            try:
-                callback()
-            except Exception:  # broad: the unit is committed; a failed follow-up is logged and must neither report the commit as failed nor skip the callbacks after it
-                log.exception("after_commit callback %r failed", callback)
+        _run_callbacks(callbacks)
+
+    @contextlib.contextmanager
+    def _joined(self, conn: sqlite3.Connection) -> Iterator[None]:
+        """A unit inside a transaction an unconverted caller began and will end.
+
+        A savepoint, like a nested unit, and it never commits: the caller
+        that began the transaction owns it. Its ``after_commit`` callbacks run
+        when the block ends, since the owner's commit is out of sight. A
+        migration rule only, like adoption.
+        """
+        if isinstance(conn, HoldingConnection):
+            conn.doomed_at = None
+            conn.unit = self
+        self.depth = 1
+        self._retry_busy = False
+        self._callbacks = [[]]
+        _hold(conn, 1)
+        conn.execute("SAVEPOINT uow_join")
+        finished = False
+        try:
+            yield
+            finished = True
+        finally:
+            callbacks = self._callbacks[0]
+            self._leave(conn)
+            if not finished:
+                _roll_back_to(conn, "uow_join")
+        _release(conn, "uow_join")
+        _run_callbacks(callbacks)
 
     def _leave(self, conn: sqlite3.Connection) -> None:
         self.depth = 0

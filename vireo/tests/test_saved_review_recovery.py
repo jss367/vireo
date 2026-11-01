@@ -62,6 +62,7 @@ def test_reopening_reloads_analysis_and_current_decisions_without_writes(db, tmp
     PhotoReviewService(db).set_flag(ids[1], "flagged")
     PhotoReviewService(db).set_flag(ids[2], "rejected")
     db.photo_review.set_rating(ids[1], 5)
+    db.commit()
     _analyze(db, tmp_path, ids[3])
     db.commit()
     before = list(db.conn.iterdump())

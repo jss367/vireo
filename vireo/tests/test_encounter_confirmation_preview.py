@@ -51,6 +51,7 @@ def test_explicit_transition_exact_subset_and_single_undo(app_and_db, first, sec
     other = db.add_keyword('American Wigeon', is_species=True)
     db.tag_photo(ids[1], other)
     db.photo_review.set_flag(ids[1], 'flagged')
+    db.commit()
     before = json.load(open(path))
     body = {'species': second, 'previous_species': first, 'photo_ids': ids[1:],
             'source_photo_ids': ids, 'split': True}
@@ -123,6 +124,7 @@ def test_stale_preview_fails_without_species_writes(app_and_db, change):
         db.tag_photo(ids[0], db.add_keyword('Robin', is_species=True))
     elif change == 'flag':
         db.photo_review.set_flag(ids[0], 'flagged')
+        db.commit()
     elif change == 'choice':
         body['photo_ids'] = ids[:1]
     else:
@@ -979,6 +981,7 @@ def test_burst_preview_ignores_live_changes_outside_species_refresh_read_set(app
         db.conn.execute('UPDATE taxa SET inat_id=800004 WHERE id=900003')
     elif change == 'sibling_flag':
         db.photo_review.set_flag(ids[1], 'flagged')
+        db.commit()
     elif change == 'sibling_prediction':
         did = db.detections.save(ids[1], [{'box': {'x': .1, 'y': .1, 'w': .2, 'h': .3},
                                           'confidence': .9, 'category': 'animal'}], detector_model='test')[0]

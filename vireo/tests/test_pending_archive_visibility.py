@@ -14,6 +14,7 @@ def test_transfer_summary_counts_the_staging_tree_and_retains_rejected_photos(ap
         pid = photo_ingest.add_photo(db, folder, name, ".nef", size, 100)
         if name == "reject.NEF":
             db.photo_review.set_flag(pid, "rejected")
+            db.commit()
     db.pending_archives.register("waiting", "/Volumes/NAS/Shoot", str(staging), {})
     db.conn.execute("UPDATE pending_archives SET created_at='2026-10-01 12:00:00' WHERE id='waiting'")
     db.commit()

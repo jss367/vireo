@@ -100,6 +100,7 @@ def test_open_external_hands_off_rendered_edit_recipe(client_with_photo, monkeyp
         photo_id,
         {"rotation": 90, "flip": {"horizontal": True}},
     )
+    db.commit()
     client.post('/api/config',
                 data=json.dumps({"external_editor": "/usr/bin/gimp"}),
                 content_type='application/json')
@@ -136,6 +137,7 @@ def test_open_external_edit_recipe_avoids_capped_working_copy(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     client.post('/api/config',
                 data=json.dumps({"external_editor": "/usr/bin/gimp"}),
                 content_type='application/json')
@@ -174,6 +176,7 @@ def test_open_external_uses_working_copy_when_raw_source_missing(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     client.post('/api/config',
                 data=json.dumps({"external_editor": "/usr/bin/gimp"}),
                 content_type='application/json')
@@ -220,6 +223,7 @@ def test_open_external_pins_working_copy_when_raw_source_missing(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     client.post('/api/config',
                 data=json.dumps({"external_editor": "/usr/bin/gimp"}),
                 content_type='application/json')
@@ -282,6 +286,7 @@ def test_open_external_uses_companion_when_raw_source_missing(
     )
     db.conn.commit()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    db.commit()
     client.post('/api/config',
                 data=json.dumps({"external_editor": "/usr/bin/gimp"}),
                 content_type='application/json')
@@ -320,6 +325,7 @@ def test_open_external_uses_companion_for_cropped_raw_source_missing(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    db.commit()
     client.post('/api/config',
                 data=json.dumps({"external_editor": "/usr/bin/gimp"}),
                 content_type='application/json')
@@ -371,6 +377,7 @@ def test_open_external_falls_back_to_companion_when_raw_decode_fails(
         ("bird.JPG", pid),
     )
     db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
+    db.commit()
     db.conn.commit()
 
     real_load_image = image_loader.load_image

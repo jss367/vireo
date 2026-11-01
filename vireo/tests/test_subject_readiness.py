@@ -167,6 +167,7 @@ def test_loader_distinguishes_ranked_legacy_and_confirmed_flags(db, readiness_ph
 
     pid, _, _ = readiness_photo
     db.photo_review.flag_ranked_candidate(pid)
+    db.commit()
     ranked = _loaded_photo(db, pid)
     run_triage([{"photos": [ranked]}])
     assert ranked["flag"] == "flagged"
@@ -180,6 +181,7 @@ def test_loader_distinguishes_ranked_legacy_and_confirmed_flags(db, readiness_ph
     assert confirmed["label"] == label
 
     db.photo_review.set_flag(pid, "flagged")  # A later unattributed writer invalidates confirmation.
+    db.commit()
     legacy = _loaded_photo(db, pid)
     run_triage([{"photos": [legacy]}])
     assert legacy["flag_confirmation_status"] == "unverified"

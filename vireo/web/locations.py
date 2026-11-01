@@ -256,7 +256,6 @@ def _record_place_link(db: Database, keyword_id: int, details: JsonDict, result:
         queue_location_sync_if_enabled(
             db, row["photo_id"],
             workspace_id=row["workspace_id"],
-            _commit=False,
         )
     if photo_rows:
         db.commit()
@@ -436,7 +435,7 @@ def create_locations_blueprint(
                     db.rollback()
                     return json_error("Enable Write assigned locations to XMP in Settings before queueing corrections.", 409)
                 for photo_id in photo_ids:
-                    queue_location_sync_if_enabled(db, photo_id, _commit=False)
+                    queue_location_sync_if_enabled(db, photo_id)
                     db.locations.delete_gps_review(photo_id)
             else:
                 for photo_id in photo_ids:

@@ -5,8 +5,9 @@ matching sidecar write as a pending change. These helpers keep the queue
 minimal: an add cancels a still-pending remove of the same keyword (and
 vice versa) instead of stacking both, and a location edit replaces any
 earlier queued location write. Every function takes the request
-``Database`` explicitly; ``_commit=False`` lets a caller batch several
-edits into its own transaction.
+``Database`` explicitly and never commits: the route, job or service that
+records the edit owns the unit of work, so the edit and its sidecar work
+land together.
 
 The sidecar sync consumes the queue through the second half of this module:
 ``claim_pending_changes_for_sync`` marks the rows it is about to write, and
@@ -32,7 +33,6 @@ if TYPE_CHECKING:
 
 def queue_keyword_add(
     db: Database, photo_id: int, keyword_name: str, workspace_id: int | None = None,
-    _commit: bool = True,
 ) -> None:
     """Queue a keyword add unless it cancels a pending removal."""
     # Normalize before the cancellation lookup: queue_change normalizes
@@ -43,7 +43,7 @@ def queue_keyword_add(
         return
     removed = db.remove_pending_changes(
         photo_id, "keyword_remove", keyword_name,
-        workspace_id=workspace_id, _commit=_commit,
+        workspace_id=workspace_id,
     )
     # A migration-generated flat removal is obsolete as soon as the user
     # explicitly re-adds that term. Clear it across every workspace that
@@ -55,18 +55,16 @@ def queue_keyword_add(
             "change_type": "keyword_remove_flat",
             "value": keyword_name,
         }],
-        _commit=_commit,
     )
     if removed == 0:
         db.queue_change(
             photo_id, "keyword_add", keyword_name,
-            workspace_id=workspace_id, _commit=_commit,
+            workspace_id=workspace_id,
         )
 
 
 def queue_keyword_remove(
     db: Database, photo_id: int, keyword_name: str, workspace_id: int | None = None,
-    _commit: bool = True,
 ) -> None:
     """Queue a keyword removal unless it cancels a pending add."""
     # See queue_keyword_add: keep the cancellation lookup in the same
@@ -76,17 +74,17 @@ def queue_keyword_remove(
         return
     removed = db.remove_pending_changes(
         photo_id, "keyword_add", keyword_name,
-        workspace_id=workspace_id, _commit=_commit,
+        workspace_id=workspace_id,
     )
     if removed == 0:
         db.queue_change(
             photo_id, "keyword_remove", keyword_name,
-            workspace_id=workspace_id, _commit=_commit,
+            workspace_id=workspace_id,
         )
 
 
 def queue_location_sync_if_enabled(
-    db: Database, photo_id: int, workspace_id: int | None = None, _commit: bool = True,
+    db: Database, photo_id: int, workspace_id: int | None = None,
 ) -> None:
     """Queue GPS sidecar sync or cleanup work for location edits."""
     if workspace_id is None:
@@ -97,11 +95,11 @@ def queue_location_sync_if_enabled(
     # Queue even when assigned-location writes are disabled so sync can
     # remove stale Vireo-authored GPS previously written while enabled.
     db.remove_pending_changes(
-        photo_id, "location", workspace_id=workspace_id, _commit=_commit,
+        photo_id, "location", workspace_id=workspace_id,
     )
     db.queue_change(
         photo_id, "location", "effective",
-        workspace_id=workspace_id, _commit=_commit,
+        workspace_id=workspace_id,
     )
 
 
@@ -114,7 +112,8 @@ def claim_pending_changes_for_sync(
     have seen it. Persist that fact before any filesystem work, including
     across failed writes or a process restart. Match immutable tokens so
     a cancellation between selection and this claim cannot resurrect the
-    old edit or claim a replacement that reused its rowid.
+    old edit or claim a replacement that reused its rowid. The caller's unit
+    of work commits the claim, before its filesystem work.
     """
     if not changes:
         return []
@@ -129,7 +128,7 @@ def mark_sync_started(
 
 
 def remove_pending_change_token(db: Database, change_token: str | None) -> int:
-    """Delete a single pending change by immutable token. Returns rows removed."""
+    """Delete a single pending change by immutable token (no commit). Returns rows removed."""
     if not change_token:
         return 0
     return db.pending_changes.remove_token(change_token)
@@ -137,12 +136,9 @@ def remove_pending_change_token(db: Database, change_token: str | None) -> int:
 
 def clear_pending(
     db: Database, change_ids: Sequence[int], *, clear_equivalent_flat_removals: bool = False,
-    expected_tokens: Sequence[str | None] | None = None, _commit: bool = True,
+    expected_tokens: Sequence[str | None] | None = None,
 ) -> None:
-    """Delete pending changes by id.
-
-    ``_commit=False`` leaves the delete and any equivalent flat removals
-    in the caller's transaction, allowing an atomic discard/history edit.
+    """Delete pending changes by id (no commit: the caller's unit owns it).
 
     When ``clear_equivalent_flat_removals`` is true, a successfully
     applied flat keyword removal also clears equivalent rows from sibling
@@ -174,15 +170,13 @@ def clear_pending(
         expected_tokens=expected_tokens,
     )
     if synced_changes:
-        repo.clear_equivalent_flat_removals(synced_changes, _commit=False)
-    if _commit:
-        repo.commit()
+        repo.clear_equivalent_flat_removals(synced_changes)
 
 
 def clear_pending_by_token(
     db: Database, change_tokens: Sequence[str], *, clear_equivalent_flat_removals: bool = False,
 ) -> None:
-    """Delete pending changes named by their immutable tokens.
+    """Delete pending changes named by their immutable tokens (no commit).
 
     ``pending_changes.id`` is a bare ``INTEGER PRIMARY KEY``, so SQLite
     re-issues a deleted row's rowid to the next insert into the table. A
@@ -203,5 +197,4 @@ def clear_pending_by_token(
         clear_equivalent_flat_removals=clear_equivalent_flat_removals,
     )
     if synced_changes:
-        repo.clear_equivalent_flat_removals(synced_changes, _commit=False)
-    repo.commit()
+        repo.clear_equivalent_flat_removals(synced_changes)

@@ -272,9 +272,9 @@ def reconcile_location(db, source_id, target_id):
         db._merge_keyword_into(source_id, target_id)
         for row in affected:
             db.remove_pending_changes(row['photo_id'], 'location',
-                                      workspace_id=row['workspace_id'], _commit=False)
+                                      workspace_id=row['workspace_id'])
             db.queue_change(row['photo_id'], 'location', 'effective',
-                            workspace_id=row['workspace_id'], _commit=False)
+                            workspace_id=row['workspace_id'])
     return candidate
 
 
@@ -1085,16 +1085,16 @@ def _queue_merged_photo_changes(db, affected, target_id, resolved,
         db.queue_change(pid, 'keyword_merge', json.dumps({
             'source_path': source['path'], 'target_id': target_id,
             'target_path': resolved['path'],
-        }, sort_keys=True), workspace_id=ws, _commit=False)
+        }, sort_keys=True), workspace_id=ws)
         if old_name != resolved['name']:
             # Only remove the old flat name if another surviving keyword
             # on this photo does not still need it.
             still_used = db.keyword_merges.keyword_names_on_photo(pid)
             if not any(keyword_match_key(r['name']) == keyword_match_key(old_name) for r in still_used):
-                db.queue_change(pid, 'keyword_remove_flat', old_name, workspace_id=ws, _commit=False)
-        db.remove_pending_changes(pid, 'keyword_remove', resolved['name'], workspace_id=ws, _commit=False)
+                db.queue_change(pid, 'keyword_remove_flat', old_name, workspace_id=ws)
+        db.remove_pending_changes(pid, 'keyword_remove', resolved['name'], workspace_id=ws)
         db.pending_changes.clear_equivalent_flat_removals(
-            [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}], _commit=False,
+            [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}],
         )
         _queue_merge_keyword_add(db, pid, ws, target_id, resolved['name'], resolved['type'],
                                  location_export_settings)
@@ -1111,9 +1111,9 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
     for folded_id in preview.get('metadata_folded_ids', []):
         for row in db.photo_keywords.photo_workspaces_tagged_with(folded_id):
             db.remove_pending_changes(row['photo_id'], 'location',
-                                      workspace_id=row['workspace_id'], _commit=False)
+                                      workspace_id=row['workspace_id'])
             db.queue_change(row['photo_id'], 'location', 'effective',
-                            workspace_id=row['workspace_id'], _commit=False)
+                            workspace_id=row['workspace_id'])
     if (resolved['type'] == 'location' or target['type'] == 'location'
             or any(s['type'] == 'location' for s in preview['sources'])):
         # Filling previously missing coordinates, or moving the retained
@@ -1124,8 +1124,8 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
         # hierarchy and coordinates in their sidecars, and only a
         # ``location`` resync clears them.
         for row in db.photo_keywords.photo_workspaces_tagged_with(target_id):
-            db.remove_pending_changes(row['photo_id'], 'location', workspace_id=row['workspace_id'], _commit=False)
-            db.queue_change(row['photo_id'], 'location', 'effective', workspace_id=row['workspace_id'], _commit=False)
+            db.remove_pending_changes(row['photo_id'], 'location', workspace_id=row['workspace_id'])
+            db.queue_change(row['photo_id'], 'location', 'effective', workspace_id=row['workspace_id'])
     if (target['type'] == 'location' and resolved['type'] != 'location'
             and target['name'] == resolved['name']):
         # Demoting the retained row out of `location` without renaming
@@ -1137,7 +1137,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
         # location->non-location retype.
         for row in db.photo_keywords.photo_workspaces_tagged_with(target_id):
             db.queue_change(row['photo_id'], 'keyword_add', resolved['name'],
-                            workspace_id=row['workspace_id'], _commit=False)
+                            workspace_id=row['workspace_id'])
     if (target['type'] == 'location') != (resolved['type'] == 'location'):
         # ``get_photo_location_paths`` stops walking at the first
         # non-location ancestor, so retyping the retained parent across
@@ -1149,9 +1149,9 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
         # subtree here; the block above already handled ``target_id``.
         for row in db.keyword_merges.location_subtree_photo_workspaces(target_id):
             db.remove_pending_changes(row['photo_id'], 'location',
-                                      workspace_id=row['workspace_id'], _commit=False)
+                                      workspace_id=row['workspace_id'])
             db.queue_change(row['photo_id'], 'location', 'effective',
-                            workspace_id=row['workspace_id'], _commit=False)
+                            workspace_id=row['workspace_id'])
 
 
 def _apply_merge_overrides(db, target_id, resolved):
@@ -1207,7 +1207,7 @@ def _queue_merge_keyword_add(db, photo_id, workspace_id, keyword_id, name, keywo
             # tagged ancestors still need their own ordinary keyword addition.
             if leaves[photo_id] == keyword_id:
                 return
-    db.queue_change(photo_id, 'keyword_add', name, workspace_id=workspace_id, _commit=False)
+    db.queue_change(photo_id, 'keyword_add', name, workspace_id=workspace_id)
 
 
 def _queue_survivor_rename(db, target_id, old_name, new_name, keyword_type, settings):
@@ -1227,7 +1227,7 @@ def _queue_survivor_rename(db, target_id, old_name, new_name, keyword_type, sett
         if not any(keyword_match_key(r['name']) == keyword_match_key(old_name)
                    for r in still_used):
             db.queue_change(pid, 'keyword_remove_flat', old_name,
-                            workspace_id=ws, _commit=False)
+                            workspace_id=ws)
         _queue_merge_keyword_add(db, pid, ws, target_id, new_name, keyword_type, settings)
 
 def _collapsing_child_tags(db, preview):
@@ -1271,7 +1271,7 @@ def _queue_disambiguated_child_renames(db, preview, renamed_tags, settings):
         if not any(keyword_match_key(r['name']) == keyword_match_key(child['name'])
                    for r in still_used):
             db.queue_change(pid, 'keyword_remove_flat', child['name'],
-                            workspace_id=ws, _commit=False)
+                            workspace_id=ws)
         keyword_type = db.keyword_merges.type_of(child['id'])['type']
         _queue_merge_keyword_add(db, pid, ws, child['id'], child['new_name'], keyword_type, settings)
 
@@ -1329,13 +1329,13 @@ def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_ke
         db.queue_change(row['photo_id'], 'keyword_merge', json.dumps({
             'source_path': old_path, 'target_id': destination_id,
             'target_path': new_path,
-        }, sort_keys=True), workspace_id=row['workspace_id'], _commit=False)
+        }, sort_keys=True), workspace_id=row['workspace_id'])
         # Same set the preview's rival-place guard used, so the two agree on
         # which rows really move their exported location. A location under a
         # general ancestor keeps its exported chain through a reparent and
         # needs the hierarchy rewrite above but no resync.
         if kid in location_change_ids:
             db.remove_pending_changes(row['photo_id'], 'location',
-                                      workspace_id=row['workspace_id'], _commit=False)
+                                      workspace_id=row['workspace_id'])
             db.queue_change(row['photo_id'], 'location', 'effective',
-                            workspace_id=row['workspace_id'], _commit=False)
+                            workspace_id=row['workspace_id'])

@@ -382,11 +382,11 @@ class _HighlightsRelabel:
             # is authoritative).
             if old["id"] != kid:
                 queue_keyword_remove(
-                    db, pid, old["name"], workspace_id=self.ws_id, _commit=False,
+                    db, pid, old["name"], workspace_id=self.ws_id,
                 )
 
         db.tag_photo(pid, kid, source="manual", _commit=False)
-        queue_keyword_add(db, pid, self.species, workspace_id=self.ws_id, _commit=False)
+        queue_keyword_add(db, pid, self.species, workspace_id=self.ws_id)
         self.items.append({
             "photo_id": pid,
             "old_value": self._history_old_value(pid, pred, old_primary, old_rows),

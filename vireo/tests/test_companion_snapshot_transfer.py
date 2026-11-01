@@ -36,6 +36,7 @@ def catalog(tmp_path):
             {"region": "subject", "adjustments": {"exposure": 1}},
         ]}})
     db.set_photo_edit_recipe(ids[".jpg"], recipes[2])
+    db.commit()
     # The middle snapshot exists only in a historical new_value, and the
     # first only in an old_value. Neither may be lost when history moves.
     for before, after in zip(recipes[:-1], recipes[1:], strict=True):
@@ -294,6 +295,7 @@ def test_cleanup_retains_source_if_prepared_copy_disappears(catalog):
 
 def test_existing_primary_recipe_wins_without_copying_companion_masks(catalog, monkeypatch):
     catalog.db.set_photo_edit_recipe(catalog.raw, {"rotation": 90})
+    catalog.db.commit()
 
     def unexpected(*args):
         pytest.fail("the companion's recipe will not be transferred")
