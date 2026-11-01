@@ -121,7 +121,10 @@ class EventStreams:
         job["status"] = status
         event = {
             "type": "status",
-            "data": {"job_id": job_id, "status": status},
+            "data": {"job_id": job_id, "status": status,
+                     "pausable": job.get("pausable", False),
+                     "cancellable": job.get("cancellable", True),
+                     "control_unavailable_reason": job.get("control_unavailable_reason")},
             "time": time.time(),
         }
         if job_id in self.events:

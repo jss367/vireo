@@ -42,6 +42,9 @@ import { fetchHistory, fetchJobs } from './polling.js';
     var job = state.activeJobs.find(function(j) { return j.id === jobId; });
     if (job && data.status) {
       job.status = data.status;
+      if (typeof data.pausable === 'boolean') job.pausable = data.pausable;
+      if (typeof data.cancellable === 'boolean') job.cancellable = data.cancellable;
+      if ('control_unavailable_reason' in data) job.control_unavailable_reason = data.control_unavailable_reason;
       if (state.selectedJobId === jobId) renderDetail(job);
       updateList();
       updateRunningBadge();

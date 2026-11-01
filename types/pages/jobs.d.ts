@@ -46,7 +46,8 @@ interface JobsRow {
   id: string; type: string; status: string; config?: JobsConfig; result?: JobsResult | null;
   started_at: string; finished_at?: string; duration?: number | null; workspace_id?: number | null;
   steps?: JobsStep[]; tree?: JobsStep[]; progress?: JobsProgress; errors?: string[]; error?: string;
-  summary?: string; result_details?: string[]; pausable?: boolean;
+  summary?: string; result_details?: string[]; pausable?: boolean; cancellable?: boolean;
+  pause_unavailable_reason?: string | null; control_unavailable_reason?: string | null;
   import_resume_pending?: boolean; import_direct_pending?: boolean;
   import_resume_allowed?: boolean; import_recovery_options?: JobsRecoveryOptions;
 }

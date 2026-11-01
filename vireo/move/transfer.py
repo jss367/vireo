@@ -14,6 +14,8 @@ import tempfile
 import threading
 import time
 
+from job_runner.subprocess_control import process_group_kwargs, stop_process_tree
+
 try:
     from ..proc import no_window_kwargs
 except ImportError:
@@ -59,7 +61,7 @@ def _copy_and_verify(src, dst):
 
 
 def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
-                             progress_cb):
+                             progress_cb, control=None):
     """Recursively copy src_path into dest_path, reporting each file copied.
 
     ``skip_existing`` mirrors rsync ``--ignore-existing`` (merge/resume): a
@@ -92,14 +94,18 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
         # primary rsync -a path (which preserves symlinks rather than
         # following them) and keeping the verification counts consistent.
         for d in dirs:
+            if control:
+                control.checkpoint()
             src_sub = os.path.join(root, d)
             if not os.path.islink(src_sub):
                 continue
             dst_sub = os.path.join(target_dir, d)
-            if skip_existing and os.path.lexists(dst_sub):
+            if (skip_existing or (control and control.generation)) and os.path.lexists(dst_sub):
                 continue
             os.symlink(os.readlink(src_sub), dst_sub)
         for fn in files:
+            if control:
+                control.checkpoint()
             # Merges skip Finder metadata (``.DS_Store``) — the destination
             # keeps its own copy, and the source's is discarded when the
             # source tree is removed after a successful merge. Fresh moves
@@ -112,7 +118,7 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
             # still counts as present for a merge, so we never dereference it
             # and write through to its target. exists() returns False for a
             # broken symlink and would fall through to copy2 below.
-            if skip_existing and os.path.lexists(dst_file):
+            if (skip_existing or (control and control.generation)) and os.path.lexists(dst_file):
                 continue
             if os.path.islink(src_file):
                 # Preserve the symlink rather than copy2's dereferenced target,
@@ -132,7 +138,7 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
     # metadata. Run after all contents exist so child writes don't re-bump a
     # parent's mtime. Skipped on a merge: a pre-existing destination dir keeps
     # the user's own metadata rather than being overwritten with the source's.
-    if not skip_existing:
+    if not skip_existing and not (control and control.generation):
         for src_dir, target_dir in created_dirs:
             shutil.copystat(src_dir, target_dir)
 
@@ -207,11 +213,11 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
         poll = 1.0 if cancel_check is not None else min(stall_timeout, 30)
         while not done.wait(poll):
             if cancel_check is not None and cancel_check():
-                proc.kill()
+                stop_process_tree(proc)
                 return
             if time.monotonic() - last_activity["t"] > stall_timeout:
                 state["timed_out"] = True
-                proc.kill()
+                stop_process_tree(proc)
                 return
 
     watchdog = threading.Thread(target=_watchdog, daemon=True)
@@ -219,17 +225,22 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
 
     stderr_thread, stderr_chunks = _start_stderr_drain(proc, last_activity)
 
+    completed = False
     try:
         _stream_rsync_progress(
             stdout_stream, total_files, progress_cb, last_activity)
         proc.wait()
+        completed = True
     finally:
         done.set()
+        if not completed:
+            stop_process_tree(proc)
+            proc.wait()
         if stdout_stream is not None and stdout_stream is not proc.stdout:
             with contextlib.suppress(OSError):
                 stdout_stream.close()
-    stderr_thread.join()
-    watchdog.join()
+        stderr_thread.join()
+        watchdog.join()
     return proc.returncode, "".join(stderr_chunks), state["timed_out"]
 
 
@@ -263,7 +274,7 @@ def _spawn_rsync_on_pty(cmd):
     try:
         proc = subprocess.Popen(
             cmd, stdout=stdout_arg, stderr=subprocess.PIPE, text=True,
-            **no_window_kwargs(),
+            **no_window_kwargs(), **process_group_kwargs(),
         )
     except BaseException:
         # Popen can raise after os.openpty() succeeded (bad rsync_bin,

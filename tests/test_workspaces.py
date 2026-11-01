@@ -565,7 +565,7 @@ def test_job_history_workspace_id(db_with_workspace):
     def noop(job):
         return {"ok": True}
 
-    job_id = runner.start("test-job", noop, workspace_id=ws_id)
+    job_id = runner.start("test-job", noop, workspace_id=ws_id, pausable=False)
 
     # Wait for job to complete
     import sqlite3
@@ -608,8 +608,8 @@ def test_job_history_filtered_by_workspace(db_with_workspace):
         return {"ok": True}
 
     # Start jobs in two different workspaces
-    job1_id = runner.start("test-ws1", noop, workspace_id=ws_id)
-    job2_id = runner.start("test-ws2", noop, workspace_id=ws2_id)
+    job1_id = runner.start("test-ws1", noop, workspace_id=ws_id, pausable=False)
+    job2_id = runner.start("test-ws2", noop, workspace_id=ws2_id, pausable=False)
 
     # Wait for both jobs to be fully persisted to job_history. Polling
     # ``status`` alone races the worker thread: it sets ``status =

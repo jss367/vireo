@@ -26,7 +26,7 @@ class _FolderMoveTarget:
     """
 
     def __init__(self, db, folder_id, src_path, landing_name, *, merge, remote,
-                 reject_tracked_ancestor, allow_tracked_merge):
+                 reject_tracked_ancestor, allow_tracked_merge, control=None):
         self.db = db
         self.folder_id = folder_id
         self.src_path = src_path
@@ -35,6 +35,7 @@ class _FolderMoveTarget:
         self.remote = remote
         self.reject_tracked_ancestor = reject_tracked_ancestor
         self.allow_tracked_merge = allow_tracked_merge
+        self.control = control
         self.transfer_dest = None
         self.rsync_target = None
         self.catalog_path = None
@@ -315,7 +316,8 @@ class _FolderMoveTarget:
                     "Install it or set the GNU rsync path in Settings."
                 ]}
             conflict = _find_remote_content_conflict(
-                remote_rsync, src_path, self.rsync_target, remote)
+                remote_rsync, src_path, self.rsync_target, remote,
+                **({"control": self.control} if self.control else {}))
             if conflict is not None:
                 name, detail = conflict
                 if name == "__ERROR__":
@@ -330,10 +332,12 @@ class _FolderMoveTarget:
                     f"or deleted."
                 ]}
         else:
-            conflict = _find_content_conflict(src_path, self.transfer_dest)
+            conflict = _find_content_conflict(
+                src_path, self.transfer_dest,
+                **({"checkpoint": self.control.checkpoint} if self.control else {}))
             if conflict is not None:
                 return {"moved": 0, "errors": [
                     f"Conflict: '{conflict}' already exists at the destination "
-                    f"with different content. Nothing was copied or deleted."
+                    f"with different content or an unsafe link. Nothing was copied or deleted."
                 ]}
         return None

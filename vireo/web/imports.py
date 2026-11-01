@@ -25,6 +25,7 @@ from config import config_value
 from db import Database
 from file_identity import catalog_file_paths, catalog_scan_root
 from flask import Blueprint, Response, abort, jsonify, make_response, request
+from job_runner.work_control import SerializedWork, WorkControl
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
 from new_images import exclude_snapshot_folders, invalidate_new_images_after_scan
@@ -1446,6 +1447,22 @@ def create_imports_blueprint(
             db.pending_archives.delete(archive_id)
         return jsonify({"ok": True})
 
+    def _sync_before_archive_transfer(
+        thread_db: Database, control: WorkControl,
+        progress: Callable[..., None], folder_ids: list[int],
+    ) -> tuple[int, set[str]]:
+        # Never park with the global sidecar writer lock held. A pause during
+        # sync waits for that phase to finish; the copy runs without the lock.
+        while True:
+            control.checkpoint()
+            if sync_job_lock.acquire(timeout=0.1):
+                break
+            progress(0, 0, "", "Waiting for current XMP sync")
+        try:
+            return _sync_staged_metadata(thread_db, progress, sync_job_lock, folder_ids)
+        finally:
+            sync_job_lock.release()
+
     def _transfer_pending_archive(thread_db: Database, runner: JobRunner, job: JobDict, archive: JsonDict, sync_first: bool,
                                   progress: Callable[..., None],
                                   send_pending_archive: Callable[..., JsonDict]) -> tuple[JsonDict, int, int | None]:
@@ -1466,82 +1483,61 @@ def create_imports_blueprint(
             _staged_photo_ids(thread_db, folder_ids)
             if sync_first else []
         )
-        if sync_first and not sync_job_lock.acquire(blocking=False):
-            # Cancellably: the wait can be minutes if another
-            # workspace's XMP sync holds the lock, and nothing
-            # on disk has been touched yet. Mirrors the
-            # /api/jobs/sync route's own acquire.
-            progress(0, 0, "", "Waiting for current XMP sync")
-            while not sync_job_lock.acquire(timeout=0.1):
-                if runner.is_cancelled(job["id"]):
-                    raise ValueError(
-                        "Transfer cancelled before it started. "
-                        "Local originals are retained.")
-        try:
-            # Only now: the lock is in hand and the next step
-            # touches files.
-            if not runner.begin_uncancellable(job["id"]):
-                raise ValueError("Transfer cancelled before it started. Local originals are retained.")
-
-            # Before the move, while the sidecars are still on
-            # local disk. Recomputed here rather than trusting
-            # the count the banner showed, so edits queued
-            # between the click and the job travel too.
-            synced, undeliverable = _sync_staged_metadata(
-                thread_db, progress, sync_job_lock,
-                folder_ids) if sync_first else (0, set())
-
-            # Transfer preflight can fail before move_folder's
-            # first callback. The successful sync is already over.
-            progress(0, 0, "", "Checking destination")
-            result = send_pending_archive(
-                thread_db, archive, vireo_dir=media_root(config["THUMB_CACHE_DIR"]),
-                guard_folder=guard_move_folder, progress_cb=progress,
+        # Keep the copy unlocked, but exclude sibling sidecar writers during
+        # final verification and source removal. Pause releases that guard;
+        # Resume reacquires it before the mandatory fresh verification.
+        control = SerializedWork(runner, job["id"], sync_job_lock if sync_first else None).control
+        synced, undeliverable = _sync_before_archive_transfer(
+            thread_db, control, progress, folder_ids) if sync_first else (0, set())
+        control.checkpoint()
+        # Transfer preflight can fail before move_folder's
+        # first callback. The successful sync is already over.
+        progress(0, 0, "", "Checking destination")
+        result = send_pending_archive(
+            thread_db, archive, vireo_dir=media_root(config["THUMB_CACHE_DIR"]),
+            guard_folder=guard_move_folder, progress_cb=progress, control=control,
+        )
+        if sync_first:
+            # Unconditionally, not just when something
+            # synced: a queue holding only changes this
+            # workspace declines to write syncs nothing,
+            # and an edit made during the copy would then
+            # go unreported.
+            #
+            # ``preserved_off_staging_identities`` covers
+            # edits the tracked-merge path remapped onto
+            # a survivor NOT in ``staged_photo_ids`` --
+            # the archive-side row of a byte-identical
+            # real collision, whose id the by-photo
+            # residual re-read below cannot see. The
+            # phantom-target and intra-staged cases
+            # leave the survivor inside
+            # ``staged_photo_ids`` and the residual
+            # re-read finds them on its own; adding the
+            # full ``preserved_edit_count`` here would
+            # double-count those. See
+            # merge_staged_tree_into_archive.
+            #
+            # Reported as identities, not a raw
+            # rowcount: filtering ``undeliverable``
+            # here keeps rows the pre-transfer drain
+            # deliberately did not write (a flag under
+            # ``sync_flags_to_xmp`` off) out of the
+            # "queued during transfer" count -- they
+            # predate the transfer and were considered
+            # by the sync. Sibling-workspace edits are
+            # already dropped upstream by
+            # ``merge_staged_tree_into_archive``.
+            residual = _residual_staged_changes(
+                thread_db, staged_photo_ids, undeliverable)
+            off_staging = result.get(
+                "preserved_off_staging_identities", []) or []
+            off_staging_residual = sum(
+                1 for ident in off_staging
+                if ident not in undeliverable
             )
-            if sync_first:
-                # Unconditionally, not just when something
-                # synced: a queue holding only changes this
-                # workspace declines to write syncs nothing,
-                # and an edit made during the copy would then
-                # go unreported.
-                #
-                # ``preserved_off_staging_identities`` covers
-                # edits the tracked-merge path remapped onto
-                # a survivor NOT in ``staged_photo_ids`` --
-                # the archive-side row of a byte-identical
-                # real collision, whose id the by-photo
-                # residual re-read below cannot see. The
-                # phantom-target and intra-staged cases
-                # leave the survivor inside
-                # ``staged_photo_ids`` and the residual
-                # re-read finds them on its own; adding the
-                # full ``preserved_edit_count`` here would
-                # double-count those. See
-                # merge_staged_tree_into_archive.
-                #
-                # Reported as identities, not a raw
-                # rowcount: filtering ``undeliverable``
-                # here keeps rows the pre-transfer drain
-                # deliberately did not write (a flag under
-                # ``sync_flags_to_xmp`` off) out of the
-                # "queued during transfer" count -- they
-                # predate the transfer and were considered
-                # by the sync. Sibling-workspace edits are
-                # already dropped upstream by
-                # ``merge_staged_tree_into_archive``.
-                residual = _residual_staged_changes(
-                    thread_db, staged_photo_ids, undeliverable)
-                off_staging = result.get(
-                    "preserved_off_staging_identities", []) or []
-                off_staging_residual = sum(
-                    1 for ident in off_staging
-                    if ident not in undeliverable
-                )
-                if residual is not None:
-                    residual += off_staging_residual
-        finally:
-            if sync_first:
-                sync_job_lock.release()
+            if residual is not None:
+                residual += off_staging_residual
         return result, synced, residual
 
     @blueprint.post("/api/import/pending-archives/<archive_id>/send")
@@ -1619,7 +1615,7 @@ def create_imports_blueprint(
                         return result
                     except Exception as e:  # broad: mark the archive retryable before propagating any worker failure
                         if steps is not None:
-                            steps.fail(str(e), status="cancelled" if runner.is_cancelled(job["id"]) else "failed")
+                            steps.fail(str(e), status="cancelled" if runner.cancellation_requested(job["id"]) else "failed")
                         thread_db.pending_archives.set_state(archive_id, "pending", str(e))
                         raise
 

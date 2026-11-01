@@ -9,6 +9,8 @@ runs the move's phases in order through three collaborators:
 import logging
 import os
 import shutil
+from contextlib import nullcontext
+from dataclasses import dataclass
 
 from .folder_catalog import _FolderCatalogRewrite
 from .folder_target import _FolderMoveTarget
@@ -19,10 +21,22 @@ from .paths import normalize_destination_name
 log = logging.getLogger("move")
 
 
+@dataclass(frozen=True)
+class FolderMoveOptions:
+    """Folder transfer settings, separate from progress and job controls."""
+
+    merge: bool = False
+    remote: dict | None = None
+    reject_tracked_ancestor: bool = False
+    allow_tracked_merge: bool = False
+    destination_name: str = ""
+    verify_contents: bool = False
+    pre_commit_check: object = None
+    thumb_cache_dir: str | None = None
+
+
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
-                merge=False, remote=None, reject_tracked_ancestor=False,
-                allow_tracked_merge=False, destination_name="", verify_contents=False,
-                pre_commit_check=None, thumb_cache_dir=None):
+                *, control=None, **options):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name unless
@@ -102,18 +116,16 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     is included — the archive is committed and ``errors`` stays empty, but
     callers should still surface the leftover originals to the user.
     """
+    options = FolderMoveOptions(**options)
     src_path, folder_name, landing_name, error = _folder_move_source(
-        db, folder_id, destination_name)
+        db, folder_id, options.destination_name)
     if error is not None:
         return error
 
     move = _FolderMove(
         db, folder_id, src_path, landing_name,
-        progress_cb=progress_cb, developed_dir=developed_dir, merge=merge,
-        remote=remote, reject_tracked_ancestor=reject_tracked_ancestor,
-        allow_tracked_merge=allow_tracked_merge,
-        verify_contents=verify_contents, pre_commit_check=pre_commit_check,
-        thumb_cache_dir=thumb_cache_dir,
+        progress_cb=progress_cb, developed_dir=developed_dir,
+        options=options, control=control,
     )
     return move.run(destination, folder_name)
 
@@ -162,29 +174,32 @@ class _FolderMove:
     """
 
     def __init__(self, db, folder_id, src_path, landing_name, *, progress_cb,
-                 developed_dir, merge, remote, reject_tracked_ancestor,
-                 allow_tracked_merge, verify_contents, pre_commit_check,
-                 thumb_cache_dir):
+                 developed_dir, options, control):
         self.src_path = src_path
         self.progress_cb = progress_cb
+        self.control = control
+        self.source_identity = None
         self.target = _FolderMoveTarget(
-            db, folder_id, src_path, landing_name, merge=merge, remote=remote,
-            reject_tracked_ancestor=reject_tracked_ancestor,
-            allow_tracked_merge=allow_tracked_merge,
+            db, folder_id, src_path, landing_name, merge=options.merge, remote=options.remote,
+            reject_tracked_ancestor=options.reject_tracked_ancestor,
+            allow_tracked_merge=options.allow_tracked_merge,
+            control=control,
         )
         self.transfer = _FolderTransfer(
-            db, src_path, self.target, remote=remote,
-            verify_contents=verify_contents, progress_cb=progress_cb,
-            progress=self.progress,
+            db, src_path, self.target, remote=options.remote,
+            verify_contents=options.verify_contents, progress_cb=progress_cb,
+            progress=self.progress, control=control,
         )
         self.catalog = _FolderCatalogRewrite(
             db, folder_id, src_path, landing_name, self.target,
-            progress=self.progress, pre_commit_check=pre_commit_check,
-            thumb_cache_dir=thumb_cache_dir, developed_dir=developed_dir,
+            progress=self.progress, pre_commit_check=options.pre_commit_check,
+            thumb_cache_dir=options.thumb_cache_dir, developed_dir=developed_dir,
         )
         self.cleanup_error = None
 
     def progress(self, current, total, filename, phase):
+        if self.control and phase in ("Checking timestamps", "Verifying copy"):
+            self.control.checkpoint()
         if self.progress_cb:
             self.progress_cb(current, total, filename, phase)
 
@@ -203,6 +218,8 @@ class _FolderMove:
                       target.resolve_tracked_destination,
                       target.probe_destination,
                       target.refuse_content_conflict):
+            if self.control:
+                self.control.checkpoint()
             error = check()
             if error is not None:
                 return error
@@ -211,21 +228,76 @@ class _FolderMove:
                  "Merging" if target.dest_exists else "Moving", self.src_path,
                  target.rsync_target)
 
-        for phase in (transfer.ensure_remote_parent,
-                      transfer.copy_tree,
-                      transfer.plan_mtime_corrections,
-                      transfer.verify_copy):
+        if self.control:
+            source_stat = os.stat(self.src_path)
+            self.source_identity = (source_stat.st_dev, source_stat.st_ino)
+
+        for phase in (transfer.ensure_remote_parent, transfer.copy_tree):
+            if self.control:
+                self.control.checkpoint()
+                error = self.validate_source()
+                if error:
+                    return error
             error = phase()
             if error is not None:
                 return error
 
-        catalog.update_catalog()
-        catalog.apply_mtime_corrections(transfer.mtime_updates)
-        catalog.relocate_developed_dirs()
-        self.remove_originals()
-        self.progress(transfer.total_files, transfer.total_files, folder_name,
-                      "Done")
+        guard = self.control.commit_context if self.control else nullcontext
+        with guard():
+            error = self.verify_and_begin_commit()
+            if error is not None:
+                return error
+            catalog.update_catalog()
+            catalog.apply_mtime_corrections(transfer.mtime_updates)
+            catalog.relocate_developed_dirs()
+            self.remove_originals()
+            self.progress(transfer.total_files, transfer.total_files, folder_name,
+                          "Done")
         return self.result()
+
+    def verify_and_begin_commit(self):
+        """Never delete originals using verification from before a pause."""
+        while True:
+            if self.control:
+                self.control.checkpoint()
+                error = self.validate_source()
+                if error:
+                    return error
+                if self.control.generation:
+                    # A paused transfer no longer exclusively owns a fresh
+                    # destination. Preserve every existing file and recheck
+                    # catalog ownership before publishing or cleaning up.
+                    self.target.dest_exists = True
+                    self.transfer.verify_contents = True
+                    error = self.target.resolve_tracked_destination()
+                    if error:
+                        return error
+            generation = self.control.generation if self.control else 0
+            for phase in (self.transfer.plan_mtime_corrections,
+                          self.transfer.verify_copy):
+                error = phase()
+                if error is not None:
+                    return error
+            if self.control is None:
+                return None
+            if generation == self.control.generation and self.control.try_commit():
+                return None
+            self.control.checkpoint()
+
+    def validate_source(self):
+        """A released transfer slot must not let us commit another move's tree."""
+        row = self.catalog.db.moves_merge.folder_source_row(self.catalog.folder_id)
+        try:
+            st = os.stat(self.src_path)
+            same_directory = (st.st_dev, st.st_ino) == self.source_identity
+        except OSError:
+            same_directory = False
+        if row is None or row["path"] != self.src_path or not same_directory:
+            return {"moved": 0, "errors": [
+                "The source folder changed during the transfer. "
+                "The catalog was not updated and source files were not removed."
+            ]}
+        return None
 
     def remove_originals(self):
         """Delete originals.
