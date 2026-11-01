@@ -185,3 +185,106 @@ test('large choices and keystroke validation read candidate cells only linearly'
     assert.deepEqual(h.choices()[0].cells, ['1'], 'new preview mapping replaces old counts');
   }
 });
+
+test('a clicked nearby place becomes a Google choice only while the box names it', () => {
+  const h = harness();
+  h.ctx.data.groups[0].suggestion = {kind: 'google', source: 'google_area',
+    place_id: 'county', name: 'San Diego County', summary: 'San Diego County · California'};
+  h.ctx.data.groups[0].nearby_places = [
+    {place_id: 'lake', name: 'Big Laguna Lake', type: 'natural_feature',
+      distance_m: 574, farthest_m: 2186},
+    {place_id: 'lmra', name: 'Laguna Mountain Recreation Area', type: 'park',
+      distance_m: 2176, farthest_m: 2210}];
+  h.run(`importLocations.data = data;
+    globalThis.row = renderImportLocationGroup(data.groups[0]);
+    globalThis.body = row.children[2];
+    globalThis.input = body.children[1];
+    globalThis.nearby = body.children[4];`);
+  assert.equal(h.choices()[0].place_id, 'county', 'the broad suggestion stays the default');
+  const labels = JSON.parse(h.run('JSON.stringify(nearby.children[1].children.map(b => b.textContent))'));
+  // Closest–farthest photo; a range that rounds to one value reads as one.
+  assert.deepEqual(labels, ['Big Laguna Lake · 574 m–2.2 km', 'Laguna Mountain Recreation Area · 2.2 km']);
+  assert.match(h.run('nearby.children[0].textContent'), /can’t tell whether the photos were taken inside/);
+
+  h.run('nearby.children[1].children[0].handlers.click();');
+  assert.equal(h.run('input.value'), 'Big Laguna Lake');
+  const [choice] = h.choices();
+  assert.deepEqual({kind: choice.kind, place_id: choice.place_id, name: choice.name},
+    {kind: 'google', place_id: 'lake', name: 'Big Laguna Lake'});
+  assert.ok(!('latitude' in choice), 'no coordinates are sent for a Google place');
+
+  h.run('input.value = "Big Laguna Lake trail"; input.handlers.input();');
+  assert.equal(h.choices()[0].kind, 'new', 'typing a different name drops the Google place');
+  h.run('input.value = "big laguna lake"; input.handlers.input();');
+  assert.equal(h.choices()[0].place_id, 'lake', 'back to the picked name is the picked place');
+});
+
+test('a picked nearby place is sent with every cell of its outing', () => {
+  // The server splits broad names into outings and offers only places whose
+  // pin reaches every photo, so a pick never drops part of the group.
+  const h = harness();
+  h.ctx.data.groups[0].cells = ['0,0', '1,0', '2,0'];
+  h.ctx.data.file_cells = {'/invented/0': '0,0', '/invented/1': '1,0', '/invented/2': '2,0'};
+  h.ctx.data.groups[0].suggestion = {kind: 'google', source: 'google_area',
+    place_id: 'county', name: 'San Diego County', summary: 'San Diego County · California'};
+  h.ctx.data.groups[0].nearby_places = [
+    {place_id: 'lake', name: 'Big Laguna Lake', type: 'natural_feature',
+      distance_m: 574, farthest_m: 2186}];
+  h.ctx.importPreviewedPaths = ['/invented/0', '/invented/1', '/invented/2'];
+  h.run(`importLocations.data = data;
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.deepEqual(h.choices()[0].cells, ['0,0', '1,0', '2,0']);
+  h.run('nearby.children[1].children[0].handlers.click();');
+  const [lake] = h.choices();
+  assert.equal(lake.place_id, 'lake');
+  assert.deepEqual(lake.cells, ['0,0', '1,0', '2,0']);
+});
+
+test('a clicked nearby place wins over a same-named broad suggestion', () => {
+  // A county and a park can share a normalized name; the clicked place
+  // must still submit its own place_id instead of the broad suggestion's.
+  const h = harness();
+  h.ctx.data.groups[0].suggestion = {kind: 'google', source: 'google_area',
+    place_id: 'county', name: 'Laguna', summary: 'Laguna · California'};
+  h.ctx.data.groups[0].nearby_places = [
+    {place_id: 'park', name: 'Laguna', type: 'park', distance_m: 500, farthest_m: 900}];
+  h.run(`importLocations.data = data;
+    globalThis.row = renderImportLocationGroup(data.groups[0]);
+    globalThis.body = row.children[2];
+    globalThis.input = body.children[1];
+    globalThis.nearby = body.children[4];`);
+  assert.equal(h.choices()[0].place_id, 'county', 'default is the broad suggestion');
+  h.run('nearby.children[1].children[0].handlers.click();');
+  assert.equal(h.choices()[0].place_id, 'park', 'clicking the same-named park submits the park');
+});
+
+test('a broadly named group says why it has no nearby places', () => {
+  const h = harness();
+  h.ctx.data.groups[0].nearby_places = [];
+  h.ctx.data.groups[0].nearby_unresolved = 'transient_error';
+  h.run(`importLocations.data = data;
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.match(h.run('nearby.children[0].textContent'), /didn’t answer.*Preview again/);
+  h.run(`data.groups[0].nearby_unresolved = 'spread_out';
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.match(h.run('nearby.children[0].textContent'), /too spread out for one nearby place/);
+  h.run('delete data.groups[0].nearby_unresolved;');
+  h.run('globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];');
+  assert.match(h.run('nearby.children[0].textContent'), /no visited park or natural feature within 5 km of all of them/);
+  const backend = readFileSync('vireo/services/import_locations.py', 'utf8');
+  assert.match(backend, /NEARBY_RADIUS_M = 5000\b/);
+});
+
+test('a list from partly failed lookups says it may be missing places', () => {
+  const h = harness();
+  h.ctx.data.groups[0].nearby_places = [
+    {place_id: 'lake', name: 'Big Laguna Lake', type: 'natural_feature', distance_m: 574, farthest_m: 900}];
+  h.ctx.data.groups[0].nearby_unresolved = 'transient_error';
+  h.run(`importLocations.data = data;
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.equal(h.run('nearby.children[1].children.length'), 1);
+  assert.match(h.run('nearby.children[2].textContent'), /may be missing nearby places.*Preview again/);
+  h.run(`delete data.groups[0].nearby_unresolved;
+    globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
+  assert.equal(h.run('nearby.children.length'), 2, 'a complete list carries no warning');
+});

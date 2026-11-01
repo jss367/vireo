@@ -2453,6 +2453,81 @@ def test_import_location_suggestions_become_the_chosen_location_choices(
     ]
 
 
+def test_import_county_only_spots_offer_named_places_nearby(live_server, page, tmp_path):
+    """A spot Google only names by county keeps the county as the default,
+    lists named places nearby with their pin distance, and a click on one
+    sends that Google place, not the photos' coordinates."""
+    from PIL import Image
+
+    url = live_server["url"]
+    card = tmp_path / "card"
+    card.mkdir()
+    paths = []
+    for i in range(1, 3):
+        Image.new("RGB", (16, 16), "green").save(card / f"DSC_000{i}.JPG")
+        paths.append(str(card / f"DSC_000{i}.JPG"))
+    captured = {}
+    cells = ["32875,-116449", "32878,-116461"]
+    frames = [
+        {"reading": 2, "total": 2}, {"naming": 2, "total": 2}, {"nearby": 1, "total": 1},
+        {"done": True, "groups": [{
+            "key": "google:sd-county", "cells": cells, "file_count": 2,
+            "latitude": 32.8765, "longitude": -116.455, "sample_paths": paths,
+            "unresolved_reasons": {},
+            "suggestion": {"kind": "google", "place_id": "sd-county", "name": "San Diego County",
+                           "summary": "San Diego County · United States · California",
+                           "source": "google_area"},
+            "nearby_places": [
+                {"place_id": "lake", "name": "Big Laguna Lake", "type": "natural_feature",
+                 "distance_m": 386, "farthest_m": 1504},
+                {"place_id": "meadow", "name": "Laguna Meadow", "type": "natural_feature",
+                 "distance_m": 666, "farthest_m": 912},
+                {"place_id": "lmra", "name": "Laguna Mountain Recreation Area", "type": "park",
+                 "distance_m": 2386, "farthest_m": 2412},
+            ],
+        }], "file_cells": dict(zip(paths, cells, strict=True)), "no_gps_paths": [],
+         "location_options": []},
+    ]
+
+    def config_route(route):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "google_maps_api_key": "configured-for-test",
+            "pipeline": {"default_process_id": None},
+        }))
+
+    def start_import(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"job_id": "import-nearby-test"}))
+
+    page.route("**/api/config", config_route)
+    page.route("**/api/import/location-suggestions", lambda route: route.fulfill(
+        status=200, content_type="text/event-stream",
+        body="".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)))
+    page.route("**/api/jobs/import-in-place", start_import)
+    page.goto(f"{url}/import")
+    page.locator("#chkLocationFromGps").check()
+    page.locator("#sourceInput").fill(str(card))
+    page.locator("#btnAddSource").click()
+
+    group = page.locator(".import-location-group")
+    expect(group).to_have_count(1, timeout=15000)
+    expect(group.locator("input[type=text]")).to_have_value("San Diego County")
+    expect(group).to_contain_text("Google Maps only has a broad area name for these spots")
+    buttons = group.locator(".import-location-nearby-place")
+    expect(buttons).to_have_text(["Big Laguna Lake · 386 m–1.5 km", "Laguna Meadow · 666–912 m",
+                                  "Laguna Mountain Recreation Area · 2.4 km"])
+    buttons.nth(0).click()
+    expect(group.locator("input[type=text]")).to_have_value("Big Laguna Lake")
+    expect(group).to_contain_text("Will add “Big Laguna Lake” from Google Maps.")
+    page.locator("#btnStart").click()
+    expect(page.locator("#progressCard")).to_be_visible()
+
+    assert captured["body"]["location_choices"] == [
+        {"kind": "google", "place_id": "lake", "name": "Big Laguna Lake", "cells": cells},
+    ]
+
+
 def test_import_location_suggestions_work_without_an_api_key(live_server, page):
     url = live_server["url"]
 

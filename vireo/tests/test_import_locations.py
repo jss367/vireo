@@ -80,6 +80,13 @@ def no_google(monkeypatch):
     def refuse(*args, **kwargs):
         raise AssertionError("Google was asked for a place the catalog already names")
     monkeypatch.setattr(places, "reverse_geocode", refuse)
+    monkeypatch.setattr(places, "nearby_named_places", refuse)
+
+
+@pytest.fixture(autouse=True)
+def fresh_nearby_cache(monkeypatch):
+    """Nearby answers are cached per process; start each test without them."""
+    monkeypatch.setattr(import_locations, "_nearby_cache", {})
 
 
 def _files(points):
@@ -279,6 +286,663 @@ def test_location_options_stay_unique_when_ancestry_reads_alike(db):
     assert labels[ids[0]] == f"Laguna Lake · San Diego County · California · USA [#{ids[0]}]"
     assert labels[dog] == f"Dog Beach · Ocean Beach [#{dog}]"
     assert labels[breadcrumb] == "Dog Beach · Ocean Beach"
+
+
+# -- named places near broadly named spots ---------------------------------------
+
+# A walk past Laguna Meadow in the Cleveland National Forest, where Geocoding's
+# most specific name is the county.
+LAGUNA = [(32.8750, -116.4640), (32.8780, -116.4610), (32.8750, -116.4490),
+          (32.8620, -116.4620)]
+_COUNTY = {
+    "place_id": "sd-county", "name": "San Diego County",
+    "types": ["administrative_area_level_2", "political"], "lat": 33.0, "lng": -116.7,
+    "source": "area", "address_components": [
+        {"name": "San Diego County", "types": ["administrative_area_level_2"]},
+        {"name": "California", "types": ["administrative_area_level_1"]}],
+}
+_LAGUNA_PLACES = [
+    {"place_id": "lake", "name": "Big Laguna Lake", "type": "natural_feature",
+     "lat": 32.8810, "lng": -116.4560},
+    {"place_id": "lmra", "name": "Laguna Mountain Recreation Area", "type": "park",
+     "lat": 32.8601, "lng": -116.4339},
+    {"place_id": "far", "name": "Cuyamaca Rancho State Park", "type": "park",
+     "lat": 32.9200, "lng": -116.5600},
+]
+
+
+@pytest.fixture
+def broad_google(monkeypatch):
+    """Google names every spot only as the county; returns the nearby lookups."""
+    lookups = []
+
+    def fake_nearby(lat, lng, api_key, *, language="en"):
+        lookups.append((lat, lng, language))
+        return _LAGUNA_PLACES
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", fake_nearby)
+    return lookups
+
+
+def test_a_county_only_spot_offers_named_places_nearby_with_their_distance(db, broad_google):
+    result = suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")
+
+    [group] = result["groups"]
+    assert group["suggestion"]["name"] == "San Diego County"
+    assert group["suggestion"]["source"] == "google_area"
+    nearby = group["nearby_places"]
+    # Nearest first, with the closest and farthest photo from each pin; the
+    # state park's pin is out of reach.
+    assert nearby == [
+        {"place_id": "lake", "name": "Big Laguna Lake", "type": "natural_feature",
+         "distance_m": 574, "farthest_m": 2186},
+        {"place_id": "lmra", "name": "Laguna Mountain Recreation Area", "type": "park",
+         "distance_m": 2176, "farthest_m": 3263},
+    ]
+    # One walk is one outing, so the group keeps its plain key.
+    assert group["key"] == "google:sd-county"
+    assert "nearby_unresolved" not in group
+    # One lookup per ~2 km bucket, not per cell.
+    buckets = {import_locations._nearby_bucket(*p) for p in LAGUNA}
+    assert len(broad_google) == len(buckets) < len(LAGUNA)
+    assert {language for *_, language in broad_google} == {"en"}
+
+
+def test_nearby_places_are_cached_for_the_next_preview(db, broad_google):
+    first = suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")
+    asked = len(broad_google)
+    second = suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")
+
+    assert second["groups"] == first["groups"]
+    assert len(broad_google) == asked
+
+
+def test_specifically_named_spots_do_not_look_for_nearby_places(db, monkeypatch):
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: {
+        "place_id": "ocean-beach", "name": "Ocean Beach", "types": ["neighborhood", "political"],
+        "lat": 1.0, "lng": 2.0, "source": "area", "address_components": []})
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked for places near a named spot"))
+
+    [group] = suggest_import_locations(db, _files(RIVER), api_key="KEY", language="en")["groups"]
+
+    assert group["suggestion"]["name"] == "Ocean Beach"
+    assert "nearby_places" not in group
+
+
+def test_a_failed_nearby_lookup_is_reported_and_asked_again_next_time(db, monkeypatch):
+    calls = []
+
+    def failing(*args, **kwargs):
+        calls.append(args)
+        raise places.PlacesTransientError("OVER_QUERY_LIMIT")
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", failing)
+
+    [group] = suggest_import_locations(db, _files(LAGUNA[:1]), api_key="KEY", language="en")["groups"]
+    suggest_import_locations(db, _files(LAGUNA[:1]), api_key="KEY", language="en")
+
+    assert group["nearby_places"] == []
+    assert group["nearby_unresolved"] == "transient_error"
+    assert len(calls) == 2
+
+
+def test_a_cached_county_without_an_api_key_says_why_nothing_is_nearby(db, broad_google):
+    suggest_import_locations(db, _files(LAGUNA[:1]), api_key="KEY", language="en")
+    import_locations._nearby_cache.clear()
+    asked = len(broad_google)
+
+    [group] = suggest_import_locations(db, _files(LAGUNA[:1]), api_key="", language="en")["groups"]
+
+    assert group["suggestion"]["name"] == "San Diego County"  # from the geocode cache
+    assert group["nearby_places"] == []
+    assert group["nearby_unresolved"] == "no_api_key"
+    assert len(broad_google) == asked
+
+
+def test_cached_nearby_results_are_suppressed_after_the_api_key_is_removed(db, broad_google):
+    """Clicking a cached button would fail at import time without a key, so
+    the preview must hide the cached buttons instead of promising them."""
+    suggest_import_locations(db, _files(LAGUNA[:1]), api_key="KEY", language="en")
+    asked = len(broad_google)
+
+    [group] = suggest_import_locations(db, _files(LAGUNA[:1]), api_key="", language="en")["groups"]
+
+    assert group["nearby_places"] == []
+    assert group["nearby_unresolved"] == "no_api_key"
+    assert len(broad_google) == asked  # no new provider calls either
+
+
+def test_choosing_a_nearby_place_tags_it_and_keeps_the_photos_measured_gps(db, fid, monkeypatch):
+    """The place's pin becomes the keyword's point; no photo is moved to it."""
+    pids = [_photo(db, fid, f"new{i}.jpg", p) for i, p in enumerate(LAGUNA)]
+    monkeypatch.setattr(places, "place_details_for_language", lambda *a: {
+        "place_id": "lake", "name": "Big Laguna Lake", "types": ["natural_feature"],
+        "lat": 32.8810, "lng": -116.4560, "address_components": [
+            {"name": "Big Laguna Lake", "types": ["natural_feature"]},
+            {"name": "San Diego County", "types": ["administrative_area_level_2"]}]})
+    choices = parse_location_choices([{
+        "cells": sorted({cell_key(*p) for p in LAGUNA}), "kind": "google",
+        "place_id": "lake", "name": "Big Laguna Lake",
+    }])
+    summary = _summary()
+
+    apply_location_choices(db, pids, choices, api_key="KEY", language="en",
+                           summary=summary, cancel_check=_never)
+
+    assert summary["locations_added"] == len(LAGUNA)
+    for pid, point in zip(pids, LAGUNA, strict=True):
+        assert _location(db, pid) == "Big Laguna Lake"
+        row = db.conn.execute(
+            "SELECT latitude, longitude FROM photos WHERE id = ?", (pid,)).fetchone()
+        assert (row["latitude"], row["longitude"]) == point
+
+
+def test_an_over_limit_preview_refuses_before_paying_for_any_nearby_lookups(db, monkeypatch):
+    """100,000 broad cells in distinct 2 km buckets must not drive 200,000 paid calls."""
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked up nearby for an over-limit preview"))
+    # 0.03-degree steps so each cell lives in its own 0.02-degree bucket.
+    points = [(10.0 + i * 0.03, 20.0) for i in range(import_locations.MAX_CHOICES + 1)]
+    assert len({import_locations._nearby_bucket(*p) for p in points}) == len(points)
+
+    result = suggest_import_locations(db, _files(points), api_key="KEY", language="en")
+
+    assert result["groups"] == []
+    assert "work_limit_error" in result
+
+
+# Laguna Meadow and a beach 73 km away, both only "San Diego County" to Google.
+_MEADOW, _COAST = (32.8750, -116.4640), (32.9800, -117.2900)
+_TWO_OUTING_PLACES = [
+    {"place_id": "lagoon-park", "name": "Lagoon Park", "type": "park",
+     "lat": 32.8810, "lng": -116.4560},
+    {"place_id": "coast-park", "name": "Coast Park", "type": "park",
+     "lat": 32.9820, "lng": -117.2920},
+]
+
+
+def test_two_outings_in_one_county_are_separate_groups_with_their_own_places(db, monkeypatch):
+    """A park near one outing is never offered for, or sent with, the other."""
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: _TWO_OUTING_PLACES)
+    files = _files([_MEADOW, _MEADOW, _COAST])
+
+    first = suggest_import_locations(db, files, api_key="KEY", language="en")
+    again = suggest_import_locations(db, files, api_key="KEY", language="en")
+
+    meadow, coast = first["groups"]
+    assert meadow["cells"] == [cell_key(*_MEADOW)] and meadow["file_count"] == 2
+    assert coast["cells"] == [cell_key(*_COAST)]
+    # Same county suggestion, distinct keys that a repeated preview keeps.
+    assert meadow["suggestion"]["place_id"] == coast["suggestion"]["place_id"] == "sd-county"
+    assert meadow["key"] == f"google:sd-county@{cell_key(*_MEADOW)}"
+    assert coast["key"] == f"google:sd-county@{cell_key(*_COAST)}"
+    assert [g["key"] for g in again["groups"]] == [meadow["key"], coast["key"]]
+    assert [p["place_id"] for p in meadow["nearby_places"]] == ["lagoon-park"]
+    assert [p["place_id"] for p in coast["nearby_places"]] == ["coast-park"]
+
+
+def test_a_county_keyword_group_keeps_your_photos_cells_and_splits_off_broad_outings(
+        db, fid, monkeypatch):
+    """Your county keyword can name a spot (tagged photos there) and also
+    match Google's broad name elsewhere; only the broad cells get nearby places."""
+    county = _kw(db, "San Diego County", place_id="sd-county")
+    _tag(db, _photo(db, fid, "old.jpg", _COAST), county)
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: _TWO_OUTING_PLACES)
+
+    groups = suggest_import_locations(
+        db, _files([_COAST, _MEADOW]), api_key="KEY", language="en")["groups"]
+
+    by_key = {g["key"]: g for g in groups}
+    tagged = by_key[f"keyword:{county}"]
+    broad = by_key[f"keyword:{county}@{cell_key(*_MEADOW)}"]
+    assert tagged["cells"] == [cell_key(*_COAST)]
+    assert tagged["suggestion"]["source"] == "your_photos"
+    assert "nearby_places" not in tagged
+    assert broad["cells"] == [cell_key(*_MEADOW)]
+    assert broad["suggestion"]["keyword_id"] == county
+    assert [p["place_id"] for p in broad["nearby_places"]] == ["lagoon-park"]
+
+
+_ONE_OUTING_WALKS = [
+    [(60.0, -120.0), (60.016, -120.0)],          # ~1.8 km due north at 60°N, 120°W
+    [(60.0, -120.0), (60.012, -120.02), (60.024, -120.04)],  # a ~1.7 km-step chain
+    [(89.9, 0.0), (89.9, 3.0)],                  # ~580 m near the North Pole
+    [(-89.99, 10.0), (-89.99, 40.0), (-89.995, 100.0)],  # a chain around the South Pole
+    [(60.0, 179.99), (60.0, -179.99)],           # ~1.1 km across the antimeridian
+    [(-16.5, 179.995), (-16.5, -179.995), (-16.49, -179.985)],  # a chain across it (Fiji)
+]
+
+
+@pytest.mark.parametrize("points", [
+    *_ONE_OUTING_WALKS, *(list(reversed(walk)) for walk in _ONE_OUTING_WALKS),
+])
+def test_nearby_cells_are_one_outing_anywhere_on_earth(points):
+    """Cells within the link distance chain into one outing at high
+    latitudes, at the poles and across the antimeridian, in any order."""
+    from location_review import distance_meters
+    for (a_lat, a_lng), (b_lat, b_lng) in zip(points, points[1:], strict=False):
+        step = distance_meters({"latitude": a_lat, "longitude": a_lng},
+                               {"latitude": b_lat, "longitude": b_lng})
+        assert step < import_locations.OUTING_LINK_M
+    cells = {cell_key(*p): {"lat": p[0], "lng": p[1]} for p in points}
+
+    assert import_locations._outings(cells, list(cells), import_locations._ComparisonBudget()) == [list(cells)]
+
+
+@pytest.mark.parametrize("pair", [
+    [(60.0, -120.0), (60.019, -120.0)],          # ~2.1 km
+    [(89.9, 0.0), (89.9, 12.0)],                 # ~2.3 km near the pole
+    [(60.0, 179.98), (60.0, -179.98)],           # ~2.2 km across the antimeridian
+])
+def test_cells_just_past_the_link_distance_stay_separate_outings(pair):
+    cells = {cell_key(*p): {"lat": p[0], "lng": p[1]} for p in pair}
+
+    assert len(import_locations._outings(cells, list(cells), import_locations._ComparisonBudget())) == 2
+
+
+@pytest.mark.parametrize("lat", [90.0, 89.995, -89.9999])
+def test_dense_cells_near_a_pole_group_without_pairwise_measuring(monkeypatch, lat):
+    """Distinct-longitude cells near a pole collapse into a few cubes; they
+    must link in one pass, not by comparing every pair (billions at 100,000)."""
+    monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", 1000)
+    cells = {f"{lat},{i}": {"lat": lat, "lng": -180 + i * 0.072} for i in range(5000)}
+
+    assert import_locations._outings(cells, list(cells), import_locations._ComparisonBudget()) == [list(cells)]
+
+
+def test_a_preview_past_the_outing_work_budget_is_refused_before_nearby_lookups(db, monkeypatch):
+    monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", 0)
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked up nearby for a refused preview"))
+    walk = [(32.8750, -116.4640), (32.8900, -116.4640)]  # 1.7 km: two cubes to measure
+
+    result = suggest_import_locations(db, _files(walk), api_key="KEY", language="en")
+
+    assert result["groups"] == []
+    assert "too densely packed" in result["work_limit_error"]
+
+
+def _two_broad_groups_each_needing_one_comparison(monkeypatch):
+    """Two broad names (county, state), each with a 1.7 km pair in two cubes:
+    one distance check per group, two for the preview."""
+    state = {**_COUNTY, "place_id": "california", "name": "California",
+             "types": ["administrative_area_level_1", "political"]}
+    county_walk = [(32.8750, -116.4640), (32.8900, -116.4640)]
+    state_walk = [(36.0000, -118.0000), (36.0150, -118.0000)]
+    answers = {cell_key(*p): _COUNTY for p in county_walk}
+    answers.update({cell_key(*p): state for p in state_walk})
+    monkeypatch.setattr(places, "reverse_geocode",
+                        lambda lat, lng, *a, **k: dict(answers[cell_key(lat, lng)]))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked up nearby for a refused preview"))
+    spent = []
+    original = import_locations._ComparisonBudget.spend
+
+    def counting(self):
+        spent.append(1)
+        original(self)
+
+    monkeypatch.setattr(import_locations._ComparisonBudget, "spend", counting)
+    return [*county_walk, *state_walk], spent
+
+
+@pytest.mark.parametrize("limit, refused", [(1, True), (2, False)])
+def test_the_outing_budget_is_shared_by_every_group_in_a_preview(db, monkeypatch, limit, refused):
+    """Each group alone fits in a budget of one check; together they need two."""
+    points, spent = _two_broad_groups_each_needing_one_comparison(monkeypatch)
+    monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", limit)
+    if not refused:
+        monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [])
+
+    result = suggest_import_locations(db, _files(points), api_key="KEY", language="en")
+
+    assert len(spent) <= limit + 1
+    if refused:
+        assert result["groups"] == []
+        assert "too densely packed" in result["work_limit_error"]
+    else:
+        assert len(result["groups"]) == 2 and "work_limit_error" not in result
+
+
+def test_a_streamed_preview_past_the_shared_outing_budget_is_refused_before_nearby_lookups(
+        db, monkeypatch, exiftool_present):
+    points, spent = _two_broad_groups_each_needing_one_comparison(monkeypatch)
+    monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", 1)
+    paths = [f"/card/{i}.NEF" for i in range(len(points))]
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda paths: dict(zip(paths, points, strict=True)))
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    assert len(spent) == 2
+    assert not [f for f in frames if "nearby" in f]
+    assert frames[-1]["groups"] == []
+    assert "too densely packed" in frames[-1]["work_limit_error"]
+
+
+@pytest.mark.parametrize("point", [
+    (90.0, 0.0), (-90.0, 0.0), (0.0, 180.0), (0.0, -180.0), (89.999, 179.999), (-89.999, -179.999),
+])
+def test_nearby_lookups_at_the_edges_of_the_globe_ask_google_about_real_coordinates(
+        db, monkeypatch, point):
+    """A bucket holding latitude 90 or longitude 180 must not center at 90.01
+    or 180.01, which Google rejects as a failed lookup."""
+    asked = []
+
+    def fake_nearby(lat, lng, api_key, *, language="en"):
+        asked.append((lat, lng))
+        return [{"place_id": "edge", "name": "Edge Park", "type": "park",
+                 "lat": point[0], "lng": point[1]}]
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", fake_nearby)
+
+    [group] = suggest_import_locations(db, _files([point]), api_key="KEY", language="en")["groups"]
+
+    [(lat, lng)] = asked
+    assert -90 <= lat <= 90 and -180 <= lng < 180
+    assert [p["place_id"] for p in group["nearby_places"]] == ["edge"]
+    assert "nearby_unresolved" not in group
+
+
+def test_both_sides_of_the_antimeridian_share_a_nearby_lookup():
+    assert import_locations._nearby_bucket(10.0, 180.0) == import_locations._nearby_bucket(10.0, -180.0)
+
+
+def test_a_streamed_preview_at_the_pole_reports_its_nearby_places(db, monkeypatch, exiftool_present):
+    asked = []
+    monkeypatch.setattr(import_locations, "read_source_gps", lambda paths: {paths[0]: (90.0, 180.0)})
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+
+    def fake_nearby(lat, lng, api_key, *, language="en"):
+        asked.append((lat, lng))
+        return [{"place_id": "pole", "name": "Pole Park", "type": "park", "lat": 90.0, "lng": 0.0}]
+
+    monkeypatch.setattr(places, "nearby_named_places", fake_nearby)
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, ["/card/pole.NEF"], {"google_maps_api_key": "KEY"})]
+
+    [(lat, lng)] = asked
+    assert lat == 90.0 and -180 <= lng < 180
+    assert frames[-1]["groups"][0]["nearby_places"][0]["name"] == "Pole Park"
+
+
+@pytest.mark.parametrize("pole", [90.0, -90.0])
+def test_every_longitude_at_a_pole_is_one_nearby_lookup(db, monkeypatch, pole):
+    """At latitude ±90 the EXIF longitude says nothing: 1,500 longitudes are one
+    point, one lookup, and not an over-limit preview."""
+    asked = []
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda lat, lng, *a, **k: asked.append((lat, lng)) or [])
+    points = [(pole, -180 + i * 0.24) for i in range(1500)]
+    assert len({cell_key(*p) for p in points}) == 1500
+
+    result = suggest_import_locations(db, _files(points), api_key="KEY", language="en")
+
+    assert "work_limit_error" not in result
+    [group] = result["groups"]
+    assert len(group["cells"]) == 1500
+    assert len(asked) == 1
+
+
+def test_a_streamed_preview_at_a_pole_makes_one_nearby_lookup(db, monkeypatch, exiftool_present):
+    points = [(-90.0, -180 + i * 0.24) for i in range(1500)]
+    paths = [f"/card/{i}.NEF" for i in range(len(points))]
+    gps = dict(zip(paths, points, strict=True))
+    # GPS is read in chunks; answer each chunk's paths.
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda chunk: {path: gps[path] for path in chunk})
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [])
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    assert [f for f in frames if "nearby" in f] == [{"nearby": 1, "total": 1}]
+    assert "work_limit_error" not in frames[-1]
+
+
+def test_a_partly_failed_lookup_is_reported_beside_the_places_found(db, monkeypatch):
+    """One bucket answers and one fails: the places found are offered, and the
+    group still says the list may be missing places."""
+    walk = [(32.8790, -116.4640), (32.8810, -116.4640)]  # 220 m apart, across a bucket edge
+    assert len({import_locations._nearby_bucket(*p) for p in walk}) == 2
+    lake = {"place_id": "lake", "name": "Big Laguna Lake", "type": "natural_feature",
+            "lat": 32.8810, "lng": -116.4560}
+
+    def half_failing(lat, lng, *a, **k):
+        if lat < 32.88:
+            raise places.PlacesTransientError("OVER_QUERY_LIMIT")
+        return [lake]
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", half_failing)
+
+    [group] = suggest_import_locations(db, _files(walk), api_key="KEY", language="en")["groups"]
+
+    assert [p["place_id"] for p in group["nearby_places"]] == ["lake"]
+    assert group["nearby_unresolved"] == "transient_error"
+
+
+def test_places_from_a_half_answered_lookup_are_offered_and_asked_for_again(db, monkeypatch):
+    """The park search answers and the feature search fails: the park is
+    offered with the warning, and the incomplete answer is not cached."""
+    calls = []
+
+    def half_answered(*a, **k):
+        calls.append(1)
+        raise places.PlacesPartialResult([_LAGUNA_PLACES[1]])
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", half_answered)
+
+    [group] = suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")["groups"]
+    first_calls = len(calls)
+    suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")
+
+    assert [p["place_id"] for p in group["nearby_places"]] == ["lmra"]
+    assert group["nearby_unresolved"] == "transient_error"
+    assert len(calls) == 2 * first_calls
+
+
+def test_a_streamed_preview_offers_places_from_a_half_answered_lookup(db, monkeypatch, exiftool_present):
+    paths = [f"/card/{i}.NEF" for i in range(len(LAGUNA))]
+    gps = dict(zip(paths, LAGUNA, strict=True))
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda chunk: {path: gps[path] for path in chunk})
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+
+    def half_answered(*a, **k):
+        raise places.PlacesPartialResult([_LAGUNA_PLACES[0]])
+
+    monkeypatch.setattr(places, "nearby_named_places", half_answered)
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    [group] = frames[-1]["groups"]
+    assert [p["place_id"] for p in group["nearby_places"]] == ["lake"]
+    assert group["nearby_unresolved"] == "transient_error"
+    assert frames[-1]["file_cells"] == {path: cell_key(*gps[path]) for path in paths}
+
+
+def test_a_later_preview_at_the_pole_reuses_the_pole_lookup_whatever_the_longitude(db, monkeypatch):
+    asked = []
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda lat, lng, *a, **k: asked.append((lat, lng)) or [])
+
+    suggest_import_locations(db, _files([(90.0, 10.0)]), api_key="KEY", language="en")
+    suggest_import_locations(db, _files([(90.0, -135.0)]), api_key="KEY", language="en")
+
+    assert len(asked) == 1
+
+
+def test_spots_near_but_not_at_a_pole_keep_their_own_lookups():
+    near_pole = [(89.999, 0.0), (89.999, 90.0), (89.999, -90.0)]
+
+    assert len({import_locations._nearby_bucket(*p) for p in near_pole}) == 3
+
+
+def test_an_outing_across_the_antimeridian_is_offered_places_not_called_spread_out(db, monkeypatch):
+    """Longitudes 179.99 and -179.99 are 1.1 km apart, not half the planet."""
+    walk = [(-16.5, 179.995), (-16.5, -179.995)]
+    reef = {"place_id": "reef", "name": "Reef Park", "type": "park", "lat": -16.501, "lng": 180.0}
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [reef])
+
+    [group] = suggest_import_locations(db, _files(walk), api_key="KEY", language="en")["groups"]
+
+    assert len(group["cells"]) == 2
+    assert [p["place_id"] for p in group["nearby_places"]] == ["reef"]
+    assert group["nearby_places"][0]["farthest_m"] < 1000
+
+
+def test_a_place_out_of_reach_of_any_photo_in_the_outing_is_not_offered(db, monkeypatch):
+    """Cells 1.5 km apart chain into one 6 km outing; a pin 0.5 km past one
+    end is 5.5 km from the other, so picking it would name far photos."""
+    walk = [(32.8000 + i * 0.0135, -116.4600) for i in range(5)]
+    near_start = {"place_id": "start", "name": "Trailhead Park", "type": "park",
+                  "lat": 32.7955, "lng": -116.4600}
+    middle = {"place_id": "middle", "name": "Middle Meadow", "type": "natural_feature",
+              "lat": 32.8270, "lng": -116.4600}
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [near_start, middle])
+
+    [group] = suggest_import_locations(db, _files(walk), api_key="KEY", language="en")["groups"]
+
+    assert len(group["cells"]) == 5
+    assert [p["place_id"] for p in group["nearby_places"]] == ["middle"]
+
+
+def test_one_photo_past_the_reach_excludes_a_place_its_cell_centroid_is_within(db, monkeypatch):
+    """Two photos ~78 m apart share a cell; the pin is 4.95 km from one and
+    5.03 km from the other, so the cell's centroid (4.99 km) is within reach
+    but not every photo is."""
+    photo_a, photo_b = (32.89965, -116.5440), (32.90035, -116.5440)
+    assert cell_key(*photo_a) == cell_key(*photo_b)
+    pin = (32.8551, -116.5440)
+    place = {"place_id": "edge", "name": "Edge Park", "type": "park", "lat": pin[0], "lng": pin[1]}
+    from location_review import distance_meters
+
+    def meters(point):
+        return distance_meters({"latitude": point[0], "longitude": point[1]},
+                               {"latitude": pin[0], "longitude": pin[1]})
+
+    assert meters(photo_a) < import_locations.NEARBY_RADIUS_M < meters(photo_b)
+    centroid = ((photo_a[0] + photo_b[0]) / 2, photo_a[1])
+    assert meters(centroid) < import_locations.NEARBY_RADIUS_M
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [place])
+
+    [one] = suggest_import_locations(db, _files([photo_a]), api_key="KEY", language="en")["groups"]
+    [both] = suggest_import_locations(
+        db, _files([photo_a, photo_b]), api_key="KEY", language="en")["groups"]
+
+    assert [p["place_id"] for p in one["nearby_places"]] == ["edge"]
+    assert both["nearby_places"] == []
+
+
+def test_an_outing_too_spread_for_any_pin_says_so(db, monkeypatch):
+    """A 20 km chain of cells is one outing no single pin can cover; it is
+    reported, and no place is measured against every photo."""
+    chain = [(32.8000 + i * 0.015, -116.4600) for i in range(13)]
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [_LAGUNA_PLACES[0]])
+    monkeypatch.setattr(import_locations, "_pin_reach",
+                        lambda *a: pytest.fail("measured a place against a spread-out outing"))
+
+    [group] = suggest_import_locations(db, _files(chain), api_key="KEY", language="en")["groups"]
+
+    assert len(group["cells"]) == len(chain)
+    assert group["nearby_places"] == []
+    assert group["nearby_unresolved"] == "spread_out"
+
+
+def test_an_over_limit_stream_refuses_before_any_nearby_lookup(db, monkeypatch, exiftool_present):
+    """The streamed preview applies the same budget as the synchronous one:
+    more outings than groups allowed makes no Nearby Search at all."""
+    monkeypatch.setattr(import_locations, "MAX_CHOICES", 3)
+    points = [(10.0 + i * 0.05, 20.0) for i in range(4)]  # 5.5 km apart: four outings
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda paths: dict(zip(paths, points, strict=True)))
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked up nearby for an over-limit preview"))
+    paths = [f"/card/{i}.NEF" for i in range(len(points))]
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    assert not [f for f in frames if "nearby" in f]
+    assert frames[-1]["groups"] == []
+    assert "3 groups" in frames[-1]["work_limit_error"]
+
+
+def test_too_many_groups_refuses_before_any_nearby_lookup(db, monkeypatch):
+    """Groups over the limit (not buckets) also stop before paying Google."""
+    monkeypatch.setattr(import_locations, "MAX_CHOICES", 3)
+    named = [{"place_id": f"area-{i}", "name": f"Area {i}", "types": ["neighborhood"],
+              "lat": 1.0, "lng": 2.0, "source": "area", "address_components": []}
+             for i in range(3)]
+    answers = iter([*named, dict(_COUNTY)])
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: next(answers))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked up nearby for an over-limit preview"))
+    points = [(10.0 + i * 0.05, 20.0) for i in range(4)]
+
+    result = suggest_import_locations(db, _files(points), api_key="KEY", language="en")
+
+    assert result["groups"] == []
+    assert "work_limit_error" in result
+
+
+def test_nearby_distance_is_from_the_closest_photo_in_the_cell(db, monkeypatch):
+    """For multiple photos in one reverse-geocode cell, pick the per-photo
+    minimum: a place just inside 5 km of one photo must not be excluded when
+    the cell's averaged centroid falls outside."""
+    # Two photos ~55 m apart in one reverse-geocode cell: the centroid is
+    # between them. The pin at (32.9205, -116.5440) is ~1 m north of photo A
+    # but ~110 m north of the centroid.
+    photo_a = (32.9205, -116.5440)
+    photo_b = (32.9195, -116.5440)
+    assert cell_key(*photo_a) == cell_key(*photo_b)
+    pin = (32.9206, -116.5440)
+    nearby_place = {"place_id": "spot", "name": "Spot", "type": "park",
+                    "lat": pin[0], "lng": pin[1]}
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [nearby_place])
+
+    [group] = suggest_import_locations(
+        db, _files([photo_a, photo_b]), api_key="KEY", language="en")["groups"]
+
+    assert len(group["nearby_places"]) == 1
+    assert group["nearby_places"][0]["distance_m"] < 60  # not the ~110 m centroid distance
+
+
+def test_stream_reports_nearby_lookups_after_naming(db, monkeypatch, broad_google, exiftool_present):
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda paths: dict(zip(paths, LAGUNA, strict=True)))
+    paths = [f"/card/{i}.NEF" for i in range(len(LAGUNA))]
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    nearby = [f for f in frames if "nearby" in f]
+    assert nearby and nearby[-1] == {"nearby": len(broad_google), "total": len(broad_google)}
+    first_nearby = frames.index(nearby[0])
+    assert all("naming" in f for f in frames[first_nearby - len(LAGUNA):first_nearby])
+    assert frames[-1]["groups"][0]["nearby_places"][0]["name"] == "Big Laguna Lake"
 
 
 # -- choices ------------------------------------------------------------------------

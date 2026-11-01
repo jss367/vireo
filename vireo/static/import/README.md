@@ -63,7 +63,11 @@ Keep the lifecycle boundaries intact when changing this code:
   signature, and `updateStartGate()` refreshes it and holds Start while GPS
   is read, so the import applies exactly the choices on screen. Choices are
   keyed by GPS cell, not path: after cataloging, each new photo takes the
-  choice for its own cell.
+  choice for its own cell. A group Google names only by county or broader
+  lists `nearby_places`; clicking one records it as the row's `pick`, which
+  sends that Google place only while the box still holds its name. The
+  server splits such spots into outings and offers only places whose pin
+  reaches every photo, so a pick, like any choice, covers the whole group.
 - `loading.js` binds invalidation and selection handlers before its first
   await. Remote targets and metadata readiness start independently; slow
   readiness must not block the rest of the form or snapshot deep links.

@@ -218,6 +218,19 @@ class PlacesTransientError(Exception):
     """
 
 
+class PlacesPartialResult(PlacesTransientError):
+    """Raised by :func:`nearby_named_places` when some of its searches failed
+    and others answered: ``places`` holds what the answered ones found.
+
+    It is a :class:`PlacesTransientError`, so a caller that only knows that
+    error still treats the answer as a failure and never caches it.
+    """
+
+    def __init__(self, found: list[dict]) -> None:
+        super().__init__("some nearby searches failed")
+        self.places = found
+
+
 def reverse_geocode(
     lat: float,
     lng: float,
@@ -342,6 +355,88 @@ def _nearest_park(lat: float, lng: float, api_key: str, language: str | None) ->
         if (result.get("user_ratings_total") or 0) >= PARK_MIN_RATINGS:
             return result
     return None
+
+
+# Geocoding's broadest named areas. When the most specific name it has for a
+# spot is one of these (a county in a national forest, say), the name says
+# nothing about the outing, so the import page also offers
+# :func:`nearby_named_places`.
+BROAD_AREA_TYPES = frozenset({
+    "administrative_area_level_3",
+    "administrative_area_level_2",
+    "administrative_area_level_1",
+    "country",
+})
+
+
+def is_broad_area(details: dict | None) -> bool:
+    """Whether :func:`reverse_geocode` could only name a county or broader."""
+    if not details or details.get("source") != "area":
+        return False
+    named = [t for t in details.get("types") or [] if t in AREA_TYPE_PRIORITY]
+    return bool(named) and all(t in BROAD_AREA_TYPES for t in named)
+
+
+# What a wild outing is named after: recreation areas, preserves and other
+# parks, and natural features (lakes, meadows, peaks). Google's place pins
+# are single points and its bounds are not the place's extent, so a caller
+# can report how far a pin is, never that a photo was taken inside it.
+NEARBY_PLACE_TYPES = ("park", "natural_feature")
+
+# Anyone can add a place to Google Maps, and back-country maps are thick with
+# unvisited ravines. A few reviews say people go there: Laguna Meadow has
+# four, the ravines around it none to two.
+NEARBY_MIN_RATINGS = 3
+
+
+def nearby_named_places(
+    lat: float, lng: float, api_key: str, *, language: str | None = "en",
+) -> list[dict]:
+    """Visited parks and natural features nearest a point, nearest first.
+
+    One Nearby Search per :data:`NEARBY_PLACE_TYPES` entry, each ranked by
+    distance (Google returns its 20 nearest). Each result is
+    ``{"place_id", "name", "type", "lat", "lng"}`` with ``type`` the
+    searched type. An empty list is a true no-match. Each search runs even
+    when another fails: :class:`PlacesPartialResult` carries what the
+    answered searches found, and :class:`PlacesTransientError` means none
+    answered.
+    """
+    found: dict[str, dict] = {}
+    failed = 0
+    for place_type in NEARBY_PLACE_TYPES:
+        params = {
+            "location": f"{lat},{lng}",
+            "rankby": "distance",
+            "type": place_type,
+            "key": api_key,
+        }
+        if language:
+            params["language"] = language
+        url = f"{_NEARBY_SEARCH_URL}?{urllib.parse.urlencode(params)}"
+        try:
+            results = _google_results(url, f"nearby {place_type} search") or []
+        except PlacesTransientError:
+            failed += 1
+            continue
+        for result in results:
+            point = _result_point(result)
+            place_id = result.get("place_id")
+            name = _location_safe_name(result.get("name") or "")
+            if point is None or not place_id or not name or place_id in found:
+                continue
+            if (result.get("user_ratings_total") or 0) < NEARBY_MIN_RATINGS:
+                continue
+            found[place_id] = {
+                "place_id": place_id, "name": name, "type": place_type,
+                "lat": point[0], "lng": point[1],
+            }
+    nearest = sorted(found.values(), key=lambda p: _distance_m(lat, lng, p["lat"], p["lng"]))
+    if failed == len(NEARBY_PLACE_TYPES):
+        raise PlacesTransientError("every nearby search failed")
+    if failed:
+        raise PlacesPartialResult(nearest)
+    return nearest
 
 
 def _area_rank(result: dict) -> int | None:
