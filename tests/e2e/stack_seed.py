@@ -71,5 +71,6 @@ def seed_browse_stack(db, photo_ids, start=None):
                 "UPDATE photos SET timestamp = ? WHERE id = ?", (timestamp, photo_id)
             )
             for keyword_id in keyword_ids:
-                db.tag_photo(photo_id, keyword_id, _commit=False)
+                db.tag_photo(photo_id, keyword_id)
+                db.commit()
     return timestamps

@@ -320,6 +320,7 @@ def test_remove_orphan_rows_drops_dependents_and_rows_without_committing(db, lib
     gone, kept = library["ids"]["a_ok"], library["ids"]["b_ok"]
     for pid in (gone, kept):
         db.tag_photo(pid, db.add_keyword(f"kw{pid}"))
+        db.commit()
         db.queue_change(pid, "keyword_add", f"kw{pid}")
         db.commit()
         db.conn.execute(

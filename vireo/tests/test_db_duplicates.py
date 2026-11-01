@@ -464,6 +464,7 @@ def test_merge_preserves_embedded_suppression_and_survivor_removals(
     _import_embedded_keywords_for_photo(db, loser, metadata)
     manual = db.add_keyword("Field note")
     db.tag_photo(loser, manual, source="manual")
+    db.commit()
 
     db._apply_winner_loser_merge(winner, [loser])
     names = {k["name"] for k in db.photo_keywords.get_for_photo(winner)}
@@ -499,6 +500,7 @@ def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
         "SELECT id FROM keywords WHERE name = ?", ("Robin",),
     ).fetchone()["id"]
     db.tag_photo(loser, robin, source="manual")
+    db.commit()
 
     db._apply_winner_loser_merge(winner, [loser])
 
@@ -570,6 +572,7 @@ def test_merge_carries_the_strongest_loser_source_per_keyword(db, folder):
     db.tag_photo(l2, k_unknown, source=None)
     db.tag_photo(w, k_shared, source=None)
     db.tag_photo(l1, k_shared, source="manual")
+    db.commit()
 
     db._apply_winner_loser_merge(w, [l1, l2])
 
@@ -589,16 +592,17 @@ def test_merge_tags_through_the_facade_inside_its_transaction(db, folder, monkey
     lo = _photo(db, fid, "l.jpg", "H", rating=3)
     kid = db.add_keyword("Heron")
     db.tag_photo(lo, kid, source="accept")
+    db.commit()
     calls = []
 
-    def _record(photo_id, keyword_id, source="manual", _commit=True, *, species_provenance=None):
-        calls.append((photo_id, keyword_id, source, _commit, species_provenance, db.conn.in_transaction))
+    def _record(photo_id, keyword_id, source="manual", *, species_provenance=None):
+        calls.append((photo_id, keyword_id, source, species_provenance, db.conn.in_transaction))
 
     monkeypatch.setattr(db, "tag_photo", _record)
 
     db._apply_winner_loser_merge(w, [lo])
 
-    assert calls == [(w, kid, "accept", False, None, True)]
+    assert calls == [(w, kid, "accept", None, True)]
     assert not db.conn.in_transaction
     assert _committed_rating(db, w) == 3
 
@@ -609,6 +613,7 @@ def test_merge_rolls_back_everything_when_tagging_fails(db, folder, monkeypatch)
     lo = _photo(db, fid, "l.jpg", "H", rating=5)
     kid = db.add_keyword("Egret")
     db.tag_photo(lo, kid)
+    db.commit()
 
     def _boom(*args, **kwargs):
         raise RuntimeError("tag failed")
@@ -678,6 +683,7 @@ def test_merge_chunks_loser_reads_and_rejections(db, folder):
     db.conn.commit()
     kid = db.add_keyword("Last Loser Tag")
     db.tag_photo(losers[-1], kid, source="accept")
+    db.commit()
 
     with _SqlRecorder(db) as rec:
         db._apply_winner_loser_merge(w, losers)
@@ -742,6 +748,7 @@ def test_bulk_resolve_keeps_the_folder_copy_and_merges(db, tmp_path):
     _touch(os.path.join(keep, "long_keep_name.jpg"))
     kid = db.add_keyword("Plover")
     db.tag_photo(lo, kid, source="manual")
+    db.commit()
     w2 = _photo(db, fk, "b.jpg", "H2")
     l2 = _photo(db, fo, "b.jpg", "H2")
     _touch(os.path.join(keep, "b.jpg"))

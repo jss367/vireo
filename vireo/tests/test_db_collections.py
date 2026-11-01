@@ -736,6 +736,7 @@ def test_keyword_identity_rule(db, folder):
     _photo(db, folder, "b.jpg")
     kid = db.add_keyword("Heron")
     db.tag_photo(a, kid)
+    db.commit()
     identity = db.conn.execute(
         f"SELECT {identity_sql('k')} FROM keywords k WHERE k.id = ?", (kid,)
     ).fetchone()[0]
@@ -925,6 +926,7 @@ def test_keyword_filter_values(db, folder):
     db.tag_photo(a, kid)
     db.tag_photo(b, kid)
     db.tag_photo(b, other)
+    db.commit()
     assert db.collections.get_filter_field_values("keyword", q="sun") == [
         {"value": "Sunset", "count": 2},
         {"value": "Sunrise", "count": 1},
@@ -1235,6 +1237,7 @@ def test_top_predicted_species_matches_summary(db, folder):
     db.conn.commit()
     # Conflicting saved metadata must not change a prediction drill-down.
     db.tag_photo(hawk, db.add_keyword("Robin", is_species=True))
+    db.commit()
     def rule(species):
         return [{"field": "top_predicted_species", "op": "is", "value": species}]
 

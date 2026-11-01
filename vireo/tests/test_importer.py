@@ -527,6 +527,49 @@ def test_execute_import_reports_failed_file_as_failure(tmp_path, monkeypatch):
     assert result['errors'] and 'keyword write refused' in result['errors'][0]
 
 
+def test_execute_import_rolls_back_a_photos_partial_tags_on_failure(tmp_path, monkeypatch):
+    """One photo's catalog keywords land together or not at all.
+
+    Each ``add_keyword``/``tag_photo`` used to commit on its own, so a
+    failure on the second keyword left the first tag (and the keyword rows
+    created for it) behind on a photo the run counted as failed. The photo's
+    tags are now one unit of work.
+    """
+    from db import Database
+    from importer import execute_import
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    with open(os.path.join(root, 'DSC_0001.NEF'), 'wb') as f:
+        f.write(b'\x00' * 100)
+    cat_path = str(tmp_path / "two.lrcat")
+    _create_test_catalog(cat_path, root, [
+        ('DSC_0001.NEF', '', [('Cardinal', 'Birds'), ('Sunrise', None)]),
+    ])
+    db = Database(str(tmp_path / "test.db"))
+    fid = workspace_folders.add_folder(db, root, name='photos')
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
+                                 file_size=100, file_mtime=1.0)
+    real_tag = db.tag_photo
+    calls = []
+
+    def tag_then_fail(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 2:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real_tag(*args, **kwargs)
+
+    monkeypatch.setattr(db, "tag_photo", tag_then_fail)
+    result = execute_import([cat_path], db, write_xmp=False)
+
+    assert len(calls) == 2
+    assert result['failed'] == 1
+    assert db.photo_keywords.get_for_photo(pid) == []
+    with sqlite3.connect(str(tmp_path / "test.db")) as other:
+        names = {row[0] for row in other.execute("SELECT name FROM keywords")}
+    assert not names & {"Birds", "Cardinal", "Sunrise"}
+
+
 def test_preview_import_reports_unreadable_catalog(tmp_path):
     from importer import preview_import
 

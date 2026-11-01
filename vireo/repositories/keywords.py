@@ -61,9 +61,8 @@ What deliberately stays on ``Database``:
 - The methods with no SQL of their own (``_apply_case_convention``,
   ``_sentence_case_first_word``, ``species_case_convention``).
 
-``_commit`` flags are carried through unchanged: ``_commit=False`` means the
-caller owns the transaction, and no method here commits unless the
-``Database`` method it backs did.
+No method here commits: the route, job or service that adds a keyword owns
+the unit of work (``db.transaction()``).
 """
 
 import sqlite3
@@ -173,7 +172,6 @@ class KeywordRepository:
                 "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
                 (name,),
             )
-        self.conn.commit()
 
     def count(self):
         """Return count of keywords used by photos in the active workspace.
@@ -212,7 +210,7 @@ class KeywordRepository:
             (self.workspace_id,),
         ).fetchone()[0]
 
-    def add_source_species(self, name, source_taxon_id, parent_id=None, _commit=True):
+    def add_source_species(self, name, source_taxon_id, parent_id=None):
         """Bind accepted source evidence without reassigning same-name tags."""
         if type(source_taxon_id) is not int or not 0 < source_taxon_id < (1 << 63):
             raise ValueError("source_taxon_id must be a positive SQLite integer")
@@ -267,11 +265,9 @@ class KeywordRepository:
                 "VALUES (?, ?, 1, 'taxonomy', ?, ?)",
                 (candidate, parent_id, local_id, source_taxon_id),
             ).lastrowid
-        if _commit:
-            self.conn.commit()
         return kid
 
-    def add(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True, source_taxon_id=None,
+    def add(self, name, parent_id=None, is_species=False, kw_type=None, source_taxon_id=None,
                     _resolve_alias=False):
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
 
@@ -286,8 +282,6 @@ class KeywordRepository:
                      ``KEYWORD_TYPES`` if provided. When ``None``, the type is
                      auto-detected (``taxonomy`` for species or names matching
                      a known taxon, otherwise ``general``).
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
             source_taxon_id: Explicit iNaturalist ID for a species keyword;
                      bypass common-name inference and reuse only that identity.
             _resolve_alias: Import callers opt in for leaf keywords only.
@@ -317,7 +311,7 @@ class KeywordRepository:
         if source_taxon_id is not None:
             if not is_species:
                 raise ValueError("source_taxon_id requires a species keyword")
-            return self._add_source_species_keyword(name, source_taxon_id, parent_id, _commit)
+            return self._add_source_species_keyword(name, source_taxon_id, parent_id)
         # Case-insensitive lookup with type-aware matching:
         #
         # When kw_type is supplied, only same-type or 'general' rows are
@@ -341,10 +335,8 @@ class KeywordRepository:
         # (case convention) and ``kw_type`` (auto-detection).
         lookup_name, lookup_kw_type, lookup_is_species = name, kw_type, is_species
         if existing:
-            self._backfill_candidate_taxon(
-                existing, name, is_species, kw_type, _commit,
-            )
-            self._promote_candidate_type(existing, is_species, kw_type, _commit)
+            self._backfill_candidate_taxon(existing, name, is_species, kw_type)
+            self._promote_candidate_type(existing, is_species, kw_type)
             return existing["id"]
 
         name, kw_type, taxon_id = self._new_keyword_name_and_type(
@@ -352,7 +344,7 @@ class KeywordRepository:
         )
         return self._insert_new_keyword(
             name, parent_id, is_species, kw_type, taxon_id, lookup_name,
-            lookup_kw_type, lookup_is_species, _commit,
+            lookup_kw_type, lookup_is_species,
         )
 
     @staticmethod
@@ -379,9 +371,7 @@ class KeywordRepository:
             kw_type = 'taxonomy'
         return is_species, kw_type
 
-    def _backfill_candidate_taxon(
-        self, existing, name, is_species, kw_type, _commit,
-    ):
+    def _backfill_candidate_taxon(self, existing, name, is_species, kw_type):
         """Link the row ``add`` reuses to its species-rank taxon."""
         # Older confirmed-species rows can be correctly typed yet have a
         # NULL taxon_id because the historic is_species=True insert path
@@ -447,10 +437,8 @@ class KeywordRepository:
                     "WHERE id = ? AND type = 'general'",
                     (taxon_id, taxon_id, taxon_id, existing["id"]),
                 )
-                if _commit:
-                    self.conn.commit()
 
-    def _promote_candidate_type(self, existing, is_species, kw_type, _commit):
+    def _promote_candidate_type(self, existing, is_species, kw_type):
         """Upgrade the row ``add`` reuses to the type this call asks for."""
         # Promote an unset row to taxonomy when this call indicates a
         # species. Restrict to 'general' (the legacy default for unknown
@@ -463,8 +451,6 @@ class KeywordRepository:
                 "WHERE id = ? AND is_species = 0 AND type IN ('general', 'taxonomy')",
                 (existing["id"],),
             )
-            if _commit:
-                self.conn.commit()
         # Upgrade an existing 'general' row to the explicitly requested type.
         # Without this, explicitly typed callers would hit the
         # case-insensitive fast path and silently get back a wrong-typed row.
@@ -484,8 +470,6 @@ class KeywordRepository:
                     "WHERE id = ? AND type = 'taxonomy'",
                     (existing["id"],),
                 )
-            if _commit:
-                self.conn.commit()
 
     def _new_keyword_name_and_type(self, name, is_species, kw_type):
         """``(name, kw_type, taxon_id)`` for a keyword ``add`` will insert."""
@@ -528,38 +512,25 @@ class KeywordRepository:
 
     def _insert_new_keyword(
         self, name, parent_id, is_species, kw_type, taxon_id, lookup_name,
-        lookup_kw_type, lookup_is_species, _commit,
+        lookup_kw_type, lookup_is_species,
     ):
         """Insert the keyword ``add`` found no row for, racing safely."""
         # The lookup above ran without a write lock, so a second connection
         # can pass the same check before either inserts. UNIQUE(name,
         # parent_id) cannot catch that for a top-level keyword (SQLite treats
-        # NULL parents as distinct) and is case-sensitive besides. Whenever
-        # the connection is not already in a transaction, take the write
-        # lock and look again, so the loser of the race reuses the winner's
-        # row. This must include ``_commit=False`` callers (``sync.py``,
-        # ``web/encounters.py``, ``web/highlights.py``, the import job at
-        # ``web/imports.py``): each passes ``_commit=False`` as the first
-        # mutation on a fresh worker connection, so without the write lock
-        # the same race lets both sides insert a duplicate root keyword.
-        # When we start the transaction under ``_commit=False``, the caller
-        # inherits our open ``BEGIN IMMEDIATE`` and finalises it with the
-        # rest of their work.
-        started_transaction = not self.conn.in_transaction
-        if started_transaction:
-            self.conn.execute("BEGIN IMMEDIATE")
+        # NULL parents as distinct) and is case-sensitive besides. When the
+        # caller's unit has not written yet, take the writer lock with a
+        # no-op write (it begins the unit's transaction) and look again, so
+        # the loser of the race reuses the winner's row. Nothing here
+        # commits: the caller's unit of work owns the transaction.
+        if not self.conn.in_transaction:
+            self.conn.execute("UPDATE keywords SET id = id WHERE 0")
             if self._find_add_candidate(lookup_name, parent_id, lookup_kw_type) is not None:
-                # No writes happened under our new transaction. When we own
-                # the commit, finalise it before recursing so the reused row
-                # is visible; when the caller owns it, leave the transaction
-                # open so the recursion runs under it and the caller commits.
-                if _commit:
-                    self.conn.commit()
                 # Rerun so the reused row gets the same promotions as any
                 # other hit on the lookup.
                 return self.add(
                     lookup_name, parent_id, is_species=lookup_is_species,
-                    kw_type=lookup_kw_type, _commit=_commit,
+                    kw_type=lookup_kw_type,
                 )
         try:
             cur = self.conn.execute(
@@ -568,21 +539,14 @@ class KeywordRepository:
             )
         except sqlite3.IntegrityError:
             # A same-spelling row under this parent committed after the
-            # lookup. Reuse it when it is one ``add`` would have returned.
-            if started_transaction:
-                self.conn.rollback()
+            # lookup. SQLite undid only the failed statement; reuse the row
+            # when it is one ``add`` would have returned.
             if self._find_add_candidate(lookup_name, parent_id, lookup_kw_type) is None:
                 raise
             return self.add(
                 lookup_name, parent_id, is_species=lookup_is_species,
-                kw_type=lookup_kw_type, _commit=_commit,
+                kw_type=lookup_kw_type,
             )
-        except BaseException:
-            if started_transaction:
-                self.conn.rollback()
-            raise
-        if _commit:
-            self.conn.commit()
         return cur.lastrowid
 
     def _find_add_candidate(self, name, parent_id, kw_type):

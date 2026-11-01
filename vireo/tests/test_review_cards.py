@@ -174,6 +174,7 @@ def test_compare_legacy_aliases_undo_redo_tags_and_sidecar_intent(
     keywords = {name: db.add_keyword(name, is_species=True) for name in aliases}
     if existing_alias:
         db.tag_photo(photo_id, keywords[existing_alias])
+        db.commit()
     before = {k['id'] for k in db.photo_keywords.get_for_photo(photo_id)}
     detection_id = db.detections.save(photo_id, [{
         'box': {'x': .1, 'y': .1, 'w': .3, 'h': .4}, 'confidence': .9,
@@ -270,6 +271,7 @@ def test_card_undo_preserves_existing_keyword_and_prior_alternative_decision(app
     photos, detections, ids = _seed(db)
     kid = db.add_keyword('Blue Tit', is_species=True)
     db.tag_photo(photos[1], kid)
+    db.commit()
     db.predictions.add(detections[1], 'Other bird', .1, 'BioCLIP',
                        labels_fingerprint='current', status='reviewed')
     earlier = db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0]

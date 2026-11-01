@@ -1048,6 +1048,7 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
             (json.dumps(meta), photo_id),
         )
     db.tag_photo(already, db.add_keyword("Egret"))
+    db.commit()
     db.conn.commit()
 
     assert backfill_embedded_keywords(db) == 1
@@ -1099,6 +1100,42 @@ def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals
     assert db.photo_keywords.get_for_photo(handled) == []
     assert db.meta.get(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
     assert scanner.backfill_embedded_keywords(db) == 0
+
+
+def test_backfill_embedded_keywords_rolls_back_a_photos_partial_import(
+        tmp_path, monkeypatch):
+    """A conflict part-way through a photo's embedded keywords keeps none.
+
+    Each tag used to commit as it was written, so a conflict found after the
+    first keyword left that tag behind without its offered-key record, and
+    the retry treated it as already imported. The photo's import is now one
+    unit of work: the conflict rolls back its tags and the retry imports the
+    whole photo.
+    """
+    import scanner
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
+                                 file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET exif_data = ? WHERE id = ?",
+                    (json.dumps({"XMP": {"Subject": ["Heron", "Egret"]}}), pid))
+    db.conn.commit()
+    original = scanner.keywords._import_keyword_lists
+
+    def first_then_conflict(db, photo_id, flat, hier):
+        original(db, photo_id, flat[:1], [])
+        raise ValueError("different linked places")
+
+    monkeypatch.setattr(scanner.keywords, "_import_keyword_lists", first_then_conflict)
+    assert scanner.backfill_embedded_keywords(db) == 0
+    assert not db.conn.in_transaction
+    assert db.photo_keywords.get_for_photo(pid) == []
+
+    monkeypatch.setattr(scanner.keywords, "_import_keyword_lists", original)
+    assert scanner.backfill_embedded_keywords(db) == 1
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(pid)} == {"Heron", "Egret"}
 
 
 def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
@@ -3280,6 +3317,7 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     # Add a keyword to the JPEG
     kw_id = db.add_keyword("Robin")
     db.tag_photo(jpeg_id, kw_id)
+    db.commit()
     db.conn.commit()
 
     # Now add the raw file and rescan
@@ -3426,10 +3464,12 @@ def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_r
                         else {"Subject": ["Robin"]})}
     _import_embedded_keywords_for_photo(db, jpeg, metadata)
     db.tag_photo(jpeg, db.add_keyword("Field note"))
+    db.commit()
     if removed_on_raw:
         _import_embedded_keywords_for_photo(db, raw, metadata)
         for keyword in db.photo_keywords.get_for_photo(raw):
             db.untag_photo(raw, keyword["id"])
+            db.commit()
 
     _pair_raw_jpeg_companions(db)
 
@@ -9086,6 +9126,7 @@ def test_unchanged_companion_recovers_embedded_keywords_without_churn(
     # must respect the durable suppression, without needing a pending queue.
     for keyword in cat.db.photo_keywords.get_for_photo(cat.raw_id):
         cat.db.untag_photo(cat.raw_id, keyword["id"])
+        cat.db.commit()
     assert cat.db.pending_changes.keyword_removal_keys(cat.raw_id) == set()
     cat.scan(incremental=False)
     assert cat.db.photo_keywords.get_for_photo(cat.raw_id) == []

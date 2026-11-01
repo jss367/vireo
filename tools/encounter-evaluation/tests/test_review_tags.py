@@ -32,12 +32,13 @@ def writable_queue(tmp_path):
         (4, 104, 'Another taxon', 'Glossy Ibis', 'species'),
     ])
     db.conn.commit()
-    old = db.add_keyword('Spotted Redshank', is_species=True, source_taxon_id=101)
-    genre = db.add_keyword('Favorite', kw_type='genre')
-    genus = db.add_keyword('Plegadis', kw_type='taxonomy')
-    db.conn.execute('UPDATE keywords SET taxon_id=3 WHERE id=?', (genus,))
-    for kid in [old, genre, genus]:
-        db.tag_photo(pid, kid)
+    with db.transaction():
+        old = db.add_keyword('Spotted Redshank', is_species=True, source_taxon_id=101)
+        genre = db.add_keyword('Favorite', kw_type='genre')
+        genus = db.add_keyword('Plegadis', kw_type='taxonomy')
+        db.conn.execute('UPDATE keywords SET taxon_id=3 WHERE id=?', (genus,))
+        for kid in [old, genre, genus]:
+            db.tag_photo(pid, kid)
     run = tmp_path/'run'
     manifest = prepare(path, run, workspace=ws)
     for entry in manifest['sessions']:
@@ -165,7 +166,8 @@ def test_retry_after_library_commit_does_not_repeat_or_overwrite_later_edits(wri
     monkeypatch.setattr(review_tags, '_apply_tags', interrupt_after_commit)
     assert save_and_sync(queue, pid, ['inat:102'])['status'] == 'pending'
     added = (keywords(db, pid) - preserved).pop()
-    db.untag_photo(pid, added)  # An explicit later user edit must survive retry.
+    with db.transaction():
+        db.untag_photo(pid, added)  # An explicit later user edit must survive retry.
     monkeypatch.setattr(review_tags, '_apply_tags', original)
     with connect(queue) as conn:
         assert sync_review_tags(conn, pid)['status'] == 'applied'

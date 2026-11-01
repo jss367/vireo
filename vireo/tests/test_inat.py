@@ -1392,6 +1392,7 @@ def test_api_inat_prepare_lists_confirmed_species_first(app_and_db):
     _add_second_subject(db, pid)
     for name in ("Northern Cardinal", "House Finch"):
         db.tag_photo(pid, db.add_keyword(name, is_species=True))
+        db.commit()
     data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
     assert data["species"] == "Northern Cardinal"
     assert [(o["species"], o["source"], o["primary"]) for o in data["species_options"]] == [

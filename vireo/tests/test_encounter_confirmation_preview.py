@@ -10,8 +10,10 @@ def seed(app, db, species=None):
     ids = [row['id'] for row in db.conn.execute('SELECT id FROM photos ORDER BY id')]
     if species:
         kid = db.add_keyword(species, is_species=True)
+        db.commit()
         for pid in ids:
             db.tag_photo(pid, kid)
+            db.commit()
     photos = [dict(row, label='REVIEW') for row in db.conn.execute(
         'SELECT id, filename, timestamp, flag FROM photos ORDER BY id')]
     result = {
@@ -50,6 +52,7 @@ def test_explicit_transition_exact_subset_and_single_undo(app_and_db, first, sec
     ids, path = seed(app, db, first)
     other = db.add_keyword('American Wigeon', is_species=True)
     db.tag_photo(ids[1], other)
+    db.commit()
     db.photo_review.set_flag(ids[1], 'flagged')
     db.commit()
     before = json.load(open(path))
@@ -122,6 +125,7 @@ def test_stale_preview_fails_without_species_writes(app_and_db, change):
             json.dump(cached, handle)
     elif change == 'keyword':
         db.tag_photo(ids[0], db.add_keyword('Robin', is_species=True))
+        db.commit()
     elif change == 'flag':
         db.photo_review.set_flag(ids[0], 'flagged')
         db.commit()
@@ -189,6 +193,7 @@ def test_mixed_encounter_without_common_cached_species_can_replace_a_named_frame
     ids, path = seed(app, db)
     db.tag_photo(ids[1], db.add_keyword('Western Grebe', is_species=True))
     db.tag_photo(ids[1], db.add_keyword('American Wigeon', is_species=True))
+    db.commit()
     body = {'species': 'Eared Grebe', 'photo_ids': [ids[1]], 'source_photo_ids': ids,
             'previous_species': 'Western Grebe'}
     client = app.test_client()
@@ -205,6 +210,7 @@ def test_preview_binds_unattached_target_keyword_identity(app_and_db, change):
     app, db = app_and_db
     ids, path = seed(app, db, 'Western Grebe')
     target_id = db.add_keyword('Eared Grebe', is_species=True)
+    db.commit()
     db.conn.executemany(
         'INSERT INTO taxa (id, inat_id, name, rank) VALUES (?, ?, ?, ?)',
         [(900001, 800001, 'Podiceps nigricollis', 'species'),
@@ -536,19 +542,23 @@ def homonym_preview_setup(app, db, mode):
         (900002, 800002, 'Preview beta', 'Other Preview Robin', 'species'),
     ])
     root = db.add_keyword('Preview Robin', is_species=True)
+    db.commit()
     db.conn.execute('UPDATE keywords SET taxon_id=NULL, source_taxon_id=NULL WHERE id=?', (root,))
     parent = db.add_keyword('Preview field guide')
+    db.commit()
     leaf = db.conn.execute(
         "INSERT INTO keywords (name, parent_id, is_species, type) VALUES ('Preview Robin', ?, 1, 'taxonomy')",
         (parent,),
     ).lastrowid
     parent = db.add_keyword('Unattached preview guide')
+    db.commit()
     homonym = db.conn.execute(
         "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Preview Robin', ?, 1, 'taxonomy', 900002)",
         (parent,),
     ).lastrowid
     for pid in ids:
         db.tag_photo(pid, leaf)
+        db.commit()
         if mode != 'add':
             db.tag_photo(pid, root)
     db.commit()
@@ -738,8 +748,10 @@ def test_scoped_confirmation_preserves_approved_primary_order(app_and_db, mode, 
     initial = ['Western Grebe', 'Eared Grebe', 'American Wigeon'] if mode == 'remove' else ['Western Grebe', 'American Wigeon']
     for name in initial[1:]:
         kid = db.add_keyword(name, is_species=True)
+        db.commit()
         for pid in ids:
             db.tag_photo(pid, kid)
+            db.commit()
     cached = json.load(open(path))
     cached['encounters'][0]['confirmed_species_list'] = initial
     cached['encounters'][0]['bursts'][0]['species_override'] = {
@@ -821,8 +833,10 @@ def test_partial_confirmation_preserves_untouched_burst_primary_order(app_and_db
     app, db = app_and_db
     ids, path = seed(app, db, 'Western Grebe')
     extra = db.add_keyword('American Wigeon', is_species=True)
+    db.commit()
     for pid in ids:
         db.tag_photo(pid, extra)
+        db.commit()
     cached = json.load(open(path))
     enc = cached['encounters'][0]
     enc['confirmed_species_list'] = ['Western Grebe', 'American Wigeon']
@@ -859,6 +873,7 @@ def test_preferred_primary_order_does_not_merge_shared_name_taxon_homonyms(app_a
     keywords = []
     for index, taxon in enumerate((900001, 900002)):
         parent = db.add_keyword(f'Guide {index}')
+        db.commit()
         keywords.append(db.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Robin', ?, 1, 'taxonomy', ?)",
             (parent, taxon),
@@ -914,10 +929,12 @@ def test_burst_preview_binds_live_sibling_species_read_by_encounter_refresh(app_
     app, db = app_and_db
     ids, path, body = sibling_burst_setup(app, db)
     extra = db.add_keyword('Herring Gull', is_species=True)
+    db.commit()
     db.conn.executemany('INSERT INTO taxa (id, inat_id, name, rank) VALUES (?, ?, ?, ?)', [
         (900001, 800001, 'Sibling alpha', 'species'), (900002, 800002, 'Sibling beta', 'species'),
     ])
     parent = db.add_keyword('Sibling guide')
+    db.commit()
     sibling = db.conn.execute(
         "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Sibling Robin', ?, 1, 'taxonomy', 900001)",
         (parent,),
@@ -932,9 +949,11 @@ def test_burst_preview_binds_live_sibling_species_read_by_encounter_refresh(app_
     assert [row['id'] for row in preview['photos']] == ids[:1]
     if change == 'add':
         db.tag_photo(ids[1], extra)
+        db.commit()
     elif change == 'remove':
         western = db.conn.execute("SELECT id FROM keywords WHERE name='Western Grebe'").fetchone()[0]
         db.untag_photo(ids[1], western)
+        db.commit()
     elif change == 'relink':
         db.conn.execute('UPDATE keywords SET taxon_id=900002 WHERE id=?', (sibling,))
     elif change == 'source_identity':
@@ -961,6 +980,7 @@ def test_burst_preview_ignores_live_changes_outside_species_refresh_read_set(app
     app, db = app_and_db
     ids, path, body = sibling_burst_setup(app, db)
     extra = db.add_keyword('Herring Gull', is_species=True)
+    db.commit()
     if change == 'outside_identity':
         db.conn.execute("INSERT INTO taxa (id, inat_id, name, rank) VALUES (900003, 800003, 'Unrelated bird', 'species')")
         outside = db.conn.execute(
@@ -972,6 +992,7 @@ def test_burst_preview_ignores_live_changes_outside_species_refresh_read_set(app
     preview = request_preview(client, body)
     if change in ('outside_species', 'outside_cache'):
         db.tag_photo(ids[2], extra)
+        db.commit()
         if change == 'outside_cache':
             cached = json.load(open(path))
             cached['encounters'][1]['confirmed_species_list'] = ['Western Grebe', 'Herring Gull']
@@ -1007,12 +1028,14 @@ def test_preview_revalidates_unlinked_previous_species_root_candidates(app_and_d
     ids, path = seed(app, db)
     db.conn.execute("INSERT INTO taxa (id, inat_id, name, rank) VALUES (900001, 800001, 'Root candidate robin', 'species')")
     parent = db.add_keyword('Previous species guide')
+    db.commit()
     leaf = db.conn.execute(
         "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Previous Robin', ?, 1, 'taxonomy', ?)",
         (parent, 900001 if linked else None),
     ).lastrowid
     for pid in ids:
         db.tag_photo(pid, leaf)
+        db.commit()
     root = None
     if change != 'create':
         root = db.conn.execute("INSERT INTO keywords (name, is_species, type) VALUES ('Previous Robin', 1, 'taxonomy')").lastrowid
@@ -1052,6 +1075,7 @@ def test_previous_species_root_snapshot_excludes_irrelevant_candidates(app_and_d
     client = app.test_client()
     preview = request_preview(client, body)
     parent = db.add_keyword('Unrelated candidate guide')
+    db.commit()
     if candidate == 'unrelated_root':
         values = ('Unrelated Robin', None, 1, 'taxonomy')
     elif candidate == 'unlinked_nested':
@@ -1075,8 +1099,10 @@ def test_combined_species_summaries_use_final_burst_membership(app_and_db, mode,
     initial = ['Western Grebe', 'Eared Grebe', 'American Wigeon'] if mode == 'remove' else ['Western Grebe', 'American Wigeon']
     for name in initial[1:]:
         kid = db.add_keyword(name, is_species=True)
+        db.commit()
         for pid in ids:
             db.tag_photo(pid, kid)
+            db.commit()
     cached = json.load(open(path))
     enc = cached['encounters'][0]
     enc['confirmed_species_list'] = initial
@@ -1138,6 +1164,7 @@ def test_combined_removal_from_later_burst_restores_exact_full_cache(app_and_db,
     # snapshot round-trip includes every cache field without a photo refresh.
     extra = db.add_keyword('Eared Grebe', is_species=True)
     db.tag_photo(ids[1], extra)
+    db.commit()
     cached = json.load(open(path))
     cached['encounters'][0].update(burst_count=2, bursts=[{'photo_ids': ids[:1]}, {'photo_ids': ids[1:]}])
     with open(path, 'w') as handle:
@@ -1183,12 +1210,14 @@ def test_scoped_edits_retain_shared_taxon_when_one_frame_has_same_name_homonym(a
     keywords = {}
     for taxon in ([900002, 900001] if reverse else [900001, 900002]):
         parent = db.add_keyword(f'Homonym guide {taxon}')
+        db.commit()
         keywords[taxon] = db.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Robin', ?, 1, 'taxonomy', ?)",
             (parent, taxon),
         ).lastrowid
     for pid in ids:
         db.tag_photo(pid, keywords[900001])
+        db.commit()
     db.tag_photo(ids[0], keywords[900002])
     db.commit()
     cached = json.load(open(path))

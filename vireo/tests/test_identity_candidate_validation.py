@@ -13,11 +13,13 @@ def _aliases(db, kind):
         scientific_parent = db.add_keyword('Scientific hierarchy')
         common = db.add_keyword('Source common', parent_id=common_parent, is_species=True, source_taxon_id=88001)
         scientific = db.add_keyword('Source scientific', parent_id=scientific_parent, is_species=True, source_taxon_id=88001)
+        db.commit()
         return [db.keywords.name_of(common), db.keywords.name_of(scientific)], common
     inat = None if kind == 'local_only' else 88001
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88001,?,'Tyrannus melancholicus','Tropical Kingbird','species')", (inat,))
     db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES (88001,'Yellow Kingbird')")
     scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    db.commit()
     names = ['Tropical Kingbird', 'Yellow Kingbird'] if kind == 'alternate_common' else ['Tropical Kingbird', 'Tyrannus melancholicus']
     return names, scientific
 
@@ -35,6 +37,7 @@ def test_equivalent_species_candidates_rejected_before_any_domain_write(app_and_
     names, confirmed = _aliases(db, kind)
     photo, sidecar = _setup_photo_with_xmp(tmp_path, db, keywords={db.keywords.name_of(confirmed), 'Unrelated note'})
     db.tag_photo(photo, confirmed, source='accept')
+    db.commit()
     db.photo_review.set_flag(photo, 'rejected')
     db.commit()
     db.queue_change(photo, 'rating', '4')
@@ -63,11 +66,13 @@ def test_genuinely_distinct_or_unknown_candidates_remain_valid(app_and_db, entry
         db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88001,88001,'Species alpha','Alpha','species')")
         db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88002,88002,'Species beta','Beta','species')")
         db.add_keyword('Alpha', is_species=True, source_taxon_id=88001)
+        db.commit()
         if kind == 'source_precedence':
             # Local taxonomy suggests the same species; the explicit source
             # bindings authoritatively distinguish these keyword spellings.
             db.conn.execute("UPDATE keywords SET taxon_id=88002 WHERE name='Alpha'")
         db.add_keyword('Species beta', is_species=True, source_taxon_id=88002)
+        db.commit()
         names = ['Alpha', 'Species beta']
     else:
         names = ['Uncataloged bird alpha', 'Uncataloged bird beta']

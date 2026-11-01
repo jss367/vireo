@@ -14,6 +14,7 @@ def _setup(tmp_path, alias_count):
     photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
     common = db.add_keyword('Common alpha', is_species=True, source_taxon_id=88001)
     other = db.add_keyword('Common beta', is_species=True, source_taxon_id=88002)
+    db.commit()
     ids = []
     for index in range(alias_count):
         row = db.conn.execute("INSERT INTO keywords(name,type,is_species,source_taxon_id) VALUES (?,'taxonomy',1,88001)", (f'Scientific alias {index}',))
@@ -36,6 +37,7 @@ def test_resolved_collision_uses_linked_primary_keys_and_preserves_conflict_sema
         selected = [aliases[0], other if conflict else aliases[1]]
         for photo, keyword in zip(photos, selected, strict=True):
             db.tag_photo(photo, keyword, source='accept')
+            db.commit()
         before = [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords')]
         queries = _identity_queries(db)
         if conflict:
@@ -59,7 +61,7 @@ def test_resolved_collision_chunks_large_link_union_under_legacy_parameter_limit
     db, photos, aliases, _, state = _setup(tmp_path, 1200)
     try:
         for index, keyword in enumerate(aliases):
-            db.tag_photo(photos[index % 2], keyword, source='accept', _commit=False)
+            db.tag_photo(photos[index % 2], keyword, source='accept')
         db.commit()
         db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
         queries = _identity_queries(db)
@@ -78,6 +80,7 @@ def test_empty_or_one_sided_collision_skips_identity_comparison_query(tmp_path, 
     try:
         if linked_photos:
             db.tag_photo(photos[0], aliases[0])
+            db.commit()
         queries = _identity_queries(db)
         _check_merge_confirmations(db.conn, *photos, state)
         assert queries == []

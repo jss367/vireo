@@ -77,6 +77,7 @@ def seed_e2e_data(db, thumb_dir):
     k2 = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(photos[0], k1)
     db.tag_photo(photos[3], k2)
+    db.commit()
 
     db.create_workspace("Field Work")
 

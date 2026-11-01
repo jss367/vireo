@@ -1148,7 +1148,7 @@ def _untag_keywords_missing_from_sidecar(
             # here), so suppress the species-evidence snapshot that would
             # otherwise leak into a later unrelated ``record_edit`` call on
             # the same ``Database`` instance.
-            db.untag_photo(photo_id, kw["id"], _commit=False, _record_history=False)
+            db.untag_photo(photo_id, kw["id"], _record_history=False)
 
 
 def sync_from_xmp(db, photo_ids):
@@ -1218,7 +1218,7 @@ def sync_from_xmp(db, photo_ids):
                 if not aliases and kw_key in db_keywords_by_key:
                     continue
                 imported_ids = sorted(aliases) if aliases else [
-                    db.add_keyword(xmp_keywords_by_key[kw_key], _commit=False, _resolve_alias=True)
+                    db.add_keyword(xmp_keywords_by_key[kw_key], _resolve_alias=True)
                 ]
                 for kid in imported_ids:
                     resolved_ids.add(kid)
@@ -1227,7 +1227,6 @@ def sync_from_xmp(db, photo_ids):
                         photo_id,
                         kid,
                         source=KEYWORD_SOURCE_UNKNOWN,
-                        _commit=False,
                     )
 
             _untag_keywords_missing_from_sidecar(

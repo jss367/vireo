@@ -126,6 +126,7 @@ def test_background_import_tag_refreshes_history_controls(live_server, page, not
     photo_id = live_server['data']['photos'][0]
     keyword_id = db.add_keyword('Imported trip')
     db.tag_photo(photo_id, keyword_id)
+    db.commit()
     description = 'Added Imported trip during import'
     db.record_edit('keyword_add', description, str(keyword_id), [
         {'photo_id': photo_id, 'old_value': '', 'new_value': str(keyword_id)},

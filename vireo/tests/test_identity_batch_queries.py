@@ -48,6 +48,7 @@ def test_resolution_refreshes_identity_after_keyword_creation_in_same_transactio
         common = db.add_keyword('Choice')  # promoted by resolution, not a species yet
         alias = db.add_keyword('Scientific alias', is_species=True, source_taxon_id=99001)
         db.tag_photo(photo, alias, source='accept')
+        db.commit()
         with db.transaction():
             # Warm name resolution before either the taxonomy or promoted keyword exists.
             save_alternatives(db, [photo], ['Choice', 'Other'], 'Distant frame', 'Bill')
@@ -73,12 +74,14 @@ def test_batch_identity_reuse_keeps_each_photo_association_check_live(tmp_path, 
         folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
         photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
         keyword = db.add_keyword('Heron', is_species=True)
+        db.commit()
         original = IdentityAlternativesRepository.set_state
 
         def change_next_photo(repository, photo_id, state):
             original(repository, photo_id, state)
             if photo_id == photos[0]:
-                db.tag_photo(photos[1], keyword, source='manual', _commit=False)
+                db.tag_photo(photos[1], keyword, source='manual')
+                db.commit()
 
         monkeypatch.setattr(IdentityAlternativesRepository, 'set_state', change_next_photo)
         with pytest.raises(IdentityHistoryStale), db.transaction():
@@ -105,12 +108,14 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
         db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (99002,102,'Puma concolor','Cougar','species')")
         db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES (99002,'Puma')")
         higher = db.add_keyword('Puma', kw_type='taxonomy')
+        db.commit()
         db.conn.execute('UPDATE keywords SET taxon_id=99001,source_taxon_id=101,is_species=0 WHERE id=?', (higher,))
         scientific = db.add_keyword('Puma concolor', is_species=True)
         note = db.add_keyword('Unrelated note')
         db.tag_photo(photo, higher, source='manual')
         db.tag_photo(photo, scientific, source='accept')
         db.tag_photo(photo, note, source='manual')
+        db.commit()
         db.photo_review.set_flag(photo, 'rejected')
         db.commit()
         with db.transaction():

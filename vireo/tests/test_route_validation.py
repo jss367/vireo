@@ -258,7 +258,8 @@ def test_object_and_empty_bodies_still_reach_the_route(app_and_db):
 
 
 def _location_keyword(db, name="Backyard"):
-    return db.add_keyword(name, kw_type="location")
+    with db.transaction():
+        return db.add_keyword(name, kw_type="location")
 
 
 def test_update_unknown_keyword_is_404(app_and_db):

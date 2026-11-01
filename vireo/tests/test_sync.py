@@ -494,6 +494,7 @@ def test_sync_from_xmp_updates_db(tmp_path):
     # Import initial keyword
     kid = db.add_keyword('Sparrow')
     db.tag_photo(pid, kid)
+    db.commit()
 
     # Replace the XMP sidecar with a different keyword set.
     os.remove(xmp_path)
@@ -524,6 +525,7 @@ def test_sync_from_xmp_keeps_keywords_when_the_sidecar_cannot_be_read(
     db.set_active_workspace(db.ensure_default_workspace())
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"Sparrow"})
     db.tag_photo(pid, db.add_keyword("Sparrow"))
+    db.commit()
 
     os.remove(xmp_path)
     if damage == "unreadable":
@@ -605,6 +607,7 @@ def test_sync_from_xmp_flat_removal_preserves_same_name_hierarchy(tmp_path):
     nested = db.add_keyword("Wildlife", parent_id=parent)
     db.tag_photo(pid, flat)
     db.tag_photo(pid, nested)
+    db.commit()
     db.queue_change(pid, "keyword_remove_flat", "Wildlife")
     db.commit()
 
@@ -628,6 +631,7 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
 
     kid = db.add_keyword('Sparrow')
     db.tag_photo(pid, kid)
+    db.commit()
 
     os.remove(xmp_path)
     write_sidecar(xmp_path, flat_keywords={'sparrow'}, hierarchical_keywords=set())
@@ -658,6 +662,7 @@ def test_sync_from_xmp_preserves_tag_when_only_edge_quote_differs(tmp_path):
 
     kid = db.add_keyword('apapane')
     db.tag_photo(pid, kid)
+    db.commit()
 
     os.remove(xmp_path)
     write_sidecar(
@@ -688,6 +693,7 @@ def test_sync_from_xmp_skips_xmp_keywords_that_normalize_to_empty(tmp_path):
 
     kid = db.add_keyword('Sparrow')
     db.tag_photo(pid, kid)
+    db.commit()
 
     os.remove(xmp_path)
     # A lone smart quote normalizes to empty; a real second keyword sits
@@ -1275,6 +1281,7 @@ def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
 
     db.tag_photo(pid, kid_by_type['taxonomy'])
     db.tag_photo(pid, kid_by_type['individual'])
+    db.commit()
 
     os.remove(xmp_path)
     write_sidecar(xmp_path, flat_keywords={'Robin'}, hierarchical_keywords=set())
@@ -3227,6 +3234,7 @@ def test_keyword_edit_during_sync_keeps_corrective_intent(
         tmp_path, db, keywords={'Osprey'} if initially_present else set(),
     )
     keyword = db.add_keyword('Osprey')
+    db.commit()
     initial_op = 'keyword_remove' if initially_present else 'keyword_add'
     inverse_op = 'keyword_add' if initially_present else 'keyword_remove'
     db.queue_change(pid, initial_op, 'Osprey')
@@ -3472,6 +3480,7 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     keyword = db.add_keyword('Osprey')
     db.tag_photo(pid, keyword, source='manual')
+    db.commit()
     db.queue_change(pid, 'keyword_add', 'Osprey')
     db.commit()
     db.record_edit('keyword_add', 'Added Osprey', str(keyword),

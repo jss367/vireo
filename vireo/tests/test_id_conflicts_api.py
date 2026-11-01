@@ -25,6 +25,7 @@ def compare_collection(app_and_db):
     ]
     cardinal = db.add_keyword("Cardinal", is_species=True)
     db.tag_photo(photo_ids[0], cardinal)
+    db.commit()
     for index, photo_id in enumerate(photo_ids):
         det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
@@ -172,6 +173,7 @@ def test_refresh_photo_id_picks_up_a_sibling_that_just_joined(app_and_db):
     bird = db.add_keyword("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
     db.tag_photo(photo_ids[1], bird)
+    db.commit()
     # Only photos with the "Bird" species keyword satisfy the rule, so the
     # third photo starts outside the collection until it is tagged too.
     for photo_id in photo_ids:
@@ -191,6 +193,7 @@ def test_refresh_photo_id_picks_up_a_sibling_that_just_joined(app_and_db):
     assert first["total"] == 2
 
     db.tag_photo(photo_ids[2], bird)
+    db.commit()
 
     refresh_url = (
         f"/api/predictions/compare?collection_id={cid}&filter=all"
@@ -286,6 +289,7 @@ def test_a_joining_sibling_that_carries_a_new_model_reassesses(app_and_db):
     bird = db.add_keyword("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
     db.tag_photo(photo_ids[1], bird)
+    db.commit()
     for photo_id in photo_ids:
         det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
@@ -307,6 +311,7 @@ def test_a_joining_sibling_that_carries_a_new_model_reassesses(app_and_db):
     assert first["models"] == ["model-a"]
 
     db.tag_photo(photo_ids[2], bird)
+    db.commit()
     refreshed = app.test_client().get(
         f"/api/predictions/compare?collection_id={cid}&filter=all"
         f"&token={first['token']}"
@@ -344,6 +349,7 @@ def test_a_widening_refresh_shows_every_model_it_advertises(app_and_db):
     ]
     bird = db.add_keyword("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
+    db.commit()
     for photo_id in photo_ids:
         det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
@@ -361,6 +367,7 @@ def test_a_widening_refresh_shows_every_model_it_advertises(app_and_db):
 
     first = _get(app, cid, filter="all")
     db.tag_photo(photo_ids[1], bird)
+    db.commit()
     refreshed = app.test_client().get(
         f"/api/predictions/compare?collection_id={cid}&filter=all"
         f"&token={first['token']}&refresh_photo_id={photo_ids[1]}"
@@ -386,6 +393,7 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
     ]
     bird = db.add_keyword("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
+    db.commit()
     for photo_id in photo_ids:
         det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
@@ -405,6 +413,7 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
     assert first["models"] == ["model-a"]
 
     db.tag_photo(photo_ids[1], bird)
+    db.commit()
     refreshed = app.test_client().get(
         f"/api/predictions/compare?collection_id={cid}&filter=all"
         f"&model=model-a&token={first['token']}"
@@ -464,8 +473,10 @@ def test_multi_species_counts_real_case_variant_unlinked_keywords(compare_collec
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id=?", (pid,))
     for index, name in enumerate(["Robin", "robin"]):
         keyword = db.add_keyword(f"Distinct Robin {index}", is_species=True)
+        db.commit()
         db.conn.execute("UPDATE keywords SET name=? WHERE id=?", (name, keyword))
         db.tag_photo(pid, keyword)
+        db.commit()
     photo = next(p for p in id_conflicts.build_comparison(db, cid)["photos"] if p["photo_id"] == pid)
     assert photo["species_identity_count"] == 2
     assert id_conflicts._is_multi_species(photo, {"signal": {"additional_subject_count": 0}})

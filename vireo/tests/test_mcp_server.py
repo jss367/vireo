@@ -287,6 +287,7 @@ def test_species_preview_binds_existing_assignment_evidence(mcp, app_and_db):
     _seed_encounter_cache(app, db, [1, 2])
     keyword = db.add_keyword("Mallard", is_species=True)
     db.tag_photo(1, keyword)
+    db.commit()
     provenance = {"method": "direct_visual", "reviewer": "Agent", "reason": "Visible plumage"}
     preview = call(server, "preview_species_assignment", photo_ids=[1], species="Robin", provenance=provenance)
     response = app.test_client().post(f"/api/photos/1/species/{keyword}/provenance", json={
@@ -309,6 +310,7 @@ def test_species_tools_preserve_existing_user_evidence_in_mixed_selection(mcp, a
     _seed_encounter_cache(app, db, [1, 2, 3])
     keyword = db.add_keyword("Robin", is_species=True)
     db.tag_photo(1, keyword)
+    db.commit()
     assert app.test_client().post(f"/api/photos/1/species/{keyword}/provenance", json={
         "method": "direct_visual", "reviewer": "User", "reason": "User-reviewed identification",
     }).status_code == 200
@@ -364,6 +366,7 @@ def test_species_tools_reject_shared_keyword_promotion_or_rebinding(mcp, app_and
     ).lastrowid
     db.commit()
     db.tag_photo(3, keyword)
+    db.commit()
     original = db.keywords.species_assignment_identity(keyword)
     original_species = db.photo_species.get_species_for_photos([1, 2, 3])
     original_history = db.edit_history.list_recent()
@@ -392,6 +395,7 @@ def test_species_tools_reuse_shared_species_metadata_through_undo_and_redo(mcp, 
     ).lastrowid
     db.commit()
     db.tag_photo(3, keyword)
+    db.commit()
     original = db.keywords.species_assignment_identity(keyword)
     outside = db.species_provenance.assignments(3)
     provenance = {"method": "direct_visual", "reviewer": "Agent", "reason": "Visible plumage"}
@@ -718,6 +722,7 @@ def test_search_keywords_matches_substrings_and_builds_paths(mcp):
     # The tree holds keywords used by photos in the workspace plus their
     # ancestors, so tagging the child surfaces the parent too.
     db.tag_photo(db.photos.list_page()[0]["id"], child)
+    db.commit()
     found = call(server, "search_keywords", query="owl")
     assert found["total_matches"] == 2
     assert {k["path"] for k in found["keywords"]} == {"Owls", "Owls / Barn owl"}

@@ -461,7 +461,8 @@ def create_batch_blueprint(
                 else None
             )
             try:
-                kid = db.add_keyword(name, kw_type=kw_type)
+                with db.transaction():
+                    kid = db.add_keyword(name, kw_type=kw_type)
             except ValueError as exc:
                 return json_error(str(exc))
             # Queue/record the stored spelling (see api_add_keyword).
@@ -474,7 +475,7 @@ def create_batch_blueprint(
 
         with db.transaction():
             for pid in added_ids:
-                db.tag_photo(pid, kid, source='manual', _commit=False)
+                db.tag_photo(pid, kid, source='manual')
                 queue_keyword_add(db, pid, name)
             items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
             if items:

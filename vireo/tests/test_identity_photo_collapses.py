@@ -49,6 +49,7 @@ def test_folder_merge_keeps_resolved_tags_provenance_pending_and_history(catalog
     db.photo_visibility.grant(second, [losing])
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(survivor, unrelated, source='manual')
+    db.commit()
     db.photo_review.set_flag(survivor, 'rejected')
     db.commit()
     with db.transaction():
@@ -105,6 +106,7 @@ def test_companion_pairing_keeps_identity_tags_and_normal_history(catalog, tmp_p
     primary, companion = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(primary, unrelated)
+    db.commit()
     with db.transaction():
         edit = save_alternatives(db, [companion], CANDIDATES, 'Uncertain call', 'Audio')
         if resolved:
@@ -152,6 +154,7 @@ def test_collapse_does_not_reintroduce_candidate_outvoted_by_newer_visible_revie
         survivor, losing = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')
     keyword = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(losing, keyword)
+    db.commit()
     db.queue_change(losing, 'keyword_add', CANDIDATES[0])
     db.commit()
     db.conn.execute("UPDATE pending_changes SET created_at='2020-01-01' WHERE photo_id=?", (losing,))
@@ -179,10 +182,11 @@ def test_folder_collapse_repairs_alias_intents_in_both_visible_workspaces(catalo
     db.photo_visibility.grant(second, [losing])
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (93001,99999,'Tyrannus melancholicus','Tropical Kingbird','species')")
     scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    db.commit()
     scientific_name = db.keywords.name_of(scientific)
     with db.transaction():
         save_alternatives(db, [losing], CANDIDATES, 'Uncertain', 'Audio')
-        db.tag_photo(losing, scientific, source='manual', _commit=False)
+        db.tag_photo(losing, scientific, source='manual')
         resolve_alternatives(db, [losing], CANDIDATES[0])
     db.queue_change(survivor, 'keyword_add', CANDIDATES[0], workspace_id=first)
     db.commit()

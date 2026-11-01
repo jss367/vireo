@@ -309,7 +309,10 @@ class _FileIndexer:
         # Keywords Lightroom wrote into the file itself (JPEG, TIFF, DNG).
         # This path runs whenever the file is new or changed, which is also
         # when such a write lands: it rewrites the file, not a sidecar.
-        _import_embedded_keywords_for_photo(db, photo_id, item.meta.file_meta)
+        # Durable boundary: duplicate resolution below refuses to run inside
+        # an open transaction, so the file's keywords commit here.
+        with db.transaction():
+            _import_embedded_keywords_for_photo(db, photo_id, item.meta.file_meta)
 
         # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
         # are committed. add_photo was called without the hash, so the hook

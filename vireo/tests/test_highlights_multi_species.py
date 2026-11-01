@@ -63,6 +63,7 @@ def _teal_photo_with_wigeon_subject(db, fid):
     """A photo tagged Green-winged Teal whose second subject reads as a wigeon."""
     pid = _photo(db, fid, "pair.jpg")
     db.tag_photo(pid, db.add_keyword("Green-winged Teal", is_species=True))
+    db.commit()
     teal_det, wigeon_det = _subjects(db, pid)
     teal_pred = _pred(db, teal_det, "Green-winged Teal", 0.9)
     wigeon_pred = _pred(db, wigeon_det, "American Wigeon", 0.85)
@@ -115,6 +116,7 @@ def test_photo_tagged_with_two_species_is_confirmed_in_both(app_and_db):
     pid = _photo(db, fid, "two-tags.jpg")
     db.tag_photo(pid, db.add_keyword("Green-winged Teal", is_species=True))
     db.tag_photo(pid, db.add_keyword("American Wigeon", is_species=True))
+    db.commit()
 
     _data, buckets = _buckets(app.test_client(), fid)
 
@@ -149,6 +151,7 @@ def test_keyword_the_model_disagrees_with_opens_no_prediction_bucket(app_and_db)
     fid = _folder(db)
     pid = _photo(db, fid, "corrected.jpg")
     db.tag_photo(pid, db.add_keyword("Green-winged Teal", is_species=True))
+    db.commit()
     (det,) = _subjects(db, pid, count=1)
     _pred(db, det, "Mallard", 0.95)
 
@@ -235,6 +238,7 @@ def test_relabel_from_a_bucket_replaces_only_that_species(app_and_db):
     pid = _photo(db, fid, "relabel-pair.jpg")
     db.tag_photo(pid, db.add_keyword("Green-winged Teal", is_species=True))
     db.tag_photo(pid, db.add_keyword("American Wigeon", is_species=True))
+    db.commit()
     teal_det, wigeon_det = _subjects(db, pid)
     teal_pred = _pred(db, teal_det, "Green-winged Teal", 0.9)
     wigeon_pred = _pred(db, wigeon_det, "American Wigeon", 0.85)

@@ -32,6 +32,7 @@ def _duplicates(db):
         kid = db.conn.execute("INSERT INTO keywords(name, type) VALUES (?, 'general')", (name,)).lastrowid
         ids.append(kid)
         db.tag_photo(pid, kid)
+        db.commit()
     return ids
 
 

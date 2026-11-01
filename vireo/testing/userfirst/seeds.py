@@ -137,6 +137,7 @@ def browse_seed(db_path, thumb_dir, photos_root):
     db.tag_photo(photos[2], k_robin)
     db.tag_photo(photos[3], k_robin)
     db.tag_photo(photos[4], k_sparrow)
+    db.commit()
 
     # Create thumbnails
     os.makedirs(thumb_dir, exist_ok=True)

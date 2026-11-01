@@ -132,6 +132,7 @@ def test_photo_keyword_and_pending_top_prediction_do_not_confirm_subject(compari
         db.update_prediction_status(row["id"], "pending")
     keyword = db.add_keyword(TARGET, is_species=True)
     db.tag_photo(pids[0], keyword)
+    db.commit()
     pack = _pack(app, pids, requested_species=TARGET)
     card = next(c for c in pack["cards"] if c["id"] == pids[0])
     assert card["evidence_status"] == "subject_identity_uncertain"

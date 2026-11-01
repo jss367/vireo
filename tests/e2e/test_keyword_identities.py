@@ -11,10 +11,12 @@ def test_species_groups_preserve_paths_and_chart_drill_down(live_server, page):
     parent = db.add_keyword('Imported birds')
     root = db.add_keyword('Test bird', is_species=True)
     leaf = db.add_keyword('Test Bird', parent_id=parent, is_species=True)
+    db.commit()
     db.conn.execute('UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)', (taxon, root, leaf))
     db.tag_photo(photos[0], root)
     db.tag_photo(photos[0], leaf)
     db.tag_photo(photos[1], leaf)
+    db.commit()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_server['url'] + '/keywords')
@@ -49,12 +51,14 @@ def test_location_preview_combines_only_chosen_match(live_server, page):
     db = live_server['db']
     photos = live_server['data']['photos']
     source = db.add_keyword('Lake Hodges', kw_type='general')
+    db.commit()
     target = db.upsert_place_chain({
         'place_id': 'test-place', 'name': 'Lake Hodges', 'lat': 33, 'lng': -117,
         'address_components': [{'name': 'San Diego', 'types': ['locality']}],
     })
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     page.goto(live_server['url'] + '/keywords')
     page.locator('#kwSearch').fill('Lake Hodges')
     expect(page.locator('#kwBody tr')).to_have_count(2)
@@ -76,12 +80,14 @@ def test_merge_toolbar_stays_visible_when_scrolled_and_preserves_coordinates(liv
     for index in range(60):
         kid = db.add_keyword(f'Scroll keyword {index:02d}', kw_type='general')
         db.tag_photo(photos[0], kid)
+        db.commit()
     source = db.add_keyword('Wing St. Canyon', kw_type='location')
     target = db.add_keyword('Wing Street Canyon', kw_type='location')
     db.update_keyword(target, latitude=32.7447, longitude=-117.2186)
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_server['url'] + '/keywords')
@@ -130,6 +136,7 @@ def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(liv
                             kw_type='location')
     located = db.add_keyword('Overlook Point', kw_type='location')
     coordless = db.add_keyword('Overlook Unmapped', kw_type='location')
+    db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-hostile', latitude = 48.10, "
                     "longitude = 11.50 WHERE id = ?", (hostile,))
     db.conn.execute("UPDATE keywords SET place_id = 'place-located', latitude = 48.20, "
@@ -138,6 +145,7 @@ def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(liv
     db.conn.commit()
     for index, keyword in enumerate((hostile, located, coordless, quoted)):
         db.tag_photo(photos[index % len(photos)], keyword)
+        db.commit()
 
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -191,12 +199,14 @@ def test_merge_context_menu_keeps_one_rows_name_and_the_others_place(live_server
     db = live_server['db']
     photos = live_server['data']['photos']
     source = db.add_keyword('Whatcom Falls Park', kw_type='general')
+    db.commit()
     target = db.upsert_place_chain({
         'place_id': 'whatcom-falls', 'name': 'Whatcom Falls Park', 'lat': 48.7504, 'lng': -122.4269,
         'address_components': [{'name': 'Bellingham', 'types': ['locality']}],
     })
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
+    db.commit()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_server['url'] + '/keywords')

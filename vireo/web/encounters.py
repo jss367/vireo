@@ -830,7 +830,7 @@ class _SpeciesConfirmation:
             self.newly_tagged = []
             return
         self.kid = (self.preserved_keyword_id if self.preserved_keyword_id is not None
-                    else db.add_keyword(self.species, is_species=True, _commit=False))
+                    else db.add_keyword(self.species, is_species=True))
         # Queue/record the stored spelling (see api_add_keyword).
         stored = db.keywords.name_of(self.kid)
         if stored:
@@ -926,7 +926,7 @@ class _SpeciesConfirmation:
         for pid, old_rows in self.old_rows_by_photo.items():
             remove_names = []
             for old in old_rows:
-                self.db.untag_photo(pid, old["id"], _commit=False, _record_history=True)
+                self.db.untag_photo(pid, old["id"], _record_history=True)
                 # A same-taxon alias replace re-adds ``kid`` right
                 # after, so its sidecar remove is skipped; a remove
                 # must queue every untagged row.
@@ -941,7 +941,7 @@ class _SpeciesConfirmation:
 
     def tag_new_species(self, ws_id: int) -> None:
         for pid in self.newly_tagged:
-            self.db.tag_photo(pid, cast(int, self.kid), source="manual", _commit=False,
+            self.db.tag_photo(pid, cast(int, self.kid), source="manual",
                               provenance=self.provenance, _record_provenance=True)
             queue_keyword_add(
                 self.db, pid, self.species, workspace_id=ws_id,

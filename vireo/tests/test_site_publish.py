@@ -80,6 +80,7 @@ def _seed_publish_app(tmp_path, monkeypatch):
     db.tag_photo(p1, cardinal)
     db.tag_photo(p1, backyard)
     db.tag_photo(p2, sparrow)
+    db.commit()
     db.conn.commit()
 
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))

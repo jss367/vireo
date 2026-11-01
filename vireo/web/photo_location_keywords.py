@@ -85,7 +85,8 @@ def create_photo_location_keywords_blueprint(
                 else None
             )
             try:
-                kid = db.add_keyword(name, kw_type=kw_type)
+                with db.transaction():
+                    kid = db.add_keyword(name, kw_type=kw_type)
             except ValueError as exc:
                 return json_error(str(exc))
             # Queue/record the stored spelling: add_keyword normalizes

@@ -809,6 +809,7 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
     phantom = _photo(db, source, "phantom.jpg")
     kw = db.add_keyword("K")
     db.tag_photo(dup, kw)
+    db.commit()
     witness = _photo(db, target, "w.jpg")
     _set_provenance(db, witness, "/src")
     kid_witness = _photo(db, target, "kw.jpg")
@@ -916,6 +917,7 @@ def test_merge_into_existing_moves_embedded_keyword_offered_onto_survivor(
     survivor = _photo(db, target, "bird.jpg")
     dup = _photo(db, source, "bird.jpg")
     db.photo_keywords.record_embedded_offered_keys(dup, ["robin"])
+    db.commit()
     assert db.photo_keywords.embedded_offered_keys(dup) == {"robin"}
     assert db.photo_keywords.embedded_offered_keys(survivor) == set()
 
@@ -948,6 +950,7 @@ def test_merge_into_existing_drops_phantom_embedded_keyword_offered(
     db.conn.commit()
     phantom = _photo(db, source, "gone.jpg")
     db.photo_keywords.record_embedded_offered_keys(phantom, ["robin"])
+    db.commit()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
 
@@ -982,12 +985,14 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
     # keyword yet. The suppression key is what a prior embedded scan of
     # ``bird.jpg`` on the source row recorded.
     robin_id = db.add_keyword("Robin")
+    db.commit()
     db.conn.execute(
         "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
         "VALUES (?, ?, NULL)",
         (dup, robin_id),
     )
     db.photo_keywords.record_embedded_offered_keys(dup, ["robin"])
+    db.commit()
     db.conn.commit()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
@@ -1035,6 +1040,7 @@ def test_folder_merge_respects_embedded_keyword_removals(
         _import_embedded_keywords_for_photo(db, survivor, metadata)
         for keyword in db.photo_keywords.get_for_photo(survivor):
             db.untag_photo(survivor, keyword["id"])
+            db.commit()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
 

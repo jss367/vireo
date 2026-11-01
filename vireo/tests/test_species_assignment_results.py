@@ -31,6 +31,7 @@ def test_confirmation_contract_counts_identity_warnings_and_undo(app_and_db, mod
     before = json.loads(Path(path).read_text())
     kid = db.add_keyword('Blue Jay', is_species=True)
     db.tag_photo(ids[0], kid)
+    db.commit()
     db.photo_review.set_flag(ids[0], 'flagged')
     db.commit()
     db.photo_review.set_flag(ids[1], 'rejected')
@@ -228,8 +229,10 @@ def test_compact_removal_counts_and_cache_only_undo(app_and_db):
     client = app.test_client()
     ids, path = seed(app, db)
     kid = db.add_keyword('Blue Jay', is_species=True)
+    db.commit()
     for pid in ids:
         db.tag_photo(pid, kid)
+        db.commit()
     body = {'species': 'Blue Jay', 'photo_ids': ids, 'response_mode': 'compact'}
     confirmed = client.post('/api/encounters/species', json=body).json
     assert confirmed['counts']['changed'] == 0

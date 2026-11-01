@@ -66,6 +66,7 @@ def _seed_location_keyword(live_server, name, place_id=None):
     else:
         kw_id = db.get_or_create_text_location(name)
     db.tag_photo(photo_id, kw_id)
+    db.commit()
     return kw_id
 
 

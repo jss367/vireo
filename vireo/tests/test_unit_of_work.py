@@ -480,7 +480,7 @@ def test_a_failed_joined_set_flag_preserves_history_and_undo_for_caller_species_
     db.commit()
 
     db.begin_immediate()
-    db.untag_photo(photo_id, kid, _commit=False, _record_history=True)
+    db.untag_photo(photo_id, kid, _record_history=True)
     assert db.species_provenance.state(photo_id, kid) is None
     assert (photo_id, kid) in db._species_provenance_before
     with pytest.raises(FlagConflict):

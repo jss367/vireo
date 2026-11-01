@@ -59,4 +59,5 @@ def check_invalid_calls(db: Database) -> None:
     db.set_active_workspace("1")  # pyright: ignore[reportArgumentType]
     db.add_keyword("Robin", parent_id="1")  # pyright: ignore[reportArgumentType]
     db.tag_photo(1, None)  # pyright: ignore[reportArgumentType]
+    db.commit()
     db.record_edit("rating", "Rated photo", "5", [None])  # pyright: ignore[reportArgumentType]

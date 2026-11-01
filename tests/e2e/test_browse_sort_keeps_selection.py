@@ -682,8 +682,10 @@ def _seed_two_adjacent_stacks(db, ids):
                 ((base + datetime.timedelta(seconds=offset)).isoformat(), photo_id),
             )
     keyword_id = db.add_keyword("Merlin", is_species=True)
+    db.commit()
     for photo_id in ids[:2]:
         db.tag_photo(photo_id, keyword_id)
+        db.commit()
     return keyword_id
 
 
@@ -730,6 +732,7 @@ def test_history_reload_restores_the_frames_the_user_picked(live_server, page):
     # that was keeping it apart from its neighbours, so all four merge.
     for photo_id in picked:
         db.tag_photo(photo_id, keyword_id)
+        db.commit()
     page.evaluate("() => pageModules.predictionPanels.afterHistoryChange()")
     page.wait_for_function("() => !pageModules.pagination.pagination.loading", timeout=15000)
 

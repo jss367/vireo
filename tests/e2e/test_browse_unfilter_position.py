@@ -16,6 +16,7 @@ ACTIONS = [
 def _prepare(page, live_server, action, photo_link=False):
     db = live_server["db"]
     place = db.add_keyword("Park", kw_type="location")
+    db.commit()
     keyword = db.add_keyword("Portfolio") if action == "sidebar_keyword" else None
     ids = []
     for i in range(180):
@@ -28,8 +29,10 @@ def _prepare(page, live_server, action, photo_link=False):
         ids.append(photo_id)
         if keyword and i >= 120:
             db.tag_photo(photo_id, keyword)
+            db.commit()
         if i < 120:
             db.tag_photo(photo_id, place)
+            db.commit()
         elif action == "color":
             db.photo_labels.set(photo_id, "red")
             db.commit()

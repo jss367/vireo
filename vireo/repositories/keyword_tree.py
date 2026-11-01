@@ -315,19 +315,13 @@ class KeywordTreeRepository:
 
 
     def apply_update(self, keyword_id: int, updates: Mapping[str, Any]) -> None:
-        """Write the resolved ``updates`` column map to one keyword and commit."""
+        """Write the resolved ``updates`` column map to one keyword (no commit)."""
         previous = self.rename_state(keyword_id) if 'name' in updates else None
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [keyword_id]
         self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
         if previous is not None and (previous['is_species'] or previous['type'] == 'taxonomy'):
             retarget_candidate_names(self.conn, previous['name'], updates['name'])
-        self.conn.commit()
-
-
-    def commit(self) -> None:
-        """Commit the connection's open transaction."""
-        self.conn.commit()
 
 
     def rename_state(self, keyword_id: int) -> sqlite3.Row | None:
@@ -492,21 +486,11 @@ class KeywordTreeRepository:
         Runs passes until convergence so case-duplicate parent chains
         ("Birds">"Heron" vs "birds">"heron") fully collapse: the children
         only become same-parent duplicates after their parents merge.
-        The whole pass is all-or-nothing: an exception rolls back every
-        pending merge instead of leaving a half-merged tree on the
-        connection for a later unrelated commit to persist.
-        Returns count of merges performed.
+        The whole pass is all-or-nothing within the caller's unit of work: an
+        exception propagates and the unit rolls every pending merge back.
+        Does not commit. Returns count of merges performed.
         """
-        ws = self.workspace_id
-        total_merged = 0
-        try:
-            total_merged = self._merge_duplicate_keywords_pass(ws)
-        except Exception:
-            self.conn.rollback()
-            raise
-        if total_merged:
-            self.conn.commit()
-        return total_merged
+        return self._merge_duplicate_keywords_pass(self.workspace_id)
 
 
     def duplicate_scope_rows(self, ws: int) -> list[sqlite3.Row]:
@@ -573,12 +557,11 @@ class KeywordTreeRepository:
     # -- delete ----------------------------------------------------------------
 
     def delete(self, keyword_id: int) -> None:
-        """Delete one keyword and commit.
+        """Delete one keyword (no commit).
 
         Its children become root keywords and its photo associations are
-        removed. Statements the caller left uncommitted share the commit.
+        removed.
         """
         self.conn.execute("UPDATE keywords SET parent_id = NULL WHERE parent_id = ?", (keyword_id,))
         self.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
-        self.conn.commit()

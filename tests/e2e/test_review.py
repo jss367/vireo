@@ -235,6 +235,7 @@ def test_second_subject_card_is_not_shown_as_disagreeing(live_server, page):
     db.predictions.add(egret_det, "Little Egret", 0.9, "bioclip",
                       category="disagreement", labels_fingerprint="fp1")
     db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
+    db.commit()
     egret = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (egret_det,),
     ).fetchone()["id"]

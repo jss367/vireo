@@ -43,6 +43,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     workspace_folders.add_workspace_folder(db, sharing, source)
     note = db.add_keyword('Unrelated note')
     db.tag_photo(survivor, note, source='manual')
+    db.commit()
     db.photo_review.set_flag(survivor, 'rejected')
     db.commit()
     with db.transaction():
@@ -109,8 +110,8 @@ def test_collapse_conflicts_keep_pair_data_and_folder_transaction_untouched(db, 
         if conflict == 'decision':
             save_alternatives(db, [survivor], ['Heron', 'Egret'], 'Other evidence', 'Call')
         else:
-            keyword = db.add_keyword('Heron', is_species=True, _commit=False)
-            db.tag_photo(survivor, keyword, source='manual', _commit=False)
+            keyword = db.add_keyword('Heron', is_species=True)
+            db.tag_photo(survivor, keyword, source='manual')
     # A folder rejection must preserve unrelated writes in its outer transaction.
     db.conn.execute('UPDATE photos SET rating=4 WHERE id=?', (survivor,))
     tables = ['photos', 'folders', 'photo_keywords', 'photo_identity_alternatives', 'pending_changes', 'edit_history_items']
@@ -132,6 +133,7 @@ def test_collapse_keeps_current_tags_for_redo_only_identity_history(db, tmp_path
     source, target, survivor, losing, target_path = _fixture(db, tmp_path, path)
     keyword = db.add_keyword('Heron', is_species=True)
     db.tag_photo(losing, keyword, source='accept')
+    db.commit()
     with db.transaction():
         saved = save_alternatives(db, [losing], ['Heron', 'Egret'], 'Redo evidence', 'Bill')
     undo_last_edit(db)
@@ -218,6 +220,7 @@ def test_folder_identity_conflict_rolls_back_earlier_duplicate_carries(db, tmp_p
     keyword = db.add_keyword('Earlier embedded note')
     db.tag_photo(losing, keyword, source='manual')
     db.photo_keywords.record_embedded_offered_keys(losing, ['earlier embedded note'])
+    db.commit()
     later_target = _photo(db, target, 'later.jpg')
     later_source = _photo(db, source, 'later.jpg')
     with db.transaction():

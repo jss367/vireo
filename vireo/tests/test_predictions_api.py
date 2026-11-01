@@ -639,6 +639,7 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     db.tag_photo(live_pid, kid_live)
     db.tag_photo(rejected_pid, kid_rejected)
     db.tag_photo(photos[2]['id'], kid_untagged)
+    db.commit()
     db.set_species_representative('Coyote Live', live_pid)
     db.set_species_representative('Coyote Rejected', rejected_pid)
     db.set_species_representative('Coyote Untagged', photos[2]['id'])
@@ -648,6 +649,7 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     db.photo_review.set_flag(rejected_pid, 'rejected')
     db.commit()
     db.untag_photo(photos[2]['id'], kid_untagged)
+    db.commit()
 
     client = app.test_client()
     resp = client.get('/api/predictions')
@@ -674,6 +676,7 @@ def test_get_predictions_species_rule_keeps_disagreement_rows(app_and_db):
     # Confirmed species keyword on p1.
     robin_id = db.add_keyword('Robin', is_species=True)
     db.tag_photo(photos[0]['id'], robin_id)
+    db.commit()
     # Pending prediction proposes Sparrow — the reviewer wants to see it.
     det = _make_detection(db, photos[0]['id'])
     db.predictions.add(detection_id=det, species='Sparrow', confidence=0.9,

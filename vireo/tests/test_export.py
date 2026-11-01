@@ -293,6 +293,7 @@ def export_env(tmp_path):
     # Add a species keyword to p1
     k = db.add_keyword("Red-tailed Hawk", is_species=True)
     db.tag_photo(p1, k)
+    db.commit()
 
     return {
         "db": db, "tmp_path": tmp_path, "vireo_dir": str(vireo_dir),
@@ -601,6 +602,7 @@ def test_export_photos_embeds_only_selected_metadata(export_env, monkeypatch):
     )
     second_species = env["db"].add_keyword("Northern Flicker", is_species=True)
     env["db"].tag_photo(env["p1"], second_species)
+    env['db'].commit()
     env["db"].conn.commit()
 
     import export as export_module
@@ -705,11 +707,13 @@ def test_export_photos_uses_assigned_keyword_location(export_env):
 
     env = export_env
     location_id = env["db"].add_keyword("Torrey Pines", kw_type="location")
+    env['db'].commit()
     env["db"].conn.execute(
         "UPDATE keywords SET latitude=?, longitude=? WHERE id=?",
         (32.92, -117.25, location_id),
     )
     env["db"].tag_photo(env["p1"], location_id)
+    env['db'].commit()
     env["db"].conn.commit()
 
     result = export_photos(
@@ -855,6 +859,7 @@ def test_export_metadata_categories_remain_independent(export_env, selected):
         pytest.skip("ExifTool is not available")
     env = export_env
     location = env["db"].add_keyword("Réserve", kw_type="location")
+    env['db'].commit()
     env["db"].set_photo_location(env["p1"], location)
     env["db"].conn.execute("UPDATE photos SET exif_data=?, latitude=?, longitude=? WHERE id=?", (
         json.dumps({"EXIF": {"DateTimeOriginal": "2024:06:15 14:30:22", "OffsetTimeOriginal": "-07:00"}}),

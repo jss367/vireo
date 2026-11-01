@@ -36,8 +36,9 @@ the data layer itself, ``vireo/db.py`` and ``vireo/repositories/*.py``:
 The bodies of ``Database``'s transaction-control methods are the one place
 transaction control belongs, so they are not counted: ``commit``,
 ``rollback``, ``commit_with_retry``, ``begin``, ``begin_immediate``,
-``transaction`` and ``close``, and the module-level ``commit_with_retry``
-helper. (The unit of work's machinery, ``vireo/unit_of_work.py``, is not part
+``transaction``, ``close`` and ``__init__`` (which seeds a fresh catalog's
+defaults in its own unit of work), and the module-level
+``commit_with_retry`` helper. (The unit of work's machinery, ``vireo/unit_of_work.py``, is not part
 of the data layer.)
 
 Run ``python vireo/tests/test_transaction_ownership.py`` to print the current
@@ -72,6 +73,9 @@ EXEMPT_DATA_LAYER_QUALNAMES = {
         "Database.begin",
         "Database.begin_immediate",
         "Database.transaction",
+        # Connection lifecycle: opening a catalog seeds its defaults in its
+        # own unit of work, as schema setup does.
+        "Database.__init__",
         "Database.close",
     },
 }
@@ -81,7 +85,7 @@ EXEMPT_DATA_LAYER_QUALNAMES = {
 # data methods stop committing and lose their flag; never raise one.
 COMMIT_FLAG_LIMITS: dict[str, int] = {
     "vireo/audit.py": 5,
-    "vireo/db.py": 35,
+    "vireo/db.py": 21,
     "vireo/import_job/cataloging.py": 2,
     "vireo/offline_cache.py": 1,
     "vireo/pipeline_stages/features.py": 5,
@@ -90,22 +94,19 @@ COMMIT_FLAG_LIMITS: dict[str, int] = {
     "vireo/repositories/caches.py": 1,
     "vireo/repositories/edit_history.py": 1,
     "vireo/repositories/folders.py": 4,
-    "vireo/repositories/keyword_provenance.py": 9,
+    "vireo/repositories/keyword_provenance.py": 6,
     "vireo/repositories/keyword_tree.py": 2,
-    "vireo/repositories/keywords.py": 7,
     "vireo/repositories/masks_features.py": 5,
-    "vireo/repositories/photo_keywords.py": 2,
     "vireo/repositories/photos.py": 1,
     "vireo/repositories/predictions.py": 5,
     "vireo/repositories/species_curation.py": 11,
     "vireo/repositories/workspace_folders.py": 3,
     "vireo/services/analysis_retry.py": 4,
-    "vireo/services/bulk_species_assignments.py": 2,
     "vireo/services/catalog_deletion.py": 2,
-    "vireo/services/grouping_history.py": 5,
-    "vireo/services/identity_alternatives.py": 6,
+    "vireo/services/grouping_history.py": 3,
+    "vireo/services/identity_alternatives.py": 2,
     "vireo/services/import_locations.py": 1,
-    "vireo/services/imports.py": 3,
+    "vireo/services/imports.py": 1,
     "vireo/services/local_folder.py": 2,
     "vireo/services/local_workspace.py": 2,
     "vireo/services/maintenance_history.py": 1,
@@ -115,15 +116,14 @@ COMMIT_FLAG_LIMITS: dict[str, int] = {
     "vireo/services/render_cache.py": 7,
     "vireo/services/subject_masks.py": 1,
     "vireo/services/workspace_folders.py": 1,
-    "vireo/sync.py": 3,
-    "vireo/web/batch.py": 6,
-    "vireo/web/encounters.py": 5,
-    "vireo/web/highlights.py": 12,
+    "vireo/web/batch.py": 5,
+    "vireo/web/encounters.py": 2,
+    "vireo/web/highlights.py": 9,
     "vireo/web/job_launchers.py": 1,
     "vireo/web/locations.py": 1,
     "vireo/web/photo_edit_recipes.py": 1,
     "vireo/web/pipeline.py": 2,
-    "vireo/web/predictions.py": 23,
+    "vireo/web/predictions.py": 19,
     "vireo/web/species.py": 1,
     "vireo/web/sync.py": 2,
     "vireo/web/web_types.py": 1,
@@ -131,7 +131,7 @@ COMMIT_FLAG_LIMITS: dict[str, int] = {
 
 # Transaction control inside the data layer, per module. Same rules.
 DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {
-    "vireo/db.py": 9,
+    "vireo/db.py": 5,
     "vireo/repositories/audit.py": 2,
     "vireo/repositories/caches.py": 9,
     "vireo/repositories/detections.py": 6,
@@ -140,14 +140,11 @@ DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {
     "vireo/repositories/folders.py": 13,
     "vireo/repositories/identity_alternatives.py": 5,
     "vireo/repositories/imports.py": 2,
-    "vireo/repositories/keyword_provenance.py": 4,
-    "vireo/repositories/keyword_tree.py": 5,
-    "vireo/repositories/keywords.py": 10,
+    "vireo/repositories/keyword_provenance.py": 2,
     "vireo/repositories/locations.py": 10,
     "vireo/repositories/masks_features.py": 9,
     "vireo/repositories/model_runs.py": 4,
     "vireo/repositories/moves_merge.py": 12,
-    "vireo/repositories/photo_keywords.py": 2,
     "vireo/repositories/photos.py": 12,
     "vireo/repositories/pipeline_features.py": 2,
     "vireo/repositories/predictions.py": 13,

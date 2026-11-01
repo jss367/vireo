@@ -101,6 +101,7 @@ def test_api_photos_marks_species_representative(app_and_db):
     photo = db.photos.list_page()[0]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(photo["id"], kid)
+    db.commit()
     db.set_species_representative("American Robin", photo["id"])
 
     client = app.test_client()
@@ -593,6 +594,7 @@ def test_api_photos_keyword_whole_word_option(app_and_db):
     tern_id = photos[1]["id"]
     db.tag_photo(western_id, db.add_keyword("Western Gull"))
     db.tag_photo(tern_id, db.add_keyword("Common Tern"))
+    db.commit()
 
     client = app.test_client()
     resp = client.get("/api/photos?keyword=tern&sort=name")
@@ -1121,6 +1123,7 @@ def test_photo_detail_life_list_lists_eligible_species(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
+    db.commit()
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["species"] == ["American Robin"]
@@ -1140,6 +1143,7 @@ def test_photo_detail_life_list_marks_current_representative(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
+    db.commit()
     db.species_curation.set_photo_preference("life_list", "American Robin", pid)
 
     data = client.get(f"/api/photos/{pid}").get_json()
@@ -1162,6 +1166,7 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
+    db.commit()
     db.species_curation.set_photo_preference("life_list", "American Robin", p2)
 
     data = client.get(f"/api/photos/{p1}").get_json()
@@ -1185,6 +1190,7 @@ def test_photo_detail_life_list_marks_only_primary_of_multiple_reps(app_and_db):
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
+    db.commit()
     # p1 selected first, then p2 — species_curation.get_representative_lists is
     # newest-first, so p2 is the primary (index 0) and p1 is secondary.
     db.set_species_representative("American Robin", p1)
@@ -1219,6 +1225,7 @@ def test_photo_detail_life_list_uses_primary_eligible_rep(app_and_db):
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
+    db.commit()
     db.set_species_representative("American Robin", p1)
     db.set_species_representative("American Robin", p2)
     db.photo_review.set_flag(p2, "rejected")
@@ -1242,6 +1249,7 @@ def test_photo_detail_life_list_excludes_non_species_keyword(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("Central Park", kw_type="location")
     db.tag_photo(pid, kid)
+    db.commit()
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["life_list"] == []
@@ -1260,6 +1268,7 @@ def test_photo_detail_life_list_includes_taxonomy_type_keyword(app_and_db):
         "SELECT id FROM keywords WHERE name='Bald Eagle'"
     ).fetchone()["id"]
     db.tag_photo(pid, kid)
+    db.commit()
     db.conn.commit()
 
     data = client.get(f"/api/photos/{pid}").get_json()
@@ -1279,6 +1288,7 @@ def test_photo_detail_life_list_multiple_species_independent_state(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     db.tag_photo(pid, db.add_keyword("American Robin", is_species=True))
     db.tag_photo(pid, db.add_keyword("Blue Jay", is_species=True))
+    db.commit()
     db.species_curation.set_photo_preference("life_list", "Blue Jay", pid)
 
     data = client.get(f"/api/photos/{pid}").get_json()
@@ -1294,6 +1304,7 @@ def test_photo_detail_life_list_empty_for_rejected_photo(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
+    db.commit()
     db.photo_review.set_flag(pid, "rejected")
     db.commit()
 
@@ -1625,6 +1636,7 @@ def test_api_photos_geo_unplottable_focus_names_coordless_location(app_and_db):
     db.conn.commit()
     lake = db.add_keyword("Laguna Lake", kw_type="location")
     db.tag_photo(photos["bird2.jpg"], lake)
+    db.commit()
 
     resp = app.test_client().get(f"/api/photos/geo?photo_id={photos['bird2.jpg']}")
 
@@ -1675,6 +1687,7 @@ def test_api_photos_geo_unplottable_focus_missing_folder_outranks_no_coordinates
     bird2_id, folder_id = photos["bird2.jpg"]
     lake = db.add_keyword("Laguna Lake", kw_type="location")
     db.tag_photo(bird2_id, lake)
+    db.commit()
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (folder_id,),
     )
@@ -9952,6 +9965,7 @@ def test_map_review_assignment_repairs_legacy_california_taxonomy_node(
     county_id = db.add_keyword(
         "San Diego County", parent_id=state_id, kw_type="location",
     )
+    db.commit()
     photo_id = db.photos.list_page()[0]["id"]
 
     response = app.test_client().post(
@@ -10967,6 +10981,44 @@ def test_post_keyword_link_place_accepts_client_place_details_without_server_loo
     assert [p["name"] for p in kw["parent_chain"]] == [
         "United States", "New York", "New York County", "New York",
     ]
+
+
+def test_post_keyword_link_place_rolls_back_the_link_when_its_audit_fails(
+    app_and_db, monkeypatch,
+):
+    """The link, its edit-history entry and its photos' location sync are
+    one unit of work. The link used to commit before the audit entry was
+    written, so a failure there answered 500 with the link already saved
+    and no history row to undo it."""
+    import sqlite3
+
+    import config as cfg
+    from web import locations as web_locations
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+    kw_id = db.get_or_create_text_location("Central Park")
+
+    def audit_fails(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(web_locations, "_record_place_link", audit_fails)
+    app.config["PROPAGATE_EXCEPTIONS"] = False
+    resp = app.test_client().post(
+        f"/api/keywords/{kw_id}/link-place",
+        json={
+            "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+            "place": _central_park_client_place(),
+        },
+    )
+    assert resp.status_code == 500
+    row = db.conn.execute(
+        "SELECT place_id, latitude, parent_id FROM keywords WHERE id = ?", (kw_id,),
+    ).fetchone()
+    assert tuple(row) == (None, None, None)
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = 'United States'",
+    ).fetchone()[0] == 0
 
 
 def test_post_keyword_link_place_rejects_non_finite_client_coords(app_and_db):

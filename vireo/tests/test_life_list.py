@@ -65,14 +65,17 @@ def life_app(tmp_path, monkeypatch):
                  timestamp="2024-05-01T12:00:00")
 
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    db.commit()
     cur = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
         ("Passer domesticus", "House Sparrow", "species"))
     taxon_id = cur.lastrowid
     k_sparrow = db.add_keyword("House Sparrow", kw_type="taxonomy")
+    db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon_id, k_sparrow))
     k_loc = db.add_keyword("Backyard", kw_type="location")
+    db.commit()
     db.conn.commit()
 
     db.tag_photo(p1, k_card)
@@ -80,6 +83,7 @@ def life_app(tmp_path, monkeypatch):
     db.tag_photo(p_rej, k_card)
     db.tag_photo(p3, k_sparrow)
     db.tag_photo(p2, k_loc)
+    db.commit()
 
     for pid in (p1, p2, p3):
         Image.new("RGB", (100, 100)).save(os.path.join(thumb_dir, f"{pid}.jpg"))
@@ -104,6 +108,7 @@ def _entry(data, species):
 
 def _add_cardinal_photos(db, ids, count, prefix="card-extra"):
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    db.commit()
     photo_ids = []
     for i in range(count):
         pid = photo_ingest.add_photo(
@@ -115,6 +120,7 @@ def _add_cardinal_photos(db, ids, count, prefix="card-extra"):
             timestamp=f"2024-05-01T08:{i // 60:02d}:{i % 60:02d}",
         )
         db.tag_photo(pid, k_card)
+        db.commit()
         photo_ids.append(pid)
     return photo_ids
 
@@ -399,6 +405,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     year_ws = db.create_workspace("Whole Year")
     species = "Rollup Cardinal"
     kid = db.add_keyword(species, is_species=True)
+    db.commit()
 
     db.set_active_workspace(jan_ws)
     jan_fid = workspace_folders.add_folder(db, "/photos/january", name="january")
@@ -407,6 +414,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
         file_size=1000, file_mtime=10.0, timestamp="2024-01-10T09:00:00",
     )
     db.tag_photo(jan_pid, kid)
+    db.commit()
     db.set_species_representative(species, jan_pid)
 
     db.set_active_workspace(feb_ws)
@@ -416,6 +424,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
         file_size=1000, file_mtime=20.0, timestamp="2024-02-10T09:00:00",
     )
     db.tag_photo(feb_pid, kid)
+    db.commit()
     db.set_species_representative(species, feb_pid)
 
     workspace_folders.add_workspace_folder(db, year_ws, jan_fid)
@@ -736,6 +745,7 @@ def _seed_higher_rank_accipiter(db, folder_id):
         ("Accipiter", "genus", aves),
     ).lastrowid
     keyword_id = db.add_keyword("Accipiter", kw_type="taxonomy")
+    db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
         (accipiter, keyword_id),
@@ -749,6 +759,7 @@ def _seed_higher_rank_accipiter(db, folder_id):
         timestamp="2024-06-01T12:00:00",
     )
     db.tag_photo(photo_id, keyword_id)
+    db.commit()
     db.conn.commit()
     return {"aves": aves, "accipiter": accipiter, "photo": photo_id,
             "keyword": keyword_id}
@@ -761,6 +772,7 @@ def test_higher_rank_taxonomy_identification_is_listed(life_app):
     # must surface its location chip / CSV value like species-rank rows do.
     location_id = db.add_keyword("Backyard", kw_type="location")
     db.tag_photo(seed["photo"], location_id)
+    db.commit()
     db.conn.commit()
 
     entry = _entry(_get_life_list(app), "Accipiter")
@@ -908,6 +920,7 @@ def _seed_robin_with_ancestor_keywords(db, folder_id):
 
     def _linked(name, taxon_id):
         kid = db.add_keyword(name, kw_type="taxonomy")
+        db.commit()
         db.conn.execute(
             "UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon_id, kid))
         return kid
@@ -928,6 +941,7 @@ def _seed_robin_with_ancestor_keywords(db, folder_id):
     db.tag_photo(photo_id, k_turdus)
     db.tag_photo(photo_id, k_turdidae)
     db.tag_photo(photo_id, k_aves)
+    db.commit()
     db.conn.commit()
     return {
         "photo": photo_id,
@@ -978,6 +992,7 @@ def test_life_list_locations_omit_ancestor_buckets(life_app):
     seed = _seed_robin_with_ancestor_keywords(db, ids["folder"])
     location_id = db.add_keyword("Backyard", kw_type="location")
     db.tag_photo(seed["photo"], location_id)
+    db.commit()
     db.conn.commit()
 
     locations = db.species_curation.get_life_list_locations()
@@ -1078,8 +1093,10 @@ def test_life_list_keeps_unrelated_higher_rank_identifications(life_app):
         ("Mammalia", "Mammals", "class"),
     ).lastrowid
     k_aves = db.add_keyword("Aves", kw_type="taxonomy")
+    db.commit()
     db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (aves, k_aves))
     k_mam = db.add_keyword("Mammalia", kw_type="taxonomy")
+    db.commit()
     db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (mammalia, k_mam))
     pid = photo_ingest.add_photo(
         db, folder_id=ids["folder"], filename="mixed.jpg", extension=".jpg",
@@ -1087,6 +1104,7 @@ def test_life_list_keeps_unrelated_higher_rank_identifications(life_app):
     )
     db.tag_photo(pid, k_aves)
     db.tag_photo(pid, k_mam)
+    db.commit()
     db.conn.commit()
 
     data = _get_life_list(app)
@@ -1153,9 +1171,11 @@ def test_same_named_species_keywords_dedupe_photos(life_app):
         "Northern Cardinal", parent_id=parent_a, is_species=True)
     twin_b = db.add_keyword(
         "Northern Cardinal", parent_id=parent_b, is_species=True)
+    db.commit()
     assert twin_a != twin_b
     db.tag_photo(ids["p2"], twin_a)
     db.tag_photo(ids["p2"], twin_b)
+    db.commit()
     db.conn.commit()
 
     data = _get_life_list(app)
@@ -1264,6 +1284,7 @@ def test_life_list_export_csv_escapes_formula_leading_cells(life_app):
     k_location = db.add_keyword("+Backyard", kw_type="location")
     db.tag_photo(p_formula, k_species)
     db.tag_photo(p_formula, k_location)
+    db.commit()
 
     resp = app.test_client().get(
         "/api/life-list/export?format=csv&include_locations=1"
@@ -1318,6 +1339,7 @@ def test_life_list_export_all_photos_is_not_limited_to_page_count(life_app):
 def test_life_list_summary_exports_ignore_hidden_all_photo_scope(life_app):
     app, db, ids = life_app
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    db.commit()
     for i in range(13):
         pid = photo_ingest.add_photo(
             db, folder_id=ids["folder"],
@@ -1328,6 +1350,7 @@ def test_life_list_summary_exports_ignore_hidden_all_photo_scope(life_app):
             timestamp=f"2024-07-{i + 1:02d}T08:00:00",
         )
         db.tag_photo(pid, k_card)
+        db.commit()
 
     resp = app.test_client().get("/api/life-list/export?format=json&photos=all")
     assert resp.status_code == 200
@@ -1348,6 +1371,7 @@ def test_life_list_summary_exports_ignore_hidden_all_photo_scope(life_app):
 def test_life_list_file_export_keeps_duplicate_filenames_by_photo_id(life_app):
     app, db, ids = life_app
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    db.commit()
     other_folder = workspace_folders.add_folder(db, "/photos/2025", name="2025")
     for folder_id in (ids["folder"], other_folder):
         pid = photo_ingest.add_photo(
@@ -1359,6 +1383,7 @@ def test_life_list_file_export_keeps_duplicate_filenames_by_photo_id(life_app):
             timestamp=f"2024-06-{folder_id:02d}T08:00:00",
         )
         db.tag_photo(pid, k_card)
+        db.commit()
 
     resp = app.test_client().get("/api/life-list/export?format=file&photos=all")
     assert resp.status_code == 200
@@ -1439,6 +1464,7 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
 
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("verdin", parent_id=parent)
+    db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
         "WHERE id = ?",
@@ -1452,6 +1478,7 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
     ).lastrowid
     db.tag_photo(pid_hier, nested)
     db.tag_photo(pid_root, root)
+    db.commit()
     db.conn.commit()
 
     # The hierarchical photo only carries the lower-cased leaf.
@@ -1503,6 +1530,7 @@ def test_life_list_merges_apostrophe_variant_species_into_one_entry(life_app):
 
     ascii_kw = db.add_keyword("Say's phoebe", is_species=True)
     curly_kw = db.add_keyword("Say’s phoebe", is_species=True)
+    db.commit()
     # The fold happens at the storage choke point, so both spellings must
     # land on a single keyword row.
     assert curly_kw == ascii_kw
@@ -1517,6 +1545,7 @@ def test_life_list_merges_apostrophe_variant_species_into_one_entry(life_app):
             timestamp=f"2026-02-0{i + 1}T09:00:00",
         )
         db.tag_photo(pid, ascii_kw)
+        db.commit()
 
     data = _get_life_list(app)
     matches = [e for e in data["species"] if "phoebe" in e["species"].lower()]
@@ -1551,6 +1580,7 @@ def test_life_list_numbering_places_okina_species_under_a(life_app):
 
     apapane_kw = db.add_keyword("ʻApapane", is_species=True)
     hutton_kw = db.add_keyword("Hutton's Vireo", is_species=True)
+    db.commit()
     # Identical timestamps make the numbering tuple fall through to the
     # alphabetical tie-breaker, isolating the behavior under test.
     for filename, kw in (("apapane1.jpg", apapane_kw),
@@ -1564,6 +1594,7 @@ def test_life_list_numbering_places_okina_species_under_a(life_app):
             timestamp="2022-01-01T00:00:00",
         )
         db.tag_photo(pid, kw)
+        db.commit()
     db.conn.commit()
 
     data = _get_life_list(app)
@@ -1617,11 +1648,14 @@ def test_life_list_groups_taxon_aliases_with_paging_and_curation(
             timestamp=f"2026-05-0{i + 1}T09:00:00",
         )
         db.tag_photo(photo, keywords[i % 2])
+        db.commit()
         photos.append(photo)
     # Carry both aliases on one photo: count it once and dedupe locations.
     db.tag_photo(photos[2], keywords[1])
+    db.commit()
     for photo, name in zip(photos, ("France", "Hawaii", "France"), strict=True):
         db.tag_photo(photo, db.add_keyword(name, kw_type="location"))
+        db.commit()
     # The most recent representative was selected under the second alias.
     db.species_curation.set_global_representative(stored_names[0], photos[0])
     db.species_curation.set_global_representative(stored_names[1], photos[1])
@@ -1675,6 +1709,7 @@ def test_life_list_keeps_different_taxa_with_the_same_name_separate(life_app):
     for i, photo in enumerate((ids["p1"], ids["p2"])):
         parent = db.add_keyword(f"Parent {i}")
         keyword = db.add_keyword("Shared Bird", parent_id=parent, is_species=True)
+        db.commit()
         taxon = db.conn.execute(
             "INSERT INTO taxa (name, rank) VALUES (?, 'species')",
             (f"Distinctus species{i}",),
@@ -1682,6 +1717,7 @@ def test_life_list_keeps_different_taxa_with_the_same_name_separate(life_app):
         db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
         db.tag_photo(photo, keyword)
         db.tag_photo(photo, db.add_keyword(f"Place {i}", kw_type="location"))
+        db.commit()
     db.species_curation.set_global_representative("Shared Bird", ids["p1"])
     db.commit()
 
@@ -1701,6 +1737,7 @@ def test_life_list_does_not_guess_identity_from_similar_unlinked_names(life_app)
     app, db, ids = life_app
     for photo, name in zip((ids["p1"], ids["p2"]), ("Unlinked bird", "Unlinked-bird"), strict=True):
         db.tag_photo(photo, db.add_keyword(name, is_species=True))
+        db.commit()
     entries = [entry for entry in _get_life_list(app)["species"]
                if entry["species"].startswith("Unlinked")]
     assert len(entries) == 2
@@ -1714,6 +1751,7 @@ def test_life_list_pages_same_named_taxa_by_identity(life_app):
         keyword = db.add_keyword(
             "Shared Bird", parent_id=db.add_keyword(f"Taxon parent {i}"), is_species=True,
         )
+        db.commit()
         taxon = db.conn.execute(
             "INSERT INTO taxa (name, rank) VALUES (?, 'species')",
             (f"Differentus species{i}",),
@@ -1721,6 +1759,7 @@ def test_life_list_pages_same_named_taxa_by_identity(life_app):
         taxa.append(taxon)
         db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
         db.tag_photo(photo, keyword)
+        db.commit()
     for taxon, photo in zip(taxa, (ids["p1"], ids["p2"]), strict=True):
         response = app.test_client().get("/api/life-list/species", query_string={
             "species": "Shared Bird", "taxon_id": taxon, "limit": 1,
@@ -1737,6 +1776,7 @@ def test_life_list_pages_unlinked_homonym_without_appending_linked_photos(life_a
     app, db, ids = life_app
     linked = db.add_keyword("Shared Bird", parent_id=db.add_keyword("Linked parent"), is_species=True)
     unlinked = db.add_keyword("Shared Bird", parent_id=db.add_keyword("Unlinked parent"), is_species=True)
+    db.commit()
     taxon = db.conn.execute(
         "INSERT INTO taxa (name, rank) VALUES ('Linkedus bird', 'species')",
     ).lastrowid
@@ -1752,6 +1792,7 @@ def test_life_list_pages_unlinked_homonym_without_appending_linked_photos(life_a
                 timestamp=f"{year}-01-01T08:{i // 60:02d}:{i % 60:02d}",
             )
             db.tag_photo(photo, keyword)
+            db.commit()
             expected[keyword].add(photo)
     entries = [entry for entry in _get_life_list(app)["species"] if entry["species"] == "Shared Bird"]
     assert [entry["taxon_id"] for entry in entries] == [taxon, None]

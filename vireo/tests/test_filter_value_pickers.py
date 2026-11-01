@@ -44,6 +44,7 @@ def test_keyword_choices_match_any_and_exclude_all(db, tmp_path, field):
     db.tag_photo(a, hawk)
     db.tag_photo(a, robin)
     db.tag_photo(b, robin)
+    db.commit()
     assert set(db.collections.query_photo_ids([{"field": field, "op": "in", "value": ["Hawk", "Robin"]}])) == {a, b}
     assert set(db.collections.query_photo_ids([{"field": field, "op": "not_in", "value": ["Hawk", "Robin"]}])) == {c}
     nested = {"mode": "any", "rules": [

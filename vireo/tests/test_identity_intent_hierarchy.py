@@ -14,11 +14,13 @@ def test_resolution_preserves_retained_taxonomy_alias_hierarchy(app_and_db, tmp_
     )
     root = db.add_keyword(CANDIDATES[0], is_species=True)
     alias = db.add_keyword(scientific, parent_id=root, is_species=True)
+    db.commit()
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     hierarchy = CANDIDATES[0] + '|' + scientific
     write_sidecar(path, flat_keywords={CANDIDATES[0], scientific}, hierarchical_keywords={hierarchy})
     assert save(client, [pid]).status_code == 200
     db.tag_photo(pid, alias, source='accept')
+    db.commit()
     assert resolve(client, current_group(client)).status_code == 200
     assert db.conn.execute('SELECT 1 FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (pid, alias)).fetchone()
     assert sync_to_xmp(db)['failed'] == 0

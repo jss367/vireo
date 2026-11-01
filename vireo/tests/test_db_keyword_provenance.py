@@ -96,20 +96,21 @@ def lib(db, tmp_path, monkeypatch):
 # -- tag_photo ------------------------------------------------------------------------------
 
 
-def test_tag_photo_commits_by_default(db, lib):
+def test_tag_photo_commits_with_the_callers_unit(db, lib):
     p0 = lib["p"][0]
-    kid = db.add_keyword("Driftwood")
-    db.tag_photo(p0, kid)
+    with db.transaction():
+        kid = db.add_keyword("Driftwood")
+        db.tag_photo(p0, kid)
     assert not db.conn.in_transaction
     assert _visible(
         db, "SELECT photo_id, keyword_id, source FROM photo_keywords",
     ) == [(p0, kid, "manual")]
 
 
-def test_tag_photo_without_commit_leaves_transaction_open(db, lib):
+def test_tag_photo_leaves_commit_to_caller(db, lib):
     p0 = lib["p"][0]
     kid = db.add_keyword("Driftwood")
-    db.tag_photo(p0, kid, source=KEYWORD_SOURCE_UNKNOWN, _commit=False)
+    db.tag_photo(p0, kid, source=KEYWORD_SOURCE_UNKNOWN)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
     db.conn.rollback()
@@ -136,9 +137,10 @@ def test_tag_photo_without_commit_leaves_transaction_open(db, lib):
 )
 def test_tag_photo_retag_stores_the_lattice_max(db, lib, first, second, expected):
     p0 = lib["p"][0]
-    kid = db.add_keyword("Wildlife", kw_type="genre")
-    db.tag_photo(p0, kid, source=first)
-    db.tag_photo(p0, kid, source=second)
+    with db.transaction():
+        kid = db.add_keyword("Wildlife", kw_type="genre")
+        db.tag_photo(p0, kid, source=first)
+        db.tag_photo(p0, kid, source=second)
     assert _visible(
         db, "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
         (p0, kid),
@@ -150,9 +152,10 @@ def test_tag_photo_retag_stores_the_lattice_max(db, lib, first, second, expected
 
 def test_merge_keyword_into_leaves_commit_to_caller(db, lib):
     p0 = lib["p"][0]
-    src = db.add_keyword("Egret")
-    dst = db.add_keyword("Heron")
-    db.tag_photo(p0, src)
+    with db.transaction():
+        src = db.add_keyword("Egret")
+        dst = db.add_keyword("Heron")
+        db.tag_photo(p0, src)
     assert db._merge_keyword_into(src, dst) == 1
     assert db.conn.in_transaction
     # Nothing is visible to another connection until the caller commits.
@@ -465,15 +468,16 @@ def test_upsert_one_keyword_rejects_cross_type_collision(db, lib):
 _COMPONENTS = [{"name": "California", "types": ["administrative_area_level_1"]}]
 
 
-def test_link_keyword_to_place_commits_and_builds_chain_through_the_facade(
+def test_link_keyword_to_place_builds_chain_through_the_facade(
     db, lib, monkeypatch,
 ):
     kid = db.get_or_create_text_location("Home")
     chain_calls = _spy(monkeypatch, db, "_upsert_location_parent_chain")
-    result = db.keyword_provenance.link_keyword_to_place(kid, {
-        "place_id": "place-home", "name": "Home Park", "lat": 1.0, "lng": 2.0,
-        "address_components": _COMPONENTS, "types": ["park"],
-    })
+    with db.transaction():
+        result = db.keyword_provenance.link_keyword_to_place(kid, {
+            "place_id": "place-home", "name": "Home Park", "lat": 1.0, "lng": 2.0,
+            "address_components": _COMPONENTS, "types": ["park"],
+        })
     assert result == {"keyword_id": kid, "merged": False}
     assert not db.conn.in_transaction
     assert len(chain_calls) == 1
@@ -501,10 +505,12 @@ def test_link_keyword_to_place_merges_into_canonical_and_folds_provenance(db, li
     db.tag_photo(p1, kid, source=KEYWORD_SOURCE_UNKNOWN)
     db.tag_photo(p2, kid, source=KEYWORD_SOURCE_ACCEPT)
     db.tag_photo(p2, canonical)  # manual
+    db.commit()
 
-    result = db.keyword_provenance.link_keyword_to_place(kid, {
-        "place_id": "place-home", "name": "Home Park", "address_components": [],
-    })
+    with db.transaction():
+        result = db.keyword_provenance.link_keyword_to_place(kid, {
+            "place_id": "place-home", "name": "Home Park", "address_components": [],
+        })
     assert result == {"keyword_id": canonical, "merged": True}
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT id FROM keywords WHERE id = ?", (kid,)) == []
@@ -527,7 +533,8 @@ def test_link_keyword_to_place_rolls_back_on_failure(db, lib, monkeypatch):
         raise RuntimeError("chain failed")
 
     monkeypatch.setattr(db, "_upsert_location_parent_chain", boom)
-    with pytest.raises(RuntimeError, match="chain failed"):
+    # The caller's unit rolls the partial chain back with the failure.
+    with pytest.raises(RuntimeError, match="chain failed"), db.transaction():
         db.keyword_provenance.link_keyword_to_place(kid, {"place_id": "place-home", "name": "Home"})
     assert not db.conn.in_transaction
     assert db.conn.execute(
@@ -596,8 +603,8 @@ def test_accept_prediction_tags_manual_and_queues_add_through_the_facade(
     result = db.accept_prediction(pid)
 
     kid = result["keyword_id"]
-    assert added == [(("Robin",), {"is_species": True, "_commit": False})]
-    assert tags == [((p0, kid), {"source": "manual", "_commit": False})]
+    assert added == [(("Robin",), {"is_species": True})]
+    assert tags == [((p0, kid), {"source": "manual"})]
     assert queued == [((p0, "keyword_add", "Robin"), {})]
     assert statuses == [((pid, "accepted"), {"_commit": False})]
     assert result["accepted_prediction_ids"] == [pid]
@@ -1101,7 +1108,7 @@ def test_keyword_provenance_facade_signatures_unchanged():
     sig = {n: calling_signature(getattr(Database, n)) for n in _DELEGATING_PROVENANCE_METHODS}
     assert sig == {
         "tag_photo": (
-            "(self, photo_id, keyword_id, source='manual', _commit=True, "
+            "(self, photo_id, keyword_id, source='manual', "
             "*, provenance=None, species_provenance=None, _record_provenance=False)"
         ),
         "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",

@@ -371,7 +371,7 @@ class _HighlightsRelabel:
         if old_primary is not None:
             self.has_old_species = True
         for old in old_rows:
-            db.untag_photo(pid, old["id"], _commit=False, _record_history=True)
+            db.untag_photo(pid, old["id"], _record_history=True)
             # Compare by keyword id: SQLite's NOCASE is ASCII-only,
             # so `Éclair` and `éclair` live as distinct rows with
             # distinct ids, but Python `.lower()` folds them equal.
@@ -385,7 +385,7 @@ class _HighlightsRelabel:
                     db, pid, old["name"], workspace_id=self.ws_id,
                 )
 
-        db.tag_photo(pid, kid, source="manual", _commit=False)
+        db.tag_photo(pid, kid, source="manual")
         queue_keyword_add(db, pid, self.species, workspace_id=self.ws_id)
         self.items.append({
             "photo_id": pid,
@@ -1085,7 +1085,7 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             from_species=from_species,
         )
         relabel.snapshot_curation()
-        kid = db.add_keyword(species, is_species=True, _commit=False)
+        kid = db.add_keyword(species, is_species=True)
         relabel.adopt_stored_spelling(kid)
         relabel.retag_photos(kid)
         relabel.rename_curation()

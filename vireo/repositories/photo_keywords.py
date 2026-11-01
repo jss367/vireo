@@ -223,19 +223,12 @@ class PhotoKeywordRepository:
         return [pid for pid in photo_ids_list if pid not in excluded]
 
 
-    def untag(self, photo_id: int, keyword_id: int, _commit: bool = True) -> None:
-        """Remove a keyword association from a photo.
-
-        Args:
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
-        """
+    def untag(self, photo_id: int, keyword_id: int) -> None:
+        """Remove a keyword association from a photo (no commit)."""
         self.conn.execute(
             "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
             (photo_id, keyword_id),
         )
-        if _commit:
-            self.conn.commit()
 
 
     def embedded_offered_keys(self, photo_id: int) -> set[str]:
@@ -260,13 +253,12 @@ class PhotoKeywordRepository:
 
 
     def record_embedded_offered_keys(
-        self, photo_id: int, keys: Iterable[str], _commit: bool = True,
+        self, photo_id: int, keys: Iterable[str],
     ) -> None:
         """Mark these normalized keys as embedded-offered for the photo.
 
         See ``embedded_offered_keys`` for why the record exists. Idempotent (INSERT OR IGNORE on the composite
-        primary key). ``keys`` empty is a no-op. ``_commit=False`` leaves the
-        commit to the caller for batch work.
+        primary key). ``keys`` empty is a no-op. Does not commit.
         """
         rows = [(photo_id, key) for key in keys if key]
         if not rows:
@@ -276,8 +268,6 @@ class PhotoKeywordRepository:
             "(photo_id, keyword_key) VALUES (?, ?)",
             rows,
         )
-        if _commit:
-            self.conn.commit()
 
 
     def transfer_embedded_offered_keys(self, losing_id: int, surviving_id: int) -> None:

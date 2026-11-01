@@ -45,6 +45,7 @@ def test_permanently_stale_identity_retires_without_replay_and_unblocks_history(
     else:
         kid = db.add_keyword(CANDIDATES[0], is_species=True)
         db.tag_photo(1, kid)
+        db.commit()
     before = db.identity_alternatives.for_photos(include_resolved=True)
     tags = db.photo_species.get_species_for_photos([1])
     pending = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
@@ -110,12 +111,15 @@ def test_shared_keyword_intents_follow_identity_history_and_real_sidecar_sync(
     switch = _workspace_switcher(db)
     switch(first)
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.commit()
     if operation == 'save':
         db.tag_photo(pid, kid, source='accept')
+        db.commit()
     else:
         assert save(client, [pid]).status_code == 200
         if operation == 'resolve_retained':
             db.tag_photo(pid, kid)
+            db.commit()
     db.photo_review.set_flag(pid, 'rejected')
     db.commit()
     opposite = 'keyword_add' if operation == 'save' else 'keyword_remove'
@@ -166,8 +170,10 @@ def test_shared_intent_reconciliation_rolls_back_with_failed_batch(app_and_db, m
     second = db.create_workspace('Other pending changes')
     db.photo_visibility.grant(second, [1, 2])
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.commit()
     for pid in (1, 2):
         db.tag_photo(pid, kid, source='accept')
+        db.commit()
         db.queue_change(pid, 'keyword_add', CANDIDATES[0], workspace_id=second)
         db.commit()
         db.queue_change(pid, 'rating', '4', workspace_id=second)
@@ -205,8 +211,10 @@ def test_identity_decision_repairs_sibling_sync_already_publishing(
     pid, path = _setup_photo_with_xmp(tmp_path, db, keywords=initial)
     workspace_folders.add_workspace_folder(db, second, db.photos.get(pid)['folder_id'])
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.commit()
     if operation == 'save':
         db.tag_photo(pid, kid, source='accept')
+        db.commit()
     else:
         assert save(client, [pid]).status_code == 200
     opposite = 'keyword_add' if operation == 'save' else 'keyword_remove'
@@ -263,6 +271,7 @@ def test_zero_link_save_and_alias_intents_converge_through_resolution_history(ap
         (scientific, CANDIDATES[0]),
     )
     db.add_keyword(scientific, is_species=True)
+    db.commit()
     pid, path = _setup_photo_with_xmp(tmp_path, db, keywords={scientific, CANDIDATES[0], 'Unrelated note'})
     folder = db.photos.get(pid)['folder_id']
     workspace_folders.add_workspace_folder(db, second, folder)
@@ -319,8 +328,10 @@ def test_keyword_names_follow_live_and_empty_link_identity_history(app_and_db, o
     app, db = app_and_db
     client = app.test_client()
     source = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.commit()
     target_name = CANDIDATES[1] if operation == 'merge' else 'Renamed Kingbird'
     survivor = db.add_keyword(target_name, is_species=True) if operation == 'merge' else source
+    db.commit()
     assert save(client, [1]).status_code == 200
     if history_state == 'undone':
         assert client.post('/api/undo').status_code == 200
@@ -361,10 +372,13 @@ def test_keyword_merge_retargets_identity_history_without_removing_existing_surv
     db.commit()
     source = db.add_keyword(CANDIDATES[0], is_species=True)
     survivor = db.add_keyword('Surviving Kingbird', is_species=True)
+    db.commit()
     if preexisting_survivor:
         db.tag_photo(1, survivor, source=survivor_stamp)
+        db.commit()
     if operation == 'save':
         db.tag_photo(1, source, source=source_stamp)
+        db.commit()
     assert save(client, [1]).status_code == 200
     if operation == 'resolve':
         assert resolve(client, current_group(client)).status_code == 200
@@ -402,6 +416,7 @@ def test_keyword_merge_folds_converged_identity_snapshot_provenance(app_and_db, 
     survivor = db.add_keyword(CANDIDATES[1], is_species=True)
     db.tag_photo(1, source)
     db.tag_photo(1, survivor, source='accept')
+    db.commit()
     assert save(client, [1]).status_code == 200
     if merge_after_undo:
         assert client.post('/api/undo').status_code == 200
@@ -425,6 +440,7 @@ def test_keyword_maintenance_retargets_empty_link_groups_and_both_history_states
     app, db = app_and_db
     client = app.test_client()
     source = db.add_keyword(source_name, is_species=True)
+    db.commit()
     target_name = CANDIDATES[1] if collapse else 'Surviving Kingbird'
     db.photo_review.set_flag(1, 'rejected')
     db.commit()
@@ -433,6 +449,7 @@ def test_keyword_maintenance_retargets_empty_link_groups_and_both_history_states
     assert save(client, [1], group_id=group['group_id'], reason='Still awaiting a call').status_code == 200
     if maintenance == 'merge':
         survivor = db.add_keyword(target_name, is_species=True)
+        db.commit()
         db._merge_keyword_into(source, survivor)
         db.commit()
     else:
@@ -471,14 +488,17 @@ def test_keyword_maintenance_retargets_resolved_history_before_undo(app_and_db, 
     app, db = app_and_db
     client = app.test_client()
     source = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.commit()
     assert save(client, [1]).status_code == 200
     assert resolve(client, current_group(client)).status_code == 200
     target_name = 'Surviving Kingbird'
     if maintenance == 'merge':
         survivor = db.add_keyword(target_name, is_species=True)
+        db.commit()
         db._merge_keyword_into(source, survivor)
     elif maintenance == 'rename':
         db.update_keyword(source, name=target_name)
+        db.commit()
     else:
         # Internal canonicalization and collision renames share this hook.
         db._rename_keyword_dependents(source, CANDIDATES[0], target_name)
@@ -497,13 +517,16 @@ def test_non_species_keyword_maintenance_leaves_same_named_alternatives_unchange
     app, db = app_and_db
     client = app.test_client()
     source = db.add_keyword(CANDIDATES[0], kw_type='individual')
+    db.commit()
     assert save(client, [1]).status_code == 200
     before = current_group(client)
     if maintenance == 'merge':
         survivor = db.add_keyword('An individual bird', kw_type='individual')
+        db.commit()
         db._merge_keyword_into(source, survivor)
     elif maintenance == 'rename':
         db.update_keyword(source, name='An individual bird')
+        db.commit()
     else:
         db._rename_keyword_dependents(source, CANDIDATES[0], 'An individual bird')
     db.commit()
@@ -518,12 +541,14 @@ def test_keyword_maintenance_rejects_stale_forms_and_preserves_batch_revision_on
     app, db = app_and_db
     client = app.test_client()
     source = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.commit()
     assert save(client, [1, 2, 3]).status_code == 200
     before = current_group(client)
     assert resolve(client, before, photo_ids=[1]).status_code == 200
     target_name = 'Surviving Kingbird'
     if maintenance == 'merge':
         survivor = db.add_keyword(target_name, is_species=True)
+        db.commit()
         db._merge_keyword_into(source, survivor)
     else:
         db.update_keyword(source, name=target_name)
@@ -561,6 +586,7 @@ def test_taxonomy_candidate_without_keyword_removes_confirmed_scientific_alias(a
     unrelated = db.add_keyword('Great Egret', is_species=True)
     db.tag_photo(1, source, source='accept')
     db.tag_photo(1, unrelated)
+    db.commit()
     db.photo_review.set_flag(1, 'rejected')
     db.commit()
     source_name = db.keywords.name_of(source)
@@ -595,6 +621,7 @@ def test_equivalent_candidate_aliases_rejected_without_catalog_changes(app_and_d
     common = db.add_keyword('Tropical Kingbird', parent_id=db.add_keyword('Common names'), is_species=True, source_taxon_id=source)
     scientific = db.add_keyword('Tyrannus melancholicus', parent_id=db.add_keyword('Scientific names'), is_species=True, source_taxon_id=source)
     db.tag_photo(1, scientific, source='accept')
+    db.commit()
     db.photo_review.set_flag(1, 'rejected')
     db.commit()
     group_id = None
@@ -616,6 +643,7 @@ def test_known_candidate_and_unknown_alternative_remain_distinct(app_and_db):
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES(101,501,'Tyrannus melancholicus','Tropical Kingbird','species')")
     scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
     db.tag_photo(1, scientific, source='accept')
+    db.commit()
     assert save(client, [1], candidates=['Tropical Kingbird', 'Unknown alternative']).status_code == 200
     assert db.photo_species.get_species_for_photos([1]) == {}
     assert current_group(client)['candidates'] == ['Tropical Kingbird', 'Unknown alternative']
@@ -635,6 +663,7 @@ def test_higher_rank_homonym_does_not_mask_species_candidate_alias(app_and_db, r
     )
     db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES(101,'Puma')")
     homonym = db.add_keyword('Puma', kw_type='taxonomy')
+    db.commit()
     # Catalog taxonomy ancestors can retain a higher-rank link even after a
     # species common-name alias with the same spelling becomes available.
     db.conn.execute('UPDATE keywords SET taxon_id=102,source_taxon_id=? WHERE id=?',
@@ -643,6 +672,7 @@ def test_higher_rank_homonym_does_not_mask_species_candidate_alias(app_and_db, r
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(1, scientific, source='accept')
     db.tag_photo(1, unrelated)
+    db.commit()
     db.photo_review.set_flag(1, 'rejected')
     db.commit()
     assert db.identity_alternatives.candidate_identities(['pUMA']) == {'inat:501'}
@@ -662,9 +692,11 @@ def test_candidate_matching_bridges_source_only_aliases_and_local_taxa(app_and_d
     client = app.test_client()
     first_parent = db.add_keyword('Common names')
     second_parent = db.add_keyword('Scientific names')
+    db.commit()
     source_id = 999999999
     common = db.add_keyword('Tropical Kingbird', parent_id=first_parent, is_species=True, source_taxon_id=source_id)
     scientific = db.add_keyword('Tyrannus melancholicus', parent_id=second_parent, is_species=True, source_taxon_id=source_id)
+    db.commit()
     assert db.conn.execute('SELECT taxon_id FROM keywords WHERE id=?', (scientific,)).fetchone()[0] is None
     if local_taxon:
         db.conn.execute(
@@ -677,6 +709,7 @@ def test_candidate_matching_bridges_source_only_aliases_and_local_taxa(app_and_d
     else:
         candidate = db.keywords.name_of(common)
     db.tag_photo(1, scientific, source='accept')
+    db.commit()
     assert save(client, [1], candidates=[candidate, CANDIDATES[1]]).status_code == 200
     assert db.photo_species.get_species_for_photos([1]) == {}
     assert client.post('/api/undo').status_code == 200
@@ -697,11 +730,13 @@ def test_candidate_matching_respects_explicit_source_identity_over_local_claim(a
     )
     candidate = db.add_keyword(CANDIDATES[0], is_species=True)
     alias = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    db.commit()
     conflicting = candidate if conflicting_source == 'candidate' else alias
     # Preserve a source's explicit claim even when a stale common-name lookup
     # linked the same keyword to a different locally downloaded taxon.
     db.conn.execute('UPDATE keywords SET source_taxon_id=222 WHERE id=?', (conflicting,))
     db.tag_photo(1, alias)
+    db.commit()
     before = db.photo_species.get_species_for_photos([1])
     assert save(client, [1]).status_code == 200
     assert db.photo_species.get_species_for_photos([1]) == before
@@ -737,6 +772,7 @@ def test_global_identity_resolution_and_history_are_shared_but_visibility_filter
     db.commit()
     prior = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(1, prior, source='accept')
+    db.commit()
     assert save(client, [1, 2]).status_code == 200
     original = current_group(client)
     switch(second)
@@ -822,6 +858,7 @@ def test_history_rejects_superseded_candidate_associations_without_changing_iden
     before = current_group(client)
     confirmed = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(1, confirmed)
+    db.commit()
     assert client.post('/api/undo').status_code == 409
     assert current_group(client) == before
     assert db.photo_species.get_species_for_photos([1]) == {1: [CANDIDATES[0]]}
@@ -911,6 +948,7 @@ def test_identity_retirement_keeps_writer_lock_against_concurrent_rowid_reuse(ap
     # An external attachment creates a redo conflict without advancing history.
     keyword = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(1, keyword)
+    db.commit()
     original = EditHistoryRepository.retire_superseded_identity_entry
     attempts = []
     with Database(db._db_path) as other:
@@ -995,6 +1033,7 @@ def test_marking_confirmations_uncertain_removes_only_candidates_and_undo_restor
     db.tag_photo(1, first, source='accept')
     db.tag_photo(1, second)
     db.tag_photo(1, other)
+    db.commit()
     db.photo_review.set_flag(1, 'rejected')
     db.commit()
     assert save(client, [1]).status_code == 200
@@ -1014,6 +1053,7 @@ def test_resolution_is_one_audited_undoable_edit_and_preserves_genuine_mixed_spe
     client = app.test_client()
     other = db.add_keyword('Great Egret', is_species=True)
     db.tag_photo(1, other)
+    db.commit()
     db.photo_review.set_flag(1, 'flagged')
     db.commit()
     assert save(client, [1, 2]).status_code == 200
@@ -1123,6 +1163,7 @@ def test_failure_partway_through_batch_rolls_back_tags_state_and_history(app_and
     app.config['TESTING'] = True
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(1, kid)
+    db.commit()
     original = IdentityAlternativesRepository.set_state
 
     def fail_second(self, photo_id, state):
@@ -1167,6 +1208,7 @@ def test_export_uses_unknown_name_and_does_not_write_candidate_species(app_and_d
     pid = photo_ingest.add_photo(db, folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=100, file_mtime=1)
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(pid, kid)
+    db.commit()
     assert save(client, [pid]).status_code == 200
     written_args = []
 
@@ -1206,10 +1248,12 @@ def test_taxonomy_only_common_candidate_removes_alias_from_catalog_cache_and_exp
     pid = photo_ingest.add_photo(db, folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=100, file_mtime=1)
     alias = db.add_keyword('Tyrannus melancholicus', is_species=True)
     db.tag_photo(pid, alias, source='accept')
+    db.commit()
     expected = []
     if mixed_species:
         other = db.add_keyword('Great Egret', is_species=True)
         db.tag_photo(pid, other)
+        db.commit()
         expected = ['Great Egret']
     before = db.photo_species.get_species_for_photos([pid])[pid]
     assert db.conn.execute('SELECT id FROM keywords WHERE name=? COLLATE NOCASE', (CANDIDATES[0],)).fetchone() is None
@@ -1274,6 +1318,7 @@ def test_process_cache_and_summary_do_not_claim_unresolved_candidates(app_and_db
     client = app.test_client()
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(1, kid)
+    db.commit()
     cache = {
         'photos': [{'id': 1, 'confirmed_species': CANDIDATES[0], 'confirmed_species_list': [CANDIDATES[0]]}],
         'encounters': [{'photo_ids': [1], 'confirmed_species': CANDIDATES[0],
@@ -1303,6 +1348,7 @@ def test_species_decisions_and_history_refresh_all_shared_workspace_caches(app_a
     db.commit()
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(1, kid)
+    db.commit()
     workspaces = [active_ws, folder_shared, photo_shared]
     for ws_id in workspaces:
         save_results_raw({
@@ -1366,6 +1412,7 @@ def test_collection_coverage_counts_real_unresolved_state_with_unrelated_confirm
     client = app.test_client()
     other = db.add_keyword('Great Egret', is_species=True)
     db.tag_photo(1, other)
+    db.commit()
     collection = db.collections.add('Photos to inspect', json.dumps([{'field': 'photo_ids', 'value': [1, 2]}]))
     db.commit()
     assert save(client, [1, 3]).status_code == 200
@@ -1389,6 +1436,7 @@ def test_workspace_switch_before_writer_lock_rejects_shared_photo_edits(app_and_
     original_ws = db.require_workspace_id()
     kid = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(1, kid)
+    db.commit()
     group = None
     if operation == 'resolve':
         assert save(client, [1]).status_code == 200
