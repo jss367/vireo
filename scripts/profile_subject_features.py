@@ -16,6 +16,7 @@ embeddings, and the mask PNG write. Run it on an otherwise idle machine; the
 ONNX encoder shares cores with everything else.
 """
 import argparse
+import contextlib
 import os
 import random
 import sqlite3
@@ -29,26 +30,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vireo"))
 
 
 def sample_photos(db_path, first, last, variant, sample, seed):
-    conn = sqlite3.connect(f"file:{os.path.expanduser(db_path)}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.execute(
-        "SELECT p.id, p.filename, f.path AS folder, pm.prompt_x AS x, pm.prompt_y AS y,"
-        " pm.prompt_w AS w, pm.prompt_h AS h"
-        " FROM photos p JOIN folders f ON f.id = p.folder_id"
-        " JOIN photo_masks pm ON pm.photo_id = p.id AND pm.variant = ?"
-        " WHERE p.id BETWEEN ? AND ? ORDER BY p.id",
-        (variant, first, last),
-    )
+    """Reservoir-sample up to ``sample`` rows, streaming the cursor."""
+    uri = f"file:{os.path.expanduser(db_path)}?mode=ro"
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT p.id, p.filename, f.path AS folder, pm.prompt_x AS x, pm.prompt_y AS y,"
+            " pm.prompt_w AS w, pm.prompt_h AS h"
+            " FROM photos p JOIN folders f ON f.id = p.folder_id"
+            " JOIN photo_masks pm ON pm.photo_id = p.id AND pm.variant = ?"
+            " WHERE p.id BETWEEN ? AND ? ORDER BY p.id",
+            (variant, first, last),
+        )
+        return _reservoir(rows, sample, seed)
+
+
+def _reservoir(rows, sample, seed):
     rng = random.Random(seed)
     reservoir = []
-    for index, row in enumerate(cursor):
+    for index, row in enumerate(rows):
         if index < sample:
             reservoir.append(row)
             continue
         slot = rng.randint(0, index)
         if slot < sample:
             reservoir[slot] = row
-    conn.close()
     return reservoir
 
 
@@ -73,33 +79,35 @@ def profile(rows, sam2, dinov2, longest_edge):
         timings.setdefault(phase, []).append(time.perf_counter() - start)
         return value
 
-    masks_dir = tempfile.mkdtemp(prefix="vireo-profile-masks-")
-    for row in rows:
-        start = time.perf_counter()
-        proxy = timed("decode", masking.render_proxy,
-                      os.path.join(row["folder"], row["filename"]), longest_edge=longest_edge)
-        if proxy is None:
-            print(f"{row['id']} {row['filename']}: unreadable, skipped")
-            continue
-        width, height = proxy.size
-        tensor = onnx_runtime.preprocess_image(
-            proxy, size=(masking.SAM2_INPUT_SIZE, masking.SAM2_INPUT_SIZE),
-            mean=masking._IMAGENET_MEAN, std=masking._IMAGENET_STD,
-        )
-        encoded = timed("sam2_encoder", encoder.run, None, {encoder.get_inputs()[0].name: tensor})
-        coords, labels = masking._sam2_box_prompt(
-            row["x"] * width, row["y"] * height, row["w"] * width, row["h"] * height,
-            width, height,
-        )
-        feeds = masking._sam2_decoder_inputs(decoder, encoded, coords, labels, height, width)
-        decoded = timed("sam2_decoder", decoder.run, None, feeds)
-        mask = masking._best_sam2_mask(decoded[0], decoded[1], height, width)
-        timed("analyze", analyze, masking.crop_completeness, compute_all_quality_features, proxy, mask)
-        crop = masking.crop_subject(proxy, mask, margin=0.15)
-        timed("embed", dino_embed.embed_batch, [crop, proxy] if crop else [proxy], variant=dinov2)
-        timed("store_png", masking.save_mask, mask, masks_dir, row["id"], sam2)
-        timings.setdefault("total", []).append(time.perf_counter() - start)
-        print(f"{row['id']} {row['filename']} {width}x{height} {timings['total'][-1]:.2f}s", flush=True)
+    # The PNG writes are timed, not kept: the directory goes with the run,
+    # whether it finishes, fails or is interrupted.
+    with tempfile.TemporaryDirectory(prefix="vireo-profile-masks-") as masks_dir:
+        for row in rows:
+            start = time.perf_counter()
+            proxy = timed("decode", masking.render_proxy,
+                          os.path.join(row["folder"], row["filename"]), longest_edge=longest_edge)
+            if proxy is None:
+                print(f"{row['id']} {row['filename']}: unreadable, skipped")
+                continue
+            width, height = proxy.size
+            tensor = onnx_runtime.preprocess_image(
+                proxy, size=(masking.SAM2_INPUT_SIZE, masking.SAM2_INPUT_SIZE),
+                mean=masking._IMAGENET_MEAN, std=masking._IMAGENET_STD,
+            )
+            encoded = timed("sam2_encoder", encoder.run, None, {encoder.get_inputs()[0].name: tensor})
+            coords, labels = masking._sam2_box_prompt(
+                row["x"] * width, row["y"] * height, row["w"] * width, row["h"] * height,
+                width, height,
+            )
+            feeds = masking._sam2_decoder_inputs(decoder, encoded, coords, labels, height, width)
+            decoded = timed("sam2_decoder", decoder.run, None, feeds)
+            mask = masking._best_sam2_mask(decoded[0], decoded[1], height, width)
+            timed("analyze", analyze, masking.crop_completeness, compute_all_quality_features, proxy, mask)
+            crop = masking.crop_subject(proxy, mask, margin=0.15)
+            timed("embed", dino_embed.embed_batch, [crop, proxy] if crop else [proxy], variant=dinov2)
+            timed("store_png", masking.save_mask, mask, masks_dir, row["id"], sam2)
+            timings.setdefault("total", []).append(time.perf_counter() - start)
+            print(f"{row['id']} {row['filename']} {width}x{height} {timings['total'][-1]:.2f}s", flush=True)
     return timings
 
 
