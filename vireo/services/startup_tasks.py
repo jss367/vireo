@@ -57,6 +57,26 @@ class StartupApp(Protocol):
     def _preview_workers(self) -> PreviewWorkers: ...
 
 
+def _label_identity_backfill_is_noop(result: Mapping[str, Any]) -> bool:
+    """Whether the label-identity backfill run should be dropped from history.
+
+    A successfully processed label set stamps a repair marker in
+    ``apply_label_set`` and records the labels iNaturalist did not match,
+    so a run that reaches ``label_sets > 0`` has changed state even when
+    no name matched. ``unidentified_labels_total`` is the user-visible
+    "47 labels without a single matching iNaturalist species" count, so
+    producing one is not a no-op either.
+    """
+    return not (
+        result.get("label_sets")
+        or result.get("labels_identified")
+        or result.get("predictions_updated")
+        or result.get("legacy_predictions_updated")
+        or result.get("unidentified_labels_total")
+        or result.get("errors")
+    )
+
+
 class StartupTasks:
     """Startup and maintenance passes bound to one app.
 
@@ -436,12 +456,7 @@ class StartupTasks:
                     thread_db, progress=progress,
                     cancel_check=lambda: runner.is_cancelled(job["id"]),
                 )
-                result["noop"] = not (
-                    result.get("labels_identified")
-                    or result.get("predictions_updated")
-                    or result.get("legacy_predictions_updated")
-                    or result.get("errors")
-                )
+                result["noop"] = _label_identity_backfill_is_noop(result)
                 return result
             finally:
                 thread_db.close()

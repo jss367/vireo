@@ -75,21 +75,50 @@ class JobHistoryRepository:
         storage maintenance, model downloads), which belong to every
         workspace; leaving them out hid Vireo's own maintenance from the
         Jobs page entirely.
+
+        The limit is applied per ``origin``: pruning already keeps a
+        separate quota of user and system operations, and the Jobs page
+        applies its "Started by" filter after the fetch, so a single
+        combined limit would let a burst of newer system/global outcomes
+        crowd user operations out of the response (hiding retained user
+        rows behind "Started by you" with an empty list). Each origin
+        gets its own newest-first window of up to ``limit`` rows.
         """
         placeholders = ",".join(["?"] * len(statuses))
         if workspace_id is not None:
             return self.conn.execute(
-                f"SELECT * FROM job_history "
-                f"WHERE (workspace_id = ? OR workspace_id IS NULL) "
-                f"AND status IN ({placeholders}) "
-                f"ORDER BY started_at DESC LIMIT ?",
-                (workspace_id, *statuses, limit),
+                f"SELECT * FROM ("
+                f"  SELECT * FROM job_history "
+                f"  WHERE (workspace_id = ? OR workspace_id IS NULL) "
+                f"    AND status IN ({placeholders}) "
+                f"    AND origin = 'user' "
+                f"  ORDER BY started_at DESC LIMIT ? "
+                f") "
+                f"UNION ALL "
+                f"SELECT * FROM ("
+                f"  SELECT * FROM job_history "
+                f"  WHERE (workspace_id = ? OR workspace_id IS NULL) "
+                f"    AND status IN ({placeholders}) "
+                f"    AND origin = 'system' "
+                f"  ORDER BY started_at DESC LIMIT ? "
+                f") "
+                f"ORDER BY started_at DESC",
+                (workspace_id, *statuses, limit, workspace_id, *statuses, limit),
             ).fetchall()
         return self.conn.execute(
-            f"SELECT * FROM job_history "
-            f"WHERE status IN ({placeholders}) "
-            f"ORDER BY started_at DESC LIMIT ?",
-            (*statuses, limit),
+            f"SELECT * FROM ("
+            f"  SELECT * FROM job_history "
+            f"  WHERE status IN ({placeholders}) AND origin = 'user' "
+            f"  ORDER BY started_at DESC LIMIT ? "
+            f") "
+            f"UNION ALL "
+            f"SELECT * FROM ("
+            f"  SELECT * FROM job_history "
+            f"  WHERE status IN ({placeholders}) AND origin = 'system' "
+            f"  ORDER BY started_at DESC LIMIT ? "
+            f") "
+            f"ORDER BY started_at DESC",
+            (*statuses, limit, *statuses, limit),
         ).fetchall()
 
     def analysis_retry_results(self, workspace_id: int) -> list[sqlite3.Row]:

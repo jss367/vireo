@@ -231,8 +231,42 @@ def test_a_list_without_its_query_is_not_looked_up(db, tmp_path, legacy_list):
     result = backfill(db, fetch=fetch)
 
     assert fetch.calls == []
+    assert result["label_sets"] == 1
     assert result["labels_identified"] == 0
     assert result["unidentified_labels_total"] == 2
+
+
+def test_label_identity_backfill_noop_predicate_keeps_processed_unmatched_runs():
+    """A list processed but with no matches stamps a repair marker and lists
+    unidentified labels, so the history row must stay (not a no-op).
+
+    ``apply_label_set`` writes the per-fingerprint marker before returning,
+    so ``label_sets > 0`` alone proves the catalog changed. The
+    user-visible "N labels without a matching iNaturalist species" count
+    (``unidentified_labels_total``) also keeps the row.
+    """
+    from services.startup_tasks import _label_identity_backfill_is_noop
+
+    assert _label_identity_backfill_is_noop({
+        "label_sets": 0, "labels_identified": 0, "predictions_updated": 0,
+        "legacy_predictions_updated": 0, "unidentified_labels_total": 0,
+        "errors": [],
+    }) is True
+    assert _label_identity_backfill_is_noop({
+        "label_sets": 1, "labels_identified": 0, "predictions_updated": 0,
+        "legacy_predictions_updated": 0, "unidentified_labels_total": 2,
+        "errors": [],
+    }) is False
+    assert _label_identity_backfill_is_noop({
+        "label_sets": 0, "labels_identified": 0, "predictions_updated": 0,
+        "legacy_predictions_updated": 0, "unidentified_labels_total": 5,
+        "errors": [],
+    }) is False
+    assert _label_identity_backfill_is_noop({
+        "label_sets": 0, "labels_identified": 0, "predictions_updated": 0,
+        "legacy_predictions_updated": 0, "unidentified_labels_total": 0,
+        "errors": ["offline"],
+    }) is False
 
 
 def test_a_list_classified_before_merging_folded_case_variants_is_matched(db, tmp_path, legacy_list):
