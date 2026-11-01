@@ -6,7 +6,8 @@ import vm from 'node:vm';
 function harness() {
   const storage = new Map(), nodes = new Map();
   const element = id => {
-    if (!nodes.has(id)) nodes.set(id, {textContent: '', style: {}, dataset: {}, hidden: false, removeAttribute(name) {delete this[name];}});
+    if (!nodes.has(id)) nodes.set(id, {textContent: '', style: {}, dataset: {}, hidden: false, listeners: {},
+      addEventListener(name, callback) {this.listeners[name] = callback;}, removeAttribute(name) {delete this[name];}});
     return nodes.get(id);
   };
   const ctx = vm.createContext({
@@ -95,6 +96,87 @@ test('a failed flag compare disables changes and preserves the stored inspection
   assert.equal(ctx.reviewQueue.current, null);
   assert.match(element('rqFlag').textContent, /changed elsewhere/);
   assert.equal(storage.get('session'), before);
+});
+
+for (const flag of ['flagged', 'rejected', 'none']) {
+  test('transfer conflict retains unsaved ' + flag + ' across reload, with no catalog decision or automatic retry', async () => {
+    const {ctx, storage, element} = harness();
+    ctx.reviewQueue.workspace = 1;
+    ctx.reviewQueue.key = 'session';
+    ctx.reviewQueue.current = {id:1,flag:'flagged'};
+    ctx.reviewQueue.items = [{photo_id:1}];
+    ctx.reviewQueue.session.photoId = 1;
+    ctx.allPredictions = [{photo_id:1,flag:'flagged'}];
+    let calls = 0;
+    ctx.safeFetch = async () => {calls++;throw Object.assign(new Error('Cannot save flag edit during NAS transfer'), {code:'workspace_busy',status:409});};
+    await ctx.rqSetFlag(flag);
+    assert.equal(calls, 1);
+    assert.equal(ctx.reviewQueue.current, null);
+    assert.equal(ctx.reviewQueue.busy, false);
+    assert.equal(ctx.allPredictions[0].flag, 'flagged');
+    assert.equal(ctx.rqItem(1).inspected, false);
+    assert.equal(ctx.rqItem(1).pendingFlag, flag);
+    assert.match(element('rqPendingFlag').textContent, /Unsaved review choice/);
+    assert.match(element('rqPendingFlag').textContent, /Nothing is retried automatically/);
+    ctx.reviewQueue.session = ctx.rqSession(JSON.parse(storage.get('session')));
+    ctx.reviewQueue.current = {id:1,flag:'none'}; // refreshed catalog can differ
+    ctx.rqShowFlag(); ctx.rqRenderProgress();
+    assert.equal(ctx.rqItem(1).pendingFlag, flag);
+    assert.equal(calls, 1);
+    ctx._clearPredictionRepresentativeStateIfIneligible = () => false;
+    ctx.safeFetch = async (_url, options) => {
+      calls++;
+      const body = JSON.parse(options.body);
+      assert.equal(body.flag, flag);
+      assert.equal(body.observed_flag, 'none');
+      assert.equal(body.observed_workspace_id, 1);
+      return {ok:true};
+    };
+    await ctx.rqSetFlag(flag); // new explicit choice after refresh
+    assert.equal(calls, 2);
+    assert.equal(ctx.rqItem(1).pendingFlag, undefined);
+    assert.equal(ctx.rqItem(1).inspected, true);
+    assert.equal(ctx.reviewQueue.current.flag, flag);
+    assert.equal(element('rqPendingFlag').textContent, '');
+    assert.equal(JSON.parse(storage.get('session')).items['1'].pendingFlag, undefined);
+  });
+}
+
+test('late transfer rejection keeps intent in the original scope without overwriting the new photo', async () => {
+  const {ctx, storage, element} = harness();
+  ctx.reviewQueue.workspace = 1;
+  ctx.reviewQueue.key = 'old';
+  ctx.reviewQueue.current = {id:1,flag:'none'};
+  ctx.reviewQueue.session.photoId = 1;
+  let reject;
+  ctx.safeFetch = () => new Promise((_resolve, fail) => {reject = fail;});
+  const write = ctx.rqSetFlag('rejected');
+  ctx.reviewQueue.sequence++;
+  ctx.reviewQueue.key = 'new';
+  ctx.reviewQueue.session = ctx.rqSession({photoId:2});
+  ctx.reviewQueue.current = {id:2,flag:'flagged'};
+  element('rqFlag').textContent = 'Photo 2';
+  reject(Object.assign(new Error('NAS transfer'), {code:'workspace_busy'}));
+  await write;
+  assert.equal(JSON.parse(storage.get('old')).items['1'].pendingFlag, 'rejected');
+  assert.equal(storage.has('new'), false);
+  assert.equal(element('rqFlag').textContent, 'Photo 2');
+  assert.equal(element('rqPendingFlag').textContent, '');
+});
+
+test('discarding unsaved intent requires no catalog write; unknown stored choices are ignored', () => {
+  const {ctx, storage, element} = harness();
+  ctx.reviewQueue.workspace = 1;
+  ctx.reviewQueue.key = 'session';
+  ctx.reviewQueue.session = ctx.rqSession({photoId:1,items:{'1':{pendingFlag:'rejected'},'2':{pendingFlag:'invalid'}}});
+  ctx.rqPlaceCenter = () => {};
+  ctx.window.addEventListener = () => {};
+  ctx.bindReviewQueue();
+  element('rqDiscardPendingFlag').listeners.click();
+  assert.equal(ctx.rqItem(1).pendingFlag, undefined);
+  assert.equal(ctx.rqItem(2).pendingFlag, undefined);
+  assert.equal(element('rqDiscardPendingFlag').hidden, true);
+  assert.equal(JSON.parse(storage.get('session')).items['1'].pendingFlag, undefined);
 });
 
 

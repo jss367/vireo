@@ -90,6 +90,27 @@ TRANSFER_SCOPED_ENDPOINTS = frozenset({
 })
 
 
+def _read_only_burst_evidence_request() -> bool:
+    """Only evidence reads may skip reservation; analysis keeps the normal guard."""
+    if request.method != "POST" or request.endpoint not in {
+        "photos.api_selected_photos_burst_evidence", "v1_api_selected_photos_burst_evidence",
+    }:
+        return False
+    body = request.get_json(silent=True)
+    # Match the route's boolean contract exactly. Invalid values must never
+    # become a new way around the workspace guard.
+    return isinstance(body, dict) and ("analyze" not in body or body["analyze"] is False)
+
+
+def _mutation_label() -> str:
+    """Name the edit a workspace reservation would block."""
+    if request.endpoint in {"photo_review.set_flag", "v1_set_flag"}:
+        return f"the flag edit for photo {(request.view_args or {}).get('photo_id')}"
+    if request.endpoint in {"photo_review.set_flags", "v1_set_flags"}:
+        return "the batch flag edit"
+    return f"the request {request.method} {request.path}"
+
+
 def start_after_first_request(app: Flask, kickoff: Callable[[], str]) -> None:
     """Launch maintenance once requests can run, never during construction."""
     lock = threading.Lock()
@@ -350,7 +371,7 @@ def _handle_error(e: Exception) -> ErrorResponse | HTTPException:
     if isinstance(e, DeferredIdentificationError):
         return json_error(str(e), 409, code='identification_deferred')
     if isinstance(e, WorkspaceBusyError):
-        return json_error(str(e), 409)
+        return json_error(str(e), 409, code="workspace_busy")
     if isinstance(e, HTTPException):
         return e
     if search_lanes.is_superseded_interrupt(e, g.get("search_superseded")):
@@ -460,7 +481,7 @@ def register_app_hooks(
     def _reserve_workspace_mutation() -> None:
         if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.path.startswith("/api/"):
             return None
-        if request.endpoint in reservation_exempt_endpoints:
+        if request.endpoint in reservation_exempt_endpoints or _read_only_burst_evidence_request():
             return None
         target_ws = (request.view_args or {}).get("ws_id")
         # A request with no active workspace and no explicit target has no
@@ -487,7 +508,7 @@ def register_app_hooks(
                         request.endpoint == "workspaces.api_delete_workspace"
                         and workspace_id == target_ws
                     ),
-                    label=f"the request {request.method} {request.path}",
+                    label=_mutation_label(),
                     defer_transfer_check=request.endpoint in TRANSFER_SCOPED_ENDPOINTS,
                 ))
             g.nas_workspace_mutation = reservation.pop_all()

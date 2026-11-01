@@ -410,6 +410,55 @@ def test_set_flag(app_and_db):
     )
 
 
+@pytest.mark.parametrize("prefix", ["/api", "/api/v1"])
+@pytest.mark.parametrize("batch", [False, True])
+def test_transfer_blocks_flag_edits_without_catalog_or_metadata_changes(app_and_db, prefix, batch):
+    import threading
+
+    from testing.waits import synchronization_timeout
+    from wait import wait_for_job_via_runner
+
+    app, db = app_and_db
+    photo = db.photos.list_page()[0]
+    pid = photo["id"]
+    runner = app._job_runner
+    release = threading.Event()
+    transfer, _, _ = runner.start_singleton(
+        "send-to-nas", lambda job: release.wait(synchronization_timeout(30)),
+        singleton_key="archive", workspace_id=db.active_workspace_id, exclusive_workspace=True,
+    )
+    path = f"{prefix}/batch/flag" if batch else f"{prefix}/photos/{pid}/flag"
+    body = {"flag": "rejected"}
+    if batch:
+        body["photo_ids"] = [pid]
+    else:
+        body.update(observed_flag=photo["flag"] or "none", observed_workspace_id=db.active_workspace_id)
+    headers = {"X-Vireo-Token": app.config["API_TOKEN"]}
+    pending = db.pending_changes.list_all()
+    history = db.conn.execute("SELECT * FROM edit_history").fetchall()
+    try:
+        response = app.test_client().post(path, json=body, headers=headers)
+        assert response.status_code == 409
+        result = response.get_json()
+        assert result["code"] == "workspace_busy"
+        assert ("batch flag edit" if batch else f"flag edit for photo {pid}") in result["error"]
+        assert "NAS transfer" in result["error"]
+        assert "starting another job" not in result["error"]
+        assert "No changes were saved" in result["error"]
+        assert db.photos.get(pid)["flag"] == photo["flag"]
+        assert db.pending_changes.list_all() == pending
+        assert db.conn.execute("SELECT * FROM edit_history").fetchall() == history
+    finally:
+        release.set()
+        assert wait_for_job_via_runner(runner, transfer)["status"] == "completed"
+    # A new explicit request after the transfer keeps normal undo and XMP behavior.
+    assert app.test_client().post(path, json=body, headers=headers).status_code == 200
+    assert db.photos.get(pid)["flag"] == "rejected"
+    assert any(c["photo_id"] == pid and c["change_type"] == "flag" and c["value"] == "rejected"
+               for c in db.pending_changes.list_all())
+    assert db.conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0] == len(history) + 1
+
+
 def test_set_flag_clears_pending_xmp_when_sync_disabled(app_and_db):
     """Changing a flag with flag sync disabled clears stale queued flag writes."""
     import config as cfg

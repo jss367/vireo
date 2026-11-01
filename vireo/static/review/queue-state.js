@@ -1,4 +1,4 @@
-// Browser-local inspection bookkeeping never stores or replays catalog decisions.
+// Browser-local inspection notes and unsaved choices never replay catalog writes.
 /** @type {ReviewQueueState} */
 var reviewQueue = {workspace: null, key: '', session: {photoId: null, items: {}, followUpOnly: false},
   enabled: false, items: [], current: null, subjects: [], sequence: 0, cropSequence: 0,
@@ -30,10 +30,15 @@ function rqSession(value) {
     Object.entries(session.items).forEach(function(entry) {
       var item = entry[1];
       if (!/^\d+$/.test(entry[0]) || !item || typeof item !== 'object') return;
-      items[entry[0]] = {inspected: item.inspected === true, unresolved: item.unresolved === true,
+      /** @type {ReviewQueueItemState} */
+      var restored = {inspected: item.inspected === true, unresolved: item.unresolved === true,
         subject: Number.isSafeInteger(item.subject) ? item.subject : null,
         center: Array.isArray(item.center) && item.center.length === 2 &&
           item.center.every(function(v) { return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1; }) ? item.center : null};
+      if (item.pendingFlag === 'flagged' || item.pendingFlag === 'rejected' || item.pendingFlag === 'none') {
+        restored.pendingFlag = item.pendingFlag;
+      }
+      items[entry[0]] = restored;
     });
   }
   return {photoId: Number.isSafeInteger(session?.photoId) ? session?.photoId || null : null,

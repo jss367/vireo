@@ -34,6 +34,7 @@ function renderReviewQueue() {
 }
 
 function rqRenderProgress() {
+  rqShowPendingFlag();
   var counts = rqProgress();
   var index = reviewQueue.items.findIndex(function(p) { return p.photo_id === reviewQueue.session.photoId; });
   rqElement('rqProgress').textContent = 'Position ' + (index + 1) + ' of ' + reviewQueue.items.length +
@@ -96,6 +97,16 @@ function rqShowFlag() {
     (photo.flag_note?.description ? ' · ' + photo.flag_note.description : '') + '. Changes require an explicit click; navigation preserves this flag.';
 }
 
+function rqShowPendingFlag() {
+  var id = reviewQueue.session.photoId;
+  var pending = id ? reviewQueue.session.items[String(id)]?.pendingFlag : null;
+  var label = pending === 'flagged' ? 'Keep photo' : pending === 'rejected' ? 'Reject photo' : 'Clear photo flag';
+  rqElement('rqPendingFlag').textContent = pending ? 'Unsaved review choice: ' + label +
+    '. Not saved to the catalog. After the transfer finishes, refresh catalog decisions and click a flag button to confirm. Nothing is retried automatically.' : '';
+  rqElement('rqDiscardPendingFlag').hidden = !pending;
+  /** @type {HTMLButtonElement} */ (rqElement('rqDiscardPendingFlag')).disabled = reviewQueue.busy;
+}
+
 /** @param {number} offset */
 function rqMove(offset) {
   if (reviewQueue.busy || _predictionsReloading) return;
@@ -109,11 +120,14 @@ async function rqSetFlag(flag) {
   var photo = reviewQueue.current;
   if (!photo || reviewQueue.busy || _predictionsReloading) return;
   var sequence = reviewQueue.sequence;
+  var session = reviewQueue.session, key = reviewQueue.key;
   reviewQueue.busy = true; rqRenderProgress();
   try {
     /** @type {{ok?:boolean}} */ var confirmed = await safeFetch('/api/photos/' + photo.id + '/flag', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({flag: flag, observed_flag: photo.flag || 'none', observed_workspace_id: reviewQueue.workspace})}, {toast: false});
     if (!confirmed || confirmed.ok !== true) throw new Error('The server did not confirm the flag change. Refresh before trying again.');
+    delete session.items[String(photo.id)]?.pendingFlag;
+    if (key) rqWrite(key, session);
     if (sequence !== reviewQueue.sequence) return;
     photo.flag = flag; photo.flag_note = null;
     var photoId = photo.id;
@@ -122,9 +136,16 @@ async function rqSetFlag(flag) {
     rqShowFlag(); rqSave();
     if (_clearPredictionRepresentativeStateIfIneligible(photo.id, flag)) renderAll();
   } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'workspace_busy' &&
+        (flag === 'flagged' || flag === 'rejected' || flag === 'none')) {
+      var item = session.items[String(photo.id)] || (session.items[String(photo.id)] =
+        {inspected: false, unresolved: false, subject: null, center: null});
+      item.pendingFlag = flag;
+      if (key) rqWrite(key, session);
+    }
     if (sequence !== reviewQueue.sequence) return;
     rqElement('rqFlag').textContent = reviewErrorMessage(error, 'Flag was not saved. Refresh the catalog and retry.');
-    // Never replay the stale choice; a reload must precede the next explicit choice.
+    // Keep unsaved intent separate from the catalog; refresh before another explicit write.
     reviewQueue.current = null;
   } finally { reviewQueue.busy = false; rqRenderProgress(); }
 }
@@ -137,6 +158,11 @@ function bindReviewQueue() {
   rqElement('rqPrevious').addEventListener('click', function() { rqMove(-1); });
   rqElement('rqNext').addEventListener('click', function() { rqMove(1); });
   rqElement('rqRefresh').addEventListener('click', function() { reviewQueue.current = null; ++reviewQueue.sequence; switchCollection(currentCollection); });
+  rqElement('rqDiscardPendingFlag').addEventListener('click', function() {
+    if (reviewQueue.busy || !reviewQueue.session.photoId) return;
+    delete rqItem(reviewQueue.session.photoId).pendingFlag;
+    rqSave(); rqShowPendingFlag();
+  });
   rqElement('rqInspected').addEventListener('click', function() {
     if (!reviewQueue.current) return;
     rqItem(reviewQueue.current.id).inspected = true; rqSave(); rqRenderProgress();

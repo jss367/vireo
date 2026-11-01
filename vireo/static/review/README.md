@@ -244,8 +244,10 @@ deep links take precedence over that snapshot.
 
 `vireo:review-queue:<workspace>:<scope JSON>` stores the selected photo and
 per-photo inspection/follow-up, subject and normalized manual center. It never
-stores flag or prediction decisions. These notes are explicitly local to this
-browser and scope, not a durable library-wide review ledger. Storage failure is
+replays flag or prediction decisions. Transfer-blocked flag choices are stored
+separately as unsaved intent and displayed with an explicit discard button.
+These notes are explicitly local to this browser and scope, not a durable
+library-wide review ledger. Storage failure is
 visible. Merely entering or navigating the queue does not count as inspection;
 Mark inspected, Needs follow-up, or a successful explicit flag write does.
 Decided counts catalog keep/reject flags at the last refresh; follow-up remains
@@ -263,7 +265,13 @@ are visible and manual centering remains available with a usable full frame.
 Flag changes reuse the normal undoable single-photo endpoint with
 `observed_flag` and `observed_workspace_id`. The flag baseline is compared under
 the existing writer lock; a stale change returns 409 and the user must refresh
-before choosing again. Every filter/catalog reload invalidates in-flight
+before choosing again. A `workspace_busy` conflict preserves the unsaved choice
+in this browser and scope, including across reloads; it never changes catalog
+flags, counts as inspection, or retries automatically. Refresh and a new explicit
+flag click are required to save after the transfer finishes. Both the transfer
+reservation and the flag/workspace comparison remain in force so metadata
+synchronization and file transfer stay consistent.
+Every filter/catalog reload invalidates in-flight
 inspection responses. Response epochs also prevent a late crop from replacing
 the current photo.
 
