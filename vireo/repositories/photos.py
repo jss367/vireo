@@ -1101,8 +1101,7 @@ class PhotoRepository:
                 FROM _browse_summary_ids s
                 JOIN best_pred bp ON bp.photo_id = s.id AND bp.rn = 1
                 GROUP BY bp.species
-                ORDER BY count DESC
-                LIMIT 5""",
+                ORDER BY count DESC, bp.species COLLATE NOCASE""",
             (ws, min_conf),
         ).fetchall()
 
