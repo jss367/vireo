@@ -54,6 +54,10 @@ stored names without an inferred taxon or synonym relationship.
 An explicit source taxon ID takes precedence over a local taxon link. If that
 source taxon is absent from the catalog, details retain its source ID and stored
 label without borrowing a name or synonyms from a conflicting local taxon.
+`reject_region(detection_id, reason, source?)` records that an inspected region
+holds no animal (a stump the detector boxed and the classifier ranked), and
+`restore_region` reverses it; both are one Undo step in Vireo and are described
+with the rest of the subject verdict in the species review evidence page.
 Every photo row (`get_photo`, `search_photos`, `find_photos_by_text`) carries
 the app's own analysis readiness, read from
 `POST /api/photos/analysis-readiness` (one call per returned page):

@@ -396,7 +396,7 @@ class PhotoRepository:
                              WHERE d.photo_id = p.id
                                AND d.category = 'animal'
                                AND d.detector_model != 'full-image'
-                               AND d.detector_confidence >= ?) AS detection_count
+                               AND d.detector_confidence >= ? AND d.subject_verdict IS NULL) AS detection_count
                       FROM photos p WHERE p.id IN ({placeholders})""",
                 (min_conf, *chunk),
             ).fetchall()
@@ -1084,7 +1084,7 @@ class PhotoRepository:
             """SELECT COUNT(DISTINCT s.id) FROM _browse_summary_ids s
                 JOIN detections det ON det.photo_id = s.id
                 JOIN predictions pred ON pred.detection_id = det.id
-                WHERE det.detector_confidence >= ?""",
+                WHERE det.detector_confidence >= ? AND det.subject_verdict IS NULL""",
             (min_conf,),
         ).fetchone()[0]
 
@@ -1137,7 +1137,7 @@ class PhotoRepository:
                      SELECT 1 FROM detections det
                       WHERE det.photo_id = s.id AND det.category = 'animal'
                         AND det.detector_model != 'full-image'
-                        AND det.detector_confidence >= ?)) AS with_detection,
+                        AND det.detector_confidence >= ? AND det.subject_verdict IS NULL)) AS with_detection,
                  SUM(EXISTS (
                      SELECT 1 FROM detector_runs dr
                       WHERE dr.photo_id = s.id AND dr.detector_model != 'full-image'

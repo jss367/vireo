@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -606,7 +606,17 @@ class CanonicalSchema:
                 box_h               REAL,
                 detector_confidence REAL,
                 category            TEXT,
-                created_at          TEXT DEFAULT (datetime('now'))
+                created_at          TEXT DEFAULT (datetime('now')),
+                -- The reviewer's verdict on the region itself, catalog-wide
+                -- (a stump is a stump in every workspace): NULL, or
+                -- 'not_animal' once the user rejected the box as background.
+                -- A rejected region is not retained: every reader that
+                -- applies the detector-confidence floor also requires
+                -- subject_verdict IS NULL, so its predictions leave Review,
+                -- species evidence, grouping and primary-subject selection
+                -- together. The content-addressed upsert never touches it,
+                -- so the verdict survives a rerun that finds the same box.
+                subject_verdict     TEXT CHECK (subject_verdict IN ('not_animal'))
             );
 
             -- subject_size is declared REAL because compute_all_quality_features

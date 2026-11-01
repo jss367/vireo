@@ -94,6 +94,7 @@ class PhotoSpeciesRepository:
             rows = self.conn.execute(
                 f"""SELECT d.photo_id, d.id AS detection_id, d.box_x, d.box_y,
                            d.box_w, d.box_h, d.detector_confidence, d.detector_model, d.category,
+                           d.subject_verdict,
                            p.id AS prediction_id, p.species, p.confidence,
                            p.classifier_model, p.labels_fingerprint,
                            {prediction_review_status('r')} AS status
@@ -108,7 +109,7 @@ class PhotoSpeciesRepository:
                 if did not in subjects:
                     subject = {k: row[k] for k in (
                         "detection_id", "box_x", "box_y", "box_w", "box_h", "detector_confidence",
-                        "detector_model", "category",
+                        "detector_model", "category", "subject_verdict",
                     )}
                     subject["predictions"] = []
                     subjects[did] = subject

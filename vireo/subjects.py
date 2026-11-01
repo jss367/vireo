@@ -186,6 +186,14 @@ def payload(db, photo_id):
         detection["predictions"] = grouped.get(detection["id"], [])
         detection["is_primary"] = detection is detections[0]
     primary_id = detections[0]["id"] if detections else None
+    rejected = []
+    for row in db.subjects.rejected_regions(photo_id):
+        region = dict(row)
+        region["predictions"] = grouped.get(region["id"], [])
+        rejected.append(region)
     return {"photo_id": photo_id, "subjects": detections, "primary_detection_id": primary_id,
             "selection": "manual" if choice else "automatic",
-            "choice_unavailable": bool(choice and choice["detection_id"] != primary_id)}
+            "choice_unavailable": bool(choice and choice["detection_id"] != primary_id),
+            # Regions the user rejected as background: not retained, shown
+            # with their crops so the rejection is visible and reversible.
+            "rejected": rejected}

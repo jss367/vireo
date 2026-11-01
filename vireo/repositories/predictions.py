@@ -783,7 +783,7 @@ class PredictionRepository:
                 f"""SELECT photo_id, COUNT(*) AS n FROM detections
                     WHERE photo_id IN ({placeholders})
                       AND detector_model != 'full-image'
-                      AND detector_confidence >= ?
+                      AND detector_confidence >= ? AND subject_verdict IS NULL
                     GROUP BY photo_id""",
                 [*chunk, detector_floor],
             ):
@@ -833,7 +833,7 @@ class PredictionRepository:
                       AND pr.species IS NOT NULL AND pr.species != ''
                       AND {prediction_review_status()}
                           NOT IN ('rejected', 'alternative')
-                      AND d.detector_confidence >= ?
+                      AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                       AND pr.labels_fingerprint = (
                           SELECT pr2.labels_fingerprint
                           FROM predictions pr2
@@ -901,7 +901,7 @@ class PredictionRepository:
         detector_floor = config_value(self.effective_config(), "detector_confidence")
         base_conditions = [
             "wf.workspace_id = ?",
-            "(d.detector_model = 'full-image' OR d.detector_confidence >= ?)",
+            "(d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)",
         ]
         base_params = [ws, detector_floor]
         if rules is not None:
@@ -1277,7 +1277,7 @@ class PredictionRepository:
                JOIN photo_workspace_visibility wf
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.photo_id = ?
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id
@@ -1299,7 +1299,7 @@ class PredictionRepository:
         both species instead of collapsing the photo to the single best
         guess. Rows carry the same columns as :meth:`get_top_for_photo`.
         """
-        floor_clause = "AND d.detector_confidence >= ?" if min_detector_confidence is not None else ""
+        floor_clause = "AND d.detector_confidence >= ? AND d.subject_verdict IS NULL" if min_detector_confidence is not None else ""
         params = [self.workspace_id, photo_id]
         if min_detector_confidence is not None:
             params.append(min_detector_confidence)
@@ -1390,7 +1390,7 @@ class PredictionRepository:
                JOIN detections d ON d.id = pr.detection_id
                {prediction_review_join('pr')}
                WHERE d.photo_id = ?
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  AND d.detector_model != 'full-image'
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -1456,7 +1456,7 @@ class PredictionRepository:
                        JOIN predictions pr ON pr.detection_id = d.id
                        {prediction_review_join('pr')}
                        WHERE d.photo_id IN ({placeholders})
-                         AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                         AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
                          AND pr.species IS NOT NULL
                          AND {prediction_review_status()} != 'rejected'
                          AND pr.labels_fingerprint = (

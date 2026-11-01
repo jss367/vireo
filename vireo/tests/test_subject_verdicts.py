@@ -1,0 +1,284 @@
+"""A rejected region is not a subject anywhere, and the rejection is reversible.
+
+The report behind this: a stump classified as Mule Deer, a charred branch
+as Great Curassow. Rejecting the region must drop its predictions from
+Review, species evidence, grouping and primary selection together, apply no
+species to any other frame, and undo in one step.
+"""
+
+import json
+import os
+
+import numpy as np
+import pytest
+from PIL import Image
+from pipeline import load_photo_features, refresh_cache_predictions_for_photos
+from services import detection_store, photo_ingest, subject_verdicts, workspace_folders
+from services.edit_history import redo_last_undo, undo_last_edit
+from subjects import analyze_photo, payload, sync_primary
+
+STUMP = {"box": {"x": .05, "y": .1, "w": .35, "h": .8}, "confidence": .95, "category": "animal"}
+BIRD = {"box": {"x": .6, "y": .1, "w": .35, "h": .8}, "confidence": .7, "category": "animal"}
+
+
+@pytest.fixture
+def scene(db, tmp_path):
+    """One photo: a confident stump box and a weaker real-bird box."""
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Scene")
+    path = tmp_path / "DSC_3539.jpg"
+    pixels = np.full((160, 320, 3), 90, dtype=np.uint8)
+    pixels[:, 160:] = np.where((np.indices((160, 160)).sum(axis=0) // 4 % 2)[..., None], 160, 60)
+    Image.fromarray(pixels).save(path)
+    photo_id = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=".jpg",
+                                      file_size=path.stat().st_size, file_mtime=1)
+    stump, bird = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [STUMP, BIRD])
+    db.predictions.add(stump, "Mule Deer", .93, "bioclip")
+    db.predictions.add(bird, "Hairy Woodpecker", .61, "bioclip")
+    db.commit()
+    return photo_id, stump, bird, path
+
+
+def _verdict(db, det):
+    return db.detections.row(det)["subject_verdict"]
+
+
+def test_rejected_region_leaves_every_retained_read(db, scene):
+    photo_id, stump, bird, _ = scene
+    assert [d["id"] for d in detection_store.get_detections(db, photo_id)] == [stump, bird]
+
+    result = subject_verdicts.set_subject_verdict(db, stump, "not_animal", source="reviewer", reason="a stump")
+    assert result["changed"] and result["previous_verdict"] is None
+    assert _verdict(db, stump) == "not_animal"
+    # Retained reads: by photo, in bulk, and at any floor.
+    assert [d["id"] for d in detection_store.get_detections(db, photo_id)] == [bird]
+    assert [d["id"] for d in detection_store.get_detections(db, photo_id, min_conf=0)] == [bird]
+    assert [d["id"] for d in detection_store.get_detections_for_photos(db, [photo_id])[photo_id]] == [bird]
+    # Only the readers that show what was rejected ask for it back.
+    assert {d["id"] for d in detection_store.get_detections(db, photo_id, min_conf=0, include_rejected=True)} == {stump, bird}
+    # Species evidence for the pipeline comes from the bird alone.
+    features = load_photo_features(db, photo_ids=[photo_id])[0]
+    assert [entry[0] for entry in features["species_top5"]] == ["Hairy Woodpecker"]
+    assert features["detection_box"]["x"] == pytest.approx(.6)
+    # Review's listing no longer offers the stump's species.
+    assert {row["species"] for row in db.predictions.get_rows(photo_ids=[photo_id])} == {"Hairy Woodpecker"}
+    # Nothing was deleted: the prediction rows wait for a restore.
+    assert db.conn.execute("SELECT COUNT(*) FROM predictions WHERE detection_id = ?", (stump,)).fetchone()[0] == 1
+
+
+def test_rejecting_the_primary_promotes_the_next_box_and_restoring_returns_it(db, scene):
+    photo_id, stump, bird, path = scene
+    analyze_photo(db, photo_id, path)
+    sync_primary(db, photo_id)
+    db.commit()
+    assert payload(db, photo_id)["primary_detection_id"] in (stump, bird)
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    after = payload(db, photo_id)
+    assert after["primary_detection_id"] == bird
+    assert [s["id"] for s in after["subjects"]] == [bird]
+    assert [r["id"] for r in after["rejected"]] == [stump]
+    assert after["rejected"][0]["predictions"][0]["species"] == "Mule Deer"
+    assert db.subjects.primary_state(photo_id)["detection_id"] == bird
+
+    restored = subject_verdicts.set_subject_verdict(db, stump, None)
+    assert restored["changed"] and restored["previous_verdict"] == "not_animal"
+    assert _verdict(db, stump) is None
+    assert payload(db, photo_id)["rejected"] == []
+    assert {s["id"] for s in payload(db, photo_id)["subjects"]} == {stump, bird}
+
+
+def test_verdict_survives_a_rerun_that_finds_the_same_box_and_goes_with_a_retired_one(db, scene):
+    photo_id, stump, bird, _ = scene
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    # Same boxes again: content-addressed ids, the verdict column untouched.
+    again = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [STUMP, BIRD])
+    assert again == [stump, bird]
+    assert _verdict(db, stump) == "not_animal"
+    # The detector no longer proposes the stump: its row and verdict go.
+    detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [BIRD])
+    assert db.detections.row(stump) is None
+    assert [d["id"] for d in detection_store.get_detections(db, photo_id)] == [bird]
+
+
+def test_verdict_refuses_full_image_unknown_and_foreign_regions(db, scene, tmp_path):
+    photo_id, stump, bird, _ = scene
+    with pytest.raises(subject_verdicts.SubjectVerdictError) as missing:
+        subject_verdicts.set_subject_verdict(db, 424242, "not_animal")
+    assert missing.value.status == 404
+    full = detection_store.write_detection_batch(db, photo_id, "full-image", [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1.0, "category": "animal"}])[0]
+    with pytest.raises(subject_verdicts.SubjectVerdictError) as whole:
+        subject_verdicts.set_subject_verdict(db, full, "not_animal")
+    assert whole.value.status == 400
+    with pytest.raises(subject_verdicts.SubjectVerdictError):
+        subject_verdicts.validate_verdict("maybe")
+    with pytest.raises(subject_verdicts.SubjectVerdictError):
+        subject_verdicts.validate_provenance({"reason": "x" * 301})
+    # A repeated verdict writes nothing.
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    history_count = len(db.edit_history.list_recent())
+    assert subject_verdicts.set_subject_verdict(db, stump, "not_animal")["changed"] is False
+    assert len(db.edit_history.list_recent()) == history_count
+    # A photo outside the active workspace is not reachable.
+    other = db.create_workspace("Other")
+    db.set_active_workspace(other)
+    with pytest.raises(subject_verdicts.SubjectVerdictError) as foreign:
+        subject_verdicts.set_subject_verdict(db, bird, "not_animal")
+    assert foreign.value.status == 404
+
+
+def test_verdict_is_one_undo_step_with_provenance(db, scene):
+    photo_id, stump, bird, _ = scene
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal", source="Claude", reason="charred branch")
+    entry = db.edit_history.list_recent()[0]
+    assert entry["action_type"] == "subject_verdict"
+    assert entry["description"] == "Rejected region as not an animal — Claude: charred branch"
+    assert entry["source"] == "Claude" and entry["reason"] == "charred branch"
+    assert json.loads(entry["new_value"]) == {"detection_id": stump, "verdict": "not_animal"}
+
+    assert undo_last_edit(db)["id"] == entry["id"]
+    assert _verdict(db, stump) is None
+    assert [d["id"] for d in detection_store.get_detections(db, photo_id)] == [stump, bird]
+    assert redo_last_undo(db)["id"] == entry["id"]
+    assert _verdict(db, stump) == "not_animal"
+    assert [d["id"] for d in detection_store.get_detections(db, photo_id)] == [bird]
+    # The primary follows each replay.
+    assert db.subjects.primary_state(photo_id)["detection_id"] == bird
+    undo_last_edit(db)
+    assert db.subjects.primary_state(photo_id)["detection_id"] == stump
+
+
+def test_cache_refresh_recomputes_only_the_photos_evidence(db, scene, tmp_path):
+    photo_id, stump, bird, _ = scene
+    sibling = photo_ingest.add_photo(db, folder_id=db.photos.get(photo_id)["folder_id"],
+                                     filename="DSC_3540.jpg", extension=".jpg", file_size=1, file_mtime=2)
+    sibling_det = detection_store.write_detection_batch(db, sibling, "megadetector-v6", [STUMP])[0]
+    db.predictions.add(sibling_det, "Mule Deer", .9, "bioclip")
+    db.commit()
+    ws = db.require_workspace_id()
+    cache_dir = str(tmp_path / "cache")
+    os.makedirs(cache_dir)
+    photos = [dict(p) for p in load_photo_features(db, photo_ids=[photo_id, sibling])]
+    for p in photos:
+        p.pop("dino_subject_embedding", None)
+        p.pop("dino_global_embedding", None)
+    results = {
+        "photos": photos,
+        "encounters": [{
+            "species": ["Mule Deer", .9], "species_predictions": [], "photo_ids": [photo_id, sibling],
+            "confirmed_species": None, "confirmed_species_list": [], "species_confirmed": False,
+            "photo_count": 2, "burst_count": 1, "time_range": [None, None],
+            "bursts": [{"photo_ids": [photo_id, sibling], "species_predictions": [],
+                        "species_override": {"species": "Mule Deer", "confirmed": False}}],
+        }],
+        "summary": {},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws}.json")
+    with open(path, "w") as f:
+        json.dump(results, f)
+
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    assert refresh_cache_predictions_for_photos(db, cache_dir, ws, [photo_id]) is True
+    with open(path) as f:
+        data = json.load(f)
+    by_id = {p["id"]: p for p in data["photos"]}
+    assert [e[0] for e in by_id[photo_id]["species_top5"]] == ["Hairy Woodpecker"]
+    assert [s["detection_id"] for s in by_id[photo_id]["subjects"]] == [bird]
+    # The sibling frame keeps its own evidence: nothing was applied to it.
+    assert [e[0] for e in by_id[sibling]["species_top5"]] == ["Mule Deer"]
+    encounter = data["encounters"][0]
+    assert encounter["species"][0] == "Mule Deer"  # the sibling still votes for it
+    assert {v["species"] for v in encounter["species_predictions"]} == {"Mule Deer", "Hairy Woodpecker"}
+    assert encounter["bursts"][0]["species_override"] == {"species": "Mule Deer", "confirmed": False}
+
+    subject_verdicts.set_subject_verdict(db, sibling_det, "not_animal")
+    assert refresh_cache_predictions_for_photos(db, cache_dir, ws, [sibling]) is True
+    with open(path) as f:
+        data = json.load(f)
+    encounter = data["encounters"][0]
+    assert encounter["species"][0] == "Hairy Woodpecker"
+    assert encounter["bursts"][0]["species_override"] == {"species": "Hairy Woodpecker", "confirmed": False}
+    # Photos the cache does not hold change nothing.
+    assert refresh_cache_predictions_for_photos(db, cache_dir, ws, [999999]) is False
+
+
+def _detections(db, photo_id):
+    return detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [STUMP, BIRD])
+
+
+def test_route_rejects_restores_and_undoes_with_the_subject_payload(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.photos.list_page()[0]["id"]
+    stump, bird = _detections(db, photo_id)
+    db.predictions.add(stump, "Zebra", .97, "bioclip")
+    db.commit()
+
+    missing = client.post(f"/api/detections/{stump}/subject-verdict", json={})
+    assert missing.status_code == 400
+    bad = client.post(f"/api/detections/{stump}/subject-verdict", json={"verdict": "maybe"})
+    assert bad.status_code == 400
+    unknown = client.post("/api/detections/424242/subject-verdict", json={"verdict": "not_animal"})
+    assert unknown.status_code == 404
+
+    response = client.post(f"/api/detections/{stump}/subject-verdict",
+                           json={"verdict": "not_animal", "source": "Claude", "reason": "stump"})
+    assert response.status_code == 200, response.json
+    body = response.json
+    assert body["ok"] and body["changed"] and body["verdict"] == "not_animal"
+    assert body["photo_id"] == photo_id
+    assert [s["id"] for s in body["subjects"]["subjects"]] == [bird]
+    assert [r["id"] for r in body["subjects"]["rejected"]] == [stump]
+    assert "pipeline_cache_stale" not in body
+    assert client.get("/api/undo/status").json["count"] == 1
+    # The subject panel's own read agrees, and the crop of a rejected region still renders.
+    assert [r["id"] for r in client.get(f"/api/photos/{photo_id}/subjects").json["rejected"]] == [stump]
+    # Review no longer lists the stump's Zebra.
+    listing = client.get("/api/predictions", query_string={"photo_id": photo_id}).json["predictions"]
+    assert all(p["detection_id"] != stump for p in listing)
+
+    assert client.post("/api/undo").status_code == 200
+    assert db.detections.row(stump)["subject_verdict"] is None
+    assert client.post("/api/redo").status_code == 200
+    assert db.detections.row(stump)["subject_verdict"] == "not_animal"
+
+    restored = client.post(f"/api/detections/{stump}/subject-verdict", json={"verdict": None})
+    assert restored.status_code == 200
+    assert restored.json["changed"] and restored.json["subjects"]["rejected"] == []
+    again = client.post(f"/api/detections/{stump}/subject-verdict", json={"verdict": None})
+    assert again.status_code == 200 and again.json["changed"] is False
+
+
+def test_route_reports_a_stale_pipeline_cache_instead_of_failing(app_and_db, monkeypatch):
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.photos.list_page()[0]["id"]
+    stump, _ = _detections(db, photo_id)
+    import pipeline
+
+    def explode(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_predictions_for_photos", explode)
+    response = client.post(f"/api/detections/{stump}/subject-verdict", json={"verdict": "not_animal"})
+    assert response.status_code == 200
+    assert response.json["pipeline_cache_stale"] is True
+    assert "Process Review" in response.json["warning"]
+    assert db.detections.row(stump)["subject_verdict"] == "not_animal"
+
+
+def test_species_evidence_names_the_rejection_and_drops_the_candidate(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.photos.list_page()[0]["id"]
+    stump, bird = _detections(db, photo_id)
+    db.predictions.add(stump, "Great Curassow", .96, "bioclip")
+    db.predictions.add(bird, "Hairy Woodpecker", .6, "bioclip")
+    db.commit()
+    before = client.post("/api/photos/species-evidence", json={"photo_ids": [photo_id]}).json
+    assert {c["species_identity"]["name"] for c in before["candidate_selections"]} == {"Great Curassow", "Hairy Woodpecker"}
+    subject_verdicts.set_subject_verdict(db, stump, "not_animal")
+    after = client.post("/api/photos/species-evidence", json={"photo_ids": [photo_id]}).json
+    assert {c["species_identity"]["name"] for c in after["candidate_selections"]} == {"Hairy Woodpecker"}
+    subject = next(s for s in after["photos"][0]["subjects"] if s["detection_id"] == stump)
+    assert subject["retained"] is False
+    assert any("rejected this region" in reason for reason in subject["review_reasons"])

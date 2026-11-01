@@ -17,6 +17,7 @@
       "POST /api/batch/rating",
       "POST /api/batch/wildlife-excluded",
       "POST /api/culling/apply",
+      "POST /api/detections/<int:detection_id>/subject-verdict",
       "POST /api/encounters/species",
       "POST /api/encounters/species/bulk",
       "POST /api/highlights/confirm",

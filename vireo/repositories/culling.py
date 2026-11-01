@@ -53,7 +53,7 @@ class CullingRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE d.photo_id = ?
-                 AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                 AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
                  AND pr.labels_fingerprint = (
                      SELECT pr2.labels_fingerprint FROM predictions pr2
                      WHERE pr2.detection_id = pr.detection_id

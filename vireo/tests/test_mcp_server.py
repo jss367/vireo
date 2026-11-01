@@ -93,6 +93,7 @@ def test_tools_are_the_documented_set(mcp):
         "find_photos_by_text", "get_photo", "view_photo", "burst",
         "set_flag", "set_rating", "add_keyword", "remove_keyword",
         "get_species_evidence", "preview_species_assignment", "apply_species_assignment",
+        "reject_region", "restore_region",
     }
     for tool in anyio.run(server.list_tools):
         assert tool.description, f"{tool.name} has no description"

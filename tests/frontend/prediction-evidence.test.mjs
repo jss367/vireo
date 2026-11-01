@@ -86,3 +86,47 @@ test('a stale save response cannot overwrite the newly loaded scope', async () =
   await pending;
   assert.equal(reloaded, 0);
 });
+
+test('rejecting a region posts the verdict, reloads the queue once, and blocks a double click', async () => {
+  const ctx = harness();
+  ctx.predictions = [prediction(1, 10)];
+  let done, sent = [], reloaded = 0, toasts = [];
+  ctx.safeFetch = async (url, options) => {sent.push({url, body: JSON.parse(options.body)});return new Promise(resolve => {done = resolve;});};
+  ctx.loadPredictions = async () => {reloaded++;ctx._loadPredictionsEpoch++;};
+  ctx.showToast = (message, kind) => {toasts.push([message, kind]);};
+  const pending = ctx.rejectReviewRegion(1);
+  assert.equal(ctx.reviewEvidenceSaving.has(10), true);
+  await ctx.rejectReviewRegion(1);
+  assert.deepEqual(sent, [{url: '/api/detections/10/subject-verdict', body: {verdict: 'not_animal'}}]);
+  done({ok: true, changed: true, verdict: 'not_animal'});
+  await pending;
+  assert.equal(reloaded, 1);
+  assert.equal(ctx.reviewEvidenceSaving.size, 0);
+  assert.deepEqual(toasts, [['Region rejected as not an animal. Undo restores it.', 'success']]);
+  // The evidence buttons route the region action to the verdict, not to evidence-review.
+  const full = prediction(1, 10);
+  Object.assign(full.evidence, {
+    score: {model: 'bioclip', explanation: 'relative', raw_value: null, raw_kind: null, label_count: 3},
+    match: {explanation: 'listed'}, geography: {explanation: 'unknown'},
+    subject: {decision: 'unreviewed', revision: 0, detector_model: 'megadetector-v6', detector_score: .9, category: 'animal', explanation: 'box'},
+  });
+  ctx.escapeHtml = text => String(text);
+  ctx.escapeAttr = text => String(text);
+  const html = ctx.reviewEvidenceHtml(full);
+  assert.match(html, /data-evidence-decision="reject_region"[^>]*>Not an animal: reject region/);
+  assert.doesNotMatch(html, /data-evidence-decision="invalid_subject"/);
+});
+
+test('a rejection the server did not confirm is reported and keeps the queue', async () => {
+  const ctx = harness();
+  ctx.predictions = [prediction(1, 10)];
+  let reloaded = 0, toasts = [];
+  ctx.safeFetch = async () => ({ok: false});
+  ctx.loadPredictions = async () => {reloaded++;};
+  ctx.showToast = (message, kind) => {toasts.push([message, kind]);};
+  await ctx.rejectReviewRegion(1);
+  assert.equal(reloaded, 0);
+  assert.equal(toasts.length, 1);
+  assert.equal(toasts[0][1], 'error');
+  assert.match(toasts[0][0], /^Region was not rejected: /);
+});

@@ -21,7 +21,7 @@ import os
 from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
-from services import prediction_decisions
+from services import prediction_decisions, subject_verdicts
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.render_cache import queue_edit_recipe_sync
 
@@ -103,7 +103,8 @@ def create_history_blueprint(
                 # only the photo edit was reversed.
                 return True
             action = (payload.get("photo_edit") or {}).get("action_type")
-        if action not in ("species_replace", "keyword_add", "prediction_accept", "identity_alternatives"):
+        if action not in ("species_replace", "keyword_add", "prediction_accept", "identity_alternatives",
+                          subject_verdicts.ACTION_TYPE):
             return True
         photo_ids = [
             pid for pid in db.edit_history.item_photo_ids(entry["id"], distinct=True)
@@ -111,6 +112,10 @@ def create_history_blueprint(
         ]
         if not photo_ids:
             return True
+        if action == subject_verdicts.ACTION_TYPE:
+            # A verdict changes which regions the photo retains, so its
+            # cached evidence (not its confirmed species) is what to redo.
+            return subject_verdicts.refresh_pipeline_cache(db, db_path, photo_ids)
         try:
             if action == "identity_alternatives":
                 from services.identity_alternatives import refresh_species_caches

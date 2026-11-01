@@ -105,6 +105,8 @@ def _subject(
     reasons = set()
     if not localized:
         reasons.add("No usable localized animal box; inspect the full frame.")
+    elif raw.get("subject_verdict") == "not_animal":
+        reasons.add("The reviewer rejected this region as not an animal; its predictions are not evidence.")
     elif did not in eligible:
         reasons.add("This region is outside the current retained-subject selection.")
     if not reviewable:

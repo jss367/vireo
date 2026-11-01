@@ -37,7 +37,7 @@ def catalog(photo_source=None):
         CREATE TABLE folders(id,path,name,status);
         CREATE TABLE photos(id,folder_id,subject_tenengrad,eye_tenengrad,miss_computed_at);
         CREATE TABLE photo_workspace_visibility(photo_id,workspace_id);
-        CREATE TABLE detections(id,photo_id,category,detector_model,detector_confidence);
+        CREATE TABLE detections(id,photo_id,category,detector_model,detector_confidence,subject_verdict);
         CREATE TABLE predictions(id,detection_id,species,confidence,classifier_model,labels_fingerprint,created_at);
         CREATE TABLE prediction_review(prediction_id,workspace_id,status);
         CREATE TABLE detector_runs(photo_id,detector_model,box_count);
@@ -49,7 +49,7 @@ def catalog(photo_source=None):
             (9,1,10,10,'hidden'),(10,2,10,10,'offline');
         INSERT INTO photo_workspace_visibility VALUES(1,1),(2,1),(3,1),(4,1),
             (5,1),(6,1),(7,1),(8,1),(9,2),(10,1);
-        INSERT INTO detections VALUES(1,1,'animal','real',.9),(2,1,'animal','real',.8),
+        INSERT INTO detections(id,photo_id,category,detector_model,detector_confidence) VALUES(1,1,'animal','real',.9),(2,1,'animal','real',.8),
             (3,3,'person','real',.9),(4,4,'animal','real',.05),
             (5,5,'animal','real',.9),(7,7,'animal','full-image',1),
             (8,8,'animal','other-model',.9),(9,9,'animal','real',.9),
