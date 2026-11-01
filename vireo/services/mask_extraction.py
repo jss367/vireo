@@ -504,10 +504,9 @@ class _MaskExtractionRun:
                 phash_crop=features.pop("phash_crop", None),
                 noise_estimate=features.pop("noise_estimate", None),
             ),
-            _commit=False,
         )
         subject_masks.set_active_mask_variant(
-            thread_db, photo_id, self.sam2_variant, _commit=False,
+            thread_db, photo_id, self.sam2_variant,
         )
         # Remaining (non-mask) per-photo features still land
         # on the photos row. mask_path / crop_complete /
@@ -516,14 +515,13 @@ class _MaskExtractionRun:
         # intentionally NOT passed here.
         if features:
             thread_db.masks_features.update_pipeline_features(
-                photo_id, PipelineFeatures(**features), _commit=False,
+                photo_id, PipelineFeatures(**features),
             )
         thread_db.masks_features.update_embeddings(
             photo_id,
             dino_subject_embedding=subj_emb_blob,
             dino_global_embedding=global_emb_blob,
             variant=self.dinov2_variant,
-            _commit=False,
         )
         stage.install()
         thread_db.commit_with_retry()

@@ -6352,6 +6352,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     db.masks_features.update_pipeline_features(
         masked_id, PipelineFeatures(mask_path=str(tmp_path / "mask_a.png")),
     )
+    db.commit()
 
     # Photo B: no mask, only sub-threshold detection → should be flagged.
     lowconf_id = photo_ingest.add_photo(db, folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
@@ -9454,6 +9455,7 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
         (0.1, 0.1, 0.5, 0.5),
     )
     subject_masks.set_active_mask_variant(db, cached, sam2_variant)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
         (dinov2_variant, cached),
@@ -9810,6 +9812,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         cfg.save(settings)
         assert run(False)["quality_input_recipe"] is None
         subject_masks.set_active_mask_variant(db, ids[0], "sam2-small")
+        db.commit()
         restored = db.conn.execute("SELECT quality_input_recipe FROM photos WHERE id=?", (ids[0],)).fetchone()
         assert restored[0] == raw_analysis.RECIPE
         restored_features = db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
@@ -9826,6 +9829,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         cfg.save(settings)
         run(True)
         subject_masks.set_active_mask_variant(db, ids[0], "sam2-small")
+        db.commit()
         settings["pipeline"]["sam2_variant"] = "sam2-small"
         cfg.save(settings)
         restored_normal = run(False)
@@ -18312,6 +18316,7 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
         (0.1, 0.1, 0.5, 0.5),
     )
     subject_masks.set_active_mask_variant(db, masked, sam2_variant)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
         (dinov2_variant, masked),
@@ -18388,6 +18393,7 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
             (0.1, 0.1, 0.5, 0.5),
         )
         subject_masks.set_active_mask_variant(db, pid, sam2_variant)
+        db.commit()
         db.conn.execute(
             "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
             (dinov2_variant, pid),
@@ -18655,6 +18661,7 @@ def _seed_cached_mask(db, tmp_path, photo_id, sam2_variant, dinov2_variant,
     mask_file = str(mask_dir / f"{photo_id}.{sam2_variant}.png")
     Image.new("L", (4, 4), 255).save(mask_file)
     db.masks_features.upsert_mask(photo_id, sam2_variant, mask_file, detector, prompt)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET mask_path=?, active_mask_variant=?, "
         "dino_embedding_variant=? WHERE id=?",

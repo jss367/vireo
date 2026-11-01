@@ -71,7 +71,8 @@ def _context_ids(db: Database, ids: list[int], effective: JsonDict) -> list[int]
     options = effective.get("pipeline", {})
     if not options.get("weak_detection_rescue_enabled", True):
         return ids
-    db.pipeline_features.stage_scope_photo_ids(ids)
+    with db.transaction(join=True):
+        db.pipeline_features.stage_scope_photo_ids(ids)
     rows = db.pipeline_features.selected_folder_context(db.require_workspace_id())
     weak_confidence = config_value(options, "weak_detection_confidence", section="pipeline")
     detections = get_detections_for_photos(db, [row["id"] for row in rows],
@@ -292,18 +293,17 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                     raise ValueError("Subject mask changed before quality publication; retry the current mask")
             db.masks_features.upsert_mask(pid, variant, mask_path, detection["detector_model"],
                 tuple(detection["box_" + key] for key in "xywh"),
-                MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}), _commit=False)
+                MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}))
             current = _current_photo(db, pid, effective)
             weak_floor = (rescue_floor(current, config_value(effective.get("pipeline", {}), "weak_detection_confidence", section="pipeline"))
                           if current.get("subject_uncertain") else None)
-            db.masks_features.set_active_variant(pid, variant, config_value(effective, "detector_confidence"),
-                _commit=False, weak_rescue_min_conf=weak_floor)
+            db.masks_features.set_active_variant(pid, variant, config_value(effective, "detector_confidence"), weak_rescue_min_conf=weak_floor)
             db.masks_features.update_pipeline_features(pid, PipelineFeatures(
                 **{field: features.get(field) for field in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad")},
                 eye_kp_fingerprint=(EYE_KP_FINGERPRINT_VERSION
-                    if features.get("eye_status") in ("measured", "not_located") else None)), _commit=False)
+                    if features.get("eye_status") in ("measured", "not_located") else None)))
             if existing_mask_path is None:
-                db.masks_features.update_embeddings(pid, None, None, variant=None, _commit=False)
+                db.masks_features.update_embeddings(pid, None, None, variant=None)
             photo = db.photos.get(pid, verify_workspace=True)
             publish_analysis(db, photo, detection, analysis, effective)
             db.commit_with_retry()

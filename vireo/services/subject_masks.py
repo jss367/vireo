@@ -27,23 +27,21 @@ if TYPE_CHECKING:
 
 
 def set_active_mask_variant(
-    db: Database, photo_id: int, variant: str, _commit: bool = True, *,
+    db: Database, photo_id: int, variant: str, *,
     weak_rescue_min_conf: float | None = None,
 ) -> None:
     """Mark `variant` as active for `photo_id` and denormalize its
     fields into the photos row (mask_path + per-mask features) so
     downstream readers (scoring, pipeline) see the active mask.
 
-    ``_commit=False`` lets bulk callers (e.g. the
-    ``/api/pipeline/active-mask-variant`` endpoint) batch many
-    per-photo updates into a single commit, instead of paying a WAL
-    fsync per photo. Bulk callers MUST call ``commit_with_retry``
-    themselves once the loop completes.
+    Does not commit: bulk callers (e.g. the
+    ``/api/pipeline/active-mask-variant`` endpoint) batch many per-photo
+    updates into one unit of work instead of paying a WAL fsync per photo.
     """
     effective = db.get_effective_config(cfg.load())
     min_conf = config_value(effective, "detector_confidence")
     db.masks_features.set_active_variant(
-        photo_id, variant, min_conf, _commit,
+        photo_id, variant, min_conf,
         weak_rescue_min_conf=weak_rescue_min_conf,
     )
 
@@ -58,8 +56,9 @@ def delete_stale_masks(db: Database, detector_confidence: float | None = None) -
     deletion set matches the count the storage card shows.
     """
     repo = db.masks_features
-    stale = repo.find_stale(detector_confidence=detector_confidence)
-    return repo.delete_stale(stale)
+    with db.transaction():
+        stale = repo.find_stale(detector_confidence=detector_confidence)
+        return repo.delete_stale(stale)
 
 
 def sam_variant_rerun_warning(

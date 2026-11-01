@@ -6641,6 +6641,7 @@ def test_update_photo_eye_fields_roundtrip(tmp_path):
             eye_tenengrad=18450.2,
         ),
     )
+    db.commit()
     row = db.conn.execute(
         "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
         (pid,),
@@ -6679,6 +6680,7 @@ def test_update_photo_eye_fields_accept_null(tmp_path):
             eye_tenengrad=None,
         ),
     )
+    db.commit()
     row = db.conn.execute(
         "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
         (pid,),
@@ -6721,6 +6723,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
     subject_masks.set_active_mask_variant(db, pid, "test")
+    db.commit()
     # Top-confidence prediction has species but no taxonomy_class/scientific_name.
     db.predictions.add(
         det_ids[0],
@@ -6783,6 +6786,7 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
     subject_masks.set_active_mask_variant(db, pid, "test")
+    db.commit()
     db.predictions.add(
         det_ids[0],
         species="Turdus migratorius",
@@ -6830,6 +6834,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
         prompt=(0, 0, 1, 1),
     )
     subject_masks.set_active_mask_variant(db, pid, "test")
+    db.commit()
     # Stale fingerprint — high confidence + bird taxonomy.
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
@@ -6891,6 +6896,7 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
             prompt=(0.1, 0.1, 0.8, 0.8),
         )
         subject_masks.set_active_mask_variant(db, pid, "test")
+        db.commit()
         db.predictions.add(
             det_ids[0], species="Vulpes vulpes", confidence=0.9,
             model="bioclip-2.5", category="match",
@@ -16104,6 +16110,7 @@ def test_update_photo_embeddings_stores_variant(tmp_path):
         dino_global_embedding=blob,
         variant="vit-l14",
     )
+    db.commit()
     row = db.conn.execute(
         "SELECT dino_embedding_variant FROM photos WHERE id = ?", (pid,)
     ).fetchone()
@@ -16130,6 +16137,7 @@ def test_update_photo_embeddings_rewrite_updates_variant(tmp_path):
         dino_global_embedding=np.ones(1024, dtype=np.float32).tobytes(),
         variant="vit-l14",
     )
+    db.commit()
     row = db.conn.execute(
         "SELECT dino_embedding_variant FROM photos WHERE id = ?", (pid,)
     ).fetchone()
@@ -21868,6 +21876,7 @@ def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
             crop_complete=1.0,
         ),
     )
+    db.commit()
     row = db.conn.execute(
         "SELECT path, prompt_x FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
     ).fetchone()
@@ -21886,6 +21895,7 @@ def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
             crop_complete=1.0,
         ),
     )
+    db.commit()
     row = db.conn.execute(
         "SELECT prompt_x, subject_size FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
     ).fetchone()
@@ -21911,6 +21921,7 @@ def test_get_photo_mask_returns_row_or_none(tmp_path):
         photo_id=1, variant="sam2-small", path="/p", detector_model="md",
         prompt=(1, 2, 3, 4),
     )
+    db.commit()
     m = db.masks_features.get_mask(1, "sam2-small")
     assert m["path"] == "/p"
     assert m["detector_model"] == "md"
@@ -21932,6 +21943,7 @@ def test_list_masks_for_photo(tmp_path):
         photo_id=1, variant="sam2-large", path="/b",
         detector_model="md", prompt=(1, 2, 3, 4),
     )
+    db.commit()
     variants = sorted(m["variant"] for m in db.masks_features.list_masks_for_photo(1))
     assert variants == ["sam2-large", "sam2-small"]
 
@@ -21954,6 +21966,7 @@ def test_set_active_mask_variant_denormalizes(tmp_path):
         ),
     )
     subject_masks.set_active_mask_variant(db, 1, "sam2-large")
+    db.commit()
     row = db.conn.execute(
         "SELECT mask_path, active_mask_variant, subject_size, "
         "subject_tenengrad, bg_tenengrad, crop_complete FROM photos WHERE id=1"
@@ -21974,6 +21987,7 @@ def test_set_active_mask_variant_missing_row_raises(tmp_path):
     )
     with pytest.raises(ValueError):
         subject_masks.set_active_mask_variant(db, 1, "sam3-small")
+        db.commit()
 
 
 def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
@@ -22007,6 +22021,7 @@ def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
             crop_complete=0.9,
         ),
     )
+    db.commit()
     # An unrelated detection remains (e.g. reclassify swapped the box):
     # the mask's prompt no longer matches any real detection, so the
     # active-mask activation must refuse rather than silently reactivate
@@ -22019,6 +22034,7 @@ def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
     db.conn.commit()
     with pytest.raises(ValueError, match="another subject"):
         subject_masks.set_active_mask_variant(db, 1, "sam2-large")
+        db.commit()
     # The photos row must remain unactivated — no denormalised
     # mask_path or subject_size from the obsolete mask.
     row = db.conn.execute(
@@ -22047,6 +22063,7 @@ def test_set_active_mask_variant_allows_weak_detection_below_floor(
         prompt=(0.1, 0.1, 0.5, 0.5),
         quality=MaskQuality(subject_size=42, subject_tenengrad=1.0),
     )
+    db.commit()
     db.conn.execute(
         "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
         "box_w, box_h, detector_confidence, category) "
@@ -22059,9 +22076,12 @@ def test_set_active_mask_variant_allows_weak_detection_below_floor(
         import pytest
         with pytest.raises(ValueError, match="another subject"):
             subject_masks.set_active_mask_variant(db, 1, "sam2-large")
+            db.commit()
         with pytest.raises(ValueError, match="another subject"):
             subject_masks.set_active_mask_variant(db, 1, "sam2-large", weak_rescue_min_conf=.19)
+            db.commit()
         subject_masks.set_active_mask_variant(db, 1, "sam2-large", weak_rescue_min_conf=.12)
+        db.commit()
         row = db.conn.execute(
             "SELECT active_mask_variant, subject_size FROM photos WHERE id=1"
         ).fetchone()
@@ -22090,6 +22110,7 @@ def test_set_active_mask_variant_allows_migration_without_detections(
         detector_model="md", prompt=(1, 2, 3, 4),
     )
     subject_masks.set_active_mask_variant(db, 1, "sam2-large")
+    db.commit()
     row = db.conn.execute(
         "SELECT active_mask_variant FROM photos WHERE id=1"
     ).fetchone()
@@ -22122,6 +22143,7 @@ def test_set_active_mask_variant_rejects_orphaned_zero_detection_reclassify(
         prompt=(0.1, 0.1, 0.5, 0.5),
         quality=MaskQuality(subject_size=999, subject_tenengrad=1.0),
     )
+    db.commit()
     # Reclassify ran (produced zero detections) — detector_runs.box_count=0.
     db.conn.execute(
         "INSERT INTO detector_runs(photo_id, detector_model, box_count) "
@@ -22130,6 +22152,7 @@ def test_set_active_mask_variant_rejects_orphaned_zero_detection_reclassify(
     db.conn.commit()
     with pytest.raises(ValueError, match="another subject"):
         subject_masks.set_active_mask_variant(db, 1, "sam2-large")
+        db.commit()
     row = db.conn.execute(
         "SELECT mask_path, active_mask_variant FROM photos WHERE id=1"
     ).fetchone()
@@ -22164,6 +22187,7 @@ def test_delete_masks_for_variant_removes_files_and_rows(tmp_path):
     )
 
     deleted = db.masks_features.delete_for_variant("sam2-small")
+    db.commit()
     assert deleted == 2
     assert not p1.exists() and not p2.exists()
     assert db.conn.execute(
@@ -22188,8 +22212,10 @@ def test_delete_masks_for_variant_refuses_active(tmp_path):
         detector_model="md", prompt=(0, 0, 0, 0),
     )
     subject_masks.set_active_mask_variant(db, 1, "sam2-small")
+    db.commit()
     with pytest.raises(ValueError):
         db.masks_features.delete_for_variant("sam2-small")
+        db.commit()
 
 
 def test_delete_inactive_masks(tmp_path):
@@ -22215,6 +22241,7 @@ def test_delete_inactive_masks(tmp_path):
     )
     subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     n = db.masks_features.delete_inactive()
+    db.commit()
     assert n == 1
     assert not pa.exists()
     assert pb.exists()
@@ -22244,6 +22271,7 @@ def test_delete_inactive_masks_skips_photos_with_no_active(tmp_path):
     )
     # Note: NO set_active_mask_variant call — leaves active NULL.
     n = db.masks_features.delete_inactive()
+    db.commit()
     assert n == 0
     assert p.exists()
     assert {m["variant"] for m in db.masks_features.list_masks_for_photo(1)} == {"sam2-small"}
@@ -22267,6 +22295,7 @@ def test_find_stale_masks(tmp_path):
         detector_model="megadetector-v6",
         prompt=(10, 20, 100, 200),
     )
+    db.commit()
     assert db.masks_features.find_stale() == []
 
     # Insert a mask whose prompt no longer matches the current detection
@@ -22275,6 +22304,7 @@ def test_find_stale_masks(tmp_path):
         detector_model="megadetector-v6",
         prompt=(99, 20, 100, 200),
     )
+    db.commit()
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {(1, "sam2-large")}
 
@@ -22312,6 +22342,7 @@ def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
         detector_model="megadetector-v6",
         prompt=(10, 20, 100, 200),
     )
+    db.commit()
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
@@ -22325,6 +22356,7 @@ def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
         detector_model="megadetector-v6",
         prompt=(200, 200, 50, 50),
     )
+    db.commit()
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
@@ -22357,6 +22389,7 @@ def test_find_stale_masks_preserves_real_precision_bbox(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.123, 0.456, 0.300, 0.400),
     )
+    db.commit()
     assert db.masks_features.find_stale() == []
 
     # Mask whose prompt matches what the prior int() truncation would
@@ -22367,6 +22400,7 @@ def test_find_stale_masks_preserves_real_precision_bbox(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0, 0, 0, 0),
     )
+    db.commit()
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-large")
@@ -22398,6 +22432,7 @@ def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.10, 0.20, 0.30, 0.40),
     )
+    db.commit()
     # Photo 2 has a fresh, above-floor detection that matches its mask.
     db.conn.execute(
         "INSERT INTO photos(id, folder_id, filename) VALUES (2, 1, 'b.jpg')"
@@ -22412,6 +22447,7 @@ def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.50, 0.50, 0.20, 0.20),
     )
+    db.commit()
 
     # No floor: photo 1's mask matches its (low-confidence) detection,
     # so neither mask is stale. Preserves prior behavior for callers
@@ -22458,6 +22494,7 @@ def test_find_stale_masks_floor_drops_below_threshold_match(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.10, 0.10, 0.10, 0.10),
     )
+    db.commit()
     # Without floor: the 0.40 box is the primary, its prompt equals
     # the cached one → fresh.
     assert db.masks_features.find_stale() == []
@@ -22494,6 +22531,7 @@ def test_delete_stale_masks_honors_detector_confidence(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.10, 0.10, 0.10, 0.10),
     )
+    db.commit()
     # Without a floor the (matching, low-confidence) detection keeps
     # the mask fresh.
     assert subject_masks.delete_stale_masks(db) == 0
@@ -22590,6 +22628,7 @@ def test_delete_stale_masks(tmp_path):
         detector_model="megadetector-v6",
         prompt=(99, 20, 100, 200),
     )
+    db.commit()
     deleted = subject_masks.delete_stale_masks(db)
     assert deleted == 1
     assert fresh.exists()
@@ -22632,6 +22671,7 @@ def test_find_stale_masks_breaks_primary_ties_deterministically(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.20, 0.20, 0.20, 0.20),
     )
+    db.commit()
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
@@ -22644,6 +22684,7 @@ def test_find_stale_masks_breaks_primary_ties_deterministically(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.10, 0.10, 0.10, 0.10),
     )
+    db.commit()
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
@@ -22676,6 +22717,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
     )
 
     db.masks_features.delete_for_variant("sam2-small")
+    db.commit()
     assert outside.exists(), "file outside masks dir was deleted"
 
     # Same protection on delete_inactive_masks.
@@ -22683,6 +22725,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
         1, "sam2-small", str(outside),
         detector_model="md", prompt=(0, 0, 0, 0),
     )
+    db.commit()
     inside = masks_dir / "1.sam2-large.png"
     inside.write_bytes(b"in")
     db.masks_features.upsert_mask(
@@ -22691,6 +22734,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
     )
     subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     db.masks_features.delete_inactive()
+    db.commit()
     assert outside.exists(), "delete_inactive_masks unlinked outside path"
     # Active variant inside masks dir is preserved.
     assert inside.exists()
@@ -22708,6 +22752,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
         1, "sam2-small", str(stale_outside),
         detector_model="md", prompt=(1, 1, 1, 1),
     )
+    db.commit()
     subject_masks.delete_stale_masks(db)
     assert stale_outside.exists(), "delete_stale_masks unlinked outside path"
 
@@ -22735,7 +22780,9 @@ def test_mask_variants_summary(tmp_path):
             pid, var, str(p),
             detector_model="md", prompt=(0, 0, 0, 0),
         )
+        db.commit()
     subject_masks.set_active_mask_variant(db, 1, "sam2-large")
+    db.commit()
 
     summary = {s["variant"]: s for s in db.masks_features.variants_summary()}
     assert summary["sam2-small"]["count"] == 2
@@ -22778,6 +22825,7 @@ def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
         detector_model="md", prompt=(0, 0, 0, 0))
 
     subject_masks.set_active_mask_variant(db, p1, "sam2-large")
+    db.commit()
 
     db.set_active_workspace(ws_in)
     cov = {c["variant"]: c for c in db.masks_features.variant_coverage()}
@@ -22837,6 +22885,7 @@ def test_update_photo_pipeline_features_stamps_eye_kp_fingerprint(tmp_path):
             eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
         ),
     )
+    db.commit()
     fp = db.conn.execute(
         "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
     ).fetchone()[0]
@@ -22854,6 +22903,7 @@ def test_update_photo_pipeline_features_skips_eye_kp_fingerprint_when_unset(tmp_
     )
     db.conn.commit()
     db.masks_features.update_pipeline_features(1, PipelineFeatures(eye_x=0.5, eye_y=0.5))
+    db.commit()
     fp = db.conn.execute(
         "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
     ).fetchone()[0]
@@ -23126,6 +23176,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
             prompt=(0.1, 0.1, 0.8, 0.8),
         )
         subject_masks.set_active_mask_variant(db, pid, "test")
+        db.commit()
         db.predictions.add(
             det_ids[0], species="Vulpes vulpes", confidence=0.9,
             model="bioclip-2.5", category="match",

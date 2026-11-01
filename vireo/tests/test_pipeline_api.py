@@ -3272,6 +3272,7 @@ def _seed_workspace_with_masks(db_path):
         detector_model="md", prompt=(0, 0, 0, 0))
     subject_masks.set_active_mask_variant(db, p1, "sam2-small")
     subject_masks.set_active_mask_variant(db, p2, "sam2-small")
+    db.commit()
     db.close()
     return p1, p2
 
@@ -3299,6 +3300,7 @@ def _seed_workspace_with_large_only_masks(db_path):
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
         subject_masks.set_active_mask_variant(db, pid, "sam2-large")
+        db.commit()
         photo_ids.append(pid)
     db.close()
     return photo_ids
@@ -3607,6 +3609,7 @@ def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
         db.masks_features.upsert_mask(p_b, "sam2-small", "/m/b.small.png",
             detector_model="md", prompt=(0, 0, 0, 0),
             )
+        db.commit()
 
         # Mark ws_a as the most-recently-opened so a fresh Database()
         # inside _get_db() picks it as the active workspace.

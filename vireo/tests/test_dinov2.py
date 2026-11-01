@@ -562,6 +562,7 @@ def test_db_embedding_storage_roundtrip(tmp_path):
         dino_subject_embedding=embedding_to_blob(subj_emb),
         dino_global_embedding=embedding_to_blob(global_emb),
     )
+    db.commit()
 
     row = db.conn.execute(
         "SELECT dino_subject_embedding, dino_global_embedding FROM photos WHERE id=?",
@@ -610,6 +611,7 @@ def test_db_embedding_partial_update(tmp_path):
         dino_subject_embedding=embedding_to_blob(subj_emb),
         dino_global_embedding=embedding_to_blob(global_emb),
     )
+    db.commit()
 
     # Update only subject
     new_subj = np.full(768, 0.5, dtype=np.float32)
@@ -618,6 +620,7 @@ def test_db_embedding_partial_update(tmp_path):
         dino_subject_embedding=embedding_to_blob(new_subj),
         dino_global_embedding=embedding_to_blob(global_emb),
     )
+    db.commit()
 
     row = db.conn.execute(
         "SELECT dino_subject_embedding, dino_global_embedding FROM photos WHERE id=?",

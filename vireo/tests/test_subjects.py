@@ -196,9 +196,11 @@ def test_cannot_reactivate_mask_from_previous_primary(db, subject_photo):
     db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,prompt_x,prompt_y,prompt_w,prompt_h)
         VALUES (?,'test','mask.png',1,?,?,?,?,?)""", (photo_id, det['detector_model'], *(det['box_' + k] for k in 'xywh')))
     subject_masks.set_active_mask_variant(db, photo_id, 'test')
+    db.commit()
     select_primary(db, photo_id, ids[0])
     with pytest.raises(ValueError, match='another subject'):
         subject_masks.set_active_mask_variant(db, photo_id, 'test')
+        db.commit()
 
 
 def test_activate_mask_survives_floor_change_without_state_sync(db, subject_photo):
@@ -224,6 +226,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
          *(det_hi['box_' + k] for k in 'xywh')),
     )
     subject_masks.set_active_mask_variant(db, photo_id, 'test')
+    db.commit()
     # Raise the workspace's detector_confidence above ids[1]'s 0.7 so the
     # current effective primary flips to ids[0] (0.95) WITHOUT syncing
     # photo_subject_state, which still names ids[1].
@@ -240,6 +243,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
         prompt=(det_lo['box_x'], det_lo['box_y'], det_lo['box_w'], det_lo['box_h']),
     )
     subject_masks.set_active_mask_variant(db, photo_id, 'test')
+    db.commit()
 
 
 def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident(db, subject_photo):
@@ -264,6 +268,7 @@ def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident
          *(primary_det['box_' + k] for k in 'xywh')),
     )
     subject_masks.set_active_mask_variant(db, photo_id, 'test')
+    db.commit()
     rows = subject_masks.list_photos_for_eye_keypoint_stage(db, [photo_id])
     assert len(rows) == 1
     assert rows[0]['box_x'] == .6
@@ -300,6 +305,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
          *(det_hi['box_' + k] for k in 'xywh')),
     )
     subject_masks.set_active_mask_variant(db, photo_id, 'test')
+    db.commit()
     # Baseline: cached state names ids[1] (initial primary at floor 0.2);
     # eye stage surfaces the photo on ids[1]'s box.
     baseline = subject_masks.list_photos_for_eye_keypoint_stage(db, [photo_id])
@@ -327,6 +333,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
         prompt=(det_lo['box_x'], det_lo['box_y'], det_lo['box_w'], det_lo['box_h']),
     )
     subject_masks.set_active_mask_variant(db, photo_id, 'test')
+    db.commit()
     rows = subject_masks.list_photos_for_eye_keypoint_stage(db, [photo_id])
     assert len(rows) == 1
     assert rows[0]['box_x'] == .05

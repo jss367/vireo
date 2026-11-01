@@ -76,6 +76,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
                 dino_subject_embedding=embedding_to_blob(emb),
                 dino_global_embedding=embedding_to_blob(emb),
             )
+            db.commit()
 
             # Update subject_size via the existing quality method
             db.photos.update_quality(
@@ -101,6 +102,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
                 detector_model="megadetector",
                 prompt=(0.2, 0.2, 0.4, 0.4),
             )
+            db.commit()
             db.conn.execute(
                 "UPDATE photos SET active_mask_variant=? WHERE id=?",
                 ("sam2-small", pid),
@@ -1097,6 +1099,7 @@ def test_compute_review_readiness_full_features(tmp_path):
                     eye_tenengrad=200.0,
                 ),
             )
+            db.commit()
 
     out = compute_review_readiness(db)
     assert out["state"] == "computable"
@@ -1130,6 +1133,7 @@ def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
 
     # Exactly one mask out of four → 25% coverage, at the threshold.
     db.masks_features.update_pipeline_features(pids[0], PipelineFeatures(mask_path=f"/masks/{pids[0]}.png"))
+    db.commit()
 
     out = compute_review_readiness(db)
     assert out["state"] == "computable"
@@ -1143,6 +1147,7 @@ def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
 
     # Asymmetric companion: drop the only mask → 0/4, below threshold.
     db.masks_features.update_pipeline_features(pids[0], PipelineFeatures(mask_path=None))
+    db.commit()
     out_below = compute_review_readiness(db)
     assert out_below["state"] == "insufficient"
     assert out_below["with_masks"] == 0
@@ -1179,6 +1184,7 @@ def test_compute_review_readiness_below_threshold_uses_ceiling(tmp_path):
 
     # 1 mask out of 5 → 20% coverage, strictly below the 25% threshold.
     db.masks_features.update_pipeline_features(pids[0], PipelineFeatures(mask_path=f"/masks/{pids[0]}.png"))
+    db.commit()
 
     out = compute_review_readiness(db)
     assert out["state"] == "insufficient"
@@ -1269,6 +1275,7 @@ def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_pa
             dino_subject_embedding=embedding_to_blob(emb),
             dino_global_embedding=embedding_to_blob(emb),
         )
+        db.commit()
 
     for pid in pids[2:]:
         detection_store.write_detection_batch(db, pid, "megadetector-v6", [])
@@ -1328,6 +1335,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.2, 0.2, 0.4, 0.4),
     )
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET active_mask_variant=? WHERE id=?",
         ("sam2-small", pid),
@@ -1337,6 +1345,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
         dino_subject_embedding=embedding_to_blob(emb),
         dino_global_embedding=embedding_to_blob(emb),
     )
+    db.commit()
 
     out = compute_review_readiness(db)
     assert out["with_eye_keypoint_attempts"] == 1
@@ -1371,6 +1380,7 @@ def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
         detector_model="megadetector-v6",
         prompt=(0.2, 0.2, 0.4, 0.4),
     )
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET active_mask_variant=? WHERE id=?",
         ("sam2-small", pid),
@@ -2366,6 +2376,7 @@ def _add_photo_with_embedding(db, fid, filename, emb, variant=None, ts=None):
         dino_global_embedding=embedding_to_blob(emb),
         variant=variant,
     )
+    db.commit()
     return pid
 
 
@@ -2494,6 +2505,7 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
     subject_masks.set_active_mask_variant(db, pid, "test")
+    db.commit()
     return db, pid
 
 
@@ -2616,6 +2628,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
     subject_masks.set_active_mask_variant(db, other_pid, "test")
+    db.commit()
     db.predictions.add(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2702,6 +2715,7 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
     subject_masks.set_active_mask_variant(db, other_pid, "test")
+    db.commit()
 
     calls = {"n": 0}
 
@@ -2793,6 +2807,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
     subject_masks.set_active_mask_variant(db, other_pid, "test")
+    db.commit()
     db.predictions.add(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2894,6 +2909,7 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
         prompt=(0.125, 0.167, 0.75, 0.667),
     )
     subject_masks.set_active_mask_variant(db, pid, "test")
+    db.commit()
     db.predictions.add(
         det_ids[0],
         species="Vulpes vulpes",

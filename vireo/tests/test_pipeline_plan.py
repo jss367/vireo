@@ -48,6 +48,7 @@ def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
     subject_masks.set_active_mask_variant(db, photo_id, variant)
+    db.commit()
 
 
 def _tol_weights(tmp_path, name="bioclip-2"):
@@ -509,6 +510,7 @@ def test_count_photos_pending_masks_is_variant_aware(tmp_path):
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
         subject_masks.set_active_mask_variant(db, pid, "sam2-large")
+        db.commit()
 
     assert stage_counts.count_photos_pending_masks(db) == {"eligible": 2, "pending": 0}
     assert stage_counts.count_photos_pending_masks(
@@ -527,6 +529,7 @@ def test_count_photos_pending_masks_selected_variant_requires_cache_row(tmp_path
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
     subject_masks.set_active_mask_variant(db, p_done, "sam2-small")
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET mask_path='/m/legacy.png' WHERE id=?",
         (p_legacy,),
@@ -576,6 +579,7 @@ def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
         subject_masks.set_active_mask_variant(db, pid, "sam2-large")
+        db.commit()
 
     plan = compute_plan(db, PipelinePlanParams(), str(tmp_path / "test.db"))
     extract = plan["stages"]["Extract"]
@@ -803,6 +807,7 @@ def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.9, 0.9, 0.05, 0.05),
     )
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET active_mask_variant=? WHERE id=?",
         ("sam2-small", pid),
@@ -2154,6 +2159,7 @@ def test_extract_plan_done_prior_when_all_masks_present(tmp_path):
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
     subject_masks.set_active_mask_variant(db, pid, "sam2-small")
+    db.commit()
     plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
     extract = plan["stages"]["Extract"]
     assert extract["state"] == "done-prior"
@@ -2170,6 +2176,7 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
     subject_masks.set_active_mask_variant(db, pid_done, "sam2-small")
+    db.commit()
     _add_photo_with_detection(db, folder_id, "todo.jpg")
     db.conn.commit()
 
@@ -2937,6 +2944,7 @@ def test_extract_plan_restores_normal_quality_only_in_selected_scope(tmp_path):
     db, folder_id = _make_db(tmp_path)
     photo_id, _ = _add_photo_with_detection(db, folder_id, "bird.jpg")
     db.masks_features.update_pipeline_features(photo_id, PipelineFeatures(quality_input_recipe="linear-raw-subject-v1"))
+    db.commit()
     params = PipelinePlanParams()
     config = {"sam2_variant": "sam2-small"}
     plan = _extract_plan(db, params, [photo_id], config)
@@ -4309,6 +4317,7 @@ def test_extract_plan_counts_rescued_masks_and_stale_prompts(tmp_path, monkeypat
     db.masks_features.upsert_mask(pid, 'sam2-small', '/m/rescued.png',
                                  detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5))
     subject_masks.set_active_mask_variant(db, pid, 'sam2-small', weak_rescue_min_conf=0.001)
+    db.commit()
     done = extract()
     assert done['state'] == 'done-prior'
     assert done['detail']['eligible'] == 3
@@ -4359,6 +4368,7 @@ def test_rescued_mask_counts_keep_variant_detector_and_large_scope_gates(tmp_pat
     db.masks_features.upsert_mask(pid, 'sam2-small', '/m/rescued.png',
                                  detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5))
     subject_masks.set_active_mask_variant(db, pid, 'sam2-small', weak_rescue_min_conf=0.001)
+    db.commit()
     # Force both the scope and the rescue set past SQLite's legacy parameter
     # budget, including non-existent IDs that must never inflate counts.
     scope = [pid, *range(10000, 12000)]
