@@ -103,6 +103,7 @@ def test_api_photos_marks_species_representative(app_and_db):
     db.tag_photo(photo["id"], kid)
     db.commit()
     db.set_species_representative("American Robin", photo["id"])
+    db.commit()
 
     client = app.test_client()
     resp = client.get("/api/photos")
@@ -1145,6 +1146,7 @@ def test_photo_detail_life_list_marks_current_representative(app_and_db):
     db.tag_photo(pid, kid)
     db.commit()
     db.species_curation.set_photo_preference("life_list", "American Robin", pid)
+    db.commit()
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["life_list"] == [
@@ -1168,6 +1170,7 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
     db.tag_photo(p2, kid)
     db.commit()
     db.species_curation.set_photo_preference("life_list", "American Robin", p2)
+    db.commit()
 
     data = client.get(f"/api/photos/{p1}").get_json()
     assert data["life_list"] == [
@@ -1195,6 +1198,7 @@ def test_photo_detail_life_list_marks_only_primary_of_multiple_reps(app_and_db):
     # newest-first, so p2 is the primary (index 0) and p1 is secondary.
     db.set_species_representative("American Robin", p1)
     db.set_species_representative("American Robin", p2)
+    db.commit()
 
     primary = client.get(f"/api/photos/{p2}").get_json()
     secondary = client.get(f"/api/photos/{p1}").get_json()
@@ -1228,6 +1232,7 @@ def test_photo_detail_life_list_uses_primary_eligible_rep(app_and_db):
     db.commit()
     db.set_species_representative("American Robin", p1)
     db.set_species_representative("American Robin", p2)
+    db.commit()
     db.photo_review.set_flag(p2, "rejected")
     db.commit()
 
@@ -1290,6 +1295,7 @@ def test_photo_detail_life_list_multiple_species_independent_state(app_and_db):
     db.tag_photo(pid, db.add_keyword("Blue Jay", is_species=True))
     db.commit()
     db.species_curation.set_photo_preference("life_list", "Blue Jay", pid)
+    db.commit()
 
     data = client.get(f"/api/photos/{pid}").get_json()
     by_species = {e["species"]: e["is_current_photo"] for e in data["life_list"]}

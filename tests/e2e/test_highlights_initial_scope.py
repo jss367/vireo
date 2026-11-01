@@ -427,6 +427,7 @@ def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, pag
     highlighted_id = data["photos"][1]
     unhighlighted_id = data["photos"][0]
     db.species_curation.add_highlight("Red-tailed Hawk", highlighted_id)
+    db.commit()
 
     _goto_highlights(page, live_server["url"])
     hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
@@ -497,6 +498,7 @@ def test_highlights_lightbox_pick_applies_backend_score_bonus(live_server, page)
     db.conn.commit()
 
     db.species_curation.add_highlight("Red-tailed Hawk", highlighted_id)
+    db.commit()
 
     _goto_highlights(page, live_server["url"])
     hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
@@ -990,6 +992,7 @@ def test_highlights_curation_filter_controls_combine(live_server, page):
     db.species_curation.add_highlight("Red-tailed Hawk", data["photos"][0])
     db.species_curation.add_highlight("American Robin", data["photos"][3])
     db.set_species_representative("American Robin", data["photos"][3])
+    db.commit()
 
     _goto_highlights(page, live_server["url"])
     expect(page.locator(".highlights-card").first).to_be_visible(timeout=5000)
@@ -1103,6 +1106,7 @@ def test_ordered_highlight_updates_top_photo_timestamp(live_server):
 
     highlighted = data["photos"][2]
     db.species_curation.add_highlight("Red-tailed Hawk", highlighted)
+    db.commit()
 
     base = live_server["url"]
     with urlopen(f"{base}/api/highlights?scope=workspace") as resp:

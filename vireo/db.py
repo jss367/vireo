@@ -3664,7 +3664,7 @@ class Database:
             if photo_ids
         }
 
-    def set_species_representative(self, species: str, photo_id: int, _commit: bool = True) -> None:
+    def set_species_representative(self, species: str, photo_id: int) -> None:
         """Mark a photo as a representative for a species globally.
 
         Multiple photos can represent a species. Re-selecting an existing
@@ -3673,7 +3673,7 @@ class Database:
         that still expect one main representative in the active workspace.
         """
         self.species_curation.set_photo_preference(
-            "species_representative", species, photo_id, _commit=_commit
+            "species_representative", species, photo_id
         )
 
     def rename_photo_preferences_species(
@@ -3681,11 +3681,10 @@ class Database:
         old_species: str,
         new_species: str,
         photo_workspace_pairs: Collection[tuple[int, int]] | None = None,
-        _commit: bool = True,
     ) -> int:
-        """Rename stored representative-photo preferences across workspaces."""
+        """Rename stored representative-photo preferences across workspaces (no commit)."""
         return self._species_curation_repository().rename_photo_preferences(
-            old_species, new_species, photo_workspace_pairs=photo_workspace_pairs, _commit=_commit,
+            old_species, new_species, photo_workspace_pairs=photo_workspace_pairs,
         )
 
     def rename_species_highlights_species(
@@ -3693,9 +3692,8 @@ class Database:
         old_species: str,
         new_species: str,
         photo_workspace_pairs: Collection[tuple[int, int]] | None = None,
-        _commit: bool = True,
     ) -> int:
-        """Rename ordered species-highlight rows to a new species bucket.
+        """Rename ordered species-highlight rows to a new species bucket (no commit).
 
         Companion to :meth:`rename_photo_preferences_species` for the
         ``species_highlights`` table. The rows carry a per-species ``rank``,
@@ -3716,7 +3714,7 @@ class Database:
         (excludes rows dropped as duplicates).
         """
         return self._species_curation_repository().rename_highlights(
-            old_species, new_species, photo_workspace_pairs=photo_workspace_pairs, _commit=_commit,
+            old_species, new_species, photo_workspace_pairs=photo_workspace_pairs,
         )
 
     # Reads the Highlights relabel snapshots before it moves any curation.

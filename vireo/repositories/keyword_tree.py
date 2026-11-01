@@ -415,11 +415,11 @@ class KeywordTreeRepository:
         if photo_workspace_pairs:
             self.rename_species_highlights_species(
                 old_name, new_name,
-                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
+                photo_workspace_pairs=photo_workspace_pairs,
             )
             self.rename_photo_preferences_species(
                 old_name, new_name,
-                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
+                photo_workspace_pairs=photo_workspace_pairs,
             )
 
 

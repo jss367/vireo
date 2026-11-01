@@ -7,7 +7,7 @@ taxonomy-explorer reads, and the two one-shot legacy backfills.
 
 The tests go through ``db.species_curation`` (the domain accessor) and the
 two renames that stay on the ``Database`` façade. They pin return shapes and
-ordering, the ``_commit=False`` nested-transaction seams (the caller's
+ordering, that the writers leave the commit to the caller (the caller's
 transaction stays open and nothing is committed), commit visibility from a
 second connection, lazy active-workspace resolution, chunking, and that
 composition still routes where patches reach it: the other domains'
@@ -505,10 +505,11 @@ def test_photo_preferences_scoped_to_workspace(db, cur):
     assert db.species_curation.get_photo_preferences("highlights") == {}
 
 
-def test_set_photo_preference_upserts_and_commits(db, cur):
+def test_set_photo_preference_upserts_and_commits_with_the_callers_unit(db, cur):
     p = cur["p"]
-    db.species_curation.set_photo_preference("custom", "American Robin", p["robin1"])
-    db.species_curation.set_photo_preference("custom", "American Robin", p["robin2"])
+    with db.transaction():
+        db.species_curation.set_photo_preference("custom", "American Robin", p["robin1"])
+        db.species_curation.set_photo_preference("custom", "American Robin", p["robin2"])
     assert not db.conn.in_transaction
     assert _visible(
         db, "SELECT purpose, species, photo_id FROM photo_preferences"
@@ -528,9 +529,9 @@ def test_set_photo_preference_representative_purposes(db, cur, purpose):
     ]
 
 
-def test_set_photo_preference_without_commit_leaves_transaction_open(db, cur):
+def test_set_photo_preference_leaves_commit_to_caller(db, cur):
     p = cur["p"]
-    db.species_curation.set_photo_preference("life_list", "American Robin", p["robin1"], _commit=False)
+    db.species_curation.set_photo_preference("life_list", "American Robin", p["robin1"])
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_preferences") == [(0,)]
     assert _visible(db, "SELECT COUNT(*) FROM species_representatives") == [(0,)]
@@ -571,7 +572,7 @@ def test_set_species_representative(db, cur):
     assert _prefs(db) == [
         (cur["ws"], "species_representative", "American Robin", p["robin1"]),
     ]
-    db.set_species_representative("Northern Cardinal", p["card1"], _commit=False)
+    db.set_species_representative("Northern Cardinal", p["card1"])
     assert db.conn.in_transaction
     db.conn.rollback()
 
@@ -645,7 +646,8 @@ def test_representative_lists_canonicalize_species_filter(db, cur, monkeypatch):
 
 def test_restore_species_representative(db, cur):
     p = cur["p"]
-    db.set_species_representative("American Robin", p["robin1"])  # order 1
+    with db.transaction():
+        db.set_species_representative("American Robin", p["robin1"])  # order 1
     db.species_curation.restore_representative("American Robin", p["robin2"])
     db.species_curation.restore_representative("American Robin", p["card1"], "bogus")
     db.species_curation.restore_representative("American Robin", p["card2"], [1])
@@ -690,7 +692,8 @@ def test_clear_photo_preference(db, cur):
     db.set_active_workspace(other)
     db.species_curation.set_photo_preference("life_list", "American Robin", p["robin2"])
     db.set_active_workspace(cur["ws"])
-    db.species_curation.clear_photo_preference("life_list", "American Robin")
+    with db.transaction():
+        db.species_curation.clear_photo_preference("life_list", "American Robin")
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -701,12 +704,13 @@ def test_clear_photo_preference(db, cur):
     assert len(_reps(db)) == 2
 
 
-def test_clear_photo_preference_without_commit(db, cur, monkeypatch):
-    db.species_curation.set_photo_preference("custom", "American Robin", cur["p"]["robin1"])
+def test_clear_photo_preference_leaves_commit_to_caller(db, cur, monkeypatch):
+    with db.transaction():
+        db.species_curation.set_photo_preference("custom", "American Robin", cur["p"]["robin1"])
     names = []
     monkeypatch.setattr(db, "resolve_species_display_name",
                         lambda name: names.append(name) or "American Robin")
-    db.species_curation.clear_photo_preference("custom", "american robin", _commit=False)
+    db.species_curation.clear_photo_preference("custom", "american robin")
     assert names == ["american robin"]
     assert db.conn.in_transaction
     assert _prefs(db) == []
@@ -729,7 +733,8 @@ def test_clear_species_representative(db, cur):
     db.set_active_workspace(other)
     db.species_curation.set_photo_preference("highlights", "American Robin", p["robin2"])
     db.set_active_workspace(cur["ws"])
-    db.species_curation.clear_representative("American Robin")
+    with db.transaction():
+        db.species_curation.clear_representative("American Robin")
     assert not db.conn.in_transaction
     assert _visible(
         db, "SELECT species, photo_id FROM species_representatives"
@@ -741,9 +746,10 @@ def test_clear_species_representative(db, cur):
     ]
 
 
-def test_clear_species_representative_without_commit(db, cur):
-    db.set_species_representative("American Robin", cur["p"]["robin1"])
-    db.species_curation.clear_representative("American Robin", _commit=False)
+def test_clear_species_representative_leaves_commit_to_caller(db, cur):
+    with db.transaction():
+        db.set_species_representative("American Robin", cur["p"]["robin1"])
+    db.species_curation.clear_representative("American Robin")
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM species_representatives") == [(1,)]
     assert _reps(db) == []
@@ -752,11 +758,12 @@ def test_clear_species_representative_without_commit(db, cur):
 # -- species highlights --------------------------------------------------------------------
 
 
-def test_add_species_highlight_appends_and_commits(db, cur):
+def test_add_species_highlight_appends_and_commits_with_the_callers_unit(db, cur):
     p = cur["p"]
-    assert db.species_curation.add_highlight("American Robin", p["robin1"]) == 1
-    assert db.species_curation.add_highlight("American Robin", p["robin2"]) == 2
-    assert db.species_curation.add_highlight("Northern Cardinal", p["card1"]) == 1
+    with db.transaction():
+        assert db.species_curation.add_highlight("American Robin", p["robin1"]) == 1
+        assert db.species_curation.add_highlight("American Robin", p["robin2"]) == 2
+        assert db.species_curation.add_highlight("Northern Cardinal", p["card1"]) == 1
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -775,20 +782,20 @@ def test_add_species_highlight_existing_row_keeps_rank(db, cur):
     db.species_curation.add_highlight("American Robin", p["robin2"])
     db.conn.execute("UPDATE species_highlights SET updated_at = '2000-01-01'")
     db.conn.commit()
-    assert db.species_curation.add_highlight("American Robin", p["robin2"]) == 2
+    with db.transaction():
+        assert db.species_curation.add_highlight("American Robin", p["robin2"]) == 2
     assert not db.conn.in_transaction
     assert _visible(
         db,
         "SELECT photo_id FROM species_highlights WHERE updated_at != '2000-01-01'",
     ) == [(p["robin2"],)]
-    assert db.species_curation.add_highlight("American Robin", p["robin1"], _commit=False) == 1
+    assert db.species_curation.add_highlight("American Robin", p["robin1"]) == 1
     assert db.conn.in_transaction
     db.conn.rollback()
 
 
-def test_add_species_highlight_without_commit(db, cur):
-    assert db.species_curation.add_highlight("American Robin", cur["p"]["robin1"],
-                                             _commit=False) == 1
+def test_add_species_highlight_leaves_commit_to_caller(db, cur):
+    assert db.species_curation.add_highlight("American Robin", cur["p"]["robin1"]) == 1
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM species_highlights") == [(0,)]
 
@@ -1025,7 +1032,8 @@ def test_promote_species_highlight(db, cur):
     p = cur["p"]
     for pid in (p["robin1"], p["robin2"], p["card1"]):
         db.species_curation.add_highlight("American Robin", pid)
-    assert db.species_curation.promote_highlight("American Robin", p["card1"]) == 1
+    with db.transaction():
+        assert db.species_curation.promote_highlight("American Robin", p["card1"]) == 1
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -1041,10 +1049,10 @@ def test_promote_species_highlight(db, cur):
     ]
 
 
-def test_promote_species_highlight_without_commit(db, cur):
-    db.species_curation.add_highlight("American Robin", cur["p"]["robin1"])
-    assert db.species_curation.promote_highlight("American Robin", cur["p"]["robin2"],
-                                                 _commit=False) == 1
+def test_promote_species_highlight_leaves_commit_to_caller(db, cur):
+    with db.transaction():
+        db.species_curation.add_highlight("American Robin", cur["p"]["robin1"])
+    assert db.species_curation.promote_highlight("American Robin", cur["p"]["robin2"]) == 1
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM species_highlights") == [(1,)]
 
@@ -1053,14 +1061,14 @@ def test_remove_species_highlight(db, cur):
     p = cur["p"]
     db.species_curation.add_highlight("American Robin", p["robin1"])
     db.species_curation.add_highlight("American Robin", p["robin2"])
-    assert db.species_curation.remove_highlight("American Robin", p["robin1"]) == 1
+    with db.transaction():
+        assert db.species_curation.remove_highlight("American Robin", p["robin1"]) == 1
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT photo_id, rank FROM species_highlights") == [
         (p["robin2"], 2)
     ]
     assert db.species_curation.remove_highlight("American Robin", p["robin1"]) == 0
-    assert db.species_curation.remove_highlight("American Robin", p["robin2"],
-                                                _commit=False) == 1
+    assert db.species_curation.remove_highlight("American Robin", p["robin2"]) == 1
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM species_highlights") == [(1,)]
 
@@ -1077,7 +1085,8 @@ def test_move_species_highlight(db, cur):
     assert db.species_curation.move_highlight("American Robin", p["card1"], "down") is True
     db.conn.set_trace_callback(None)
     assert not any(s.lstrip().startswith("UPDATE") for s in statements)
-    assert db.species_curation.move_highlight("American Robin", p["robin1"], "down") is True
+    with db.transaction():
+        assert db.species_curation.move_highlight("American Robin", p["robin1"], "down") is True
     assert not db.conn.in_transaction
     assert order() == [p["robin2"], p["robin1"], p["card1"]]
     assert _visible(
@@ -1087,12 +1096,12 @@ def test_move_species_highlight(db, cur):
     assert order() == [p["robin2"], p["card1"], p["robin1"]]
 
 
-def test_move_species_highlight_without_commit(db, cur):
+def test_move_species_highlight_leaves_commit_to_caller(db, cur):
     p = cur["p"]
-    db.species_curation.add_highlight("American Robin", p["robin1"])
-    db.species_curation.add_highlight("American Robin", p["robin2"])
-    assert db.species_curation.move_highlight("American Robin", p["robin2"], "up",
-                                              _commit=False) is True
+    with db.transaction():
+        db.species_curation.add_highlight("American Robin", p["robin1"])
+        db.species_curation.add_highlight("American Robin", p["robin2"])
+    assert db.species_curation.move_highlight("American Robin", p["robin2"], "up") is True
     assert db.conn.in_transaction
     assert _visible(
         db, "SELECT photo_id FROM species_highlights ORDER BY rank"
@@ -1165,7 +1174,8 @@ def test_rename_photo_preferences_all_workspaces(db, cur):
     other = _seed_renames(db, cur)
     # INSERT OR IGNORE: other/custom already has a New Name row, so the old
     # one is dropped rather than moved.
-    assert db.rename_photo_preferences_species("Old Name", "New Name") == 3
+    with db.transaction():
+        assert db.rename_photo_preferences_species("Old Name", "New Name") == 3
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -1187,11 +1197,12 @@ def test_rename_photo_preferences_all_workspaces(db, cur):
 def test_rename_photo_preferences_selected_pairs(db, cur):
     p, ws = cur["p"], cur["ws"]
     other = _seed_renames(db, cur)
-    moved = db.rename_photo_preferences_species(
-        "Old Name", "New Name",
-        [(p["robin2"], other), (p["robin2"], other), (p["robin1"], ws),
-         (p["puma"], ws)],
-    )
+    with db.transaction():
+        moved = db.rename_photo_preferences_species(
+            "Old Name", "New Name",
+            [(p["robin2"], other), (p["robin2"], other), (p["robin1"], ws),
+             (p["puma"], ws)],
+        )
     assert moved == 2
     assert not db.conn.in_transaction
     assert _visible(
@@ -1212,8 +1223,8 @@ def test_rename_photo_preferences_routes_representatives_through_facade(db, cur,
     calls = []
     monkeypatch.setattr(
         SpeciesCurationRepository, "rename_representatives",
-        lambda self, old, new, photo_ids=None, _commit=True: calls.append(
-            (old, new, photo_ids, _commit)
+        lambda self, old, new, photo_ids=None: calls.append(
+            (old, new, photo_ids)
         ),
     )
     db.rename_photo_preferences_species("A", "B")
@@ -1221,18 +1232,18 @@ def test_rename_photo_preferences_routes_representatives_through_facade(db, cur,
         "A", "B", [(p["robin2"], ws), (p["robin1"], ws), (p["robin2"], 99)]
     )
     assert calls == [
-        ("A", "B", None, False),
-        ("A", "B", sorted([p["robin1"], p["robin2"]]), False),
+        ("A", "B", None),
+        ("A", "B", sorted([p["robin1"], p["robin2"]])),
     ]
 
 
 @pytest.mark.parametrize("pairs", [None, "selected"])
-def test_rename_photo_preferences_without_commit(db, cur, pairs):
+def test_rename_photo_preferences_leaves_commit_to_caller(db, cur, pairs):
     p, ws = cur["p"], cur["ws"]
     _seed_renames(db, cur)
     if pairs == "selected":
         pairs = [(p["robin1"], ws)]
-    db.rename_photo_preferences_species("Old Name", "New Name", pairs, _commit=False)
+    db.rename_photo_preferences_species("Old Name", "New Name", pairs)
     assert db.conn.in_transaction
     assert _visible(
         db, "SELECT COUNT(*) FROM photo_preferences WHERE species = 'New Name'"
@@ -1242,7 +1253,8 @@ def test_rename_photo_preferences_without_commit(db, cur, pairs):
 def test_rename_species_representatives_all(db, cur):
     p = cur["p"]
     _seed_renames(db, cur)
-    assert db.species_curation.rename_representatives("Old Name", "New Name") == 1
+    with db.transaction():
+        assert db.species_curation.rename_representatives("Old Name", "New Name") == 1
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -1254,9 +1266,10 @@ def test_rename_species_representatives_all(db, cur):
 def test_rename_species_representatives_selected_photos(db, cur):
     p = cur["p"]
     _seed_renames(db, cur)
-    assert db.species_curation.rename_representatives(
-        "Old Name", "New Name", photo_ids=[str(p["robin1"])]
-    ) == 1
+    with db.transaction():
+        assert db.species_curation.rename_representatives(
+            "Old Name", "New Name", photo_ids=[str(p["robin1"])]
+        ) == 1
     assert _visible(
         db,
         "SELECT species, photo_id FROM species_representatives "
@@ -1286,12 +1299,12 @@ def test_rename_species_representatives_chunks(db, cur):
 
 
 @pytest.mark.parametrize("photo_ids", [None, "selected"])
-def test_rename_species_representatives_without_commit(db, cur, photo_ids):
+def test_rename_species_representatives_leave_commit_to_caller(db, cur, photo_ids):
     _seed_renames(db, cur)
     if photo_ids == "selected":
         photo_ids = [cur["p"]["robin1"]]
     db.species_curation.rename_representatives("Old Name", "New Name",
-                                               photo_ids=photo_ids, _commit=False)
+                                               photo_ids=photo_ids)
     assert db.conn.in_transaction
     assert _visible(
         db, "SELECT COUNT(*) FROM species_representatives WHERE species = 'Old Name'"
@@ -1309,13 +1322,15 @@ def _seed_highlight_renames(db, cur):
     db.species_curation.add_highlight("Old Name", p["puma"])
     db.species_curation.add_highlight("Old Name", p["plain"])
     db.set_active_workspace(ws)
+    db.commit()
     return other
 
 
 def test_rename_species_highlights_all_workspaces(db, cur):
     p, ws = cur["p"], cur["ws"]
     other = _seed_highlight_renames(db, cur)
-    assert db.rename_species_highlights_species("Old Name", "New Name") == 4
+    with db.transaction():
+        assert db.rename_species_highlights_species("Old Name", "New Name") == 4
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -1365,12 +1380,12 @@ def test_rename_species_highlights_chunks_selected_photos(db, cur):
 
 
 @pytest.mark.parametrize("pairs", [None, "selected"])
-def test_rename_species_highlights_without_commit(db, cur, pairs):
+def test_rename_species_highlights_leave_commit_to_caller(db, cur, pairs):
     p, ws = cur["p"], cur["ws"]
     _seed_highlight_renames(db, cur)
     if pairs == "selected":
         pairs = [(p["robin1"], ws)]
-    db.rename_species_highlights_species("Old Name", "New Name", pairs, _commit=False)
+    db.rename_species_highlights_species("Old Name", "New Name", pairs)
     assert db.conn.in_transaction
     assert _visible(
         db, "SELECT COUNT(*) FROM species_highlights WHERE species = 'Old Name'"
@@ -1598,21 +1613,19 @@ def test_species_curation_signatures_unchanged():
         "(self, folder_id, min_quality=0.0, photo_id=None)"
     )
     assert sig["repo.set_photo_preference"] == (
-        "(self, purpose, species, photo_id, _commit=True)"
+        "(self, purpose, species, photo_id)"
     )
     assert sig["repo.move_highlight"] == (
-        "(self, species, photo_id, direction, _commit=True)"
+        "(self, species, photo_id, direction)"
     )
     assert sig["rename_photo_preferences_species"] == (
-        "(self, old_species, new_species, photo_workspace_pairs=None, "
-        "_commit=True)"
+        "(self, old_species, new_species, photo_workspace_pairs=None)"
     )
     assert sig["rename_species_highlights_species"] == (
-        "(self, old_species, new_species, photo_workspace_pairs=None, "
-        "_commit=True)"
+        "(self, old_species, new_species, photo_workspace_pairs=None)"
     )
     assert sig["repo.rename_representatives"] == (
-        "(self, old_species, new_species, photo_ids=None, _commit=True)"
+        "(self, old_species, new_species, photo_ids=None)"
     )
     assert sig["repo.restore_representative"] == (
         "(self, species, photo_id, selected_order=None)"

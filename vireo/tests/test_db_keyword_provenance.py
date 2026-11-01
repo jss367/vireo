@@ -325,7 +325,7 @@ def test_merge_keyword_into_retargets_pending_and_curation_through_the_facade(
         args, kwargs = calls[0]
         assert args == ("Egret", "Heron")
         assert sorted(kwargs.pop("photo_workspace_pairs")) == pairs
-        assert kwargs == {"_commit": False}
+        assert kwargs == {}
     rows = sorted(tuple(r) for r in db.conn.execute(
         "SELECT photo_id, change_type, value FROM pending_changes"
     ).fetchall())
@@ -735,8 +735,8 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
         ((p0, "keyword_add", "Robin"), {}),
         ((p1, "keyword_add", "Robin"), {}),
     ]
-    assert highlights[0] == (("Jay", "Robin", [(p0, ws)]), {"_commit": False})
-    assert prefs[0] == (("Jay", "Robin", [(p0, ws)]), {"_commit": False})
+    assert highlights[0] == (("Jay", "Robin", [(p0, ws)]), {})
+    assert prefs[0] == (("Jay", "Robin", [(p0, ws)]), {})
     assert _visible(
         db, "SELECT species FROM species_highlights WHERE photo_id = ?", (p0,),
     ) == [("Robin",)]
