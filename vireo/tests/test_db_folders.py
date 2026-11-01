@@ -453,6 +453,58 @@ def test_check_folder_health_updates_status_and_clears_provenance(db, tmp_path):
     assert not db.conn.in_transaction
 
 
+def test_folder_health_interrupted_during_publish_rolls_back_status_and_provenance(db, tmp_path):
+    gone = str(tmp_path / "gone")
+    folder = workspace_folders.add_folder(db, gone)
+    photo = _photo(db, folder, "bird.jpg")
+    db.conn.execute("UPDATE photos SET last_move_source_folder_path=? WHERE id=?", (gone, photo))
+    db.commit()
+
+    class TransferStarted(Exception):
+        pass
+
+    def checkpoint():
+        if db.conn.in_transaction:
+            # A transfer starts after folder updates, before provenance and
+            # commit. The pass must undo both changes instead of publishing.
+            raise TransferStarted()
+
+    with pytest.raises(TransferStarted):
+        db.folders.check_health(checkpoint=checkpoint)
+    assert not db.conn.in_transaction
+    assert db.folders.get(folder)["status"] == "ok"
+    assert db.conn.execute(
+        "SELECT last_move_source_folder_path FROM photos WHERE id=?", (photo,),
+    ).fetchone()[0] == gone
+    with _reader(db) as conn:
+        assert conn.execute("SELECT status FROM folders WHERE id=?", (folder,)).fetchone()[0] == "ok"
+
+
+def test_folder_health_does_not_overwrite_a_concurrently_relocated_folder(db, tmp_path, monkeypatch):
+    gone = str(tmp_path / "gone")
+    moved = str(tmp_path / "moved")
+    folder = workspace_folders.add_folder(db, gone)
+    photo = _photo(db, folder, "bird.jpg")
+    db.conn.execute("UPDATE photos SET last_move_source_folder_path=? WHERE id=?", (gone, photo))
+    db.commit()
+    real_exists = os.path.exists
+
+    def exists(path):
+        if path == gone:
+            with _reader(db) as conn:
+                conn.execute("UPDATE folders SET path=? WHERE id=?", (moved, folder))
+                conn.commit()
+        return real_exists(path)
+
+    monkeypatch.setattr(os.path, "exists", exists)
+    assert db.folders.check_health() == 0
+    assert db.folders.get(folder)["path"] == moved
+    assert db.folders.get(folder)["status"] == "ok"
+    assert db.conn.execute(
+        "SELECT last_move_source_folder_path FROM photos WHERE id=?", (photo,),
+    ).fetchone()[0] == gone
+
+
 def test_check_folder_health_chunks_provenance_clear(db, tmp_path):
     n = db_module._SQLITE_PARAM_CHUNK_SIZE + 3
     db.conn.executemany(

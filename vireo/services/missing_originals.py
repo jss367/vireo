@@ -66,6 +66,7 @@ def _present_names_via_listing(
     )
     names: set[str] = set()
     for name in listing.names:
+        check_cancelled()
         if name in listing.symlinks and not os.path.exists(
             os.path.join(folder_path, name)
         ):
@@ -457,6 +458,14 @@ def _scan_progress_callback(runner: JobRunner, job: JobDict) -> Callable[[JsonDi
     return progress
 
 
+class _FolderHealthDeferred(Exception):
+    """A transfer superseded this automatic folder-health pass."""
+
+
+class _AutomaticScanDeferred(Exception):
+    """An automatic missing-originals pass yielded without publishing a result."""
+
+
 class MissingOriginals:
     """Per-app Missing Originals scan state and the folder-health loop.
 
@@ -623,6 +632,8 @@ class MissingOriginals:
         return out
 
     def heavy_job_active(self) -> bool:
+        if self._get_runner().storage_transfer_active():
+            return True
         for job in self._get_runner().list_jobs():
             if job.get("status") not in (
                 "running", "pausing", "paused", "queued",
@@ -814,7 +825,13 @@ class MissingOriginals:
             progress = _scan_progress_callback(runner, job)
 
             def cancel_check() -> bool:
-                return runner.is_cancelled(job["id"])
+                if runner.is_cancelled(job["id"]):
+                    return True
+                # Do not wait: a same-workspace transfer may itself be waiting
+                # for this scan to release its workspace reservation.
+                if scan.automatic and runner.storage_transfer_active():
+                    raise _AutomaticScanDeferred()
+                return False
 
             # The 30-minute automatic check reuses the listing of every
             # folder unchanged since it was last read; a check the user
@@ -865,6 +882,8 @@ class MissingOriginals:
                 "folders_read": listing_pass.read,
                 "folders_unchanged": listing_pass.unchanged,
             }
+        except _AutomaticScanDeferred:
+            return {"deferred": True, "reason": "storage_move_active", "scope": scan.scope_label}
         except MissingPhotosCancelled:
             raise
         except Exception as exc:
@@ -896,14 +915,23 @@ class MissingOriginals:
                     ),
                 }
 
+    def _folder_health_checkpoint(self) -> None:
+        """Abandon observations made while a transfer changes folder paths."""
+        if self._get_runner().storage_transfer_active():
+            raise _FolderHealthDeferred()
+
     def folder_health_loop(self) -> None:
         """Periodically check folder health."""
         time.sleep(30)  # Initial delay
         while True:
             health_db = None
+            deferred = False
             try:
+                if self._get_runner().storage_transfer_active():
+                    time.sleep(30)
+                    continue
                 health_db = Database(self.db_path)
-                changed = health_db.folders.check_health()
+                changed = health_db.folders.check_health(checkpoint=self._folder_health_checkpoint)
                 if changed:
                     log.info("Folder health check: %d folder(s) changed status", changed)
                     # A background ok↔missing flip would otherwise leave a
@@ -913,9 +941,12 @@ class MissingOriginals:
                     # from a folder that just came back, until a later
                     # rescan replaced the entry.
                     self.invalidate()
+            except _FolderHealthDeferred:
+                deferred = True
+                log.debug("Folder health check deferred to photo transfer")
             except Exception:
                 log.debug("Folder health check failed", exc_info=True)
             finally:
                 if health_db is not None:
                     health_db.close()
-            time.sleep(600)  # 10 minutes
+            time.sleep(30 if deferred else 600)  # Retry deferred passes promptly.

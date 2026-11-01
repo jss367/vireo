@@ -182,7 +182,8 @@ def test_api_new_images_returns_pending_when_walk_is_slow(app_and_db, monkeypatc
 
 
 @pytest.mark.parametrize("query", ["", "?manual_recheck=1"])
-def test_api_new_images_defers_walk_during_folder_move(app_and_db, query):
+@pytest.mark.parametrize("job_type", ["move-folder", "move-photos", "send-to-nas"])
+def test_api_new_images_defers_walk_during_folder_move(app_and_db, query, job_type):
     """Automatic and manual checks wait while rsync moves the library."""
     import threading
     import time
@@ -194,7 +195,7 @@ def test_api_new_images_defers_walk_during_folder_move(app_and_db, query):
 
     release = threading.Event()
     move_id = app._job_runner.start(
-        "move-folder",
+        job_type,
         lambda _job: release.wait(timeout=synchronization_timeout(5)),
         workspace_id=ws_id,
     )
@@ -223,6 +224,105 @@ def test_api_new_images_defers_walk_during_folder_move(app_and_db, query):
         if app._job_runner.get(move_id)["status"] != "running":
             break
         time.sleep(0.01)
+
+
+@pytest.mark.parametrize("action", ["resume", "cancel"])
+@pytest.mark.parametrize("pause_at", ["root", "entry", "publish"])
+def test_inflight_discovery_yields_to_a_new_nas_transfer(app_and_db, monkeypatch, action, pause_at):
+    import os
+    import threading
+
+    import new_images as module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "photos"
+    moved = tmp_path / "moved"
+    _touch_image(str(root / "bird.jpg"))
+    folder = workspace_folders.add_folder(db, str(root))
+    entered, next_entry, waiting, release = [threading.Event() for _ in range(4)]
+    reading = threading.Event()
+    closed = threading.Event()
+    closed.set()  # No directory reader is open before the first root.
+    runner = app._job_runner
+    original_push = runner.push_event
+    original_count_root = module._count_root_new_images
+
+    def count_root(*args, **kwargs):
+        if pause_at == "root" and not entered.is_set():
+            entered.set()
+            assert next_entry.wait(synchronization_timeout(5))
+        result = original_count_root(*args, **kwargs)
+        if pause_at == "publish" and not entered.is_set():
+            entered.set()
+            assert next_entry.wait(synchronization_timeout(5))
+        return result
+
+    def walk(top, **kwargs):
+        closed.clear()
+        try:
+            with os.scandir(top) as entries:
+                for entry in entries:
+                    if pause_at == "entry":
+                        entered.set()
+                        assert next_entry.wait(synchronization_timeout(5))
+                    kwargs["on_entry"]()
+                    reading.set()
+                    yield top, [], [entry.name]
+        finally:
+            closed.set()
+
+    def push(job_id, kind, payload):
+        original_push(job_id, kind, payload)
+        if payload.get("phase") == "Waiting for photo transfer":
+            waiting.set()
+
+    def transfer_work(job):
+        from db import Database
+
+        assert release.wait(synchronization_timeout(10))
+        root.rename(moved)
+        with Database(db._db_path) as connection:
+            connection.conn.execute("UPDATE folders SET path=? WHERE id=?", (str(moved), folder))
+            connection.commit()
+        return {}
+
+    monkeypatch.setattr(module, "safe_scan_walk", walk)
+    monkeypatch.setattr(module, "_count_root_new_images", count_root)
+    monkeypatch.setattr(runner, "push_event", push)
+    client = app.test_client()
+    try:
+        assert client.get("/api/workspaces/active/new-images").get_json()["pending"]
+        assert entered.wait(synchronization_timeout(5))
+        discovery = next(job for job in runner.list_jobs() if job["type"] == "new_images_walk")
+        transfer, _, _ = runner.start_singleton(
+            "send-to-nas", transfer_work,
+            singleton_key="transfer", workspace_id=ws_id, exclusive_workspace=True,
+        )
+        reading.clear()
+        next_entry.set()
+        assert waiting.wait(synchronization_timeout(5))
+        assert not reading.is_set()
+        assert closed.is_set(), "discovery parked with an open directory iterator"
+        if action == "resume":
+            release.set()
+        else:
+            runner.cancel_job(discovery["id"])
+        from wait import wait_for_job_via_client
+        result = wait_for_job_via_client(client, discovery["id"])
+        assert result["status"] == ("completed" if action == "resume" else "cancelled"), result
+        if action == "resume":
+            assert reading.is_set()
+            cached = client.get("/api/workspaces/active/new-images").get_json()
+            assert cached["new_count"] == 1
+            assert cached["sample"] == [str(moved / "bird.jpg")]
+            assert not cached["unreachable_roots"]
+        else:
+            assert not reading.is_set()
+        release.set()
+        wait_for_job_via_client(client, transfer)
+    finally:
+        next_entry.set()
+        release.set()
 
 
 def test_api_new_images_returns_cached_after_background_compute_finishes(app_and_db):

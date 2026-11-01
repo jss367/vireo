@@ -20,6 +20,84 @@ from services.grouping_history import record_grouping_edit
 from wait import wait_for_job_via_client
 
 
+def test_source_verification_never_waits_with_original_handle_open(db, tmp_path, monkeypatch):
+    import hashlib
+
+    config = _cache_config(tmp_path)
+    source = _payload(tmp_path / "source" / "bird.jpg", b"photo" * 500_000)
+    info = source.stat()
+    folder = workspace_folders.add_folder(db, str(source.parent))
+    photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?",
+                    (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
+    db.commit()
+    render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
+    handles, cancellations, transfer_waits = [], [], []
+    real_open = retained_cache.open_source
+    transfer_started = threading.Event()
+
+    def tracked_open(path):
+        handle = real_open(path)
+        if os.fspath(path) == str(source):
+            handles.append(handle)
+        return handle
+
+    def checkpoint():
+        if any(not handle.closed for handle in handles):
+            # A transfer arrives during the first hash chunk. Subsequent
+            # chunks must finish/close the source instead of parking with it.
+            transfer_started.set()
+        cancellations.append(True)
+
+    def wait_for_transfer():
+        assert all(handle.closed for handle in handles), "transfer wait retained an original handle"
+        transfer_waits.append(transfer_started.is_set())
+
+    monkeypatch.setattr(retained_cache, "open_source", tracked_open)
+    probe = retained_cache.source_verifier(
+        db, config, checkpoint, read_checkpoint=wait_for_transfer,
+    )
+    assert probe(str(render)), probe.verification_failure
+    assert transfer_started.is_set()
+    assert transfer_waits == [False]  # Only before opening the source.
+    assert len(cancellations) >= 4  # Hash chunks and EOF remain cancellable.
+    assert all(handle.closed for handle in handles)
+    assert probe.recheck(str(render))
+    assert transfer_waits == [False]  # No transfer wait under the reader guard.
+    wait_for_transfer()  # The next cleanup checkpoint can yield safely.
+    assert transfer_waits == [False, True]
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_source_verification_rejects_an_original_moved_during_hashing(db, tmp_path, replace):
+    import hashlib
+
+    config = _cache_config(tmp_path)
+    source = _payload(tmp_path / "source" / "bird.jpg", b"original" * 300_000)
+    info = source.stat()
+    folder = workspace_folders.add_folder(db, str(source.parent))
+    photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?",
+                    (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
+    db.commit()
+    render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
+    moved = source.with_name("moved.jpg")
+
+    def checkpoint():
+        if not moved.exists():
+            source.rename(moved)  # Arrives after the transfer gate, with the read handle open.
+            if replace:
+                source.write_bytes(moved.read_bytes())
+                os.utime(source, (info.st_atime, info.st_mtime))
+
+    probe = retained_cache.source_verifier(db, config, checkpoint, read_checkpoint=lambda: None)
+    assert not probe(str(render))
+    assert probe.verification_failure
+    assert not probe.recheck(str(render))
+    assert render.exists()
+    assert moved.read_bytes() == b"original" * 300_000
+
+
 def _pipeline(path, ids):
     path.write_text(json.dumps({
         "photos": [{"id": pid} for pid in ids],
@@ -894,6 +972,49 @@ def test_maintenance_that_only_removed_orphan_results_is_kept_in_history(app_and
     ).fetchone()
     assert row is not None and row["origin"] == "system"
     assert "2 result files of deleted workspaces" in row["summary"]
+
+
+def test_automatic_maintenance_yields_between_files_and_resumes(app_and_db, monkeypatch):
+    from services.startup_tasks import StartupTasks
+    from testing.waits import synchronization_timeout
+
+    app, db = app_and_db
+    runner = app._job_runner
+    entered, next_file, waiting, release = [threading.Event() for _ in range(4)]
+    files = []
+    original_push = runner.push_event
+
+    def push(job_id, kind, payload):
+        original_push(job_id, kind, payload)
+        if payload.get("phase") == "Waiting for photo transfer":
+            waiting.set()
+
+    def cleanup(*args, checkpoint, **kwargs):
+        files.append("first")
+        entered.set()
+        assert next_file.wait(synchronization_timeout(5))
+        checkpoint()
+        files.append("second")
+        return {"errors": [], "errors_total": 0, "ok": True}
+
+    monkeypatch.setattr(runner, "push_event", push)
+    monkeypatch.setattr(retained_cache, "cleanup", cleanup)
+    tasks = StartupTasks(app, db._db_path, db)
+    background = runner.start("retained-cache-maintenance", tasks._maintain_retained_caches)
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        transfer = runner.start("send-to-nas", lambda _: release.wait(synchronization_timeout(10)), workspace_id=2)
+        next_file.set()
+        assert waiting.wait(synchronization_timeout(5))
+        assert files == ["first"]
+        release.set()
+        job = wait_for_job_via_client(app.test_client(), background)
+        assert job["status"] == "completed", job
+        assert files == ["first", "second"]
+        wait_for_job_via_client(app.test_client(), transfer)
+    finally:
+        next_file.set()
+        release.set()
 
 
 def test_maintenance_with_nothing_to_do_is_a_noop(app_and_db, monkeypatch):

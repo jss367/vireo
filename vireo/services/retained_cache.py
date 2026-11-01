@@ -18,9 +18,11 @@ from typing import TYPE_CHECKING, Any
 
 from app_paths import media_root
 from config import config_value
+from source_reader import open_source
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
+    from typing import BinaryIO
 
     from db import Database
     from services.service_types import JsonDict
@@ -84,8 +86,23 @@ class SourceVerifier:
         return self._verify(path)
 
 
-def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], object] = lambda: None) -> SourceVerifier:
+def _source_hash(handle: BinaryIO, checkpoint: Callable[[], object]) -> str:
+    digest = hashlib.sha256()
+    while True:
+        checkpoint()
+        block = handle.read(1024 * 1024)
+        if not block:
+            return digest.hexdigest()
+        digest.update(block)
+
+
+def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], object] = lambda: None,
+                    *, read_checkpoint: Callable[[], object] | None = None) -> SourceVerifier:
     """Fail closed unless independent catalog sources can be read in full."""
+    # Yield before opening each source. Hashing only polls cancellation: a
+    # transfer must never wait for a Windows source handle we parked with open.
+    # The guarded final recheck likewise never waits under a renderer lock.
+    read_checkpoint = checkpoint if read_checkpoint is None else read_checkpoint
     generated = media_root(config["THUMB_CACHE_DIR"])
     excluded = [*roots(config).values(), *[os.path.join(generated, name) for name in (
         "offline", "working", "previews", "staging", "local-folders", "local-workspaces",
@@ -103,7 +120,7 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
         # can expose ChangeTime. Keep every identity field, including the
         # change-time guard, by querying the named path through fstat too.
         if os.name == "nt":
-            with open(path, "rb") as handle:
+            with open_source(path) as handle:
                 return _identity(os.fstat(handle.fileno()))
         return _identity(os.stat(path))
 
@@ -128,11 +145,12 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
         checked = []
         try:
             for name, expected_size, expected_mtime, expected_hash in identities:
+                read_checkpoint()
                 original = os.path.join(source["folder_path"], name)
                 resolved = os.path.normcase(os.path.realpath(original))
                 if any(_within(resolved, root) for root in excluded):
                     return reject("managed-source-path")
-                with open(original, "rb") as handle:
+                with open_source(original) as handle:
                     before = os.fstat(handle.fileno())
                     if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
                         return reject("nonempty-regular-source-required", mode=before.st_mode, size=before.st_size)
@@ -140,14 +158,11 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
                         return reject("catalog-metadata-mismatch", expected_size=expected_size,
                                       actual_size=before.st_size, expected_mtime=expected_mtime,
                                       actual_mtime=before.st_mtime)
-                    digest = hashlib.sha256()
-                    while block := handle.read(1024 * 1024):
-                        checkpoint()
-                        digest.update(block)
+                    digest = _source_hash(handle, checkpoint)
                     after = os.fstat(handle.fileno())
                     if _identity(before) != _identity(after):
                         return reject("source-changed-during-read", before=_identity(before), after=_identity(after))
-                    if digest.hexdigest() != expected_hash:
+                    if digest != expected_hash:
                         return reject("source-hash-mismatch")
                 after = path_identity(original)
                 if _identity(before) != after:
@@ -171,7 +186,7 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
                 resolved = os.path.normcase(os.path.realpath(original))
                 if any(_within(resolved, root) for root in excluded):
                     return False
-                with open(original, "rb") as handle:
+                with open_source(original) as handle:
                     if (_identity(os.fstat(handle.fileno())) != _identity(expected)
                             or not handle.read(1)
                             or path_identity(original) != _identity(expected)):

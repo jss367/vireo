@@ -6,6 +6,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -230,6 +231,10 @@ class _RootOffline(Exception):
         self.exc = exc
 
 
+class DiscoveryDeferred(Exception):
+    """Close this root's directory iterators before yielding to a transfer."""
+
+
 class _NewImagesTally:
     """Running totals of one :func:`count_new_images_for_workspace` pass."""
 
@@ -329,12 +334,22 @@ def _root_excluded_before_walk(root_path, mount_root):
     return not os.path.isdir(root_path)
 
 
+def _root_checkpoint(progress):
+    """Restart a stale root snapshot instead of waiting and then using it."""
+    if progress.should_yield is not None:
+        if progress.should_yield():
+            raise DiscoveryDeferred()
+    elif progress.checkpoint is not None:
+        progress.checkpoint()
+
+
 def _count_root_new_images(tally, root, known, reachability, staged_sources,
                            source_resolutions, reachability_generation,
-                           sample_limit, progress_callback, progress_every,
+                           sample_limit, progress,
                            stall_timeout, listing_cache):
     """Walk one mapped root and add what it holds to ``tally``."""
     root_path = root["path"]
+    _root_checkpoint(progress)
     # prune_scan_dirs filters only children; if the root is, or sits
     # inside, an excluded bundle (e.g. user added
     # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
@@ -386,10 +401,7 @@ def _count_root_new_images(tally, root, known, reachability, staged_sources,
     outcome = _walk_root_bounded(
         _RootWalk(root_path, mount_root, reachability, reachability_generation),
         known, tally.seen_new_paths,
-        _WalkProgress(
-            progress_callback, progress_every,
-            tally.files_checked, tally.total, tally.last_emitted,
-        ),
+        progress,
         stall_timeout,
         listing_pass=listing_pass,
         excluded_dirs=excluded_dirs,
@@ -424,7 +436,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 
                                    progress_every=250,
                                    reachability=None,
                                    stall_timeout=None,
-                                   listing_cache=None):
+                                   listing_cache=None,
+                                   checkpoint=None, should_yield=None):
     """Return {'new_count': int, 'per_root': [...], 'sample': [abs_path, ...],
     'unreachable_roots': [abs_path, ...], 'folders_read': int,
     'folders_unchanged': int}.
@@ -470,6 +483,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 
     until the copy is synced or discarded. They are listed in
     ``local_copy_excluded`` so the banner can say what was left out.
     """
+    if checkpoint is not None:
+        checkpoint()
     if reachability is None:
         reachability = volume_reachability.get_shared()
     if stall_timeout is None:
@@ -490,7 +505,9 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 
         _count_root_new_images(
             tally, root, known, reachability, staged_sources,
             source_resolutions, reachability_generation, sample_limit,
-            progress_callback, progress_every, stall_timeout, listing_cache,
+            _WalkProgress(progress_callback, progress_every, tally.files_checked,
+                          tally.total, tally.last_emitted, checkpoint, should_yield),
+            stall_timeout, listing_cache,
         )
 
     if progress_callback is not None:
@@ -498,7 +515,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 
     volume_reachability.record_known_mount_roots(
         db, {root: True for root in tally.live_mount_roots}
     )
-
+    if should_yield is not None and should_yield():
+        raise DiscoveryDeferred()
     return tally.result(sample_limit)
 
 
@@ -642,6 +660,10 @@ class _WalkProgress:
     """New images found in earlier roots."""
     last_emitted: int
     """``files_checked`` at the last report."""
+    checkpoint: Callable[[], object] | None = None
+    """Yield background I/O without reporting the intentional wait as a stall."""
+    should_yield: Callable[[], bool] | None = None
+    """Nonblocking transfer/cancellation probe safe inside directory reads."""
 
 
 def _reserve_root_walk(walk):
@@ -726,6 +748,8 @@ def _root_walk_worker(state, walk, known, local_seen, progress, listing_pass,
     def _beat():
         if state["abandoned"]:
             raise _WalkAbandoned()
+        if progress.should_yield is not None and progress.should_yield():
+            raise DiscoveryDeferred()
         state["last"] = time.monotonic()
 
     def _on_walk_error(exc):
@@ -767,15 +791,15 @@ def _root_walk_worker(state, walk, known, local_seen, progress, listing_pass,
             # ``on_entry`` heartbeats on every directory entry received, so a
             # slow-but-streaming network listing (or a directory with fewer
             # than 256 entries taking a while) is not mistaken for a stall.
-            walk = safe_scan_walk(
+            with closing(safe_scan_walk(
                 root_path, onerror=_on_walk_error, on_entry=_beat,
                 listing_pass=listing_pass,
-            )
-            _walk_root_for_new_images(
-                walk, known, local_seen, state["paths"],
-                on_file=_on_file, on_error=_on_walk_error,
-                excluded_dirs=excluded_dirs, excluded_hits=state["excluded"],
-            )
+            )) as entries:
+                _walk_root_for_new_images(
+                    entries, known, local_seen, state["paths"],
+                    on_file=_on_file, on_error=_on_walk_error,
+                    excluded_dirs=excluded_dirs, excluded_hits=state["excluded"],
+                )
         except _RootOffline as exc:
             state["offline"] = exc
         except _WalkAbandoned:
@@ -806,6 +830,7 @@ def _walk_root_bounded(walk, known, seen_new_paths, progress, stall_timeout, *,
     # Recorded on this root if the watchdog fires: it dates the outage to the
     # world this walk started in, so a later recheck can tell it apart from
     # one observed after the user asked us to look again.
+    _root_checkpoint(progress)
     walk_epoch = _current_walk_epoch()
     if not _reserve_root_walk(walk):
         return None

@@ -628,6 +628,8 @@ def _new_images_walk(result: dict, config: dict) -> tuple[str, list[str]]:
 
 
 def _missing_originals_scan(result: dict, config: dict) -> tuple[str, list[str]]:
+    if result.get("deferred"):
+        return "Check deferred until photo transfer finishes", []
     if result.get("cancelled"):
         return "Check cancelled", []
     missing = _int(result, "missing_count")
