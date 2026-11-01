@@ -837,6 +837,7 @@ def test_sync_preview_describes_location_keyword_as_xmp_delta(
     ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, tallahassee_id)
+    db.commit()
     db.queue_change(photo_id, "location", "effective")
     db.commit()
 
@@ -876,6 +877,7 @@ def test_sync_preview_keeps_location_assignment_clear_when_xmp_writes_are_disabl
     ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, location_id)
+    db.commit()
     db.queue_change(photo_id, "location", "effective")
     db.commit()
 
@@ -976,6 +978,7 @@ def test_sync_preview_reports_rating_persisted_when_location_creates_sidecar(
     ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, location_id)
+    db.commit()
     db.queue_change(photo_id, "rating", "4")
     db.commit()
     db.queue_change(photo_id, "location", "effective")
@@ -1013,6 +1016,7 @@ def test_sync_preview_does_not_persist_rating_when_location_lacks_gps(
     ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, location_id)
+    db.commit()
     db.queue_change(photo_id, "rating", "2")
     db.commit()
     db.queue_change(photo_id, "location", "effective")
@@ -2365,6 +2369,7 @@ def _assign_location(db, photo_id, chain):
         ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, parent_id)
+    db.commit()
     return parent_id
 
 
@@ -2790,6 +2795,7 @@ def test_renaming_a_location_ancestor_queues_descendant_photos(
     ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, paris_id)
+    db.commit()
     _drop_all_pending(db)
 
     client = app.test_client()
@@ -2981,6 +2987,7 @@ def test_deleting_a_location_ancestor_queues_descendant_photos(
     ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, paris_id)
+    db.commit()
     _drop_all_pending(db)
 
     client = app.test_client()

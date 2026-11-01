@@ -26,7 +26,6 @@ access, see ``Database.locations``).
 import sqlite3
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager
 
 
 class LocationRepository:
@@ -42,26 +41,6 @@ class LocationRepository:
         self.folder_subtree_ids = folder_subtree_ids
         self.build_query_from_rules = build_query_from_rules
         self.merge_keyword_into = merge_keyword_into
-
-    @contextmanager
-    def transaction(self):
-        """Keep nested location failures local and respect held history commits."""
-        nested = self.conn.in_transaction
-        if nested:
-            self.conn.execute("SAVEPOINT location_edit")
-        try:
-            yield self.conn
-        except BaseException:
-            if nested:
-                self.conn.execute("ROLLBACK TO location_edit")
-                self.conn.execute("RELEASE location_edit")
-            else:
-                self.conn.rollback()
-            raise
-        else:
-            if nested:
-                self.conn.execute("RELEASE location_edit")
-            self.conn.commit()
 
     def _chunks(self, values):
         values = list(values)
@@ -370,8 +349,8 @@ class LocationRepository:
     def queue_changes_for_tagged_photos(self, *, queue_change):
         """Queue a ``location`` change for every located photo in the workspace.
 
-        ``queue_change`` is the façade's ``Database.queue_change``; each call
-        runs uncommitted and one commit covers the batch. Returns
+        ``queue_change`` is the façade's ``Database.queue_change``. Does not
+        commit: the caller's unit of work covers the batch. Returns
         ``{"photos": n, "queued": k, "already_queued": n - k}``.
         """
         ws_id = self.workspace_id_fn()
@@ -394,7 +373,6 @@ class LocationRepository:
                 workspace_id=ws_id,
             ):
                 queued += 1
-        self.conn.commit()
         return {
             "photos": len(photo_ids),
             "queued": queued,
@@ -618,7 +596,7 @@ class LocationRepository:
         return True
 
     def repair_misclassified_ancestors(self, *, restore_ancestor):
-        """Run the restore passes and the root merge; commit if anything changed.
+        """Run the restore passes and the root merge (no commit).
 
         ``restore_ancestor`` is the façade's
         ``_restore_misclassified_location_ancestor``. Returns
@@ -640,8 +618,6 @@ class LocationRepository:
             if not repaired_this_pass:
                 break
         merged_roots = self.merge_duplicate_roots()
-        if repaired or merged_roots:
-            self.conn.commit()
         return repaired, merged_roots
 
     def merge_duplicate_roots(self):
@@ -743,7 +719,6 @@ class LocationRepository:
             "longitude = COALESCE(longitude, ?) WHERE id = ?",
             (latitude, longitude, keyword_id),
         )
-        self.conn.commit()
 
     def keyword_place_row(self, keyword_id):
         """Row (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
@@ -903,16 +878,9 @@ class LocationRepository:
 
         Does NOT delete the keyword rows themselves — other photos may still
         reference them, and even if they don't, free-text/place-id keywords
-        are part of the user's vocabulary.
-
-        Commits.
+        are part of the user's vocabulary. Does not commit.
         """
-        with self.transaction():
-            self.conn.execute(
-                "DELETE FROM photo_keywords WHERE photo_id = ? "
-                "AND keyword_id IN (SELECT id FROM keywords WHERE type='location')",
-                (photo_id,),
-            )
+        self.delete_photo_links(photo_id)
 
     # -- reverse-geocode cache -----------------------------------------------
 
@@ -946,16 +914,15 @@ class LocationRepository:
         return {"place_id": row["place_id"], "response": row["response"]}
 
     def reverse_geocode_cache_put(self, lat_grid, lng_grid, place_id, response_json):
-        """Upsert a reverse-geocode result at a grid cell and commit."""
+        """Upsert a reverse-geocode result at a grid cell (no commit)."""
         fetched_at = int(time.time())
-        with self.conn:
-            self.conn.execute(
-                "INSERT INTO place_reverse_geocode_cache "
-                "  (lat_grid, lng_grid, place_id, response, fetched_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(lat_grid, lng_grid) DO UPDATE SET "
-                "  place_id   = excluded.place_id, "
-                "  response   = excluded.response, "
-                "  fetched_at = excluded.fetched_at",
-                (lat_grid, lng_grid, place_id, response_json, fetched_at),
-            )
+        self.conn.execute(
+            "INSERT INTO place_reverse_geocode_cache "
+            "  (lat_grid, lng_grid, place_id, response, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(lat_grid, lng_grid) DO UPDATE SET "
+            "  place_id   = excluded.place_id, "
+            "  response   = excluded.response, "
+            "  fetched_at = excluded.fetched_at",
+            (lat_grid, lng_grid, place_id, response_json, fetched_at),
+        )

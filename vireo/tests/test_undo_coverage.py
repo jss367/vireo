@@ -23,6 +23,7 @@ def test_location_history_restores_mixed_originals_and_provenance(app_and_db, ro
     db.commit()
     before = [db.edit_history.photo_location_state(pid) for pid in pids]
     new_id = db.get_or_create_text_location('New place')
+    db.commit()
     body = {'keyword_id': new_id}
     if 'text' in route:
         body = {'name': 'New place'}
@@ -195,6 +196,7 @@ def test_later_location_group_conflict_preserves_successful_assignments(app_and_
     pids = [p['id'] for p in db.photos.list_page()]
     good = db.get_or_create_text_location('Good place')
     country = db.get_or_create_text_location('Conflict country')
+    db.commit()
     db.conn.execute("INSERT INTO keywords(name, type, parent_id) VALUES ('Conflict state', 'general', ?)", (country,))
     db.commit()
     with db.transaction():
@@ -225,8 +227,10 @@ def test_unchanged_text_location_with_new_coordinates_queues_sync_and_keeps_redo
     client = app.test_client()
     pids = [p['id'] for p in db.photos.list_page()][:2 if batch else 1]
     keyword_id = db.get_or_create_text_location('Existing place')
+    db.commit()
     for pid in pids:
         db.set_photo_location(pid, keyword_id)
+        db.commit()
     assert not any(db.locations.has_pending_change(pid) for pid in pids)
     # An unrelated undone edit must remain redoable after this assignment.
     assert client.post(f'/api/photos/{pids[0]}/rating', json={'rating': 5}).status_code == 200

@@ -112,9 +112,10 @@ def reverse_geocode_cache_put(
     the caller serializes; we don't re-encode.
     """
     lat_grid, lng_grid = reverse_geocode_grid(lat, lng)
-    db.locations.reverse_geocode_cache_put(
-        lat_grid, lng_grid, place_id, response_json,
-    )
+    with db.transaction():
+        db.locations.reverse_geocode_cache_put(
+            lat_grid, lng_grid, place_id, response_json,
+        )
 
 
 def decode_cached_reverse_geocode(cached: Mapping[str, str | None], language: str | None) -> tuple[bool, JsonDict]:

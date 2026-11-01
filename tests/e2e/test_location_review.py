@@ -189,9 +189,11 @@ def _seed_gps_discrepancies(live_server):
     db = live_server['db']
     photo_ids = live_server['data']['photos'][:2]
     keyword = db.get_or_create_text_location('Kumeyaay Lake')
+    db.commit()
     db.conn.execute('UPDATE keywords SET latitude=?, longitude=? WHERE id=?', (32.841515, -117.032998, keyword))
     for pid in photo_ids:
         db.set_photo_location(pid, keyword)
+        db.commit()
         db.conn.execute(
             'UPDATE photos SET latitude=?, longitude=?, timestamp=? WHERE id=?',
             (32.8360733333333, -117.029203333333, '2026-09-12T10:31:33', pid),
@@ -2163,8 +2165,10 @@ def test_time_review_reuses_saved_location_and_preserves_scope(live_server, page
     db = live_server["db"]
     photo_ids = live_server["data"]["photos"]
     location_id = db.get_or_create_text_location("Lakeside Park")
+    db.commit()
     db.conn.execute("UPDATE keywords SET latitude = 42, longitude = -71 WHERE id = ?", (location_id,))
     db.set_photo_location(photo_ids[3], location_id)
+    db.commit()
     collection_id = db.collections.add("Morning outing", json.dumps([
         {"field": "photo_ids", "value": photo_ids[:3]},
     ]))

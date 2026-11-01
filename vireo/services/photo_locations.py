@@ -97,9 +97,10 @@ def queue_location_changes_for_tagged_photos(db: Database) -> dict[str, int]:
     Returns ``{"photos": n, "queued": k, "already_queued": n - k}``.
     ``queue_change`` skips a duplicate, so re-running this is idempotent.
     """
-    result = db.locations.queue_changes_for_tagged_photos(
-        queue_change=db.queue_change,
-    )
+    with db.transaction():
+        result = db.locations.queue_changes_for_tagged_photos(
+            queue_change=db.queue_change,
+        )
     log.info(
         "Queued %d location change(s) for %d located photo(s)",
         result["queued"], result["photos"],

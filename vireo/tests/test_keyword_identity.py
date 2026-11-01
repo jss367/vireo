@@ -51,6 +51,7 @@ def place_pair(db, name='Lake Hodges', nested=False):
         'place_id': 'test-place', 'name': name, 'lat': 33.06, 'lng': -117.11,
         'address_components': [{'name': 'San Diego', 'types': ['locality']}],
     })
+    db.commit()
     return source, target, parent
 
 
@@ -207,6 +208,7 @@ def test_catalog_import_does_not_attach_flat_and_hierarchical_leaf(catalog, monk
     assert leaves[0]['parent_id'] is not None
     target = db.upsert_place_chain({'place_id': 'test-place', 'name': 'Lake Hodges', 'lat': 33, 'lng': -117,
                                     'address_components': []})
+    db.commit()
     reconcile_location(db, leaves[0]['id'], target)
     execute_import(['dummy.lrcat'], db, write_xmp=False)
     assert [k['id'] for k in db.photo_keywords.get_for_photo(photos[0])] == [target]
@@ -233,11 +235,13 @@ def test_reconciliation_accepts_an_existing_descendant_location(catalog):
     source, target, _ = place_pair(db)
     child = db.upsert_place_chain({'name': 'Picnic area', 'place_id': 'picnic-place',
                                    'lat': 33.1, 'lng': -117.1, 'address_components': []})
+    db.commit()
     db.conn.execute('UPDATE keywords SET parent_id = ? WHERE id = ?', (target, child))
     db.conn.commit()
     db.tag_photo(photos[0], source)
     db.commit()
     db.set_photo_location(photos[0], child)
+    db.commit()
     assert location_candidates(db)[0]['conflicting_photo_count'] == 0
     reconcile_location(db, source, target)
     assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target, child}
@@ -249,9 +253,11 @@ def test_reconciliation_does_not_override_a_different_assigned_place(catalog):
     source, target, _ = place_pair(db)
     other = db.upsert_place_chain({'name': 'Another lake', 'place_id': 'another-place',
                                   'lat': 40, 'lng': -100, 'address_components': []})
+    db.commit()
     db.tag_photo(photos[0], source)
     db.commit()
     db.set_photo_location(photos[0], other)
+    db.commit()
     assert location_candidates(db)[0]['conflicting_photo_count'] == 1
     with pytest.raises(ValueError, match='different linked place'):
         reconcile_location(db, source, target)
@@ -366,6 +372,7 @@ def test_linking_a_place_to_an_existing_place_preserves_import_aliases(catalog):
     details = {'name': 'Lake Hodges Preserve', 'place_id': 'corrected-place',
                'lat': 33, 'lng': -117, 'address_components': []}
     survivor = db.upsert_place_chain(details)
+    db.commit()
     result = db.keyword_provenance.link_keyword_to_place(target, details)
     db.commit()
     assert result == {'keyword_id': survivor, 'merged': True}
@@ -392,6 +399,7 @@ def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(cat
         db.commit()
         target = db.upsert_place_chain({'name': 'Springfield', 'place_id': f'springfield-{index}',
                                         'lat': 38 + index, 'lng': -90, 'address_components': []})
+        db.commit()
         db.tag_photo(photos[index], source)
         db.commit()
         reconcile_location(db, source, target)
@@ -619,6 +627,7 @@ def test_manual_merge_rejects_unsafe_selection(catalog, case):
         db.conn.execute('UPDATE keywords SET is_species = 1 WHERE id = ?', (source,))
     elif case in ('photo_conflict', 'alias'):
         other = db.upsert_place_chain({'place_id': 'other-place', 'name': 'Other lake', 'lat': 34, 'lng': -116, 'address_components': []})
+        db.commit()
         if case == 'photo_conflict':
             db.tag_photo(photos[0], other)
             db.commit()
@@ -901,6 +910,7 @@ def test_merge_conflict_guard_covers_photos_tagged_only_on_a_moved_descendant(ca
     elsewhere = db.upsert_place_chain({
         'place_id': 'other-place', 'name': 'Elsewhere', 'lat': 50, 'lng': 10,
         'address_components': []})
+    db.commit()
     db.conn.commit()
     db.tag_photo(photos[0], leaf)
     db.tag_photo(photos[0], elsewhere)
@@ -1257,6 +1267,7 @@ def _collapsing_into_a_linked_child(db, photos, unrelated_place):
         elsewhere = db.upsert_place_chain({
             'place_id': 'other-place', 'name': 'Elsewhere', 'lat': 50, 'lng': 10,
             'address_components': []})
+        db.commit()
         db.tag_photo(photos[0], elsewhere)
         db.commit()
     db.conn.commit()
@@ -1417,6 +1428,7 @@ def test_conflict_guard_ignores_pre_existing_locations_on_a_general_merge(catalo
         keyword = db.upsert_place_chain({
             'place_id': place, 'name': f'Park {index}', 'lat': index + 1,
             'lng': index + 1, 'address_components': []})
+        db.commit()
         db.tag_photo(photos[0], keyword)
         db.commit()
     db.conn.commit()
@@ -1629,6 +1641,7 @@ def test_moving_a_location_under_a_general_ancestor_is_not_a_location_change(cat
     elsewhere = db.upsert_place_chain({
         'place_id': 'other', 'name': 'Elsewhere', 'lat': 9, 'lng': 9,
         'address_components': []})
+    db.commit()
     db.conn.commit()
     db.tag_photo(photos[0], park)
     db.tag_photo(photos[0], elsewhere)     # independent location tag
@@ -1717,6 +1730,7 @@ def test_manual_merge_asks_which_link_to_keep_instead_of_refusing(catalog):
     other = db.upsert_place_chain({
         'place_id': 'other-place', 'name': 'Other lake', 'lat': 34, 'lng': -116,
         'address_components': []})
+    db.commit()
     db.tag_photo(photos[0], other)
     db.tag_photo(photos[1], second)
     db.commit()
@@ -1774,6 +1788,7 @@ def test_manual_merge_mixes_spelling_and_place_across_rows(catalog):
     linked = db.upsert_place_chain({
         'place_id': 'trailhead', 'name': 'Borrego Palm Canyon Trailhead',
         'lat': 33.27, 'lng': -116.42, 'address_components': []})
+    db.commit()
     db.tag_photo(photos[0], plain)
     db.tag_photo(photos[1], linked)
     db.commit()
@@ -2023,6 +2038,7 @@ def test_catalog_import_resolves_multiple_non_location_merge_aliases(catalog, mo
     # Non-location aliases must not participate in the one-linked-place rule.
     place = db.upsert_place_chain({'place_id': 'real-place', 'name': 'A place', 'lat': 33, 'lng': -117,
                                    'address_components': []})
+    db.commit()
     db.tag_photo(photos[0], place)
     db.commit()
     expected.add(place)

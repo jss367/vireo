@@ -182,6 +182,7 @@ def test_location_changes_are_grouped_with_plain_language_delta(
     db.conn.commit()
     for photo_id in photo_ids:
         db.set_photo_location(photo_id, tallahassee_id)
+        db.commit()
         db.queue_change(photo_id, "location", "effective")
         db.commit()
 
@@ -231,6 +232,7 @@ def test_location_without_gps_is_shown_as_added(live_server, page, tmp_path):
     ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, reserve_id)
+    db.commit()
     db.queue_change(photo_id, "location", "effective")
     db.commit()
 

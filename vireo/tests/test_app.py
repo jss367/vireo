@@ -8628,6 +8628,7 @@ def test_rename_location_keyword_rejects_pipe(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     kid = db.get_or_create_text_location("Home")
+    db.commit()
 
     resp = client.put(f"/api/keywords/{kid}", json={"name": "Home|Cabin"})
     assert resp.status_code == 400

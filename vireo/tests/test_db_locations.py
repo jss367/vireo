@@ -514,6 +514,33 @@ def test_queue_location_changes_route_through_facade_queue_change(
     assert "Queued 1 location change(s) for 2 located photo(s)" in caplog.text
 
 
+def test_queue_location_changes_failure_leaves_no_partial_batch(db, fid, monkeypatch):
+    """The backfill is one unit of work. A failure on a later photo used to
+    leave the earlier queue rows uncommitted on the connection, where the
+    next unrelated commit (the settings route swallows the error) would
+    publish half a batch."""
+    a = _photo(db, fid, "a.jpg")
+    b = _photo(db, fid, "b.jpg")
+    kid = _kw(db, "Park")
+    _link(db, a, kid)
+    _link(db, b, kid)
+    db.commit()
+    real = db.queue_change
+
+    def fail_on_b(photo_id, *args, **kwargs):
+        if photo_id == b:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(photo_id, *args, **kwargs)
+
+    monkeypatch.setattr(db, "queue_change", fail_on_b)
+    with pytest.raises(sqlite3.OperationalError):
+        photo_locations.queue_location_changes_for_tagged_photos(db)
+    assert not db.conn.in_transaction
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE change_type = 'location'"
+    ).fetchone()[0] == 0
+
+
 def test_queue_location_changes_requires_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
@@ -532,7 +559,7 @@ def test_set_photo_location_validates_keyword(db, fid):
         db.set_photo_location(pid, general)
 
 
-def test_set_photo_location_replaces_and_commits(db, fid):
+def test_set_photo_location_replaces_with_the_callers_unit(db, fid):
     pid = _photo(db, fid, "a.jpg")
     old = _kw(db, "Old")
     new = _kw(db, "New")
@@ -541,7 +568,9 @@ def test_set_photo_location_replaces_and_commits(db, fid):
     _link(db, pid, bird, source=None)
 
     db.set_photo_location(pid, new)
-    assert not db.conn.in_transaction
+    # The caller's unit of work owns the commit.
+    assert db.conn.in_transaction
+    db.commit()
     with _reader(db) as other:
         rows = other.execute(
             "SELECT keyword_id, source FROM photo_keywords WHERE photo_id = ? "
@@ -566,10 +595,10 @@ def test_set_photo_location_tags_through_facade_in_one_transaction(
         raise RuntimeError("tag failed")
 
     monkeypatch.setattr(db, "tag_photo", boom)
-    with pytest.raises(RuntimeError, match="tag failed"):
+    with pytest.raises(RuntimeError, match="tag failed"), db.transaction():
         db.set_photo_location(pid, new)
     assert calls == [(pid, new, KEYWORD_SOURCE_MANUAL)]
-    # The DELETE rolled back with the failed tag.
+    # The DELETE rolled back with the failed tag, in the caller's unit.
     rows = db.conn.execute(
         "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,),
     ).fetchall()
@@ -577,13 +606,14 @@ def test_set_photo_location_tags_through_facade_in_one_transaction(
     assert not db.conn.in_transaction
 
 
-def test_clear_photo_location_commits_and_keeps_other_keywords(db, fid):
+def test_clear_photo_location_keeps_other_keywords(db, fid):
     pid = _photo(db, fid, "a.jpg")
     loc = _kw(db, "Park")
     bird = _kw(db, "Bird", kw_type="general")
     _link(db, pid, loc)
     _link(db, pid, bird)
-    db.locations.clear_photo(pid)
+    with db.transaction():
+        db.locations.clear_photo(pid)
     assert not db.conn.in_transaction
     with _reader(db) as other:
         rows = other.execute(
@@ -603,14 +633,15 @@ def test_upsert_place_chain_requires_place_id(db):
         db.upsert_place_chain({"name": "Nowhere"})
 
 
-def test_upsert_place_chain_commits_and_excludes_existing_leaf(db):
+def test_upsert_place_chain_leaves_commit_to_caller_and_excludes_existing_leaf(db):
     first = db.upsert_place_chain({
         "place_id": "pl-1", "name": "Nairobi", "lat": -1.3, "lng": 36.8,
         "address_components": [
             {"long_name": "Kenya", "types": ["country"]},
         ],
     })
-    assert not db.conn.in_transaction
+    assert db.conn.in_transaction
+    db.commit()
     with _reader(db) as other:
         row = other.execute(
             "SELECT k.name, k.place_id, parent.name AS parent "
@@ -635,7 +666,7 @@ def test_upsert_place_chain_commits_and_excludes_existing_leaf(db):
     assert again == first
     statements = [s.strip() for s in statements]
     assert statements[0] == "SELECT id FROM keywords WHERE place_id = 'pl-1'"
-    assert statements[-1] == "COMMIT"
+    assert "COMMIT" not in statements
     parent = db.conn.execute(
         "SELECT parent_id FROM keywords WHERE id = ?", (first,),
     ).fetchone()[0]
@@ -658,7 +689,7 @@ def test_upsert_place_chain_rolls_back_on_failure(db, monkeypatch):
         KeywordProvenanceRepository, "upsert_one_keyword",
         lambda _repo, **kwargs: fail_on_leaf(**kwargs),
     )
-    with pytest.raises(RuntimeError, match="leaf failed"):
+    with pytest.raises(RuntimeError, match="leaf failed"), db.transaction():
         db.upsert_place_chain({
             "place_id": "pl-2", "name": "Mara",
             "address_components": [{"long_name": "Kenya", "types": ["country"]}],
@@ -686,10 +717,11 @@ def test_location_parent_components_skip_noise(db):
     assert Database._location_component_rank("nope") is None
 
 
-def test_get_or_create_text_location_rejects_none_and_commits(db):
+def test_get_or_create_text_location_rejects_none_and_commits_with_the_callers_unit(db):
     with pytest.raises(ValueError, match="must not be empty"):
         db.get_or_create_text_location(None)
-    kid = db.get_or_create_text_location("  Back garden ")
+    with db.transaction():
+        kid = db.get_or_create_text_location("  Back garden ")
     assert not db.conn.in_transaction
     with _reader(db) as other:
         row = other.execute(
@@ -775,7 +807,8 @@ def test_fill_missing_location_coordinates_keeps_an_established_point(db):
     half = _kw(db, "Pond", lat=1.5)
     placed = _kw(db, "Marsh", lat=10.0, lng=20.0)
     for kid in (empty, half, placed):
-        db.locations.fill_missing_coordinates(kid, 3.0, 4.0)
+        with db.transaction():
+            db.locations.fill_missing_coordinates(kid, 3.0, 4.0)
         assert not db.conn.in_transaction
     with _reader(db) as other:
         rows = {
@@ -873,13 +906,13 @@ def test_repair_misclassified_ancestors_noop_leaves_no_transaction(db, caplog):
     assert "merged" not in caplog.text
 
 
-def test_repair_misclassified_ancestors_commits_and_logs(db, caplog):
+def test_repair_misclassified_ancestors_commits_with_the_callers_unit_and_logs(db, caplog):
     country = _kw(db, "USA")
     state = _kw(db, "California", parent_id=country, kw_type="taxonomy")
     county = _kw(db, "Marin", parent_id=state, kw_type="taxonomy")
     _kw(db, "Point Reyes", parent_id=county)
 
-    with caplog.at_level(logging.INFO, logger="db"):
+    with caplog.at_level(logging.INFO, logger="db"), db.transaction():
         assert db.repair_misclassified_location_ancestors() == 2
     assert not db.conn.in_transaction
     with _reader(db) as other:
@@ -911,7 +944,7 @@ def test_repair_merges_coordless_duplicate_roots_through_facade(
         return real_merge(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(db, "_merge_keyword_into", recorder)
-    with caplog.at_level(logging.INFO, logger="db"):
+    with caplog.at_level(logging.INFO, logger="db"), db.transaction():
         assert db.repair_misclassified_location_ancestors() == 0
     assert merges == [(second, first), (third, first)]
     assert not db.conn.in_transaction
@@ -1055,7 +1088,6 @@ _DELEGATING_LOCATION_METHODS = (
     "repair_misclassified_location_ancestors",
     "upsert_place_chain",
     "set_photo_location",
-    "get_or_create_text_location",
 )
 
 # The location reads moved to ``services/photo_locations.py`` and the
