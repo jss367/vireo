@@ -285,7 +285,10 @@ def create_batch_blueprint(
                 })
                 continue
             try:
-                leaf_id = db.upsert_place_chain(details)
+                # A savepoint: a group whose chain conflicts leaves no
+                # partial chain behind while the other groups apply.
+                with db.transaction():
+                    leaf_id = db.upsert_place_chain(details)
             except RuntimeError as err:
                 group_errors.append({
                     "place_id": place_id,

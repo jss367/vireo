@@ -56,6 +56,7 @@ def test_location_preview_combines_only_chosen_match(live_server, page):
         'place_id': 'test-place', 'name': 'Lake Hodges', 'lat': 33, 'lng': -117,
         'address_components': [{'name': 'San Diego', 'types': ['locality']}],
     })
+    db.commit()
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
     db.commit()
@@ -204,6 +205,7 @@ def test_merge_context_menu_keeps_one_rows_name_and_the_others_place(live_server
         'place_id': 'whatcom-falls', 'name': 'Whatcom Falls Park', 'lat': 48.7504, 'lng': -122.4269,
         'address_components': [{'name': 'Bellingham', 'types': ['locality']}],
     })
+    db.commit()
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], target)
     db.commit()

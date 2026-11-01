@@ -9823,6 +9823,7 @@ def test_delete_photo_location_rejects_out_of_workspace_photo(app_and_db):
     )
     leaf_id = db.upsert_place_chain(_central_park_details())
     db.set_photo_location(pid, leaf_id)
+    db.commit()
     db.set_active_workspace(active_ws)
 
     client = app.test_client()
@@ -9848,6 +9849,7 @@ def test_delete_photo_location_clears_links(app_and_db):
     # round-trip needed for the delete path).
     leaf_id = db.upsert_place_chain(_central_park_details())
     db.set_photo_location(pid, leaf_id)
+    db.commit()
     # Sanity: the link exists before DELETE.
     pre_links = db.conn.execute(
         "SELECT 1 FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
@@ -10073,9 +10075,11 @@ def test_delete_photo_location_records_edit(app_and_db):
     app, db = app_and_db
 
     leaf_id = db.upsert_place_chain(_central_park_details())
+    db.commit()
     photo = db.photos.list_page()[0]
     pid = photo["id"]
     db.set_photo_location(pid, leaf_id)
+    db.commit()
 
     pre_history = db.edit_history.list_recent()
     pre_count = len(pre_history)
@@ -10664,6 +10668,7 @@ def test_location_review_preview_skips_assigned_and_reports_missing_gps(
     )
     location_id = db.get_or_create_text_location("Already reviewed")
     db.set_photo_location(p2, location_id)
+    db.commit()
 
     response = app.test_client().post(
         "/api/location-review/preview",
@@ -10702,6 +10707,7 @@ def test_location_review_saved_suggestions_are_nearby_and_workspace_used(
     db.conn.commit()
     db.set_photo_location(p1, near_id)
     db.set_photo_location(p2, far_id)
+    db.commit()
 
     response = app.test_client().get(
         "/api/location-review/saved-suggestions"
@@ -10897,9 +10903,11 @@ def test_post_keyword_link_place_attaches_metadata(app_and_db, monkeypatch):
 
     # Pre-create a free-text "Central Park" keyword and tag a photo with it.
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
     photo = db.photos.list_page()[0]
     pid = photo["id"]
     db.set_photo_location(pid, kw_id)
+    db.commit()
 
     client = app.test_client()
     resp = client.post(
@@ -10959,6 +10967,7 @@ def test_post_keyword_link_place_accepts_client_place_details_without_server_loo
     monkeypatch.setattr(places, "place_details", fail_place_details)
 
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
 
     client = app.test_client()
     resp = client.post(
@@ -10998,6 +11007,7 @@ def test_post_keyword_link_place_rolls_back_the_link_when_its_audit_fails(
 
     cfg.save({**cfg.load(), "google_maps_api_key": ""})
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
 
     def audit_fails(*args, **kwargs):
         raise sqlite3.OperationalError("disk I/O error")
@@ -11028,6 +11038,7 @@ def test_post_keyword_link_place_rejects_non_finite_client_coords(app_and_db):
 
     cfg.save({**cfg.load(), "google_maps_api_key": ""})
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
 
     place = _central_park_client_place()
     place["geometry"]["location"]["lat"] = "NaN"
@@ -11070,6 +11081,7 @@ def test_post_keyword_link_place_falls_back_on_malformed_client_geometry(
 
     monkeypatch.setattr(places, "place_details", fake_place_details)
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
     place = _central_park_client_place()
     place["geometry"] = "bad"
 
@@ -11105,6 +11117,7 @@ def test_post_keyword_link_place_ignores_malformed_component_types(
 
     monkeypatch.setattr(places, "place_details", fail_place_details)
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
     place = _central_park_client_place()
     place["address_components"][0]["types"] = 42
 
@@ -11128,6 +11141,7 @@ def test_post_keyword_link_place_rejects_mismatched_client_place_id(app_and_db):
 
     cfg.save({**cfg.load(), "google_maps_api_key": ""})
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
 
     client = app.test_client()
     resp = client.post(
@@ -11164,6 +11178,7 @@ def test_post_keyword_link_place_merges_when_place_id_already_taken(
     # Distinct names so they're separate rows in keywords.
     kw_a = db.get_or_create_text_location("Central Park A")
     kw_b = db.get_or_create_text_location("Central Park B")
+    db.commit()
 
     client = app.test_client()
     # First link -> kw_a becomes the place_id-bearing canonical row.
@@ -11257,6 +11272,7 @@ def test_post_keyword_link_place_returns_400_on_missing_place_id(app_and_db):
     """Empty body / missing place_id -> 400 (never reaches Google)."""
     app, db = app_and_db
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
 
     client = app.test_client()
     resp = client.post(f"/api/keywords/{kw_id}/link-place", json={})
@@ -11270,6 +11286,7 @@ def test_post_keyword_link_place_returns_400_on_empty_api_key(app_and_db):
     app, db = app_and_db
     cfg.save({**cfg.load(), "google_maps_api_key": ""})
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
 
     client = app.test_client()
     resp = client.post(
@@ -11292,6 +11309,7 @@ def test_post_keyword_link_place_returns_404_when_google_returns_none(
     monkeypatch.setattr(places, "place_details", lambda place_id, key: None)
 
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
     client = app.test_client()
     resp = client.post(
         f"/api/keywords/{kw_id}/link-place",
@@ -11338,6 +11356,7 @@ def test_post_keyword_link_place_returns_409_on_cross_type_collision(
     db.conn.commit()
 
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
     client = app.test_client()
     resp = client.post(
         f"/api/keywords/{kw_id}/link-place",
@@ -11364,6 +11383,7 @@ def test_post_keyword_link_place_records_edit(app_and_db, monkeypatch):
                         lambda place_id, key: _central_park_details())
 
     kw_id = db.get_or_create_text_location("Central Park")
+    db.commit()
 
     pre_history = db.edit_history.list_recent()
     pre_count = len(pre_history)

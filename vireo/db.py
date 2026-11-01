@@ -3244,7 +3244,9 @@ class Database:
         ``(name, parent_id)`` and only the leaf carries ``place_id``/coords.
 
         Idempotent: calling twice with the same ``details`` returns the same
-        leaf id and does not create duplicate rows.
+        leaf id and does not create duplicate rows. Does not commit; a caller
+        that survives a failure here wraps the call in its own (nested)
+        ``with db.transaction():`` so the partial chain rolls back.
         """
         if not details.get("place_id"):
             raise ValueError("upsert_place_chain requires details['place_id']")
@@ -3254,37 +3256,35 @@ class Database:
         lng = details.get("lng")
         components = details.get("address_components") or []
 
-        repo = self._location_repository()
-        with repo.transaction():
-            existing_leaf = repo.find_place_keyword(details["place_id"])
-            chain = self._upsert_location_parent_chain(
-                components,
-                leaf_name=name,
-                leaf_types=details.get("types"),
-                exclude_keyword_id=(
-                    existing_leaf["id"] if existing_leaf is not None else None
-                ),
-            )
-            parent_id = chain[-1] if chain else None
-            leaf_id = self.keyword_provenance.upsert_one_keyword(
-                name=name,
-                parent_id=parent_id,
-                place_id=details["place_id"],
-                latitude=lat,
-                longitude=lng,
-                reuse_location_component=(
-                    self._location_component_rank({
-                        "types": details.get("types"),
-                    }) is not None
-                ),
-            )
-        return leaf_id
+        existing_leaf = self._location_repository().find_place_keyword(details["place_id"])
+        chain = self._upsert_location_parent_chain(
+            components,
+            leaf_name=name,
+            leaf_types=details.get("types"),
+            exclude_keyword_id=(
+                existing_leaf["id"] if existing_leaf is not None else None
+            ),
+        )
+        parent_id = chain[-1] if chain else None
+        return self.keyword_provenance.upsert_one_keyword(
+            name=name,
+            parent_id=parent_id,
+            place_id=details["place_id"],
+            latitude=lat,
+            longitude=lng,
+            reuse_location_component=(
+                self._location_component_rank({
+                    "types": details.get("types"),
+                }) is not None
+            ),
+        )
 
     def set_photo_location(self, photo_id: int, leaf_keyword_id: int) -> None:
         """Set ``photo_id``'s location to ``leaf_keyword_id``.
 
         Removes any existing ``type='location'`` keyword links for the photo,
-        then inserts the new link. Atomic.
+        then inserts the new link. Does not commit: the caller's unit of
+        work keeps the removal and the new link together.
 
         Raises ``ValueError`` if ``leaf_keyword_id`` does not exist or its
         keyword type is not ``'location'`` — otherwise the DELETE would strip
@@ -3293,15 +3293,14 @@ class Database:
         """
         repo = self._location_repository()
         repo.require_location_keyword(leaf_keyword_id)
-        with repo.transaction():
-            repo.delete_photo_links(photo_id)
-            # Every caller of this method is a person assigning a place
-            # (map click, text entry, batch apply, EXIF-derived confirm), so
-            # the association is user-authored.
-            self.tag_photo(
-                photo_id, leaf_keyword_id,
-                source=KEYWORD_SOURCE_MANUAL,
-            )
+        repo.delete_photo_links(photo_id)
+        # Every caller of this method is a person assigning a place
+        # (map click, text entry, batch apply, EXIF-derived confirm), so
+        # the association is user-authored.
+        self.tag_photo(
+            photo_id, leaf_keyword_id,
+            source=KEYWORD_SOURCE_MANUAL,
+        )
 
     def get_or_create_text_location(self, name: str | None) -> int:
         """Find or create a free-text ``type='location'`` keyword.
@@ -3325,14 +3324,13 @@ class Database:
                 "location name may not contain '|' -- XMP keyword "
                 "hierarchies reserve it as the level delimiter"
             )
-        with self._location_repository().transaction():
-            return self.keyword_provenance.upsert_one_keyword(
-                name=stripped,
-                parent_id=None,
-                place_id=None,
-                latitude=None,
-                longitude=None,
-            )
+        return self.keyword_provenance.upsert_one_keyword(
+            name=stripped,
+            parent_id=None,
+            place_id=None,
+            latitude=None,
+            longitude=None,
+        )
 
     def _merge_duplicate_keywords_pass(self, ws):
         """Convergence loop for merge_duplicate_keywords. Caller commits."""

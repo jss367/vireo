@@ -187,7 +187,8 @@ class StartupTasks:
         # File-backed startup skips Database's schema initialization. Repair old
         # move parentage here too, before Browse can serve the stale hierarchy.
         init_db.repair_stale_folder_parents()
-        repaired_location_ancestors = init_db.repair_misclassified_location_ancestors()
+        with init_db.transaction():
+            repaired_location_ancestors = init_db.repair_misclassified_location_ancestors()
         if repaired_location_ancestors:
             log.info(
                 "Restored %d location hierarchy nodes misclassified as taxonomy",

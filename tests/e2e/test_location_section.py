@@ -246,6 +246,7 @@ def test_existing_location_keywords_suggest_while_typing(live_server, page):
     photo_ids = live_server["data"]["photos"][:2]
     existing_location_id = db.get_or_create_text_location("San Diego Airbnb")
     db.set_photo_location(photo_ids[1], existing_location_id)
+    db.commit()
 
     page.goto(f"{live_server['url']}/browse")
     page.locator(f".grid-card[data-id='{photo_ids[0]}']").wait_for(state="visible")
@@ -281,6 +282,7 @@ def test_saved_location_enter_does_not_steal_google_keyboard_pick(live_server, p
     photo_ids = live_server["data"]["photos"][:2]
     existing_location_id = db.get_or_create_text_location("San Diego Airbnb")
     db.set_photo_location(photo_ids[1], existing_location_id)
+    db.commit()
     _set_api_key()
 
     page.goto(f"{live_server['url']}/browse")
@@ -483,6 +485,7 @@ def test_exif_suggestion_hidden_when_already_has_location(live_server, page):
     # Pre-tag with a free-text location.
     leaf_id = db.get_or_create_text_location("Pre-existing Location")
     db.set_photo_location(photo_id, leaf_id)
+    db.commit()
     _seed_reverse_geocode_cache(
         live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
     )
@@ -698,6 +701,7 @@ def test_exif_suggestion_cleared_by_filled_location_render(
     db = live_server["db"]
     existing_location_id = db.get_or_create_text_location("Existing Spot")
     db.set_photo_location(photo_b, existing_location_id)
+    db.commit()
 
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
