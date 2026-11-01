@@ -889,25 +889,72 @@ def build_highlights_payload(db, query=None):
     }
 
 
-def _merge_life_list_locations(canonicalize, locations_by_species):
-    """Fold each species' locations under its canonical spelling."""
-    merged_locations = {}
-    for raw_species, locations in locations_by_species.items():
-        canonical = canonicalize(raw_species) or raw_species
-        existing = merged_locations.setdefault(canonical, [])
-        for loc in locations:
-            if loc not in existing:
-                existing.append(loc)
-    return merged_locations
+class _LifeListIdentities:
+    """Group linked names by taxon while leaving stored curation keys intact."""
+
+    def __init__(self, db):
+        self.canonicalize = species_canonicalizer(db)
+        self.names = {}
+        self.aliases = {}
+        for row in db.species_curation.get_life_list_keywords():
+            identity = self.key(row)
+            name = (row["species"] if row["taxon_id"] is not None
+                    else self.canonicalize(row["species"]))
+            # The query orders roots before hierarchy leaves, then by id.
+            self.names.setdefault(identity, name)
+            self.aliases.setdefault(row["species"], set()).add(identity)
+
+    def key(self, row):
+        if row["taxon_id"] is not None:
+            return ("taxon", row["taxon_id"])
+        return ("name", self.canonicalize(row["species"]) or row["species"])
 
 
-def _life_list_buckets(rows, canonicalize, class_by_taxon):
-    """Group candidate rows by canonical species, one entry per photo."""
+def _merge_life_list_locations(identities, rows):
+    """Combine alias locations without sharing them across different taxa."""
+    locations = {}
+    for row in rows:
+        existing = locations.setdefault(identities.key(row), [])
+        if row["location"] not in existing:
+            existing.append(row["location"])
+    return locations
+
+
+def _life_list_selection_maps(db, identities, buckets, scoped):
+    """Apply selections saved under any alias, preserving representative order."""
+    species_names = None
+    if scoped:
+        species_names = {
+            name for name, keys in identities.aliases.items()
+            if keys.intersection(buckets)
+        }
+    rep_rows, highlight_rows = db.species_curation.get_life_list_selections(species_names)
+    representatives, highlights = {}, {}
+    for rows, result in ((rep_rows, representatives), (highlight_rows, highlights)):
+        for row in rows:
+            keys = identities.aliases.get(row["species"], set())
+            for key in keys.intersection(buckets):
+                # Legacy curation keys contain only a name. A shared name
+                # must not move a selection onto a different taxon's photo.
+                if len(keys) > 1 and row["photo_id"] not in buckets[key]["seen_ids"]:
+                    continue
+                if result is representatives:
+                    ids = result.setdefault(key, [])
+                    if row["photo_id"] not in ids:
+                        ids.append(row["photo_id"])
+                else:
+                    result.setdefault(key, {}).setdefault(row["photo_id"], row["rank"])
+    return representatives, highlights
+
+
+def _life_list_buckets(rows, identities, class_by_taxon):
+    """Group linked names by taxon and unlinked names by stored spelling."""
     buckets = {}
     for row in rows:
         r = dict(row)
-        r["species"] = canonicalize(r["species"]) or r["species"]
-        entry = buckets.setdefault(r["species"], {
+        identity = identities.key(r)
+        entry = buckets.setdefault(identity, {
+            "species": identities.names.get(identity, r["species"]),
             "scientific_name": None,
             "common_name": None,
             "taxon_id": None,
@@ -975,18 +1022,16 @@ def _compact_life_list_photo(photo):
 
 
 def _life_list_species_entry(
-    species, entry, photos, representatives, highlights_by_species,
-    locations_by_species, photo_offset, photo_limit,
+    species, entry, photos, representative_ids, highlight_ranks,
+    locations, photo_offset, photo_limit,
 ):
     """Rank one species' photos and build its Life List entry."""
     timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
     _highlight_score_bucket(photos)
-    representative_ids = representatives.get(species) or []
     representative_order = {
         photo_id: idx for idx, photo_id in enumerate(representative_ids)
     }
     preferred_id = representative_ids[0] if representative_ids else None
-    highlight_ranks = highlights_by_species.get(species, {})
     for photo in photos:
         rank = highlight_ranks.get(photo["id"])
         photo["is_highlighted"] = rank is not None
@@ -1048,7 +1093,7 @@ def _life_list_species_entry(
         "photo_count": len(photos),
         "first_seen": min(timestamps) if timestamps else None,
         "last_seen": max(timestamps) if timestamps else None,
-        "locations": locations_by_species.get(species, []),
+        "locations": locations,
         "preferred_photo_id": preferred_id,
         "has_preferred_photo": preferred_applied,
         "best_source": best_source,
@@ -1064,9 +1109,12 @@ def build_life_list_payload(
     photos_per_species: int | None = 12,
     photo_offset=0,
     species_filter=None,
+    taxon_id=None,
 ):
     rows = db.species_curation.get_life_list_candidates(species=species_filter)
-    locations_by_species = db.species_curation.get_life_list_locations(species=species_filter)
+    if taxon_id is not None:
+        rows = [row for row in rows if row["taxon_id"] == taxon_id]
+    location_rows = db.species_curation.get_life_list_location_rows(species=species_filter)
     class_by_taxon = db.species_curation.get_class_ancestors({
         row["taxon_id"] for row in rows if row["taxon_id"] is not None
     })
@@ -1078,31 +1126,25 @@ def build_life_list_payload(
             1, min(int(photos_per_species), 100)
         )
 
-    # Canonicalize each row's species to the root keyword's stored
-    # spelling. After the retired duplicate-species repair detached a
-    # redundant root row, a photo may only carry the hierarchy leaf
-    # (``verdin``) whose spelling differs from the curation-keyed
-    # root (``Verdin``); without canonicalization, that photo would
-    # sit in its own ``verdin`` bucket, its curation on
-    # ``Verdin`` would never apply, and single-species API loads
-    # for ``Verdin`` would return an entry named ``verdin``.
-    canonicalize = species_canonicalizer(db)
-    locations_by_species = _merge_life_list_locations(
-        canonicalize, locations_by_species,
+    # Taxon identity unifies all stored aliases, including two differently
+    # spelled roots. Name resolution alone intentionally preserves each root
+    # because keyword writes and saved curation still use those spellings.
+    identities = _LifeListIdentities(db)
+    locations = _merge_life_list_locations(identities, location_rows)
+    buckets = _life_list_buckets(rows, identities, class_by_taxon)
+    representatives, highlights = _life_list_selection_maps(
+        db, identities, buckets, scoped=species_filter is not None,
     )
-
-    buckets = _life_list_buckets(rows, canonicalize, class_by_taxon)
 
     species_entries = []
     distinct_photo_ids = set()
-    representatives = db.species_curation.get_representative_lists(species=species_filter)
-    highlights_by_species = db.species_curation.get_highlights(species=species_filter)
-    for species, entry in buckets.items():
+    for identity, entry in buckets.items():
         photos = entry["photos"]
         distinct_photo_ids.update(p["id"] for p in photos)
         species_entries.append(_life_list_species_entry(
-            species, entry, photos, representatives, highlights_by_species,
-            locations_by_species, photo_offset, photo_limit,
+            entry["species"], entry, photos, representatives.get(identity, []),
+            highlights.get(identity, {}), locations.get(identity, []),
+            photo_offset, photo_limit,
         ))
 
     # Life-list numbering: chronological by first photographed date,

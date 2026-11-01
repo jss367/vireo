@@ -313,6 +313,7 @@ def create_life_list_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprin
             photos_per_species=limit,
             photo_offset=offset,
             species_filter=species,
+            taxon_id=request.args.get("taxon_id", type=int),
         )
         if not payload["species"]:
             return json_error("species not found", 404)

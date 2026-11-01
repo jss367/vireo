@@ -437,3 +437,33 @@ def test_life_list_lightbox_continues_across_page_boundary(live_server, page):
         arg=initial_last_id,
     )
     assert page.evaluate("window._lightboxPhotoList.length") == 102
+
+
+def test_life_list_merges_aliases_and_opens_same_named_taxa_independently(live_server, page):
+    db = live_server["db"]
+    photos = live_server["data"]["photos"][:3]
+    taxon_ids = [db.conn.execute(
+        "INSERT INTO taxa (name, rank) VALUES (?, 'species')", (name,),
+    ).lastrowid for name in ("Ardea ibis", "Distinctus species")]
+    parent = db.add_keyword("Other taxon")
+    for photo, name, taxon, parent_id in zip(
+        photos,
+        ("Western Cattle-Egret", "Western Cattle Egret", "Western Cattle-Egret"),
+        (taxon_ids[0], taxon_ids[0], taxon_ids[1]),
+        (None, None, parent), strict=True,
+    ):
+        keyword = db.add_keyword(name, parent_id=parent_id, is_species=True)
+        db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
+        db.tag_photo(photo, keyword)
+    db.commit()
+
+    page.goto(f"{live_server['url']}/life-list")
+    egret = page.locator(f'.species-card[data-taxon-id="{taxon_ids[0]}"]')
+    expect(egret).to_have_count(1)
+    expect(egret.locator(".species-meta")).to_contain_text("2 photos")
+    other = page.locator(f'.species-card[data-taxon-id="{taxon_ids[1]}"]')
+    expect(other).to_have_count(1)
+    other.click()
+    page.wait_for_function(
+        "pid => vireoLightboxSession.requestedPhotoId() === pid", arg=photos[2],
+    )
