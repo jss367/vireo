@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 # helpers (e.g. `from wait import wait_for_job_via_client`).
 sys.path.insert(0, os.path.dirname(__file__))
 
+import config  # noqa: F401  (installs the settings provider the Database reads)
 import pytest
 from db import Database
 from PIL import Image

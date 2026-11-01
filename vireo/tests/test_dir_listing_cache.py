@@ -25,7 +25,7 @@ HOUR = 3600
 
 @pytest.fixture(autouse=True)
 def _clear_shared_caches():
-    from new_images import get_shared_cache
+    from new_images_cache import get_shared_cache
 
     dir_listing_cache.get_shared().clear()
     get_shared_cache().clear()

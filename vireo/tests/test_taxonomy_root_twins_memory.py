@@ -142,7 +142,6 @@ def setup():
 
     modules = {
         "species_identity": types.SimpleNamespace(COMMON_NAME_CORRECTIONS={}, SpeciesResolver=Resolver),
-        "config": types.SimpleNamespace(get=lambda key: None),
         "repositories.species_provenance": types.SimpleNamespace(
             retarget_keyword_history=species_prov_ns["retarget_keyword_history"],
         ),
@@ -151,7 +150,7 @@ def setup():
     repo._lookup_taxon_id_for_keyword = repo.lookup_taxon_id
     repo._taxon_lookup_variants = lambda name: [name]
     repo.resolve_species_display_name = lambda name: name
-    repo.detect_keyword_case_convention = lambda: None
+    repo.species_case_convention = lambda: None
     repo._apply_case_convention = lambda name, case: name
     repo.KEYWORD_TYPES = {"general", "taxonomy", "location", "individual", "genre"}
 

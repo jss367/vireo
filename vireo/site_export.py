@@ -160,7 +160,7 @@ def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
         if reading_snapshot:
             # Never wait through a pause with the catalog transaction open.
             if cancel_check and cancel_check():
-                from web.background_jobs import JobCancelled
+                from job_runner.work_control import JobCancelled
                 raise JobCancelled("Site export cancelled")
         elif checkpoint:
             checkpoint()
@@ -267,7 +267,7 @@ def _render_snapshot(snapshot, captured, workspace_id, vireo_dir, destination,
         (output / "README.md").write_text(README, encoding="utf-8")
         progress(total, total, "", "Finishing site export")
         if begin_commit and not begin_commit():
-            from web.background_jobs import JobCancelled
+            from job_runner.work_control import JobCancelled
             raise JobCancelled("Site export cancelled")
         return {
             "ok": not errors,

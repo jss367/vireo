@@ -17,7 +17,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
+import logging
+from typing import TYPE_CHECKING, Any, cast
 
 import id_conflicts
 from db import Database
@@ -60,6 +61,8 @@ if TYPE_CHECKING:
     from web.web_types import AppConfig, GetDb
 
 
+log = logging.getLogger(__name__)
+
 def _request_photo_ids_arg() -> list[int] | None:
     """Parse the optional ``photo_ids`` query param (comma-separated ints).
 
@@ -92,6 +95,27 @@ def _request_photo_ids_arg() -> list[int] | None:
     if len(ids) > 1000:
         raise ValueError("too many photo_ids")
     return ids
+
+
+def _species_replacement_taxonomy() -> Any:
+    """The local taxonomy a replace-species accept compares neighbours with.
+
+    Loaded once per accept, not per photo. ``None`` (no readable taxonomy
+    file) degrades replace-species to protecting exact-name keywords only,
+    and the warning says so.
+    """
+    from taxonomy import load_local_taxonomy
+
+    try:
+        taxonomy = load_local_taxonomy()
+    except (OSError, ValueError):
+        log.warning(
+            "Taxonomy unavailable for species replacement; "
+            "protecting only exact-name keywords",
+            exc_info=True,
+        )
+        return None
+    return taxonomy
 
 
 def create_predictions_blueprint(
@@ -652,6 +676,7 @@ def create_predictions_blueprint(
             # photos are replaced consistently.
             result = db.accept_prediction(
                 pred_id, replace_species=True, _commit=False,
+                species_taxonomy=_species_replacement_taxonomy(),
             )
             if result is None:
                 db.rollback()

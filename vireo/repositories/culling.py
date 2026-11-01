@@ -24,17 +24,17 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-import config as cfg
+from settings_source import config_value
 
 
 class CullingRepository:
     def __init__(
         self, conn: sqlite3.Connection,
         # Config values span arbitrary settings and workspace overrides.
-        get_effective_config: Callable[[dict[str, Any]], dict[str, Any]],
+        effective_config: Callable[[], dict[str, Any]],
     ) -> None:
         self.conn = conn
-        self.get_effective_config = get_effective_config
+        self.effective_config = effective_config
 
     def top_prediction(
         self, photo_id: int, min_detector_confidence: float | None = None,
@@ -46,9 +46,7 @@ class CullingRepository:
         or None when the photo has no prediction.
         """
         if min_detector_confidence is None:
-            min_detector_confidence = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2
-            )
+            min_detector_confidence = config_value(self.effective_config(), "detector_confidence")
         return self.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model,
                       pr.scientific_name, pr.labels_fingerprint, pr.source_taxon_id

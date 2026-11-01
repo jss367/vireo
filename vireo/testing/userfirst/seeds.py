@@ -13,6 +13,9 @@ _VIREO_DIR = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 if _VIREO_DIR not in sys.path:
     sys.path.insert(0, _VIREO_DIR)
 
+# Importing config installs the settings provider every Database here reads
+# through settings_source; the data layer never imports config itself.
+import config  # noqa: E402,F401
 from services import photo_ingest, workspace_folders  # noqa: E402
 
 

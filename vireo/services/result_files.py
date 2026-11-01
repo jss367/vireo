@@ -9,32 +9,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from typing import TYPE_CHECKING
+
+from catalog_result_files import result_files
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Iterable
 
 log = logging.getLogger(__name__)
-RESULT_NAME = re.compile(r"^(pipeline|culling)_results_ws([1-9][0-9]*)\.json$")
-
-
-def result_files(catalog_dir: str) -> list[tuple[str, str, int]]:
-    try:
-        with os.scandir(catalog_dir or os.curdir) as entries:
-            return [
-                (entry.path, match[1], int(match[2]))
-                for entry in entries
-                if (match := RESULT_NAME.fullmatch(entry.name)) and entry.is_file()
-                and not entry.is_symlink()
-                and int(match[2]) < 2**63 - 1
-            ]
-    except FileNotFoundError:
-        return []
-
-
-def highest_workspace_id(catalog_dir: str) -> int:
-    return max((ws for _path, _kind, ws in result_files(catalog_dir)), default=0)
 
 
 def delete_workspace_results(
