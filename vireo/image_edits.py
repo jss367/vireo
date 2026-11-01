@@ -517,6 +517,22 @@ def apply_recipe_to_loaded_image(
             from presence import apply_presence
         result = apply_presence(result, scale=scale, **presence)
 
+    result = _apply_render_detail(result, adjustments, local, mask_geo, scale, denoise_kwargs)
+    if local and local.get("background_denoise") and mask_geo is not None:
+        from background_denoise import apply_background_denoise
+        weight = local_weight_map(
+            local_mask, img.size, normalized, native_size, detail_scale=scale,
+            render_size=result.size,
+        )
+        if weight is not None:
+            result = apply_background_denoise(
+                result, weight, local["background_denoise"], scale, camera_metadata,
+            )
+    return result
+
+
+def _apply_render_detail(result, adjustments, local, mask_geo, scale, denoise_kwargs):
+    """Apply existing global/local detail before optional background smoothing."""
     subject_detail, background_detail = (
         _local_region_deltas(local, _DETAIL_KEYS)
         if (local and mask_geo is not None) else ({}, {})
@@ -550,7 +566,7 @@ def apply_recipe_to_loaded_image(
 
 def local_weight_map(
     local_mask, source_size, recipe, native_size=None, detail_scale=None,
-    feather=None,
+    feather=None, render_size=None,
 ):
     """The local-adjustment weight map exactly as the renderer computes it.
 
@@ -571,16 +587,25 @@ def local_weight_map(
     ``feather`` previews a mask the recipe does not reference yet (the
     editor's Show Mask before any local slider moves): when given, it
     replaces the recipe's ``local.mask.feather`` and the recipe needs no
-    local section.
+    local section. With background smoothing enabled this returns its
+    subject-protection weight, including filled holes and the outward
+    transition. ``render_size`` resizes geometry before computing that
+    transition, matching the final detail pass.
     """
     normalized = normalize_recipe(recipe) or {}
     local = normalized.get("local")
     if local_mask is None or (not local and feather is None):
         return None
+    protected = bool(local and local.get("background_denoise"))
+    if protected:
+        from background_denoise import protection_mask
+        local_mask = protection_mask(local_mask, corrected=local["mask"].get("corrected", False))
     fitted = _fit_mask_to_source(local_mask, source_size)
     if fitted is None:
         return None
     mask_geo = _apply_geometry(fitted, normalized)
+    if render_size and mask_geo.size != render_size:
+        mask_geo = mask_geo.resize(render_size, Image.Resampling.BILINEAR)
     scale = (
         detail_scale
         if detail_scale is not None
@@ -588,4 +613,7 @@ def local_weight_map(
     )
     if feather is None:
         feather = local["mask"].get("feather") or 0.0
+    if protected:
+        from background_denoise import protection_weight
+        return protection_weight(mask_geo, scale, feather)
     return _feathered_weight(mask_geo, feather * scale)

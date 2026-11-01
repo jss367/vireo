@@ -1040,6 +1040,12 @@ body {
 
     <div class="panel-band" id="localBand" style="display:none">
       <div class="panel-title">Local (Subject / Background)</div>
+      <div class="control-row">
+        <label for="backgroundDenoiseRange">Smooth background</label>
+        <input id="backgroundDenoiseRange" type="range" min="0" max="100" step="1" value="0" oninput="setBackgroundDenoise(this.value)" aria-describedby="backgroundDenoiseHelp">
+        <span class="control-value" id="backgroundDenoiseValue">Off</span>
+      </div>
+      <p id="backgroundDenoiseHelp" class="local-unavailable-note">Extra camera-aware denoising outside the subject mask, with a soft transition around its edges. Show Protection to check the protected area; paint corrections below if needed. Zero turns it off.</p>
       <div class="local-stale-banner" id="localStaleBanner" style="display:none">
         <span>Newer subject mask available</span>
         <button class="editor-btn" type="button" onclick="updateLocalMask()">Update</button>

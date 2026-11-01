@@ -67,6 +67,56 @@ def test_show_mask_before_any_local_adjustment(live_server, page, masked_photo):
     expect(overlay).to_be_hidden()
 
 
+def test_background_smoothing_save_reload_undo_and_off(live_server, page, masked_photo, tmp_path):
+    page.goto(f"{live_server['url']}/edit/{masked_photo}")
+    page.wait_for_function('!editorState.loading')
+    expect(page.locator('#backgroundDenoiseValue')).to_have_text('Off')
+    page.locator('#backgroundDenoiseRange').fill('65')
+    page.wait_for_function('editorState.recipe.local?.background_denoise === 65')
+    expect(page.locator('#maskOverlayBtn')).to_have_text('Show Protection')
+    with page.expect_response('**/edit-mask-preview?*') as overlay:
+        page.locator('#maskOverlayBtn').click()
+    assert overlay.value.ok
+    with page.expect_response('**/edit-preview?*') as preview:
+        page.evaluate('updatePreview()')
+    assert preview.value.ok
+    assert page.evaluate('saveRecipe()') is True
+    recipe = live_server['db'].get_photo_edit_recipe(masked_photo)
+    assert recipe['local']['background_denoise'] == 65
+    assert recipe['local']['regions'] == []
+    page.reload()
+    page.wait_for_function('!editorState.loading')
+    expect(page.locator('#backgroundDenoiseRange')).to_have_value('65')
+    expect(page.locator('#saveBtn')).to_be_disabled()
+    page.locator('#backgroundDenoiseRange').scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / 'background-smoothing.png'))
+    page.locator('#backgroundDenoiseRange').fill('0')
+    expect(page.locator('#backgroundDenoiseValue')).to_have_text('Off')
+    assert page.evaluate('saveRecipe()') is True
+    assert live_server['db'].get_photo_edit_recipe(masked_photo) is None
+    assert page.evaluate('doUndo()') is True
+    expect(page.locator('#backgroundDenoiseRange')).to_have_value('65')
+    assert page.evaluate('doRedo()') is True
+    expect(page.locator('#backgroundDenoiseRange')).to_have_value('0')
+
+
+def test_background_smoothing_does_not_clear_other_local_edits(live_server, page, masked_photo):
+    page.goto(f"{live_server['url']}/edit/{masked_photo}")
+    page.wait_for_function('!editorState.loading')
+    page.evaluate("setLocalAdjustment('subject', 'exposure', '1', true)")
+    page.wait_for_function('!!editorState.recipe.local')
+    page.locator('#backgroundDenoiseRange').fill('50')
+    page.locator('#backgroundDenoiseRange').fill('0')
+    assert page.evaluate('editorState.recipe.local.regions') == [
+        {'region': 'subject', 'adjustments': {'exposure': 1}},
+    ]
+    assert page.evaluate('editorState.recipe.local.background_denoise') is None
+    page.locator('#backgroundDenoiseRange').fill('50')
+    page.get_by_role('button', name='Reset Local', exact=True).click()
+    expect(page.locator('#backgroundDenoiseRange')).to_have_value('0')
+    assert page.evaluate('editorState.recipe.local') is None
+
+
 @pytest.mark.parametrize('zero_region_first', [False, True])
 def test_feather_only_does_not_freeze_an_obsolete_active_mask(
     live_server, page, masked_photo, tmp_path, zero_region_first,

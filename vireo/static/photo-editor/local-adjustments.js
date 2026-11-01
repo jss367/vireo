@@ -40,7 +40,7 @@ function buildLocalControls() {
 }
 
 /** @param {EditorRecipe} recipe */ function localRegionValues(recipe) {
-  /** @type {EditorLocalDraft} */ var out = {subject: {}, background: {}, feather: 0};
+  /** @type {EditorLocalDraft} */ var out = {subject: {}, background: {}, feather: 0, backgroundDenoise: 0};
   var local = recipe.local;
   (local?.regions || []).forEach(function(entry) {
     if (out[entry.region]) {
@@ -48,6 +48,7 @@ function buildLocalControls() {
     }
   });
   out.feather = Number((local?.mask || {}).feather || 0);
+  out.backgroundDenoise = Number(local?.background_denoise || 0);
   return out;
 }
 
@@ -65,7 +66,7 @@ function rebuildLocalSection() {
   // Mirror normalize_recipe's canonical region order so the dirty-state
   // comparison stays stable against the server's saved form.
   regions.sort(function(a, b) { return a.region < b.region ? -1 : 1; });
-  if (!regions.length && !(editorState.localMask && editorState.localMask.corrected)) {
+  if (!regions.length && !draft.backgroundDenoise && !(editorState.localMask && editorState.localMask.corrected)) {
     delete editorState.recipe.local;
     // No adjustment retains this snapshot. Preview and the next adjustment
     // must both use the current active generation, including after zeroing
@@ -88,6 +89,7 @@ function rebuildLocalSection() {
     mask.feather = Number(draft.feather);
   }
   editorState.recipe.local = {mask: mask, regions: regions};
+  if (draft.backgroundDenoise) editorState.recipe.local.background_denoise = draft.backgroundDenoise;
 }
 
 function syncLocalControls() {
@@ -96,6 +98,7 @@ function syncLocalControls() {
     subject: vals.subject,
     background: vals.background,
     feather: vals.feather,
+    backgroundDenoise: vals.backgroundDenoise,
   };
   var savedMask = (editorState.recipe.local || {}).mask;
   if (savedMask && savedMask.ref) {
@@ -125,7 +128,41 @@ function syncLocalControls() {
   if (feather) feather.value = String(vals.feather || 0);
   var featherLabel = /** @type {HTMLElement} */ (document.getElementById('featherValue'));
   if (featherLabel) featherLabel.textContent = String(Math.round(vals.feather || 0));
+  syncBackgroundDenoiseControl();
   updateLocalBandVisibility();
+}
+
+function syncBackgroundDenoiseControl() {
+  var amount = editorState.localDraft.backgroundDenoise;
+  var input = /** @type {HTMLInputElement|null} */ (document.getElementById('backgroundDenoiseRange'));
+  var value = document.getElementById('backgroundDenoiseValue');
+  var overlay = document.getElementById('maskOverlayBtn');
+  if (input) input.value = String(amount);
+  if (value) value.textContent = amount ? String(amount) : 'Off';
+  if (overlay) overlay.textContent = amount ? 'Show Protection' : 'Show Mask';
+}
+
+/** @param {string} raw */ function setBackgroundDenoise(raw) {
+  if (editorState.loading) return;
+  editorState.localDraft.backgroundDenoise = Math.max(0, Math.min(100, Number(raw) || 0));
+  syncBackgroundDenoiseControl();
+  if (editorState.localMask) {
+    rebuildLocalSection();
+    markChanged(true);
+    return;
+  }
+  if (!editorState.localDraft.backgroundDenoise) return;
+  var photoId = editorState.photoId;
+  var updateSeq = editorState.localMaskUpdateSeq;
+  ensureLocalMask().then(function() {
+    if (editorState.photoId !== photoId || editorState.localMaskUpdateSeq !== updateSeq) return;
+    rebuildLocalSection();
+    markChanged(true);
+  }).catch(function() {
+    if (editorState.photoId !== photoId || editorState.localMaskUpdateSeq !== updateSeq) return;
+    editorState.localDraft.backgroundDenoise = 0;
+    syncBackgroundDenoiseControl();
+  });
 }
 
 function updateLocalBandVisibility() {
@@ -231,7 +268,7 @@ function ensureLocalMask() {
 function resetLocal() {
   cancelMaskBrush();
   editorState.localMaskUpdateSeq++;
-  editorState.localDraft = {subject: {}, background: {}, feather: 0};
+  editorState.localDraft = {subject: {}, background: {}, feather: 0, backgroundDenoise: 0};
   delete editorState.recipe.local;
   syncLocalControls();
   markChanged(true);

@@ -8,7 +8,7 @@
   savedRecipeSeq: 0,
   recipe: {},
   presets: [],
-  localDraft: {subject: {}, background: {}, feather: 0},
+  localDraft: {subject: {}, background: {}, feather: 0, backgroundDenoise: 0},
   localMask: null,
   localMaskPromise: null,
   localMaskUpdateSeq: 0,
