@@ -143,6 +143,8 @@ export function renderListItem(j, source, options) {
   html += '<span class="job-list-item-type">' + escapeHtml(formatJobType(j.type)) + '</span>';
   if (isSystemJob(j) && !options.followUp) {
     html += '<span class="job-origin-chip" title="' + escapeHtml(j.reason || 'Vireo started this on its own') + '">Vireo</span>';
+  } else if (j.origin === 'user' && !options.followUp) {
+    html += '<span class="job-origin-chip" title="' + (j.parent_job_id ? 'Part of a user-started operation' : 'Started by you') + '">User</span>';
   }
   html += '<span class="job-list-item-time">' + time + '</span>';
   html += '</div>';
