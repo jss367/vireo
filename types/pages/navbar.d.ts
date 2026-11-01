@@ -82,6 +82,7 @@ interface NavJob {
   type: string;
   status: string;
   origin?: 'user' | 'system';
+  parent_job_id?: string | null;
   reason?: string | null;
   counts_for_badge?: boolean;
   workspace_id?: number | null;
