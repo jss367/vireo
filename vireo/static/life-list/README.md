@@ -53,15 +53,18 @@ Explorer tab when `?view=explorer`.
 
 Browser tests reach the modules through `tests/e2e/module_pages.py`
 (`install_page_module_exposure(page, "life-list", "lifeListState")`), e.g.
-`lifeListState.currentData` and `lifeListState.lifeListLightboxSpecies`.
+`lifeListState.currentData`, `lifeListState.lifeListLightboxSpecies`, and
+`lifeListState.lifeListLightboxTaxonId`.
 
 Keep these request-ordering rules intact when changing this code:
 
 - `loadLifeList()` owns `state.lifeListLoadSeq`. It runs at load, after a Pick
   changes and on `lifelist:changed`; a response for an older sequence must be
   dropped, not rendered.
-- `loadMoreLifeListPhotos()` keeps one in-flight page per species in
-  `state.lifeListLoadPromises`. The lightbox prefetch and the navigation-boundary
+- `loadMoreLifeListPhotos()` keeps one in-flight page per taxon (or unlinked name) in
+  `state.lifeListLoadPromises`. Cards and paging requests carry `taxon_id` so
+  distinct taxa sharing a name stay separate; `taxon_id=none` explicitly pages
+  the unlinked entry, while omitting the parameter keeps legacy name-only loads. The lightbox prefetch and the navigation-boundary
   listener share that promise, and the boundary only advances if
   `vireoLightboxSession.requestedPhotoId()` is still the photo it started from.
 - `refreshPublishPreflight()` owns `state.publishPreflightSequence`. Any settings

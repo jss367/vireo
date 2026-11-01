@@ -31,7 +31,7 @@ export const LIFE_LIST_PAGE_SIZE = 100;
   var remaining = Math.max(0, entry.photo_count - (entry.photos || []).length);
   var loadMore = entry.has_more
     ? '<button type="button" class="lifelist-load-more" data-load-more-species="'
-      + escapeAttr(entry.species) + '"' + (entry.loading_more ? ' disabled' : '') + '>'
+      + escapeAttr(entry.species) + '" data-taxon-id="' + escapeAttr(entry.taxon_id ?? '') + '"' + (entry.loading_more ? ' disabled' : '') + '>'
       + (entry.loading_more
         ? 'Loading photos…'
         : 'Load ' + Math.min(LIFE_LIST_PAGE_SIZE, remaining) + ' more photo'
@@ -45,7 +45,7 @@ export const LIFE_LIST_PAGE_SIZE = 100;
       + (best.flag === 'flagged' ? '<div class="lifelist-pick-badge" title="Flagged as Pick">Pick</div>' : '')
       + '</div>';
   }
-  return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
+  return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" data-taxon-id="' + escapeAttr(entry.taxon_id ?? '') + '" title="'
     + escapeAttr((entry.locations || []).join(', ')) + '">'
     + '<div class="lifer-number">#' + displayNumber + '</div>'
     + badges
@@ -59,15 +59,16 @@ export const LIFE_LIST_PAGE_SIZE = 100;
     + '</div></div>';
 }
 
-/** @param {string | null} species */ export function lifeListEntry(species) {
+/** @param {string | null} species @param {number|null} [taxonId] */ export function lifeListEntry(species, taxonId) {
   return (state.currentData && state.currentData.species || []).find(function(entry) {
-    return entry.species === species;
+    return entry.species === species && (taxonId === undefined || (entry.taxon_id ?? null) === taxonId);
   });
 }
 
 /** @param {LifeSpecies | undefined} entry */ export function loadMoreLifeListPhotos(entry) {
   if (!entry || !entry.has_more) return Promise.resolve(entry ? entry.photos : []);
-  const pending = state.lifeListLoadPromises[entry.species]; if (pending) {
+  const key = entry.taxon_id == null ? "name:" + entry.species : "taxon:" + entry.taxon_id;
+  const pending = state.lifeListLoadPromises[key]; if (pending) {
     return pending;
   }
   entry.loading_more = true;
@@ -76,6 +77,7 @@ export const LIFE_LIST_PAGE_SIZE = 100;
     species: entry.species,
     offset: String((entry.photos || []).length),
     limit: String(LIFE_LIST_PAGE_SIZE),
+    taxon_id: String(entry.taxon_id ?? 'none'),
   });
   /** @type {Promise<{photos?:LifePhoto[];loaded_count?:number;has_more?:boolean}>} */ var request = safeFetch('/api/life-list/species?' + params.toString());
   var promise = request.then(function(data) {
@@ -95,10 +97,10 @@ export const LIFE_LIST_PAGE_SIZE = 100;
     })
     .finally(function() {
       entry.loading_more = false;
-      delete state.lifeListLoadPromises[entry.species];
+      delete state.lifeListLoadPromises[key];
       render();
     });
-  state.lifeListLoadPromises[entry.species] = promise;
+  state.lifeListLoadPromises[key] = promise;
   return promise;
 }
 
@@ -162,18 +164,20 @@ export function render() {
   content.querySelectorAll('[data-load-more-species]').forEach(function(button) {
     button.addEventListener('click', function(event) {
       event.stopPropagation();
-      loadMoreLifeListPhotos(lifeListEntry(button.getAttribute('data-load-more-species')));
+      loadMoreLifeListPhotos(lifeListEntry(button.getAttribute('data-load-more-species'),
+        Number(button.getAttribute('data-taxon-id')) || null));
     });
   });
 
   content.querySelectorAll('.species-card').forEach(function(card) {
     card.addEventListener('click', function() {
       var sp = card.getAttribute('data-species');
-      var entry = (state.currentData?.species || []).find(function(e) { return e.species === sp; });
+      var entry = lifeListEntry(sp, Number(card.getAttribute('data-taxon-id')) || null);
       if (entry && entry.best && hasLightbox()) {
         // Keep the same array object as pages are appended so the shared
         // lightbox immediately sees newly loaded photos.
         state.lifeListLightboxSpecies = entry.species;
+        state.lifeListLightboxTaxonId = entry.taxon_id ?? null;
         openLightbox(entry.best.id, entry.best.filename, entry.photos || [entry.best]);
       }
     });

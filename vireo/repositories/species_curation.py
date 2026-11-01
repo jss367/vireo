@@ -527,7 +527,7 @@ class SpeciesCurationRepository:
         ``Verdin``) after the retired duplicate-species repair detached the
         redundant root row, but curation stays keyed on the root spelling
         — so the filter also accepts any keyword whose ``taxon_id`` links
-        back to a root species keyword named ``species``. Otherwise
+        back to an accepted keyword named ``species``. Otherwise
         ``/api/life-list/species?species=Verdin`` would 404 for photos
         whose only remaining tag is the hierarchy leaf.
         """
@@ -540,8 +540,7 @@ class SpeciesCurationRepository:
                          k.taxon_id IS NOT NULL
                          AND EXISTS (
                              SELECT 1 FROM keywords rk
-                             WHERE rk.parent_id IS NULL
-                               AND rk.taxon_id = k.taxon_id
+                             WHERE rk.taxon_id = k.taxon_id
                                AND (rk.is_species = 1 OR rk.type = 'taxonomy')
                                AND rk.name = ?
                          )
@@ -580,6 +579,51 @@ class SpeciesCurationRepository:
                ORDER BY k.name, p.timestamp""",
             params,
         ).fetchall()
+
+    def get_life_list_keywords(self):
+        """Accepted names and identities, with stable root spellings first.
+
+        Read catalog-wide so a paging request or a different workspace picks
+        the same name even when only one alias has visible photos.
+        """
+        return self.conn.execute(
+            """SELECT k.name AS species, t.id AS taxon_id
+               FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id
+               WHERE k.is_species = 1 OR k.type = 'taxonomy'
+               ORDER BY (k.parent_id IS NOT NULL), k.id""",
+        ).fetchall()
+
+    def get_life_list_selections(self, species_names=None):
+        """Read saved selections across aliases without changing stored keys.
+
+        Representatives retain their global newest-selection order across
+        names; highlights retain each name's existing rank order. Restrict
+        paging to the requested taxon's aliases, using one JSON parameter
+        rather than a caller-sized list of SQL variables.
+        """
+        ws = self.workspace_id
+        params = [ws]
+        species_filter = ""
+        if species_names is not None:
+            species_filter = "AND s.species IN (SELECT value FROM json_each(?))"
+            params.append(json.dumps(sorted(species_names)))
+        representatives = self.conn.execute(
+            f"""SELECT s.species, s.photo_id
+                FROM species_representatives s
+                JOIN photo_workspace_visibility wf ON wf.photo_id = s.photo_id
+                 AND wf.workspace_id = ?
+                WHERE 1=1 {species_filter}
+                ORDER BY s.selected_order DESC, s.id DESC""",
+            params,
+        ).fetchall()
+        highlights = self.conn.execute(
+            f"""SELECT s.species, s.photo_id, s.rank
+                FROM species_highlights s
+                WHERE s.workspace_id = ? {species_filter}
+                ORDER BY s.species, s.rank, s.created_at, s.photo_id""",
+            params,
+        ).fetchall()
+        return representatives, highlights
 
     def get_explorer_root(self, name="Aves", rank="class"):
         """Return {id,name,common_name,rank} for the default explorer root class,
@@ -909,7 +953,16 @@ class SpeciesCurationRepository:
         return sorted(chosen.values(), key=lambda n: keyword_match_key(n))
 
     def get_life_list_locations(self, species=None):
-        """Return {identification name: [location keyword names]} for the life list.
+        """Return {identification name: [location names]} for legacy callers."""
+        result = {}
+        for row in self.get_life_list_location_rows(species):
+            locations = result.setdefault(row["species"], [])
+            if row["location"] not in locations:
+                locations.append(row["location"])
+        return result
+
+    def get_life_list_location_rows(self, species=None):
+        """Return identification name, taxon id, and location rows for the life list.
 
         A location is attributed to an identification when at least one
         workspace-visible, non-rejected photo carries both the
@@ -924,7 +977,7 @@ class SpeciesCurationRepository:
         used by the single-identification paging endpoint so incremental
         loads don't do catalog-wide work. Matching mirrors
         :meth:`get_life_list_candidates`: raw ``k.name`` first, then a
-        taxon-linked root fallback so a hierarchy leaf surviving repair
+        taxon-linked alias fallback so a hierarchy leaf surviving repair
         (``verdin`` vs canonical root ``Verdin``) still contributes its
         location keywords to the requested bucket.
 
@@ -945,8 +998,7 @@ class SpeciesCurationRepository:
                          k.taxon_id IS NOT NULL
                          AND EXISTS (
                              SELECT 1 FROM keywords rk
-                             WHERE rk.parent_id IS NULL
-                               AND rk.taxon_id = k.taxon_id
+                             WHERE rk.taxon_id = k.taxon_id
                                AND (rk.is_species = 1 OR rk.type = 'taxonomy')
                                AND rk.name = ?
                          )
@@ -954,12 +1006,13 @@ class SpeciesCurationRepository:
                  )"""
             params.extend([species, species])
         params.append(ws)
-        rows = self.conn.execute(
-            f"""SELECT DISTINCT k.name AS species, lk.name AS location
+        return self.conn.execute(
+            f"""SELECT DISTINCT k.name AS species, t.id AS taxon_id, lk.name AS location
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                 {species_filter}
+               LEFT JOIN taxa t ON t.id = k.taxon_id
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
@@ -974,10 +1027,6 @@ class SpeciesCurationRepository:
                ORDER BY k.name, lk.name""",
             tuple(params),
         ).fetchall()
-        result = {}
-        for r in rows:
-            result.setdefault(r["species"], []).append(r["location"])
-        return result
 
     def get_photo_preferences(self, purpose):
         """Return {species: photo_id} preferences for the active workspace."""
