@@ -1274,6 +1274,17 @@ body.sidebar-resizing {
   color: var(--text-ghost);
   margin-bottom: 6px;
 }
+.browse-histogram { width: 100%; height: 82px; background: #0f1113; border-radius: 4px; }
+.browse-histogram-legend, .browse-histogram-values {
+  display: flex; justify-content: space-between; gap: 8px; font-size: 11px; margin-top: 4px;
+}
+.browse-histogram-legend { color: var(--text-ghost); }
+.browse-histogram-legend .red { color: #ff7777; }
+.browse-histogram-legend .green { color: #78d995; }
+.browse-histogram-legend .blue { color: #82afff; }
+.browse-histogram-values { flex-wrap: wrap; color: var(--text-secondary); }
+.browse-histogram-values[hidden] { display: none; }
+.browse-histogram-status { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
 .detail-rating {
   display: flex;
   gap: 4px;
@@ -2225,6 +2236,17 @@ body.sidebar-resizing {
       <img data-browse-on="click:openDetailInLightbox" class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;">
       <div class="detail-filename single-only" id="detailFilename"></div>
       <button data-browse-on="click:toggleDetailPairSource" class="detail-source-control single-only" id="detailSourceControl" type="button"></button>
+
+      <div class="detail-section single-only" id="browseHistogramSection">
+        <div class="detail-section-title">Preview Histogram</div>
+        <canvas class="browse-histogram" id="browseHistogram" width="256" height="82" role="img" aria-label="Red, green, and blue preview histogram" hidden></canvas>
+        <div class="browse-histogram-legend" aria-hidden="true"><span>0 · Shadows</span><span><span class="red">R</span> <span class="green">G</span> <span class="blue">B</span></span><span>Highlights · 255</span></div>
+        <div class="browse-histogram-values" id="browseHistogramValues" hidden>
+          <span id="browseHistogramLow" title="Sampled preview pixels with luminance at or below 3 out of 255."></span>
+          <span id="browseHistogramHigh" title="Sampled preview pixels with any RGB channel at or above 253 out of 255."></span>
+        </div>
+        <div class="browse-histogram-status" id="browseHistogramStatus" role="status">Loading preview…</div>
+      </div>
 
       <div class="detail-section">
         <div class="detail-section-title">Rating <span class="batch-mixed" id="ratingMixed" hidden>· Mixed</span></div>

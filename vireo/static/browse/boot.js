@@ -54,6 +54,7 @@ import { renderFolderTree } from './sidebar-folders.js';
 import { renderKeywordTree } from './sidebar-keywords.js';
 import { browseStacksEnabled } from './stacks.js';
 import { updateFilterSummary, updateThumbSize } from './view-controls.js';
+import { bindBrowseHistogram } from './histogram.js';
 
 // The desktop build resolves template includes only, so compose the filter
 // bar's shared row (sort, size, stacks, boxes, calendar) in the browser.
@@ -109,6 +110,7 @@ VireoBrowseCompare.bindControls(document, function() { return browseCompare; });
 
 /* ---------- Bootstrap ---------- */
 bindSelectionPanelActions();
+bindBrowseHistogram();
 VireoViewPreferences.restoreAll(/** @type {HTMLElement | null} */ (document.querySelector('.browse-view-controls')));
 updateThumbSize(/** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider')).value);
 bootstrapBrowse();

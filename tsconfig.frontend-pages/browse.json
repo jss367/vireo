@@ -22,6 +22,7 @@
     "../vireo/static/browse/export.js",
     "../vireo/static/browse/folder-health.js",
     "../vireo/static/browse/grid.js",
+    "../vireo/static/browse/histogram.js",
     "../vireo/static/browse/keyboard.js",
     "../vireo/static/browse/keyword-autocomplete.js",
     "../vireo/static/browse/layout.js",
