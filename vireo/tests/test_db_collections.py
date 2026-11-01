@@ -101,6 +101,7 @@ def test_get_collections_is_workspace_scoped_and_name_ordered(db):
     db.collections.add("a", "[]", "{}")
     db.commit()
     other_ws = db.create_workspace("other")
+    db.commit()
     db.set_active_workspace(other_ws)
     db.collections.add("elsewhere", "[]")
     db.commit()
@@ -114,6 +115,7 @@ def test_delete_collection_commits_and_ignores_other_workspace(db):
     keep = db.collections.add("keep", "[]")
     db.commit()
     other_ws = db.create_workspace("other")
+    db.commit()
     db.set_active_workspace(other_ws)
     foreign = db.collections.add("foreign", "[]")
     db.commit()
@@ -141,6 +143,7 @@ def test_rename_collection_commits(db):
 
 def test_rename_collection_missing_or_foreign_raises(db):
     other_ws = db.create_workspace("other")
+    db.commit()
     db.set_active_workspace(other_ws)
     foreign = db.collections.add("foreign", "[]")
     db.commit()
@@ -200,6 +203,7 @@ def test_get_collections_for_picker_orders_case_insensitively_then_by_id(db):
     lower_a = db.collections.add("a", "[]")
     db.commit()
     other_ws = db.create_workspace("other")
+    db.commit()
     db.set_active_workspace(other_ws)
     db.collections.add("elsewhere", "[]")
     db.commit()
@@ -216,6 +220,7 @@ def test_get_collection_is_workspace_scoped(db):
     cid = db.collections.add("Mine", '[{"field": "all"}]', '{"prompt": "owl"}')
     db.commit()
     other_ws = db.create_workspace("other")
+    db.commit()
     db.set_active_workspace(other_ws)
     foreign = db.collections.add("foreign", "[]")
     db.commit()
@@ -272,6 +277,7 @@ def test_update_collection_with_nothing_runs_no_statement(db):
 
 def test_update_collection_ignores_other_workspace(db):
     other_ws = db.create_workspace("other")
+    db.commit()
     db.set_active_workspace(other_ws)
     foreign = db.collections.add("foreign", "[]")
     db.commit()
@@ -432,6 +438,7 @@ def test_remap_collection_photo_ids_follows_chains_and_folds_duplicates(db):
     from repositories.collections import remap_collection_photo_ids
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     rows = {
         "chain": [{"field": "photo_ids", "value": [1, "2", 9]}],
         "dupes": [{"match": "any", "rules": [
@@ -471,6 +478,7 @@ def test_remap_collection_photo_ids_normalizes_boolean_ids(db):
     from repositories.collections import remap_collection_photo_ids
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     rules = [{"field": "photo_ids", "value": [True, 1, False, 0, 2]}]
     cid = db.conn.execute(
         "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
@@ -497,6 +505,7 @@ def test_remap_collection_photo_ids_normalizes_float_and_stringified_ids(db):
     from repositories.collections import remap_collection_photo_ids
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     rules = [
         {"field": "photo_ids", "value": [1, 1.0, "1", "1.0", "1e0", "2"]},
     ]
@@ -525,6 +534,7 @@ def test_remap_collection_photo_ids_leaves_unicode_whitespace_wrapped_ids_alone(
     from repositories.collections import remap_collection_photo_ids
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     rules = [
         {"field": "photo_ids", "value": [" 1 ", " 1 ", "1"]},
     ]
@@ -618,6 +628,7 @@ def test_remap_collection_photo_ids_preserves_large_integer_string_ids(db):
     from repositories.collections import remap_collection_photo_ids
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     big = 9007199254740993
     rules = [{"field": "photo_ids", "value": [str(big), big + 2]}]
     cid = db.conn.execute(
@@ -644,6 +655,7 @@ def test_remap_collection_photo_ids_handles_json_escaped_field_names(db):
     from repositories.collections import remap_collection_photo_ids
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     raw = '[{"field":"photo\\u005fids","value":[1]}]'
     assert "photo_ids" not in raw
     cid = db.conn.execute(
@@ -956,6 +968,7 @@ def test_create_default_collections_commits(db):
 
 def test_create_default_collections_for_explicit_workspace_skips_active(db):
     other_ws = db.create_workspace("other")
+    db.commit()
     db.set_active_workspace(None)
     db.collections.create_defaults(workspace_id=other_ws)
     db.commit()

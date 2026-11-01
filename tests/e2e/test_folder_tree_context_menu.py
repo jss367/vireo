@@ -286,6 +286,7 @@ def test_folder_tree_work_locally_copies_selected_root(live_server, page, tmp_pa
     source.mkdir()
     (source / "bird.jpg").write_bytes(b"original")
     workspace_id = db.create_workspace("Browse Local Copy")
+    db.commit()
     db.set_active_workspace(workspace_id)
     folder_id = workspace_folders.add_folder(db, str(source), name="nas-source")
     assert page.request.post(
@@ -336,6 +337,7 @@ def test_folder_tree_marks_parent_when_only_descendant_is_local(
     child.mkdir(parents=True)
     (child / "bird.jpg").write_bytes(b"original")
     workspace_id = db.create_workspace("Mixed Local Folders")
+    db.commit()
     parent_id = workspace_folders.add_folder(
         db, str(source), name="trip", link_to_workspace=False
     )
@@ -493,6 +495,7 @@ def test_folder_tree_fallback_anchor_does_not_bleed_into_siblings(
     child_b.mkdir(parents=True)
     (child_b / "b.jpg").write_bytes(b"b")
     workspace_id = db.create_workspace("Fallback Spread")
+    db.commit()
     parent_id = workspace_folders.add_folder(
         db, str(source), name="trip-with-siblings", link_to_workspace=False
     )
@@ -1009,6 +1012,7 @@ def test_folder_tree_shows_associated_workspaces(live_server, page):
     active_workspace = db.workspaces.get(db._active_workspace_id)
     folder_id = db.folders.tree()[0]["id"]
     shared_workspace_id = db.create_workspace("Shared Bird Library")
+    db.commit()
     workspace_folders.add_workspace_folder(db, shared_workspace_id, folder_id)
 
     page.goto(f"{live_server['url']}/browse")

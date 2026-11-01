@@ -175,6 +175,7 @@ def test_saved_recovery_stays_in_its_workspace(db, tmp_path):
     pid = _photo(db, tmp_path)
     ws1 = db.active_workspace_id
     ws2 = db.workspaces.create("Other")
+    db.commit()
     old = _old_review([pid])
     save_results_raw(old, str(tmp_path), ws1)
     save_results_raw(old, str(tmp_path), ws2)

@@ -264,6 +264,7 @@ def export_env(tmp_path):
     """Set up a DB with photos and real image files for export testing."""
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src = tmp_path / "src"
@@ -2463,6 +2464,7 @@ def test_preview_export_renames_verifies_colliding_directory_identities(
     Image.new("RGB", (20, 20), color="blue").save(second / "bird.jpg", "JPEG")
     db = Database(str(tmp_path / "identity.db"))
     workspace_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(workspace_id)
     first_folder = workspace_folders.add_folder(db, str(first), name="First")
     second_folder = workspace_folders.add_folder(db, str(second), name="Second")
@@ -3176,6 +3178,7 @@ def test_export_configured_developed_dir_disambiguates_same_basename(tmp_path):
     """
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     # Two source folders, each with a photo that shares the same basename.
@@ -3266,6 +3269,7 @@ def test_export_developed_stem_match_is_case_sensitive(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src = tmp_path / "src"
@@ -3462,6 +3466,7 @@ def test_export_reused_folder_id_does_not_inherit_stale_developed(tmp_path):
     """
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     vireo_dir = tmp_path / "vireo"
@@ -3547,6 +3552,7 @@ def test_export_case_variant_developed_prefers_lowercase_extension(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src = tmp_path / "src"
@@ -3770,6 +3776,7 @@ def test_move_folder_rebases_configured_developed_dir(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src_parent = tmp_path / "old_parent"
@@ -3967,6 +3974,7 @@ def test_move_folder_descendant_query_ignores_like_wildcard_matches(tmp_path, mo
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src_parent = tmp_path / "src"

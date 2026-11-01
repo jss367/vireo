@@ -576,6 +576,7 @@ def test_dashboard_scope_rejects_foreign_collection(app_and_db):
     """Scope ids cannot cross workspace boundaries."""
     app, db = app_and_db
     other_workspace = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_workspace)
     foreign_collection = db.collections.add("Foreign", "[]")
     db.commit()
@@ -1404,6 +1405,7 @@ def test_api_photos_companion_count_scoped_to_active_workspace(app_and_db):
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     other_fid = workspace_folders.add_folder(db, '/other/photos', name='other')
     other_pid = photo_ingest.add_photo(
@@ -7441,6 +7443,7 @@ def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid1 = photo_ingest.add_photo(
@@ -7479,6 +7482,7 @@ def test_reconcile_drops_ghost_rows_when_files_missing(tmp_path):
     (vireo_dir / "previews").mkdir()
     db = Database(str(vireo_dir / "vireo.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path / "src"), name="src")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -7508,6 +7512,7 @@ def test_reconcile_keeps_live_rows(tmp_path):
     preview_dir.mkdir()
     db = Database(str(vireo_dir / "vireo.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path / "src"), name="src")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -7548,6 +7553,7 @@ def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path / "src"), name="src")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -7679,6 +7685,7 @@ def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
     # Set up a photo and a pre-existing legacy preview file.
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid = photo_ingest.add_photo(
@@ -8245,6 +8252,7 @@ def test_startup_evicts_when_migration_pushes_over_quota(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid = photo_ingest.add_photo(
@@ -8328,6 +8336,7 @@ def test_legacy_sized_preview_files_are_backfilled_at_startup(tmp_path, monkeypa
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid_kept = photo_ingest.add_photo(
@@ -8388,6 +8397,7 @@ def test_legacy_sized_preview_backfill_skips_already_tracked(tmp_path, monkeypat
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid = photo_ingest.add_photo(
@@ -8477,6 +8487,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid_edited = photo_ingest.add_photo(
@@ -8594,6 +8605,7 @@ def test_edit_math_version_migration_leaves_version_on_failed_purge(
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid_edited = photo_ingest.add_photo(
@@ -8658,6 +8670,7 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     pid = photo_ingest.add_photo(
@@ -8765,6 +8778,7 @@ def test_edit_math_version_migration_scans_preview_dir_once(
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
@@ -9024,6 +9038,7 @@ def test_storage_delete_files_chunks_large_thumb_id_list(
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
 
@@ -9683,6 +9698,7 @@ def test_post_photo_location_returns_404_on_missing_photo(app_and_db, monkeypatc
 def _add_out_of_workspace_photo(db):
     active_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     fid = workspace_folders.add_folder(db, "/photos/other", name="other")
     pid = photo_ingest.add_photo(
@@ -9849,6 +9865,7 @@ def test_delete_photo_location_rejects_out_of_workspace_photo(app_and_db):
     app, db = app_and_db
     active_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     fid = workspace_folders.add_folder(db, "/photos/other", name="other")
     pid = photo_ingest.add_photo(
@@ -11760,6 +11777,7 @@ def _add_other_workspace_photo(db):
     """Create a photo whose folder is linked only to another workspace."""
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     fid = workspace_folders.add_folder(db, '/secret/other', name='secret-other')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='hidden.jpg', extension='.jpg',
@@ -12238,6 +12256,7 @@ def test_local_snapshot_root_matches_thumb_cache_dir(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     photo_id = photo_ingest.add_photo(

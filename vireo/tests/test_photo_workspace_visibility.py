@@ -29,6 +29,7 @@ def test_move_preserves_only_selected_photo_when_checked(tmp_path, keep_visible)
     with Database(path) as db:
         a = db._active_workspace_id
         b = db.create_workspace("Other")
+        db.commit()
         source, moved = _photo(db, tmp_path / "source", "moved.jpg")
         _, unselected = _photo(db, tmp_path / "source", "unselected.jpg", b"other")
         destination, unrelated = _photo(db, tmp_path / "destination", "unrelated.jpg", b"unrelated")
@@ -58,6 +59,7 @@ def test_unchecked_subsequent_move_revokes_prior_photo_grant(tmp_path):
     with Database(str(tmp_path / "db")) as db:
         a = db._active_workspace_id
         b = db.create_workspace("Other")
+        db.commit()
         source, photo = _photo(db, tmp_path / "source", "photo.jpg")
         workspace_folders.add_workspace_folder(db, b, source)
         assert move_photos(db, [photo], str(tmp_path / "first"))["moved"] == 1
@@ -70,6 +72,7 @@ def test_unchecked_subsequent_move_revokes_prior_photo_grant(tmp_path):
 def test_unchecked_move_does_not_remove_existing_destination_sharing(tmp_path):
     with Database(str(tmp_path / "db")) as db:
         b = db.create_workspace("Other")
+        db.commit()
         source, photo = _photo(db, tmp_path / "source", "photo.jpg")
         destination, sibling = _photo(db, tmp_path / "destination", "sibling.jpg", b"sibling")
         workspace_folders.add_workspace_folder(db, b, source)
@@ -95,6 +98,7 @@ def test_visibility_write_failure_keeps_original_catalog_and_bytes(tmp_path, mon
 def test_removing_folder_membership_removes_photo_grants(tmp_path):
     with Database(str(tmp_path / "db")) as db:
         b = db.create_workspace("Other")
+        db.commit()
         folder, photo = _photo(db, tmp_path / "folder", "photo.jpg")
         db.photo_visibility.grant(b, [photo])
         db.conn.commit()
@@ -116,6 +120,7 @@ def test_move_preference_persists_and_default_is_checked(tmp_path, monkeypatch):
 def test_visibility_preview_is_scoped_and_names_affected_workspaces(app_and_db, tmp_path):
     app, db = app_and_db
     b = db.create_workspace("Birds")
+    db.commit()
     source, photo = _photo(db, tmp_path / "source", "photo.jpg")
     workspace_folders.add_workspace_folder(db, b, source)
     client = app.test_client()
@@ -123,6 +128,7 @@ def test_visibility_preview_is_scoped_and_names_affected_workspaces(app_and_db, 
     assert response.status_code == 200
     assert response.json == {"workspaces": [{"id": b, "name": "Birds", "photo_count": 1}]}
     c = db.create_workspace("Hidden")
+    db.commit()
     db.set_active_workspace(c)
     _, hidden = _photo(db, tmp_path / "hidden", "hidden.jpg")
     db.set_active_workspace(1)
@@ -156,6 +162,7 @@ def test_reimport_moved_duplicate_grants_only_existing_photo(tmp_path, monkeypat
     with Database(db_path) as db:
         a = db._active_workspace_id
         b = db.create_workspace("Receiving")
+        db.commit()
         first = run_import_job(_make_job(), FakeRunner(), db_path, a, params)
         assert first["ok"] and first["copied"] == 1
         row = db.conn.execute("SELECT id, folder_id FROM photos").fetchone()
@@ -189,6 +196,7 @@ def test_reimport_visibility_failure_reports_failure(tmp_path, monkeypatch):
     with Database(db_path) as db:
         a = db._active_workspace_id
         b = db.create_workspace("Receiving")
+        db.commit()
         assert run_import_job(_make_job(), FakeRunner(), db_path, a, params)["ok"]
         def fail(self, workspace_id, rows):
             raise RuntimeError("cannot persist visibility")
@@ -202,6 +210,7 @@ def test_reimport_visibility_failure_reports_failure(tmp_path, monkeypatch):
 def test_grant_only_folder_is_not_a_storage_import_root(tmp_path):
     with Database(str(tmp_path / "db")) as db:
         b = db.create_workspace("Other")
+        db.commit()
         folder, photo = _photo(db, tmp_path / "folder", "photo.jpg")
         db.photo_visibility.grant(b, [photo])
         db.conn.commit()
@@ -214,6 +223,7 @@ def test_deleting_folder_does_not_delete_another_workspaces_granted_photo(tmp_pa
     with Database(str(tmp_path / "db")) as db:
         a = db._active_workspace_id
         b = db.create_workspace("Other")
+        db.commit()
         folder, photo = _photo(db, tmp_path / "folder", "photo.jpg")
         db.photo_visibility.grant(b, [photo])
         db.photo_visibility.grant(a, [photo])
@@ -230,6 +240,7 @@ def test_identity_fold_transfers_grants_without_sharing_destination(tmp_path):
     from repositories.photo_visibility import remap_photo_visibility
     with Database(str(tmp_path / "db")) as db:
         b = db.create_workspace("Other")
+        db.commit()
         _, losing = _photo(db, tmp_path / "old", "photo.jpg")
         destination, survivor = _photo(db, tmp_path / "new", "photo.jpg")
         _, unrelated = _photo(db, tmp_path / "new", "unrelated.jpg", b"unrelated")
@@ -244,6 +255,7 @@ def test_identity_fold_transfers_grants_without_sharing_destination(tmp_path):
 def test_large_affected_selection_is_deduplicated_and_chunked(tmp_path):
     with Database(str(tmp_path / "db")) as db:
         b = db.create_workspace("Other")
+        db.commit()
         source, photo = _photo(db, tmp_path / "source", "photo.jpg")
         workspace_folders.add_workspace_folder(db, b, source)
         assert db.photo_visibility.affected_workspaces([photo] * 900 + list(range(10000, 10900))) == [
@@ -258,6 +270,7 @@ def test_move_job_uses_remembered_choice_or_explicit_override(app_and_db, tmp_pa
 
     app, db = app_and_db
     b = db.create_workspace("Other")
+    db.commit()
     source, photo = _photo(db, tmp_path / "job-source", "photo.jpg")
     workspace_folders.add_workspace_folder(db, b, source)
     raw = cfg.read_raw_config_file()
@@ -280,6 +293,7 @@ def test_grant_only_folder_path_is_readable_but_cannot_be_rescanned(app_and_db, 
     app, db = app_and_db
     a = db._active_workspace_id
     b = db.create_workspace("Other")
+    db.commit()
     folder, photo = _photo(db, tmp_path / "grant-folder", "photo.jpg")
     db.photo_visibility.grant(b, [photo])
     db.conn.commit()
@@ -299,6 +313,7 @@ def test_grants_reach_browse_collections_but_not_missing_siblings(tmp_path):
 
     with Database(str(tmp_path / 'db')) as db:
         b = db.create_workspace('Other')
+        db.commit()
         folder, visible = _photo(db, tmp_path / 'folder', 'visible.jpg')
         _, hidden = _photo(db, tmp_path / 'folder', 'hidden.jpg', b'hidden')
         db.photo_visibility.grant(b, [visible])
@@ -329,6 +344,7 @@ def test_date_move_preview_includes_detached_physical_descendants(app_and_db, tm
     app, db = app_and_db
     a = db._active_workspace_id
     b = db.create_workspace('Hidden descendant owner')
+    db.commit()
     root, visible = _photo(db, tmp_path / 'root', 'visible.jpg')
     child, hidden = _photo(db, tmp_path / 'root' / 'detached', 'hidden.jpg', b'hidden')
     workspace_folders.add_workspace_folder(db, b, child)
@@ -356,6 +372,7 @@ def test_workspace_folder_transfer_removes_source_grants_atomically(tmp_path, ab
         source = db._active_workspace_id
         target = db.create_workspace('Target')
         other = db.create_workspace('Other')
+        db.commit()
         folder, photo = _photo(db, tmp_path / 'folder', 'photo.jpg')
         db.photo_visibility.grant(source, [photo])
         db.photo_visibility.grant(other, [photo])
@@ -381,6 +398,7 @@ def test_raw_jpeg_fold_preserves_photo_grants_without_sibling_access(tmp_path):
 
     with Database(str(tmp_path / 'db')) as db:
         b = db.create_workspace('Other')
+        db.commit()
         folder, jpeg = _photo(db, tmp_path / 'folder', 'IMG_001.jpg')
         raw = photo_ingest.add_photo(db, folder_id=folder, filename='IMG_001.cr3', extension='.cr3', file_size=2000, file_mtime=1)
         _, sibling = _photo(db, tmp_path / 'folder', 'unrelated.jpg', b'unrelated')
@@ -397,6 +415,7 @@ def test_raw_jpeg_fold_preserves_photo_grants_without_sibling_access(tmp_path):
 def test_associated_workspaces_include_only_exact_photo_grant_folder(app_and_db, tmp_path):
     app, db = app_and_db
     b = db.create_workspace('Other')
+    db.commit()
     folder, photo = _photo(db, tmp_path / 'folder', 'photo.jpg')
     child, _ = _photo(db, tmp_path / 'folder' / 'child', 'hidden.jpg')
     db.photo_visibility.grant(b, [photo])
@@ -417,6 +436,7 @@ def test_grant_only_folder_read_scopes_keep_siblings_hidden(app_and_db, tmp_path
 
     app, db = app_and_db
     b = db.create_workspace('Other')
+    db.commit()
     folder, photo = _photo(db, tmp_path / 'folder', 'photo.jpg')
     _, sibling = _photo(db, tmp_path / 'folder', 'hidden.jpg', b'hidden')
     db.photo_visibility.grant(b, [photo])
@@ -448,6 +468,7 @@ def test_grant_only_folder_is_excluded_from_audit_roots(app_and_db, tmp_path):
     """
     app, db = app_and_db
     b = db.create_workspace('Other')
+    db.commit()
     linked_dir = tmp_path / 'linked'
     linked_dir.mkdir()
     linked_folder = workspace_folders.add_folder(db, str(linked_dir))
@@ -502,6 +523,7 @@ def test_folder_relocate_requires_real_folder_link_not_photo_grant(app_and_db, t
     app, db = app_and_db
     owner = db._active_workspace_id
     guest = db.create_workspace('Guest')
+    db.commit()
     folder_dir = tmp_path / 'owned-folder'
     folder, owned_photo = _photo(db, folder_dir, 'owned.jpg')
     _, sibling = _photo(db, folder_dir, 'sibling.jpg', b'sibling')
@@ -615,6 +637,7 @@ def test_grant_only_workspace_cannot_preflight_or_launch_whole_folder_move(app_a
     app, db = app_and_db
     owner = db._active_workspace_id
     guest = db.create_workspace("Guest")
+    db.commit()
     source = tmp_path / "owned-source"
     folder, shared = _photo(db, source, "shared.jpg")
     _, sibling = _photo(db, source, "private.jpg", b"private")
@@ -645,6 +668,7 @@ def test_grant_only_folder_cannot_become_a_workspace_scan_or_local_copy_root(app
     app, db = app_and_db
     owner = db._active_workspace_id
     guest = db.create_workspace("Photo-only guest")
+    db.commit()
     folder, shared = _photo(db, tmp_path / "root", "shared.jpg")
     _, sibling = _photo(db, tmp_path / "root", "private.jpg", b"private")
     db.photo_visibility.grant(guest, [shared])
@@ -668,6 +692,7 @@ def test_grant_only_missing_folder_cannot_delete_hidden_siblings(app_and_db, tmp
     app, db = app_and_db
     owner = db._active_workspace_id
     guest = db.create_workspace("Photo-only guest")
+    db.commit()
     folder, shared = _photo(db, tmp_path / "missing-root", "shared.jpg")
     _, sibling = _photo(db, tmp_path / "missing-root", "private.jpg", b"private")
     db.photo_visibility.grant(guest, [shared])
@@ -695,6 +720,7 @@ def test_failed_move_rolls_back_destination_subtree_membership(tmp_path, monkeyp
     with Database(str(tmp_path / "db")) as db:
         active = db._active_workspace_id
         owner = db.create_workspace("Destination owner")
+        db.commit()
         source, photo = _photo(db, tmp_path / "source", "moving.jpg")
         destination, sibling = _photo(db, tmp_path / "destination", "private.jpg", b"private")
         child, nested = _photo(db, tmp_path / "destination" / "nested", "hidden.jpg", b"nested")
@@ -722,6 +748,7 @@ def test_failed_move_rolls_back_destination_subtree_membership(tmp_path, monkeyp
 def test_highlights_parent_count_includes_granted_child_without_hidden_siblings(tmp_path):
     with Database(str(tmp_path / "db")) as db:
         guest = db.create_workspace("Photo-only guest")
+        db.commit()
         parent, parent_photo = _photo(db, tmp_path / "parent", "parent.jpg")
         child, shared = _photo(db, tmp_path / "parent" / "child", "shared.jpg")
         _, hidden = _photo(db, tmp_path / "parent" / "child", "hidden.jpg", b"private")
@@ -742,6 +769,7 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
     with Database(str(tmp_path / "db")) as db:
         active = db._active_workspace_id
         owner = db.create_workspace("Hidden subtree owner")
+        db.commit()
         parent, root_photo = _photo(db, tmp_path / "root", "root.jpg")
         gap, hidden = _photo(db, tmp_path / "root" / "detached", "private.jpg", b"private")
         day, shared = _photo(db, tmp_path / "root" / "detached" / "day", "shared.jpg")

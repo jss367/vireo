@@ -66,6 +66,7 @@ def test_model_choices_respect_workspace_and_visible_predictions(db, tmp_path):
     predict(a, "Alternative only", status="alternative")
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     folder2 = workspace_folders.add_folder(db, str(tmp_path / "elsewhere"))
     predict(_photo(db, folder2, "elsewhere.jpg"), "Other workspace model")

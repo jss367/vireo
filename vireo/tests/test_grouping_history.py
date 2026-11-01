@@ -534,6 +534,7 @@ def test_grouping_history_is_workspace_scoped(app_and_db):
     _detach(client)
     original_workspace = db._ws_id()
     other = db.create_workspace('Another trip')
+    db.commit()
     # The app's request connections follow the active workspace stored in meta.
     assert client.post(f'/api/workspaces/{other}/activate', json={}).status_code == 200
     assert client.get('/api/undo/status').json['available'] is False

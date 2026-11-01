@@ -108,6 +108,7 @@ def test_time_preview_skips_existing_locations_and_gps(app_and_db):
 def test_all_photo_scope_respects_active_workspace(app_and_db):
     app, db = app_and_db
     db.create_workspace("Empty workspace")
+    db.commit()
     workspace = db.conn.execute("SELECT id FROM workspaces WHERE name = 'Empty workspace'").fetchone()[0]
     client = app.test_client()
     assert client.post(f"/api/workspaces/{workspace}/activate").status_code == 200
@@ -311,6 +312,7 @@ def test_discrepancy_scope_cannot_cross_workspaces(discrepancy_catalog):
     client, db, photo_ids, _, _ = discrepancy_catalog
     photos = discrepancy_preview(client)
     other_ws = db.create_workspace('Another workspace')
+    db.commit()
     assert client.post(f'/api/workspaces/{other_ws}/activate').status_code == 200
     assert discrepancy_preview(client) == []
     assert resolve(client, photos, 'assigned').status_code == 403

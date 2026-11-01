@@ -123,6 +123,7 @@ def test_folders_reveal_allows_cross_workspace_paths_known_to_library(app_and_db
     app, db = app_and_db
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     workspace_folders.add_folder(db, "/tmp/cross-ws-bucket")
     db.set_active_workspace(default_ws)

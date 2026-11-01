@@ -342,6 +342,7 @@ def test_delete_missing_returns_false_and_leaves_workspaces_alone(db):
     ws = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": 31337}},
     )
+    db.commit()
     before = _overrides_raw(db, ws)
     assert saved_processes.delete_saved_process(db, 31337) is False
     assert not db.conn.in_transaction
@@ -358,6 +359,7 @@ def test_delete_rewrites_only_the_matching_pointer(db):
             "other": {"x": 1},
         },
     )
+    db.commit()
     saved_processes.delete_saved_process(db, pid)
     conn = _other_conn(db)
     try:
@@ -381,6 +383,7 @@ def test_delete_rewrites_every_referencing_workspace(db):
         )
         for i in range(3)
     ]
+    db.commit()
     saved_processes.delete_saved_process(db, pid)
     for ws in ws_ids:
         assert json.loads(_overrides_raw(db, ws))["pipeline"]["default_process_id"] is None
@@ -403,6 +406,7 @@ def test_delete_skips_workspaces_it_cannot_or_need_not_rewrite(db, raw):
     pid = db.processes.create("Skip")
     db.commit()
     ws = db.create_workspace("WS")
+    db.commit()
     _set_overrides_raw(db, ws, raw)
     assert saved_processes.delete_saved_process(db, pid) is True
     assert _overrides_raw(db, ws) == raw
@@ -413,6 +417,7 @@ def test_delete_skips_null_overrides(db):
     pid = db.processes.create("Nulls")
     db.commit()
     ws = db.create_workspace("WS")
+    db.commit()
     assert _overrides_raw(db, ws) is None
     assert saved_processes.delete_saved_process(db, pid) is True
     assert _overrides_raw(db, ws) is None
@@ -425,6 +430,7 @@ def test_delete_compares_pointer_by_equality(db):
     ws_str = db.create_workspace(
         "WSstr", config_overrides={"pipeline": {"default_process_id": str(pid)}},
     )
+    db.commit()
     saved_processes.delete_saved_process(db, pid)
     assert json.loads(_overrides_raw(db, ws_str))["pipeline"]["default_process_id"] == str(pid)
 
@@ -436,6 +442,7 @@ def test_delete_mixed_rows_rewrites_matches_and_skips_malformed(db):
     good = db.create_workspace(
         "Good", config_overrides={"pipeline": {"default_process_id": pid}},
     )
+    db.commit()
     _set_overrides_raw(db, bad, "{not json")
     assert saved_processes.delete_saved_process(db, pid) is True
     assert _overrides_raw(db, bad) == "{not json"

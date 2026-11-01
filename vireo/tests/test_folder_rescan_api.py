@@ -112,6 +112,7 @@ def test_folder_rescan_rejects_folder_outside_active_workspace(app_and_db, tmp_p
     # switch back so the folder is only linked to the other workspace.
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     folder_id = workspace_folders.add_folder(db, str(real_dir), name="other-ws")
     db.set_active_workspace(default_ws)

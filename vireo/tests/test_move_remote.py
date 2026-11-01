@@ -224,6 +224,7 @@ def test_coerce_remote_target_coerces_and_defaults():
 def remote_env(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src = tmp_path / "src"

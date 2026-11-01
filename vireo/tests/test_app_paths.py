@@ -181,6 +181,7 @@ def test_upgrade_reopens_original_catalog_even_if_native_catalog_exists(fresh_ho
     old.parent.mkdir()
     db = Database(str(old))
     workspace = db.create_workspace("Original catalog")
+    db.commit()
     db.close()
     monkeypatch.setattr(sys, "argv", ["vireo"])
     args = _parse_main_args()

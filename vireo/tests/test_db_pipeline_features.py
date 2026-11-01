@@ -41,6 +41,7 @@ def catalog(db, tmp_path):
 def test_workspace_membership(db, catalog, tmp_path):
     ws, photos, _dets = catalog
     other = db.create_workspace("Other")
+    db.commit()
     features = db.pipeline_features
     assert features.workspace_photo_ids(ws) == set(photos)
     assert features.workspace_photo_ids(other) == set()

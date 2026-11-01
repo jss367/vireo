@@ -38,6 +38,7 @@ def _committed(db, archive_id):
 def test_open_with_review_collection(db):
     ws = db.require_workspace_id()
     other = db.create_workspace("Other")
+    db.commit()
     review = db.collections.add("Review", "[]")
     db.commit()
     _archive(db, "late", created_at="2026-02-01 00:00:00", collection_id=review)
@@ -73,6 +74,7 @@ def test_open_with_review_collection(db):
 def test_delete_is_workspace_scoped(db):
     ws = db.require_workspace_id()
     other = db.create_workspace("Other")
+    db.commit()
     _archive(db, "mine")
     _archive(db, "theirs", workspace_id=other)
     db.pending_archives.delete("mine")
@@ -91,6 +93,7 @@ def test_delete_is_workspace_scoped(db):
 
 def test_set_state_writes_by_id_in_any_workspace(db):
     other = db.create_workspace("Other")
+    db.commit()
     _archive(db, "a", workspace_id=other)
     db.pending_archives.set_state("a", "pending", "disk full")
     db.commit()
@@ -122,6 +125,7 @@ def test_register_writes_once_per_id_and_get_is_workspace_scoped(db):
     assert row["target_json"] == '{"host": "nas", "port": 22}'
     assert db.pending_archives.get("missing") is None
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     assert db.pending_archives.get("a1") is None
 
@@ -167,6 +171,7 @@ def test_scoped_operations_resolve_the_workspace_active_at_the_call(db):
     """A fresh repository per access, and each call reads the current workspace."""
     ws = db.require_workspace_id()
     other = db.create_workspace("Other")
+    db.commit()
     _archive(db, "mine")
     _archive(db, "theirs", workspace_id=other)
     db.set_active_workspace(other)

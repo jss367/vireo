@@ -1041,7 +1041,8 @@ class ImportService:
         try:
             from datetime import datetime
 
-            ws_id = db.create_workspace(name)
+            with db.transaction():
+                ws_id = db.create_workspace(name)
             self.invalidate_missing_originals(workspace_ids=[ws_id])
             with db.transaction():
                 db.collections.create_defaults(workspace_id=ws_id)

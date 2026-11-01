@@ -188,6 +188,7 @@ def test_review_queue_workspace_and_collection_inspection_do_not_leak(page, live
     page.locator('#collectionFilter').select_option(str(collection))
     expect(page.locator('#rqProgress')).to_contain_text('inspected here: 1')
     other = live_server['db'].create_workspace('Other inspection scope')
+    live_server["db"].commit()
     page.request.post(live_server['url'] + f'/api/workspaces/{other}/activate')
     page.reload()
     expect(page.locator('#rqEnabled')).not_to_be_checked()

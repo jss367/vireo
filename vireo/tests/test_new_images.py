@@ -31,6 +31,7 @@ def _clear_shared_new_images_cache():
 def db_with_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     return db, ws_id, tmp_path
 
@@ -620,6 +621,7 @@ def test_invalidate_cache_for_shared_folder_across_workspaces(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("B")
+    db.commit()
 
     # Link the same folder into both workspaces.
     db.set_active_workspace(ws_a)
@@ -666,6 +668,7 @@ def test_scan_job_invalidates_cache(db_with_workspace):
 def test_two_database_instances_share_cache(tmp_path):
     db_a = Database(str(tmp_path / "test.db"))
     ws_id = db_a.ensure_default_workspace()
+    db_a.commit()
     db_a.set_active_workspace(ws_id)
     root = tmp_path / "shoot"
     os.makedirs(root, exist_ok=True)
@@ -773,6 +776,7 @@ def test_invalidate_new_images_after_scan_normalizes_trailing_slash(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     root = tmp_path / "shoot"
@@ -802,6 +806,7 @@ def test_invalidate_new_images_after_scan_follows_symlinked_root(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     root = tmp_path / "shoot"
@@ -831,6 +836,7 @@ def test_invalidate_new_images_after_scan_preserves_dotdot_segments(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     # Build a path containing `..`. Mirror what the scanner would do: store
@@ -882,6 +888,7 @@ def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(t
     # descendant of `root`.
     db_a = Database(str(tmp_path / "test.db"))
     ws_id = db_a.ensure_default_workspace()
+    db_a.commit()
     db_a.set_active_workspace(ws_id)
 
     root = tmp_path / "shoot"
@@ -896,6 +903,7 @@ def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(t
     # Create a second workspace that only links the descendant folder, so
     # invalidation via the LIKE query (on the root path) must reach it.
     ws_b = db_a.create_workspace("B")
+    db_a.commit()
     workspace_folders.add_workspace_folder(db_a, ws_b, descendant_id)
 
     # Prime caches for both workspaces via db_a.
@@ -1014,6 +1022,7 @@ def test_scan_handler_invalidates_cache_when_scan_raises(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
@@ -1197,8 +1206,10 @@ def test_delete_workspace_clears_cache(tmp_path):
     data leaks across identities until TTL expiry."""
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     ws_tmp = db.create_workspace("to-delete")
+    db.commit()
 
     # Populate the cache directly (avoids needing a real folder / photo setup).
     db._new_images_cache.set(
@@ -1225,9 +1236,11 @@ def test_create_workspace_clears_stale_cache_on_id_reuse(tmp_path):
     """
     db = Database(str(tmp_path / "test.db"))
     ws_default = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_default)
 
     ws_a = db.create_workspace("A")
+    db.commit()
     stale_payload = {"new_count": 42, "per_root": [], "sample": ["/stale.JPG"]}
 
     workspace_lifecycle.delete_workspace(db, ws_a)
@@ -1245,6 +1258,7 @@ def test_create_workspace_clears_stale_cache_on_id_reuse(tmp_path):
     # Create a new workspace. SQLite typically reuses the highest freed rowid,
     # so this usually gets ws_a's old id.
     ws_b = db.create_workspace("B")
+    db.commit()
 
     if ws_a == ws_b:
         # Id was reused — create_workspace's hook must have cleared the stale
@@ -1319,6 +1333,7 @@ def test_add_workspace_folder_invalidates_cache(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("B")
+    db.commit()
 
     # Add a folder under workspace B only. ``add_folder`` auto-links to the
     # active workspace, so set ws_b active first.
@@ -1373,6 +1388,7 @@ def test_move_folders_to_workspace_invalidates_both_workspaces(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("B")
+    db.commit()
 
     # Add a folder to ws_a (auto-linked via add_folder).
     db.set_active_workspace(ws_a)

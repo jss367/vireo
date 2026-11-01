@@ -324,6 +324,7 @@ def test_gc_respects_references_history_and_grace(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     pid = photo_ingest.add_photo(
@@ -386,6 +387,7 @@ def test_gc_rechecks_mtime_before_deleting(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
     pid = photo_ingest.add_photo(

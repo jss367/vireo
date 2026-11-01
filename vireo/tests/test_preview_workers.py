@@ -271,6 +271,7 @@ def test_real_worker_endpoint_preserves_pixels_and_checks_workspace(client_with_
     assert client.get(url + '&preview_session=invalid').status_code == 400
     assert client.post('/api/edit-preview/cancel', json=['invalid']).status_code == 400
     other = db.create_workspace('Other')
+    db.commit()
     assert client.post(f'/api/workspaces/{other}/activate').status_code == 200
     assert client.get(url).status_code == 404
 

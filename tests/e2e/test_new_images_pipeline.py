@@ -57,6 +57,7 @@ def fresh_server(tmp_path, monkeypatch):
     with ExitStack() as cleanup:
         db = cleanup.enter_context(Database(db_path))
         ws_id = db.ensure_default_workspace()
+        db.commit()
         db.set_active_workspace(ws_id)
         # Register the folder so it's "known" to the workspace but empty on disk.
         folder_id = workspace_folders.add_folder(db, str(photo_dir), name="photos")

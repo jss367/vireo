@@ -1416,6 +1416,7 @@ def _photo_only_in_other_workspace(db, tmp_path):
     """
     home_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     folder = tmp_path / "other"
     folder.mkdir()
@@ -1717,6 +1718,7 @@ def test_delete_photos_with_companions_chunks_expanded_ids(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, str(tmp_path / "lib"), name="lib")
 

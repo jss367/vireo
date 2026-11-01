@@ -90,30 +90,30 @@ class WorkspaceRepository:
 
     def create(self, name: str, config_overrides: dict | None = None,
                ui_state: dict | None = None, *, id_floor: int = 0) -> int:
-        """Insert a workspace with the default tabs and commit. Returns its id.
+        """Insert a workspace with the default tabs (no commit). Returns its id.
 
         Call ``Database.create_workspace`` instead: it also clears any stale
-        new-images cache entry for a reused rowid.
+        new-images cache entry for a reused rowid. The caller's unit of work
+        keeps the id high-water bump and the insert together.
         """
         # Keep ownership stable even when Windows refuses to unlink a
         # deleted workspace's result files or old browser state survives.
-        with self.conn:
-            self._remember_id_floor(id_floor)
-            self.conn.execute(
-                "UPDATE db_meta SET value = CAST(value AS INTEGER) + 1 "
-                "WHERE key = 'workspace_id_high_water'"
-            )
-            workspace_id = int(self.conn.execute(
-                "SELECT value FROM db_meta WHERE key = 'workspace_id_high_water'"
-            ).fetchone()[0])
-            self.conn.execute(
-                """INSERT INTO workspaces (id, name, config_overrides, ui_state, tabs)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (workspace_id, name,
-                 json.dumps(config_overrides) if config_overrides else None,
-                 json.dumps(ui_state) if ui_state else None,
-                 json.dumps(self.default_tabs)),
-            )
+        self._remember_id_floor(id_floor)
+        self.conn.execute(
+            "UPDATE db_meta SET value = CAST(value AS INTEGER) + 1 "
+            "WHERE key = 'workspace_id_high_water'"
+        )
+        workspace_id = int(self.conn.execute(
+            "SELECT value FROM db_meta WHERE key = 'workspace_id_high_water'"
+        ).fetchone()[0])
+        self.conn.execute(
+            """INSERT INTO workspaces (id, name, config_overrides, ui_state, tabs)
+               VALUES (?, ?, ?, ?, ?)""",
+            (workspace_id, name,
+             json.dumps(config_overrides) if config_overrides else None,
+             json.dumps(ui_state) if ui_state else None,
+             json.dumps(self.default_tabs)),
+        )
         return workspace_id
 
     def _remember_id_floor(self, id_floor=0):
@@ -181,7 +181,7 @@ class WorkspaceRepository:
         )
 
     def delete(self, workspace_id: int) -> None:
-        """Delete a workspace (cascading its scoped rows) and commit.
+        """Delete a workspace (cascading its scoped rows); no commit.
 
         Call ``services.workspace_lifecycle.delete_workspace`` instead: it also drops the
         workspace's cached new-images payload.
@@ -190,17 +190,16 @@ class WorkspaceRepository:
         refusal is raised as ``ValueError`` so routes can show it.
         """
         try:
-            with self.conn:
-                self._remember_id_floor()
-                self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
-                # job_history predates workspace ownership and is created
-                # lazily by JobRunner. Keep deletion atomic when it exists.
-                if self.conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='job_history' AND type='table'"
-                ).fetchone():
-                    self.conn.execute(
-                        "DELETE FROM job_history WHERE workspace_id = ?", (workspace_id,)
-                    )
+            self._remember_id_floor()
+            self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
+            # job_history predates workspace ownership and is created
+            # lazily by JobRunner. Keep deletion atomic when it exists.
+            if self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='job_history' AND type='table'"
+            ).fetchone():
+                self.conn.execute(
+                    "DELETE FROM job_history WHERE workspace_id = ?", (workspace_id,)
+                )
         except sqlite3.IntegrityError as e:
             if "Send pending photos to NAS" in str(e):
                 raise ValueError(str(e)) from e

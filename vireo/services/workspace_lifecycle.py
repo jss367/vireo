@@ -21,7 +21,8 @@ def delete_workspace(db: Database, workspace_id: int) -> list[str]:
 
     Returns the result-file cleanup errors (empty when every file went).
     """
-    db.workspaces.delete(workspace_id)
+    with db.transaction():
+        db.workspaces.delete(workspace_id)
     cleanup_errors: list[str] = []
     if db._db_path != ":memory:":
         from services.result_files import delete_workspace_results

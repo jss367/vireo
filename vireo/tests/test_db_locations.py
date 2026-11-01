@@ -302,6 +302,7 @@ def test_assigned_photo_location_workspace_guards(db, fid, monkeypatch):
     pid = _photo(db, fid, "a.jpg")
     _link(db, pid, _kw(db, "Park", lat=1.0, lng=2.0, place_id="pl"))
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
         photo_locations.get_assigned_photo_location(db, pid)

@@ -95,6 +95,7 @@ def test_highlight_eligibility_tracks_ranking_but_keeps_saved_choices_and_keywor
     assert db.species_curation.get_highlights("Current", eligible_only=True) == {"Current": {pid: 1}}
     # A rejection in another workspace cannot change this workspace's ranking.
     other = db.create_workspace("Other", config_overrides={"detector_confidence": 0.9})
+    db.commit()
     db.set_review_status(current, other, "rejected")
     assert _ranked(db, pid) == ("Current",) * 3
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.9})
@@ -122,6 +123,7 @@ def test_misses_override_uses_current_fingerprints_but_preserves_weak_context(db
     _prediction(db, pid, "Full image", 0.95, floor=0, detector="full-image")
     assert row(db.active_workspace_id)["max_prediction_conf"] == 0.95
     other = db.create_workspace("Other")
+    db.commit()
     assert db.detections.workspace_miss_rows(other, 0.5) == []
 
 
@@ -129,6 +131,7 @@ def test_highlight_candidates_remain_workspace_scoped(db, catalog):
     pid, _ = catalog
     _prediction(db, pid, "Current", 0.8)
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     assert db.species_curation.get_highlights_candidates(None, photo_id=pid) == []
 

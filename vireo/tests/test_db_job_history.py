@@ -98,6 +98,7 @@ def test_get_returns_every_column(history_db):
 def test_get_is_exact_and_unscoped(history_db):
     db = history_db
     other = db.create_workspace("History other")
+    db.commit()
     _insert(db, "job-b", workspace_id=other)
     db.set_active_workspace(None)
     # Any workspace's record: the caller compares ``workspace_id`` itself.

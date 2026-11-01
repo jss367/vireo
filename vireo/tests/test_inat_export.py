@@ -164,6 +164,7 @@ def test_write_inat_metadata_round_trips_selected_fields(tmp_path):
 def test_export_inat_photo_renders_separate_edited_jpeg(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(workspace_id)
     source_dir = tmp_path / "photos"
     source_dir.mkdir()
@@ -202,6 +203,7 @@ def test_export_inat_photo_renders_separate_edited_jpeg(tmp_path):
 def test_export_inat_photo_uses_bounded_staging_filename(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(workspace_id)
     source_dir = tmp_path / "photos"
     source_dir.mkdir()
@@ -250,6 +252,7 @@ def test_export_inat_photo_uses_bounded_staging_filename(tmp_path):
 def test_export_inat_photo_restores_rendered_file_mode(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(workspace_id)
     source_dir = tmp_path / "photos"
     source_dir.mkdir()

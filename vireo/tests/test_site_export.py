@@ -47,6 +47,7 @@ def test_complete_export_preserves_albums_metadata_and_workspace_scope(tmp_path,
     db.conn.commit()
     original_ws = db._ws_id()
     other_ws = db.create_workspace('Other site')
+    db.commit()
     db.set_active_workspace(other_ws)
     other_folder = workspace_folders.add_folder(db, str(tmp_path / 'other'), name='other')
     foreign = photo_ingest.add_photo(db, folder_id=other_folder, filename='private.jpg', extension='.jpg',
@@ -425,6 +426,7 @@ def test_site_export_renders_preserved_photo_without_destination_siblings(tmp_pa
 
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     b = db.create_workspace('Receiving')
+    db.commit()
     photo = meta['p1']
     source = db.photos.get(photo)['folder_id']
     workspace_folders.add_workspace_folder(db, b, source)

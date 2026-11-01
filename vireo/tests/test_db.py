@@ -283,6 +283,7 @@ def test_folder_subtree_does_not_expand_when_root_is_inactive(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     active_ws = db._ws_id()
     other_ws = db.create_workspace('Other')
+    db.commit()
     a = workspace_folders.add_folder(db, '/a', name='a')
     b = workspace_folders.add_folder(db, '/a/b', name='b', parent_id=a)
     # Detach A from the active workspace; B stays.
@@ -307,6 +308,7 @@ def test_folder_subtree_matches_effective_tree_without_exposing_hidden_nodes(tmp
     db = Database(str(tmp_path / "test.db"))
     active_ws = db._ws_id()
     other_ws = db.create_workspace('Other')
+    db.commit()
     a = workspace_folders.add_folder(db, '/a', name='a')
     b = workspace_folders.add_folder(db, '/a/b', name='b', parent_id=a)
     c = workspace_folders.add_folder(db, '/a/b/c', name='c', parent_id=b)
@@ -699,6 +701,7 @@ def test_pending_changes_queue(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -730,6 +733,7 @@ def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     staging = workspace_folders.add_folder(db, '/staging/trip', name='trip')
     destination = workspace_folders.add_folder(db, '/nas/trip', name='trip')
@@ -772,6 +776,7 @@ def test_staged_sync_scope_by_photos_separates_sibling_workspaces(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
     ws2 = db.create_workspace('sibling')
+    db.commit()
     db.set_active_workspace(ws1)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     shared = photo_ingest.add_photo(
@@ -820,6 +825,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(
@@ -875,6 +881,7 @@ def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(
@@ -908,6 +915,7 @@ def test_clear_pending_chunks_large_change_sets(tmp_path):
     from db import _SQLITE_PARAM_CHUNK_SIZE, Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(
@@ -1067,6 +1075,7 @@ def test_collection_crud(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     rules = [{"field": "rating", "op": ">=", "value": 4}]
     cid = db.collections.add('Best Photos', json.dumps(rules))
@@ -1085,6 +1094,7 @@ def test_collection_photos_rating_rule(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='good.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -1110,6 +1120,7 @@ def test_collection_photos_date_sort_puts_missing_timestamps_last(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     photo_ingest.add_photo(db, folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
@@ -1141,6 +1152,7 @@ def test_collection_photo_ids_honors_sort(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p_a = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -1190,6 +1202,7 @@ def test_collection_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path)
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     # Burst pair where the earlier-named member is the low-quality frame and
@@ -1266,6 +1279,7 @@ def test_query_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     burst_soft = photo_ingest.add_photo(
@@ -1482,6 +1496,7 @@ def test_query_photo_ids_stacked_folder_scoped(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid_a = workspace_folders.add_folder(db, '/photos/a', name='a')
     fid_b = workspace_folders.add_folder(db, '/photos/b', name='b')
@@ -1507,6 +1522,7 @@ def test_collection_photos_keyword_rule(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -1534,6 +1550,7 @@ def test_count_photos_for_rules_unsaved(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='good.jpg', extension='.jpg',
@@ -1568,6 +1585,7 @@ def test_smart_collection_can_select_photos_with_jpeg_companions(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     paired = photo_ingest.add_photo(
@@ -1597,6 +1615,7 @@ def test_count_photos_for_rules_rejects_malformed_input(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     with pytest.raises(ValueError):
@@ -1644,6 +1663,7 @@ def test_collection_untagged_rule(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='tagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -1669,6 +1689,7 @@ def test_collection_recent_days_rule(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
 
@@ -1698,6 +1719,7 @@ def test_collection_timestamp_between_subsec(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
 
@@ -1735,6 +1757,7 @@ def test_collection_timestamp_rules_match_ui_shape(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
 
@@ -1792,6 +1815,7 @@ def test_collection_has_species_rule(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='classified.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -1826,6 +1850,7 @@ def test_has_subject_rule_matches_photos_without_subject_keywords(tmp_path, monk
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
@@ -1854,6 +1879,7 @@ def test_collection_wildlife_excluded_rule(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='wild.jpg', extension='.jpg',
@@ -1882,6 +1908,7 @@ def test_default_needs_identification_excludes_not_wildlife(tmp_path, monkeypatc
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     needs_id = photo_ingest.add_photo(db, folder_id=fid, filename='needs.jpg',
@@ -1920,6 +1947,7 @@ def test_has_subject_rule_value_one_matches_identified_photos(tmp_path, monkeypa
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
@@ -1951,6 +1979,7 @@ def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_pa
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": []})
     db.commit()
@@ -1988,6 +2017,7 @@ def test_has_subject_rule_counts_legacy_is_species_when_taxonomy_in_subject_type
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy"]})
     db.commit()
@@ -2045,6 +2075,7 @@ def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_p
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["genre"]})
     db.commit()
@@ -2089,6 +2120,7 @@ def test_has_subject_rule_rejects_invalid_op_when_subject_types_empty(tmp_path, 
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": []})
     db.commit()
@@ -2114,6 +2146,7 @@ def test_has_subject_rule_empty_subject_types_value_zero_matches_all(tmp_path, m
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": []})
     db.commit()
@@ -3821,6 +3854,7 @@ def test_default_collections_created(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     db.collections.create_defaults()
     db.commit()
@@ -3840,6 +3874,7 @@ def test_default_collections_idempotent(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     db.collections.create_defaults()
     db.commit()
@@ -3857,6 +3892,7 @@ def test_default_collections_adds_missing(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     # Create just one collection manually
     db.collections.add('Flagged', json.dumps([{"field": "flag", "op": "equals", "value": "flagged"}]))
@@ -3882,6 +3918,7 @@ def test_default_collections_for_all_workspaces_adds_missing_defaults(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
     ws2 = db.create_workspace("ws-b")
+    db.commit()
 
     # Simulate an upgraded multi-workspace database where only one workspace
     # already had the older default set. The all-workspaces startup pass should
@@ -3916,6 +3953,7 @@ def test_default_collection_uses_has_subject_for_new_workspaces(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     db.collections.create_defaults()
     db.commit()
@@ -3936,6 +3974,7 @@ def test_default_gps_without_location_keyword_collection_matches_expected_photos
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     needs_location = photo_ingest.add_photo(
@@ -3975,6 +4014,7 @@ def test_has_location_keyword_rule_and_no_location_information_definition(tmp_pa
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     no_location = photo_ingest.add_photo(
@@ -4039,6 +4079,7 @@ def test_all_photos_collection_returns_all_photos(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -4064,6 +4105,7 @@ def _make_workspace_with_photos(tmp_path, photo_overrides=None):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     workspace_folders.add_workspace_folder(db, ws_id, fid)
@@ -4160,6 +4202,7 @@ def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     park = workspace_folders.add_folder(db, "/photos/park", name="park")
     yard = workspace_folders.add_folder(db, "/photos/yard", name="yard")
@@ -4218,6 +4261,7 @@ def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     ok_folder = workspace_folders.add_folder(db, "/photos/ok", name="ok")
     gone_folder = workspace_folders.add_folder(db, "/photos/gone", name="gone")
@@ -4310,6 +4354,7 @@ def test_get_coverage_stats_empty_workspace(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     stats = dashboard_stats.get_coverage_stats(db)
     assert stats['total'] == 0
@@ -4369,6 +4414,7 @@ def test_coverage_stats_scoped_to_active_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
     ws2 = db.create_workspace('Other')
+    db.commit()
     db.set_active_workspace(ws1)
     fid1 = workspace_folders.add_folder(db, '/ws1', name='ws1')
     workspace_folders.add_workspace_folder(db, ws1, fid1)
@@ -4392,6 +4438,7 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid_a = workspace_folders.add_folder(db, '/A', name='A')
     fid_b = workspace_folders.add_folder(db, '/B', name='B')
@@ -4423,6 +4470,7 @@ def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     folder_a = workspace_folders.add_folder(db, "/A", name="A")
     folder_b = workspace_folders.add_folder(db, "/B", name="B")
@@ -4980,6 +5028,7 @@ def test_move_folders_moves_prediction_review(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_src = db.create_workspace("src")
     ws_tgt = db.create_workspace("tgt")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/p", name="p")
     workspace_folders.add_workspace_folder(db, ws_src, fid)
 
@@ -5264,6 +5313,7 @@ def test_get_photos_missing_masks_folder_ids_scoped_to_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
+    db.commit()
     fa = workspace_folders.add_folder(db, "/a", name="a")
     fb = workspace_folders.add_folder(db, "/b", name="b")
     workspace_folders.add_workspace_folder(db, ws_a, fa)
@@ -5450,6 +5500,7 @@ def _make_calendar_db(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos/2024', name='2024')
     fid2 = workspace_folders.add_folder(db, '/photos/2024/January', name='January', parent_id=fid)
@@ -5534,6 +5585,7 @@ def test_get_geolocated_photos_workspace_scoped(tmp_path):
 
     # Create a second workspace without this folder
     ws2 = db.create_workspace('Other')
+    db.commit()
     db.set_active_workspace(ws2)
     results = db.locations.get_geolocated_photos()
     assert len(results) == 0
@@ -5950,6 +6002,7 @@ def test_get_effective_photo_location_enforces_active_workspace(tmp_path):
     db.conn.commit()
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
 
     with pytest.raises(ValueError, match="active workspace"):
@@ -6381,6 +6434,7 @@ def test_get_photos_with_embedding_excludes_other_workspaces(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("Other")
+    db.commit()
     # add_folder auto-links to the active workspace, so switch before each.
     db.set_active_workspace(ws_a)
     fid_a = workspace_folders.add_folder(db, '/a', name='a')
@@ -7098,6 +7152,7 @@ def test_save_detections_replaces_existing(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
@@ -7127,6 +7182,7 @@ def test_save_detections_is_global(tmp_path):
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws_a, folder_id)
     workspace_folders.add_workspace_folder(db, ws_b, folder_id)
     photo_id = photo_ingest.add_photo(db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
@@ -7157,6 +7213,7 @@ def test_get_detections_threshold_filter(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -7194,6 +7251,7 @@ def test_get_detections_cross_workspace_read(tmp_path):
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws_a, folder_id)
     workspace_folders.add_workspace_folder(db, ws_b, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -7225,6 +7283,7 @@ def test_get_detections_for_photos_threshold_filter(tmp_path, monkeypatch):
     fid = workspace_folders.add_folder(db, "/tmp/p")
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws_a, fid)
     workspace_folders.add_workspace_folder(db, ws_b, fid)
     p1 = photo_ingest.add_photo(db, fid, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
@@ -7330,6 +7389,7 @@ def test_get_detections_for_photos_is_global(tmp_path):
     db.commit()
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
 
     # Global cache: workspace "Other" sees detections written under the default workspace.
@@ -7344,6 +7404,7 @@ def test_get_predictions_for_detection_filters(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -7568,6 +7629,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     taxa = _seed_taxa(
         db,
@@ -8762,6 +8824,7 @@ def test_write_detection_batch_is_atomic_under_commit_failure(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -8833,6 +8896,7 @@ def test_write_detection_batch_writes_both_tables_atomically(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -8872,6 +8936,7 @@ def test_write_detection_batch_records_empty_scene(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -8900,6 +8965,7 @@ def test_write_detection_batch_ids_are_stable_for_same_content(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_a = photo_ingest.add_photo(
@@ -8945,6 +9011,7 @@ def test_write_detection_batch_retires_stale_rows(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -9007,6 +9074,7 @@ def test_runtime_change_retires_unreviewed_detector_output(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -9057,6 +9125,7 @@ def test_runtime_change_preserves_output_reviewed_in_any_workspace(tmp_path):
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
+    db.commit()
     for ws in (ws_a, ws_b):
         workspace_folders.add_workspace_folder(db, ws, folder_id)
     db._active_workspace_id = ws_a
@@ -9132,6 +9201,7 @@ def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_pa
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -9185,6 +9255,7 @@ def test_write_detection_batch_conflict_refreshes_box_fields(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -9231,6 +9302,7 @@ def test_write_detection_batch_deduplicates_same_batch_ids(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -9281,6 +9353,7 @@ def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, fid)
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
@@ -9335,6 +9408,7 @@ def test_pairing_redirects_classifier_runs_so_cache_gate_still_hits(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, fid)
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
@@ -9480,6 +9554,7 @@ def test_pairing_preserves_review_when_duplicate_prediction_collapses(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, fid)
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
@@ -9521,6 +9596,7 @@ def test_multiple_predictions_per_detection(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws_id, fid)
@@ -9551,6 +9627,7 @@ def test_alternative_predictions_filtered_from_pending(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws_id, fid)
@@ -9592,6 +9669,7 @@ def test_folder_status_column_exists(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(1)
     fid = workspace_folders.add_folder(db, "/photos/test", name="test")
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()
@@ -9603,6 +9681,7 @@ def test_check_folder_health_marks_missing(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     real_dir = str(tmp_path / "real")
@@ -9625,6 +9704,7 @@ def test_check_folder_health_recovers(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = str(tmp_path / "comeback")
@@ -9658,6 +9738,7 @@ def test_check_folder_health_preserves_partial_when_path_exists(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = str(tmp_path / "partial_folder")
@@ -9686,6 +9767,7 @@ def test_check_folder_health_partial_becomes_missing_when_path_gone(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid = workspace_folders.add_folder(db, "/nope/partial_gone", name="partial_gone")
@@ -9706,6 +9788,7 @@ def test_get_missing_folders(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid = workspace_folders.add_folder(db, "/gone/folder", name="gone")
@@ -9726,6 +9809,7 @@ def test_get_missing_folders_scoped_to_active_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("Other")
+    db.commit()
 
     db.set_active_workspace(ws_a)
     fid_a = workspace_folders.add_folder(db, "/gone/in_a", name="in_a")
@@ -9750,6 +9834,7 @@ def test_get_missing_photos_returns_photos_with_missing_source(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = tmp_path / "photos"
@@ -9779,6 +9864,7 @@ def test_get_missing_photos_excludes_photos_in_missing_folders(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid = workspace_folders.add_folder(db, "/gone/folder", name="gone")
@@ -9803,6 +9889,7 @@ def test_get_missing_photos_skips_folder_whose_root_is_offline(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     # Folder is 'ok' in DB but its path doesn't exist (unmounted volume).
@@ -9822,6 +9909,7 @@ def test_get_missing_photos_scoped_to_active_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("Other")
+    db.commit()
 
     folder_a = tmp_path / "a"
     folder_a.mkdir()
@@ -9861,6 +9949,7 @@ def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = tmp_path / "shoot"
@@ -9903,6 +9992,7 @@ def test_get_missing_photos_ignores_progress_callback_errors(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = tmp_path / "shoot"
@@ -9925,6 +10015,7 @@ def test_get_missing_photos_reports_periodic_photo_progress(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = tmp_path / "shoot"
@@ -9960,6 +10051,7 @@ def test_get_missing_photos_handles_unicode_normalization(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = tmp_path / "shoot"
@@ -9995,6 +10087,7 @@ def test_get_missing_photos_defers_case_to_filesystem(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = tmp_path / "shoot"
@@ -10030,6 +10123,7 @@ def test_get_missing_photos_distinguishes_case_on_case_sensitive_fs(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = tmp_path / "shoot"
@@ -10068,6 +10162,7 @@ def test_get_missing_photos_treats_broken_symlink_as_missing(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     folder = tmp_path / "shoot"
@@ -10096,6 +10191,7 @@ def test_relocate_folder(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid = workspace_folders.add_folder(db, "/old/path", name="photos")
@@ -10117,6 +10213,7 @@ def test_relocate_folder_cascade(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     parent = workspace_folders.add_folder(db, "/old/root", name="root")
@@ -10142,6 +10239,7 @@ def test_nearest_ancestor_folder_id(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     usa = workspace_folders.add_folder(db, "/vol/USA", name="USA")
@@ -10164,6 +10262,7 @@ def test_relocate_folder_relinks_parent_by_path(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     pics_2026 = workspace_folders.add_folder(db, "/pics/2026", name="2026")
@@ -10190,6 +10289,7 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     existing_path = str(tmp_path / "existing")
@@ -10241,6 +10341,7 @@ def test_relocate_folder_merge_revalidates_source_path(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     source_path = str(tmp_path / "source")
@@ -10270,6 +10371,7 @@ def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     dir_a = str(tmp_path / "folder_a")
@@ -10296,6 +10398,7 @@ def test_relocate_folder_merge_updates_photo_count(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     existing_path = str(tmp_path / "existing")
@@ -10324,6 +10427,7 @@ def test_relocate_folder_merge_marks_target_ok(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     existing_path = str(tmp_path / "existing")
@@ -10347,6 +10451,7 @@ def test_relocate_folder_merge_reparents_children(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     existing_path = str(tmp_path / "existing")
@@ -10375,6 +10480,7 @@ def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws1)
 
     existing_path = str(tmp_path / "existing")
@@ -10418,6 +10524,7 @@ def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws1)
 
     existing_path = str(tmp_path / "existing")
@@ -10455,6 +10562,7 @@ def test_relocate_folder_cascade_skips_duplicate(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     parent = workspace_folders.add_folder(db, "/old/root", name="root")
@@ -10485,6 +10593,7 @@ def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     parent = workspace_folders.add_folder(db, "/old/root", name="root")
@@ -10518,6 +10627,7 @@ def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(t
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     parent = workspace_folders.add_folder(db, "C:/old/root", name="root")
@@ -10550,6 +10660,7 @@ def test_delete_folder(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid = workspace_folders.add_folder(db, "/delete/me", name="me")
@@ -10570,6 +10681,7 @@ def test_delete_folder_with_descendants(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     parent = workspace_folders.add_folder(db, "/tree", name="tree")
@@ -10601,6 +10713,7 @@ def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_a)
 
     parent = workspace_folders.add_folder(db, "/tree", name="tree")
@@ -10613,6 +10726,7 @@ def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
 
     # Workspace B imports /tree/sub as its own root.
     ws_b = db.create_workspace("B")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws_b, child, is_root=True)
 
     pid_parent = photo_ingest.add_photo(db, folder_id=parent, filename="p.jpg", extension=".jpg",
@@ -10670,6 +10784,7 @@ def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_a)
 
     parent = workspace_folders.add_folder(db, "/tree", name="tree")
@@ -10678,6 +10793,7 @@ def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
 
     # Workspace B imports /tree itself as its own root.
     ws_b = db.create_workspace("B")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws_b, parent, is_root=True)
     workspace_folders.add_workspace_folder(db, ws_b, child, is_root=False)
 
@@ -10731,6 +10847,7 @@ def test_delete_folder_keeps_target_covered_by_other_workspace_ancestor_root(tmp
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_a)
 
     parent = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -10740,6 +10857,7 @@ def test_delete_folder_keeps_target_covered_by_other_workspace_ancestor_root(tmp
     # Workspace B imports /photos as its root; the scanner materializes the
     # descendant /photos/2024 as a non-root link.
     ws_b = db.create_workspace("B")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws_b, parent, is_root=True)
     workspace_folders.add_workspace_folder(db, ws_b, child, is_root=False)
 
@@ -10788,6 +10906,7 @@ def test_delete_folder_includes_path_only_descendants(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     parent = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -10823,6 +10942,7 @@ def test_delete_folder_keeps_path_only_descendant_linked_in_other_workspace(tmp_
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_a)
 
     parent = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -10830,6 +10950,7 @@ def test_delete_folder_keeps_path_only_descendant_linked_in_other_workspace(tmp_
     child = workspace_folders.add_folder(db, "/photos/2024", name="2024", workspace_root=False)
 
     ws_b = db.create_workspace("B")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws_b, child, is_root=True)
 
     pid_parent = photo_ingest.add_photo(db, folder_id=parent, filename="p.jpg", extension=".jpg",
@@ -10863,6 +10984,7 @@ def test_missing_folder_photos_hidden_from_browse(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid_ok = workspace_folders.add_folder(db, "/ok/folder", name="ok")
@@ -10897,6 +11019,7 @@ def test_count_photos_in_workspace_includes_missing(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid_ok = workspace_folders.add_folder(db, "/ok/folder", name="ok")
@@ -10927,6 +11050,7 @@ def test_count_keywords_in_workspace_includes_missing(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -10957,6 +11081,7 @@ def test_count_photos_in_workspace_scoped_to_active_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("OtherWS")
+    db.commit()
 
     db.set_active_workspace(ws_a)
     fid = workspace_folders.add_folder(db, "/some/folder", name="folder")
@@ -10978,6 +11103,7 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -11013,6 +11139,7 @@ def test_missing_folder_hidden_from_folder_tree(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid_ok = workspace_folders.add_folder(db, "/ok/folder", name="ok")
@@ -11036,6 +11163,7 @@ def test_folder_tree_orphan_parent_becomes_root(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     # Parent folder exists in the folders table but is NOT linked to the
@@ -11057,6 +11185,7 @@ def test_folder_tree_linked_parent_preserved(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid_parent = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -11073,6 +11202,7 @@ def test_folder_tree_walks_past_unlinked_ancestor(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid_gp = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -11095,6 +11225,7 @@ def test_folder_tree_walks_past_missing_ancestor(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid_gp = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -11118,6 +11249,7 @@ def test_folder_tree_null_parent_stays_null(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -11135,6 +11267,7 @@ def test_folder_tree_orphan_resolution_is_workspace_scoped(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
+    db.commit()
 
     # Build hierarchy in workspace A: parent AND child linked.
     db.set_active_workspace(ws_a)
@@ -11165,6 +11298,7 @@ def test_missing_folder_hidden_from_collection(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     fid_ok = workspace_folders.add_folder(db, "/ok/folder", name="ok")
@@ -11411,6 +11545,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
@@ -11727,6 +11862,7 @@ def test_merge_staged_tree_links_archive_to_active_workspace(db):
 
     # Switch to a fresh workspace — the one running the pipeline.
     active_ws = db.create_workspace("Active")
+    db.commit()
     db.set_active_workspace(active_ws)
 
     # Precondition: the active ws cannot see the archive yet.
@@ -11805,6 +11941,7 @@ def test_merge_staged_tree_new_descendant_roots_tracked_ancestor_for_active_ws(
     # Switch to a fresh workspace with NO link to /arch and NO root
     # ancestor above it.
     active_ws = db.create_workspace("Active")
+    db.commit()
     db.set_active_workspace(active_ws)
     assert db.conn.execute(
         "SELECT 1 FROM workspace_folders "
@@ -13813,6 +13950,7 @@ def test_merge_staged_tree_keyword_rename_pair_exemption_is_workspace_scoped(
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     db.set_active_workspace(ws)
     # Losing (staged) photo: older ``keyword_add`` in ws + a ``keyword_remove``
     # in the sibling workspace. That is NOT a rename pair -- they belong to
@@ -13978,6 +14116,7 @@ def test_merge_staged_tree_keyword_conflict_spans_workspaces(db, tmp_path):
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     db.set_active_workspace(ws)
     _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
                           "2026-01-01 00:00:00", "tok-add", sibling_ws)
@@ -14024,6 +14163,7 @@ def test_merge_staged_tree_drops_older_opposing_row_on_winning_photo(
     )
     sibling_a = db.create_workspace("SiblingA")
     sibling_b = db.create_workspace("SiblingB")
+    db.commit()
     db.set_active_workspace(ws)
     # Surviving photo already holds contradictory intents in two
     # workspaces: an OLD remove and the NEWEST add. Before this merge
@@ -14349,6 +14489,7 @@ def test_assigned_location_accepts_sync_only_grant(db, tmp_path):
         "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
         (pid, kw))
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     db.set_active_workspace(sibling_ws)
     db.conn.commit()
 
@@ -14636,6 +14777,7 @@ def test_merge_staged_tree_flag_conflict_spans_workspaces(db, tmp_path):
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     db.set_active_workspace(ws)
     db.conn.execute(
         "INSERT INTO pending_changes "
@@ -14694,6 +14836,7 @@ def test_merge_staged_tree_edit_recipe_conflict_spans_workspaces(
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     db.set_active_workspace(ws)
     db.conn.execute(
         "INSERT INTO photo_edit_recipes (photo_id, recipe_json) "
@@ -14760,6 +14903,7 @@ def test_merge_staged_tree_scalar_conflict_spans_workspaces(db, tmp_path):
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     db.set_active_workspace(ws)
     db.conn.execute(
         "INSERT INTO pending_changes "
@@ -14806,6 +14950,7 @@ def test_sync_only_grant_follows_the_photo_across_a_move(db, tmp_path):
         file_size=8, file_mtime=1.0, file_hash="AHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     db.set_active_workspace(ws)
     assert db.moves_merge.link_survivor_for_sibling_edits(sibling_ws, pid) is True
     db.conn.commit()
@@ -14838,6 +14983,7 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
     from sync import _resolve_xmp_paths
     ws = db._active_workspace_id
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     arch = tmp_path / "arch" / "USA"
     date_dir = arch / "2026-01-01"
     date_dir.mkdir(parents=True)
@@ -14929,6 +15075,7 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
     from sync import _resolve_xmp_paths
     ws = db._active_workspace_id
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     arch = tmp_path / "arch" / "USA"
     date_dir = arch / "2026-01-01"
     date_dir.mkdir(parents=True)
@@ -14995,6 +15142,7 @@ def test_link_survivor_sync_only_grant_is_idempotent(db, tmp_path):
     stays at one."""
     ws = db._active_workspace_id
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     arch = tmp_path / "arch"
     arch.mkdir()
     folder_id = workspace_folders.add_folder(db, str(arch), name="arch")
@@ -15018,6 +15166,7 @@ def test_link_survivor_skips_when_workspace_already_owns_folder(
     table free of noise rows that would linger past merge."""
     ws = db._active_workspace_id
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     arch = tmp_path / "arch"
     arch.mkdir()
     folder_id = workspace_folders.add_folder(db, str(arch), name="arch")
@@ -15044,6 +15193,7 @@ def test_merge_staged_tree_off_staging_identities_skip_sibling_workspace(
     the user."""
     ws = db._active_workspace_id
     sibling_ws = db.create_workspace("Sibling")
+    db.commit()
     arch = tmp_path / "arch" / "USA"
     date_dir = arch / "2026-01-01"
     date_dir.mkdir(parents=True)
@@ -15157,6 +15307,7 @@ def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, mon
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     f_2023 = workspace_folders.add_folder(db, "/photos/2023", name="2023")
@@ -15189,6 +15340,7 @@ def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     f_root = workspace_folders.add_folder(db, "C:\\Photos\\2023", name="2023")
@@ -15225,6 +15377,7 @@ def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     f_2023 = workspace_folders.add_folder(db, "/photos/2023", name="2023")
@@ -15428,6 +15581,7 @@ def test_get_highlights_candidates_workspace_wide_isolates_workspaces(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     active_ws = db._ws_id()
     other_ws = db.create_workspace('Other')
+    db.commit()
     # Folder in the active workspace.
     f_active = workspace_folders.add_folder(db, '/active', name='active')
     # Folder only in the other workspace.
@@ -15653,6 +15807,7 @@ def test_get_folders_with_quality_data_scopes_to_active_workspace(tmp_path):
     # Parent lives in the active (Default) workspace; child is moved to a second workspace.
     active_ws = db._ws_id()
     other_ws = db.create_workspace('Other')
+    db.commit()
     root = workspace_folders.add_folder(db, '/p', name='p')
     child = workspace_folders.add_folder(db, '/p/c', name='c', parent_id=root)
     pid = photo_ingest.add_photo(db, folder_id=child, filename='a.jpg', extension='.jpg',
@@ -15681,6 +15836,7 @@ def test_get_folders_with_quality_data_rolls_up_across_hidden_ancestor(tmp_path)
     db = Database(str(tmp_path / "test.db"))
     active_ws = db._ws_id()
     other_ws = db.create_workspace('Other')
+    db.commit()
     a = workspace_folders.add_folder(db, '/a', name='a')
     b = workspace_folders.add_folder(db, '/a/b', name='b', parent_id=a)
     c = workspace_folders.add_folder(db, '/a/b/c', name='c', parent_id=b)
@@ -15788,6 +15944,7 @@ def test_color_label_workspace_scoped(tmp_path):
 
     # Create second workspace and add the folder
     ws2 = db.create_workspace('Second')
+    db.commit()
     db.set_active_workspace(ws2)
     workspace_folders.add_workspace_folder(db, ws2, fid)
     db.photo_labels.set(pid, 'blue')
@@ -15806,6 +15963,7 @@ def test_color_label_descriptions_are_workspace_scoped(tmp_path):
     db.photo_labels.set_description("red", "Reptiles")
 
     ws2 = db.create_workspace("Second")
+    db.commit()
     db.set_active_workspace(ws2)
     assert db.photo_labels.get_descriptions() == {}
     db.photo_labels.set_description("red", "Needs review")
@@ -16302,6 +16460,7 @@ def test_record_detector_run_and_lookup(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     db._active_workspace_id = db.create_workspace("WS")
+    db.commit()
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
@@ -16331,6 +16490,7 @@ def test_detector_run_is_not_workspace_scoped(tmp_path):
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
+    db.commit()
     workspace_folders.add_workspace_folder(db, ws_a, folder_id)
     workspace_folders.add_workspace_folder(db, ws_b, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -16360,6 +16520,7 @@ def test_record_classifier_run_and_lookup(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     db._active_workspace_id = db.create_workspace("WS")
+    db.commit()
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
@@ -16417,6 +16578,7 @@ def test_review_status_absence_is_pending(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("WS")
+    db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
@@ -16656,6 +16818,7 @@ def test_list_misses_scoped_to_active_workspace(tmp_path):
 
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("Other")
+    db.commit()
 
     db.set_active_workspace(ws_a)
     fa = workspace_folders.add_folder(db, "/tmp/a", name="a")
@@ -16866,6 +17029,7 @@ def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
 
     ws_a = db._active_workspace_id
     ws_b = db.create_workspace("Other")
+    db.commit()
 
     db.set_active_workspace(ws_a)
     fa = workspace_folders.add_folder(db, "/tmp/a", name="a")
@@ -16930,6 +17094,7 @@ def test_get_snapshot_from_different_workspace_returns_none(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     other_ws = db.create_workspace("Other")
+    db.commit()
     paths = ["/tmp/a/IMG_001.JPG"]
     snap_id = db.workspaces.create_new_images_snapshot(paths)
     db.commit()
@@ -16941,6 +17106,7 @@ def test_snapshot_deleted_with_workspace(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     throwaway_ws = db.create_workspace("Throwaway")
+    db.commit()
     db.set_active_workspace(throwaway_ws)
     snap_id = db.workspaces.create_new_images_snapshot(["/tmp/a.jpg"])
     db.commit()
@@ -17038,6 +17204,7 @@ def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
 
     db = Database(str(tmp_path / "tree.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     ok_id = workspace_folders.add_folder(db, "/ok", name="ok")
@@ -17242,6 +17409,7 @@ def test_get_subject_types_honors_workspace_override(tmp_path, monkeypatch):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy"]})
     db.commit()
@@ -17255,6 +17423,7 @@ def test_get_subject_types_drops_unknown_values(tmp_path, monkeypatch):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws_id)
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy", "alien"]})
     db.commit()
@@ -17288,6 +17457,7 @@ def test_filter_out_wildlife_excluded_drops_marked_photos(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     workspace_folders.add_workspace_folder(db, ws, fid)
@@ -17354,6 +17524,7 @@ def test_get_subject_types_drops_non_string_entries(tmp_path, monkeypatch):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     # Persist deliberately-malformed subject_types via the workspace
     # config (mirrors what api_update_workspace would let through).
@@ -17528,6 +17699,7 @@ def test_manual_keyword_add_stamps_durable_provenance(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws = db.create_workspace("ws")
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     workspace_folders.add_workspace_folder(db, ws, fid)
@@ -19519,6 +19691,7 @@ def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -19555,6 +19728,7 @@ def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
@@ -19629,6 +19803,7 @@ def test_photo_life_list_species_preserves_linked_homonyms(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     taxa = _seed_taxa(
         db,
@@ -19675,6 +19850,7 @@ def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     pid = photo_ingest.add_photo(
@@ -20567,6 +20743,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     try:
         ws = db.ensure_default_workspace()
+        db.commit()
         db.set_active_workspace(ws)
         fid = workspace_folders.add_folder(db, "/photos", name="photos")
         pid_had_both = photo_ingest.add_photo(
@@ -20650,6 +20827,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tm
     db = Database(str(tmp_path / "test.db"))
     try:
         ws = db.ensure_default_workspace()
+        db.commit()
         db.set_active_workspace(ws)
         fid = workspace_folders.add_folder(db, "/photos", name="photos")
         pid_had_both = photo_ingest.add_photo(
@@ -20727,6 +20905,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept
     db = Database(str(tmp_path / "test.db"))
     try:
         ws = db.ensure_default_workspace()
+        db.commit()
         db.set_active_workspace(ws)
         fid = workspace_folders.add_folder(db, "/photos", name="photos")
         pid_had_both = photo_ingest.add_photo(
@@ -22607,6 +22786,7 @@ def test_min_detector_confidence_picks_lowest_override(tmp_path):
     strict = db.create_workspace(
         "strict", config_overrides={"detector_confidence": 0.5}
     )
+    db.commit()
     # Active workspace shouldn't matter — try both.
     db.set_active_workspace(strict)
     assert workspace_config.min_detector_confidence_across_workspaces(
@@ -22629,6 +22809,7 @@ def test_min_detector_confidence_includes_unoverridden_workspaces(tmp_path):
     db.create_workspace(
         "strict", config_overrides={"detector_confidence": 0.5}
     )
+    db.commit()
     # The auto-created Default workspace has no overrides → uses 0.2.
     assert workspace_config.min_detector_confidence_across_workspaces(
         db, {"detector_confidence": 0.2}
@@ -22836,6 +23017,7 @@ def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
     db = Database(str(tmp_path / "v.db"))
     ws_in = db.create_workspace("In")
     ws_out = db.create_workspace("Out")
+    db.commit()
 
     f_in = workspace_folders.add_folder(db, "/in", name="in")
     f_out = workspace_folders.add_folder(db, "/out", name="out")
@@ -23015,6 +23197,7 @@ def test_get_workspace_extensions_scoped_to_active_workspace(tmp_path):
                  file_size=1, file_mtime=1.0)
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     f_other = workspace_folders.add_folder(db, '/b', name='b')
     photo_ingest.add_photo(db, folder_id=f_other, filename='y.nef', extension='.nef',
@@ -23580,6 +23763,7 @@ def test_get_default_explorer_root_finds_aves(db):
 def test_life_list_taxon_ids_scope(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -23613,6 +23797,7 @@ def test_life_list_taxon_ids_excludes_non_species_matches(db):
     # unmatched list instead so the "not counted" honesty footnote is accurate.
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -23635,6 +23820,7 @@ def test_life_list_uncounted_suppresses_redundant_ancestor_per_photo(db):
     but the same broad label must remain actionable on a broad-only photo."""
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     species_photo = photo_ingest.add_photo(
@@ -23698,6 +23884,7 @@ def test_life_list_uncounted_filter_targets_only_unsuppressed_photos(db):
     """
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     broad_photo = photo_ingest.add_photo(
@@ -23752,6 +23939,7 @@ def test_life_list_uncounted_filter_targets_only_unsuppressed_photos(db):
 def test_life_list_taxon_ids_excludes_rejected(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -23806,6 +23994,7 @@ def test_get_classes_for_taxa_chunks_large_id_lists(db):
 def test_best_photo_by_taxon(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='low.jpg', extension='.jpg',
@@ -23833,6 +24022,7 @@ def test_best_photo_by_taxon_chunks_large_id_list(db):
     mixed in among thousands of non-matching ones."""
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
@@ -23873,6 +24063,7 @@ def test_curation_setters_canonicalize_species_casing(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     try:
         ws_id = db.ensure_default_workspace()
+        db.commit()
         db.set_active_workspace(ws_id)
         fid = workspace_folders.add_folder(db, '/photos', name='photos')
         pid = photo_ingest.add_photo(
@@ -25281,6 +25472,7 @@ def _filter_db(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     return db, fid
@@ -25725,6 +25917,7 @@ def test_is_duplicate_sees_cross_workspace_partners(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     active_ws = db._ws_id()
     other_ws = db.create_workspace('Other')
+    db.commit()
 
     active_folder = workspace_folders.add_folder(db, '/active', name='active')
     other_folder = workspace_folders.add_folder(db, '/other', name='other')
@@ -27124,6 +27317,7 @@ def test_prediction_confidence_rejection_is_workspace_scoped(tmp_path):
     db.conn.commit()
     home = db._ws_id()
     other_ws = db.create_workspace("Other")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other_ws, fid)
     db.set_active_workspace(other_ws)
     prediction_id = db.conn.execute(
@@ -27240,6 +27434,7 @@ def test_get_filter_field_values_folder_counts_over_subtree(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     root = workspace_folders.add_folder(db, '/photos', name='photos')
     year = workspace_folders.add_folder(db, '/photos/2024', name='2024', parent_id=root)
@@ -27297,6 +27492,7 @@ def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
@@ -27345,6 +27541,7 @@ def test_get_filter_field_values_species_preserves_attached_root_spelling(tmp_pa
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     taxa = _seed_taxa(db, [(9999, "Corvus brachyrhynchos", "American Crow")])
@@ -27400,6 +27597,7 @@ def test_get_filter_field_values_folder_escapes_like_metacharacters(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     literal = workspace_folders.add_folder(db, '/photos/my_dir', name='my_dir')
     look_alike = workspace_folders.add_folder(db, '/photos/myXdir', name='myXdir')
@@ -27433,6 +27631,7 @@ def test_get_filter_field_values_folder_root_with_trailing_separator(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     # POSIX root stored with trailing '/', descendants without.
     root = workspace_folders.add_folder(db, '/', name='root')
@@ -27818,6 +28017,7 @@ def test_get_workspace_root_folder_ids_matches_roots_without_counting_photos(tmp
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     assert workspace_folders.get_workspace_root_folder_ids(db, ws_id) == []
 

@@ -72,6 +72,7 @@ def lib(db, tmp_path):
     root = workspace_folders.add_folder(db, str(tmp_path / "lib"), name="lib")
     child = workspace_folders.add_folder(db, str(tmp_path / "lib" / "c"), name="c", parent_id=root)
     other_ws = db.create_workspace("Other")
+    db.commit()
     foreign = workspace_folders.add_folder(
         db, str(tmp_path / "foreign"), name="foreign", link_to_workspace=False,
     )

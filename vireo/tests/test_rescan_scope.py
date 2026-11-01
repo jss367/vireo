@@ -16,6 +16,7 @@ from wait import wait_for_job_via_client
 def _db_with_active_ws(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     return db
 
@@ -161,6 +162,7 @@ def app_with_real_folders(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
 
     a = tmp_path / "A"
@@ -229,6 +231,7 @@ def test_scan_workspace_empty_workspace(tmp_path, monkeypatch):
     os.makedirs(thumb_dir)
     db = Database(db_path)
     ws = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws)
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
 

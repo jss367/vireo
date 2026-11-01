@@ -992,6 +992,7 @@ def test_duplicate_only_import_skips_twins_cataloged_in_other_workspace(
 
     # A fresh workspace has never seen this folder.
     fresh_ws = db.create_workspace("Fresh")
+    db.commit()
     assert str(twin_dir) not in _ws_visible_folder_paths(db, fresh_ws)
 
     card = tmp_path / "card"
@@ -3668,6 +3669,7 @@ def test_import_photos_rejects_case_variant_source_nested_destination(
     os.makedirs(thumb_dir)
     d = Database(db_path)
     d.ensure_default_workspace()
+    d.commit()
     d.close()
 
     # Set up a plausibly cased source (real dir) and a differently cased
@@ -6962,6 +6964,7 @@ def test_remote_import_dup_only_batch_does_not_scan_mount(
     _scanner.scan(str(archive_twin_dir), db)
     # Run from a fresh workspace so the import must perform the link.
     ws_id = db.create_workspace("Fresh")
+    db.commit()
     assert str(archive_twin_dir) not in _ws_visible_folder_paths(db, ws_id)
     # Sanity: the twin row is present with the right hash.
     twin_rows = db.conn.execute(

@@ -556,6 +556,7 @@ def test_get_missing_folders_scoped_with_counts(db):
     assert set(rows[0].keys()) == {"id", "path", "name", "parent_id", "photo_count"}
     assert ok not in {r["id"] for r in rows} and foreign not in {r["id"] for r in rows}
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     assert db.folders.missing() == []
     db.set_active_workspace(None)
@@ -813,6 +814,7 @@ def test_relocate_folder_unknown_id_and_same_path(db):
 def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch, cache):
     ws = db._ws_id()
     other_ws = db.create_workspace("Other")
+    db.commit()
     target_dir = tmp_path / "target"
     (target_dir / "kid").mkdir(parents=True)
     (target_dir / "clash" / "below").mkdir(parents=True)
@@ -881,6 +883,7 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
 
 def test_merge_into_existing_repoints_collection_photo_ids(db, tmp_path):
     other_ws = db.create_workspace("Other")
+    db.commit()
     target_dir = tmp_path / "target"
     target_dir.mkdir()
     target = workspace_folders.add_folder(db, str(target_dir), workspace_root=False)
@@ -1088,6 +1091,7 @@ def test_folder_merge_respects_embedded_keyword_removals(
 def test_folders_linked_in_other_workspace(db):
     ws = db._ws_id()
     other = db.create_workspace("Other")
+    db.commit()
     a = workspace_folders.add_folder(db, "/l/a")
     b = workspace_folders.add_folder(db, "/l/b")
     _link(db, other, b, 0)
@@ -1098,6 +1102,7 @@ def test_folders_linked_in_other_workspace(db):
 
 def test_folders_linked_in_other_workspace_chunks(db):
     other = db.create_workspace("Other")
+    db.commit()
     b = workspace_folders.add_folder(db, "/l/b")
     _link(db, other, b, 1)
     ids = list(range(100000, 100000 + db_module._SQLITE_PARAM_CHUNK_SIZE + 5)) + [b]
@@ -1149,6 +1154,7 @@ def test_delete_folder_removes_subtree_photos_and_provenance(db, cache, monkeypa
 def test_delete_folder_protected_target_is_only_unlinked(db, cache):
     ws = db._ws_id()
     other = db.create_workspace("Other")
+    db.commit()
     root = workspace_folders.add_folder(db, "/pt")
     child = workspace_folders.add_folder(db, "/pt/c", parent_id=root, workspace_root=False)
     _link(db, other, root, 1)
@@ -1169,6 +1175,7 @@ def test_delete_folder_protected_target_is_only_unlinked(db, cache):
 
 def test_delete_folder_protected_descendant_is_reparented(db, cache):
     other = db.create_workspace("Other")
+    db.commit()
     root = workspace_folders.add_folder(db, "/pd")
     kept = workspace_folders.add_folder(db, "/pd/kept", parent_id=root, workspace_root=False)
     kept_kid = workspace_folders.add_folder(db, "/pd/kept/k", parent_id=kept, workspace_root=False)

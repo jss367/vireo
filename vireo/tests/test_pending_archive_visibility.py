@@ -37,6 +37,7 @@ def test_transfer_estimates_are_scoped_to_the_active_workspaces_records(app_and_
     active = db.require_workspace_id()
     db.pending_archives.register("mine", "/nas/mine", str(tmp_path / "mine"), {})
     db.set_active_workspace(db.create_workspace("Other"))
+    db.commit()
     db.pending_archives.register("theirs", "/nas/theirs", str(tmp_path / "theirs"), {})
     db.set_active_workspace(active)
     items = app.test_client().get("/api/import/pending-archives").get_json()["items"]

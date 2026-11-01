@@ -21,6 +21,7 @@ def _make_db(tmp_path, name="test.db"):
     db = Database(str(tmp_path / name))
     folder_id = workspace_folders.add_folder(db, "/tmp/p")
     db._active_workspace_id = db.create_workspace("WS")
+    db.commit()
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     return db, folder_id
 
@@ -114,6 +115,7 @@ def test_photos_by_paths_ignores_workspace_membership(tmp_path):
                        extension=".jpg", file_size=1, file_mtime=1.0)
     # Active workspace has no folders (the import target is a fresh ws).
     db._active_workspace_id = db.create_workspace("Other")
+    db.commit()
 
     assert db.photos.by_paths(["/cards/a/x.jpg"]) == {"/cards/a/x.jpg": pid}
 
@@ -130,6 +132,7 @@ def test_workspace_unlinked_folder_count_counts_unlinked(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_other = db.create_workspace("Other")
     ws_active = db.create_workspace("Active")
+    db.commit()
 
     fid_other = workspace_folders.add_folder(db, "/cards/other-ws-only")
     workspace_folders.add_workspace_folder(db, ws_other, fid_other)
@@ -152,6 +155,7 @@ def test_workspace_unlinked_folder_count_dedupes_and_handles_empty(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db._active_workspace_id = db.create_workspace("Active")
+    db.commit()
     fid = workspace_folders.add_folder(db, "/cards/a")
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
 
@@ -3661,6 +3665,7 @@ def test_import_plan_all_known_but_folder_unlinked_to_active_workspace(tmp_path)
 
     # Photos imported under workspace A.
     ws_a = db.create_workspace("WorkspaceA")
+    db.commit()
     db._active_workspace_id = ws_a
     fid = workspace_folders.add_folder(db, "/cards/A")  # auto-linked to WorkspaceA
     photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.NEF",
@@ -3668,6 +3673,7 @@ def test_import_plan_all_known_but_folder_unlinked_to_active_workspace(tmp_path)
 
     # Switch active workspace to a fresh B that has no link to /cards/A.
     db._active_workspace_id = db.create_workspace("WorkspaceB")
+    db.commit()
 
     plan = compute_plan(
         db,
@@ -4045,6 +4051,7 @@ def test_import_plan_hash_duplicate_does_not_link_source_folder(tmp_path, monkey
     from pipeline_plan import compute_plan
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.create_workspace("WorkspaceA")
+    db.commit()
     db._active_workspace_id = ws_a
     # Photo lives at /library/2025 in WorkspaceA. Folder /cards/SD has
     # never been seen by the DB, so it would normally count as "unlinked".
@@ -4052,6 +4059,7 @@ def test_import_plan_hash_duplicate_does_not_link_source_folder(tmp_path, monkey
     photo_ingest.add_photo(db, folder_id=fid, filename="dest.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
     db._active_workspace_id = db.create_workspace("WorkspaceB")
+    db.commit()
 
     plan = compute_plan(
         db,
@@ -4085,6 +4093,7 @@ def test_import_plan_hash_duplicate_with_unlinked_source_folder(tmp_path, monkey
     from pipeline_plan import compute_plan
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.create_workspace("WorkspaceA")
+    db.commit()
     db._active_workspace_id = ws_a
     # Existing photo at /cards/A/IMG_OLD.NEF — its folder is in WorkspaceA
     # only. Re-importing into WorkspaceB will link /cards/A here.
@@ -4092,6 +4101,7 @@ def test_import_plan_hash_duplicate_with_unlinked_source_folder(tmp_path, monkey
     photo_ingest.add_photo(db, folder_id=fid_a, filename="IMG_OLD.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
     db._active_workspace_id = db.create_workspace("WorkspaceB")
+    db.commit()
 
     plan = compute_plan(
         db,

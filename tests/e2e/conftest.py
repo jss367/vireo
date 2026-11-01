@@ -48,6 +48,7 @@ def _seed_classifier_model(home_dir):
 def seed_e2e_data(db, thumb_dir):
     """Seed database with data for E2E tests."""
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     f1 = workspace_folders.add_folder(db, "/photos/park", name="park")
@@ -80,6 +81,7 @@ def seed_e2e_data(db, thumb_dir):
     db.commit()
 
     db.create_workspace("Field Work")
+    db.commit()
 
     # Add detections and predictions so the review page has content. Also
     # record classifier_runs so the pipeline plan reports Classify as

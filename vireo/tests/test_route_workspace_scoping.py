@@ -25,6 +25,7 @@ def scoped(app_and_db, tmp_path):
     ).fetchone()[0]
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     other_dir = tmp_path / "other"
     other_dir.mkdir()

@@ -225,6 +225,7 @@ def test_metadata_search_sees_edits_and_scopes(catalog):
     db.commit()
     assert db.collections.count_photos_for_rules([], collection_id=collection) == 1
     other_ws = db.create_workspace("Other workspace")
+    db.commit()
     db.set_active_workspace(other_ws)
     assert db.collections.query_photo_ids(rules) == []
 
@@ -322,6 +323,7 @@ def test_color_search_is_workspace_scoped_for_shared_photos(catalog):
     db, ids = catalog
     original_ws = db._ws_id()
     other_ws = db.create_workspace("Shared photos")
+    db.commit()
     folder = db.conn.execute("SELECT folder_id FROM photos WHERE id=?", (ids["robin"],)).fetchone()[0]
     workspace_folders.add_workspace_folder(db, other_ws, folder)
     rule = [{"field": "metadata", "op": "contains", "value": "purple"}]

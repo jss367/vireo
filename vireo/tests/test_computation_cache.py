@@ -373,6 +373,7 @@ def _database_with_photo(path, filename, file_hash=PHOTO_HASH):
     db = Database(str(path))
     folder_id = workspace_folders.add_folder(db, "/tmp/photos")
     workspace_id = db.create_workspace("Photos")
+    db.commit()
     db._active_workspace_id = workspace_id
     workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(

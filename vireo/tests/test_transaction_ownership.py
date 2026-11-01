@@ -112,7 +112,6 @@ DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {
     "vireo/db.py": 2,
     "vireo/repositories/edit_history.py": 15,
     "vireo/repositories/identity_alternatives.py": 4,
-    "vireo/repositories/workspaces.py": 2,
 }
 
 

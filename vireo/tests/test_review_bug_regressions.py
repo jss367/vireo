@@ -61,6 +61,7 @@ def test_selective_discard_rolls_back_when_history_fails(app_and_db, monkeypatch
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     ws2 = db.create_workspace("Sibling")
+    db.commit()
     db.queue_change(pid, "keyword_remove_flat", "Wildlife")
     db.commit()
     db.queue_change(pid, "keyword_remove_flat", "Wildlife", workspace_id=ws2)

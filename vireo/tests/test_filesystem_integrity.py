@@ -511,6 +511,7 @@ def test_ingest_failed_copy_leaves_no_truncated_file(tmp_path, monkeypatch):
 def three_photo_move(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     dst = tmp_path / "dst"
@@ -573,6 +574,7 @@ def test_move_photos_carries_uppercase_xmp_sidecar(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     dst = tmp_path / "dst"

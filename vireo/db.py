@@ -1111,7 +1111,8 @@ class Database:
             self.folders.repair_missing_parents()
         with self.transaction(immediate=True):
             self.repair_stale_folder_parents()
-        self.ensure_default_workspace()
+        with self.transaction():
+            self.ensure_default_workspace()
         # Idempotent default-keyword seed. Cheap warm-path (single
         # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace
         # above.
@@ -1439,7 +1440,7 @@ class Database:
         config_overrides: dict[str, Any] | None = None,
         ui_state: dict[str, Any] | None = None,
     ) -> int:
-        """Create a new workspace. Returns the workspace id."""
+        """Create a new workspace (no commit: the caller's unit owns it). Returns the id."""
         from catalog_result_files import highest_workspace_id
         id_floor = (
             highest_workspace_id(os.path.dirname(self._db_path))
@@ -1449,8 +1450,11 @@ class Database:
             name, config_overrides, ui_state, id_floor=id_floor,
         )
         # Invalidate any cached reader state even though IDs now advance
-        # monotonically past both catalog rows and legacy result files.
-        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+        # monotonically past both catalog rows and legacy result files --
+        # once the caller's unit has committed the row.
+        self.after_commit(
+            lambda: self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+        )
         return workspace_id
 
     def get_effective_config(self, global_config: dict[str, Any]) -> dict[str, Any]:
@@ -1629,7 +1633,7 @@ class Database:
         return self._source_cleanup_repository()
 
     def ensure_default_workspace(self) -> int:
-        """Create the Default workspace if it doesn't exist. Returns its id."""
+        """Create the Default workspace if it doesn't exist (no commit). Returns its id."""
         default_id = self._workspace_repository().default_id()
         if default_id is not None:
             return default_id

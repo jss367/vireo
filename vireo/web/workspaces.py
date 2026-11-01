@@ -697,7 +697,8 @@ def create_workspace_blueprint(
                             "Sync or discard that workspace's local copy before linking the folder here.",
                             409,
                         )
-                ws_id = db.create_workspace(name, config_overrides=config_overrides)
+                with db.transaction():
+                    ws_id = db.create_workspace(name, config_overrides=config_overrides)
                 # SQLite can reuse the rowid of a deleted workspace here, so a
                 # ready Missing Originals payload cached under the old
                 # workspace could otherwise be served to this fresh workspace
@@ -1043,7 +1044,8 @@ def create_workspace_blueprint(
                 if move_error is not None:
                     return json_error(move_error)
                 try:
-                    target_ws_id = db.create_workspace(new_ws_name)
+                    with db.transaction():
+                        target_ws_id = db.create_workspace(new_ws_name)
                 except Exception as e:  # broad: creation failures are answered with the reason
                     log.warning("Workspace creation for folder move failed", exc_info=True)
                     return json_error(f"Failed to create workspace: {e}")

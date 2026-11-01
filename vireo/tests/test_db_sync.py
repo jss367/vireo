@@ -75,6 +75,7 @@ def lib(db):
     """Active workspace with two folders, a sibling workspace, and photos."""
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
+    db.commit()
     f1 = workspace_folders.add_folder(db, "/lib/one", name="one")
     f2 = workspace_folders.add_folder(db, "/lib/two", name="two")
     workspace_folders.add_workspace_folder(db, other, f1)

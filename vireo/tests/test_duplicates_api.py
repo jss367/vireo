@@ -768,6 +768,7 @@ def test_catalog_cleanup_shows_copies_from_other_workspaces(app_and_db):
     app, db = app_and_db
     original_ws = db.active_workspace_id
     other_ws = db.create_workspace("Archive")
+    db.commit()
     db.set_active_workspace(other_ws)
     fid = workspace_folders.add_folder(db, "/archive/cleanup")
     kept, rejected = _seed_pair(db, "HARCHIVE", fid)
@@ -837,6 +838,7 @@ def test_scan_and_last_scan_name_each_copys_workspaces(app_and_db):
         assert entry["workspaces"] == ["Default"]
 
     zeta = db.create_workspace("Zeta")
+    db.commit()
     workspace_folders.add_workspace_folder(db, zeta, fid)
     workspace_folders.remove_workspace_folder(db, db._active_workspace_id, fid)
 

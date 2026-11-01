@@ -109,6 +109,7 @@ def _mask_file(db, name):
 def _other_workspace_photo(db, name="foreign.jpg"):
     home = db._ws_id()
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     pid = _photo(db, name, folder_id=_folder(db, "/elsewhere"))
     db.set_active_workspace(home)
@@ -1020,6 +1021,7 @@ def test_list_photos_for_eye_keypoint_stage_is_workspace_scoped(db):
     fid = _folder(db)
     _eye_ready(db, "a.jpg", fid)
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     assert subject_masks.list_photos_for_eye_keypoint_stage(db) == []
 

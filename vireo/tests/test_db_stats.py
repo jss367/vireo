@@ -108,6 +108,7 @@ def seed(db):
     """Build the shared library. Returns a dict of ids."""
     ws = db._ws_id()
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     f_other = workspace_folders.add_folder(db, "/other", name="other")
     db.set_active_workspace(ws)

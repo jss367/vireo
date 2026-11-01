@@ -20,6 +20,7 @@ def test_folder_has_photos_sees_photos_in_any_workspace(db):
     full = workspace_folders.add_folder(db, "/library/full")
     photo_ingest.add_photo(db, full, "a.jpg", ".jpg", 10, 1.0)
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
 
     assert db.source_cleanup.folder_has_photos(full) is True
@@ -50,6 +51,7 @@ def test_local_copy_paths_unions_workspace_and_folder_copies(db):
 def test_other_workspace_roots_excludes_the_given_workspace(db):
     mine = db.active_workspace_id
     other = db.create_workspace("Other")
+    db.commit()
     root = workspace_folders.add_folder(db, "/library/root")
     workspace_folders.add_workspace_folder(db, other, root)
     workspace_folders.add_workspace_folder(db, mine, root)

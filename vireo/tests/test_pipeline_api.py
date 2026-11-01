@@ -3590,6 +3590,7 @@ def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
     try:
         ws_a = db.create_workspace("A")
         ws_b = db.create_workspace("B")
+        db.commit()
 
         f_a = workspace_folders.add_folder(db, "/a", name="a")
         f_b = workspace_folders.add_folder(db, "/b", name="b")

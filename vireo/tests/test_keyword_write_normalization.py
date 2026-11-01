@@ -17,6 +17,7 @@ from services import photo_ingest, workspace_folders
 def _make_db(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     p1 = photo_ingest.add_photo(

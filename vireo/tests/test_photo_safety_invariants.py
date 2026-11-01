@@ -256,6 +256,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         self.db = Database(self.db_path)
         self.default_ws = self.db._active_workspace_id
         self.other_ws = self.db.create_workspace("Other")
+        self.db.commit()
         self.db.set_active_workspace(self.default_ws)
         self.ws_id = self.default_ws
         self.next_seed = 0
@@ -1207,6 +1208,7 @@ def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
     try:
         mine = db._active_workspace_id
         theirs = db.create_workspace("Other")
+        db.commit()
         db.set_active_workspace(mine)
         folder_id = workspace_folders.add_folder(db, str(shared), name="shared")
         workspace_folders.add_workspace_folder(db, theirs, folder_id)

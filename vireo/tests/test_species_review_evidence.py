@@ -129,6 +129,7 @@ def test_missing_or_hidden_photo_fails_the_whole_selection(app_and_db):
     client = app.test_client()
     assert client.post("/api/photos/species-evidence", json={"photo_ids": [1, 999]}).status_code == 404
     other = db.create_workspace("Empty workspace")
+    db.commit()
     assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
     assert client.post("/api/photos/species-evidence", json={"photo_ids": [1]}).status_code == 404
 

@@ -69,6 +69,7 @@ def test_stale_workspace_does_not_write_even_when_photo_is_shared(client_with_ph
     client = app.test_client()
     observed_workspace = db.active_workspace_id
     other_workspace = db.create_workspace("Other review")
+    db.commit()
     workspace_folders.add_workspace_folder(db, other_workspace, db.photos.get(photo_id)['folder_id'])
     assert client.post(f'/api/workspaces/{other_workspace}/activate').status_code == 200
     response = client.post(f'/api/photos/{photo_id}/flag', json={
@@ -85,6 +86,7 @@ def test_workspace_activation_after_request_db_opens_cannot_write(client_with_ph
     app, db, photo_id = client_with_photo
     observed_workspace = db.active_workspace_id
     other_workspace = db.create_workspace('Concurrent review')
+    db.commit()
     workspace_folders.add_workspace_folder(db, other_workspace, db.photos.get(photo_id)['folder_id'])
     original = PhotoReviewService.set_flag
     statements = []

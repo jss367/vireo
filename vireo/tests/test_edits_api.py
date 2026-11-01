@@ -258,6 +258,7 @@ def test_photo_review_routes_preserve_workspace_isolation(app_and_db):
     visible_id = db.photos.list_page()[0]["id"]
     active_workspace_id = db._active_workspace_id
     other_workspace_id = db.create_workspace("Other review workspace")
+    db.commit()
     db.set_active_workspace(other_workspace_id)
     folder_id = workspace_folders.add_folder(db, "/photos/other-review", name="other-review")
     hidden_id = photo_ingest.add_photo(
@@ -759,6 +760,7 @@ def test_sync_preview_cache_isolated_by_database(app_and_db, tmp_path):
     second_db = Database(str(tmp_path / "second-catalog.db"))
     try:
         second_ws = second_db.ensure_default_workspace()
+        second_db.commit()
         second_db.set_active_workspace(second_ws)
         second_folder = workspace_folders.add_folder(
             second_db, str(tmp_path / "second-photos"), name="second-photos",
@@ -2344,6 +2346,7 @@ def test_history_isolated_between_workspaces(app_and_db):
 
     # Create and switch to a new workspace
     ws2 = db.create_workspace('Second')
+    db.commit()
     db.set_active_workspace(ws2)
 
     # New workspace has no history

@@ -52,6 +52,7 @@ def test_remove_orphans_history_survives_deletion_and_reopen(app_and_db, tmp_pat
     with Database(db._db_path) as reopened:
         assert reopened.edit_history.list_recent()[0]['id'] == entry['id']
     other = db.create_workspace('Other')
+    db.commit()
     db.set_active_workspace(other)
     assert db.edit_history.list_recent() == []
 

@@ -560,6 +560,7 @@ def test_top_unrejected_predictions_by_photo(db, cat):
     db.set_review_status(jay, cat["ws"], "reviewed", group_id="g")
     # Another workspace's rejection does not hide a row here.
     other = db.create_workspace("Other")
+    db.commit()
     db.set_review_status(jay, other, "rejected")
 
     tie = _det(db, p1)
@@ -661,6 +662,7 @@ def test_inspector_predictions_for_photo(db, cat):
     robin = _pred_id(db, high, "Robin", fp="fp-new")
     db.set_review_status(robin, ws, "accepted", individual="Bob", group_id="g1")
     other_ws = db.create_workspace("Other")
+    db.commit()
     wren = _pred_id(db, high, "Wren", model="m2", fp="fp-x")
     db.set_review_status(wren, other_ws, "rejected")
 
@@ -743,6 +745,7 @@ def test_review_status_get_and_set(db, cat):
     db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     other = db.create_workspace("Other")
+    db.commit()
     assert db.predictions.get_review_status(pid, cat["ws"]) == "pending"
     db.set_review_status(pid, other, "accepted", individual="i", group_id="g")
     assert db.conn.in_transaction  # the caller commits
@@ -906,6 +909,7 @@ def _scope_preds(db, photo_id, species, model="m1", fp="fp1", x=0.1):
 def test_decision_row_and_status(db, cat):
     det, (pid,) = _scope_preds(db, cat["p"][0], ["Robin"])
     other = db.create_workspace("Other")
+    db.commit()
     db.set_review_status(pid, other, "accepted", group_id="other-g")
 
     row = db.predictions.get_decision_row(pid)
@@ -960,6 +964,7 @@ def test_decided_and_superseded_prediction_ids(db, cat):
     db.update_prediction_status(new, "alternative")
     db.update_prediction_status(jay, "reviewed")
     other = db.create_workspace("Other")
+    db.commit()
     db.set_review_status(new, other, "rejected")
     assert db.predictions.decided_ids([old, new, jay]) == {old, jay}
     assert db.predictions.decided_ids([]) == set()

@@ -48,6 +48,7 @@ def test_full_pyramid_cycle(tmp_path, monkeypatch):
     db_path = str(vireo_dir / "vireo.db")
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     fid = workspace_folders.add_folder(db, str(folder), name="photos")
     pid_big = photo_ingest.add_photo(

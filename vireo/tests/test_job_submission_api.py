@@ -221,6 +221,7 @@ def test_job_cull_passes_thumb_cache_parent_as_vireo_dir(tmp_path, monkeypatch):
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
 

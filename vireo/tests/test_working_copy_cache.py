@@ -9,6 +9,7 @@ def _seed_working_copies(tmp_path, sizes):
 
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(workspace_id)
     folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     working_dir = tmp_path / "working"

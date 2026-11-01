@@ -1597,6 +1597,7 @@ def test_job_records_resource_wait_timing_in_snapshot_and_history(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     workspace_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(workspace_id)
     runner = JobRunner(db=db)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=1)
@@ -1834,6 +1835,7 @@ def test_job_history_persists_steps_tree(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
 
@@ -1873,6 +1875,7 @@ def test_job_history_prunes_to_100(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
 
@@ -1909,6 +1912,7 @@ def test_system_history_does_not_evict_user_jobs(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
     for job_type in ("pipeline", "new_images_walk", "missing_originals_scan"):

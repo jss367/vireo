@@ -41,6 +41,7 @@ def move_env(tmp_path):
     """Set up a DB with two folders and photos on disk."""
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src = tmp_path / "src"
@@ -178,6 +179,7 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -262,6 +264,7 @@ def test_move_folder_by_date_copies_shared_xmp_to_each_date(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -300,6 +303,7 @@ def test_move_photos_reuses_shared_xmp_within_one_destination(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -338,6 +342,7 @@ def test_move_folder_by_date_rebases_developed_outputs(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -389,6 +394,7 @@ def test_move_folder_by_date_without_developed_dir_leaves_disk_alone(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -556,6 +562,7 @@ def test_move_photos_rejects_stale_default_developed_render_at_destination(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -595,6 +602,7 @@ def test_move_photos_rejects_blocked_default_developed_path(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -636,6 +644,7 @@ def test_move_photos_rejects_case_folded_stale_developed_render(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -672,6 +681,7 @@ def test_move_photos_out_of_developed_folder_ignores_source_original(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     destination = tmp_path / "archive"
     source = destination / "developed"
@@ -708,6 +718,7 @@ def test_move_photos_stale_check_allows_same_source_shared_stem(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -753,6 +764,7 @@ def test_move_photos_keeps_render_for_unselected_same_stem_photo(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -806,6 +818,7 @@ def test_move_folder_by_date_rebases_default_developed_renders(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -849,6 +862,7 @@ def test_move_folder_by_date_preserves_tracked_developed_child(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     tracked_child = src / "developed"
@@ -894,6 +908,7 @@ def test_move_folder_by_date_copies_shared_stem_render_to_each_date(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -945,6 +960,7 @@ def test_move_folder_by_date_copies_shared_stem_render_configured_dir(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -992,6 +1008,7 @@ def test_move_folder_by_date_rejects_distinct_same_stem_renders(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     parent = tmp_path / "card"
     first_src = parent / "a"
@@ -1052,6 +1069,7 @@ def test_move_folder_by_date_lists_developed_dir_once_per_source(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "card"
     src.mkdir()
@@ -1115,6 +1133,7 @@ def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path, te
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1143,6 +1162,7 @@ def test_folder_subtree_photos_reads_only_date_columns(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1164,6 +1184,7 @@ def test_plan_folder_date_moves_normalizes_dot_components(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1187,6 +1208,7 @@ def test_plan_folder_date_moves_rejects_dot_only_template(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1215,6 +1237,7 @@ def test_plan_folder_date_moves_rejects_template_that_escapes_destination(tmp_pa
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1237,6 +1260,7 @@ def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1267,6 +1291,7 @@ def test_plan_folder_date_moves_rejects_destination_root_regular_file(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1303,6 +1328,7 @@ def test_plan_folder_date_moves_rejects_parent_of_missing_destination_root(tmp_p
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1333,6 +1359,7 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_parent_of_root(tmp_path
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1364,6 +1391,7 @@ def test_plan_folder_date_moves_rejects_ancestor_occupied_by_file(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1399,6 +1427,7 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_ancestor(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1435,6 +1464,7 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_destination(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1476,6 +1506,7 @@ def test_plan_folder_date_moves_does_not_leak_slash_siblings_on_posix(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     photos_root = tmp_path / "photos"
@@ -1540,6 +1571,7 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     # Rows are stored with mixed case; the actual on-disk paths are used
@@ -1608,6 +1640,7 @@ def test_plan_folder_date_moves_matches_case_alias_on_casefolding_posix(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     parent_disk = tmp_path / "Photos"
     child_disk = parent_disk / "2026"
@@ -1657,6 +1690,7 @@ def test_plan_folder_date_moves_matches_symlink_alias_descendants_on_posix(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     target_root = tmp_path / "mnt" / "card"
@@ -1690,6 +1724,7 @@ def test_move_photos_allows_incremental_same_stem_siblings(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -1770,6 +1805,7 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     original_source = tmp_path / "original"
@@ -1841,6 +1877,7 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     reusable_path = tmp_path / "CARD"
@@ -1933,6 +1970,7 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     reusable_path = tmp_path / "CARD"
@@ -2032,6 +2070,7 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     old_root = tmp_path / "OLD"
@@ -2136,6 +2175,7 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     reusable_path = tmp_path / "CARD"
@@ -2228,6 +2268,7 @@ def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     source_path = tmp_path / "CARD"
@@ -2286,6 +2327,7 @@ def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     source_path = tmp_path / "CARD"
@@ -2354,6 +2396,7 @@ def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     source_path = tmp_path / "CARD"
@@ -2417,6 +2460,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     reusable_path = tmp_path / "CARD"
@@ -2521,6 +2565,7 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     reusable_path = tmp_path / "CARD"
@@ -2627,6 +2672,7 @@ def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     source_a = tmp_path / "cardA"
@@ -2687,6 +2733,7 @@ def test_move_photos_folds_stems_for_configured_developed_volume(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     source_a = tmp_path / "cardA"
     source_b = tmp_path / "cardB"
@@ -2737,6 +2784,7 @@ def test_move_photos_rejects_same_source_case_only_stem_collision(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     source = tmp_path / "case-sensitive-source"
     destination = tmp_path / "case-folding-destination"
@@ -2793,6 +2841,7 @@ def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     source_a = tmp_path / "cardA"
@@ -2836,6 +2885,7 @@ def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     src = tmp_path / "src"
     src.mkdir()
@@ -3366,6 +3416,7 @@ def test_move_folder_no_op_rename_preserves_untrimmed_source_name(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src = tmp_path / " shoot "
@@ -3410,6 +3461,7 @@ def test_move_folder_no_op_rename_uses_source_leaf_when_name_missing(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
 
     src = tmp_path / "shoot"

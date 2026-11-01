@@ -124,6 +124,7 @@ def test_record_edit_is_batch_defaults_to_zero(db, pids):
 def test_record_edit_clears_only_this_workspaces_redo_stack(db, pids):
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
+    db.commit()
     first = _rating_edit(db, pids[0], 0, 1)
     second = _rating_edit(db, pids[0], 1, 2)
     foreign_undone = _raw_edit(db, "rating", "3", workspace_id=other, undone=1)
@@ -171,6 +172,7 @@ def test_record_edit_requires_active_workspace(db, pids):
 
 def test_get_edit_history_filters_orders_counts_and_pages(db, pids):
     other = db.create_workspace("Other")
+    db.commit()
     same_ts = "2024-01-01 00:00:00"
     a = _raw_edit(db, "rating", "1", created_at=same_ts,
                   items=[(pids[0], "0", "1"), (pids[1], "0", "1")])
@@ -210,6 +212,7 @@ def test_get_edit_history_requires_active_workspace(db):
 
 def test_photo_edit_recipe_history_filters_orders_and_limits(db, pids):
     other = db.create_workspace("Other")
+    db.commit()
     same_ts = "2024-01-01 00:00:00"
     a = _raw_edit(db, "edit_recipe", created_at=same_ts, description="a",
                   items=[(pids[0], "", '{"exposure": 1}'), (pids[1], "", "x")])
@@ -245,6 +248,7 @@ def test_photo_edit_recipe_history_requires_active_workspace(db, pids):
 
 def test_item_values_with_local_adjustments_spans_workspaces_old_then_new(db, pids):
     other = db.create_workspace("Other")
+    db.commit()
     _raw_edit(db, "edit_recipe", items=[(pids[0], '{"local": [1]}', '{"exposure": 1}')])
     _raw_edit(db, "edit_recipe", workspace_id=other,
               items=[(pids[1], None, '{"local": [2]}'), (pids[2], '{"local": [3]}', None)])
@@ -316,6 +320,7 @@ def test_undo_picks_latest_and_redo_replays_oldest_first(db, pids):
 
 def test_undo_redo_ignore_other_workspaces(db, pids):
     other = db.create_workspace("Other")
+    db.commit()
     _raw_edit(db, "rating", "1", workspace_id=other, items=[(pids[0], "0", "1")])
     _raw_edit(db, "rating", "1", workspace_id=other, undone=1,
               items=[(pids[0], "0", "1")])
@@ -655,6 +660,7 @@ def test_prediction_accept_flat_removals_restore_only_live_workspaces(db, pids):
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
     gone = db.create_workspace("Gone")
+    db.commit()
     db.set_active_workspace(ws)
     kid = db.add_keyword("Hawk")
     db.tag_photo(pids[0], kid)
@@ -733,6 +739,7 @@ def _set_status(db, pred_id, status, ws=None):
 def test_undo_prediction_accept_resets_only_matching_fingerprint(db, pids):
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws)
     p = _predictions(db, pids[0])
     _set_status(db, p["a_mid"], "accepted")
@@ -786,6 +793,7 @@ def test_undo_prediction_accept_empty_ids_return_before_workspace(db):
 def test_redo_prediction_accept_reaccepts_and_rejects_open_siblings(db, pids):
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws)
     p = _predictions(db, pids[0])
     _set_status(db, p["a_top"], "alternative")
@@ -1142,6 +1150,7 @@ def max_history(monkeypatch):
 def test_prune_keeps_newest_and_undone_and_other_workspaces(db, pids, max_history):
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(ws)
     old1 = _raw_edit(db, "rating", "1", created_at="2024-01-01 00:00:00")
     old2 = _raw_edit(db, "rating", "2", created_at="2024-01-02 00:00:00")
@@ -1226,6 +1235,7 @@ def test_undo_and_redo_summaries_skip_non_undoable_and_other_workspaces(db, pids
     assert db.edit_history.count_undoable() == 0
     assert db.edit_history.oldest_redoable() is None
     other = db.create_workspace("Other")
+    db.commit()
     old = _raw_edit(db, "rating", description="old", created_at="2020-01-01 00:00:00")
     new = _raw_edit(db, "flag", description="new", created_at="2020-01-02 00:00:00")
     _raw_edit(db, "discard", description="skip", created_at="2020-01-03 00:00:00")
@@ -1293,6 +1303,7 @@ def test_workspace_reads_follow_the_workspace_active_at_the_call(db, pids):
     home = db._ws_id()
     mine = _raw_edit(db, "rating", "mine")
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     theirs = _raw_edit(db, "rating", "theirs")
     assert db.edit_history.latest_undoable()["id"] == theirs
@@ -1333,6 +1344,7 @@ def test_edit_has_changed_items(db, pids):
 def test_get_edit_action_and_new_value_reads_any_workspace(db, pids):
     edit_id = _rating_edit(db, pids[0], 0, 4)
     other = db.create_workspace("Other")
+    db.commit()
     foreign = _raw_edit(db, "pipeline_grouping", "{}", workspace_id=other)
     assert dict(db.edit_history.action_and_new_value(edit_id)) == {
         "action_type": "rating", "new_value": "4",

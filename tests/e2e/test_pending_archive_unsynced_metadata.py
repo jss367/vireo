@@ -21,6 +21,7 @@ def _staged_import(db, tmp_path, *, destination):
     day.mkdir(parents=True)
 
     workspace_id = db.create_workspace("Kept Locally")
+    db.commit()
     day_id = workspace_folders.add_folder(db, str(day), name="12", link_to_workspace=False)
     workspace_folders.add_workspace_folder(db, workspace_id, day_id, is_root=True)
     photo_ids = [
@@ -216,6 +217,7 @@ def test_banner_says_which_edits_this_sync_will_not_write(live_server, page, tmp
     workspace_id, photo_ids = _staged_import(
         db, tmp_path, destination="/Volumes/Photography/USA/2026")
     sibling = db.create_workspace("Sibling")
+    db.commit()
 
     db.queue_change(photo_ids[0], "keyword_add", "Osprey", workspace_id=workspace_id)
     db.commit()

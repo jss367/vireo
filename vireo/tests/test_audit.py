@@ -1048,6 +1048,7 @@ def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
 
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     source_folder = tmp_path / "source"
     source_folder.mkdir()

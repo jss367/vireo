@@ -134,6 +134,7 @@ def test_photo_row_deletion_rewrites_every_workspace_once_on_exit(db, tmp_path, 
     import repositories.photo_row_deletion as module
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     gone, merged, survivor, kept = (
         _photo(db, folder, f"{n}.jpg") for n in ("gone", "merged", "survivor", "kept")
@@ -200,6 +201,7 @@ def test_photo_row_deletion_rollback_restores_rows_and_collections(db, tmp_path)
 
 def test_batch_delete_prunes_collections(db, tmp_path):
     other_ws = db.create_workspace("Other")
+    db.commit()
     folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     gone = _photo(db, folder, "gone.jpg")
     kept = _photo(db, folder, "kept.jpg")
@@ -215,6 +217,7 @@ def test_remove_orphans_prunes_collections(db):
     from audit import remove_orphans
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     folder = workspace_folders.add_folder(db, "/gone", name="gone")
     orphan = _photo(db, folder, "missing.jpg")
     kept = _photo(db, folder, "kept.jpg")
@@ -229,6 +232,7 @@ def test_remove_orphans_prunes_collections(db):
 
 def test_relocating_a_missing_folder_onto_an_existing_one_prunes_collections(db, tmp_path):
     other_ws = db.create_workspace("Other")
+    db.commit()
     target_dir = tmp_path / "target"
     target_dir.mkdir()
     target = workspace_folders.add_folder(db, str(target_dir), workspace_root=False)
@@ -271,6 +275,7 @@ def _staged_tree(db, tmp_path, *, archived_on_disk):
 
 def test_archive_merge_dropping_an_already_archived_photo_remaps_collections(db, tmp_path):
     other_ws = db.create_workspace("Other")
+    db.commit()
     arch, stage_root, archived, staged = _staged_tree(db, tmp_path, archived_on_disk=True)
     coll = _static_collection(db, other_ws, "c", [staged])
 
@@ -284,6 +289,7 @@ def test_archive_merge_dropping_an_already_archived_photo_remaps_collections(db,
 
 def test_archive_merge_replacing_a_phantom_row_remaps_collections(db, tmp_path):
     other_ws = db.create_workspace("Other")
+    db.commit()
     arch, stage_root, phantom, staged = _staged_tree(db, tmp_path, archived_on_disk=False)
     coll = _static_collection(db, other_ws, "c", [phantom])
 
@@ -299,6 +305,7 @@ def test_companion_merge_remaps_collections(db, tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     other_ws = db.create_workspace("Other")
+    db.commit()
     folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     jpeg = _photo(db, folder, "IMG_001.jpg", file_size=1000)
     raw = _photo(db, folder, "IMG_001.cr3", file_size=2000)
@@ -319,6 +326,7 @@ def _repair(db):
 
 def test_startup_repair_removes_only_entries_for_missing_photos(db, tmp_path, caplog):
     other_ws = db.create_workspace("Other")
+    db.commit()
     folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     kept_a = _photo(db, folder, "a.jpg")
     kept_b = _photo(db, folder, "b.jpg")

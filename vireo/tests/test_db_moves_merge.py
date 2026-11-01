@@ -779,6 +779,7 @@ def test_transfer_edit_recipe_inserts_missing_survivor_row(db, two_photos):
 def test_link_survivor_for_sibling_edits(db, caplog):
     active = db._active_workspace_id
     sibling = db.create_workspace("Sibling")
+    db.commit()
     fid = _folder(db, "/arch", root=True)
     pid = _photo(db, fid, "a.jpg")
 
@@ -804,6 +805,7 @@ def test_link_survivor_for_sibling_edits(db, caplog):
 def test_get_sync_only_photo_paths(db):
     active = db._active_workspace_id
     sibling = db.create_workspace("Sibling")
+    db.commit()
     ok = _folder(db, "/ok", root=True)
     gone = _folder(db, "/gone", root=True)
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (gone,))
@@ -884,6 +886,7 @@ def test_query_move_rule_matches_scopes_to_active_workspace_and_visible_folders(
     db.conn.commit()
     assert p["other"] not in moves_merge.query_move_rule_matches(db, {})
     empty_ws = db.create_workspace("Empty")
+    db.commit()
     db.set_active_workspace(empty_ws)
     assert moves_merge.query_move_rule_matches(db, {}) == []
     db.set_active_workspace(None)
@@ -988,6 +991,7 @@ def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_p
     losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
     first = db.require_workspace_id()
     second = db.create_workspace('Shared review')
+    db.commit()
     db.photo_visibility.grant(first, [losing, survivor])
     db.photo_visibility.grant(second, [losing])
     keyword = db.add_keyword('Tropical Kingbird', is_species=True)
@@ -1313,6 +1317,7 @@ def test_merge_links_sibling_survivors_through_the_facade(
         db, tmp_path, monkeypatch):
     t = _collision_tree(db, tmp_path)
     sibling = db.create_workspace("Sibling")
+    db.commit()
     _queue(db, t["staged"], "flag", "flagged", "2026-01-01 00:00:00", ws=sibling)
     calls = []
     real = MovesMergeRepository.link_survivor_for_sibling_edits
@@ -1577,6 +1582,7 @@ def test_merge_into_existing_folder_keeps_photo_in_sharing_workspace(db):
     ws = db._active_workspace_id
     sharing = db.create_workspace("Sharing")
     linked = db.create_workspace("Linked")
+    db.commit()
     db.set_active_workspace(ws)
     arch = _folder(db, "/arch", root=True)
     _photo(db, arch, "old.jpg")
@@ -1600,6 +1606,7 @@ def test_merge_into_existing_folder_keeps_photo_in_sharing_workspace(db):
 def test_merge_new_path_roots_deepest_tracked_ancestor(db):
     ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     _folder(db, "/photos", root=True)
     db.set_active_workspace(ws)
@@ -1653,6 +1660,7 @@ def test_merge_intra_staged_case_alias_drops_later_row(db, monkeypatch):
 def test_merge_phantom_sibling_edits_link_staged_survivor(db, tmp_path):
     t = _collision_tree(db, tmp_path, same_hash=False)
     sibling = db.create_workspace("Sibling")
+    db.commit()
     _queue(db, t["survivor"], "rating", "3", "2026-01-01 00:00:00", ws=sibling)
     counts = moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
     assert counts["preserved_edit_count"] == 1
@@ -1665,6 +1673,7 @@ def test_merge_phantom_sibling_edits_link_staged_survivor(db, tmp_path):
 
 def test_photo_syncable_in_workspace(db):
     sibling = db.create_workspace("Sibling")
+    db.commit()
     lib = _folder(db, "/lib", root=True)
     other = _folder(db, "/other", link=False)
     member = _photo(db, lib, "member.jpg")
@@ -2194,6 +2203,7 @@ def test_collision_preserves_identity_decision_history_and_sharing(db, tmp_path,
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
     ws = db._active_workspace_id
     sharing = db.create_workspace("Identity sharing")
+    db.commit()
     db.set_active_workspace(ws)
     workspace_folders.add_workspace_folder(db, ws, t["stage_root"])
     workspace_folders.add_workspace_folder(db, sharing, t["stage_root"])
@@ -2415,6 +2425,7 @@ def test_higher_rank_homonym_collision_rollback_survives_sync_and_history(db, tm
     ws = db.require_workspace_id()
     workspace_folders.add_workspace_folder(db, ws, t['stage_root'])
     sharing = db.create_workspace('Homonym sync sharing')
+    db.commit()
     db.set_active_workspace(ws)
     workspace_folders.add_workspace_folder(db, sharing, t['stage_root'])
     workspace_folders.add_workspace_folder(db, sharing, t['base'])

@@ -148,6 +148,7 @@ def test_verdict_refuses_full_image_unknown_and_foreign_regions(db, scene, tmp_p
     assert len(db.edit_history.list_recent()) == history_count
     # A photo outside the active workspace is not reachable.
     other = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other)
     with pytest.raises(subject_verdicts.SubjectVerdictError) as foreign:
         subject_verdicts.set_subject_verdict(db, bird, "not_animal")
@@ -428,6 +429,7 @@ def test_cache_refresh_rewrites_every_workspace_that_sees_the_photo(db, scene, t
     photo_id, stump, bird, _ = scene
     first_ws = db.require_workspace_id()
     other_ws = db.create_workspace("Other")
+    db.commit()
     folder_id = db.photos.get(photo_id)["folder_id"]
     db.set_active_workspace(first_ws)
     workspace_folders.add_workspace_folder(db, other_ws, folder_id)

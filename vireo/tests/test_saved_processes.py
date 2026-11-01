@@ -171,6 +171,7 @@ def test_delete_nulls_referencing_workspace_default(tmp_path):
     ws_id = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": pid}},
     )
+    db.commit()
     saved_processes.delete_saved_process(db, pid)
     ws = db.workspaces.get(ws_id)
     overrides = json.loads(ws["config_overrides"])
@@ -190,6 +191,7 @@ def test_delete_workspace_default_beats_global_default(tmp_path):
     ws_id = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": doomed}},
     )
+    db.commit()
     db.set_active_workspace(ws_id)
     saved_processes.delete_saved_process(db, doomed)
     effective = db.get_effective_config(
@@ -207,6 +209,7 @@ def test_delete_leaves_other_workspace_defaults_intact(tmp_path):
     ws_id = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": keep}},
     )
+    db.commit()
     saved_processes.delete_saved_process(db, doomed)
     ws = db.workspaces.get(ws_id)
     overrides = json.loads(ws["config_overrides"])

@@ -20,6 +20,7 @@ def test_move_visibility_checkbox_remembers_choice_and_lists_workspaces(live_ser
     db = live_server["db"]
     a = db._active_workspace_id
     b = db.create_workspace("Other birds")
+    db.commit()
     photo = db.conn.execute("SELECT id, folder_id FROM photos ORDER BY id LIMIT 1").fetchone()
     workspace_folders.add_workspace_folder(db, b, photo["folder_id"])
     page.goto(live_server["url"] + "/move")

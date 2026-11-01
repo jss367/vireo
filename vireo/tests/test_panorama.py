@@ -194,6 +194,7 @@ def test_api_validation_and_workspace_boundaries(app_and_db):
     for body in ([], {"photo_ids": [1]}, {"photo_ids": [1, 999999]}):
         assert client.post("/api/jobs/panorama", json=body).status_code == 400
     other_ws = db.create_workspace("Other")
+    db.commit()
     db.set_active_workspace(other_ws)
     other_folder = workspace_folders.add_folder(db, "/other")
     foreign_id = photo_ingest.add_photo(db, folder_id=other_folder, filename="other.jpg", extension=".jpg", file_size=1, file_mtime=1)

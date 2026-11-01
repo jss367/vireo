@@ -212,6 +212,7 @@ def test_all_workspaces_queue_current_versions_with_fresh_sync_tokens(app_and_db
     version = create(app.test_client(), pid)
     first = db.conn.execute("SELECT change_token FROM pending_changes WHERE change_type='photo_versions'").fetchone()[0]
     workspace = db.create_workspace("Second editing workspace")
+    db.commit()
     db.set_active_workspace(workspace)
     changed = dict(version, name="Renamed in the second workspace")
     db.photo_versions.put(pid, changed)

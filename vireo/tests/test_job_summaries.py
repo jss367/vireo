@@ -435,6 +435,7 @@ def test_legacy_history_summaries_are_recomputed(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
 
@@ -478,6 +479,7 @@ def test_failed_snapshot_with_partial_result_carries_fatal_error(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
 
@@ -509,6 +511,7 @@ def test_runner_history_and_snapshot_carry_prose(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
+    db.commit()
     db.set_active_workspace(ws_id)
     runner = JobRunner(db=db)
 

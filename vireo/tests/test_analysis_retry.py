@@ -175,6 +175,7 @@ def test_api_rejects_unbounded_malformed_and_foreign_selection(retry_library, en
     for values in ([], [True], ["1"], ids * 70, [10**12], [2**64]):
         assert client.post(f"/api/photos/{endpoint}", json={"photo_ids": values}).status_code == 400
     other = db.create_workspace("Foreign")
+    db.commit()
     assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
     assert client.post(f"/api/photos/{endpoint}", json={"photo_ids": ids}).status_code == 400
 
@@ -313,6 +314,7 @@ def test_job_captures_submission_workspace_even_after_switch(retry_library, monk
     try:
         assert entered.wait(synchronization_timeout(5))
         other = db.create_workspace("Other tab")
+        db.commit()
         assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
     finally:
         release.set()
