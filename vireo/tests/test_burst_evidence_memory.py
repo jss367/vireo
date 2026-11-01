@@ -224,7 +224,8 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         events.append(("gate", pid))
         return photo
 
-    boxes = [dict(category="animal", detector_model="invented", box_x=0.1, box_y=0.2, box_w=0.8, box_h=0.6)]
+    boxes = [dict(id=1, category="animal", detector_model="invented", detector_confidence=0.9,
+                  box_x=0.1, box_y=0.2, box_w=0.8, box_h=0.6)]
     cfg = types.SimpleNamespace(load=lambda: {"pipeline": {"eye_detect_enabled": enabled}, "preview_quality": 90})
 
     def loader(*a, **kw):
@@ -305,6 +306,10 @@ def focus_checks():
     res, events = focus(args={"size": "256"})
     assert res.headers["X-Vireo-Focus-Window"] == "1372,872,1628,1128"
     assert res.headers["X-Vireo-Focus-Scale"] == "1"
+    assert res.headers["X-Vireo-Focus-Detection-Id"] == "1"
+    assert res.headers["X-Vireo-Focus-Detection-Confidence"] == "0.9"
+    assert res.headers["X-Vireo-Focus-Subject-Box"] == "0.1,0.2,0.8,0.6"
+    assert res.headers["X-Vireo-Focus-Eye-Status"] == "unbound"
     assert not any(e[0] == "resize" for e in events)
     assert next(e for e in events if e[0] == "loader")[1]["max_size"] is None
     # Upright portrait returned by loader: use returned geometry, not cached landscape dimensions.
