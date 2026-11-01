@@ -513,3 +513,43 @@ def test_is_broad_area_means_county_or_broader(details, broad):
     from vireo import places
 
     assert places.is_broad_area(details) is broad
+
+
+@pytest.mark.parametrize("failing, kept", [("natural_feature", ["lmra"]), ("park", ["lake"])])
+def test_nearby_named_places_keeps_one_search_when_the_other_fails(monkeypatch, failing, kept):
+    """Each search runs whatever the other does; the answered one's places
+    come back on PlacesPartialResult, still a PlacesTransientError."""
+    from vireo import places
+
+    asked = []
+
+    def fake_urlopen(url, *args, **kwargs):
+        place_type = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["type"][0]
+        asked.append(place_type)
+        if place_type == failing:
+            return _FakeResponse({"status": "OVER_QUERY_LIMIT"})
+        result = (_nearby_result("lmra", "Laguna Mountain Recreation Area", 32.8601, -116.4339, 43)
+                  if place_type == "park" else
+                  _nearby_result("lake", "Big Laguna Lake", 32.8810, -116.4560, 31))
+        return _FakeResponse({"status": "OK", "results": [result]})
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(places.PlacesPartialResult) as partial:
+        places.nearby_named_places(32.8722, -116.4593, "FAKE_KEY")
+
+    assert asked == ["park", "natural_feature"]
+    assert [p["place_id"] for p in partial.value.places] == kept
+    assert isinstance(partial.value, places.PlacesTransientError)
+
+
+def test_nearby_named_places_with_every_search_failing_is_a_plain_transient_error(monkeypatch):
+    from vireo import places
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen",
+                        _make_fake_urlopen({"status": "UNKNOWN_ERROR"}))
+
+    with pytest.raises(places.PlacesTransientError) as failure:
+        places.nearby_named_places(32.87, -116.46, "FAKE_KEY")
+
+    assert not isinstance(failure.value, places.PlacesPartialResult)

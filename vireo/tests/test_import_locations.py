@@ -734,6 +734,66 @@ def test_a_partly_failed_lookup_is_reported_beside_the_places_found(db, monkeypa
     assert group["nearby_unresolved"] == "transient_error"
 
 
+def test_places_from_a_half_answered_lookup_are_offered_and_asked_for_again(db, monkeypatch):
+    """The park search answers and the feature search fails: the park is
+    offered with the warning, and the incomplete answer is not cached."""
+    calls = []
+
+    def half_answered(*a, **k):
+        calls.append(1)
+        raise places.PlacesPartialResult([_LAGUNA_PLACES[1]])
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", half_answered)
+
+    [group] = suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")["groups"]
+    first_calls = len(calls)
+    suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")
+
+    assert [p["place_id"] for p in group["nearby_places"]] == ["lmra"]
+    assert group["nearby_unresolved"] == "transient_error"
+    assert len(calls) == 2 * first_calls
+
+
+def test_a_streamed_preview_offers_places_from_a_half_answered_lookup(db, monkeypatch, exiftool_present):
+    paths = [f"/card/{i}.NEF" for i in range(len(LAGUNA))]
+    gps = dict(zip(paths, LAGUNA, strict=True))
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda chunk: {path: gps[path] for path in chunk})
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+
+    def half_answered(*a, **k):
+        raise places.PlacesPartialResult([_LAGUNA_PLACES[0]])
+
+    monkeypatch.setattr(places, "nearby_named_places", half_answered)
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    [group] = frames[-1]["groups"]
+    assert [p["place_id"] for p in group["nearby_places"]] == ["lake"]
+    assert group["nearby_unresolved"] == "transient_error"
+    assert frames[-1]["file_cells"] == {path: cell_key(*gps[path]) for path in paths}
+
+
+def test_a_later_preview_at_the_pole_reuses_the_pole_lookup_whatever_the_longitude(db, monkeypatch):
+    asked = []
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda lat, lng, *a, **k: asked.append((lat, lng)) or [])
+
+    suggest_import_locations(db, _files([(90.0, 10.0)]), api_key="KEY", language="en")
+    suggest_import_locations(db, _files([(90.0, -135.0)]), api_key="KEY", language="en")
+
+    assert len(asked) == 1
+
+
+def test_spots_near_but_not_at_a_pole_keep_their_own_lookups():
+    near_pole = [(89.999, 0.0), (89.999, 90.0), (89.999, -90.0)]
+
+    assert len({import_locations._nearby_bucket(*p) for p in near_pole}) == 3
+
+
 def test_an_outing_across_the_antimeridian_is_offered_places_not_called_spread_out(db, monkeypatch):
     """Longitudes 179.99 and -179.99 are 1.1 km apart, not half the planet."""
     walk = [(-16.5, 179.995), (-16.5, -179.995)]

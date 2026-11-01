@@ -300,25 +300,30 @@ def _remember_nearby(bucket: _NearbyKey, language: str | None, found: list[JsonD
 
 def _lookup_nearby(
     bucket: _NearbyKey, api_key: str, language: str | None,
-) -> list[JsonDict] | str:
-    """The named places around a bucket's center, or an unresolved reason."""
+) -> tuple[list[JsonDict], str | None]:
+    """The named places around a bucket's center, and why that list may be
+    empty or incomplete (``no_api_key``, ``transient_error``), if it may."""
     # Only an API key makes a cached result usable: clicking a nearby place
     # fetches its details through Google at import time (see
     # :func:`_google_details`), which would fail without a key, so a key
     # removed since the lookup must suppress the cached buttons too.
     if not api_key:
-        return "no_api_key"
+        return [], "no_api_key"
     cached = _cached_nearby(bucket, language)
     if cached is not None:
-        return cached
+        return cached, None
     lat, lng = _nearby_center(bucket)
     try:
         found = places.nearby_named_places(lat, lng, api_key, language=language)
+    except places.PlacesPartialResult as partial:
+        # Offer what answered, say the rest didn't, and ask again next time.
+        log.warning("some nearby searches failed for lat=%s lng=%s", lat, lng)
+        return partial.places, "transient_error"
     except places.PlacesTransientError:
         log.warning("nearby named places lookup failed for lat=%s lng=%s", lat, lng)
-        return "transient_error"
+        return [], "transient_error"
     _remember_nearby(bucket, language, found)
-    return found
+    return found, None
 
 
 def _location_path(db: Database, keyword_id: int) -> tuple[str, list[str]] | None:
@@ -639,7 +644,7 @@ class ImportLocationSuggester:
             db, ((c["lat"], c["lng"]) for c in self._cells.values()))
         self._grid_cache: dict = {}
         self._groups: dict[str, JsonDict] = {}
-        self._nearby_found: dict[_NearbyKey, list[JsonDict] | str] = {}
+        self._nearby_found: dict[_NearbyKey, tuple[list[JsonDict], str | None]] = {}
         self._nearby_over_limit = False
         self._named: dict[str, tuple[JsonDict | None, str | None, bool]] = {}
         self._outings_split = False
@@ -747,10 +752,10 @@ class ImportLocationSuggester:
         reasons: Counter[str] = Counter()
         for key in group["broad_cells"]:
             cell = self._cells[key]
-            found = self._nearby_found.get(_nearby_bucket(cell["lat"], cell["lng"]))
-            if found is None or isinstance(found, str):
-                reasons[found or "not_looked_up"] += 1
-                continue
+            looked_up = self._nearby_found.get(_nearby_bucket(cell["lat"], cell["lng"]))
+            found, reason = looked_up if looked_up is not None else ([], "not_looked_up")
+            if reason:
+                reasons[reason] += 1
             for place in found:
                 candidates.setdefault(place["place_id"], place)
         candidates.pop((group["suggestion"] or {}).get("place_id") or "", None)
