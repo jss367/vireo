@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -1550,8 +1551,9 @@ def test_preview_and_import_recovery_agree(
 
 
 @pytest.mark.parametrize("phase", ["listing", "suffixes"])
+@pytest.mark.parametrize("alternate_spelling", [False, True])
 def test_closed_recovery_preview_stops_long_walks(
-        app_and_db, tmp_path, monkeypatch, phase):
+        app_and_db, tmp_path, monkeypatch, phase, alternate_spelling):
     from web import imports
 
     app, _, _ = app_and_db
@@ -1567,7 +1569,8 @@ def test_closed_recovery_preview_stops_long_walks(
     checkpoints = []
 
     def checkpoint(stream):
-        in_listing = str(folder) not in stream.dir_listings
+        # Planner paths may use forward slashes on Windows or contain '.'.
+        in_listing = folder not in map(Path, stream.dir_listings)
         checkpoints.append("listing" if in_listing else "suffixes")
         if checkpoints[-1] == phase:
             # Emit only in the target phase. Delegating to the real checkpoint
@@ -1578,9 +1581,12 @@ def test_closed_recovery_preview_stops_long_walks(
             yield ": checking recovery candidates\n\n"
 
     monkeypatch.setattr(imports._DuplicateCheckStream, "_recovery_checkpoint", checkpoint)
+    destination = str(tmp_path / "archive")
+    if alternate_spelling:
+        destination = os.path.join(destination, ".")
     response = app.test_client().post("/api/import/check-duplicates", json={
         "paths": [str(source)], "sources": [str(source.parent)],
-        "destination": str(tmp_path / "archive"), "skip_duplicates": False,
+        "destination": destination, "skip_duplicates": False,
     }, buffered=False)
     for frame in response.response:
         if b": checking recovery candidates" in frame:
@@ -1591,8 +1597,9 @@ def test_closed_recovery_preview_stops_long_walks(
     assert checkpoints.count(phase) == 1
 
 
+@pytest.mark.parametrize("alternate_spelling", [False, True])
 def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
-        app_and_db, tmp_path, monkeypatch):
+        app_and_db, tmp_path, monkeypatch, alternate_spelling):
     import scanner
     from import_job import collision
     from web import imports
@@ -1609,27 +1616,30 @@ def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
     real_scandir, real_hash = os.scandir, scanner.compute_file_hash
 
     def scandir(path):
-        if str(path) == str(folder):
-            listings.append(path)
+        if Path(path) == folder:
+            listings.append(Path(path))
         return real_scandir(path)
 
     def file_hash(path):
-        hashes.append(str(path))
+        hashes.append(Path(path))
         return real_hash(path)
 
     def guard(source, candidate, under_source):
-        guard_probes.append(candidate)
+        guard_probes.append(Path(candidate))
         return real_guard(source, candidate, under_source)
 
     monkeypatch.setattr(collision, "_is_source_backed_path", guard)
     monkeypatch.setattr(imports.os, "scandir", scandir)
     monkeypatch.setattr(scanner, "compute_file_hash", file_hash)
+    destination = str(tmp_path / "archive")
+    if alternate_spelling:
+        destination = os.path.join(destination, ".")
     response = app.test_client().post("/api/import/check-duplicates", json={
         "paths": [str(p) for p in sources], "sources": [str(sources[0].parent)],
-        "destination": str(tmp_path / "archive"), "skip_duplicates": False,
+        "destination": destination, "skip_duplicates": False,
     })
     assert parse_sse_events(response.data)[-1]["recovered_count"] == 3
     assert len(listings) == 1
     assert len(hashes) == 6  # One matching candidate and one source per file.
-    assert all(path not in hashes for path in [str(folder / s.name) for s in sources])
-    assert guard_probes == [str(folder / f"{s.stem}_1.jpg") for s in sources]
+    assert all(folder / source.name not in hashes for source in sources)
+    assert guard_probes == [folder / f"{source.stem}_1.jpg" for source in sources]
