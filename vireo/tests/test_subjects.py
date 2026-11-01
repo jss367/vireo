@@ -495,6 +495,12 @@ def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monk
     assert payload(db, photo_id)['subjects'][0]['analysis'] is None
     assert db.photos.get(photo_id)['quality_score'] is None
 
+    monkeypatch.setattr(subjects, 'analyze_image', original)
+    current_id = payload(db, photo_id)['primary_detection_id']
+    assert analyze_photo(db, photo_id, path, detection_id=current_id) == 1
+    assert payload(db, photo_id)['subjects'][0]['analysis'] is not None
+    assert db.photos.get(photo_id)['quality_score'] is not None
+
 
 def test_reviewer_box_api_validates_scope_and_subject(app_and_db):
     app, db = app_and_db
