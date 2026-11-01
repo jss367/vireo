@@ -549,16 +549,19 @@ function renderSummary(/** @type {BrowseSummary} */ data) {
   /** @type {HTMLElement} */ (document.getElementById('summaryUnclassified')).textContent = data.unclassified.toLocaleString() + ' unclassified';
   /** @type {HTMLElement} */ (document.getElementById('summaryAnalysis')).textContent = analysisCoverageText(data);
 
-  // Top species
+  renderSummarySpecies(data.top_species || []);
+}
+
+function renderSummarySpecies(/** @type {NonNullable<BrowseSummary['top_species']>} */ species) {
   var speciesSection = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesSection'));
   var speciesList = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesList'));
   speciesList.replaceChildren();
-  var species = data.top_species || [];
   speciesSection.style.display = species.length ? '' : 'none';
-  species.forEach(function(s) {
+  var rows = species.map(function(s, index) {
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'summary-species-row';
+    row.hidden = index >= 5;
     row.title = 'Filter by top predicted species: ' + s.species;
     var name = document.createElement('span');
     name.className = 'summary-species-name';
@@ -573,7 +576,26 @@ function renderSummary(/** @type {BrowseSummary} */ data) {
       if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
     });
     speciesList.appendChild(row);
+    return row;
   });
+  if (species.length <= 5) return;
+
+  var expanded = false;
+  var toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'summary-species-toggle';
+  toggle.textContent = 'Show more';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.addEventListener('click', function() {
+    expanded = !expanded;
+    rows.forEach(function(row, index) { row.hidden = !expanded && index >= 5; });
+    toggle.textContent = expanded ? 'Show less' : 'Show more';
+    toggle.setAttribute('aria-expanded', String(expanded));
+  });
+  toggle.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+  });
+  speciesList.appendChild(toggle);
 }
 
 async function filterByTopSpecies(/** @type {string} */ species) {
