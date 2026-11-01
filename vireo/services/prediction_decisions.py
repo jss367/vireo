@@ -7,22 +7,25 @@ and the declared list of routes that take it, so the routes can live in
 ``vireo/app.py`` or in any blueprint under ``vireo/web/`` and still share one
 implementation.
 
-Taking the lock from a route::
+A route runs its checks and writes as one decision::
 
     from services import prediction_decisions
 
-    lock_err = prediction_decisions.begin_prediction_decision(
-        db, json_error=json_error,
-    )
-    if lock_err is not None:
-        return lock_err
-    ...  # checks, writes, commit (roll back on every early exit)
-
-or, for a body with several exits::
+    def work():
+        ...  # checks and writes; return an error response to refuse
+        return jsonify(...)
 
     return prediction_decisions.under_prediction_decision_lock(
-        db, work, json_error=json_error,
+        db, work, json_error=json_error, prediction_ids=[pred_id],
     )
+
+``decision`` is the context manager underneath: it takes the lock, owns the
+transaction as a unit of work (``db.transaction()``), revalidates that the
+predictions still belong to the active workspace, and commits when the block
+finishes or rolls back when it raises. ``under_prediction_decision_lock``
+also rolls back when ``work`` returns an error response (status 400 or
+above), so no exit path needs its own rollback, and none may call
+``db.commit()`` or ``db.rollback()``: the unit is the only commit point.
 
 Call these through the module (or import them under their own names); do not
 inject them into a blueprint factory under another name. The structural test
@@ -35,11 +38,12 @@ caller only when they look it up here. No function here touches ``request``;
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from db import Database
     from services.service_types import ErrorResponse, JsonError
@@ -135,29 +139,66 @@ def begin_prediction_decision(db: Database, *, json_error: JsonError) -> ErrorRe
     return None
 
 
-def under_prediction_decision_lock[R](
-    db: Database, work: Callable[[], R], *, json_error: JsonError,
-) -> R | ErrorResponse:
-    """Run ``work()`` as one serialized prediction decision.
+class DecisionRefused(Exception):
+    """Ends a decision without committing; carries the response to return."""
 
-    The wrapper form of ``begin_prediction_decision`` for routes whose
-    body has several exits. ``work`` commits when it writes; the
-    ``finally`` covers the paths that do not — an early ``404``/``409``
-    precondition failure, or an exception unwinding — because leaving
-    ``BEGIN IMMEDIATE`` open would hold the database's single writer lock
-    for the rest of this connection's life and stall every later decision
-    served on it. The single-row endpoints take the same lock inline with
-    explicit rollbacks at each exit; both shapes are equivalent, and the
-    route-contract test checks the lock, not the shape.
+    def __init__(self, response: object) -> None:
+        super().__init__()
+        self.response = response
+
+
+@contextlib.contextmanager
+def decision(
+    db: Database, *, json_error: JsonError, prediction_ids: Sequence[int] = (),
+) -> Iterator[None]:
+    """Run the block as one serialized prediction decision.
+
+    Takes the writer lock (``begin_prediction_decision``), then owns the
+    locked transaction as a unit of work: the block's checks and writes
+    commit together when it finishes, and roll back when it raises. Raise
+    ``DecisionRefused(response)`` to refuse after checking. With
+    ``prediction_ids``, first refuses with a 404 if any of them left the
+    active workspace between the caller's parse and the lock
+    (``out_of_workspace_prediction_ids``). A lock that cannot be taken
+    raises ``DecisionRefused`` with the 503 before anything runs.
     """
     lock_err = begin_prediction_decision(db, json_error=json_error)
     if lock_err is not None:
-        return lock_err
+        raise DecisionRefused(lock_err)
+    # The unit adopts the BEGIN IMMEDIATE the lock just took.
+    with db.transaction():
+        if prediction_ids and out_of_workspace_prediction_ids(db, prediction_ids):
+            raise DecisionRefused(
+                json_error("Prediction does not belong to the active workspace", 404),
+            )
+        yield
+
+
+def _status(result: object) -> int:
+    if isinstance(result, tuple):
+        return int(result[1])
+    return int(getattr(result, "status_code", 200))
+
+
+def under_prediction_decision_lock[R](
+    db: Database, work: Callable[[], R], *, json_error: JsonError,
+    prediction_ids: Sequence[int] = (),
+) -> R | ErrorResponse:
+    """Run ``work()`` inside ``decision`` and return its response.
+
+    An error response (status 400 or above) from ``work`` rolls the decision
+    back, whatever it wrote before deciding to refuse, so a body with several
+    exits needs no rollback at any of them. ``None`` (a body that reports
+    success some other way) commits.
+    """
     try:
-        return work()
-    finally:
-        if db.in_transaction:
-            db.rollback()
+        with decision(db, json_error=json_error, prediction_ids=prediction_ids):
+            result = work()
+            if result is not None and _status(result) >= 400:
+                raise DecisionRefused(result)
+    except DecisionRefused as refused:
+        return refused.response  # pyright: ignore[reportReturnType] - an error response
+    return result
 
 
 def out_of_workspace_prediction_ids(db: Database, pred_ids: Sequence[int]) -> set[int]:

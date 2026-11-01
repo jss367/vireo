@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from db import Database
+    from services.grouping_history import CacheRestore
 
 
 class HistoryItem(TypedDict):
@@ -99,7 +100,7 @@ def prediction_status_item(
 # ``Database._apply_undo`` / ``_apply_redo``.
 
 
-def undo_last_edit(db: Database) -> dict[str, Any] | None:
+def undo_last_edit(db: Database, *, cache_restore: CacheRestore | None = None) -> dict[str, Any] | None:
     """Undo the most recent undoable edit. Returns the undone entry dict, or None.
 
     Non-undoable entries (prediction_reject, discard) are skipped.
@@ -109,6 +110,9 @@ def undo_last_edit(db: Database) -> dict[str, Any] | None:
     another entry. The caller must refresh the controls so the next click
     names the edit it will actually reverse. Retirement commits on its own;
     valid combined photo/group edits retain the writer lock until complete.
+
+    ``cache_restore`` keeps the pipeline-cache restoration and regroup lock
+    alive through the caller's outer unit-of-work commit.
     """
     found = db.edit_history.next_undo()
     if not found:
@@ -124,7 +128,7 @@ def undo_last_edit(db: Database) -> dict[str, Any] | None:
         )
 
         try:
-            with restore_grouping_edit(db, entry, undo=True):
+            with restore_grouping_edit(db, entry, undo=True, cache_restore=cache_restore):
                 apply_grouping_photo_edit(db, entry, items, undo=True)
                 history.mark_undone(entry['id'])
         except GroupingHistoryStale:
@@ -141,7 +145,7 @@ def undo_last_edit(db: Database) -> dict[str, Any] | None:
         )
 
         try:
-            with restore_species_confirm_cache_edit(db, entry, undo=True):
+            with restore_species_confirm_cache_edit(db, entry, undo=True, cache_restore=cache_restore):
                 history.mark_undone(entry['id'])
         except GroupingHistoryStale:
             history.retire_stale_grouping_entry(entry['id'])
@@ -159,12 +163,14 @@ def undo_last_edit(db: Database) -> dict[str, Any] | None:
     return entry
 
 
-def redo_last_undo(db: Database) -> dict[str, Any] | None:
+def redo_last_undo(db: Database, *, cache_restore: CacheRestore | None = None) -> dict[str, Any] | None:
     """Redo the most recently undone edit. Returns the entry dict, or None.
 
     Replays in chronological order (ASC) so sequential undos are redone
     correctly. Stale cache-linked actions are retired and reported without
     replaying another entry, just as in ``undo_last_edit``.
+
+    ``cache_restore``: see ``undo_last_edit``.
     """
     found = db.edit_history.next_redo()
     if not found:
@@ -180,7 +186,7 @@ def redo_last_undo(db: Database) -> dict[str, Any] | None:
         )
 
         try:
-            with restore_grouping_edit(db, entry, undo=False):
+            with restore_grouping_edit(db, entry, undo=False, cache_restore=cache_restore):
                 apply_grouping_photo_edit(db, entry, items, undo=False)
                 history.mark_redone(entry['id'])
         except GroupingHistoryStale:
@@ -197,7 +203,7 @@ def redo_last_undo(db: Database) -> dict[str, Any] | None:
         )
 
         try:
-            with restore_species_confirm_cache_edit(db, entry, undo=False):
+            with restore_species_confirm_cache_edit(db, entry, undo=False, cache_restore=cache_restore):
                 history.mark_redone(entry['id'])
         except GroupingHistoryStale:
             history.retire_stale_grouping_entry(entry['id'])

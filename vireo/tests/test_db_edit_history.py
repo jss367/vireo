@@ -481,7 +481,7 @@ def _grouping_hooks(monkeypatch, *, stale=False, calls=None):
     import services.grouping_history as gh
 
     @contextlib.contextmanager
-    def restore(db, entry, *, undo):
+    def restore(db, entry, *, undo, cache_restore=None):
         if calls is not None:
             calls.append(("restore", entry["id"], undo))
         if stale:
@@ -1461,6 +1461,15 @@ def test_edit_history_facade_signatures_are_unchanged():
         ("_commit", True), ("source", None), ("reason", None),
     ]
     assert params("_prune_edit_history") == [("self", empty)]
+
+
+def test_history_replay_services_accept_outer_cache_restoration():
+    for replay in (undo_last_edit, redo_last_undo):
+        params = list(inspect.signature(replay).parameters.values())
+        assert [(p.name, p.default) for p in params] == [
+            ("db", inspect.Parameter.empty), ("cache_restore", None),
+        ]
+        assert params[1].kind == inspect.Parameter.KEYWORD_ONLY
 
 
 def test_accessor_methods_keep_the_removed_wrappers_signatures():

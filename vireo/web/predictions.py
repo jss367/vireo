@@ -412,7 +412,6 @@ def create_predictions_blueprint(
             if current['revision'] != revision:
                 return json_error('Subject assessment changed; reload Review', 409)
             db.predictions.set_evidence_review(detection_id, decision)
-            db.commit()
             return jsonify({'ok': True, 'decision': decision, 'revision': revision + 1})
 
         return prediction_decisions.under_prediction_decision_lock(db, save, json_error=json_error)
@@ -604,18 +603,9 @@ def create_predictions_blueprint(
         it says.
         """
         db = get_db()
-        lock_err = prediction_decisions.begin_prediction_decision(
-            db, json_error=json_error,
-        )
-        if lock_err is not None:
-            return lock_err
-        try:
-            if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
-                db.rollback()
-                return json_error("Prediction does not belong to the active workspace", 404)
+        def _decide_mark_prediction_reviewed() -> ResponseReturnValue:
             pred = db.predictions.get_decision_row(pred_id)
             if pred is None:
-                db.rollback()
                 return json_error("prediction not found", 404)
             # Only pending predictions may transition to reviewed. Without
             # this guard a stale/double request or a direct API call against
@@ -623,7 +613,6 @@ def create_predictions_blueprint(
             # overwrite the prior decision, corrupting review state and
             # audit history.
             if pred["status"] != "pending":
-                db.rollback()
                 return json_error(
                     f'prediction already {pred["status"]}; cannot mark reviewed',
                     409,
@@ -638,11 +627,10 @@ def create_predictions_blueprint(
                 f'Marked prediction "{pred["species"]}" reviewed',
                 "reviewed", [item], _commit=False,
             )
-            db.commit()
             return jsonify({"ok": True})
-        except Exception:
-            db.rollback()
-            raise
+        return prediction_decisions.under_prediction_decision_lock(
+            db, _decide_mark_prediction_reviewed, json_error=json_error, prediction_ids=[pred_id],
+        )
 
     @blueprint.route("/api/predictions/<int:pred_id>/replace-keywords", methods=["POST"])
     def api_replace_species_keywords_with_prediction(pred_id: int) -> ResponseReturnValue:
@@ -656,21 +644,11 @@ def create_predictions_blueprint(
         lost even though undo cannot restore it.
         """
         db = get_db()
-        lock_err = prediction_decisions.begin_prediction_decision(
-            db, json_error=json_error,
-        )
-        if lock_err is not None:
-            return lock_err
-        try:
-            if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
-                db.rollback()
-                return json_error("Prediction does not belong to the active workspace", 404)
+        def _decide_replace_species_keywords_with_prediction() -> ResponseReturnValue:
             current_status = _prediction_status(db, pred_id)
             if current_status is None:
-                db.rollback()
                 return json_error("prediction not found", 404)
             if current_status in _DECIDED_PREDICTION_STATUSES:
-                db.rollback()
                 return json_error(
                     f"prediction already {current_status}; cannot accept",
                     409,
@@ -684,7 +662,6 @@ def create_predictions_blueprint(
                 species_taxonomy=_species_replacement_taxonomy(),
             )
             if result is None:
-                db.rollback()
                 return json_error("prediction not found", 404)
             items = [
                 {
@@ -706,7 +683,6 @@ def create_predictions_blueprint(
                 is_batch=is_batch,
                 _commit=False,
             )
-            db.commit()
             # Same reason as ``api_accept_prediction``: replace goes through
             # the same grouped expansion, so a looping caller needs the rows
             # this transaction decided rather than the one it asked about.
@@ -715,9 +691,9 @@ def create_predictions_blueprint(
                 "prediction_ids": result["accepted_prediction_ids"],
                 "photo_ids": result["photo_ids"],
             })
-        except Exception:
-            db.rollback()
-            raise
+        return prediction_decisions.under_prediction_decision_lock(
+            db, _decide_replace_species_keywords_with_prediction, json_error=json_error, prediction_ids=[pred_id],
+        )
 
     def _parse_batch_accept_body(
         db: Database, body: JsonDict,
@@ -840,27 +816,21 @@ def create_predictions_blueprint(
         # in-lock ``prediction_decisions.out_of_workspace_prediction_ids``
         # filter re-checks the workspace half so a folder detach that lands in
         # the window between parse and lock cannot tag a now-foreign photo.
-        lock_err = prediction_decisions.begin_prediction_decision(
-            db, json_error=json_error,
-        )
-        if lock_err is not None:
-            return lock_err
-        try:
-            if all_photo_ids is not None:
+        def _decide_batch_accept_predictions() -> ResponseReturnValue:
+            selection_ids = all_photo_ids
+            if selection_ids is not None:
                 # Recheck ownership inside the write transaction, including
                 # photos that have no prediction rows to validate below.
-                all_photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error)
+                selection_ids, err = parse_selection_photo_ids(db, body, json_error=json_error)
                 if err is not None:
-                    db.rollback()
                     return err
-                selected = set(all_photo_ids)
+                selected = set(selection_ids)
                 if any(row["photo_id"] not in selected for row in _load_prediction_rows(db, pred_ids)):
-                    db.rollback()
                     return json_error("prediction_ids must belong to the selected photos")
-            return _batch_accept_under_lock(db, pred_ids, expected_species, all_photo_ids)
-        except Exception:
-            db.rollback()
-            raise
+            return _batch_accept_under_lock(db, pred_ids, expected_species, selection_ids)
+        return prediction_decisions.under_prediction_decision_lock(
+            db, _decide_batch_accept_predictions, json_error=json_error,
+        )
 
     def _batch_accept_under_lock(
         db: Database, pred_ids: list[int], expected_species: str | None = None,
@@ -900,11 +870,10 @@ def create_predictions_blueprint(
                 "prediction_accept", desc, str(keyword_id), items,
                 is_batch=photo_count > 1, _commit=False,
             )
-        db.commit()
         if items:
             # ``record_edit`` skips its prune under ``_commit=False``; run it
             # once the decision is durable so history stays bounded.
-            db._prune_edit_history()
+            db.after_commit(db._prune_edit_history)
         return jsonify({
             "ok": True,
             "accepted": len({item["photo_id"] for item in items}),
@@ -1104,7 +1073,6 @@ def create_predictions_blueprint(
                 keyword_id, species = result["keyword_id"], result["species"]
                 species_key = result["species_key"]
             elif result["species_key"] != species_key:
-                db.rollback()
                 return [], None, None, json_error(
                     "prediction_ids must all resolve to one species", 400,
                 )
@@ -1600,16 +1568,11 @@ def create_predictions_blueprint(
         if err is not None:
             return err
 
-        lock_err = prediction_decisions.begin_prediction_decision(
-            db, json_error=json_error,
-        )
-        if lock_err is not None:
-            return lock_err
-        try:
+        def _decide_batch_reject_predictions() -> ResponseReturnValue:
             return _batch_reject_under_lock(db, pred_ids)
-        except Exception:
-            db.rollback()
-            raise
+        return prediction_decisions.under_prediction_decision_lock(
+            db, _decide_batch_reject_predictions, json_error=json_error,
+        )
 
     def _batch_reject_under_lock(db: Database, pred_ids: list[int]) -> Response:
         """The checks and writes of ``batch-reject``, inside its transaction."""
@@ -1670,9 +1633,8 @@ def create_predictions_blueprint(
                 "prediction_status", desc, "rejected", items,
                 is_batch=photo_count > 1, _commit=False,
             )
-        db.commit()
         if items:
-            db._prune_edit_history()
+            db.after_commit(db._prune_edit_history)
         return jsonify({
             "ok": True,
             "rejected": len(items),
@@ -1697,18 +1659,15 @@ def create_predictions_blueprint(
         if not isinstance(ids, list) or not ids or len(ids) > 10000 or any(
             type(pid) is not int or pid <= 0 for pid in ids
         ) or type(workspace) is not int:
-            db.rollback()
             return json_error('review_prediction_ids and observed_workspace_id are required', 400)
         try:
             rows = validate_review_card(db, pred_id, list(dict.fromkeys(ids)), workspace)
         except ReviewCardConflict as exc:
-            db.rollback()
             return json_error(str(exc), 409)
-        # Legacy setters still commit internally; a unit of work holds them under
-        # the decision's existing writer lock until every member and its
-        # history have succeeded; a partial failure rolls everything back.
-        with db.transaction():
-            result = accept_review_card(db, rows) if decision == 'accept' else reject_review_card(db, rows)
+        # The decision's unit of work holds the legacy setters' own commits
+        # until every member and its history have succeeded; a partial
+        # failure rolls everything back.
+        result = accept_review_card(db, rows) if decision == 'accept' else reject_review_card(db, rows)
         return jsonify(result)
 
     @blueprint.route("/api/predictions/<int:pred_id>/accept", methods=["POST"])
@@ -1728,27 +1687,19 @@ def create_predictions_blueprint(
         indivisible, exactly as the batch endpoints already do.
         """
         db = get_db()
-        lock_err = prediction_decisions.begin_prediction_decision(
-            db, json_error=json_error,
-        )
-        if lock_err is not None:
-            return lock_err
-        try:
+        def _decide_accept_prediction() -> ResponseReturnValue:
             body = request.get_json() if request.is_json else {}
             if not isinstance(body, dict):
-                db.rollback()
                 return json_error('JSON body must be an object', 400)
             if 'review_prediction_ids' in body:
                 return _review_card_decision(db, pred_id, 'accept', body)
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
-                db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             current_status = _prediction_status(db, pred_id)
             # Missing row falls through to ``accept_prediction`` returning None
             # — the endpoint's historical contract for unknown ids is a 200
             # no-op, not a 404.
             if current_status in _DECIDED_PREDICTION_STATUSES:
-                db.rollback()
                 return json_error(
                     f"prediction already {current_status}; cannot accept",
                     409,
@@ -1785,7 +1736,6 @@ def create_predictions_blueprint(
                     'prediction_accept', desc, str(result['keyword_id']),
                     items, is_batch=is_batch, _commit=False,
                 )
-            db.commit()
             # Name every row this call decided, not just the one in the URL.
             # A grouped accept expands through the burst, so a caller looping
             # over a selection can have its next row already decided *by this
@@ -1802,9 +1752,9 @@ def create_predictions_blueprint(
                 ),
                 "photo_ids": result["photo_ids"] if result else [],
             })
-        except Exception:
-            db.rollback()
-            raise
+        return prediction_decisions.under_prediction_decision_lock(
+            db, _decide_accept_prediction, json_error=json_error,
+        )
 
     def _subject_accept_items(affected: list[JsonDict]) -> list[HistoryItem]:
         """Keep each alias's real tag mutation and all agreeing model scopes."""
@@ -1834,25 +1784,17 @@ def create_predictions_blueprint(
         rather than overwrite that decision.
         """
         db = get_db()
-        lock_err = prediction_decisions.begin_prediction_decision(
-            db, json_error=json_error,
-        )
-        if lock_err is not None:
-            return lock_err
-        try:
+        def _decide_accept_subject_species() -> ResponseReturnValue:
             current_status = _prediction_status(db, pred_id)
             if current_status is None:
-                db.rollback()
                 return json_error("prediction not found", 404)
             if current_status in _DECIDED_PREDICTION_STATUSES:
-                db.rollback()
                 return json_error(
                     f"prediction already {current_status}; cannot accept",
                     409,
                 )
             result = db.accept_subject_species(pred_id, _commit=False)
             if result is None:
-                db.rollback()
                 return json_error("prediction not found", 404)
             if result["affected"]:
                 # One history item per actual keyword, with status-only
@@ -1864,16 +1806,15 @@ def create_predictions_blueprint(
                     _subject_accept_items(result["affected"]),
                     _commit=False,
                 )
-            db.commit()
             return jsonify({
                 "ok": True,
                 "species": result["species"],
                 "prediction_ids": result["prediction_ids"],
                 "photo_ids": [result["photo_id"]],
             })
-        except Exception:
-            db.rollback()
-            raise
+        return prediction_decisions.under_prediction_decision_lock(
+            db, _decide_accept_subject_species, json_error=json_error,
+        )
 
     @blueprint.route("/api/predictions/<int:pred_id>/reject", methods=["POST"])
     def api_reject_prediction(pred_id: int) -> ResponseReturnValue:
@@ -1892,20 +1833,13 @@ def create_predictions_blueprint(
         precondition as their batch siblings.
         """
         db = get_db()
-        lock_err = prediction_decisions.begin_prediction_decision(
-            db, json_error=json_error,
-        )
-        if lock_err is not None:
-            return lock_err
-        try:
+        def _decide_reject_prediction() -> ResponseReturnValue:
             body = request.get_json() if request.is_json else {}
             if not isinstance(body, dict):
-                db.rollback()
                 return json_error('JSON body must be an object', 400)
             if 'review_prediction_ids' in body:
                 return _review_card_decision(db, pred_id, 'reject', body)
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
-                db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             # Review state lives in prediction_review now; predictions.model
             # is renamed to classifier_model. Sibling-alternative rejection
@@ -1917,10 +1851,8 @@ def create_predictions_blueprint(
             # no-op. Gate the write on existence so stale IDs stay a clean
             # 404.
             if pred is None:
-                db.rollback()
                 return json_error("prediction not found", 404)
             if pred["status"] in _DECIDED_PREDICTION_STATUSES:
-                db.rollback()
                 return json_error(
                     f'prediction already {pred["status"]}; cannot reject',
                     409,
@@ -1957,11 +1889,10 @@ def create_predictions_blueprint(
                 is_batch=len(target_photos) > 1,
                 _commit=False,
             )
-            db.commit()
             return jsonify({"ok": True, "rejected_prediction_ids": rejected_ids})
-        except Exception:
-            db.rollback()
-            raise
+        return prediction_decisions.under_prediction_decision_lock(
+            db, _decide_reject_prediction, json_error=json_error,
+        )
 
     def _reject_prediction_row(db: Database, pred_id: int) -> HistoryItem | None:
         """Reject one prediction and its ``alternative`` siblings, in-transaction."""
@@ -2255,10 +2186,9 @@ def create_predictions_blueprint(
         # the baseline.
         for pred_id in removed:
             db.ungroup_prediction(pred_id, _commit=False)
-        db.commit()
         # ``record_edit`` skips its prune under ``_commit=False``; run it once
         # the decision is durable so history stays bounded.
-        db._prune_edit_history()
+        db.after_commit(db._prune_edit_history)
         # Reported even when zero so the client can tell "nothing was stale"
         # from an older server that never checked.
         return jsonify({"ok": True, "already_decided": len(stale_photos)})
