@@ -9,9 +9,13 @@ position and select-all queries built on it, the stacked Browse projection
 
 The method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` → ``self.workspace_id`` and ``NAME`` → ``self.NAME`` for the
-``db`` module helpers and constants listed in ``__init__``; the SQL text,
-parameter order and commit placement are unchanged. Browse and the
-``/api/v1/collections`` API depend on that query text.
+``db`` module helpers and constants listed in ``__init__``; the SQL text and
+parameter order are unchanged. Browse and the ``/api/v1/collections`` API
+depend on that query text. Writes do not commit: ``add``, ``add_import``,
+``update``, ``delete``, ``rename``, ``duplicate``, ``create_defaults`` and
+``prune_collection_ids_of_missing_photos`` only stage their changes, and
+each caller owns a ``db.transaction()`` around the call. Reads are
+unaffected.
 
 Callers reach this repository through the ``db.collections`` accessor
 (``db.collections.get_photos(...)``), which builds a fresh one per access.
