@@ -331,10 +331,12 @@ def _root_excluded_before_walk(root_path, mount_root):
 
 def _count_root_new_images(tally, root, known, reachability, staged_sources,
                            source_resolutions, reachability_generation,
-                           sample_limit, progress_callback, progress_every,
+                           sample_limit, progress,
                            stall_timeout, listing_cache):
     """Walk one mapped root and add what it holds to ``tally``."""
     root_path = root["path"]
+    if progress.checkpoint is not None:
+        progress.checkpoint()
     # prune_scan_dirs filters only children; if the root is, or sits
     # inside, an excluded bundle (e.g. user added
     # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
@@ -386,10 +388,7 @@ def _count_root_new_images(tally, root, known, reachability, staged_sources,
     outcome = _walk_root_bounded(
         _RootWalk(root_path, mount_root, reachability, reachability_generation),
         known, tally.seen_new_paths,
-        _WalkProgress(
-            progress_callback, progress_every,
-            tally.files_checked, tally.total, tally.last_emitted,
-        ),
+        progress,
         stall_timeout,
         listing_pass=listing_pass,
         excluded_dirs=excluded_dirs,
@@ -424,7 +423,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 
                                    progress_every=250,
                                    reachability=None,
                                    stall_timeout=None,
-                                   listing_cache=None):
+                                   listing_cache=None,
+                                   checkpoint=None):
     """Return {'new_count': int, 'per_root': [...], 'sample': [abs_path, ...],
     'unreachable_roots': [abs_path, ...], 'folders_read': int,
     'folders_unchanged': int}.
@@ -470,6 +470,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 
     until the copy is synced or discarded. They are listed in
     ``local_copy_excluded`` so the banner can say what was left out.
     """
+    if checkpoint is not None:
+        checkpoint()
     if reachability is None:
         reachability = volume_reachability.get_shared()
     if stall_timeout is None:
@@ -490,7 +492,9 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 
         _count_root_new_images(
             tally, root, known, reachability, staged_sources,
             source_resolutions, reachability_generation, sample_limit,
-            progress_callback, progress_every, stall_timeout, listing_cache,
+            _WalkProgress(progress_callback, progress_every, tally.files_checked,
+                          tally.total, tally.last_emitted, checkpoint),
+            stall_timeout, listing_cache,
         )
 
     if progress_callback is not None:
@@ -642,6 +646,8 @@ class _WalkProgress:
     """New images found in earlier roots."""
     last_emitted: int
     """``files_checked`` at the last report."""
+    checkpoint: Callable[[], object] | None = None
+    """Yield background I/O without reporting the intentional wait as a stall."""
 
 
 def _reserve_root_walk(walk):
@@ -726,6 +732,13 @@ def _root_walk_worker(state, walk, known, local_seen, progress, listing_pass,
     def _beat():
         if state["abandoned"]:
             raise _WalkAbandoned()
+        if progress.checkpoint is not None:
+            state["waiting"] = True
+            try:
+                progress.checkpoint()
+            finally:
+                state["last"] = time.monotonic()
+                state["waiting"] = False
         state["last"] = time.monotonic()
 
     def _on_walk_error(exc):
@@ -813,7 +826,7 @@ def _walk_root_bounded(walk, known, seen_new_paths, progress, stall_timeout, *,
     state = {
         "checked": 0, "paths": [], "last": time.monotonic(),
         "emitted": progress.last_emitted, "abandoned": False, "offline": None,
-        "excluded": [],
+        "excluded": [], "waiting": False,
     }
     local_seen = set(seen_new_paths)
     worker = _root_walk_worker(
@@ -836,7 +849,7 @@ def _walk_root_bounded(walk, known, seen_new_paths, progress, stall_timeout, *,
         thread.join(_WALK_POLL_SECONDS)
         if not thread.is_alive():
             break
-        if time.monotonic() - state["last"] > stall_timeout:
+        if not state["waiting"] and time.monotonic() - state["last"] > stall_timeout:
             state["abandoned"] = True
             with _STALLED_WALKS_LOCK:
                 if _STALLED_WALKS.get(root_path) is thread:

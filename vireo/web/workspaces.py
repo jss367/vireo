@@ -302,7 +302,8 @@ def _inventory_stale(
     return stale
 
 
-def _new_images_walk_compute(db_path: str, ws_id: int, walk_result: JsonDict, walk_error: JsonDict) -> Callable[..., JsonDict]:
+def _new_images_walk_compute(db_path: str, ws_id: int, walk_result: JsonDict, walk_error: JsonDict,
+                            checkpoint: Callable[[], None]) -> Callable[..., JsonDict]:
     """The cache worker's compute: one full new-images walk of ``ws_id``.
 
     Records the result, or the exception, in the holders the recorded job
@@ -325,6 +326,7 @@ def _new_images_walk_compute(db_path: str, ws_id: int, walk_result: JsonDict, wa
                 wdb, ws_id, sample_limit=None,
                 progress_callback=progress_callback,
                 listing_cache=dir_listing_cache.get_shared(),
+                checkpoint=checkpoint,
             )
             walk_result["result"] = result
             return result
@@ -1250,7 +1252,10 @@ def create_workspace_blueprint(
         walk_result = {"result": None}
         spawn_state = {"spawned": False}
 
-        compute = _new_images_walk_compute(db_path, ws_id, walk_result, walk_error)
+        walk_job: dict[str, str] = {}
+        def checkpoint() -> None:
+            get_runner().wait_for_background_io(walk_job.get("id"))
+        compute = _new_images_walk_compute(db_path, ws_id, walk_result, walk_error, checkpoint)
 
         # Surface the walk as a recorded job so the user can see it in the
         # bottom panel rather than wondering why their workspace is silent.
@@ -1293,6 +1298,7 @@ def create_workspace_blueprint(
                     "yet in Vireo"
                 ),
             )
+            walk_job["id"] = job_id
 
             return _new_images_walk_progress_callback(runner, job_id, progress_state)
 
@@ -1315,14 +1321,7 @@ def create_workspace_blueprint(
         file list.  Return a deferred pending response instead; the existing
         client poll starts the walk after the move reaches a terminal state.
         """
-        for job in get_runner().list_jobs():
-            if job.get("status") not in (
-                "queued", "running", "pausing", "paused",
-            ):
-                continue
-            if job.get("type") in ("move-folder", "move-photos"):
-                return True
-        return False
+        return get_runner().storage_transfer_active()
 
     def _new_images_deferred_reason(*, manual: bool = False) -> str | None:
         if _new_images_walk_blocked_by_move():

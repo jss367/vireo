@@ -21,6 +21,7 @@ from config import config_value
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
+    from typing import BinaryIO
 
     from db import Database
     from services.service_types import JsonDict
@@ -84,8 +85,22 @@ class SourceVerifier:
         return self._verify(path)
 
 
-def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], object] = lambda: None) -> SourceVerifier:
+def _source_hash(handle: BinaryIO, checkpoint: Callable[[], object]) -> str:
+    digest = hashlib.sha256()
+    while True:
+        checkpoint()
+        block = handle.read(1024 * 1024)
+        if not block:
+            return digest.hexdigest()
+        digest.update(block)
+
+
+def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], object] = lambda: None,
+                    *, read_checkpoint: Callable[[], object] | None = None) -> SourceVerifier:
     """Fail closed unless independent catalog sources can be read in full."""
+    # Full reads can yield to transfers. The final guarded recheck only polls
+    # cancellation, so it never parks while holding a renderer's reader guard.
+    read_checkpoint = checkpoint if read_checkpoint is None else read_checkpoint
     generated = media_root(config["THUMB_CACHE_DIR"])
     excluded = [*roots(config).values(), *[os.path.join(generated, name) for name in (
         "offline", "working", "previews", "staging", "local-folders", "local-workspaces",
@@ -128,6 +143,7 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
         checked = []
         try:
             for name, expected_size, expected_mtime, expected_hash in identities:
+                read_checkpoint()
                 original = os.path.join(source["folder_path"], name)
                 resolved = os.path.normcase(os.path.realpath(original))
                 if any(_within(resolved, root) for root in excluded):
@@ -140,14 +156,11 @@ def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], obje
                         return reject("catalog-metadata-mismatch", expected_size=expected_size,
                                       actual_size=before.st_size, expected_mtime=expected_mtime,
                                       actual_mtime=before.st_mtime)
-                    digest = hashlib.sha256()
-                    while block := handle.read(1024 * 1024):
-                        checkpoint()
-                        digest.update(block)
+                    digest = _source_hash(handle, read_checkpoint)
                     after = os.fstat(handle.fileno())
                     if _identity(before) != _identity(after):
                         return reject("source-changed-during-read", before=_identity(before), after=_identity(after))
-                    if digest.hexdigest() != expected_hash:
+                    if digest != expected_hash:
                         return reject("source-hash-mismatch")
                 after = path_identity(original)
                 if _identity(before) != after:

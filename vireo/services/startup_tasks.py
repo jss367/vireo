@@ -132,22 +132,27 @@ class StartupTasks:
         def checkpoint() -> None:
             if runner.is_cancelled(job["id"]):
                 raise RuntimeError("Storage maintenance cancelled")
+        def io_checkpoint() -> None:
+            checkpoint()
+            runner.wait_for_background_io(job["id"])
         def progress(current: int, total: int, path: str) -> None:
             runner.push_event(job["id"], "progress", {
                 "current": current, "total": total,
                 "current_file": os.path.basename(path), "phase": "Storage maintenance",
             })
 
+        io_checkpoint()
         settings = {**cfg.load(), "THUMB_CACHE_DIR": self._app.config["THUMB_CACHE_DIR"],
                     "COMPUTATION_CACHE_DIR": self._app.config["COMPUTATION_CACHE_DIR"]}
         with Database(self._db_path) as db:
             result = cleanup(settings, db.storage.source_folder_paths(),
-                             source_is_readable=source_verifier(db, settings, checkpoint),
-                             checkpoint=checkpoint, progress=progress)
+                             source_is_readable=source_verifier(
+                                 db, settings, checkpoint, read_checkpoint=io_checkpoint),
+                             checkpoint=io_checkpoint, progress=progress)
             workspaces = db.workspaces.list_all()
             retired_total: dict[str, int] = {}
             for workspace in workspaces:
-                checkpoint()
+                io_checkpoint()
                 db.set_active_workspace(workspace["id"])
                 retired = db._prune_edit_history()
                 for key, count in retired.items():
@@ -156,7 +161,7 @@ class StartupTasks:
             result_workspace_ids = {ws_id for _path, _kind, ws_id in result_files(os.path.dirname(self._db_path))}
             orphans_removed: list[str] = []
             for ws_id in result_workspace_ids:
-                checkpoint()
+                io_checkpoint()
                 # A workspace may have been created while the preceding
                 # maintenance passes were running. Check current ownership
                 # rather than deleting from the earlier workspace snapshot.

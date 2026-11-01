@@ -1739,6 +1739,47 @@ def test_count_abandons_stalled_walk_and_reports_root_offline(db_with_workspace,
     new_images_module._STALLED_WALKS[str(wedged)].join(2)
 
 
+def test_transfer_wait_is_not_mistaken_for_an_offline_root(tmp_path, monkeypatch):
+    import threading
+
+    import new_images as module
+
+    root = tmp_path / "photos"
+    _touch_image(str(root / "bird.jpg"))
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    results = []
+    gate = _FakeReachability()
+    monkeypatch.setattr(module, "_WALK_POLL_SECONDS", 0.01)
+
+    def checkpoint():
+        entered.set()
+        assert release.wait(synchronization_timeout(5))
+
+    def run():
+        try:
+            results.append(module._walk_root_bounded(
+                module._RootWalk(str(root), gate.mount_root, gate), set(), set(),
+                module._WalkProgress(None, 1, 0, 0, 0, checkpoint), 0.03,
+            ))
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        # An intentional parked interval longer than the watchdog window
+        # must neither abandon the root nor publish an offline verdict.
+        assert not finished.wait(0.15)
+        assert gate.marked_offline == []
+    finally:
+        release.set()
+        thread.join(synchronization_timeout(5))
+    assert not thread.is_alive()
+    assert results[0][0] == [str(root / "bird.jpg")]
+    assert gate.marked_offline == []
+
+
 def test_count_caps_stalled_walks_globally(db_with_workspace, monkeypatch):
     """Distinct wedged roots cannot accumulate workers past the global cap.
 

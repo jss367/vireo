@@ -623,6 +623,8 @@ class MissingOriginals:
         return out
 
     def heavy_job_active(self) -> bool:
+        if self._get_runner().storage_transfer_active():
+            return True
         for job in self._get_runner().list_jobs():
             if job.get("status") not in (
                 "running", "pausing", "paused", "queued",
@@ -902,6 +904,9 @@ class MissingOriginals:
         while True:
             health_db = None
             try:
+                if self._get_runner().storage_transfer_active():
+                    time.sleep(30)
+                    continue
                 health_db = Database(self.db_path)
                 changed = health_db.folders.check_health()
                 if changed:

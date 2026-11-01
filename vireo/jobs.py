@@ -633,6 +633,49 @@ class JobRunner:
         """
         return self._reservations.wait_for_workspace_transfer(job_id)
 
+    def storage_transfer_active(self):
+        """Whether a transfer currently needs priority over background I/O.
+
+        Include queued and paused transfers: their intermediate folder layout
+        must not be mistaken for newly discovered or missing originals.
+        """
+        with self._lock:
+            return any(
+                (job.get("exclusive_workspace") or job.get("type") in (
+                    "send-to-nas", "move-folder", "move-photos",
+                ))
+                and job.get("status") in ("queued", "running", "pausing", "paused")
+                for job in self._jobs.values()
+            )
+
+    def wait_for_background_io(self, job_id=None):
+        """Yield at a background worker's safe point until transfers finish.
+
+        Only independent discovery and global housekeeping may park here:
+        a transfer must never be waiting for the caller's workspace reservation.
+        No filesystem or cache locks should be held across this wait.
+        """
+        with self._pause_condition:
+            job = self._jobs.get(job_id)
+            previous_phase = None
+            waiting = False
+            try:
+                while self.storage_transfer_active():
+                    if self._workers.shutting_down or job_id in self._control.cancelled:
+                        raise RuntimeError("Background work cancelled")
+                    if job is not None and not waiting:
+                        previous_phase = job["progress"].get("phase", "")
+                        self.push_event(job_id, "progress", {
+                            "phase": "Waiting for photo transfer",
+                        })
+                        waiting = True
+                    self._pause_condition.wait(timeout=0.25)
+                if self._workers.shutting_down or job_id in self._control.cancelled:
+                    raise RuntimeError("Background work cancelled")
+            finally:
+                if waiting:
+                    self.push_event(job_id, "progress", {"phase": previous_phase})
+
     def _find_singleton_locked(self, job_type, singleton_key):
         """Find an active singleton job by (job_type, singleton_key).
 
