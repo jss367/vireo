@@ -38,12 +38,6 @@ def configure_repo(path=None):
     if not (repo / "vireo" / "encounters.py").is_file():
         raise ValueError("Run from a Vireo checkout or pass --repo /path/to/vireo")
     sys.path.insert(0, str(repo / "vireo"))
-    # The data layer reads settings through settings_source, which raises
-    # until config installs itself. Direct Database consumers in this tool
-    # chain (review_server, review_tags.sync_review_tags) do not import
-    # config themselves, so bootstrap the provider here, at the one entry
-    # point every CLI, benchmark and test fixture passes through.
-    import config  # noqa: F401
     return repo
 
 

@@ -14,10 +14,17 @@ from here and applies the workspace overrides itself
 The provider is looked up on every call, never cached, so a test that
 monkeypatches ``config.load`` or ``config.get``, or points
 ``config.CONFIG_PATH`` at a temporary file, reaches these reads unchanged.
+
+When nothing has installed a provider yet (a script or tool that opens a
+``Database`` without importing ``config``), the first read imports ``config``
+by name, which installs it. That keeps every entry point reading the user's
+settings as it did when the data layer imported ``config`` itself, while the
+data layer's modules no longer depend on it statically.
 """
 
 from __future__ import annotations
 
+import importlib
 from typing import Any, Protocol
 
 
@@ -46,11 +53,13 @@ def install(provider: SettingsProvider) -> None:
 
 def _installed() -> SettingsProvider:
     if _provider is None:
-        raise RuntimeError(
-            "No settings provider is installed. Importing config installs it; "
-            "a process that reads settings through the Database must import "
-            "config first."
-        )
+        # The default provider is the application's ``config`` module,
+        # resolved by name on first use (as Django resolves its settings
+        # module), so a script or tool that opens a Database without
+        # importing config still reads the user's settings exactly as before.
+        # Importing it installs it (see the end of config.py).
+        importlib.import_module("config")
+    assert _provider is not None
     return _provider
 
 
