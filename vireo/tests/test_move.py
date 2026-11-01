@@ -2176,6 +2176,7 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     renamed_path = tmp_path / "CARD.bak"
     reusable_path.rename(renamed_path)
     db.moves_merge.move_folder_path(original_fid, str(renamed_path), new_name="CARD.bak")
+    db.commit()
 
     # The provenance must have been rebased to the new path, not left
     # pointing at the freed one.

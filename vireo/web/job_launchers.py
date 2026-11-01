@@ -1027,7 +1027,8 @@ def create_job_launchers_blueprint(
                     )
 
             if rule_id:
-                thread_db.moves_merge.touch_rule(rule_id)
+                with thread_db.transaction():
+                    thread_db.moves_merge.touch_rule(rule_id)
 
             # Per-photo move failures fail the job (the runner folds them in).
             result["ok"] = not result.get("errors")

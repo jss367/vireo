@@ -107,6 +107,7 @@ def _pending(db, *photo_ids):
 
 def test_create_move_rule_commits_and_serializes_criteria(db):
     rid = db.moves_merge.create_rule("Keepers", "/dest", {"rating_min": 4, "flag": "flagged"})
+    db.commit()
     assert isinstance(rid, int)
     assert not db.conn.in_transaction
     with _other(db) as other:
@@ -120,6 +121,7 @@ def test_create_move_rule_commits_and_serializes_criteria(db):
 
 def test_get_move_rule_returns_row_or_none(db):
     rid = db.moves_merge.create_rule("A", "/a", {})
+    db.commit()
     row = db.moves_merge.get_rule(rid)
     assert isinstance(row, sqlite3.Row)
     assert row["id"] == rid and row["criteria"] == "{}"
@@ -130,6 +132,7 @@ def test_list_move_rules_orders_by_name(db):
     assert db.moves_merge.list_rules() == []
     b = db.moves_merge.create_rule("b", "/b", {})
     a = db.moves_merge.create_rule("a", "/a", {})
+    db.commit()
     rows = db.moves_merge.list_rules()
     assert [r["id"] for r in rows] == [a, b]
     assert all(isinstance(r, sqlite3.Row) for r in rows)
@@ -138,6 +141,7 @@ def test_list_move_rules_orders_by_name(db):
 def test_update_move_rule_sets_only_given_fields_and_commits(db):
     rid = db.moves_merge.create_rule("orig", "/orig", {"flag": "flagged"})
     db.moves_merge.update_rule(rid, name="renamed")
+    db.commit()
     assert not db.conn.in_transaction
     with _other(db) as other:
         row = other.execute("SELECT * FROM move_rules WHERE id = ?", (rid,)).fetchone()
@@ -145,17 +149,20 @@ def test_update_move_rule_sets_only_given_fields_and_commits(db):
         "renamed", "/orig", '{"flag": "flagged"}')
 
     db.moves_merge.update_rule(rid, destination="/new", criteria={"rating_min": 2})
+    db.commit()
     row = db.moves_merge.get_rule(rid)
     assert (row["name"], row["destination"], row["criteria"]) == (
         "renamed", "/new", '{"rating_min": 2}')
 
     # An explicit None is a value, not "not provided".
     db.moves_merge.update_rule(rid, criteria=None)
+    db.commit()
     assert db.moves_merge.get_rule(rid)["criteria"] == "null"
 
 
 def test_update_move_rule_without_fields_runs_no_sql(db):
     rid = db.moves_merge.create_rule("orig", "/orig", {})
+    db.commit()
     statements = _trace(db)
     try:
         assert db.moves_merge.update_rule(rid) is None
@@ -167,9 +174,11 @@ def test_update_move_rule_without_fields_runs_no_sql(db):
 
 def test_update_move_rule_statement_shape(db):
     rid = db.moves_merge.create_rule("orig", "/orig", {})
+    db.commit()
     statements = _trace(db)
     try:
         db.moves_merge.update_rule(rid, name="n", destination="/d", criteria={})
+        db.commit()
     finally:
         _stop_trace(db)
     assert [s.strip() for s in statements if s.strip() not in ("BEGIN", "COMMIT")] == [
@@ -182,18 +191,21 @@ def test_delete_move_rule_commits(db):
     rid = db.moves_merge.create_rule("gone", "/g", {})
     keep = db.moves_merge.create_rule("kept", "/k", {})
     db.moves_merge.delete_rule(rid)
+    db.commit()
     assert not db.conn.in_transaction
     with _other(db) as other:
         ids = [r["id"] for r in other.execute("SELECT id FROM move_rules")]
     assert ids == [keep]
     # Deleting a missing id is a quiet no-op.
     db.moves_merge.delete_rule(rid)
+    db.commit()
 
 
 def test_touch_move_rule_stamps_last_run_at_and_commits(db):
     rid = db.moves_merge.create_rule("r", "/r", {})
     other_id = db.moves_merge.create_rule("s", "/s", {})
     db.moves_merge.touch_rule(rid)
+    db.commit()
     assert not db.conn.in_transaction
     with _other(db) as other:
         rows = {r["id"]: r["last_run_at"] for r in other.execute(
@@ -221,6 +233,7 @@ def test_batch_update_photo_folder_moves_only_listed_photos_and_commits(db):
     b = _photo(db, src, "b.jpg")
     c = _photo(db, src, "c.jpg")
     db.moves_merge.batch_update_photo_folder((a, c), dst)
+    db.commit()
     assert not db.conn.in_transaction
     with _other(db) as other:
         folders = {r["id"]: r["folder_id"] for r in other.execute(
@@ -286,6 +299,7 @@ def test_move_folder_path_rebases_subtree_and_provenance_and_commits(db):
     db.conn.commit()
 
     db.moves_merge.move_folder_path(root, "/new/renamed", new_name="renamed")
+    db.commit()
 
     assert not db.conn.in_transaction
     with _other(db) as conn:
@@ -308,6 +322,7 @@ def test_move_folder_path_rebases_subtree_and_provenance_and_commits(db):
 def test_move_folder_path_keeps_name_without_new_name(db):
     root = _folder(db, "/a/b", root=True)
     db.moves_merge.move_folder_path(root, "/a/c")
+    db.commit()
     row = db.conn.execute(
         "SELECT path, name FROM folders WHERE id = ?", (root,)).fetchone()
     assert (row["path"], row["name"]) == ("/a/c", "b")
@@ -323,6 +338,7 @@ def test_move_folder_path_to_same_path_skips_provenance_rewrite(db):
     statements = _trace(db)
     try:
         db.moves_merge.move_folder_path(root, "/same", new_name="Same")
+        db.commit()
     finally:
         _stop_trace(db)
     assert not any("last_move_source_folder_path" in s for s in statements)
@@ -348,6 +364,7 @@ def test_move_folder_path_relinks_through_the_facade_after_paths_change(
 
     monkeypatch.setattr(FolderRepository, "relink_parents_by_path", recorder)
     db.moves_merge.move_folder_path(root, "/z/q")
+    db.commit()
     assert seen == [([root, child], {root: "/z/q", child: "/z/q/r"})]
 
 
@@ -357,6 +374,7 @@ def test_move_folder_path_rolls_back_nothing_but_commits_once(db):
     statements = _trace(db)
     try:
         db.moves_merge.move_folder_path(root, "/k")
+        db.commit()
     finally:
         _stop_trace(db)
     assert [s.strip() for s in statements].count("COMMIT") == 1
@@ -1838,12 +1856,12 @@ def test_move_provenance_reads_and_clear_without_commit(db):
     ) == [(p2,)]
 
 
-def test_photo_move_savepoint_commits_the_repoint(db):
+def test_photo_move_unit_commits_the_repoint(db):
     src = _folder(db, "/src", root=True)
     dest = _folder(db, "/dest", root=True)
     pid = _photo(db, src, "a.jpg")
     moves = db.moves_merge
-    with moves.photo_move_savepoint():
+    with db.transaction():
         moves.repoint_moved_photo(pid, dest, "/src")
     assert not db.in_transaction
     assert _committed(
@@ -1851,24 +1869,20 @@ def test_photo_move_savepoint_commits_the_repoint(db):
         "WHERE id = ?", (pid,)) == [(dest, "/src")]
 
 
-def test_photo_move_savepoint_rolls_back_to_itself_and_reraises(db):
+def test_photo_move_unit_rolls_back_the_repoint_and_reraises(db):
     src = _folder(db, "/src", root=True)
     dest = _folder(db, "/dest", root=True)
     pid = _photo(db, src, "a.jpg")
-    # Work already pending on the connection stays pending: only the
-    # savepoint's own writes are undone.
-    db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (pid,))
+    db.commit()
     moves = db.moves_merge
-    with pytest.raises(KeyboardInterrupt):
-        with moves.photo_move_savepoint():
-            moves.repoint_moved_photo(pid, dest, "/src")
-            raise KeyboardInterrupt
-    assert db.in_transaction
+    with pytest.raises(KeyboardInterrupt), db.transaction():
+        moves.repoint_moved_photo(pid, dest, "/src")
+        raise KeyboardInterrupt
+    assert not db.in_transaction
     row = db.conn.execute(
-        "SELECT folder_id, last_move_source_folder_path, rating FROM photos "
+        "SELECT folder_id, last_move_source_folder_path FROM photos "
         "WHERE id = ?", (pid,)).fetchone()
-    assert tuple(row) == (src, None, 4)
-    db.rollback()
+    assert tuple(row) == (src, None)
 
 
 def test_restamp_mtimes_moves_only_pinned_markers_without_commit(db):
@@ -2078,6 +2092,7 @@ def test_relink_reaches_a_patched_folder_repository(db, monkeypatch):
     monkeypatch.setattr(FolderRepository, "relink_parents_by_path",
                         lambda self, ids: seen.append(list(ids)))
     db.moves_merge.move_folder_path(root, "/z/q")
+    db.commit()
     assert seen == [[root]]
 
 

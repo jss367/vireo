@@ -11191,6 +11191,7 @@ def test_missing_folder_hidden_from_collection(tmp_path):
 def test_create_move_rule(db):
     """Creating a move rule stores name, destination, and criteria."""
     rule_id = db.moves_merge.create_rule("Archive hawks", "/nas/archive", {"rating_min": 3, "species": ["Red-tailed Hawk"]})
+    db.commit()
     assert rule_id is not None
     rule = db.moves_merge.get_rule(rule_id)
     assert rule["name"] == "Archive hawks"
@@ -11203,6 +11204,7 @@ def test_list_move_rules(db):
     """Listing rules returns all saved rules."""
     db.moves_merge.create_rule("Rule A", "/dest/a", {})
     db.moves_merge.create_rule("Rule B", "/dest/b", {"flag": "flagged"})
+    db.commit()
     rules = db.moves_merge.list_rules()
     assert len(rules) == 2
     names = {r["name"] for r in rules}
@@ -11213,6 +11215,7 @@ def test_update_move_rule(db):
     """Updating a rule changes its fields."""
     rid = db.moves_merge.create_rule("Old name", "/old", {})
     db.moves_merge.update_rule(rid, name="New name", destination="/new", criteria={"rating_min": 5})
+    db.commit()
     rule = db.moves_merge.get_rule(rid)
     assert rule["name"] == "New name"
     assert rule["destination"] == "/new"
@@ -11222,6 +11225,7 @@ def test_delete_move_rule(db):
     """Deleting a rule removes it."""
     rid = db.moves_merge.create_rule("Temp", "/tmp", {})
     db.moves_merge.delete_rule(rid)
+    db.commit()
     assert db.moves_merge.get_rule(rid) is None
 
 
@@ -11232,6 +11236,7 @@ def test_batch_update_photo_folder(db):
     p1 = photo_ingest.add_photo(db, folder_id=fid1, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid1, filename="b.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
     db.moves_merge.batch_update_photo_folder([p1, p2], fid2)
+    db.commit()
     photo1 = db.photos.get(p1)
     photo2 = db.photos.get(p2)
     assert photo1["folder_id"] == fid2
@@ -11244,6 +11249,7 @@ def test_move_folder_path_cascade(db):
     cid = workspace_folders.add_folder(db, "/local/2024/march", name="march", parent_id=fid)
     gcid = workspace_folders.add_folder(db, "/local/2024/march/birds", name="birds", parent_id=cid)
     db.moves_merge.move_folder_path(fid, "/nas/photos/2024")
+    db.commit()
     parent = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
     child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (cid,)).fetchone()
     grandchild = db.conn.execute("SELECT path FROM folders WHERE id = ?", (gcid,)).fetchone()
@@ -11265,6 +11271,7 @@ def test_move_folder_path_relinks_parent(db, destination):
 
     new_path = destination + "/2026-07-12"
     db.moves_merge.move_folder_path(date, new_path)
+    db.commit()
 
     expected_parent = {"/photos/2026": year, "/archive": archive}.get(destination)
     tree = {row["id"]: row for row in db.folders.tree()}
@@ -11447,6 +11454,7 @@ def test_move_folder_path_does_not_touch_wildcard_siblings(db):
     sib_child = workspace_folders.add_folder(db, "/pics/myXdir/sub", name="sub", parent_id=sib)
 
     db.moves_merge.move_folder_path(fid, "/dest/dir")
+    db.commit()
 
     moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
     sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
@@ -11464,6 +11472,7 @@ def test_move_folder_path_is_case_sensitive(db):
     sib_child = workspace_folders.add_folder(db, "/photos/2024/sibling", name="sibling", parent_id=sib)
 
     db.moves_merge.move_folder_path(fid, "/Archive/2024")
+    db.commit()
 
     moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
     moved_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (child,)).fetchone()
