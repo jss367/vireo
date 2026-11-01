@@ -74,7 +74,7 @@ class StepTree:
                 job.setdefault("steps", []).append(step)
 
     def update_step(self, job_id, step_id, **kwargs):
-        """Update a step's fields (status, progress, summary, error).
+        """Update a step's fields (label, status, progress, summary, error).
 
         Automatically sets started_at/finished_at/duration timestamps.
         """
@@ -96,7 +96,7 @@ class StepTree:
                         end = datetime.fromisoformat(step["finished_at"])
                         step["duration"] = round((end - start).total_seconds(), 1)
                     for key in (
-                        "status", "summary", "error", "error_count",
+                        "label", "status", "summary", "error", "error_count",
                         "progress", "current_file", "source_index",
                         "label_source",
                     ):

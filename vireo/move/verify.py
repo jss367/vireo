@@ -34,7 +34,7 @@ REMOTE_VERIFY_TIMEOUT = 7200  # 2 hours
 
 
 def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
-                            *, is_merge=False, control=None):
+                            *, is_merge=False, control=None, files_from=None):
     """Independent verification that the remote copy is complete and correct.
 
     The local move's safety check walks the destination filesystem before
@@ -57,13 +57,18 @@ def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
     ``.DS_Store`` that the merge deliberately did not copy is never reported
     as a verification failure. A fresh move carries these along and asks
     for a full compare.
+
+    ``files_from`` selects a NUL-delimited batch of source-relative paths.
+    Mounted verification checks structure separately and compares contents
+    only: SMB and SSH can expose different ownership/permissions/timestamps.
     """
     exclude_ctx = (_rsync_finder_metadata_exclude_file(src_path)
                    if is_merge else contextlib.nullcontext([]))
     with exclude_ctx as metadata_excludes:
-        cmd = [rsync_bin, "-an", "--checksum", "--out-format=%n",
+        cmd = [rsync_bin, "-rln" if files_from else "-an", "--checksum", "--out-format=%n",
                "-e", _ssh_rsh_string(remote),
                *metadata_excludes,
+               *(["--protect-args", "--from0", "--files-from=" + files_from] if files_from else []),
                src_path + "/", rsync_target + "/"]
         try:
             if control:

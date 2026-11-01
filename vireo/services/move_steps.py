@@ -26,6 +26,9 @@ FOLDER_MOVE_PHASES = {
     "Copying files": "copy",
     "Checking timestamps": "timestamps",
     "Verifying copy": "verify",
+    "Checking NAS verification": "verify",
+    "Verifying copy on NAS": "verify",
+    "Verifying copy locally (NAS verification unavailable)": "verify",
     "Updating catalog": "catalog",
     "Removing originals": "cleanup",
 }
@@ -104,6 +107,7 @@ class MoveSteps:
                 self._job_id, step_id,
                 progress={"current": current, "total": total},
                 current_file=filename,
+                **({"label": phase} if step_id == "verify" and phase != "Verifying copy" else {}),
             )
             now = time.monotonic()
             due = (changed or now - self._last_event >= _EVENT_INTERVAL

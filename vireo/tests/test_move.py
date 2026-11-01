@@ -7679,3 +7679,76 @@ def test_photo_move_checks_directory_identity_once_per_folder(move_env, monkeypa
     result = move.move_photos(env["db"], [env["p1"], env["p2"]], str(env["dst"]))
     assert result["moved"] == 2
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('mode', ['nas', 'fallback', 'corrupt', 'fallback_corrupt'])
+def test_mounted_checksum_move_deletes_originals_only_after_verification(move_env, monkeypatch, mode):
+    """Exercise the entire copy -> verify -> catalog -> delete boundary."""
+    import move.folder_transfer as ft
+    import move.mounted_verify as mv
+    from move import move_folder
+
+    binary = mv.resolve_rsync_bin()
+    if binary is None:
+        pytest.skip('GNU rsync is not installed')
+    env = move_env
+    remote = {'host': 'nas', 'user': 'user', 'verify_path': '/Photos/src',
+              'rsync_bin': binary, 'ssh_bin': 'ssh'}
+    monkeypatch.setattr(ft, 'mounted_verification_target', lambda *a: remote)
+    monkeypatch.setattr(mv, '_probe_matches', lambda *a: not mode.startswith('fallback'))
+    monkeypatch.setattr(mv, 'rsync_dest_spec', lambda *a: str(env['dst'] / 'src'))
+    original_copy = ft._FolderTransfer.copy_tree
+
+    def copy_then_corrupt(transfer):
+        result = original_copy(transfer)
+        if 'corrupt' in mode:
+            landed = env['dst'] / 'src' / 'bird1.jpg'
+            landed.write_bytes(b'x' * landed.stat().st_size)
+        return result
+
+    monkeypatch.setattr(ft._FolderTransfer, 'copy_tree', copy_then_corrupt)
+    result = move_folder(env['db'], env['fid_src'], str(env['dst']), verify_contents=True)
+    if 'corrupt' in mode:
+        assert result['errors'] and result['moved'] == 0
+        assert (env['src'] / 'bird1.jpg').exists()
+        assert env['db'].folders.get(env['fid_src'])['path'] == str(env['src'])
+    else:
+        assert not result['errors'] and result['moved'] == 2
+        assert not env['src'].exists()
+        assert env['db'].folders.get(env['fid_src'])['path'] == str(env['dst'] / 'src')
+
+
+def test_creation_time_platform_preserves_originals_and_catalog_on_corruption(move_env, monkeypatch):
+    """Windows-style timestamp semantics must select full byte verification."""
+    import move.folder_transfer as ft
+    import move.mounted_verify as mv
+    from move import move_folder
+
+    env = move_env
+    monkeypatch.setattr(mv, '_supports_destination_change_tracking', lambda: False)
+    monkeypatch.setattr(mv, '_probe_matches', lambda *a: pytest.fail('must not use SSH'))
+    monkeypatch.setattr(env['db'], 'effective_config', lambda: {'remote_targets': [{
+        'host': 'nas', 'user': 'user', 'remote_path': '/Photos',
+        'mount_path': str(env['dst']),
+    }]})
+
+    def no_rsync(*a, **k):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(ft, '_run_rsync_streamed', no_rsync)
+    original_copy = ft._FolderTransfer.copy_tree
+
+    def copy_then_corrupt(transfer):
+        result = original_copy(transfer)
+        landed = env['dst'] / 'src' / 'bird1.jpg'
+        before = landed.stat()
+        landed.write_bytes(b'x' * before.st_size)
+        os.utime(landed, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return result
+
+    monkeypatch.setattr(ft._FolderTransfer, 'copy_tree', copy_then_corrupt)
+    result = move_folder(env['db'], env['fid_src'], str(env['dst']), verify_contents=True)
+    assert result['moved'] == 0 and result['errors']
+    assert (env['src'] / 'bird1.jpg').read_bytes() != (env['dst'] / 'src' / 'bird1.jpg').read_bytes()
+    assert env['db'].folders.get(env['fid_src'])['path'] == str(env['src'])
+    assert env['db'].photos.get(env['p1'])['folder_id'] == env['fid_src']

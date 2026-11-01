@@ -10,6 +10,7 @@ import sys
 from job_runner.work_control import JobCancelled
 
 from .folder_catalog import _plan_moved_file_mtimes
+from .mounted_verify import mounted_verification_target, verify_mounted_copy
 from .remote import _remote_mkdir_p, _ssh_rsh_string, resolve_rsync_bin
 from .transfer import (
     RSYNC_STALL_TIMEOUT,
@@ -373,14 +374,11 @@ class _FolderTransfer:
             # files (and leftover temp files from an interrupted run), so a
             # count comparison is meaningless. Instead require that every
             # source file is present at the destination with a matching size.
-            missing = _first_missing_source_file(
-                src_path, transfer_dest,
-                verify_contents=self.verify_contents, is_merge=dest_exists,
-                progress=report)
+            missing = self._verify_local_copy(report)
             if missing is not None:
                 return {"moved": 0, "errors": [
-                    f"Verification failed: '{missing}' missing, size mismatch, "
-                    f"or symlinked at destination. Originals preserved."
+                    f"Verification failed ({missing}). The source and destination "
+                    f"could not be confirmed to match. Originals preserved."
                 ]}
         else:
             verify_error = _fresh_copy_mismatch(src_path, transfer_dest,
@@ -392,3 +390,29 @@ class _FolderTransfer:
                     f"Verification failed: {verify_error}. Originals preserved."
                 ]}
         return None
+
+    def _verify_local_copy(self, report):
+        """Use a proven SSH route for mounted byte checks when available."""
+        remote = None
+        if self.verify_contents:
+            remote = mounted_verification_target(
+                self.target.transfer_dest, self.db.effective_config())
+        if remote:
+            handled, mismatch = verify_mounted_copy(
+                self.src_path, self.target.transfer_dest, remote,
+                is_merge=self.target.dest_exists, progress=self.progress,
+                control=self.control,
+            )
+            if handled:
+                return mismatch
+
+            total = sum(len(files) for _, _, files in os.walk(self.src_path))
+
+            def report(checked, name):
+                self.progress(checked, max(total, checked), name,
+                              "Verifying copy locally (NAS verification unavailable)")
+
+        return _first_missing_source_file(
+            self.src_path, self.target.transfer_dest,
+            verify_contents=self.verify_contents, is_merge=self.target.dest_exists,
+            progress=report)

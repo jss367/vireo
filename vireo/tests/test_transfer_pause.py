@@ -657,3 +657,68 @@ def test_merge_fallback_still_discards_regular_finder_metadata(tmp_path):
     )
     assert (destination / "photo.jpg").read_bytes() == b"photo bytes"
     assert not (destination / ".DS_Store").exists()
+
+
+@pytest.mark.parametrize('action', ['resume', 'resume_unchanged', 'cancel'])
+@pytest.mark.skipif(os.name != 'posix', reason='NAS-side verification requires POSIX change timestamps')
+def test_pause_after_nas_checksum_batch_reverifies_before_delete(transfer_env, monkeypatch, action):
+    import move.folder_transfer as transfer
+    import move.mounted_verify as mv
+
+    runner, db_path, _, folder_id, source, destination = transfer_env
+    checked, release = threading.Event(), threading.Event()
+    remote = {'host': 'nas', 'user': 'user', 'verify_path': '/Photos/originals',
+              'rsync_bin': 'rsync', 'ssh_bin': 'ssh'}
+    monkeypatch.setattr(transfer, 'mounted_verification_target', lambda *a: remote)
+    monkeypatch.setattr(mv, '_probe_matches', lambda *a: True)
+    monkeypatch.setattr(mv, 'VERIFY_BATCH_SIZE', 1)
+    original_batches = mv._verify_batches
+    verified_names = []
+
+    def checksum(binary, src, target, route, **kwargs):
+        with open(kwargs['files_from'], 'rb') as stream:
+            name = os.fsdecode(stream.read().rstrip(b'\0'))
+        verified_names.append(name)
+        if (source / name).read_bytes() != (destination / source.name / name).read_bytes():
+            return name, None
+        return None
+
+    def batches(src, route, files, progress, control):
+        def report(current, total, name, phase):
+            if current == 1 and not checked.is_set():
+                checked.set()
+                assert release.wait(synchronization_timeout(5))
+            progress(current, total, name, phase)
+        return original_batches(src, route, files, report, control)
+
+    monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
+    monkeypatch.setattr(mv, '_verify_batches', batches)
+    job_id = start_move(transfer_env)
+    try:
+        assert checked.wait(synchronization_timeout(5))
+        assert runner.pause_job(job_id)
+        release.set()
+        wait_status(runner, job_id, 'paused')
+        assert source.exists()
+        if action.startswith('resume'):
+            if action == 'resume':
+                first = destination / source.name / verified_names[0]
+                first.write_bytes(b'x' * first.stat().st_size)
+            assert runner.resume_job(job_id)
+        else:
+            assert runner.cancel_job(job_id)
+        job = wait_for_job_via_runner(runner, job_id)
+        expected = {'resume': 'failed', 'resume_unchanged': 'completed', 'cancel': 'cancelled'}
+        assert job['status'] == expected[action], job
+        assert source.exists() == (action != 'resume_unchanged')
+        with Database(db_path) as db:
+            final_path = destination / source.name if action == 'resume_unchanged' else source
+            assert db.folders.get(folder_id)['path'] == str(final_path)
+        assert not list((destination / source.name).glob('.vireo-verify-*'))
+        if action == 'resume':
+            assert 'destination files changed during checksum verification' in job['result']['errors'][0]
+        elif action == 'resume_unchanged':
+            assert verified_names.count(verified_names[0]) == 2
+    finally:
+        release.set()
+        runner.cancel_job(job_id)

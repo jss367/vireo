@@ -14,7 +14,7 @@ import pytest
 
 MOVE = Path(__file__).resolve().parents[1] / "move"
 MODULES = {"dates", "folder", "folder_catalog", "folder_target", "folder_transfer",
-           "paths", "photos", "remote", "transfer", "verify"}
+           "mounted_verify", "paths", "photos", "remote", "transfer", "verify"}
 DEPENDENCIES = {
     "db": ("_chunks", "_join_subtree_path", "_subtree_prefix", "_subtree_relative"),
     "proc": ("no_window_kwargs",),
@@ -86,6 +86,7 @@ def test_package_imports_and_exports_use_only_stubbed_vireo_dependencies(mode, m
     assert sys.modules[mode + ".transfer"].copy_via_temp is stubs["staged_copy"].copy_via_temp
     assert sys.modules[mode + ".remote"].no_window_kwargs is stubs["proc"].no_window_kwargs
     assert sys.modules[mode + ".verify"].no_window_kwargs is stubs["proc"].no_window_kwargs
+    assert sys.modules[mode + ".mounted_verify"].no_window_kwargs is stubs["proc"].no_window_kwargs
     assert sys.modules[mode + ".folder_catalog"]._chunks is stubs["db"]._chunks
 
 
