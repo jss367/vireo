@@ -80,6 +80,13 @@ def no_google(monkeypatch):
     def refuse(*args, **kwargs):
         raise AssertionError("Google was asked for a place the catalog already names")
     monkeypatch.setattr(places, "reverse_geocode", refuse)
+    monkeypatch.setattr(places, "nearby_named_places", refuse)
+
+
+@pytest.fixture(autouse=True)
+def fresh_nearby_cache(monkeypatch):
+    """Nearby answers are cached per process; start each test without them."""
+    monkeypatch.setattr(import_locations, "_nearby_cache", {})
 
 
 def _files(points):
@@ -279,6 +286,156 @@ def test_location_options_stay_unique_when_ancestry_reads_alike(db):
     assert labels[ids[0]] == f"Laguna Lake · San Diego County · California · USA [#{ids[0]}]"
     assert labels[dog] == f"Dog Beach · Ocean Beach [#{dog}]"
     assert labels[breadcrumb] == "Dog Beach · Ocean Beach"
+
+
+# -- named places near broadly named spots ---------------------------------------
+
+# A walk past Laguna Meadow in the Cleveland National Forest, where Geocoding's
+# most specific name is the county.
+LAGUNA = [(32.8750, -116.4640), (32.8780, -116.4610), (32.8750, -116.4490),
+          (32.8620, -116.4620)]
+_COUNTY = {
+    "place_id": "sd-county", "name": "San Diego County",
+    "types": ["administrative_area_level_2", "political"], "lat": 33.0, "lng": -116.7,
+    "source": "area", "address_components": [
+        {"name": "San Diego County", "types": ["administrative_area_level_2"]},
+        {"name": "California", "types": ["administrative_area_level_1"]}],
+}
+_LAGUNA_PLACES = [
+    {"place_id": "lake", "name": "Big Laguna Lake", "type": "natural_feature",
+     "lat": 32.8810, "lng": -116.4560},
+    {"place_id": "lmra", "name": "Laguna Mountain Recreation Area", "type": "park",
+     "lat": 32.8601, "lng": -116.4339},
+    {"place_id": "far", "name": "Cuyamaca Rancho State Park", "type": "park",
+     "lat": 32.9200, "lng": -116.5600},
+]
+
+
+@pytest.fixture
+def broad_google(monkeypatch):
+    """Google names every spot only as the county; returns the nearby lookups."""
+    lookups = []
+
+    def fake_nearby(lat, lng, api_key, *, language="en"):
+        lookups.append((lat, lng, language))
+        return _LAGUNA_PLACES
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", fake_nearby)
+    return lookups
+
+
+def test_a_county_only_spot_offers_named_places_nearby_with_their_distance(db, broad_google):
+    result = suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")
+
+    [group] = result["groups"]
+    assert group["suggestion"]["name"] == "San Diego County"
+    assert group["suggestion"]["source"] == "google_area"
+    nearby = group["nearby_places"]
+    # Nearest first, measured from the closest photo spot to each pin; the
+    # state park's pin is out of reach.
+    assert [p["place_id"] for p in nearby] == ["lake", "lmra"]
+    assert nearby[0] == {"place_id": "lake", "name": "Big Laguna Lake",
+                         "type": "natural_feature", "distance_m": 574}
+    assert nearby[1]["distance_m"] == 2176
+    assert "nearby_unresolved" not in group
+    # One lookup per ~2 km bucket, not per cell.
+    buckets = {import_locations._nearby_bucket(*p) for p in LAGUNA}
+    assert len(broad_google) == len(buckets) < len(LAGUNA)
+    assert {language for *_, language in broad_google} == {"en"}
+
+
+def test_nearby_places_are_cached_for_the_next_preview(db, broad_google):
+    first = suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")
+    asked = len(broad_google)
+    second = suggest_import_locations(db, _files(LAGUNA), api_key="KEY", language="en")
+
+    assert second["groups"] == first["groups"]
+    assert len(broad_google) == asked
+
+
+def test_specifically_named_spots_do_not_look_for_nearby_places(db, monkeypatch):
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: {
+        "place_id": "ocean-beach", "name": "Ocean Beach", "types": ["neighborhood", "political"],
+        "lat": 1.0, "lng": 2.0, "source": "area", "address_components": []})
+    monkeypatch.setattr(places, "nearby_named_places",
+                        lambda *a, **k: pytest.fail("looked for places near a named spot"))
+
+    [group] = suggest_import_locations(db, _files(RIVER), api_key="KEY", language="en")["groups"]
+
+    assert group["suggestion"]["name"] == "Ocean Beach"
+    assert "nearby_places" not in group
+
+
+def test_a_failed_nearby_lookup_is_reported_and_asked_again_next_time(db, monkeypatch):
+    calls = []
+
+    def failing(*args, **kwargs):
+        calls.append(args)
+        raise places.PlacesTransientError("OVER_QUERY_LIMIT")
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", failing)
+
+    [group] = suggest_import_locations(db, _files(LAGUNA[:1]), api_key="KEY", language="en")["groups"]
+    suggest_import_locations(db, _files(LAGUNA[:1]), api_key="KEY", language="en")
+
+    assert group["nearby_places"] == []
+    assert group["nearby_unresolved"] == "transient_error"
+    assert len(calls) == 2
+
+
+def test_a_cached_county_without_an_api_key_says_why_nothing_is_nearby(db, broad_google):
+    suggest_import_locations(db, _files(LAGUNA[:1]), api_key="KEY", language="en")
+    import_locations._nearby_cache.clear()
+    asked = len(broad_google)
+
+    [group] = suggest_import_locations(db, _files(LAGUNA[:1]), api_key="", language="en")["groups"]
+
+    assert group["suggestion"]["name"] == "San Diego County"  # from the geocode cache
+    assert group["nearby_places"] == []
+    assert group["nearby_unresolved"] == "no_api_key"
+    assert len(broad_google) == asked
+
+
+def test_choosing_a_nearby_place_tags_it_and_keeps_the_photos_measured_gps(db, fid, monkeypatch):
+    """The place's pin becomes the keyword's point; no photo is moved to it."""
+    pids = [_photo(db, fid, f"new{i}.jpg", p) for i, p in enumerate(LAGUNA)]
+    monkeypatch.setattr(places, "place_details_for_language", lambda *a: {
+        "place_id": "lake", "name": "Big Laguna Lake", "types": ["natural_feature"],
+        "lat": 32.8810, "lng": -116.4560, "address_components": [
+            {"name": "Big Laguna Lake", "types": ["natural_feature"]},
+            {"name": "San Diego County", "types": ["administrative_area_level_2"]}]})
+    choices = parse_location_choices([{
+        "cells": sorted({cell_key(*p) for p in LAGUNA}), "kind": "google",
+        "place_id": "lake", "name": "Big Laguna Lake",
+    }])
+    summary = _summary()
+
+    apply_location_choices(db, pids, choices, api_key="KEY", language="en",
+                           summary=summary, cancel_check=_never)
+
+    assert summary["locations_added"] == len(LAGUNA)
+    for pid, point in zip(pids, LAGUNA, strict=True):
+        assert _location(db, pid) == "Big Laguna Lake"
+        row = db.conn.execute(
+            "SELECT latitude, longitude FROM photos WHERE id = ?", (pid,)).fetchone()
+        assert (row["latitude"], row["longitude"]) == point
+
+
+def test_stream_reports_nearby_lookups_after_naming(db, monkeypatch, broad_google, exiftool_present):
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda paths: dict(zip(paths, LAGUNA, strict=True)))
+    paths = [f"/card/{i}.NEF" for i in range(len(LAGUNA))]
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, paths, {"google_maps_api_key": "KEY"})]
+
+    nearby = [f for f in frames if "nearby" in f]
+    assert nearby and nearby[-1] == {"nearby": len(broad_google), "total": len(broad_google)}
+    first_nearby = frames.index(nearby[0])
+    assert all("naming" in f for f in frames[first_nearby - len(LAGUNA):first_nearby])
+    assert frames[-1]["groups"][0]["nearby_places"][0]["name"] == "Big Laguna Lake"
 
 
 # -- choices ------------------------------------------------------------------------

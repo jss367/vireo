@@ -441,3 +441,75 @@ def test_reverse_geocode_raises_transient_on_network_failure(monkeypatch):
 
     with pytest.raises(places.PlacesTransientError):
         places.reverse_geocode(40.0, -73.0, "FAKE_KEY")
+
+
+def _nearby_result(place_id, name, lat, lng, ratings):
+    return {"place_id": place_id, "name": name, "user_ratings_total": ratings,
+            "geometry": {"location": {"lat": lat, "lng": lng}}}
+
+
+def test_nearby_named_places_lists_visited_parks_and_features_nearest_first(monkeypatch):
+    """Around Laguna Meadow (32.872, -116.459), Google names ravines nobody
+    reviews; visited lakes, meadows and the recreation area are offered."""
+    from vireo import places
+
+    captured = []
+
+    def fake_urlopen(url, *args, **kwargs):
+        captured.append(url)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        if query["type"] == ["park"]:
+            return _FakeResponse({"status": "OK", "results": [
+                _nearby_result("ravine-park", "Los Rasalies Ravine", 32.8810, -116.4560, 0),
+                _nearby_result("lmra", "Laguna Mountain Recreation Area", 32.8601, -116.4339, 43),
+            ]})
+        return _FakeResponse({"status": "OK", "results": [
+            _nearby_result("ravine", "Los Rasalies Ravine", 32.8770, -116.4580, 2),
+            _nearby_result("lake", "Big Laguna Lake", 32.8810, -116.4560, 31),
+            _nearby_result("meadow", "Laguna | Meadow", 32.8840, -116.4560, 4),
+            _nearby_result("lmra", "Laguna Mountain Recreation Area", 32.8601, -116.4339, 43),
+            {"name": "No id", "user_ratings_total": 50,
+             "geometry": {"location": {"lat": 32.87, "lng": -116.46}}},
+        ]})
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", fake_urlopen)
+
+    out = places.nearby_named_places(32.8722, -116.4593, "FAKE_KEY")
+
+    assert [(p["place_id"], p["name"], p["type"]) for p in out] == [
+        ("lake", "Big Laguna Lake", "natural_feature"),
+        ("meadow", "Laguna - Meadow", "natural_feature"),
+        ("lmra", "Laguna Mountain Recreation Area", "park"),
+    ]
+    assert out[0]["lat"] == pytest.approx(32.8810)
+    queries = [urllib.parse.parse_qs(urllib.parse.urlparse(u).query) for u in captured]
+    assert [q["type"] for q in queries] == [["park"], ["natural_feature"]]
+    assert all(q["rankby"] == ["distance"] and q["language"] == ["en"] for q in queries)
+
+
+def test_nearby_named_places_raises_transient_and_returns_empty_on_no_match(monkeypatch):
+    from vireo import places
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen",
+                        _make_fake_urlopen({"status": "OVER_QUERY_LIMIT"}))
+    with pytest.raises(places.PlacesTransientError):
+        places.nearby_named_places(32.87, -116.46, "FAKE_KEY")
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen",
+                        _make_fake_urlopen({"status": "ZERO_RESULTS"}))
+    assert places.nearby_named_places(32.87, -116.46, "FAKE_KEY", language=None) == []
+
+
+@pytest.mark.parametrize(("details", "broad"), [
+    ({"source": "area", "types": ["administrative_area_level_2", "political"]}, True),
+    ({"source": "area", "types": ["administrative_area_level_1", "political"]}, True),
+    ({"source": "area", "types": ["neighborhood", "political"]}, False),
+    ({"source": "area", "types": ["locality", "political"]}, False),
+    ({"source": "park", "types": ["park"]}, False),
+    ({"source": "area", "types": []}, False),
+    (None, False),
+])
+def test_is_broad_area_means_county_or_broader(details, broad):
+    from vireo import places
+
+    assert places.is_broad_area(details) is broad

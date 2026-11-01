@@ -5,7 +5,7 @@
 
 /** @type {ImportLocationState} */
 let importLocations = {
-  signature: null, pending: false, error: '', reading: 0, naming: 0, total: 0,
+  signature: null, pending: false, error: '', reading: 0, naming: 0, nearby: 0, total: 0,
   data: null, choices: new Map(), abort: null,
 };
 
@@ -40,7 +40,7 @@ function importLocationCandidatePaths() {
 function cancelImportLocations() {
   if (importLocations.abort) importLocations.abort.abort();
   importLocations = {
-    signature: null, pending: false, error: '', reading: 0, naming: 0, total: 0,
+    signature: null, pending: false, error: '', reading: 0, naming: 0, nearby: 0, total: 0,
     data: null, choices: new Map(), abort: null,
   };
 }
@@ -107,8 +107,10 @@ async function fetchImportLocations(signature) {
           if (frame.error) importLocations.error = frame.error;
           else importLocations.data = /** @type {ImportLocationSuggestions} */ (frame);
         } else {
-          // GPS reading, then naming one GPS cell at a time.
-          if (frame.naming != null) importLocations.naming = Number(frame.naming) || 0;
+          // GPS reading, then naming one GPS cell at a time, then looking
+          // up named places near spots Google could only name broadly.
+          if (frame.nearby != null) importLocations.nearby = Number(frame.nearby) || 0;
+          else if (frame.naming != null) importLocations.naming = Number(frame.naming) || 0;
           else importLocations.reading = Number(frame.reading) || 0;
           importLocations.total = Number(frame.total) || importLocations.total;
           renderImportLocationStatus();
@@ -178,6 +180,11 @@ function importLocationTarget(group) {
     }
     return { kind: 'google', place_id: suggestion.place_id, name: suggestion.name };
   }
+  // A nearby place the user clicked, for as long as the box still says it.
+  const picked = (group.nearby_places || []).find(p => p.place_id === state?.pick);
+  if (picked && folded === picked.name.toLocaleLowerCase()) {
+    return { kind: 'google', place_id: picked.place_id, name: picked.name };
+  }
   const options = importLocations.data?.location_options || [];
   // Labels are unique; a bare name may be shared by several saved places.
   const byLabel = options.find(o => o.label.toLocaleLowerCase() === folded);
@@ -239,11 +246,14 @@ function renderImportLocationStatus() {
   }
   const data = importLocations.data;
   if (!data) {
-    status.textContent = importLocations.naming
-      ? 'Naming spots… ' + importLocations.naming.toLocaleString() + ' of '
-        + importLocations.total.toLocaleString()
-      : 'Reading GPS… ' + importLocations.reading.toLocaleString()
-        + ' of ' + importLocations.total.toLocaleString() + ' files';
+    const n = importLocations.nearby || importLocations.naming;
+    status.textContent = importLocations.nearby
+      ? 'Finding named places near spots Google Maps only names broadly… '
+        + n.toLocaleString() + ' of ' + importLocations.total.toLocaleString()
+      : importLocations.naming
+        ? 'Naming spots… ' + n.toLocaleString() + ' of ' + importLocations.total.toLocaleString()
+        : 'Reading GPS… ' + importLocations.reading.toLocaleString()
+          + ' of ' + importLocations.total.toLocaleString() + ' files';
     return;
   }
   const problem = importLocationChoicesProblem();
@@ -271,6 +281,50 @@ function renderImportLocationStatus() {
     + ' change a name or uncheck a group to skip it.'
     + (missing ? ' ' + missing.toLocaleString() + ' without GPS won’t get one.' : '')
     + ' Photos that already have a location keep it.';
+}
+
+/** @param {number} meters */
+function importLocationDistanceText(meters) {
+  return meters < 1000 ? meters + ' m' : (meters / 1000).toFixed(1) + ' km';
+}
+
+// Named places near spots Google Maps could only name broadly (a county or
+// state). Offered, not chosen: a pin is one point, so the distance is all
+// Vireo knows. 5 km is NEARBY_RADIUS_M in services/import_locations.py.
+/** @param {ImportLocationGroup} group @param {(place: ImportLocationNearbyPlace) => void} onPick */
+function renderImportLocationNearby(group, onPick) {
+  const places = group.nearby_places;
+  if (!places) return null;
+  const box = document.createElement('div');
+  box.className = 'import-location-nearby';
+  const note = document.createElement('div');
+  note.className = 'hint';
+  if (!places.length) {
+    note.textContent = group.nearby_unresolved === 'no_api_key'
+      ? 'Google Maps only has a broad area name for these spots. Add a Google Maps API key in Settings to see named places nearby.'
+      : group.nearby_unresolved === 'transient_error'
+        ? 'Google Maps only has a broad area name for these spots, and didn’t answer when asked for named places nearby. Preview again to retry.'
+        : 'Google Maps only has a broad area name for these spots, and no visited park or natural feature within 5 km of them.';
+    box.appendChild(note);
+    return box;
+  }
+  note.textContent = 'Google Maps only has a broad area name for these spots. Named places nearby,'
+    + ' with the distance from the closest of these photos to the place’s map pin'
+    + ' (a pin is one point, so Vireo can’t tell whether the photos were taken inside the place):';
+  const list = document.createElement('div');
+  list.className = 'import-location-nearby-list';
+  places.forEach(place => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn import-location-nearby-place';
+    btn.textContent = place.name + ' · ' + importLocationDistanceText(place.distance_m);
+    btn.title = (place.type === 'natural_feature' ? 'Natural feature' : 'Park or recreation area')
+      + ' on Google Maps. The photos keep their own GPS.';
+    btn.addEventListener('click', () => onPick(place));
+    list.appendChild(btn);
+  });
+  box.append(note, list);
+  return box;
 }
 
 /** @param {ImportLocationGroup} group */
@@ -309,8 +363,9 @@ function renderImportLocationGroup(group) {
   source.textContent = importLocationSourceText(group);
   const outcome = document.createElement('div');
   outcome.className = 'hint import-location-outcome';
+  /** @type {string | undefined} */ let pick = state ? state.pick : undefined;
   const remember = () => {
-    importLocations.choices.set(group.key, { enabled: toggle.checked, value: input.value });
+    importLocations.choices.set(group.key, { enabled: toggle.checked, value: input.value, pick });
     outcome.textContent = importLocationOutcomeText(importLocationTarget(group));
     renderImportLocationStatus();
     updateStartGate();
@@ -322,6 +377,13 @@ function renderImportLocationGroup(group) {
   toggle.addEventListener('change', remember);
   outcome.textContent = importLocationOutcomeText(importLocationTarget(group));
   body.append(count, input, source, outcome);
+  const nearby = renderImportLocationNearby(group, place => {
+    pick = place.place_id;
+    input.value = place.name;
+    toggle.checked = true;
+    remember();
+  });
+  if (nearby) body.appendChild(nearby);
   row.append(toggle, thumbs, body);
   return row;
 }

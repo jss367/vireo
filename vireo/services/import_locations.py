@@ -22,6 +22,14 @@ A cell's suggestion comes from, in order:
     area), through the shared grid cache.
 
 Cells with no suggestion form one unnamed group the user can still name.
+
+When Google can only name a county or broader for a cell (a trail deep in a
+national forest), the cell's group also lists ``nearby_places``: visited
+parks and natural features from ``places.nearby_named_places``, each with the
+distance from the closest of those photos to the place's map pin. They are
+offered, never chosen: Google's pins are points, so Vireo cannot tell whether
+the photos were taken inside the place. Choosing one tags the photos with
+that place's keyword and leaves their own GPS as measured.
 """
 
 from __future__ import annotations
@@ -31,6 +39,8 @@ import logging
 import math
 import re
 import sqlite3
+import threading
+import time
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +75,19 @@ MAX_SUGGESTION_PATHS = 100_000
 MAX_CHOICE_CELLS = MAX_SUGGESTION_PATHS
 MAX_CHOICES = 1000
 MAX_LOCATION_NAME = 200
+
+# How far a nearby named place's map pin may be from the closest of a group's
+# photos, and how many such places a group offers. A recreation area's pin
+# sits at its visitor center, often kilometers from its trails.
+NEARBY_RADIUS_M = 5000
+MAX_NEARBY_PLACES = 6
+# Nearby lookups are made once per bucket of this many degrees (about 2 km),
+# from its center, not once per ~110 m cell: one walk spans dozens of cells.
+_NEARBY_BUCKET_DEG = 0.02
+# Nearby answers are kept for this process, so previewing the same card again
+# doesn't pay Google again; a day old, they are asked for again.
+_NEARBY_CACHE_TTL_S = 24 * 3600
+_NEARBY_CACHE_MAX = 4096
 
 _SOURCE_STRENGTH = ("your_photos", "your_place", "google_park", "google_area")
 _CELL_RE = re.compile(r"^-?\d{1,6},-?\d{1,6}$")
@@ -134,6 +157,10 @@ def read_source_gps(
 # Spatial bucket -> [(lat, lng, keyword_id, photo_id)]; photo_id is None for
 # a keyword's own map point.
 type _PointIndex = dict[tuple[int, int], list[tuple[float, float, int, int | None]]]
+type _NearbyKey = tuple[int, int]
+
+_nearby_cache: dict[tuple[int, int, str | None], tuple[float, list[JsonDict]]] = {}
+_nearby_cache_lock = threading.Lock()
 
 
 class _NearbyPlaces:
@@ -207,13 +234,15 @@ class _NearbyPlaces:
 def _google_suggestion(
     db: Database, lat: float, lng: float, api_key: str, language: str | None,
     grid_cache: dict,
-) -> tuple[JsonDict | None, str | None]:
+) -> tuple[JsonDict | None, str | None, bool]:
+    """``(suggestion, unresolved reason, whether Google named only a county or broader)``."""
     details, reason = resolve_place_for_point(db, lat, lng, api_key, language, grid_cache)
     if details is None:
-        return None, reason
+        return None, reason, False
+    broad = places.is_broad_area(details)
     existing = db.locations.find_place_keyword(details["place_id"])
     if existing is not None:
-        return {"kind": "keyword", "keyword_id": existing["id"], "source": "your_place"}, None
+        return {"kind": "keyword", "keyword_id": existing["id"], "source": "your_place"}, None, broad
     source = "google_park" if details.get("source") == "park" else "google_area"
     return {
         "kind": "google",
@@ -221,7 +250,48 @@ def _google_suggestion(
         "name": details.get("name") or "",
         "summary": summarize_details(details),
         "source": source,
-    }, None
+    }, None, broad
+
+
+def _nearby_bucket(lat: float, lng: float) -> _NearbyKey:
+    return math.floor(lat / _NEARBY_BUCKET_DEG), math.floor(lng / _NEARBY_BUCKET_DEG)
+
+
+def _cached_nearby(bucket: _NearbyKey, language: str | None) -> list[JsonDict] | None:
+    with _nearby_cache_lock:
+        hit = _nearby_cache.get((*bucket, language))
+    if hit is None or time.monotonic() - hit[0] > _NEARBY_CACHE_TTL_S:
+        return None
+    return hit[1]
+
+
+def _remember_nearby(bucket: _NearbyKey, language: str | None, found: list[JsonDict]) -> None:
+    with _nearby_cache_lock:
+        _nearby_cache.pop((*bucket, language), None)
+        while len(_nearby_cache) >= _NEARBY_CACHE_MAX:
+            # Insertion order is age order: re-inserted keys were popped first.
+            del _nearby_cache[next(iter(_nearby_cache))]
+        _nearby_cache[(*bucket, language)] = (time.monotonic(), found)
+
+
+def _lookup_nearby(
+    bucket: _NearbyKey, api_key: str, language: str | None,
+) -> list[JsonDict] | str:
+    """The named places around a bucket's center, or an unresolved reason."""
+    cached = _cached_nearby(bucket, language)
+    if cached is not None:
+        return cached
+    if not api_key:
+        return "no_api_key"
+    lat = (bucket[0] + 0.5) * _NEARBY_BUCKET_DEG
+    lng = (bucket[1] + 0.5) * _NEARBY_BUCKET_DEG
+    try:
+        found = places.nearby_named_places(lat, lng, api_key, language=language)
+    except places.PlacesTransientError:
+        log.warning("nearby named places lookup failed for lat=%s lng=%s", lat, lng)
+        return "transient_error"
+    _remember_nearby(bucket, language, found)
+    return found
 
 
 def _location_path(db: Database, keyword_id: int) -> tuple[str, list[str]] | None:
@@ -329,6 +399,7 @@ def _new_group(key: str, suggestion: JsonDict | None) -> JsonDict:
         "sample_paths": [],
         "photo_ids": set(),
         "reasons": Counter(),
+        "broad_cells": [],
     }
 
 
@@ -382,8 +453,9 @@ def _finish_group(db: Database, group: JsonDict) -> JsonDict | None:
 class ImportLocationSuggester:
     """Names an import's GPS cells one at a time, then groups them.
 
-    ``cell_keys`` lists the cells; :meth:`name_cell` suggests one (the only
-    step that may call Google), so a caller can stop between cells;
+    ``cell_keys`` lists the cells; :meth:`name_cell` suggests one, then
+    :meth:`find_nearby` looks up each of :meth:`nearby_keys` (the only steps
+    that may call Google), so a caller can stop between lookups;
     :meth:`result` returns what :func:`suggest_import_locations` documents.
     """
 
@@ -399,20 +471,63 @@ class ImportLocationSuggester:
             db, ((c["lat"], c["lng"]) for c in self._cells.values()))
         self._grid_cache: dict = {}
         self._groups: dict[str, JsonDict] = {}
+        self._nearby_found: dict[_NearbyKey, list[JsonDict] | str] = {}
         self.cell_keys = list(self._cells)
 
     def name_cell(self, key: str) -> None:
         cell = self._cells[key]
         suggestion = self._nearby.suggest(cell["lat"], cell["lng"])
-        reason = None
+        reason, broad = None, False
         if suggestion is None:
-            suggestion, reason = _google_suggestion(
+            suggestion, reason, broad = _google_suggestion(
                 self._db, cell["lat"], cell["lng"], self._api_key, self._language,
                 self._grid_cache,
             )
         group_key = _group_key(suggestion)
         group = self._groups.setdefault(group_key, _new_group(group_key, suggestion))
         _add_cell(group, key, cell, suggestion, reason)
+        if broad:
+            group["broad_cells"].append(key)
+
+    def nearby_keys(self) -> list[_NearbyKey]:
+        """The buckets to look up after naming: those of cells Google named broadly."""
+        buckets = (
+            _nearby_bucket(self._cells[key]["lat"], self._cells[key]["lng"])
+            for group in self._groups.values() for key in group["broad_cells"]
+        )
+        return list(dict.fromkeys(buckets))
+
+    def find_nearby(self, bucket: _NearbyKey) -> None:
+        """Look up one bucket's named places (the only other step that may call Google)."""
+        self._nearby_found[bucket] = _lookup_nearby(bucket, self._api_key, self._language)
+
+    def _nearby_places(self, group: JsonDict) -> tuple[list[JsonDict], str | None]:
+        """A broadly named group's nearby places, nearest first, or why there are none."""
+        closest: dict[str, JsonDict] = {}
+        reasons: Counter[str] = Counter()
+        exclude = (group["suggestion"] or {}).get("place_id")
+        for key in group["broad_cells"]:
+            cell = self._cells[key]
+            found = self._nearby_found.get(_nearby_bucket(cell["lat"], cell["lng"]))
+            if found is None or isinstance(found, str):
+                reasons[found or "not_looked_up"] += 1
+                continue
+            here = {"latitude": cell["lat"], "longitude": cell["lng"]}
+            for place in found:
+                distance = round(distance_meters(
+                    here, {"latitude": place["lat"], "longitude": place["lng"]}))
+                if distance > NEARBY_RADIUS_M or place["place_id"] == exclude:
+                    continue
+                best = closest.get(place["place_id"])
+                if best is None or distance < best["distance_m"]:
+                    closest[place["place_id"]] = {
+                        "place_id": place["place_id"], "name": place["name"],
+                        "type": place["type"], "distance_m": distance,
+                    }
+        ranked = sorted(closest.values(), key=lambda p: (p["distance_m"], p["name"]))
+        if ranked or not reasons:
+            return ranked[:MAX_NEARBY_PLACES], None
+        return [], reasons.most_common(1)[0][0]
 
     def result(self) -> JsonDict:
         if len(self._groups) > MAX_CHOICES:
@@ -432,6 +547,10 @@ class ImportLocationSuggester:
                 # stays distinct from the unnamed group (and from each other):
                 # the frontend stores per-group edits by that key.
                 done = _finish_group(self._db, {**group, "suggestion": None})
+            if done is not None and group["broad_cells"]:
+                done["nearby_places"], reason = self._nearby_places(group)
+                if reason:
+                    done["nearby_unresolved"] = reason
             finished.append(done)
         finished.sort(key=lambda g: (g["suggestion"] is None, -g["file_count"]))
         return {
@@ -454,6 +573,11 @@ def suggest_import_locations(
     it. Each group's ``suggestion`` is None or a dict with ``kind``
     (``"keyword"`` with ``keyword_id``, ``name`` and ``parents``, or
     ``"google"`` with ``place_id``, ``name`` and ``summary``) and ``source``.
+    A group Google could name only as a county or broader also carries
+    ``nearby_places`` (``place_id``, ``name``, ``type`` and ``distance_m``
+    from its closest photo spot to the place's pin, nearest first), plus
+    ``nearby_unresolved`` (``no_api_key`` or ``transient_error``) when the
+    list is empty because the lookup could not run.
     Over-budget previews return empty groups and ``work_limit_error``;
     callers must require fewer files or explicit GPS opt-out before import.
     """
@@ -463,6 +587,10 @@ def suggest_import_locations(
         if cancel_check is not None and cancel_check():
             return None
         suggester.name_cell(key)
+    for bucket in suggester.nearby_keys():
+        if cancel_check is not None and cancel_check():
+            return None
+        suggester.find_nearby(bucket)
     return suggester.result()
 
 
@@ -709,7 +837,8 @@ def stream_location_suggestions(
     """SSE frames for ``/api/import/location-suggestions``.
 
     ``{"reading": n, "total": N}`` while the files' GPS is read,
-    ``{"naming": n, "total": N}`` per GPS cell while places are named, then one
+    ``{"naming": n, "total": N}`` per GPS cell while places are named,
+    ``{"nearby": n, "total": N}`` per nearby-places lookup, then one
     ``{"done": true, "groups": [...], "file_cells": {...}, "no_gps_paths":
     [...], "location_options": [...]}`` (see :func:`suggest_import_locations`
     and :func:`location_options`), or ``{"done": true, "error": "..."}``.
@@ -747,6 +876,10 @@ def stream_location_suggestions(
         for done, key in enumerate(suggester.cell_keys, start=1):
             suggester.name_cell(key)
             yield frame({"naming": done, "total": cells})
+        buckets = suggester.nearby_keys()
+        for done, bucket in enumerate(buckets, start=1):
+            suggester.find_nearby(bucket)
+            yield frame({"nearby": done, "total": len(buckets)})
         result = suggester.result()
         options = location_options(db)
     except sqlite3.Error as exc:
