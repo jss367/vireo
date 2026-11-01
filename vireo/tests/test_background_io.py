@@ -102,3 +102,48 @@ def test_automatic_missing_originals_check_defers_to_nas_transfer(app_and_db):
     finally:
         release.set()
         wait_for_job_via_runner(runner, transfer)
+
+
+def test_folder_health_abandons_observations_when_transfer_starts(app_and_db, tmp_path, monkeypatch):
+    import os
+
+    from services import missing_originals, photo_ingest, workspace_folders
+
+    app, db = app_and_db
+    runner = app._job_runner
+    first_path, second_path = str(tmp_path / "first"), str(tmp_path / "second")
+    first = workspace_folders.add_folder(db, first_path)
+    second = workspace_folders.add_folder(db, second_path)
+    photo = photo_ingest.add_photo(db, second, "bird.jpg", ".jpg", 12, 1)
+    db.conn.execute("UPDATE photos SET last_move_source_folder_path=? WHERE id=?", (first_path, photo))
+    db.commit()
+    release = threading.Event()
+    transfer_ids = []
+    real_exists = os.path.exists
+
+    def exists(path):
+        assert not db.conn.in_transaction, "network probes must not retain a catalog writer"
+        if path == second_path:
+            transfer_ids.append(runner.start(
+                "send-to-nas", lambda _: release.wait(synchronization_timeout(5)),
+                workspace_id=db.active_workspace_id,
+            ))
+        return real_exists(path)
+
+    service = missing_originals.MissingOriginals(
+        db_path=db._db_path, config=app.config, get_runner=lambda: runner,
+    )
+    monkeypatch.setattr(missing_originals.os.path, "exists", exists)
+    try:
+        with pytest.raises(missing_originals._FolderHealthDeferred):
+            db.folders.check_health(checkpoint=service._folder_health_checkpoint)
+        assert db.folders.get(first)["status"] == "ok"
+        assert db.folders.get(second)["status"] == "ok"
+        assert db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id=?", (photo,),
+        ).fetchone()[0] == first_path
+        assert not db.conn.in_transaction
+    finally:
+        release.set()
+        for job_id in transfer_ids:
+            wait_for_job_via_runner(runner, job_id)

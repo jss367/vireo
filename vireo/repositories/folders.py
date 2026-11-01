@@ -444,13 +444,21 @@ class FolderRepository:
             )
         return updates
 
-    def check_health(self):
-        """Refresh every folder's status from disk; return how many changed."""
+    def check_health(self, *, checkpoint: Callable[[], object] = lambda: None) -> int:
+        """Refresh folder status; an interrupted pass publishes no changes.
+
+        Probe outside a write transaction, then apply observations together.
+        The optional checkpoint may abort before/after a probe or during the
+        commit, so automatic checks can yield without retaining writer locks.
+        """
         rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
+        updates = []
         changed = 0
         newly_missing_paths = []
         for row in rows:
+            checkpoint()
             exists = os.path.exists(row["path"])
+            checkpoint()
             if not exists:
                 new_status = "missing"
             elif row["status"] == "partial":
@@ -458,15 +466,7 @@ class FolderRepository:
             else:
                 new_status = "ok"
             if new_status != row["status"]:
-                self.conn.execute(
-                    "UPDATE folders SET status = ? WHERE id = ?",
-                    (new_status, row["id"]),
-                )
-                changed += 1
-                if new_status == "missing":
-                    stored_path = row["path"] or ""
-                    if stored_path:
-                        newly_missing_paths.append(stored_path)
+                updates.append((new_status, row["id"], row["path"], row["status"]))
         # A folder going missing frees its stored path to be reused by an
         # unrelated mount without a corresponding row-delete: the folder row
         # stays put in case the same content comes back, but a different
@@ -478,15 +478,27 @@ class FolderRepository:
         # photo's rendered output (developed lookup is only by destination
         # folder + stem). Clear provenance in the same transaction as the
         # status flip so a rollback restores both together.
-        for chunk in self._chunks(newly_missing_paths):
-            placeholders = ",".join("?" for _ in chunk)
-            self.conn.execute(
-                f"UPDATE photos SET last_move_source_folder_path = NULL "
-                f"WHERE last_move_source_folder_path IN ({placeholders})",
-                chunk,
-            )
-        if changed:
-            self.conn.commit()
+        if not updates:
+            return 0
+        with self.conn:
+            for status, fid, path, old_status in updates:
+                checkpoint()
+                updated = self.conn.execute(
+                    "UPDATE folders SET status = ? WHERE id = ? AND path = ? AND status = ?",
+                    (status, fid, path, old_status),
+                ).rowcount
+                changed += updated
+                if updated and status == "missing" and path:
+                    newly_missing_paths.append(path)
+            for chunk in self._chunks(newly_missing_paths):
+                checkpoint()
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE photos SET last_move_source_folder_path = NULL "
+                    f"WHERE last_move_source_folder_path IN ({placeholders})",
+                    chunk,
+                )
+            checkpoint()
         return changed
 
     def missing(self):
