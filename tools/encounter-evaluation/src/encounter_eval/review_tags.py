@@ -80,7 +80,7 @@ def _apply_tags(db, photo, answer, marker):
                 db.record_edit('keyword_add', f'Species review: added "{name}"', str(kid),
                                [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}], _commit=False)
         result = {'added': len(desired - existing), 'removed': len(removed)}
-        db.meta.set(marker, json.dumps({'revision': answer['revision'], 'fingerprint': fingerprint, 'result': result}), _commit=False)
+        db.meta.set(marker, json.dumps({'revision': answer['revision'], 'fingerprint': fingerprint, 'result': result}))
     return result
 
 
