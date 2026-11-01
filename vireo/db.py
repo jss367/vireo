@@ -20,6 +20,7 @@ from new_images_cache import get_shared_cache
 from repositories.keyword_identity_sql import resolve_import_alias
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.species_taxon_lookup import taxon_lookup_variants
+from unit_of_work import HoldingConnection, UnitOfWork, report_discarded_transaction
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -606,25 +607,6 @@ NAV_ID_ALIASES = {
 }
 
 
-class _Connection(sqlite3.Connection):
-    """``sqlite3.Connection`` whose ``commit()`` can be held off.
-
-    Undo/redo replays an edit through the ordinary per-photo setters, and
-    each of those commits on its own. Under the prediction-decision lock
-    that first commit would end ``BEGIN IMMEDIATE`` and let another decision
-    interleave with the rest of the replay. ``Database._commits_held()``
-    raises ``_commit_holds`` so those inner commits become no-ops and the
-    replay lands as one transaction.
-    """
-
-    _commit_holds = 0
-
-    def commit(self) -> None:
-        if self._commit_holds:
-            return
-        super().commit()
-
-
 def commit_with_retry(
     conn: sqlite3.Connection, max_retries: int = 5, base_delay: float = 0.1
 ) -> None:
@@ -1069,9 +1051,10 @@ class Database:
         # ``conn`` exists only while the connection is open: ``close`` deletes
         # it, so its type is the connection, never ``None``. ``close`` and
         # ``__del__`` tolerate its absence if ``sqlite3.connect`` raises.
-        self.conn: _Connection = sqlite3.connect(
-            db_path, check_same_thread=False, factory=_Connection,
+        self.conn: HoldingConnection = sqlite3.connect(
+            db_path, check_same_thread=False, factory=HoldingConnection,
         )
+        self._unit = UnitOfWork()
         self.conn.row_factory = sqlite3.Row
         self.conn.create_function(
             "vireo_keyword_text_match",
@@ -1163,6 +1146,8 @@ class Database:
             # sqlite3 raises ProgrammingError when closed from a foreign
             # thread; nothing useful can be done with a handle we are dropping.
             with contextlib.suppress(sqlite3.Error):
+                if conn.in_transaction:
+                    report_discarded_transaction(self._db_path)
                 conn.close()
             del self.conn
 
@@ -1193,22 +1178,34 @@ class Database:
     # -- Transaction control --
     #
     # How code outside the data layer opens, ends or abandons a transaction
-    # without touching ``conn``. Each is exactly the ``sqlite3.Connection``
-    # operation it names, on this connection: ``commit`` goes through
-    # ``_Connection.commit``, so it is a no-op while ``_commits_held`` holds
-    # commits, as ``db.conn.commit()`` always was.
+    # without touching ``conn``. ``transaction()`` is the unit of work, the
+    # commit point the data layer is moving to (see
+    # ``docs/plans/2026-10-25-unit-of-work-design.md``); the rest are the
+    # ``sqlite3.Connection`` operations they name, kept for callers not yet
+    # converted. While a unit is open, ``commit()`` is a no-op and
+    # ``rollback()`` dooms the unit (``unit_of_work.HoldingConnection``).
 
     @property
     def in_transaction(self) -> bool:
         """True while the connection has an open transaction."""
         return self.conn.in_transaction
 
+    @property
+    def in_unit_of_work(self) -> bool:
+        """True while a ``transaction()`` block is open on this Database."""
+        return bool(self._unit.depth)
+
     def commit(self) -> None:
-        """Commit the open transaction (a no-op while commits are held)."""
+        """Commit the open transaction (a no-op inside a unit of work)."""
         self.conn.commit()
 
     def rollback(self) -> None:
-        """Roll back the open transaction."""
+        """Roll back the open transaction.
+
+        Inside a unit of work this ends the unit's transaction part-way, so
+        the unit raises ``TransactionOwnershipError`` at its exit instead of
+        committing; abandon a unit by raising out of its block instead.
+        """
         self.conn.rollback()
         self._species_provenance_before = {}
 
@@ -1243,16 +1240,54 @@ class Database:
         self.conn.execute("BEGIN")
 
     @contextlib.contextmanager
-    def transaction(self) -> Iterator[None]:
-        """``with db.conn:``: commit when the block exits, roll back if it raises.
+    def transaction(
+        self, *, immediate: bool = False, retry_busy: bool = False,
+    ) -> Iterator[None]:
+        """One unit of work: commit when the block exits, roll back if it raises.
 
-        This is sqlite3's own connection context manager, so its commit is
-        the C-level one: unlike ``commit()`` it is not held off by
-        ``_commits_held``. It opens no transaction itself; pair it with
-        ``begin_immediate()`` to take the writer lock for the block.
+        The outermost block's transaction begins at its first write, as
+        sqlite3's own do, so reads and slow work (file I/O, network) before
+        that write hold no lock. ``immediate=True`` begins it at once with
+        ``BEGIN IMMEDIATE`` instead, holding SQLite's writer lock across the
+        block so the reads that decide its writes cannot go stale; use it for
+        check-then-write, and keep slow work out of such a block.
+        ``retry_busy`` (for jobs) retries a ``BEGIN IMMEDIATE`` with backoff
+        after ``busy_timeout`` expires instead of raising. The commit retries
+        while SQLite reports locked/busy, then ``after_commit`` callbacks run.
+
+        Inside another block it is a savepoint (beginning the owner's
+        transaction, with the writer lock, if nothing has been written yet):
+        released when the block exits, rolled back to when it raises (and the
+        exception propagates), so a caller that catches the failure keeps
+        none of the inner block.
+
+        An outermost ``immediate`` block raises ``sqlite3.OperationalError``
+        if a transaction is already open, as ``begin_immediate()`` does. An
+        outermost plain block entered while one is open (an unconverted
+        caller's ``begin_immediate()`` or uncommitted write) adopts it, as
+        ``with conn:`` did; that is a migration rule.
         """
-        with self.conn:
-            yield
+        provenance = dict(self._species_provenance_before)
+        try:
+            with self._unit.enter(self.conn, immediate=immediate, retry_busy=retry_busy):
+                yield
+        except BaseException:
+            # Python-side state follows the savepoint: a nested rollback
+            # restores the snapshot taken at its start, an outermost one
+            # (like ``rollback()``) drops everything.
+            self._species_provenance_before = provenance if self._unit.depth else {}
+            raise
+
+    def after_commit(self, callback: Callable[[], object]) -> None:
+        """Run ``callback`` once the open unit of work commits.
+
+        For work that must only happen once the data is durable (pruning
+        history, deleting cached files). Dropped if the unit (or the
+        savepoint it was registered in) rolls back; run at once when no unit
+        is open. A callback that raises is logged and does not undo the
+        commit.
+        """
+        self._unit.after_commit(callback)
 
     def set_progress_handler(self, handler: Callable[[], int] | None, n: int) -> None:
         """``sqlite3.Connection.set_progress_handler`` on this connection.
@@ -4598,7 +4633,7 @@ class Database:
         elif entry['action_type'] == 'identity_alternatives':
             self._replay_identity_history(entry, items, undo=True)
         else:
-            with self._commits_held():
+            with self.transaction():
                 self._apply_undo(entry, items)
                 history.mark_undone(entry['id'])
         return entry
@@ -4653,7 +4688,7 @@ class Database:
         elif entry['action_type'] == 'identity_alternatives':
             self._replay_identity_history(entry, items, undo=False)
         else:
-            with self._commits_held():
+            with self.transaction():
                 self._apply_redo(entry, items)
                 history.mark_redone(entry['id'])
         return entry
@@ -4665,7 +4700,7 @@ class Database:
         history = self._edit_history_repository()
         stale = False
         try:
-            with self._commits_held():
+            with self.transaction():
                 try:
                     with history.identity_replay():
                         if undo:
@@ -4686,35 +4721,6 @@ class Database:
                 'That identification was changed elsewhere. History has been refreshed; '
                 'review the next action before trying again.'
             ) from None
-
-    @contextlib.contextmanager
-    def _commits_held(self) -> Iterator[None]:
-        """Run an undo/redo replay as one transaction.
-
-        The replay's setters each commit, which would end the caller's
-        ``BEGIN IMMEDIATE`` (``api_undo`` / ``api_redo`` hold the
-        prediction-decision lock) after the first write and leave the rest of
-        the replay racing other decisions. Holding the connection's commits
-        turns those into no-ops; the whole replay then commits once here, or
-        rolls back if any step raises, so a failure part-way cannot leave half
-        an edit reversed. A connection that cannot hold commits (a test's
-        wrapper) runs the replay unheld, as before.
-        """
-        conn = self.conn
-        if not isinstance(conn, _Connection):
-            yield
-            return
-        conn._commit_holds += 1
-        try:
-            yield
-        except BaseException:
-            conn._commit_holds -= 1
-            if not conn._commit_holds:
-                conn.rollback()
-            raise
-        conn._commit_holds -= 1
-        if not conn._commit_holds:
-            conn.commit()
 
     # ------------------------------------------------------------------
     # Undo / redo

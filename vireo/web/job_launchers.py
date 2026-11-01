@@ -1882,8 +1882,7 @@ class _FullResolutionPreparation:
         # including the offline row attached to that replacement.
         # Purge disposable caches only if we actually attempted
         # work, leaving replacements found before our turn alone.
-        with thread_db.transaction():
-            thread_db.begin_immediate()
+        with thread_db.transaction(immediate=True):
             current_photo = thread_db.photos.get(photo_id)
             if not attempted or not self.photo_source_matches(photo, current_photo):
                 from preview_cache import cleanup_cached_files_for_deleted_photos

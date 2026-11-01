@@ -161,7 +161,7 @@ def test_retired_identity_conflict_refreshes_undo_tooltip_before_next_click(live
     db.photo_visibility.grant(second, ids)
     db.commit()
     db.set_active_workspace(second)
-    with db._commits_held():
+    with db.transaction():
         save_alternatives(db, ids, ['Tropical Kingbird', "Couch's Kingbird"], 'Newer shared review', 'An audio recording')
     db.set_active_workspace(first)
     page.evaluate("() => switchBpTab('history')")

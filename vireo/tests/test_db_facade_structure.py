@@ -15,7 +15,7 @@ passed as a call argument is allowed. Anything else (``self.conn.execute``,
 transaction control on the façade and belongs in a repository, except in the
 connection-lifecycle methods listed below. The tests at the end pin the
 public transaction-control methods among them (``commit``, ``rollback``,
-``in_transaction``, ``begin``, ``begin_immediate``, ``transaction``) and
+``in_transaction``, ``begin``, ``begin_immediate``) and
 ``set_progress_handler`` to the connection calls they replace, and
 ``commit_with_retry`` (which only hands the connection to
 ``db.commit_with_retry``, so the guard needs no exception for it) to that
@@ -36,15 +36,12 @@ CONNECTION_LIFECYCLE = {
     # Opens the connection and sets its PRAGMAs and SQL functions.
     "__init__",
     "close",
-    # Holds the connection's commits so an undo/redo replay is one
-    # transaction; it commits or rolls back the connection as a whole.
-    "_commits_held",
     # Public transaction control, so callers outside the data layer never
     # reach for the connection. Each is the one sqlite3.Connection call it
     # names:
     # Reports whether the connection has a transaction open.
     "in_transaction",
-    # Commits through _Connection.commit, so held commits stay no-ops.
+    # Commits through HoldingConnection.commit, a no-op inside a unit of work.
     "commit",
     # Rolls the connection's open transaction back.
     "rollback",
@@ -52,9 +49,6 @@ CONNECTION_LIFECYCLE = {
     "begin_immediate",
     # Opens a deferred transaction (a read snapshot for multi-query reads).
     "begin",
-    # sqlite3's own context manager (``with conn:``): commits on exit and
-    # rolls back on error, exactly as the ``with db.conn:`` blocks it replaces.
-    "transaction",
     # Installs a SQLite progress handler (search-lane cancellation), a
     # connection setting rather than a statement.
     "set_progress_handler",
@@ -176,8 +170,8 @@ def test_commit_rollback_and_in_transaction(db):
     assert _committed_markers(db) == 1
 
 
-def test_commit_is_a_no_op_while_commits_are_held(db):
-    with db._commits_held():
+def test_commit_is_a_no_op_inside_a_unit_of_work(db):
+    with db.transaction():
         _write(db, "a")
         db.commit()
         assert db.in_transaction
@@ -278,14 +272,16 @@ def test_transaction_rolls_back_when_the_block_raises(db):
     assert _committed_markers(db) == 0
 
 
-def test_transaction_commits_even_while_commits_are_held(db):
-    # ``with conn:`` commits through sqlite3's C-level commit, which
-    # ``_Connection.commit``'s hold never sees; ``transaction()`` keeps that.
-    with db._commits_held():
+def test_nested_transaction_commits_with_its_owner(db):
+    # A nested unit is a savepoint: nothing is durable until the outermost
+    # unit commits (``test_unit_of_work.py`` covers the rest).
+    with db.transaction():
         with db.transaction():
             _write(db, "a")
-        assert not db.in_transaction
-        assert _committed_markers(db) == 1
+        assert db.in_transaction
+        assert _committed_markers(db) == 0
+    assert not db.in_transaction
+    assert _committed_markers(db) == 1
 
 
 def test_set_progress_handler_interrupts_and_clears(db):

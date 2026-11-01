@@ -276,8 +276,7 @@ def apply_label_set(db, fingerprint, planned, label_count, unidentified=(), *, l
     so the cached output still matches what its fingerprint would produce.
     """
     marker = MARKER_PREFIX + fingerprint
-    with db.transaction():
-        db.begin_immediate()
+    with db.transaction(immediate=True):
         if db.meta.get(marker) is not None:
             return 0
         if label_set is not None and _source_snapshot(label_set["metas"]) != label_set["source_snapshot"]:
@@ -398,8 +397,7 @@ def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, s
         db, saved_metas, fetch=fetch, identities_by_file=identities_by_file,
         source_snapshots=source_snapshots, cancel_check=cancel_check,
     )
-    with db.transaction():
-        db.begin_immediate()
+    with db.transaction(immediate=True):
         for meta in saved_metas:
             snapshot = source_snapshots.get(meta.get("labels_file"))
             if snapshot is not None and _source_snapshot([meta]) != snapshot:

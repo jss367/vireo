@@ -62,7 +62,7 @@ def create_identity_alternatives_blueprint(get_db: GetDb, json_error: JsonError,
         ):
             return json_error('Unresolved alternatives changed; reload the group before saving', 409)
         try:
-            with db._commits_held():
+            with db.transaction():
                 if resolve:
                     species = identities.uncertainty_text(body.get('species'), 'species', required=True)
                     entry_id = identities.resolve_alternatives(db, ids, species)

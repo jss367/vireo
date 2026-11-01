@@ -396,7 +396,7 @@ class _FileIndexer:
         # writer lock. A second connection may legitimately add the new
         # photo to a collection as soon as the row becomes visible; cleanup
         # after add_photo commits would mistake that membership for stale.
-        with self.db._commits_held():
+        with self.db.transaction():
             photo_id, inserted = photo_ingest.add_photo(
                 self.db, folder_id=item.folder_id,
                 filename=item.image_path.name,

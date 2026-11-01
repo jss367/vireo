@@ -1260,11 +1260,11 @@ def test_record_generated_original_untracked_marks_evicted_at_source_mtime(db, l
 
 def test_record_generated_original_commits_the_callers_transaction(db, lib):
     # A plain commit, like the ``db.conn.commit()`` it replaced: it ends a
-    # transaction the caller opened, and honors ``_commits_held``.
+    # transaction the caller opened, and defers to an open unit of work.
     db.begin_immediate()
     db.photos.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
     assert not db.in_transaction
-    with db._commits_held():
+    with db.transaction():
         db.photos.record_generated_original(lib["b"], "working/b.jpg", tracked=True)
         assert db.in_transaction
     assert _working_copy_state(db, lib["b"])[0] == "working/b.jpg"
