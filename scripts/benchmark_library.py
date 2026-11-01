@@ -27,6 +27,7 @@ BUDGETS_1M = {
 
 
 def _seed(db_path, photo_count):
+    import config  # noqa: F401  (installs the settings provider the Database reads)
     from db import Database
     from services import workspace_folders
 

@@ -6,6 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
 
+import config  # noqa: F401  (installs the settings provider the Database reads)
 from db import Database
 
 
