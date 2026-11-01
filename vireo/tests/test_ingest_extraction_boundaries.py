@@ -145,9 +145,13 @@ def test_userfirst_seed_prefix_bootstraps_before_ingest_import():
             return SimpleNamespace(path=posixpath, pardir="..")
         if name == "sys":
             return fake_sys
-        assert name == "services", "Seed prefix unexpectedly imported a runtime dependency"
+        assert name in ("config", "services"), (
+            f"Seed prefix unexpectedly imported a runtime dependency: {name!r}"
+        )
         if expected not in fake_sys.path:
-            raise ModuleNotFoundError("services unavailable before seed path bootstrap")
+            raise ModuleNotFoundError(f"{name} unavailable before seed path bootstrap")
+        if name == "config":
+            return SimpleNamespace()
         return SimpleNamespace(photo_ingest=ingest, workspace_folders=object())
 
     tree = ast.parse((ROOT / "vireo/testing/userfirst/seeds.py").read_text(encoding="utf-8"))
@@ -158,4 +162,4 @@ def test_userfirst_seed_prefix_bootstraps_before_ingest_import():
         exec(compile(ast.Module(body=_module_prefix(tree), type_ignores=[]), "<inert seed prefix>", "exec"), ns)
         assert ns["photo_ingest"] is ingest
         assert fake_sys.path == [expected]
-        assert imports == ["os", "sys", "services"]
+        assert imports == ["os", "sys", "config", "services"]
