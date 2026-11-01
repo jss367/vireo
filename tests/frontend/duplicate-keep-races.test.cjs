@@ -184,3 +184,26 @@ test('keep refuses a scan already running or a restore with no current snapshot'
   await duringRestore;
   assert.equal(p.c.state.duplicateKeepPending.size, 0);
 });
+
+test('large resolved groups preserve card order without quadratic position scans', () => {
+  const count = 4096;
+  const ids = Array.from({length: count}, (_, i) => i + 1);
+  let reads = 0;
+  const order = new Proxy(ids, {
+    get(target, property, receiver) {
+      if (typeof property === 'string' && /^\d+$/.test(property)) {
+        assert(++reads <= count * 40, 'card position reads must stay within an O(n log n) budget');
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const group = {file_hash: 'EMPTY', empty_file_group: true,
+    winner: {id: count}, losers: ids.slice(0, -1).reverse().map(id => ({id})), _cardOrder: order};
+  const c = vm.createContext({escapeHtml: String, renderCategoryBadge: () => '',
+    renderGroupWarning: () => '', renderCard: (photo, kept) => `[${photo.id}:${kept}]`});
+  runFunctions(fs.readFileSync(path.join(root, 'vireo/static/duplicates/resolved.js'), 'utf8'),
+    ['renderResolvedGroup'], c);
+  const html = c.renderResolvedGroup(group);
+  assert.deepEqual([...html.matchAll(/\[(\d+):(true|false)\]/g)].map(match => [Number(match[1]), match[2]]),
+    ids.map(id => [id, id === count ? 'true' : 'false']));
+});

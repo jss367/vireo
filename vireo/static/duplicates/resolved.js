@@ -140,8 +140,8 @@ export function renderResolvedGroup(group) {
   // chosen photo left would leave KEEP stationary and another Keep button
   // under the pointer, making a second click undo the choice.
   if (!group._cardOrder) group._cardOrder = members.map(function(photo) { return photo.id; });
-  var order = group._cardOrder;
-  members.sort(function(a, b) { return order.indexOf(a.id) - order.indexOf(b.id); });
+  var order = new Map(group._cardOrder.map(function(id, index) { return [id, index]; }));
+  members.sort(function(a, b) { return (order.get(a.id) ?? -1) - (order.get(b.id) ?? -1); });
   members.forEach(function(photo) {
     var isKept = keptIds.has(photo.id);
     html += renderCard(photo, isKept, isKept ? undefined : photo.reason, !isKept, winnerProtected, winnerOffline);
