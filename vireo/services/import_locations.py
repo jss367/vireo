@@ -262,8 +262,21 @@ def _google_suggestion(
     }, None, broad
 
 
+def _wrap_lng(lng: float) -> float:
+    """Longitude in [-180, 180): 180 and -180 are one meridian."""
+    return (lng + 180.0) % 360.0 - 180.0
+
+
 def _nearby_bucket(lat: float, lng: float) -> _NearbyKey:
-    return math.floor(lat / _NEARBY_BUCKET_DEG), math.floor(lng / _NEARBY_BUCKET_DEG)
+    return math.floor(lat / _NEARBY_BUCKET_DEG), math.floor(_wrap_lng(lng) / _NEARBY_BUCKET_DEG)
+
+
+def _nearby_center(bucket: _NearbyKey) -> tuple[float, float]:
+    """A bucket's center, kept on the globe for Google: the bucket holding a
+    pole (latitude exactly 90) would otherwise center past it."""
+    lat = (bucket[0] + 0.5) * _NEARBY_BUCKET_DEG
+    lng = (bucket[1] + 0.5) * _NEARBY_BUCKET_DEG
+    return min(90.0, max(-90.0, lat)), _wrap_lng(lng)
 
 
 def _cached_nearby(bucket: _NearbyKey, language: str | None) -> list[JsonDict] | None:
@@ -296,8 +309,7 @@ def _lookup_nearby(
     cached = _cached_nearby(bucket, language)
     if cached is not None:
         return cached
-    lat = (bucket[0] + 0.5) * _NEARBY_BUCKET_DEG
-    lng = (bucket[1] + 0.5) * _NEARBY_BUCKET_DEG
+    lat, lng = _nearby_center(bucket)
     try:
         found = places.nearby_named_places(lat, lng, api_key, language=language)
     except places.PlacesTransientError:

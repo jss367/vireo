@@ -628,6 +628,54 @@ def test_a_streamed_preview_past_the_shared_outing_budget_is_refused_before_near
     assert "too densely packed" in frames[-1]["work_limit_error"]
 
 
+@pytest.mark.parametrize("point", [
+    (90.0, 0.0), (-90.0, 0.0), (0.0, 180.0), (0.0, -180.0), (89.999, 179.999), (-89.999, -179.999),
+])
+def test_nearby_lookups_at_the_edges_of_the_globe_ask_google_about_real_coordinates(
+        db, monkeypatch, point):
+    """A bucket holding latitude 90 or longitude 180 must not center at 90.01
+    or 180.01, which Google rejects as a failed lookup."""
+    asked = []
+
+    def fake_nearby(lat, lng, api_key, *, language="en"):
+        asked.append((lat, lng))
+        return [{"place_id": "edge", "name": "Edge Park", "type": "park",
+                 "lat": point[0], "lng": point[1]}]
+
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+    monkeypatch.setattr(places, "nearby_named_places", fake_nearby)
+
+    [group] = suggest_import_locations(db, _files([point]), api_key="KEY", language="en")["groups"]
+
+    [(lat, lng)] = asked
+    assert -90 <= lat <= 90 and -180 <= lng < 180
+    assert [p["place_id"] for p in group["nearby_places"]] == ["edge"]
+    assert "nearby_unresolved" not in group
+
+
+def test_both_sides_of_the_antimeridian_share_a_nearby_lookup():
+    assert import_locations._nearby_bucket(10.0, 180.0) == import_locations._nearby_bucket(10.0, -180.0)
+
+
+def test_a_streamed_preview_at_the_pole_reports_its_nearby_places(db, monkeypatch, exiftool_present):
+    asked = []
+    monkeypatch.setattr(import_locations, "read_source_gps", lambda paths: {paths[0]: (90.0, 180.0)})
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
+
+    def fake_nearby(lat, lng, api_key, *, language="en"):
+        asked.append((lat, lng))
+        return [{"place_id": "pole", "name": "Pole Park", "type": "park", "lat": 90.0, "lng": 0.0}]
+
+    monkeypatch.setattr(places, "nearby_named_places", fake_nearby)
+
+    frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
+        db._db_path, ["/card/pole.NEF"], {"google_maps_api_key": "KEY"})]
+
+    [(lat, lng)] = asked
+    assert lat == 90.0 and -180 <= lng < 180
+    assert frames[-1]["groups"][0]["nearby_places"][0]["name"] == "Pole Park"
+
+
 def test_an_outing_across_the_antimeridian_is_offered_places_not_called_spread_out(db, monkeypatch):
     """Longitudes 179.99 and -179.99 are 1.1 km apart, not half the planet."""
     walk = [(-16.5, 179.995), (-16.5, -179.995)]
