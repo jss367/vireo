@@ -449,6 +449,7 @@ POST         /api/sync/discard
 POST         /api/sync/location-writes
 POST         /api/system/install-exiftool
 POST         /api/system/mcp-check
+POST         /api/thumbnail-cache/recheck
 POST         /api/undo
 POST         /api/v1/batch/flag
 POST         /api/v1/encounters/species
@@ -485,6 +486,7 @@ PUT          /api/color-label-descriptions/<color>
 PUT          /api/keywords/<int:keyword_id>
 PUT          /api/move-rules/<int:rule_id>
 PUT          /api/photos/<int:photo_id>/primary-subject
+PUT          /api/photos/<int:photo_id>/subjects/reviewer-box
 PUT          /api/processes/<int:process_id>
 PUT          /api/workspaces/<int:ws_id>
 PUT          /api/workspaces/<int:ws_id>/subject-types

@@ -211,7 +211,7 @@ class MasksFeaturesRepository:
         ).fetchone()
 
     def set_active_variant(
-        self, photo_id: int, variant: str, min_conf: float, _commit: bool = True, *,
+        self, photo_id: int, variant: str, min_conf: float, *,
         weak_rescue_min_conf: float | None = None,
     ) -> None:
         """Activate ``variant`` for ``photo_id`` against the ``min_conf`` floor.
@@ -279,13 +279,11 @@ class MasksFeaturesRepository:
              row["subject_clip_high"], row["subject_clip_low"], row["subject_y_median"],
              row["bg_separation"], row["phash_crop"], row["noise_estimate"], photo_id),
         )
-        if _commit:
-            self.commit_with_retry(self.conn)
 
     # -- storage cleanup -----------------------------------------------------
 
     def delete_for_variant(self, variant: str) -> int:
-        """Delete all photo_masks rows + files for a variant and commit.
+        """Delete all photo_masks rows + files for a variant (no commit).
 
         Refuses (``ValueError``) if the variant is active for any photo
         (caller must switch active first). Files go through ``remove_file``,
@@ -306,12 +304,11 @@ class MasksFeaturesRepository:
         for r in rows:
             self.remove_file(r["path"])
         self.conn.execute("DELETE FROM photo_masks WHERE variant=?", (variant,))
-        self.commit_with_retry(self.conn)
         return len(rows)
 
     def delete_inactive(self) -> int:
         """Delete all photo_masks rows + files except the active variant
-        per photo, and commit. Returns the number of rows deleted.
+        per photo (no commit). Returns the number of rows deleted.
 
         Photos whose ``active_mask_variant IS NULL`` are skipped entirely
         (we never delete the only mask we know about). The user must
@@ -333,7 +330,6 @@ class MasksFeaturesRepository:
                 "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
                 (r["photo_id"], r["variant"]),
             )
-        self.commit_with_retry(self.conn)
         return len(rows)
 
     def find_stale(self, detector_confidence: float | None = None) -> list[dict[str, Any]]:
@@ -382,7 +378,7 @@ class MasksFeaturesRepository:
 
     def delete_stale(self, stale: Iterable[dict[str, Any]]) -> int:
         """Remove rows + files for the ``stale`` masks (a ``find_stale``
-        result), skipping active variants, and commit. Returns the count."""
+        result), skipping active variants (no commit). Returns the count."""
         deleted = 0
         for s in stale:
             is_active = self.conn.execute(
@@ -397,7 +393,6 @@ class MasksFeaturesRepository:
                 (s["photo_id"], s["variant"]),
             )
             deleted += 1
-        self.commit_with_retry(self.conn)
         return deleted
 
     # -- coverage and summaries ----------------------------------------------
@@ -598,15 +593,13 @@ class MasksFeaturesRepository:
         detector_model: str | None,
         prompt: Sequence[float | None],
         quality: MaskQuality | None = None,
-        *,
-        _commit: bool = True,
     ) -> None:
         """Insert or replace a mask row for (photo_id, variant).
 
         ``prompt`` is the ``(x, y, w, h)`` box SAM was prompted with and
-        ``quality`` the subject measurements (all NULL when None).
-        ``_commit=False`` lets a caller include the row in a larger atomic
-        per-photo persistence transaction.
+        ``quality`` the subject measurements (all NULL when None). Does not
+        commit: the caller's per-photo unit of work persists it with the
+        rest of the photo's subject analysis.
         """
         prompt_x, prompt_y, prompt_w, prompt_h = prompt
         q = MaskQuality() if quality is None else quality
@@ -645,10 +638,8 @@ class MasksFeaturesRepository:
              q.subject_clip_high, q.subject_clip_low, q.subject_y_median, q.bg_separation, q.phash_crop,
              q.noise_estimate),
         )
-        if _commit:
-            self.commit_with_retry(self.conn)
 
-    def save_subject_raw_analysis(self, detection_id: int, report: dict[str, Any], _commit: bool = True) -> None:
+    def save_subject_raw_analysis(self, detection_id: int, report: dict[str, Any]) -> None:
         """Keep original and corrected measurements together for each detection."""
         self.conn.execute(
             "INSERT INTO subject_raw_analysis(detection_id, recipe, report_json, created_at) "
@@ -656,17 +647,14 @@ class MasksFeaturesRepository:
             "recipe=excluded.recipe, report_json=excluded.report_json, created_at=excluded.created_at",
             (detection_id, report["recipe"], json.dumps(report, allow_nan=False), int(time.time())),
         )
-        if _commit:
-            self.commit_with_retry(self.conn)
 
     def update_pipeline_features(
-        self, photo_id: int, features: PipelineFeatures, *, _commit: bool = True,
+        self, photo_id: int, features: PipelineFeatures,
     ) -> None:
         """Write ``features``' set columns to the photo's row.
 
         Only the columns the patch sets are updated (an explicit None
-        clears one). ``_commit=False`` lets a caller include the update in
-        a larger atomic per-photo persistence transaction.
+        clears one). Does not commit.
         """
         updates = features.columns()
         if not updates:
@@ -676,8 +664,6 @@ class MasksFeaturesRepository:
         self.conn.execute(
             f"UPDATE photos SET {set_clause} WHERE id=?", values
         )
-        if _commit:
-            self.commit_with_retry(self.conn)
 
     # -- stage selectors -----------------------------------------------------
 
@@ -870,23 +856,20 @@ class MasksFeaturesRepository:
     def update_embeddings(
         self, photo_id: int, dino_subject_embedding: bytes | None = None,
         dino_global_embedding: bytes | None = None,
-        variant: str | None = None, _commit: bool = True,
+        variant: str | None = None,
     ) -> None:
         """Store DINOv2 embedding BLOBs (and their variant) on the photo row.
 
         ``variant`` names the DINOv2 variant that produced the embeddings
         (e.g. "vit-b14"), so the pipeline can detect stale embeddings after a
         variant switch and drop them instead of feeding mismatched-dim vectors
-        to cosine similarity. ``_commit=False`` only when the caller owns a
-        larger transaction and will commit it.
+        to cosine similarity. Does not commit.
         """
         self.conn.execute(
             "UPDATE photos SET dino_subject_embedding=?, dino_global_embedding=?, "
             "dino_embedding_variant=? WHERE id=?",
             (dino_subject_embedding, dino_global_embedding, variant, photo_id),
         )
-        if _commit:
-            self.commit_with_retry(self.conn)
 
     def get_embedding(self, photo_id: int, model: str, variant: str = '') -> bytes | None:
         """Return the embedding blob for (photo_id, model, variant), or None."""
@@ -898,7 +881,7 @@ class MasksFeaturesRepository:
         return row["embedding"] if row else None
 
     def upsert_embedding(self, photo_id: int, model: str, embedding_bytes: bytes, variant: str = '') -> None:
-        """Store an embedding blob for (photo_id, model, variant) and commit."""
+        """Store an embedding blob for (photo_id, model, variant) (no commit)."""
         self.conn.execute(
             """INSERT INTO photo_embeddings (photo_id, model, variant, embedding)
                VALUES (?, ?, ?, ?)
@@ -907,7 +890,23 @@ class MasksFeaturesRepository:
                              created_at = datetime('now')""",
             (photo_id, model, variant, embedding_bytes),
         )
-        self.conn.commit()
+
+    def clear_detection_embeddings(self, photo_id: int, detection_id: int) -> None:
+        """Retire a replaced crop and its unprovenanced photo-level projections.
+
+        Caller owns the transaction. Other detections' vectors and unrelated
+        models remain available; the default vector has no source-detection key.
+        """
+        variant = f"det:{detection_id}"
+        models = self.conn.execute(
+            "SELECT model FROM photo_embeddings WHERE photo_id=? AND variant=?",
+            (photo_id, variant),
+        ).fetchall()
+        for row in models:
+            self.conn.execute(
+                "DELETE FROM photo_embeddings WHERE photo_id=? AND model=? AND variant IN ('', ?)",
+                (photo_id, row["model"], variant),
+            )
 
     def photos_with_embedding(
         self, model: str, variant: str = '', photo_ids: Sequence[int] | None = None,

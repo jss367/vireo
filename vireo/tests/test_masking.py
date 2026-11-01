@@ -53,6 +53,7 @@ def test_update_photo_pipeline_features(tmp_path):
             subject_clip_high=0.02,
         ),
     )
+    db.commit()
 
     row = db.conn.execute(
         "SELECT mask_path, crop_complete, subject_clip_high, subject_tenengrad "
@@ -92,6 +93,7 @@ def test_get_photos_missing_masks(tmp_path):
     ], detector_model="megadetector")
     db.commit()
     db.masks_features.update_pipeline_features(pid3, PipelineFeatures(mask_path="/masks/3.png"))
+    db.commit()
 
     photos = subject_masks.get_photos_missing_masks(db)
     assert len(photos) == 1

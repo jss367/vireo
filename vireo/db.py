@@ -2059,7 +2059,7 @@ class Database:
         loser_metas = [repo.photo_metadata(lid) for lid in loser_ids]
         merge = merge_metadata(winner_meta, loser_metas)
 
-        with repo.transaction():
+        with self.transaction():
             if winner_flag is not None:
                 repo.set_flag(winner_id, winner_flag)
             if merge.new_rating != winner_meta.rating:

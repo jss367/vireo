@@ -147,3 +147,43 @@ def test_rejecting_a_region_as_not_an_animal_promotes_the_other_subject_and_is_r
         arg=photo_id,
     )
     assert db.detections.row(stump)['subject_verdict'] is None
+
+
+def test_draw_missing_subject_and_retry_scoped_measurements(live_server, page, tmp_path):
+    from subjects import payload
+    db = live_server['db']
+    path = tmp_path / 'missing-bird.jpg'
+    Image.new('RGB', (640, 400), (80, 95, 90)).save(path)
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
+    photo_id = photo_ingest.add_photo(db, folder_id, path.name, extension='.jpg',
+                           file_size=path.stat().st_size, file_mtime=1, width=640, height=400)
+    fallback = detection_store.write_detection_batch(db, photo_id, 'full-image', [
+        {'box': dict(x=0, y=0, w=1, h=1), 'confidence': 1, 'category': 'animal'}])[0]
+    db.predictions.add(fallback, 'Full frame guess', .9, 'bioclip')
+    db.commit()
+    # A saved crop must not change the coordinate system used for drawing.
+    db.set_photo_edit_recipe(photo_id, {'crop': dict(x=.2, y=.2, w=.4, h=.4), 'rotation': 90})
+    db.commit()
+    page.goto(live_server['url'] + '/browse')
+    page.evaluate("id => openLightbox(id, 'missing-bird.jpg')", photo_id)
+    page.locator('#lightboxSubjectSummary').click()
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('Full-image classification only')
+    page.locator('#lightboxSubjectDraw').click()
+    canvas = page.locator('.lb-subject-box-dialog canvas')
+    expect(page.locator('.lb-subject-box-dialog [role=status]')).to_contain_text('Drag around the animal')
+    rect = canvas.bounding_box()
+    page.mouse.move(rect['x'] + rect['width'] * .4, rect['y'] + rect['height'] * .3)
+    page.mouse.down()
+    page.mouse.move(rect['x'] + rect['width'] * .55, rect['y'] + rect['height'] * .6, steps=5)
+    page.mouse.up()
+    page.locator('.lb-subject-box-dialog [data-save]').click()
+    expect(page.locator('.lb-subject-box-dialog')).to_have_count(0)
+    expect(page.locator('#lightboxSubjectDetails')).to_contain_text('Reviewer-selected region')
+    expect(page.locator('#lightboxSubjectDetails')).to_contain_text('not localized to this subject')
+    page.locator('#lightboxSubjectRetry').click()
+    expect(page.locator('#lightboxSubjectDetails')).to_contain_text('Box quality', timeout=30000)
+    chosen = payload(db, photo_id)['subjects'][0]
+    assert abs(chosen['box_x'] - .4) < .005
+    assert abs(chosen['box_y'] - .3) < .005
+    assert chosen['analysis'] is not None
+    assert chosen['predictions'] == []

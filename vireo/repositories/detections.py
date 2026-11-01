@@ -449,7 +449,9 @@ class DetectionsRepository:
         q += " ORDER BY confidence DESC"
         return self.conn.execute(q, params).fetchall()
 
-    def get_ids_for_photos(self, photo_ids: Collection[int]) -> dict[int, set[int]]:
+    def get_ids_for_photos(
+        self, photo_ids: Collection[int], *, exclude_model: str | None = None,
+    ) -> dict[int, set[int]]:
         """Return ``{photo_id: set(detection_id, ...)}`` for the given photo IDs.
 
         The detections table is global (no workspace_id). Used to snapshot
@@ -459,6 +461,7 @@ class DetectionsRepository:
 
         No threshold filter: the caller needs to see every existing row,
         including low-confidence ones, so they can all be cleaned up.
+        ``exclude_model`` keeps non-detector regions out of a reclassify snapshot.
 
         IDs are queried in chunks of at most 900 to stay safely under
         SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
@@ -474,8 +477,9 @@ class DetectionsRepository:
             placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
                 f"SELECT id, photo_id FROM detections "
-                f"WHERE photo_id IN ({placeholders})",
-                tuple(chunk),
+                f"WHERE photo_id IN ({placeholders})"
+                + (" AND (detector_model IS NULL OR detector_model != ?)" if exclude_model is not None else ""),
+                (*chunk, exclude_model) if exclude_model is not None else tuple(chunk),
             ).fetchall()
             for row in rows:
                 result.setdefault(row["photo_id"], set()).add(row["id"])

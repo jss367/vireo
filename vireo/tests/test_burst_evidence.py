@@ -224,6 +224,7 @@ def _mark_quality(db, photo_id, sharpness, *, crop_complete=1.0, eye=None):
                     bg_separation=0, subject_clip_high=0, subject_clip_low=0,
                     subject_y_median=115, subject_size=.05, noise_estimate=1))
     db.masks_features.set_active_variant(photo_id, "sam2-small", .2)
+    db.commit()
     if eye is not None:
         db.conn.execute(
             "UPDATE photos SET eye_x = ?, eye_y = ?, eye_conf = 0.9, eye_tenengrad = ? WHERE id = ?",
@@ -540,6 +541,7 @@ def test_focus_crop_shades_outside_the_mask(app_and_db):
     db.detections.save(pid, [{"box": {"x": .4, "y": .4, "w": .2, "h": .2}, "confidence": .9, "category": "animal"}], detector_model="MDV6")
     db.commit()
     db.masks_features.upsert_mask(pid, "test", mask_path, "MDV6", (.4, .4, .2, .2))
+    db.commit()
     db.conn.execute("UPDATE photos SET mask_path = ?, active_mask_variant='test' WHERE id = ?", (mask_path, pid))
     db.conn.commit()
 
@@ -556,6 +558,7 @@ def test_focus_crop_shades_outside_the_mask(app_and_db):
 
     # A mask path outside the masks directory is never read.
     db.masks_features.upsert_mask(pid, "test", "/etc/hosts", "MDV6", (.4, .4, .2, .2))
+    db.commit()
     db.conn.execute("UPDATE photos SET mask_path = ? WHERE id = ?", ("/etc/hosts", pid))
     db.conn.commit()
     resp = client.get(f"/photos/{pid}/focus-crop?size=256&mask=1")

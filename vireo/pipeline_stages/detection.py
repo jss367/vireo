@@ -203,7 +203,9 @@ class _DetectPass:
             photo_ids_list = [p["id"] for p in self.photos]
             detections = getattr(thread_db, "detections", None)
             pre_run_det_ids: dict = (
-                detections.get_ids_for_photos(photo_ids_list)
+                # Human regions are not outputs a detector can reproduce. Keep
+                # them out of the stale-ID cleanup performed after reclassify.
+                detections.get_ids_for_photos(photo_ids_list, exclude_model="reviewer-selected")
                 if detections is not None else {}
             )
         else:

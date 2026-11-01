@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
@@ -24,7 +27,7 @@ from resource_ledger import (
 from services import detection_store, subject_masks
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from db import Database
     from PIL import Image
@@ -147,6 +150,7 @@ def extract_masks_stage(
         run.runner.update_step(run.job["id"], "extract_masks", status="failed", error=str(e))
         masks.outcomes.stage_error = f"{type(e).__name__}: {e}"[:1000]
     finally:
+        masks.close()
         result = run.result["stages"].setdefault("extract_masks", {})
         result["outcomes"] = masks.outcomes.as_dict()
 
@@ -171,6 +175,9 @@ def _row_folder_id(row: PhotoRecord) -> int | None:
 # progress update.
 _NEXT_PHOTO = "next"
 _STOP = "stop"
+# The per-photo phases whose time the stage result reports, in
+# the order a photo goes through them.
+_MASK_PHASES = ("decode", "segment", "analyze", "embed", "store")
 
 
 class _MaskFileStage(Protocol):
@@ -298,6 +305,30 @@ class _MaskPass:
         # The pre-flight outage message, kept so an early exit can put it
         # on the failed step instead of a benign "no detections" summary.
         self.em_offline_preflight_error = None
+        # Seconds spent in each phase of the per-photo work, published on
+        # the stage result so a slow run shows where its time went. The
+        # analysis overlaps the embedding, so the phases can sum to more
+        # than the stage's wall time.
+        self.phase_seconds: dict[str, float] = dict.fromkeys(_MASK_PHASES, 0.0)
+        # Runs each photo's quality analysis beside its DINOv2 embedding;
+        # created on the first photo that needs both.
+        self._analysis_pool: ThreadPoolExecutor | None = None
+
+    def close(self) -> None:
+        if self._analysis_pool is not None:
+            self._analysis_pool.shutdown(wait=True)
+            self._analysis_pool = None
+
+    @contextmanager
+    def _timed(self, phase: str) -> Iterator[None]:
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.phase_seconds[phase] += time.perf_counter() - start
+
+    def _phase_seconds_result(self) -> dict[str, float]:
+        return {phase: round(secs, 1) for phase, secs in self.phase_seconds.items()}
 
     # -- setup -------------------------------------------------------
 
@@ -993,7 +1024,8 @@ class _MaskPass:
         # No-op on subsequent iterations.
         self._ensure_weights()
 
-        proxy = self.render_proxy(item.image_path, longest_edge=self.proxy_longest_edge)
+        with self._timed("decode"):
+            proxy = self.render_proxy(item.image_path, longest_edge=self.proxy_longest_edge)
         if proxy is None:
             # The source didn't load. Ask how far the
             # problem reaches before deciding whether to
@@ -1013,7 +1045,8 @@ class _MaskPass:
         # SAM weight load + image preprocessing + prompt-coord
         # math, blocking other pipelines' GPU work for CPU-only
         # phases.
-        mask = self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
+        with self._timed("segment"):
+            mask = self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
         if mask is None:
             self.outcomes.record(item.photo_id, "sam_no_mask")
             self.skipped += 1
@@ -1022,13 +1055,14 @@ class _MaskPass:
         if run.control.should_abort_without_pause(run.abort):
             return _STOP
 
-        completeness, features, analysis_report = self._analyze_subject(
-            item, proxy, mask,
+        completeness, features, analysis_report, embeddings = (
+            self._analyze_and_embed(item, proxy, mask)
         )
         if run.control.should_abort_without_pause(run.abort):
             return _STOP
 
-        self._store_mask(item, proxy, mask, completeness, features, analysis_report)
+        with self._timed("store"):
+            self._store_mask(item, mask, completeness, features, analysis_report, embeddings)
         self.outcomes.record(item.photo_id, "completed")
         self.masked += 1
         return None
@@ -1144,6 +1178,41 @@ class _MaskPass:
                 item.photo["folder_id"],
             )
 
+    def _analyze_and_embed(
+        self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
+    ) -> tuple[float, dict[str, Any], dict[str, Any] | None, tuple[bytes | None, bytes]]:
+        """Run the quality analysis and the DINOv2 embedding side by side.
+
+        Both read only the proxy and the mask, so neither result changes.
+        The embedding is an ONNX call that releases the GIL; the analysis is
+        mostly single-threaded numpy and scipy. Overlapping them hides the
+        analysis: about 0.3 s of the 4.5 s each photo took with sam2-large
+        on an M3 Max (docs/investigations/subject-feature-extraction-throughput.md).
+        The pool has one thread, so at most one analysis runs at a time, and
+        this waits for it before returning or raising, so none outlives the
+        photo's lock. The copied context carries the job's bound cancel probes
+        into the analysis thread.
+        """
+        if self._analysis_pool is None:
+            self._analysis_pool = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="vireo-mask-analysis",
+            )
+        analysis = self._analysis_pool.submit(
+            contextvars.copy_context().run, self._timed_analysis, item, proxy, mask,
+        )
+        try:
+            with self._timed("embed"):
+                embeddings = self._dino_embeddings(proxy, mask)
+        finally:
+            wait([analysis])
+        return (*analysis.result(), embeddings)
+
+    def _timed_analysis(
+        self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
+    ) -> tuple[float, dict[str, Any], dict[str, Any] | None]:
+        with self._timed("analyze"):
+            return self._analyze_subject(item, proxy, mask)
+
     def _analyze_subject(
         self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
     ) -> tuple[float, dict[str, Any], dict[str, Any] | None]:
@@ -1173,8 +1242,9 @@ class _MaskPass:
         return completeness, features, analysis_report
 
     def _store_mask(
-        self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray, completeness: float,
+        self, item: _MaskPhoto, mask: np.ndarray, completeness: float,
         features: dict[str, Any], analysis_report: dict[str, Any] | None,
+        embeddings: tuple[bytes | None, bytes],
     ) -> None:
         thread_db = self.thread_db
         entry = item.entry
@@ -1188,7 +1258,7 @@ class _MaskPass:
         mask_bg_tenengrad = features.pop("bg_tenengrad", None)
         mask_subject_size = _mask_subject_size(mask)
 
-        subj_emb_blob, global_emb_blob = self._dino_embeddings(proxy, mask)
+        subj_emb_blob, global_emb_blob = embeddings
 
         item.mask_file_stage = self.staged_mask_file.create(
             mask,
@@ -1220,10 +1290,9 @@ class _MaskPass:
                 phash_crop=features.pop("phash_crop", None),
                 noise_estimate=features.pop("noise_estimate", None),
             ),
-            _commit=False,
         )
         subject_masks.set_active_mask_variant(
-            thread_db, photo_id, self.sam2_variant, _commit=False,
+            thread_db, photo_id, self.sam2_variant,
             weak_rescue_min_conf=self.rescue_floor_by_photo.get(photo_id),
         )
         # Remaining (non-mask) per-photo features still land
@@ -1233,18 +1302,17 @@ class _MaskPass:
         # intentionally NOT passed here.
         if features:
             thread_db.masks_features.update_pipeline_features(
-                photo_id, PipelineFeatures(**features), _commit=False,
+                photo_id, PipelineFeatures(**features),
             )
         if analysis_report is not None:
             thread_db.masks_features.save_subject_raw_analysis(
-                entry["detection_id"], analysis_report, _commit=False,
+                entry["detection_id"], analysis_report,
             )
         thread_db.masks_features.update_embeddings(
             photo_id,
             dino_subject_embedding=subj_emb_blob,
             dino_global_embedding=global_emb_blob,
             variant=self.dinov2_variant,
-            _commit=False,
         )
         # Publish a new immutable PNG, then atomically move
         # the mask row, active denormalized fields, quality
@@ -1321,6 +1389,7 @@ class _MaskPass:
                 + self.em_preflight_masked
             ),
             "cancelled": True,
+            "phase_seconds": self._phase_seconds_result(),
         }
 
     def finalize(self) -> None:
@@ -1420,6 +1489,7 @@ class _MaskPass:
             "unreadable": em_unreadable_all,
             "total": em_total_candidates,
             "subthreshold": photos_subthreshold_only,
+            "phase_seconds": self._phase_seconds_result(),
         }
 
 

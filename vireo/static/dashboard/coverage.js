@@ -13,7 +13,7 @@ import { state } from './state.js';
 export var PIPELINE_COVERAGE_FIELDS = [
   {key: 'file_hash',         label: 'File hash (SHA-256)'},
   {key: 'phash',             label: 'Perceptual hash'},
-  {key: 'thumbnail',         label: 'Thumbnail'},
+  {key: 'thumbnail',         label: 'Recorded thumbnails'},
   {key: 'working_copy',      label: 'Working copy (JPG)'},
   {key: 'detected',          label: 'Subject detection'},
   {key: 'mask',              label: 'Subject mask'},

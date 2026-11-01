@@ -52,6 +52,7 @@ def _setup_db(tmp_path):
             dino_subject_embedding=embedding_to_blob(emb),
             dino_global_embedding=embedding_to_blob(emb),
         )
+        db.commit()
         db.photos.update_quality(
             pid,
             subject_size=0.1,
@@ -67,6 +68,7 @@ def _setup_db(tmp_path):
         db.masks_features.upsert_mask(pid, "sam2-small", str(mask_path), "megadetector-v6",
                                      (.2, .2, .4, .4), quality)
         db.masks_features.set_active_variant(pid, "sam2-small", .2)
+        db.commit()
         db.predictions.add(det_ids[0], "robin", 0.9, "bioclip", category="match")
         db.commit()
 

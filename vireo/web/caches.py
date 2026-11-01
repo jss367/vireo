@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from app_paths import media_root
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from computation_cache import ArtifactStore
     from db import Database
     from flask.typing import ResponseReturnValue
-    from services.service_types import JsonError
+    from services.service_types import JsonDict, JsonError
     from web.web_types import AppConfig, GetDb
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ log = logging.getLogger(__name__)
 
 def create_caches_blueprint(
     get_db: GetDb, json_error: JsonError, db_path: str, config: AppConfig,
+    *, start_thumbnail_recheck: Callable[[], JsonDict],
 ) -> Blueprint:
     """Build the derived-caches blueprint.
 
@@ -46,6 +48,11 @@ def create_caches_blueprint(
     locates the per-workspace culling results file beside the catalog.
     """
     blueprint = Blueprint("caches", __name__)
+
+    @blueprint.route("/api/thumbnail-cache/recheck", methods=["POST"])
+    def api_thumbnail_cache_recheck() -> ResponseReturnValue:
+        """Reconcile recorded thumbnail presence across the whole catalog."""
+        return jsonify(start_thumbnail_recheck()), 202
 
     @blueprint.route("/api/detections/<int:photo_id>")
     def api_detections(photo_id: int) -> ResponseReturnValue:

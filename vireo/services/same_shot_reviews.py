@@ -39,12 +39,11 @@ def record_same_shot_review(
     """Return the refreshed group, or None for a stale/invalid client snapshot.
 
     Only catalog data is read; this note makes no claim about file availability
-    or identical pixels. BEGIN IMMEDIATE holds the snapshot stable through commit.
+    or identical pixels. The immediate unit holds the snapshot stable through commit.
     """
     from services.same_shot_duplicates import _attach_photo_context, _group, _photo, shot_identity
 
-    with db.duplicates.transaction():
-        db.duplicates.begin_review_write()
+    with db.transaction(immediate=True):
         rows = list(db.duplicates.same_shot_rows(photo_ids))
         identities = {shot_identity(row) for row in rows}
         if len(rows) != len(photo_ids) or len(identities) != 1 or None in identities:

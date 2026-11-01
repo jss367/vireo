@@ -1727,27 +1727,26 @@ def create_pipeline_blueprint(
         # Raises with no active workspace, before any SQL runs.
         photo_ids = db.masks_features.workspace_photo_ids_with_variant(variant)
         updated = 0
-        # Batch: skip the per-row commit_with_retry inside
-        # set_active_mask_variant and commit once after the loop. A
-        # workspace with 10K photos would otherwise pay 10K WAL fsyncs
-        # per request — multiple seconds with no progress indicator.
-        for photo_id in photo_ids:
-            try:
-                subject_masks.set_active_mask_variant(
-                    db, photo_id, variant, _commit=False,
-                )
-                updated += 1
-            except ValueError as e:
-                # Race: row was deleted between SELECT and UPDATE. Skip
-                # rather than 500 — the user just asked to "make this
-                # the active variant where possible". Log the skip so
-                # the cause is visible if the count looks off.
-                log.warning(
-                    "active-mask-variant skip photo %d: %s",
-                    photo_id, e,
-                )
-                continue
-        db.commit_with_retry()
+        # One unit for the whole batch: a workspace with 10K photos would
+        # otherwise pay 10K WAL fsyncs per request — multiple seconds with
+        # no progress indicator.
+        with db.transaction():
+            for photo_id in photo_ids:
+                try:
+                    subject_masks.set_active_mask_variant(
+                        db, photo_id, variant,
+                    )
+                    updated += 1
+                except ValueError as e:
+                    # Race: row was deleted between SELECT and UPDATE. Skip
+                    # rather than 500 — the user just asked to "make this
+                    # the active variant where possible". Log the skip so
+                    # the cause is visible if the count looks off.
+                    log.warning(
+                        "active-mask-variant skip photo %d: %s",
+                        photo_id, e,
+                    )
+                    continue
         log.info(
             "Switched active mask variant to %s for %d workspace photo(s)",
             variant, updated,

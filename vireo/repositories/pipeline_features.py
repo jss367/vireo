@@ -69,33 +69,27 @@ class PipelineFeaturesRepository:
     # -- connection-local scope tables ------------------------------------------
 
     def _replace_temp_id_scope(self, table_name: str, ids: Iterable[int]) -> None:
-        """Replace a connection-local temp ID table without leaking a transaction.
+        """Replace a connection-local temp ID table (no commit).
 
         SQLite DML against a TEMP table opens a transaction on the connection. If
-        that transaction remains open while the caller reads the main WAL database,
-        a concurrent writer can advance the main database and make a later write on
-        this connection fail immediately with ``SQLITE_BUSY_SNAPSHOT`` (surfaced by
-        Python as ``database is locked``). Commit only when this helper opened the
-        transaction; an outer transaction still belongs entirely to the caller.
+        that transaction remained open while the caller reads the main WAL
+        database, a concurrent writer could advance the main database and make a
+        later write on this connection fail immediately with
+        ``SQLITE_BUSY_SNAPSHOT`` (surfaced by Python as ``database is locked``).
+        So every caller stages inside ``with db.transaction(join=True):``: it
+        commits when no transaction was open, and is a savepoint inside one the
+        caller already owns.
         """
         conn = self.conn
-        started_in_transaction = conn.in_transaction
-        try:
-            conn.execute(
-                f"CREATE TEMP TABLE IF NOT EXISTS {table_name} "
-                "(id INTEGER PRIMARY KEY)"
-            )
-            conn.execute(f"DELETE FROM {table_name}")
-            conn.executemany(
-                f"INSERT OR IGNORE INTO {table_name} (id) VALUES (?)",
-                [(photo_id,) for photo_id in ids],
-            )
-            if not started_in_transaction and conn.in_transaction:
-                conn.commit()
-        except Exception:
-            if not started_in_transaction and conn.in_transaction:
-                conn.rollback()
-            raise
+        conn.execute(
+            f"CREATE TEMP TABLE IF NOT EXISTS {table_name} "
+            "(id INTEGER PRIMARY KEY)"
+        )
+        conn.execute(f"DELETE FROM {table_name}")
+        conn.executemany(
+            f"INSERT OR IGNORE INTO {table_name} (id) VALUES (?)",
+            [(photo_id,) for photo_id in ids],
+        )
 
     def stage_scope_photo_ids(self, photo_ids: Iterable[int]) -> None:
         """Stage the feature load's photo scope (read back with ``scoped=True``).

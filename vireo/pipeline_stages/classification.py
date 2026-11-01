@@ -62,6 +62,7 @@ class _InferenceEntry(TypedDict):
     input_recipe: str | None
     photo: sqlite3.Row
     detection_id: int
+    _reviewer_box: tuple[float, ...] | None
     folder_path: str
     image_path: str
     img: Image.Image
@@ -201,6 +202,7 @@ def _stored_animal_boxes(
             "box_h": d["box_h"],
             "confidence": d["detector_confidence"],
             "category": d["category"],
+            "detector_model": d["detector_model"],
         }
         for d in detection_store.get_detections(
             thread_db, photo_id, min_conf=min_conf, detector_model=detector_model,
@@ -499,7 +501,8 @@ class _ClassifyPass:
         if img is not None and self.raw_session is not None and detection is not None:
             report = img.info.get("_vireo_raw_analysis")
             if report is not None:
-                self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
+                with self.thread_db.transaction():
+                    self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
         return img, folder_path, image_path
 
     def _should_stop(self) -> bool | str | None:
@@ -910,6 +913,7 @@ class _ClassifyPass:
                 "input_recipe": self.input_recipe,
                 "photo": photo,
                 "detection_id": detection["id"],
+                "_reviewer_box": detection_store.reviewer_box_snapshot(detection),
                 "folder_path": folder_path,
                 "image_path": image_path,
                 "img": img,
@@ -1045,7 +1049,7 @@ class _ClassifyPass:
                     d.get("id", 0),
                 ),
             )[:1]
-        return photo_dets
+        return detection_store.with_reviewer_regions(self.thread_db, photo_id, photo_dets)
 
     def _has_confident_non_animal(self, photo_id: int) -> bool:
         if photo_id in self.cached_detections:
@@ -1131,9 +1135,9 @@ class _ClassifyPass:
             )
             if cached:
                 self._count_cache_hit(spec, photo)
-                spec.raw_results.append(self._cached_raw_result(
-                    spec, photo, detection, cached[0], n_detections,
-                ))
+                result = self._cached_raw_result(spec, photo, detection, cached[0], n_detections)
+                result["_reviewer_box"] = detection_store.reviewer_box_snapshot(detection)
+                spec.raw_results.append(result)
                 return True
             # No cached prediction rows: honor a measured
             # ``classifier_match_scores`` summary for the same triple as
@@ -1705,6 +1709,7 @@ class _ClassifyPass:
                         collection_photo_ids=clear_ids,
                         labels_fingerprint=spec.fp,
                         clear_run_keys=False,
+                        exclude_detector_model="reviewer-selected",
                     )
 
         group_result = self.classify_job._store_grouped_predictions(

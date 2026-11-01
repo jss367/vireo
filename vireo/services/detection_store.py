@@ -11,6 +11,7 @@ The single-table writes (``db.detections.save``, ...) are reached through the
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
@@ -18,7 +19,7 @@ from config import config_value
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from db import Database
 
@@ -91,6 +92,62 @@ def get_detections(
         else config_value(db.get_effective_config(cfg.load()), "detector_confidence")
     )
     return db.detections.get(photo_id, floor, detector_model, include_rejected=include_rejected)
+
+
+def with_reviewer_regions(
+    db: Database, photo_id: int, detections: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge current human regions into detector candidates for either job path.
+
+    Fresh detector caches cannot reproduce reviewer regions. Read them live so
+    replaced boxes do not linger in a cached candidate list.
+    """
+    reviewer = [dict(d, confidence=d["detector_confidence"]) for d in get_detections(
+        db, photo_id, min_conf=0, detector_model="reviewer-selected")]
+    reviewer_ids = {d["id"] for d in reviewer}
+    return [dict(d) for d in detections if d.get("detector_model") != "reviewer-selected"
+            and d["id"] not in reviewer_ids] + reviewer
+
+
+def reviewer_box_snapshot(detection: Mapping[str, Any]) -> tuple[float, ...] | None:
+    """Keep exact coordinates; content-addressed IDs quantize small edits."""
+    if detection.get("detector_model") != "reviewer-selected":
+        return None
+    return tuple(detection[key] for key in ("box_x", "box_y", "box_w", "box_h"))
+
+
+def reviewer_result_is_current(db: Database, entry: Mapping[str, Any]) -> bool:
+    """Validate a captured crop inside the caller's short write transaction."""
+    snapshot = entry.get("_reviewer_box")
+    if snapshot is None:
+        return True
+    return any(d["id"] == entry.get("detection_id")
+               and reviewer_box_snapshot(dict(d)) == snapshot
+               for d in get_detections(db, entry["photo"]["id"], min_conf=0,
+                                       detector_model="reviewer-selected"))
+
+
+@contextmanager
+def guard_reviewer_results[Entry: Mapping[str, Any]](
+    db: Database, entries: list[Entry],
+) -> Iterator[None]:
+    """Drop stale reviewer crops and block redraws during their publication.
+
+    Inference runs without photo locks. Each publication boundary takes the
+    same locks as the reviewer-box API, then compares the captured coordinates.
+    Sorted acquisition keeps batches with overlapping photos deadlock-free.
+    """
+    from pipeline_locks import acquire_photo_mask
+
+    photo_ids = sorted({e["photo"]["id"] for e in entries if e.get("_reviewer_box") is not None})
+    with ExitStack() as stack:
+        for photo_id in photo_ids:
+            stack.enter_context(acquire_photo_mask(photo_id))
+        live = {d["id"]: reviewer_box_snapshot(dict(d)) for photo_id in photo_ids
+                for d in get_detections(db, photo_id, min_conf=0, detector_model="reviewer-selected")}
+        entries[:] = [e for e in entries if e.get("_reviewer_box") is None
+                      or live.get(e.get("detection_id")) == e["_reviewer_box"]]
+        yield
 
 
 def get_detections_for_photos(
@@ -191,6 +248,7 @@ def upsert_photo_embedding(
     """
     if verify_workspace:
         db._verify_photo_in_workspace(photo_id)
-    db.masks_features.upsert_embedding(
-        photo_id, model, embedding_bytes, variant,
-    )
+    with db.transaction():
+        db.masks_features.upsert_embedding(
+            photo_id, model, embedding_bytes, variant,
+        )

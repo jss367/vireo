@@ -202,3 +202,28 @@ def test_storage_sort_preserves_load_errors_and_recovers(live_server, page):
     expect(sort).to_be_enabled()
     expect(sort).to_have_value("name")
     expect(grid.locator(".stat-card").first).to_be_visible()
+
+
+def test_storage_can_recheck_thumbnail_records(live_server, page):
+    from vireo.tests.wait import wait_for_job_via_runner
+
+    db = live_server['db']
+    pid = live_server['data']['photos'][0]
+    cache = Path(live_server['app'].config['THUMB_CACHE_DIR'])
+    (cache / f'{pid}.jpg').write_bytes(b'cached')
+    db.caches.clear_thumbnail_path(pid)
+    db.commit()
+    page.goto(f"{live_server['url']}/storage")
+    button = page.get_by_role('button', name='Recheck thumbnails', exact=True)
+    expect(button).to_be_visible()
+    expect(page.get_by_text('Check cached thumbnail presence across all workspaces', exact=False)).to_be_visible()
+    with page.expect_response('**/api/thumbnail-cache/recheck') as response:
+        button.click()
+    assert response.value.status == 202
+    job = wait_for_job_via_runner(live_server['app']._job_runner, response.value.json()['job_id'])
+    assert job['status'] == 'completed', job
+    assert db.photos.get(pid)['thumb_path'] == f'{pid}.jpg'
+    expect(button).to_be_enabled()
+    if screenshot := os.environ.get('VIREO_THUMBNAIL_RECHECK_SCREENSHOT'):
+        button.scroll_into_view_if_needed()
+        page.screenshot(path=screenshot)

@@ -502,10 +502,10 @@ class _PhotoCatalogRewrite:
         # Link destination and repoint the photo together, before deleting
         # originals. A failed visibility write must not leave a folder-wide
         # link exposing unrelated destination siblings after a failed move.
-        # The savepoint releases and commits on success, and rolls back to
-        # itself on any exception (including one from the release or commit).
+        # One unit of work: it commits on success and rolls back on any
+        # exception (including one from the commit itself).
         moves = db.moves_merge
-        with moves.photo_move_savepoint():
+        with db.transaction():
             if link_destination:
                 workspace_folders.add_workspace_folder_no_commit(
                     db, db.active_workspace_id, self.dest_folder_id, restore_removed=True,

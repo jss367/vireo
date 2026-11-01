@@ -3,7 +3,7 @@
 ``create_app`` runs a handful of self-healing passes around startup: the
 ordered catalog repairs (``run_catalog_repairs``), the background thread that
 imports keywords embedded in already-scanned files and then marks species,
-the thumb_path, label-identity
+the explicit thumbnail recheck, label-identity
 and EXIF search backfill jobs, and the teardown that stops the job runner
 and closes the startup database. ``StartupTasks`` owns them because they
 share per-app state (the app, its database path and the startup connection).
@@ -329,99 +329,75 @@ class StartupTasks:
             log.exception("Failed to close database during cleanup")
         return jobs_stopped
 
-    def kickoff_thumb_path_backfill(self) -> None:
-        """Start the thumb_path backfill as a system job when it has work.
-
-        The dashboard's coverage card counts thumbnails by ``thumb_path IS
-        NOT NULL``, but for a long stretch the column was never populated by
-        production code, so libraries with 40k JPEGs cached on disk reported
-        "0 thumbnails" forever. This pass aligns the column with disk reality
-        for legacy rows, and clears it for photos whose cached file has since
-        been deleted (drift correction). It runs as a system JobRunner job
-        (``JobLineage.system``), so it shows in the bottom panel and Jobs page
-        with the reason it started and its history row survives a crash; a
-        run that changed nothing is dropped from history. It is skipped
-        entirely when a fast count check finds nothing to do.
-        """
-        from thumbnails import (
-            backfill_thumb_paths,
-            thumb_path_backfill_candidate_count,
+    def kickoff_preview_cache_maintenance(self) -> str:
+        """Reconcile and enforce the preview quota outside app construction."""
+        job_id, _joined, _snapshot = self._app._job_runner.start_singleton(
+            "preview-cache-maintenance", self._maintain_preview_cache,
+            singleton_key="preview-cache-maintenance", workspace_id=None,
+            lineage=JobLineage.system(
+                "Check preview cache records and enforce the disk quota after launch"
+            ),
         )
+        return job_id
 
-        app = self._app
-        db_path = self._db_path
-        init_db = self._init_db
-        tpdb = None
-        try:
-            tpdb = Database(db_path)
-            candidate_count = thumb_path_backfill_candidate_count(
-                tpdb, app.config["THUMB_CACHE_DIR"],
+    def _maintain_preview_cache(self, job: JobDict) -> JsonDict:
+        from app_paths import media_root
+        from preview_cache import evict_if_over_quota, reconcile_preview_cache
+
+        runner = self._app._job_runner
+        def checkpoint() -> None:
+            if runner.is_cancelled(job["id"]):
+                raise RuntimeError("Preview maintenance cancelled")
+            runner.wait_for_background_io(job["id"])
+
+        checkpoint()
+        root = media_root(self._app.config["THUMB_CACHE_DIR"])
+        with Database(self._db_path) as db:
+            runner.push_event(job["id"], "progress", {"phase": "Checking preview cache records"})
+            reconciled = reconcile_preview_cache(db, root, checkpoint=checkpoint)
+            checkpoint()
+            runner.push_event(job["id"], "progress", {"phase": "Enforcing preview cache quota"})
+            evicted = evict_if_over_quota(db, root, checkpoint=checkpoint)
+        return {
+            "reconciled": reconciled, "evicted": evicted,
+            "noop": not (reconciled or evicted),
+            "summary": f"Corrected {reconciled:,} cache records or orphan files; evicted {evicted:,} previews",
+        }
+
+    def start_thumbnail_recheck(self) -> JsonDict:
+        """Start or join an explicit catalog-wide thumbnail record recheck."""
+        job_id, joined, _snapshot = self._app._job_runner.start_singleton(
+            "thumb_path_backfill", self._recheck_thumbnail_paths,
+            singleton_key="thumbnail-recheck", workspace_id=None,
+            config={"trigger": "user"},
+        )
+        result = {"job_id": job_id, "joined": joined}
+        if joined and self._app._job_runner.is_cancelled(job_id):
+            result["cancelling"] = True
+        return result
+
+    def _recheck_thumbnail_paths(self, job: JobDict) -> JobResult:
+        from thumbnails import backfill_thumb_paths
+
+        runner = self._app._job_runner
+        def progress(current: int, total: int) -> None:
+            job["progress"].update(current=current, total=total)
+            runner.push_event(job["id"], "progress", {
+                "current": current, "total": total,
+                "phase": f"Checked {current:,} of {total:,} thumbnail records",
+            })
+
+        def cancel_check() -> bool:
+            if runner.is_cancelled(job["id"]):
+                return True
+            runner.wait_for_background_io(job["id"])
+            return runner.is_cancelled(job["id"])
+
+        with Database(self._db_path) as db:
+            return backfill_thumb_paths(
+                db, self._app.config["THUMB_CACHE_DIR"],
+                progress_callback=progress, cancel_check=cancel_check,
             )
-        except Exception:
-            log.exception("thumb_path backfill: candidate check failed")
-            return
-        finally:
-            if tpdb is not None:
-                tpdb.close()
-        if candidate_count == 0:
-            log.debug("thumb_path backfill: no candidates, skipping")
-            return
-
-        runner = app._job_runner
-        cache_dir = app.config["THUMB_CACHE_DIR"]
-
-        def work(job: JobDict) -> JobResult:
-            thread_db = Database(db_path)
-            try:
-                active_ws = init_db.active_workspace_id
-                if active_ws is not None:
-                    thread_db.set_active_workspace(active_ws)
-
-                def progress_cb(current: int, total: int) -> None:
-                    job["progress"]["current"] = current
-                    job["progress"]["total"] = total
-                    runner.push_event(
-                        job["id"],
-                        "progress",
-                        {
-                            "current": current,
-                            "total": total,
-                            "phase": f"{current:,} / {total:,} photos reconciled",
-                        },
-                    )
-
-                def status_cb(message: str, **_phase: object) -> None:
-                    runner.push_event(job["id"], "progress", {
-                        "phase": message,
-                        "current": job["progress"].get("current", 0),
-                        "total": job["progress"].get("total", 0),
-                    })
-
-                def cancel_check() -> bool:
-                    return runner.is_cancelled(job["id"])
-
-                result = backfill_thumb_paths(
-                    thread_db, cache_dir,
-                    progress_callback=progress_cb,
-                    status_callback=status_cb,
-                    cancel_check=cancel_check,
-                )
-                result["noop"] = not (result.get("set") or result.get("cleared"))
-                return result
-            finally:
-                thread_db.close()
-
-        try:
-            runner.start(
-                "thumb_path_backfill", work,
-                config={"trigger": "startup"},
-                lineage=JobLineage.system(
-                    f"At startup, {candidate_count:,} photo records did not match "
-                    "the thumbnails cached on disk"
-                ),
-            )
-        except Exception:
-            log.exception("Failed to start thumb_path backfill job")
 
     def kickoff_label_identity_backfill(self) -> None:
         """Recover taxon IDs for predictions made from legacy label lists.

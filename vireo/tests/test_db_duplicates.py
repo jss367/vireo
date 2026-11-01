@@ -859,7 +859,7 @@ def _mark_duplicate_rejected(db, *ids):
     db.conn.commit()
 
 
-def test_reopen_unrejects_only_that_hash_and_commits(db, folder):
+def test_reopen_unrejects_only_that_hash_with_the_callers_unit(db, folder):
     fid, _ = folder
     k = _photo(db, fid, "k.jpg", "H")
     r1 = _photo(db, fid, "r1.jpg", "H", flag="rejected")
@@ -868,7 +868,8 @@ def test_reopen_unrejects_only_that_hash_and_commits(db, folder):
     other = _photo(db, fid, "o.jpg", "OTHER", flag="rejected")
     _mark_duplicate_rejected(db, r1, r2, other)
 
-    assert db.duplicates.reopen("H") == 2
+    with db.transaction():
+        assert db.duplicates.reopen("H") == 2
 
     assert not db.conn.in_transaction
     assert _flags(db, [k, r1, r2, p, other]) == {
@@ -883,7 +884,8 @@ def test_reopen_leaves_hand_rejected_rows_rejected(db, folder):
     by_hand = _photo(db, fid, "r2.jpg", "H", flag="rejected")
     _mark_duplicate_rejected(db, by_resolver)
 
-    assert db.duplicates.reopen("H") == 1
+    with db.transaction():
+        assert db.duplicates.reopen("H") == 1
 
     assert _flags(db, [by_resolver, by_hand]) == {
         by_resolver: "none", by_hand: "rejected",
@@ -904,8 +906,9 @@ def test_resolution_records_which_rows_it_rejected(db, folder):
 def test_reopen_returns_zero_when_nothing_is_rejected(db, folder):
     fid, _ = folder
     _photo(db, fid, "k.jpg", "H")
-    assert db.duplicates.reopen("H") == 0
-    assert db.duplicates.reopen("UNKNOWN") == 0
+    with db.transaction():
+        assert db.duplicates.reopen("H") == 0
+        assert db.duplicates.reopen("UNKNOWN") == 0
     assert not db.conn.in_transaction
 
 

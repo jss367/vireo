@@ -141,6 +141,7 @@
       "PUT /api/keywords/<int:keyword_id>",
       "PUT /api/move-rules/<int:rule_id>",
       "PUT /api/photos/<int:photo_id>/primary-subject",
+      "PUT /api/photos/<int:photo_id>/subjects/reviewer-box",
       "PUT /api/processes/<int:process_id>",
       "PUT /api/workspaces/<int:ws_id>",
       "PUT /api/workspaces/<int:ws_id>/subject-types"
@@ -282,6 +283,7 @@
       "POST /api/storage/retained/clear",
       "POST /api/storage/retention",
       "POST /api/system/install-exiftool",
+      "POST /api/thumbnail-cache/recheck",
       "POST /api/v1/photos/analysis-retry",
       "POST /api/workspaces/active/local-folders/discard",
       "POST /api/workspaces/active/local-folders/stage",

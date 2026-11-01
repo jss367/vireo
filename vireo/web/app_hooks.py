@@ -27,9 +27,10 @@ import contextlib
 import logging
 import re
 import secrets
+import threading
 import time
 import uuid
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -87,6 +88,27 @@ TRANSFER_SCOPED_ENDPOINTS = frozenset({
     "imports.api_job_import_in_place",
     "imports.api_job_import_in_place_restart",
 })
+
+
+def start_after_first_request(app: Flask, kickoff: Callable[[], str]) -> None:
+    """Launch maintenance once requests can run, never during construction."""
+    lock = threading.Lock()
+    started = False
+
+    @app.after_request
+    def launch(response: Response) -> Response:
+        nonlocal started
+        with lock:
+            if started:
+                return response
+            started = True
+        try:
+            kickoff()
+        except RuntimeError:
+            # Shutdown may win after the request started. Maintenance must
+            # not turn that response into an error or restart stopped workers.
+            log.warning("Could not start deferred preview maintenance", exc_info=True)
+        return response
 
 
 def get_request_db(db_path: str) -> Database:

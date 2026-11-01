@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import json
 import sqlite3
@@ -83,6 +84,30 @@ class FeatureReader:
     def _ws_id(self):
         """Support historical feature loaders used in paired comparisons."""
         return self.require_workspace_id()
+
+    @contextlib.contextmanager
+    def transaction(self, *, immediate=False, retry_busy=False, join=False):
+        """Match ``Database.transaction`` on the read-only connection.
+
+        The production loader stages its connection-local scope tables inside
+        ``with db.transaction(join=True):`` to control transaction lifecycle
+        on the live Database. ``open_library`` opens this connection with
+        ``mode=ro`` and holds a single ``BEGIN``, so the main database stays
+        read-only and TEMP writes participate in that open transaction. A
+        SAVEPOINT rolls back a failed stage without disturbing the outer
+        read, and no commit is needed because nothing writes the main
+        database.
+        """
+        name = f"feature_reader_{id(self)}"
+        self.conn.execute(f"SAVEPOINT {name}")
+        try:
+            yield
+        except BaseException:
+            with contextlib.suppress(sqlite3.OperationalError):
+                self.conn.execute(f"ROLLBACK TO {name}")
+                self.conn.execute(f"RELEASE {name}")
+            raise
+        self.conn.execute(f"RELEASE {name}")
 
     @property
     def photo_species(self):

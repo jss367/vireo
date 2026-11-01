@@ -251,8 +251,9 @@ class _FolderCatalogRewrite:
             self.merge_counts = moves_merge.merge_staged_tree_into_archive(
                 db, self.folder_id, self.target.merge_reconcile_base)
         else:
-            db.moves_merge.move_folder_path(self.folder_id, self.target.catalog_path,
-                                new_name=self.landing_name)
+            with db.transaction():
+                db.moves_merge.move_folder_path(self.folder_id, self.target.catalog_path,
+                                    new_name=self.landing_name)
         db.folders.update_counts()
 
     def apply_mtime_corrections(self, mtime_updates):

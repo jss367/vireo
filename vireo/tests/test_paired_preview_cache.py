@@ -73,7 +73,7 @@ def test_paired_cache_survives_reopen_and_startup_reconciles_orphans(db, tmp_pat
     with Database(db._db_path, initialize_schema=False) as reopened:
         assert paired_preview_ready(reopened, str(paired))
         assert not paired_preview_ready(reopened, str(untracked))
-        assert reconcile_preview_cache(reopened, str(tmp_path)) == 0
+        assert reconcile_preview_cache(reopened, str(tmp_path)) == 1
         assert paired.exists()
         assert not untracked.exists()
         paired.unlink()

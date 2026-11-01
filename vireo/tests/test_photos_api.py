@@ -850,6 +850,7 @@ def _mark_best_batch_quality(db, photo_id, sharpness):
                     bg_separation=0, subject_clip_high=0, subject_clip_low=0,
                     subject_y_median=115, subject_size=.05, noise_estimate=1))
     db.masks_features.set_active_variant(photo_id, "sam2-small", .2)
+    db.commit()
 
 
 def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
@@ -1465,6 +1466,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
                 phash_crop=f"{pid:016x}",
             ),
         )
+        db.commit()
         db.photos.update_quality(pid, subject_size=0.1)
         det_id = db.detections.save(
             pid,
@@ -7517,7 +7519,7 @@ def test_reconcile_keeps_live_rows(tmp_path):
 
 
 def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
-    """create_app must drop ghost rows so eviction sees real totals.
+    """Background maintenance must drop ghost rows so eviction sees real totals.
 
     Regression for the production drift: 2 GB of phantom rows kept
     eviction asleep while the previews dir was empty, and every
@@ -7550,10 +7552,15 @@ def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
     db.caches.preview_insert(pid, 1920, 450_000)
     db.close()
 
-    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir),
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir),
                api_token="test-token-123")
 
     db2 = Database(db_path)
+    assert db2.caches.preview_total_bytes() == 450_000
+    from wait import wait_for_job_via_runner
+    job_id = app._kickoff_preview_cache_maintenance()
+    job = wait_for_job_via_runner(app._job_runner, job_id)
+    assert job['status'] == 'completed', job
     assert db2.caches.preview_total_bytes() == 0, (
         "Startup must reconcile ghost rows so eviction operates on "
         "real bytes, not phantom accounting."
@@ -8245,8 +8252,12 @@ def test_startup_evicts_when_migration_pushes_over_quota(tmp_path, monkeypatch):
     with open(legacy, "wb") as f:
         f.write(b"\xff\xd8\xff\xe0" + b"x" * 4096)
 
-    # Creating the app runs migration (inserts row) then eviction (drains).
-    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    # Migration registers the file synchronously; the background job drains it.
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert db.caches.preview_total_bytes() > 0
+    from wait import wait_for_job_via_runner
+    job = wait_for_job_via_runner(app._job_runner, app._kickoff_preview_cache_maintenance())
+    assert job['status'] == 'completed', job
 
     assert db.caches.preview_total_bytes() == 0
     assert not legacy.exists()
@@ -11434,6 +11445,7 @@ def _seed_mask(db, masks_dir, pid, variant, body=b"PNGBYTES"):
         photo_id=pid, variant=variant, path=path,
         detector_model="md", prompt=(0, 0, 0, 0),
     )
+    db.commit()
     return path
 
 
@@ -11448,6 +11460,7 @@ def test_api_photo_masks_lists_variants_and_active(app_and_db):
     _seed_mask(db, masks_dir, pid, "sam2-small")
     _seed_mask(db, masks_dir, pid, "sam2-large")
     subject_masks.set_active_mask_variant(db, pid, "sam2-large")
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/api/photos/{pid}/masks")
@@ -11516,6 +11529,7 @@ def test_api_serve_mask_404_when_file_missing(app_and_db):
         photo_id=pid, variant="sam2-small", path="/nope/missing.png",
         detector_model="md", prompt=(0, 0, 0, 0),
     )
+    db.commit()
     client = app.test_client()
     resp = client.get(f"/api/masks/{pid}/sam2-small.png")
     assert resp.status_code == 404
@@ -11560,6 +11574,7 @@ def test_api_serve_mask_uses_stored_db_path_for_legacy_filename(app_and_db):
         detector_model="unknown",
         prompt=(-1, -1, -1, -1),
     )
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/api/masks/{pid}/unknown.png")
@@ -11583,6 +11598,7 @@ def test_legacy_serve_mask_falls_back_to_active_variant(app_and_db):
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _seed_mask(db, masks_dir, pid, "sam2-small", body=b"ACTIVEPNG")
     subject_masks.set_active_mask_variant(db, pid, "sam2-small")
+    db.commit()
     # No literal `{pid}.png` on disk.
     assert not _os.path.exists(_os.path.join(masks_dir, f"{pid}.png"))
 
@@ -11606,6 +11622,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
         db, masks_dir, pid, "sam2-small", body=b"PREDECESSOR",
     )
     subject_masks.set_active_mask_variant(db, pid, "sam2-small")
+    db.commit()
     new_path = _os.path.join(masks_dir, f"{pid}.sam2-small.next.png")
     with open(new_path, "wb") as handle:
         handle.write(b"CURRENT")
@@ -11624,6 +11641,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
                 detector_model="md",
                 prompt=(0, 0, 0, 0),
             )
+            db.commit()
             _os.unlink(old_path)
             raise FileNotFoundError(old_path)
         return real_open(path, *args, **kwargs)
@@ -11661,6 +11679,7 @@ def test_legacy_serve_mask_direct_file_served_when_db_backed(app_and_db):
         photo_id=pid, variant="legacy", path=mask_file,
         detector_model="md", prompt=(0, 0, 0, 0),
     )
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/masks/{pid}.png")
@@ -11715,6 +11734,7 @@ def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
         photo_id=pid, variant="sam2-small", path=str(outside),
         detector_model="md", prompt=(0, 0, 0, 0),
     )
+    db.commit()
 
     client = app.test_client()
     resp = client.get(f"/api/masks/{pid}/sam2-small.png")
@@ -11953,6 +11973,7 @@ def _register_active_mask(db, photo_id, mask_dir, width=800, height=600):
         (0.0, 0.0, 0.5, 1.0),
     )
     subject_masks.set_active_mask_variant(db, photo_id, "sam2-small")
+    db.commit()
     return path
 
 
@@ -12036,6 +12057,7 @@ def test_local_mask_snapshot_retries_predecessor_cleanup(
                 "megadetector-v6",
                 (0.0, 0.0, 0.5, 1.0),
             )
+            db.commit()
             os.unlink(old_path)
             raise FileNotFoundError(old_path)
         return real_create_snapshot(**kwargs)
@@ -12500,6 +12522,7 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
         (0.0, 0.0, 1.0, 0.5),
     )
     subject_masks.set_active_mask_variant(db, pid2, "sam2-small")
+    db.commit()
 
     source_mask = client.post(
         f"/api/photos/{photo_id}/local-mask/snapshot"

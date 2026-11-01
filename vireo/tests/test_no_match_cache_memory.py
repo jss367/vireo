@@ -174,6 +174,7 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
         "_cached_only_detection_map": lambda db, ids: {pid: [{"id": pid}] for pid in ids},
         "_cache_run_filter": lambda db, ids, model, fp, *a: repo.classifier_cache_run_filter(model, fp, set(), True),
         "detection_store": types.SimpleNamespace(
+            reviewer_box_snapshot=lambda detection: None,
             get_predictions_for_detection=lambda db, did, **kw: [
                 dict(r)
                 for r in c.execute(

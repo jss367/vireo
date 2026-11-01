@@ -1914,6 +1914,8 @@ function bpEscape(str) {
 /** @param {string | undefined} type @returns {string} */
 export function formatJobType(type) {
   if (!type) return '';
+  if (type === 'thumb_path_backfill') return 'Recheck thumbnails';
+  if (type === 'preview-cache-maintenance') return 'Preview cache maintenance';
   if (type === 'retained-cache-cleanup') return 'Generated file and history cleanup';
   if (type === 'retained-cache-maintenance') return 'Storage retention maintenance';
   return String(type)

@@ -4312,17 +4312,16 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
     ) == []
 
 
-def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
-    """On reclassify, prior-run detection rows must be deleted after model 1
-    re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
-    stale bounding boxes via get_existing_detection_photo_ids + get_detections.
+@pytest.mark.parametrize(('job_kind', 'fresh_automatic'), [
+    ('process', False), ('process', True), ('classify', False),
+    ('classify', True), ('classify', 'detector-failed'),
+])
+@pytest.mark.parametrize('reviewer_box', [None, 'accepted', 'rejected'])
+def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, reviewer_box, fresh_automatic, job_kind, redraw=None):
+    """Both job entry points refresh reviewer and automatic evidence together.
 
-    Scenario: a photo had a prior detection (potential false positive). The
-    reclassify run finds NO animals this time (fake_detect_batch returns {}).
-    After reclassify the old detection row must be gone so future runs
-    actually call MegaDetector rather than short-circuiting to the stale box.
-
-    Regression for Codex P1 review on #511 line 848.
+    Empty detector output must preserve human regions; nonempty output must
+    classify both candidate sources while retiring the stale automatic box.
     """
     import json
 
@@ -4345,10 +4344,24 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
              "confidence": 0.9, "category": "animal"},
         ],
-        detector_model="MegaDetector",
+        detector_model=("MegaDetector" if job_kind == "process" else "megadetector-v6"),
     )
     db.commit()
     assert prior_det_ids, "setup sanity: prior detection was inserted"
+
+    db.predictions.add(prior_det_ids[0], "Stale species", .8, "BioCLIP",
+                       labels_fingerprint="older-label-set")
+    db.commit()
+
+    chosen = None
+    if reviewer_box:
+        from subjects import analyze_photo, select_reviewer_box
+        chosen = select_reviewer_box(db, photo_id, dict(x=.2, y=.2, w=.2, h=.2))
+        analyze_photo(db, photo_id, os.path.join(folder_path, "test.jpg"), detection_id=chosen)
+        db.predictions.add(chosen, 'Ruby-crowned Kinglet', .9, 'reviewed-classifier', status='accepted')
+        db.predictions.add(chosen, 'Robin', .4, 'BioCLIP', labels_fingerprint='legacy', status=reviewer_box)
+        recipe = db.set_photo_edit_recipe(photo_id, {'adjustments': {'exposure': .5}})
+        db.commit()
 
     col_id = db.collections.add(
         "Test",
@@ -4357,16 +4370,57 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     db.commit()
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+    import labels_fingerprint
+    monkeypatch.setattr(labels_fingerprint, 'compute_fingerprint', lambda *a, **k: 'legacy')
 
-    # _detect_batch stub: reclassify finds no animals this time (false pos fixed).
+    fresh_ids = []
+
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None, vireo_dir=None):
-        return {}, 0, {p["id"] for p in batch}
+        dmap = {}
+        for photo in batch:
+            boxes = ([{"box": dict(x=.6, y=.2, w=.2, h=.2),
+                       "confidence": .9, "category": "animal"}] if fresh_automatic else [])
+            with db_.transaction():
+                fresh_ids.extend(detection_store.write_detection_batch(
+                    db_, photo["id"], "megadetector-v6", boxes))
+            dmap[photo["id"]] = [dict(d, confidence=d['detector_confidence']) for d in
+                detection_store.get_detections(db_, photo["id"], detector_model="megadetector-v6")]
+        return dmap, len(fresh_ids), {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
+    replacement = []
+
+    def redraw_box():
+        if replacement:
+            return
+        from subjects import select_reviewer_box
+        writer = Database(db_path)
+        writer.set_active_workspace(ws_id)
+        replacement.append(select_reviewer_box(
+            writer, photo_id, dict(x=redraw[1], y=.2, w=.2, h=.2)))
+        writer.close()
+
+    class RedrawingClassifier(_RobinClassifier):
+        def classify_batch_with_embedding(self, images, threshold=0):
+            result = super().classify_batch_with_embedding(images, threshold)
+            if redraw and redraw[0] == 'inference':
+                redraw_box()
+            return result
+
+    monkeypatch.setattr(classifier_mod, "Classifier", RedrawingClassifier)
+    if redraw and redraw[0] == 'storage':
+        import classify_job.job_run as job_run
+        original_store = classify_job._store_grouped_predictions
+
+        def redraw_then_store(*args, **kwargs):
+            redraw_box()
+            return original_store(*args, **kwargs)
+
+        monkeypatch.setattr(classify_job, '_store_grouped_predictions', redraw_then_store)
+        monkeypatch.setattr(job_run, '_store_grouped_predictions', redraw_then_store)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -4379,21 +4433,77 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     runner = FakeRunner()
     job = _make_job()
 
-    run_pipeline_job(job, runner, db_path, ws_id, params)
+    if job_kind == 'process':
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+    else:
+        import classify_job.job_run as job_run
+
+        def fake_subjects(*, photos, folders, runner, job, reclassify, db, **kwargs):
+            if fresh_automatic == "detector-failed":
+                return {}, 0
+            dmap, count, _ = fake_detect_batch(photos, folders, runner, job, reclassify, db)
+            return dmap, count
+
+        monkeypatch.setattr(job_run, '_detect_subjects', fake_subjects)
+        monkeypatch.setattr(job_run, '_load_labels', lambda *a, **k: (["Robin"], False, []))
+        monkeypatch.setattr(job_run, 'Classifier', RedrawingClassifier)
+        classify_job.run_classify_job(job, runner, db_path, ws_id, classify_job.ClassifyParams(
+            collection_id=col_id, model_id=model_ids[0], model_name=None,
+            labels_file=None, labels_files=None, grouping_window=0,
+            similarity_threshold=.85, reclassify=True,
+        ), computation_cache_dir=str(tmp_path / 'computation-cache'))
 
     # The stale prior-run detection must be gone after reclassify so that
     # future non-reclassify runs don't reuse it via the already-detected path.
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
     remaining = detection_store.get_detections(verify_db, photo_id)
-    assert remaining == [], (
-        f"Stale prior-run detection rows must be purged during reclassify but "
-        f"db.get_detections({photo_id}) returned {remaining!r}. "
-        "Without this cleanup, future non-reclassify runs short-circuit to "
-        "stale boxes via get_existing_detection_photo_ids + get_detections, "
-        "causing false-positive detections to persist indefinitely. "
-        "Regression for Codex P1 review on #511 line 848."
-    )
+    preserved_stale_boxes = prior_det_ids if fresh_automatic == 'detector-failed' else []
+    assert {d['id'] for d in remaining} == set(
+        fresh_ids + preserved_stale_boxes + (replacement or ([chosen] if chosen else [])))
+    for prior_id in prior_det_ids:
+        assert detection_store.get_predictions_for_detection(
+            verify_db, prior_id, classifier_model='BioCLIP') == []
+    for automatic_id in fresh_ids:
+        automatic = detection_store.get_predictions_for_detection(
+            verify_db, automatic_id, classifier_model='BioCLIP')
+        assert len(automatic) == 1
+        assert automatic[0]['confidence'] == .9
+    if redraw:
+        assert replacement
+        current = replacement[0]
+        assert (current == chosen) == (redraw[1] == .20001)
+        assert verify_db.subjects.choice(photo_id)['detection_id'] == current
+        predictions = detection_store.get_predictions_for_detection(
+            verify_db, current, classifier_model='BioCLIP')
+        assert all(p['confidence'] != .9 for p in predictions)
+        assert ('BioCLIP', 'legacy') not in verify_db.model_runs.get_classifier_run_keys(current)
+        assert verify_db.masks_features.get_embedding(photo_id, 'BioCLIP', f'det:{chosen}') is None
+        assert verify_db.masks_features.get_embedding(photo_id, 'BioCLIP', f'det:{fresh_ids[0]}') is not None
+        assert verify_db.get_photo_edit_recipe(photo_id) == recipe
+        return
+    if reviewer_box:
+        from subjects import payload
+        result = payload(verify_db, photo_id)
+        assert result['primary_detection_id'] == chosen
+        assert next(s for s in result['subjects'] if s['id'] == chosen)['analysis'] is not None
+        assert any(p['species'] == 'Ruby-crowned Kinglet' and p['status'] == 'accepted'
+                   for p in next(s for s in result['subjects'] if s['id'] == chosen)['predictions'])
+        active = detection_store.get_predictions_for_detection(verify_db, chosen, classifier_model='BioCLIP')
+        assert len(active) == 1
+        assert active[0]['species'] == 'Robin'
+        assert active[0]['confidence'] == .9  # fresh inference replaced the .4 score
+        assert verify_db.predictions.current_status(active[0]['id']) == reviewer_box  # human decision survived
+        assert verify_db.get_photo_edit_recipe(photo_id) == recipe
+
+
+@pytest.mark.parametrize('job_kind', ['process', 'classify'])
+@pytest.mark.parametrize('phase', ['inference', 'storage'])
+@pytest.mark.parametrize('replacement_x', [.20001, .5])
+def test_reviewer_redraw_during_classification_discards_old_region_results(
+        tmp_path, monkeypatch, job_kind, phase, replacement_x):
+    test_pipeline_reclassify_purges_stale_detection_rows(
+        tmp_path, monkeypatch, 'accepted', True, job_kind, redraw=(phase, replacement_x))
 
 
 def test_pipeline_reclassify_same_boxes_preserves_predictions(
@@ -5246,7 +5356,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
     clear_calls = []
 
     def wrapped_clear(self, model=None, collection_photo_ids=None,
-                     labels_fingerprint=None, clear_run_keys=True):
+                     labels_fingerprint=None, clear_run_keys=True, exclude_detector_model=None):
         before = self.conn.execute(
             "SELECT COUNT(*) FROM classifier_runs"
         ).fetchone()[0]
@@ -5255,6 +5365,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
             collection_photo_ids=collection_photo_ids,
             labels_fingerprint=labels_fingerprint,
             clear_run_keys=clear_run_keys,
+            exclude_detector_model=exclude_detector_model,
         )
         after = self.conn.execute(
             "SELECT COUNT(*) FROM classifier_runs"
@@ -6352,6 +6463,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     db.masks_features.update_pipeline_features(
         masked_id, PipelineFeatures(mask_path=str(tmp_path / "mask_a.png")),
     )
+    db.commit()
 
     # Photo B: no mask, only sub-threshold detection → should be flagged.
     lowconf_id = photo_ingest.add_photo(db, folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
@@ -8999,6 +9111,103 @@ def test_extract_masks_stage_masks_full_image_rescued_dropout(tmp_path, monkeypa
     ).fetchone()[0] is not None
 
 
+def _mask_stage_photos(tmp_path, count):
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = workspace_folders.add_folder(db, folder_path)
+    photo_ids = []
+    for index in range(count):
+        filename = f"bird{index}.jpg"
+        photo_id = photo_ingest.add_photo(
+            db, folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        _drop_jpeg(folder_path, filename)
+        detection_store.write_detection_batch(
+            db, photo_id, "megadetector-v6",
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+        )
+        photo_ids.append(photo_id)
+    collection_id = db.collections.add(
+        "Mask stage photos", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+    db.commit()
+    params = PipelineParams(
+        collection_id=collection_id, skip_classify=True,
+        skip_extract_masks=False, skip_regroup=True,
+    )
+    return db_path, db, ws_id, photo_ids, params
+
+
+def test_extract_masks_overlaps_quality_analysis_with_embedding(tmp_path, monkeypatch):
+    """Each photo's quality analysis runs beside its DINOv2 embedding.
+
+    The analysis waits for the embedding to start, so a stage that ran them
+    one after the other would time out here instead of storing the features.
+    The stage result reports the seconds spent in each phase.
+    """
+    import dino_embed
+    import numpy as np
+    import quality
+
+    db_path, db, ws_id, photo_ids, params = _mask_stage_photos(tmp_path, 2)
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    embedding_started = threading.Event()
+    analysis_threads = set()
+
+    def fake_quality(proxy, mask):
+        analysis_threads.add(threading.current_thread().name)
+        assert embedding_started.wait(synchronization_timeout(10))
+        return {"subject_y_median": 42.0}
+
+    def fake_embed_batch(images, variant=None):
+        embedding_started.set()
+        return np.zeros((len(images), 384), dtype=np.float32)
+
+    monkeypatch.setattr(quality, "compute_all_quality_features", fake_quality)
+    monkeypatch.setattr(dino_embed, "embed", lambda p, variant=None: fake_embed_batch([p])[0])
+    monkeypatch.setattr(dino_embed, "embed_batch", fake_embed_batch)
+
+    result = run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    em = result["stages"]["extract_masks"]
+    assert em["masked"] == 2 and em["failed"] == 0
+    stored = db.conn.execute(
+        "SELECT photo_id, subject_y_median FROM photo_masks ORDER BY photo_id",
+    ).fetchall()
+    assert [tuple(row) for row in stored] == [(photo_ids[0], 42.0), (photo_ids[1], 42.0)]
+    assert threading.current_thread().name not in analysis_threads
+    assert set(em["phase_seconds"]) == {"decode", "segment", "analyze", "embed", "store"}
+    assert all(seconds >= 0 for seconds in em["phase_seconds"].values())
+
+
+def test_extract_masks_analysis_failure_fails_only_that_photo(tmp_path, monkeypatch):
+    """An analysis error raised on the helper thread is that photo's failure."""
+    import quality
+
+    db_path, db, ws_id, photo_ids, params = _mask_stage_photos(tmp_path, 2)
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    calls = []
+
+    def fake_quality(proxy, mask):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("bad analysis")
+        return {}
+
+    monkeypatch.setattr(quality, "compute_all_quality_features", fake_quality)
+
+    job = _make_job()
+    with pytest.raises(RuntimeError, match="1 of 2 photos failed mask extraction"):
+        run_pipeline_job(job, FakeRunner(), db_path, ws_id, params)
+
+    em = job["result"]["stages"]["extract_masks"]
+    assert (em["masked"], em["failed"]) == (1, 1)
+    assert em["outcomes"]["counts"] == {"failed": 1, "completed": 1}
+
+
 def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
     tmp_path, monkeypatch,
 ):
@@ -9454,6 +9663,7 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
         (0.1, 0.1, 0.5, 0.5),
     )
     subject_masks.set_active_mask_variant(db, cached, sam2_variant)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
         (dinov2_variant, cached),
@@ -9810,6 +10020,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         cfg.save(settings)
         assert run(False)["quality_input_recipe"] is None
         subject_masks.set_active_mask_variant(db, ids[0], "sam2-small")
+        db.commit()
         restored = db.conn.execute("SELECT quality_input_recipe FROM photos WHERE id=?", (ids[0],)).fetchone()
         assert restored[0] == raw_analysis.RECIPE
         restored_features = db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
@@ -9826,6 +10037,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         cfg.save(settings)
         run(True)
         subject_masks.set_active_mask_variant(db, ids[0], "sam2-small")
+        db.commit()
         settings["pipeline"]["sam2_variant"] = "sam2-small"
         cfg.save(settings)
         restored_normal = run(False)
@@ -18312,6 +18524,7 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
         (0.1, 0.1, 0.5, 0.5),
     )
     subject_masks.set_active_mask_variant(db, masked, sam2_variant)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
         (dinov2_variant, masked),
@@ -18388,6 +18601,7 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
             (0.1, 0.1, 0.5, 0.5),
         )
         subject_masks.set_active_mask_variant(db, pid, sam2_variant)
+        db.commit()
         db.conn.execute(
             "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
             (dinov2_variant, pid),
@@ -18655,6 +18869,7 @@ def _seed_cached_mask(db, tmp_path, photo_id, sam2_variant, dinov2_variant,
     mask_file = str(mask_dir / f"{photo_id}.{sam2_variant}.png")
     Image.new("L", (4, 4), 255).save(mask_file)
     db.masks_features.upsert_mask(photo_id, sam2_variant, mask_file, detector, prompt)
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET mask_path=?, active_mask_variant=?, "
         "dino_embedding_variant=? WHERE id=?",

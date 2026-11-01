@@ -221,15 +221,19 @@ def _flush_batch(
                 continue
             all_preds, embedding = result
 
-            if embedding is not None:
-                _store_batch_embedding(db, entry, model_name, embedding)
-
-            if not all_preds:
-                continue
-
-            raw_results.append(
-                _batch_raw_result(entry, all_preds, embedding, model_type, top_k),
-            )
+            valid = [entry]
+            with (
+                detection_store.guard_reviewer_results(db, valid),
+                db.transaction(immediate=entry.get("_reviewer_box") is not None),
+            ):
+                if not valid or not detection_store.reviewer_result_is_current(db, entry):
+                    continue
+                if embedding is not None:
+                    _store_batch_embedding(db, entry, model_name, embedding)
+                if all_preds:
+                    raw_results.append(
+                        _batch_raw_result(entry, all_preds, embedding, model_type, top_k),
+                    )
     finally:
         # Close all PIL images to avoid resource leaks
         for entry in batch:
@@ -346,6 +350,7 @@ def _batch_raw_result(
 
     raw_result = {
         "photo": entry["photo"],
+        "_reviewer_box": entry.get("_reviewer_box"),
         "detection_id": entry.get("detection_id"),
         "folder_path": entry["folder_path"],
         "image_path": entry["image_path"],
@@ -461,12 +466,13 @@ class _ClassifyPhotosPass:
 
     def _enqueue(
         self, photo: sqlite3.Row, detection_id: int, folder_path: str, image_path: str,
-        img: Image.Image,
+        img: Image.Image, reviewer_box: tuple[float, ...] | None = None,
     ) -> None:
         """Queue one prepared image, flushing once the batch is full."""
         self.batch.append({
             "photo": photo,
             "detection_id": detection_id,
+            "_reviewer_box": reviewer_box,
             "folder_path": folder_path,
             "image_path": image_path,
             "img": img,
@@ -592,6 +598,8 @@ class _ClassifyPhotosPass:
 
     def classify_photo(self, i: int, photo: sqlite3.Row) -> None:
         """Clear, report progress for and classify or queue one photo."""
+        photo_detections = detection_store.with_reviewer_regions(
+            self.db, photo["id"], self.detection_map.get(photo["id"], []))
         # Per-photo reclassify predictions purge. Lives here (rather than
         # alongside ``detections.clear`` in the detection loop) so that:
         #   1. A mid-classify cancel leaves the unprocessed tail with its
@@ -629,11 +637,13 @@ class _ClassifyPhotosPass:
                     labels_fingerprint=(
                         self.fp if self.detection_map.get(photo["id"]) else None
                     ),
+                    exclude_detector_model="reviewer-selected",
                 )
 
         self._report_progress(i, photo)
 
-        if photo["id"] in self.non_animal_ids:
+        if photo["id"] in self.non_animal_ids and not any(
+                d.get("detector_model") == "reviewer-selected" for d in photo_detections):
             # A confident person or vehicle box takes this photo out of
             # scope for species classification. MegaDetector writes only
             # replace rows for ``megadetector-v6``, so any prior
@@ -651,9 +661,6 @@ class _ClassifyPhotosPass:
 
         folder_path = self.folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
-
-        # Get detections for this photo (list of detection dicts with IDs)
-        photo_detections = self.detection_map.get(photo["id"], [])
 
         if photo_detections:
             self._classify_detections(
@@ -699,11 +706,15 @@ class _ClassifyPhotosPass:
         timestamp = _photo_timestamp(photo)
 
         for detection in photo_detections:
+            before = len(self.raw_results)
+            snapshot = detection_store.reviewer_box_snapshot(detection)
             if not self.reclassify and self._reuse_cached_run(
                 photo, detection["id"], folder_path, image_path,
                 lambda: timestamp,
                 photo_level_fallback=len(photo_detections) == 1,
             ):
+                for item in self.raw_results[before:]:
+                    item["_reviewer_box"] = snapshot
                 continue
 
             img, det_folder_path, det_image_path = _prepare_image(
@@ -714,7 +725,7 @@ class _ClassifyPhotosPass:
                 continue
 
             self._enqueue(
-                photo, detection["id"], det_folder_path, det_image_path, img,
+                photo, detection["id"], det_folder_path, det_image_path, img, snapshot,
             )
             if self.cancelled:
                 break
@@ -946,28 +957,32 @@ def _record_batch_classifier_runs(
         did = r.get("detection_id")
         if did is not None:
             counts[did] = counts.get(did, 0) + 1
-    seen: set = set()
-    for entry in batch:
-        did = entry.get("detection_id")
-        if did is None or did in seen:
-            continue
-        seen.add(did)
-        # Only record the run for detections that actually produced a
-        # prediction. A count of 0 means the classifier failed (transient
-        # load error, decode error, etc.) — caching it as "done" would
-        # permanently strand the detection on the next non-reclassify run.
-        n = counts.get(did, 0)
-        if n <= 0:
-            continue
-        # Batch boundary: one detection's run reservation.
-        with db.transaction():
-            db.model_runs.record_classifier_run(
-                did, model_name, labels_fingerprint,
-                prediction_count=n,
-                runtime_fingerprint="incomplete",
-                labels_fingerprint_full=labels_fingerprint_full,
-                input_recipe=entry.get("input_recipe"),
-            )
+    valid_batch = list(batch)
+    with detection_store.guard_reviewer_results(db, valid_batch):
+        seen: set = set()
+        for entry in valid_batch:
+            did = entry.get("detection_id")
+            if did is None or did in seen:
+                continue
+            seen.add(did)
+            # Only record the run for detections that actually produced a
+            # prediction. A count of 0 means the classifier failed (transient
+            # load error, decode error, etc.) — caching it as "done" would
+            # permanently strand the detection on the next non-reclassify run.
+            n = counts.get(did, 0)
+            if n <= 0:
+                continue
+            # Batch boundary: one detection's run reservation.
+            with db.transaction(immediate=entry.get("_reviewer_box") is not None):
+                if not detection_store.reviewer_result_is_current(db, entry):
+                    continue
+                db.model_runs.record_classifier_run(
+                    did, model_name, labels_fingerprint,
+                    prediction_count=n,
+                    runtime_fingerprint="incomplete",
+                    labels_fingerprint_full=labels_fingerprint_full,
+                    input_recipe=entry.get("input_recipe"),
+                )
 
 
 def _publish_classifier_runs_for_raw_results(
@@ -1001,31 +1016,32 @@ def _publish_classifier_runs_for_raw_results(
         return
     from computation_cache import promote_and_publish_classifier_run
 
-    seen: set = set()
-    for result in raw_results:
-        det_id = result.get("detection_id")
-        if det_id is None or det_id in seen or result.get("_existing"):
-            continue
-        seen.add(det_id)
-        try:
-            input_source = result.get("_input_source")
-            promote_and_publish_classifier_run(
-                db,
-                det_id,
-                classifier_model,
-                labels_fingerprint,
-                labels_fingerprint_full,
-                model_identity,
-                store=store,
-                taxonomy_identity=taxonomy_identity,
-                source_is_original=(
-                    input_source == "original"
-                    if input_source in ("original", "working_copy")
-                    else None
-                ),
-            )
-        except Exception:  # broad: publishing the portable cache is best-effort; the local result already committed
-            log.warning(
-                "Could not publish portable classifier result for detection %s",
-                det_id, exc_info=True,
-            )
+    with detection_store.guard_reviewer_results(db, raw_results):
+        seen: set = set()
+        for result in raw_results:
+            det_id = result.get("detection_id")
+            if det_id is None or det_id in seen or result.get("_existing"):
+                continue
+            seen.add(det_id)
+            try:
+                input_source = result.get("_input_source")
+                promote_and_publish_classifier_run(
+                    db,
+                    det_id,
+                    classifier_model,
+                    labels_fingerprint,
+                    labels_fingerprint_full,
+                    model_identity,
+                    store=store,
+                    taxonomy_identity=taxonomy_identity,
+                    source_is_original=(
+                        input_source == "original"
+                        if input_source in ("original", "working_copy")
+                        else None
+                    ),
+                )
+            except Exception:  # broad: publishing the portable cache is best-effort; the local result already committed
+                log.warning(
+                    "Could not publish portable classifier result for detection %s",
+                    det_id, exc_info=True,
+                )

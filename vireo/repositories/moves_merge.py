@@ -33,7 +33,6 @@ module imports no ``db`` code.
 import logging
 import os
 from collections.abc import Callable
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from keyword_normalization import keyword_match_key
@@ -67,13 +66,12 @@ class MovesMergeRepository:
         self.carry_keyword_associations = carry_keyword_associations
 
     def create_rule(self, name, destination, criteria):
-        """Insert a move rule and commit. Returns the rule id."""
+        """Insert a move rule (no commit). Returns the rule id."""
         import json as _json
         cur = self.conn.execute(
             "INSERT INTO move_rules (name, destination, criteria) VALUES (?, ?, ?)",
             (name, destination, _json.dumps(criteria)),
         )
-        self.conn.commit()
         return cur.lastrowid
 
     def get_rule(self, rule_id):
@@ -89,7 +87,7 @@ class MovesMergeRepository:
         ).fetchall()
 
     def update_rule(self, rule_id, name=UNSET, destination=UNSET, criteria=UNSET):
-        """Update the given fields and commit; no-op when none are given."""
+        """Update the given fields (no commit); no-op when none are given."""
         import json as _json
         sets, params = [], []
         if name is not UNSET:
@@ -105,23 +103,20 @@ class MovesMergeRepository:
             return
         params.append(rule_id)
         self.conn.execute(f"UPDATE move_rules SET {', '.join(sets)} WHERE id = ?", params)
-        self.conn.commit()
 
     def delete_rule(self, rule_id):
-        """Delete a move rule and commit."""
+        """Delete a move rule (no commit)."""
         self.conn.execute("DELETE FROM move_rules WHERE id = ?", (rule_id,))
-        self.conn.commit()
 
     def touch_rule(self, rule_id):
-        """Stamp ``last_run_at`` and commit."""
+        """Stamp ``last_run_at`` (no commit)."""
         self.conn.execute(
             "UPDATE move_rules SET last_run_at = datetime('now') WHERE id = ?",
             (rule_id,),
         )
-        self.conn.commit()
 
     def batch_update_photo_folder(self, photo_ids, target_folder_id):
-        """Repoint ``photo_ids`` at ``target_folder_id`` and commit."""
+        """Repoint ``photo_ids`` at ``target_folder_id`` (no commit)."""
         if not photo_ids:
             return
         placeholders = ",".join("?" for _ in photo_ids)
@@ -129,7 +124,6 @@ class MovesMergeRepository:
             f"UPDATE photos SET folder_id = ? WHERE id IN ({placeholders})",
             [target_folder_id] + list(photo_ids),
         )
-        self.conn.commit()
 
     def filename_collisions(self, photo_ids, target_folder_id):
         """Check if any photo filenames already exist in the target folder.
@@ -216,7 +210,6 @@ class MovesMergeRepository:
                 "WHERE last_move_source_folder_path = ?",
                 (updated_path, prior_path),
             )
-        self.conn.commit()
 
     def query_rule_matches(self, criteria, workspace_id, min_detector_confidence):
         """Return photo ids in ``workspace_id`` matching move-rule ``criteria``.
@@ -773,9 +766,8 @@ class MovesMergeRepository:
     #
     # ``move.py`` copies and deletes originals between these reads and writes,
     # so none of them commits on its own: the caller keeps every commit point
-    # (``db.commit()``) where it sits among the filesystem steps. The one
-    # exception is ``photo_move_savepoint``, whose commit sits inside the
-    # savepoint's rollback guard exactly as the inline block did.
+    # where it sits among the filesystem steps (a photo's repoint is one
+    # ``with db.transaction():`` in ``move.photos``).
 
     def folders_except(self, folder_id):
         """Cursor over ``(id, path)`` of every folder but ``folder_id``.
@@ -932,23 +924,6 @@ class MovesMergeRepository:
             "last_move_source_folder_path = ? WHERE id = ?",
             (dest_folder_id, src_dir, photo_id),
         )
-
-    @contextmanager
-    def photo_move_savepoint(self):
-        """One photo's catalog repoint: released and committed on success.
-
-        Any exception, including one from the release or commit, rolls back to
-        the savepoint and re-raises.
-        """
-        self.conn.execute("SAVEPOINT photo_move_visibility")
-        try:
-            yield
-            self.conn.execute("RELEASE photo_move_visibility")
-            self.conn.commit()
-        except BaseException:
-            self.conn.execute("ROLLBACK TO photo_move_visibility")
-            self.conn.execute("RELEASE photo_move_visibility")
-            raise
 
     def restamp_photo_mtimes(self, mtime_updates):
         """Correct ``file_mtime`` and the working-copy markers pinned to it; no commit.

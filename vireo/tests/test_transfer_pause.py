@@ -205,6 +205,7 @@ def test_pause_during_verification_invalidates_earlier_checks(transfer_env, monk
             source.rename(surviving_source)
             with Database(db_path) as db:
                 db.moves_merge.move_folder_path(folder_id, str(surviving_source))
+                db.commit()
         assert runner.resume_job(job_id)
         job = wait_for_job_via_runner(runner, job_id)
         assert job["status"] == "failed", job
