@@ -125,7 +125,7 @@ JOB_HISTORY_LATER_COLUMNS = (
 # its own); a follow-up job names the job that started it in
 # ``parent_job_id`` and inherits that job's origin; ``reason`` says why a
 # system job started. ``repeat_count`` / ``repeat_since`` record consecutive
-# identical outcomes of one system task folded into a single row.
+# failures of one system task with the same error, folded into a single row.
 JOB_HISTORY_LINEAGE_COLUMNS = (
     ("origin", "TEXT NOT NULL DEFAULT 'user'"),
     ("parent_job_id", "TEXT"),

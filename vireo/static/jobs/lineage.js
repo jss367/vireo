@@ -38,15 +38,15 @@ export function followUpText(job, parent) {
 }
 
 /**
- * How often a system task ended this way in a row, or '' for a single run.
+ * How often a system task failed with this error in a row, or '' for one run.
+ * Only failures with the same error collapse into one row (history.py).
  * @param {JobsRow} job
  */
 export function repeatText(job) {
   var count = Number(job.repeat_count || 1);
   if (!(count > 1)) return '';
   var since = job.repeat_since ? ' since ' + formatDateTime(new Date(job.repeat_since)) : '';
-  if (job.status === 'failed') return 'Failed ' + count + ' times in a row' + since;
-  return 'Same result ' + count + ' times in a row' + since;
+  return 'Failed ' + count + ' times in a row' + since;
 }
 
 /**

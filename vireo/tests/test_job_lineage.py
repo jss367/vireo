@@ -36,6 +36,7 @@ def _run(runner, job_type, result, *, ws_id, lineage=None, config=None):
 
     job_id = runner.start(
         job_type, work, workspace_id=ws_id, lineage=lineage, config=config,
+        pausable=False,
     )
     return wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
@@ -79,7 +80,8 @@ def test_system_job_row_exists_while_it_runs(runner_db):
         release.wait(synchronization_timeout(5))
         return {}
 
-    job_id = runner.start("backfill", work, workspace_id=ws_id, lineage=SYSTEM)
+    job_id = runner.start("backfill", work, workspace_id=ws_id, lineage=SYSTEM,
+                         pausable=False)
     try:
         assert started.wait(synchronization_timeout(5))
         # The running row is written before the work function is called.
@@ -97,7 +99,7 @@ def test_follow_up_inherits_its_live_parents_origin(runner_db):
     release = threading.Event()
     parent = runner.start(
         "import", lambda job: release.wait(synchronization_timeout(5)) and {},
-        workspace_id=ws_id, lineage=SYSTEM,
+        workspace_id=ws_id, lineage=SYSTEM, pausable=False,
     )
     try:
         child = _run(
@@ -195,12 +197,21 @@ def test_repeated_system_failures_collapse_into_one_row(runner_db):
     runner, db, ws_id = runner_db
     first = _run(runner, "check", RuntimeError("NAS offline"), ws_id=ws_id, lineage=SYSTEM)
     _run(runner, "check", RuntimeError("NAS offline"), ws_id=ws_id, lineage=SYSTEM)
-    last = _run(runner, "check", RuntimeError("timed out"), ws_id=ws_id, lineage=SYSTEM)
+    last = _run(runner, "check", RuntimeError("NAS offline"), ws_id=ws_id, lineage=SYSTEM)
     [row] = _rows(db, "check")
     assert row["id"] == last["id"]
     assert row["repeat_count"] == 3
     assert row["repeat_since"] == first["started_at"]
-    assert json.loads(row["result"])["error"] == "timed out"
+    assert json.loads(row["result"])["error"] == "NAS offline"
+
+
+def test_a_different_error_starts_a_new_row(runner_db):
+    runner, db, ws_id = runner_db
+    _run(runner, "check", RuntimeError("NAS offline"), ws_id=ws_id, lineage=SYSTEM)
+    _run(runner, "check", RuntimeError("timed out"), ws_id=ws_id, lineage=SYSTEM)
+    rows = _rows(db, "check")
+    assert [json.loads(r["result"])["error"] for r in rows] == ["NAS offline", "timed out"]
+    assert [r["repeat_count"] for r in rows] == [1, 1]
 
 
 def test_repeated_user_failures_stay_separate(runner_db):
@@ -220,12 +231,18 @@ def test_system_failures_of_different_scopes_do_not_collapse(runner_db):
     assert len(_rows(db, "check")) == 2
 
 
-def test_identical_system_successes_collapse_and_a_new_outcome_starts_a_row(runner_db):
+def test_system_successes_that_found_something_never_collapse(runner_db):
+    """Equal summaries can hide different details (which folder was offline)."""
     runner, db, ws_id = runner_db
-    _run(runner, "check", {"missing": 12}, ws_id=ws_id, lineage=SYSTEM)
-    _run(runner, "check", {"missing": 12}, ws_id=ws_id, lineage=SYSTEM)
-    _run(runner, "check", {"missing": 13}, ws_id=ws_id, lineage=SYSTEM)
-    assert [r["repeat_count"] for r in _rows(db, "check")] == [2, 1]
+    _run(runner, "check", {"new_count": 0, "unreachable_roots": ["/volume-a"]},
+         ws_id=ws_id, lineage=SYSTEM)
+    _run(runner, "check", {"new_count": 0, "unreachable_roots": ["/volume-b"]},
+         ws_id=ws_id, lineage=SYSTEM)
+    rows = _rows(db, "check")
+    assert [json.loads(r["result"])["unreachable_roots"] for r in rows] == [
+        ["/volume-a"], ["/volume-b"],
+    ]
+    assert [r["repeat_count"] for r in rows] == [1, 1]
 
 
 def test_a_success_breaks_a_failure_streak(runner_db):
@@ -357,7 +374,8 @@ def test_stale_checkpoint_cannot_resurrect_a_finished_system_row(runner_db, outc
             raise RuntimeError("offline")
         return {"noop": True}
 
-    job_id = runner.start("check", work, workspace_id=ws_id, lineage=SYSTEM)
+    job_id = runner.start("check", work, workspace_id=ws_id, lineage=SYSTEM,
+                         pausable=False)
     assert started.wait(synchronization_timeout(5))
     write = runner._history.write_checkpoints
 

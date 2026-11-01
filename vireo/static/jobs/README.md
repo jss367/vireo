@@ -32,7 +32,7 @@ runs the selected process in the archive instead of staging.
 | `job-card.js` | The job card: header controls (pause/resume/cancel), meta, the retry/resume row, pause and interrupted banners, and finished results |
 | `steps.js` | A job's step tree: progress bars, throughput and ETA, current file, errors, repair lists, and file leaves; and the failed step's Retry button guard |
 | `polling.js` | `fetchJobs()` (`/api/jobs`) and `fetchHistory()` (`/api/jobs/history`) |
-| `lineage.js` | Who started a job and what it follows: `groupOperations` (a root job with the follow-ups it started, at any depth), the "Started by Vireo" / "Following your Import" text, the repeat note for a system task's collapsed row, and the origin filter |
+| `lineage.js` | Who started a job and what it follows: `groupOperations` (a root job with the follow-ups it started, at any depth), the "Started by Vireo" / "Following your Import" text, the repeat note for a system task's collapsed failures, and the origin filter |
 | `list.js` | The job list pane: the type, status and origin filters (`filteredHistory`, `applyFilters`), list items grouped by operation, the running badge, and the list click listener |
 | `selection.js` | Selecting a job and following a live one over `/api/jobs/<id>/stream` |
 | `detail.js` | The detail pane: one job, step toggling, and the Active and History overviews, each operation's follow-ups indented under its root |

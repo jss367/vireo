@@ -77,6 +77,11 @@ def _is_noop(result):
     return isinstance(result, dict) and result.get("noop") is True
 
 
+def _primary_error(result):
+    """The error a failed row reports, or None when it has none."""
+    return result.get("error") if isinstance(result, dict) else None
+
+
 def _load_json(blob):
     """Decode a job_history JSON column, tolerating NULL and junk."""
     if not blob or not isinstance(blob, str):
@@ -408,7 +413,7 @@ class JobHistory:
             try:
                 conn = sqlite3.connect(self.db_path, timeout=30)
                 action, previous = self.system_disposition(
-                    conn, job, result_data, summary, config_json,
+                    conn, job, result_data, config_json,
                 )
                 if action == "drop":
                     # Routine: the check ran and found nothing to do. Its
@@ -459,18 +464,21 @@ class JobHistory:
                     conn.close()
 
     @staticmethod
-    def system_disposition(conn, job, result_data, summary, config_json):
+    def system_disposition(conn, job, result_data, config_json):
         """How a finished job's row relates to the previous run of its task.
 
         Returns ``(action, previous_row)``, ``action`` one of:
 
         - ``"keep"``: write a new row. Every job the user caused, every
-          cancelled run, and any system outcome that differs from the last.
+          cancelled run, every success that changed something, and any
+          failure that differs from the last.
         - ``"collapse"``: the previous run of the same system task (same
-          type, workspace and config) ended the same way (failed again, or
-          succeeded with the same summary). Its row is replaced by this one,
-          carrying the repeat count and when the streak began, so an
-          unmounted NAS failing every check is one row, not hundreds.
+          type, workspace and config) failed with the same error. Its row
+          is replaced by this one, carrying the repeat count and when the
+          streak began, so an unmounted NAS failing every check is one row,
+          not hundreds. Successes never collapse: two runs with the same
+          summary can still differ in detail (which folder was offline),
+          and folding them would claim a sameness the rows don't have.
         - ``"drop"``: a successful system run that changed nothing
           (``result["noop"]``) after a run that also changed nothing, or
           the first such run. A no-op that follows a failure or a run that
@@ -498,8 +506,11 @@ class JobHistory:
             ):
                 return "drop", None
             return "keep", None
-        if previous is not None and previous["status"] == job["status"] and (
-            job["status"] == "failed" or previous["summary"] == summary
+        if (
+            job["status"] == "failed" and previous is not None
+            and previous["status"] == "failed"
+            and _primary_error(_load_json(previous["result"])) is not None
+            and _primary_error(_load_json(previous["result"])) == _primary_error(result_data)
         ):
             return "collapse", previous
         return "keep", None
