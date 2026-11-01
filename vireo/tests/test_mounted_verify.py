@@ -14,6 +14,8 @@ from move.folder_transfer import _FolderTransfer
 
 @pytest.fixture
 def trees(tmp_path, monkeypatch):
+    if os.name != 'posix':
+        pytest.skip('NAS-side verification requires POSIX change timestamps')
     source, dest = tmp_path / 'source', tmp_path / 'mount' / 'shoot'
     source.mkdir()
     dest.mkdir(parents=True)
@@ -168,12 +170,8 @@ def test_destination_changed_after_hash_cannot_authorize_deletion(trees, monkeyp
         if change == 'replace':
             path.unlink()
         path.write_bytes(b'x' * before.st_size)
-        # POSIX ctime also catches preserved mtime. Windows ctime records
-        # creation time, so use a changed mtime there instead.
-        if os.name != 'nt':
-            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-        else:
-            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+        # Change time must detect an in-place rewrite preserving mtime.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
     monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
     assert run_verify(trees) == (True, 'destination files changed during checksum verification')
@@ -301,3 +299,30 @@ def test_job_step_names_actual_verification_method():
         assert actual['label'] == phase
         assert actual['status'] == 'running'
         assert actual['progress'] == {'current': 0, 'total': 3}
+
+
+def test_creation_timestamp_platform_keeps_full_byte_verification(tmp_path, monkeypatch):
+    """Simulate Windows even on POSIX: preserved mtime never skips bytes."""
+    source, dest = tmp_path / 'source', tmp_path / 'mount'
+    source.mkdir()
+    dest.mkdir()
+    (source / 'photo.nef').write_bytes(b'good')
+    (dest / 'photo.nef').write_bytes(b'good')
+    before = (dest / 'photo.nef').stat()
+    (dest / 'photo.nef').write_bytes(b'evil')
+    os.utime(dest / 'photo.nef', ns=(before.st_atime_ns, before.st_mtime_ns))
+    monkeypatch.setattr(mv, '_supports_destination_change_tracking', lambda: False)
+    monkeypatch.setattr(mv, '_probe_matches', lambda *a: pytest.fail('must not try SSH'))
+    config = settings(dest)
+    assert mv.mounted_verification_target(str(dest), config) is None
+    assert mv.verify_mounted_copy(str(source), str(dest), {}, is_merge=False,
+                                 progress=lambda *a: None) == (False, None)
+    transfer = _FolderTransfer(
+        SimpleNamespace(effective_config=lambda: config), str(source),
+        SimpleNamespace(transfer_dest=str(dest), dest_exists=True),
+        remote=None, verify_contents=True, progress_cb=None, progress=lambda *a: None,
+    )
+    result = transfer.verify_copy()
+    assert result['moved'] == 0
+    assert 'Originals preserved' in result['errors'][0]
+    assert (source / 'photo.nef').read_bytes() == b'good'

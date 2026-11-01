@@ -37,6 +37,13 @@ log = logging.getLogger("move")
 VERIFY_BATCH_SIZE = 128
 
 
+def _supports_destination_change_tracking():
+    # Windows st_ctime is creation time, so a same-size in-place rewrite
+    # preserving mtime can evade the signature check. Keep byte comparison
+    # until that platform has a reliable change indicator.
+    return os.name == "posix"
+
+
 def mounted_verification_target(destination, settings):
     """Find one unambiguous saved SSH route for this exact mounted folder.
 
@@ -45,6 +52,8 @@ def mounted_verification_target(destination, settings):
     the import was queued. Relative and symlink-redirected mappings are not
     eligible for the optimization.
     """
+    if not _supports_destination_change_tracking():
+        return None
     candidates = []
     for entry in settings.get("remote_targets") or []:
         # Settings are normally validated on write. Still refuse malformed
@@ -179,6 +188,8 @@ def verify_mounted_copy(source, destination, remote, *, is_merge, progress, cont
     verifier. Cancellation propagates, and the move coordinator restarts
     verification if the control generation changed during a pause.
     """
+    if not _supports_destination_change_tracking():
+        return False, None
     marker = None
     try:
         progress(0, 0, "", "Checking NAS verification")

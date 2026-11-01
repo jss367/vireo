@@ -660,6 +660,7 @@ def test_merge_fallback_still_discards_regular_finder_metadata(tmp_path):
 
 
 @pytest.mark.parametrize('action', ['resume', 'resume_unchanged', 'cancel'])
+@pytest.mark.skipif(os.name != 'posix', reason='NAS-side verification requires POSIX change timestamps')
 def test_pause_after_nas_checksum_batch_reverifies_before_delete(transfer_env, monkeypatch, action):
     import move.folder_transfer as transfer
     import move.mounted_verify as mv

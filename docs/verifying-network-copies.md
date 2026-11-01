@@ -7,6 +7,10 @@ over Secure Shell (SSH). Photo contents are still read on both machines,
 but only checksums and file information need to cross the network during
 this check. Disk speed and connection setup still affect verification time.
 
+This optimization is available on macOS and Linux. Windows keeps full byte
+comparison: its file creation timestamps cannot reliably reveal an in-place
+rewrite that preserves a file's size and modification time.
+
 This happens automatically when exactly one saved target under **Settings →
 Remote targets** covers the destination's mounted path. The target needs a
 working SSH connection without a password prompt, the correct server-side
