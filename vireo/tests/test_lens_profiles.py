@@ -449,23 +449,45 @@ def test_background_optical_cache_handles_disappearing_folder(database, app_and_
 
 
 def test_float_image_encodes_identically_across_a_second_boundary(monkeypatch):
-    """The embedded sRGB profile must not carry a per-save creation time."""
+    """Concurrent first saves embed the one import-time sRGB profile.
+
+    LittleCMS stamps a profile with its creation time; a profile built per
+    save (or per racing cache miss) made identical pixels encode differently.
+    Saves must never build a profile, so building one here fails the test.
+    """
+    import threading
+
     import float_image
     from float_image import FloatImage
-    from PIL import ImageCms
+    from PIL import Image, ImageCms
+    from testing.waits import synchronization_timeout
 
-    created = []
-    real = ImageCms.createProfile
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("a save built its own sRGB profile")
 
-    def counting(*args, **kwargs):
-        created.append(args)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(float_image.ImageCms, "createProfile", counting)
-    float_image._srgb_profile.cache_clear()
+    monkeypatch.setattr(float_image.ImageCms, "createProfile", refuse)
     image = FloatImage(np.full((4, 4, 3), 0.25, dtype=np.float32))
-    first, second = io.BytesIO(), io.BytesIO()
-    image.save(first, format="JPEG", quality=90)
-    image.save(second, format="JPEG", quality=90)
-    assert first.getvalue() == second.getvalue()
-    assert len(created) <= 1
+    workers = 8
+    barrier = threading.Barrier(workers)
+    outputs, errors = [None] * workers, []
+
+    def save(index):
+        try:
+            buffer = io.BytesIO()
+            barrier.wait(synchronization_timeout(5))
+            image.save(buffer, format="JPEG", quality=90)
+            outputs[index] = buffer.getvalue()
+        except Exception as exc:  # broad: surface any worker failure in the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=save, args=(i,)) for i in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(synchronization_timeout(10))
+    assert not errors, errors
+    assert len(set(outputs)) == 1
+    embedded = Image.open(io.BytesIO(outputs[0])).info["icc_profile"]
+    assert embedded == float_image.SRGB_PROFILE
+    description = ImageCms.getProfileDescription(ImageCms.ImageCmsProfile(io.BytesIO(embedded)))
+    assert "sRGB" in description
