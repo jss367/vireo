@@ -1234,8 +1234,8 @@ class ImportService:
                     # of empty content. Hashing it here would produce a
                     # different fingerprint from the parent's and stall
                     # an otherwise-valid retry of an import that had
-                    # successfully landed a zero-byte image. See PR #1387
-                    # Codex review; scanner.py resets ``file_hash`` on
+                    # successfully landed a zero-byte image; the scanner
+                    # resets ``file_hash`` on
                     # ``size == 0 and hash == EMPTY_FILE_SHA256``.
                     if current_size == 0:
                         current_hash = ""
@@ -1439,8 +1439,8 @@ class ImportService:
         # parent's imports can later name an unrelated photo. Merges
         # every fingerprint hop persisted alongside the ID sources
         # above; missing keys just fall through the verify step below
-        # (legacy parents from before this fix keep working with the
-        # same integer-ID trust).
+        # (a parent that recorded no fingerprints keeps integer-ID
+        # trust).
         allowed_fingerprints = {}
         for source in (
             parent_result.get("photo_fingerprints") or {},
@@ -2028,15 +2028,15 @@ class ImportService:
         # ``%Y`` renders only 4 digits, ``%m`` only 2, and so on. Use
         # ``_strftime_template_can_render`` to ask, per overlap position,
         # whether the template component can actually produce the mount's
-        # component: an earlier guard treated every ``%``-bearing component
-        # as an unconditional wildcard and rejected the default
-        # ``%Y/%Y-%m-%d`` template against a mount leaf like ``NAS`` even
-        # though ``%Y`` can never render letters. If every overlap position
+        # component: treating every ``%``-bearing component as an
+        # unconditional wildcard would reject the default ``%Y/%Y-%m-%d``
+        # template against a mount leaf like ``NAS`` even though ``%Y``
+        # can never render letters. If every overlap position
         # can render, SOME real strftime output overlaps the mount in one
         # of the two directions above and the request must be rejected.
         # Locale-dependent directives (``%B``, ``%A``, ``%Z``, …) whose
-        # renders are truly unknowable fall back to a wildcard pattern, so
-        # the guard stays at least as strict as before for those tokens.
+        # renders are truly unknowable fall back to a wildcard pattern, the
+        # strict choice for those tokens.
         #
         # Normalize the template with ``os.path.normpath`` before splitting
         # so ``.`` components collapse the same way the import path does
