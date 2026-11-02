@@ -164,7 +164,7 @@ def _apprun_path_for(binary):
 
 
 def _source_fingerprint(source_binary):
-    """Identity used to detect an in-place replacement of ``source_binary``.
+    """Identity that detects an in-place replacement of ``source_binary``.
 
     Combines mtime (nanoseconds) and size: mtime alone can be forged by
     os.utime, size alone misses same-size rebuilds, together they identify

@@ -1,6 +1,6 @@
 """Keep the system awake while long-running jobs are in flight.
 
-See issue #1397. A multi-hour import on battery is suspended by macOS idle
+A multi-hour import on battery is suspended by macOS idle
 sleep roughly ten minutes in, and an SMB-over-Tailscale mount does not
 survive the repeated sleep/DarkWake cycling — the job wakes to a share that
 is no longer there.

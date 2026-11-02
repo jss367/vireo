@@ -94,7 +94,7 @@ def drop_stale_vireo_location_keywords(db, photo_id, xmp_path,
     Only the two entries the last write recorded in its sidecar marker are
     dropped, and only when the ownership companion says Vireo actually
     inserted them -- a matching keyword the user typed in Lightroom is not
-    Vireo's to drop and is imported exactly as before. Returns
+    Vireo's to drop and is imported. Returns
     ``(flat_set, hierarchical_list)``. Callers that read keyword lists pass
     their snapshot's ``(location_marker, owned_marker)`` as location_metadata
     so a later read cannot mistake missing ownership for a legacy write.

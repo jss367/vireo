@@ -301,8 +301,8 @@ def compute_eye_tenengrad(image, eye_xy, bbox, k=0.08):
         image: PIL.Image (original resolution).
         eye_xy: (x, y) eye keypoint in image-pixel space.
         bbox: (x0, y0, x1, y1) MegaDetector bbox, image-pixel space. Only
-            used to choose the window size proportional to the subject —
-            not for clamping the window (image bounds handle that).
+            chooses the window size proportional to the subject — it does
+            not clamp the window (image bounds handle that).
         k: window side as fraction of min(bbox_w, bbox_h). Default 0.08.
 
     Returns:

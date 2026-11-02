@@ -672,8 +672,8 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
             format: str -- output format: jpg, png, or tiff (default jpg)
             quality: int 1-100 (default 92)
             working_copy_max_size: int -- the cap used when generating
-                working copies (default 4096); used to decide whether
-                the working copy can satisfy the requested max_size.
+                working copies (default 4096); decides whether the
+                working copy can satisfy the requested max_size.
             developed_dir: str -- optional path to darktable-developed
                 outputs (mirrors darktable_output_dir config). Export
                 prefers a developed JPG/TIFF at

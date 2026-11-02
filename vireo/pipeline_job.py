@@ -231,7 +231,7 @@ def _archive_mount_baseline(
     which is why ``lexists`` is enough there), so on Linux an unmounted
     archive looks exactly like a valid empty destination — ``os.makedirs``
     succeeds and the import writes onto the system disk under the stale
-    mount point. See PR #1394 review (Codex P1 r3687190865).
+    mount point.
 
     ``os.path.ismount`` is the right primitive rather than a hand-rolled
     ``st_dev`` comparison: on POSIX it already compares the directory's
@@ -246,7 +246,7 @@ def _archive_mount_baseline(
     that destination outright and break working setups.
 
     ``known_mounted_roots`` seeds the baseline as ``True`` for any
-    candidate the caller previously observed as a live mount (see
+    candidate a past run observed as a live mount (see
     ``_load_known_mount_roots`` / ``_record_known_mount_roots``). Without
     it, a share that was already detached BEFORE this run started
     escapes the guard: its baseline is False and no mounted → unmounted
@@ -255,7 +255,7 @@ def _archive_mount_baseline(
     land on the local disk. Cross-run history closes that hole without
     refusing hand-made local dirs — those never enter the known-set to
     begin with (no run ever observed them as a live mount) and their
-    baseline stays False. See PR #1396 review (Codex P1 r3687401636).
+    baseline stays False.
     """
     known = known_mounted_roots or set()
     # Custom mount locations (for example ``/srv/photos``) have no lexical
@@ -385,19 +385,19 @@ def _mount_root_offline(mount_root: str) -> bool:
     ``os.path.ismount`` still returns True while every read against
     the root raises EIO. Trusting ismount alone would classify the
     dropped share as folder-scoped and classify would keep reissuing
-    reads across the dead share instead of pausing for reconnection
-    (Codex #1388 P1 r3664211201). Probe with ``listdir`` first.
+    reads across the dead share instead of pausing for reconnection.
+    Probe with ``listdir`` first.
 
     A root that exists and is readable — populated OR empty — is
     treated as online. Populated is proof either that the mount is
     live or that this is an ordinary local directory with siblings
     to work through; either way any specific missing subtree is a
-    folder-scoped issue (Codex #1388 P1 r3663642357). Empty is
+    folder-scoped issue. Empty is
     ambiguous — it could be an unmounted stub OR an ordinary local
     ``/mnt/photos`` whose only child (the deleted collection folder)
     just went away — so err folder-scoped rather than paint every
-    folder-only outage as a whole-mount outage (Codex #1388 P1
-    r3664348752). If the mount truly is dead, the ``listdir`` OSError
+    folder-only outage as a whole-mount outage. If the mount truly is
+    dead, the ``listdir`` OSError
     branch above still fires and catches the case that matters
     (mount registered but server unreachable).
     """
@@ -443,26 +443,26 @@ def _source_offline_reason(
       one folder no longer resolves. Other folders in the collection may
       be healthy, so the caller should skip photos in this folder as
       unreachable and keep processing rather than stopping cold. This
-      covers a single deleted or renamed local folder — the incident
-      fix's original global-stop behavior would have stranded later
-      healthy folders (and, on ``reclassify=True``, cleared their
-      existing predictions during finalization with no replacement).
+      covers a single deleted or renamed local folder — stopping the
+      whole run would strand later healthy folders (and, on
+      ``reclassify=True``, clear their existing predictions during
+      finalization with no replacement).
 
     Deliberately conservative — an image path with no mount-shaped
     prefix under a readable containing folder returns ``None``, so a
     single unreadable file inside an ordinary local tree stays a
     per-photo failure. A readable folder under a mount-shaped path is
     still probed at the mount root, since a stale SMB/NFS mount can
-    keep folder metadata cached (Codex #1388 P1 r3665254569) — a
-    successful root probe there also returns ``None``.
+    keep folder metadata cached — a successful root probe there also
+    returns ``None``.
     """
     if not folder_path:
         return None
     # A dead SMB/NFS mount can keep folder metadata cached: reads
     # against the folder's files still raise EIO, but
     # ``os.path.isdir(folder_path)`` returns True from the stale stat.
-    # Probe every mount-shaped root candidate first (Codex #1388 P1
-    # r3665254569) so that case is scoped mount-wide and classify
+    # Probe every mount-shaped root candidate first so that case is
+    # scoped mount-wide and classify
     # pauses for reconnection, rather than being misread as "one bad
     # file" and letting classify keep hammering the dead share. A
     # successful root probe leaves the caller with the ordinary
@@ -536,7 +536,7 @@ def _preflight_mask_outcomes(
       runs`` to have surfaced the frame first (matching-anchor-species gate
       included), so counting arbitrary weak-conf offline photos as at-risk
       inflates the outage report for photos the mask worklist would never
-      read (Codex #1392 P2 r3687403366).
+      read.
     * **Cache validity** — the same test the loop's cache branch applies:
       a ``photo_masks`` row for this variant whose stored prompt and detector
       still match the current primary detection, whose file is on disk, and
@@ -602,7 +602,7 @@ def _extract_masks_early_exit(
     status and appended a Fatal error. Overwriting it with ``skipped`` lets
     the end-of-run rollup — which reads only stage statuses — finish the job
     green while the dropped photos stay unmasked and get hard-rejected in
-    Process Review as ``no_subject_mask`` (Codex #1392 P1).
+    Process Review as ``no_subject_mask``.
 
     The total counts the pre-flight-dropped photos for the same reason the
     finalizer does: reporting ``unreadable`` against a hard-coded zero total
@@ -624,7 +624,7 @@ def _extract_masks_early_exit(
     re-latch when classify already emitted a source-offline Fatal (to avoid
     a duplicate error entry), but the extract stage still had unreadable
     photos — so its row on the Jobs page must show failed too, with the
-    outage detail attached (Codex #1392 P2 r3687403367). Callers pass the
+    outage detail attached. Callers pass the
     extract-owned outage message even when it wasn't appended to
     ``errors`` so the step can carry it here.
     """
@@ -659,7 +659,7 @@ def _still_offline_folder_ids_of(thread_db, folder_ids) -> set:
     an always-probe pass over the downstream worklist, ``extract_masks``
     / ``eye_keypoints`` would then reopen the dead source, hammering it
     photo-by-photo — the exact pattern the classify pause is meant to
-    prevent (Codex #1388 P1 r3664891993).
+    prevent.
 
     Each unique folder path is probed once (``isdir`` returns False for
     every child of a dead mount, so a single probe covers folder- and
@@ -694,7 +694,7 @@ def _still_offline_folder_ids(thread_db, seed_photo_ids) -> set:
     Classify only ever adds a photo to that set after calling
     ``_prepare_image``; the non-reclassify cache branch short-circuits
     before that call, so cached photos in the same offline folder
-    never enter the seed set (Codex #1388 P2 r3664694179). Filtering
+    never enter the seed set. Filtering
     by folder catches them too — otherwise they slip through and force
     mask/eye-keypoint stages to reopen the dead source, the exact
     downstream-hammering pattern the classify pause is meant to
@@ -707,12 +707,11 @@ def _still_offline_folder_ids(thread_db, seed_photo_ids) -> set:
     classify can't be filtered by folder either.
 
     The seed lookup is chunked under SQLite's bind-variable limit
-    (999 on legacy builds this repo explicitly accommodates — see
-    ``db.py``'s ``_SQLITE_PARAM_CHUNK_SIZE``). Without chunking a
-    large offline folder would raise ``OperationalError: too many
-    SQL variables`` before the mask/eye-keypoint stages could get
-    past this filter and continue with photos from healthy folders
-    (Codex #1388 P2 r3664525158).
+    (999 on older builds — see ``db.py``'s ``_SQLITE_PARAM_CHUNK_SIZE``).
+    Without chunking a large offline folder would raise
+    ``OperationalError: too many SQL variables`` before the
+    mask/eye-keypoint stages could get past this filter and continue
+    with photos from healthy folders.
     """
     if not seed_photo_ids:
         return set()
@@ -1124,7 +1123,7 @@ def _find_broken_metadata_folders(db, photo_ids):
     return [(fp, paths) for fp, paths in by_folder.items()]
 
 
-# Approximate relative runtime cost per stage, used to weight the overall
+# Approximate relative runtime cost per stage, weighting the overall
 # progress bar so a fast stage finishing doesn't push the bar to 100%.
 # Heuristic: classify dominates on big imports; detect and eye_keypoints are
 # also GPU-heavy; ingest / model_loader / regroup are quick.
@@ -1260,8 +1259,7 @@ def _resolve_classification_eta_state(
     # batch will ever fire — the "Estimating after the first uncached
     # batch…" state below would then never resolve and the Jobs page
     # would linger on that message throughout a fully cached or fully
-    # skipped traversal. Return the finishing signal directly instead
-    # (Codex #1468 P2).
+    # skipped traversal. Return the finishing signal directly instead.
     if expected_uncached <= 0:
         fields["eta_state"] = "finishing"
         fields["eta_seconds"] = 0
@@ -1304,7 +1302,7 @@ def _classification_eta_progress(
     the batch and around ``_flush_batch`` itself, and passes it here.
     Excluding ``_prepare_image`` cost would understate the ETA on
     RAW/JPEG-heavy or slow-storage runs where preparation dominates
-    per-photo latency (Codex #1468 P2).
+    per-photo latency.
 
     ``cache_overcount`` is the count of photos where the preflight assumed
     a cache hit (a classifier_runs row existed) but runtime found no cached
@@ -1320,7 +1318,7 @@ def _classification_eta_progress(
     rescue). Runtime never enters an inference batch for them, so the
     unvisited share of them is subtracted from ``remaining_uncached`` —
     otherwise a tail of below-threshold photos inflates a numeric ETA
-    that the runtime will actually traverse without work (Codex #1468 P2).
+    that the runtime will actually traverse without work.
 
     The first classifier call is deliberately flushed as a one-photo batch
     for cancellation responsiveness and includes model warm-up.  Wait for a
@@ -1939,8 +1937,8 @@ class _StageState:
         # processing). Downstream source-reading stages (extract_masks,
         # eye_keypoints) filter these out so they don't walk back into the
         # missing folder and re-record the same photos as mask/keypoint
-        # failures, obscuring the intended source-offline diagnosis
-        # (Codex #1388 P2 r3664058173). Held on a dict rather than
+        # failures, obscuring the intended source-offline diagnosis.
+        # Held on a dict rather than
         # ``stages["classify"]`` because ``_update_stages`` pushes stage
         # dicts as JSON to SSE consumers, and a raw ``set`` isn't
         # JSON-serialisable.

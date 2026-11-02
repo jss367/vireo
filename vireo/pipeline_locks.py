@@ -130,8 +130,7 @@ def _session_uses_gpu(session):
     Runtime decided to use after construction, so this reflects reality
     even when CoreML was requested but excluded (e.g. for external-data
     models). Falls back to ``True`` if the session doesn't expose
-    ``get_providers`` — conservative default that matches the unconditional-
-    lock behavior we had before this check existed.
+    ``get_providers`` — the conservative default: take the GPU lock.
     """
     try:
         providers = session.get_providers()

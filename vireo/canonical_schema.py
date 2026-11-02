@@ -36,12 +36,12 @@ EXIF_SUMMARY_COLUMNS = (
     "iso",
 )
 
-# Schema objects that the code which first wrote them used to create on
-# demand (the job runner's history, the preview cache's "do not adopt"
-# markers, the species-identity repair audit and the common-name lookup
-# index). ``create_tables`` builds them with the rest of the schema;
-# ``schema.MIGRATIONS`` entry 18 runs the same statements on a catalog that
-# predates the move, so this tuple is the one definition.
+# Schema objects that older catalogs created on demand, in the code that
+# first wrote them (the job runner's history, the preview cache's "do not
+# adopt" markers, the species-identity repair audit and the common-name
+# lookup index). ``create_tables`` builds them with the rest of the schema;
+# ``schema.MIGRATIONS`` entry 18 runs the same statements on an older
+# catalog, so this tuple is the one definition.
 # test_schema_ddl_boundary.py keeps new DDL out of the code that writes rows.
 FORMERLY_LAZY_OBJECTS = (
     """CREATE TABLE IF NOT EXISTS job_history (

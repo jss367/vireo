@@ -388,7 +388,7 @@ def _source_root_unwalkable(source_path, onerror):
         # we refuse to walk is exactly the case where the pill would
         # otherwise go green over a card whose files were never seen.
         # Emit a synthetic OSError so the ledger records it as a
-        # discovery failure. See PR #1107 review (P1 line 927).
+        # discovery failure.
         if onerror is not None:
             onerror(PermissionError(
                 errno.EACCES,

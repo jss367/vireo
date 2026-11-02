@@ -852,7 +852,7 @@ def schema_parent_prefixes():
     """Return the set of dotted prefixes that are parents of any SCHEMA key.
 
     For example, with ``pipeline.w_focus`` and ``ingest.folder_template`` in
-    SCHEMA, this returns ``{"pipeline", "ingest"}``. Used to detect malformed
+    SCHEMA, this returns ``{"pipeline", "ingest"}``. Detects malformed
     imports that replace a schema-backed subtree with a non-object value.
     """
     out = set()

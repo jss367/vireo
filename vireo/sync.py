@@ -651,7 +651,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             can retry later anyway. On for the sync that runs before a NAS
             transfer, where "later" does not exist: the transfer deletes the
             local originals, and a cleared-but-unwritten rating is gone.
-        folder_paths: optional ``{folder_id: path}`` map used to resolve
+        folder_paths: optional ``{folder_id: path}`` map that resolves
             sidecar paths in place of the active workspace's folder tree.
             The pre-transfer sync for a pending NAS archive passes one
             covering every catalog folder because the staging tree may have

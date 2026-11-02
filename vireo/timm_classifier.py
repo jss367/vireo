@@ -282,8 +282,8 @@ def missing_common_names_notice(clf, model_name):
     the taxonomy alone (``_resolve_common_name``), so any species the
     taxonomy does not name shows its scientific name. The run's predictions
     are still valid, so callers report this as a notice, not a failure. It
-    says what Vireo's own repair is doing, because a failed repair used to
-    be visible only in the log.
+    says what Vireo's own repair is doing, so a failed repair is not
+    visible only in the log.
     """
     if not getattr(clf, "label_descriptions_missing", False):
         return None

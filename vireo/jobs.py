@@ -43,8 +43,8 @@ log = logging.getLogger(__name__)
 # Job types that must NOT hold an idle-sleep assertion. Everything else
 # does, including types added later: over-protecting a short job costs a
 # few seconds of battery, while under-protecting a long one costs the
-# whole run (issue #1397 — a 2h16m import suspended twelve minutes in,
-# whose network share did not survive the sleep/DarkWake cycling).
+# whole run (a multi-hour import that the Mac suspends loses a network
+# share that does not survive the sleep/DarkWake cycling).
 #
 # Ephemeral jobs are excluded wholesale — they are transient background
 # work surfaced for transparency, and losing one to sleep is harmless.
@@ -123,7 +123,7 @@ class JobRunner:
         self._jobs = {}
         self._lock = threading.RLock()
         self._pause_condition = threading.Condition(self._lock)
-        # Held while any sleep-blocking job runs; see issue #1397. Resolved
+        # Held while any sleep-blocking job runs. Resolved
         # through the module rather than bound at import so tests (and any
         # future platform override) can substitute the inhibitor.
         self.sleep_blocker = power.SleepBlocker(
