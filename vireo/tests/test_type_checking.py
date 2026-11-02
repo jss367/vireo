@@ -174,14 +174,17 @@ def _canonical_annotation_texts(
     module_aliases: dict[str, list[ast.expr]] | None = None,
     _visited: frozenset[str] = frozenset(),
 ) -> frozenset[str]:
-    """Return every canonical dotted/subscript text ``node`` could resolve to.
+    """Return conservative syntactic canonical candidates without evaluating code.
 
-    Multiple results arise when a module-level name has alternative
-    bindings — e.g. ``if not TYPE_CHECKING: X = tuple[int, str]`` paired
-    with ``else: X = Callable[..., Any]``, where the type checker binds
-    whichever branch its gating selects. The caller checks membership
-    against the forbidden set, so returning every reachable canonical
-    text is sufficient — the ratchet is an over-approximation.
+    Alternative bindings are combined independently across names and
+    subexpressions, without preserving control-flow correlation. Cartesian
+    products can therefore combine mutually exclusive bindings: importing
+    both ``Outer`` and ``Inner`` as ``Callable`` in one branch and both as
+    ``Any`` in another synthesizes ``Callable[..., Any]`` for
+    ``Outer[..., Inner]``, although neither branch has that annotation.
+    The architectural ratchet deliberately rejects such a candidate and
+    may report harmless declarations. A match is not proof that a type
+    checker or runtime can reach the synthesized form.
 
     ``callback: "Callable[..., Any]"`` reaches this function as an
     ``ast.Constant`` holding the string, which we parse and recurse on
@@ -200,8 +203,8 @@ def _canonical_annotation_texts(
     results from each: the matcher never discards an alternative merely
     because one branch happens to be an import and another a module
     assignment, so an import binding and a module-level assignment
-    binding one local name compose into every canonical text either
-    branch could produce.
+    binding one local name contribute syntactic candidates without
+    asserting that their combinations occur on a feasible branch.
     """
     if module_aliases is None:
         module_aliases = {}
@@ -263,7 +266,11 @@ def _canonical_annotation_texts(
 
 def _callable_facade_offenders(source: str, label: str) -> list[str]:
     """Return ``"{label}.{Class}.{attr}"`` for every class attribute whose
-    annotation names ``Callable[..., Any]`` in any supported form."""
+    conservative annotation candidates include ``Callable[..., Any]``.
+
+    Independent branch alternatives may produce false positives; this is
+    a fail-closed architectural rule, not runtime type evaluation.
+    """
     tree = ast.parse(source)
     aliases = _collect_import_aliases(tree)
     module_aliases = _collect_module_aliases(tree)
@@ -718,3 +725,44 @@ def test_callable_facade_matcher_tracks_import_branch_alternatives():
         "fixture.AliasedImportBranchElseFirst.callback",
         "fixture.AliasedImportBranchQuoted.callback",
     ]
+
+
+def test_callable_facade_matcher_deliberately_rejects_uncorrelated_candidates():
+    """Mutually exclusive bindings may synthesize an intentionally rejected form."""
+    both_callable = "from collections.abc import Callable as Outer, Callable as Inner"
+    both_any = "from typing import Any as Outer, Any as Inner"
+    forbidden = (
+        "from collections.abc import Callable as Outer\n"
+        "from typing import Any as Inner"
+    )
+
+    def fixture(imports: str, annotation: str = "Outer[..., Inner]") -> str:
+        return imports + f"\nclass Example:\n    callback: {annotation}\n"
+
+    # Each feasible branch alone is harmless; a real Callable/Any pairing
+    # must still fail, while the application's explicit signature stays legal.
+    assert _callable_facade_offenders(fixture(both_callable), "fixture") == []
+    assert _callable_facade_offenders(fixture(both_any), "fixture") == []
+    assert _callable_facade_offenders(fixture(forbidden), "fixture") == ["fixture.Example.callback"]
+    assert _callable_facade_offenders(fixture(forbidden, "Outer[[], int]"), "fixture") == []
+
+    correlated = textwrap.dedent(
+        """
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            from collections.abc import Callable as Outer, Callable as Inner
+        else:
+            from typing import Any as Outer, Any as Inner
+
+        class Example:
+            callback: Outer[..., Inner]
+        """
+    )
+    tree = ast.parse(correlated)
+    annotation = tree.body[-1].body[0].annotation
+    candidates = _canonical_annotation_texts(annotation, _collect_import_aliases(tree))
+    assert candidates == frozenset({
+        "Callable[..., Callable]", "Any[..., Any]",
+        "Callable[..., Any]", "Any[..., Callable]",
+    })
+    assert _callable_facade_offenders(correlated, "fixture") == ["fixture.Example.callback"]
