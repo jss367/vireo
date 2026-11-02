@@ -27200,6 +27200,7 @@ def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_s
         db.record_edit("keyword_add", "Add source", str(common_id), [{
             "photo_id": photo_b, "old_value": "", "new_value": str(common_id),
         }])
+        db.commit()
     response = client.post("/api/predictions/batch-accept", json={"prediction_ids": pred_ids})
     assert response.status_code == 200, response.get_data(as_text=True)
     accept_id = next(e["id"] for e in db.edit_history.list_recent() if e["action_type"] == "prediction_accept")
@@ -27215,6 +27216,7 @@ def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_s
         later_edit = db.record_edit("keyword_add", "Add survivor", str(alias_id), [{
             "photo_id": photo_b, "old_value": "", "new_value": str(alias_id),
         }])
+        db.commit()
     db._merge_keyword_into(common_id, alias_id)
     db.conn.commit()
     if earlier_source_add:

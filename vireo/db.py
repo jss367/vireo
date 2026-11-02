@@ -20,7 +20,7 @@ from new_images_cache import get_shared_cache
 from repositories.keyword_identity_sql import resolve_import_alias
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.species_taxon_lookup import taxon_lookup_variants
-from unit_of_work import HoldingConnection, UnitOfWork, report_discarded_transaction
+from unit_of_work import HoldingConnection, InOwnUnit, UnitOfWork, report_discarded_transaction
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -1295,7 +1295,10 @@ class Database:
                 survives = self._unit.depth or self.in_transaction
                 self._species_provenance_before = provenance if survives else {}
 
-    def after_commit(self, callback: Callable[[], object]) -> None:
+    def after_commit(
+        self, callback: Callable[[], object], *,
+        own_unit: bool = False, immediate: bool = False, once: bool = False,
+    ) -> None:
         """Run ``callback`` once the open unit of work commits.
 
         For work that must only happen once the data is durable (pruning
@@ -1303,8 +1306,16 @@ class Database:
         savepoint it was registered in) rolls back; run at once when no unit
         is open. A callback that raises is logged and does not undo the
         commit.
+
+        ``own_unit`` runs a callback that writes as its own unit of work
+        (``immediate`` as in ``transaction``), committed on its own after the
+        unit that registered it. ``once`` skips a callback equal to one this
+        unit already holds, so a write recorded several times in one unit
+        schedules its follow-up once.
         """
-        self._unit.after_commit(callback)
+        if own_unit:
+            callback = InOwnUnit(callback, self.transaction, immediate)
+        self._unit.after_commit(callback, once=once)
 
     def set_progress_handler(self, handler: Callable[[], int] | None, n: int) -> None:
         """``sqlite3.Connection.set_progress_handler`` on this connection.
@@ -3484,7 +3495,7 @@ class Database:
 
         Args:
             source: Durable provenance for the association. The stamp lives on
-                    the row, so authorship survives ``_prune_edit_history``
+                    the row, so authorship survives ``prune_edit_history``
                     discarding the ``keyword_add`` entry.
 
                     Defaults to ``KEYWORD_SOURCE_MANUAL`` because that is the
@@ -4511,29 +4522,31 @@ class Database:
         new_value: str | None,
         items: Iterable[Mapping[str, Any]],
         is_batch: bool = False,
-        _commit: bool = True,
         *,
         source: str | None = None,
         reason: str | None = None,
     ) -> int:
         """Record an edit action with per-photo before/after values.
 
-        Clears the redo stack (any undone entries) since a new action invalidates them.
+        Clears the redo stack (any undone entries) since a new action
+        invalidates them. Never commits: the caller's unit of work owns the
+        edit, and once that unit commits the history is pruned to its
+        configured bound in a unit of its own (``prune_edit_history``), once
+        per unit however many edits it recorded. A write outside any unit,
+        or inside a transaction the unit joined but does not own, schedules
+        no prune; its owner prunes after its own commit.
 
         Args:
-            _commit: If False, skip the internal commit and the history prune
-                     (caller is responsible for committing the transaction;
-                     prune can be run later).
             source, reason: the edit's provenance when the caller stated it
                      (who decided, and why); None for the user's own clicks.
         """
         items = self.species_provenance.history_items(action_type, items)
         edit_id = self._edit_history_repository().record(
             action_type, description, new_value, items,
-            is_batch=is_batch, _commit=_commit, source=source, reason=reason,
+            is_batch=is_batch, source=source, reason=reason,
         )
-        if _commit:
-            self._prune_edit_history()
+        if self._unit.depth and not self._unit.joined:
+            self.after_commit(self.prune_edit_history, own_unit=True, immediate=True, once=True)
         return edit_id
 
     # Action types that appear in history but cannot be reversed
@@ -4580,12 +4593,11 @@ class Database:
         if setter is None and handler is None:
             raise ValueError(f'Unsupported history action: {action}')
         if action == 'flag':
-            with self.transaction():
-                for item in items:
-                    self._edit_set_flag(item['photo_id'], item[value_key])
-                    self.photo_review.restore_flag_attribution_history(
-                        entry['id'], item['photo_id'], undo=undo,
-                    )
+            for item in items:
+                self._edit_set_flag(item['photo_id'], item[value_key])
+                self.photo_review.restore_flag_attribution_history(
+                    entry['id'], item['photo_id'], undo=undo,
+                )
             return
         for item in items:
             if setter is not None:
@@ -5047,11 +5059,12 @@ class Database:
         self.update_prediction_status(int(pred_id), "rejected")
 
     def prune_edit_history(self) -> dict[str, int]:
-        """Apply the configured history bound after a caller-owned edit transaction commits."""
-        return self._prune_edit_history()
+        """Delete the active workspace's oldest entries beyond the configured bounds.
 
-    def _prune_edit_history(self):
-        """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
+        Undone entries awaiting redo are never pruned. Never commits: run it
+        in a unit of work (``record_edit`` schedules it after its unit's
+        commit). Returns the grouping snapshots retired and their bytes.
+        """
         max_entries = settings_source.get('max_edit_history') or 1000
         return self._edit_history_repository().prune(
             max_entries,

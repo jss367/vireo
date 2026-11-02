@@ -18,9 +18,16 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from repositories.identity_alternatives import identity_merge_transaction
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import remap_photo_visibility
+
+
+class OriginalPathReturned(ValueError):
+    """A missing folder's own path is back on disk, so it is not relocated.
+
+    ``relocate`` raises it before writing anything; the caller refreshes the
+    folder's status (``mark_ok``) in its own unit of work.
+    """
 
 
 @dataclass(frozen=True)
@@ -575,6 +582,10 @@ class FolderRepository:
                 cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
         return cascaded
 
+    def mark_ok(self, folder_id):
+        """Set one folder's status to 'ok' (no commit)."""
+        self.conn.execute("UPDATE folders SET status = 'ok' WHERE id = ?", (folder_id,))
+
     def relocate(self, folder_id, new_path):
         """Update folder path and set status to 'ok' (no commit).
 
@@ -583,6 +594,10 @@ class FolderRepository:
 
         If new_path is already tracked by another folder, merges photos from
         the missing folder into the existing one and removes the missing folder.
+        If the missing folder's own path is back on disk, raises
+        ``OriginalPathReturned`` without writing; any other refusal is a
+        ``ValueError``, possibly raised part-way through the merge, so run it
+        in a savepoint (``services.folder_relocation.relocate_folder``).
 
         Returns list of child folder dicts that were also relocated.
         """
@@ -597,16 +612,10 @@ class FolderRepository:
                 "SELECT status, path FROM folders WHERE id = ?", (folder_id,)
             ).fetchone()
             if source_row and source_row["status"] == "missing":
-                # Revalidate: if original path came back, refresh status instead
+                # Revalidate: if the original path came back, refuse without
+                # writing; the caller refreshes the status (``mark_ok``).
                 if os.path.isdir(source_row["path"]):
-                    # The caller's unit keeps this refresh even though the
-                    # relocate itself is refused (it catches the ValueError
-                    # inside the unit).
-                    self.conn.execute(
-                        "UPDATE folders SET status = 'ok' WHERE id = ?",
-                        (folder_id,),
-                    )
-                    raise ValueError(
+                    raise OriginalPathReturned(
                         f"Path is already tracked as folder {conflict['id']}"
                     )
                 return self.merge_into_existing(folder_id, conflict["id"], new_path)
@@ -770,11 +779,6 @@ class FolderRepository:
                 )
 
     def merge_into_existing(self, source_folder_id, target_folder_id, new_path):
-        """Collapse folder duplicates atomically, preserving shared identity (no commit)."""
-        with identity_merge_transaction(self.conn):
-            return self._merge_into_existing(source_folder_id, target_folder_id, new_path)
-
-    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path):
         """Merge photos from a missing folder into an existing folder at the same path.
 
         - Photos with matching filenames in the target are dropped from source
@@ -786,11 +790,11 @@ class FolderRepository:
         ``relocate``).
 
         The GPS-review and embedded-offer carries and
-        ``relink_parents_by_path`` run inside this transaction. Commits only
-        when ``commit``: when it is False the caller owns the surrounding
-        transaction — used by ``services.local_workspace._restore_catalog`` so
-        the whole catalog restore (merges + rebase + state-row cleanup)
-        commits atomically.
+        ``relink_parents_by_path`` run inside the caller's unit of work; this
+        never commits. A shared-identity conflict raises
+        ``IdentityMergeConflict`` part-way through, so a caller that catches
+        it runs the merge in a savepoint of its own (``relocate_folder``); one
+        that lets it propagate rolls back with it (the local-copy restores).
         """
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (source_folder_id,)

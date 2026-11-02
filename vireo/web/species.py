@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 
 from db import text_search_match
 from flask import Blueprint, jsonify, request
+from services.edit_history import run_atomic_edit
 from web.request_args import request_bool_arg
 
 if TYPE_CHECKING:
@@ -45,11 +46,7 @@ def create_species_blueprint(get_db: GetDb) -> Blueprint:
         # and the history snapshot in the same transaction.
         if not all(0 < key < 2**63 for key in (photo_id, keyword_id)):
             return jsonify({"error": "photo and keyword IDs must be positive signed 64-bit integers"}), 400
-        try:
-            db.begin_immediate()
-        except sqlite3.OperationalError:
-            return jsonify({"error": "Another review decision is in progress; try again"}), 503
-        try:
+        def review() -> ResponseReturnValue:
             if not db.photos.get(photo_id, verify_workspace=True):
                 return jsonify({"error": "photo not found"}), 404
             assignments = db.species_provenance.assignments(photo_id)
@@ -72,13 +69,16 @@ def create_species_blueprint(get_db: GetDb) -> Blueprint:
                 str(keyword_id), [{'photo_id': photo_id,
                     'old_value': json.dumps({'keyword_id': keyword_id, 'state': before}),
                     'new_value': json.dumps({'keyword_id': keyword_id, 'state': after})}],
-                source=provenance.get('reviewer'), reason=provenance.get('reason'), _commit=False,
+                source=provenance.get('reviewer'), reason=provenance.get('reason'),
             )
-            db.commit()
             return jsonify({"ok": True, "species_assignments": db.species_provenance.assignments(photo_id)})
-        finally:
-            if db.in_transaction:
-                db.rollback()
+
+        try:
+            db.begin_immediate()
+        except sqlite3.OperationalError:
+            return jsonify({"error": "Another review decision is in progress; try again"}), 503
+        # The unit adopts the BEGIN IMMEDIATE just taken; a refusal rolls back.
+        return run_atomic_edit(db, review)
 
     @blueprint.route("/api/species")
     def api_species() -> ResponseReturnValue:

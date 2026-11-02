@@ -21,7 +21,7 @@ import contextlib
 import logging
 
 from repositories.collections import remap_collection_photo_ids
-from repositories.identity_alternatives import identity_merge_transaction, remap_photo_identities
+from repositories.identity_alternatives import remap_photo_identities
 from repositories.photo_versions import remap_photo_versions
 from sql_chunks import chunked
 
@@ -54,13 +54,16 @@ class PhotoRowDeletion:
 
     @contextlib.contextmanager
     def atomic_merge(self, losing_id):
-        """Rollback one automatic pair and its deferred collection mapping."""
+        """Forget one pair's deferred collection mapping if its merge fails.
+
+        The SQL half of a failed pair is the caller's to undo: it runs the
+        block inside a savepoint (``with db.transaction():``).
+        """
         was_mapped = losing_id in self._collection_remap
         previous = self._collection_remap.get(losing_id)
         completed = False
         try:
-            with identity_merge_transaction(self.conn):
-                yield
+            yield
             completed = True
         finally:
             if not completed:

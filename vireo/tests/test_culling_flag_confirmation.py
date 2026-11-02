@@ -111,7 +111,9 @@ class Catalog:
         items = [dict(row) for row in self.conn.execute(
             "SELECT * FROM edit_history_items WHERE edit_id=?", (edit_id,),
         )]
-        self._apply_edit_items(entry, items, undo=undo)
+        # The replay's savepoint, as ``services.edit_history`` opens it.
+        with self.transaction():
+            self._apply_edit_items(entry, items, undo=undo)
 
 
 _REPLAY = replay_methods()

@@ -454,8 +454,7 @@ def create_photo_edit_recipes_blueprint(
                     pid = item["photo_id"]
                     db.set_photo_edit_recipe(pid, applied_recipes[str(pid)], verify_workspace=False)
                     queue_edit_recipe_sync(db, pid, item["new_value"])
-                db.record_edit("edit_recipe", description, target_json, items, is_batch=True, _commit=False)
-            db._prune_edit_history()
+                db.record_edit("edit_recipe", description, target_json, items, is_batch=True)
             invalidate_photo_render_cache(db, [item["photo_id"] for item in items])
         # ``recipes`` maps each applied id to the recipe actually stored for
         # it — critical when ``has_local`` is true because each target has

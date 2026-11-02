@@ -56,6 +56,7 @@ def test_record_edit_persists_provenance_and_list_recent_carries_it(db):
         "flag", "Set flag to flagged", "flagged",
         [{"photo_id": a, "old_value": "none", "new_value": "flagged"}],
     )
+    db.commit()
     assert tuple(_history_row(db, first))[3:5] == (None, None)
 
     second = db.record_edit(
@@ -66,6 +67,7 @@ def test_record_edit_persists_provenance_and_list_recent_carries_it(db):
         ],
         is_batch=True, source="agent", reason="soft",
     )
+    db.commit()
     assert tuple(_history_row(db, second))[3:5] == ("agent", "soft")
     recent = db.edit_history.list_recent()
     assert [(e["id"], e["source"], e["reason"]) for e in recent] == [
@@ -81,6 +83,7 @@ def test_flag_note_requires_a_live_edit_matching_the_current_flag_with_provenanc
         "flag", "Set flag to rejected", "rejected",
         [{"photo_id": a, "old_value": "none", "new_value": "rejected"}],
     )
+    db.commit()
     # A hand flag: history, but nothing to attribute.
     assert flag_note(db, a, "rejected") is None
     PhotoReviewService(db).set_flag(a, "rejected", source="agent", reason="soft")

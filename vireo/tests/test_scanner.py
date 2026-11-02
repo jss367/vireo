@@ -3374,6 +3374,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
         recipe_json,
         [{"photo_id": jpeg_id, "old_value": "", "new_value": recipe_json}],
     )
+    db.commit()
     db.conn.execute(
         "UPDATE photos SET thumb_path = ? WHERE id = ?",
         ("thumbnails/raw.jpg", raw_id),
@@ -7788,10 +7789,13 @@ def test_pairing_defers_companion_file_cleanup_until_commit_succeeds(
 
     seeded = _seed_derivative_files(vireo_dir, thumb_dir, jpeg_id)
 
-    def _boom():
+    import unit_of_work
+
+    def _boom(_conn):
         raise RuntimeError("simulated commit failure")
 
-    monkeypatch.setattr(db, "commit_with_retry", _boom)
+    # The pairing pass's unit commits through the unit-of-work machinery.
+    monkeypatch.setattr(unit_of_work, "_commit", _boom)
 
     with pytest.raises(RuntimeError, match="simulated commit failure"):
         _pair_raw_jpeg_companions(

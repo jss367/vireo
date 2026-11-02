@@ -73,7 +73,6 @@ def create_identity_alternatives_blueprint(get_db: GetDb, json_error: JsonError,
         except ValueError as exc:
             # The 400 rolls the decision's unit back, writes included.
             return json_error(str(exc))
-        db.after_commit(db.prune_edit_history)
         return {'ok': True, 'entry_id': entry_id, 'photo_ids': ids, 'flags_changed': False}
 
     def _refresh_species(db: Database, ids: list[int], response: JsonDict) -> None:

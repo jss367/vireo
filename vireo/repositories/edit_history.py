@@ -25,10 +25,9 @@ Callers reach it as ``db.edit_history`` (a fresh repository per access, see
 id-keyed lookups; recording, undo and redo stay on ``Database``.
 """
 
-import contextlib
 import json
 import sqlite3
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from repositories.prediction_review import prediction_review_join, prediction_review_status
@@ -55,10 +54,6 @@ class EditHistoryRepository:
     def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""
         return self.workspace_id_fn()
-
-    def commit(self) -> None:
-        """Commit the connection's open transaction."""
-        self.conn.commit()
 
     def photo_location_state(self, photo_id: int) -> str:
         """Capture all assigned places and their provenance, plus GPS review."""
@@ -112,14 +107,15 @@ class EditHistoryRepository:
 
     def record(
         self, action_type: str, description: str, new_value: str | None,
-        items: Iterable[Mapping[str, Any]], is_batch: bool = False, _commit: bool = True,
+        items: Iterable[Mapping[str, Any]], is_batch: bool = False,
         *, source: str | None = None, reason: str | None = None,
     ) -> int:
         """Insert an edit and its per-photo items; see ``Database.record_edit``.
 
         ``source`` and ``reason`` are the edit's provenance when the caller
         stated it (who decided, and why); the user's own clicks leave both
-        NULL. The façade runs the history prune after a committed record.
+        NULL. The façade schedules the history prune after its caller's
+        unit commits.
         """
         ws = self.workspace_id
         # Clear redo stack — new edit invalidates undone entries
@@ -141,8 +137,6 @@ class EditHistoryRepository:
                 "VALUES (?, ?, ?, ?, ?)",
                 (edit_id, item['photo_id'], item['old_value'], item['new_value'], item.get('species_provenance')),
             )
-        if _commit:
-            self.conn.commit()
         return edit_id
 
     def list_recent(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
@@ -272,29 +266,12 @@ class EditHistoryRepository:
         ).fetchone() is not None
 
     def mark_undone(self, entry_id: int) -> None:
-        """Flag an entry as undone and commit."""
+        """Flag an entry as undone."""
         self.conn.execute("UPDATE edit_history SET undone = 1 WHERE id = ?", (entry_id,))
-        self.conn.commit()
 
     def mark_redone(self, entry_id: int) -> None:
-        """Clear an entry's undone flag and commit."""
+        """Clear an entry's undone flag."""
         self.conn.execute("UPDATE edit_history SET undone = 0 WHERE id = ?", (entry_id,))
-        self.conn.commit()
-
-    @contextlib.contextmanager
-    def identity_replay(self) -> Iterator[None]:
-        """Rollback a failed replay without releasing its SQLite writer lock."""
-        if not self.conn.in_transaction:
-            self.conn.execute('BEGIN IMMEDIATE')
-        self.conn.execute('SAVEPOINT identity_history_replay')
-        succeeded = False
-        try:
-            yield
-            succeeded = True
-        finally:
-            if not succeeded:
-                self.conn.execute('ROLLBACK TO identity_history_replay')
-            self.conn.execute('RELEASE identity_history_replay')
 
     def retire_superseded_identity_entry(self, entry_id: int) -> None:
         """Skip a stale action on both cursors while retaining its complete audit."""
@@ -307,8 +284,9 @@ class EditHistoryRepository:
     def retire_stale_grouping_entry(self, entry_id: int) -> None:
         """Retire stale cache state while retaining any reversible photo edit.
 
-        The caller commits this retirement and reports it to the user before
-        another action can run. This helper never applies a photo change.
+        The caller's unit commits this retirement, and the caller reports it
+        to the user before another action can run. This helper never applies
+        a photo change.
         """
         row = self.conn.execute(
             "SELECT action_type, new_value, description FROM edit_history WHERE id = ?", (entry_id,),
@@ -419,8 +397,6 @@ class EditHistoryRepository:
                                      reviewed_at = datetime('now')""",
                     (siblings[0]["id"], ws),
                 )
-        if seen_scopes:
-            self.conn.commit()
 
     def reject_accept_siblings(self, accepted_by_scope: Mapping[tuple[int, str, str], set[int]]) -> None:
         """Re-reject the open siblings of each re-accepted scope.
@@ -453,8 +429,6 @@ class EditHistoryRepository:
                                      reviewed_at = datetime('now')""",
                     (s["id"], ws),
                 )
-        if accepted_by_scope:
-            self.conn.commit()
 
     # -- relabel curation -----------------------------------------------------
 
@@ -775,59 +749,48 @@ class EditHistoryRepository:
     def prune(self, max_entries: int, *, max_payload_bytes: int | None = None) -> dict[str, int]:
         """Delete this workspace's oldest done entries beyond ``max_entries``.
 
-        Undone entries awaiting redo are never pruned.
+        Undone entries awaiting redo are never pruned. Grouping snapshots
+        beyond ``max_payload_bytes`` (newest kept first) are retired. Runs in
+        the caller's unit of work and returns how many snapshots, and how many
+        bytes of them, it removed.
         """
         ws = self.workspace_id
-        owns_transaction = not self.conn.in_transaction
-        if owns_transaction:
-            self.conn.execute("BEGIN IMMEDIATE")
-        self.conn.execute("SAVEPOINT retained_history_prune")
-        try:
-            def totals():
-                return self.conn.execute(
-                    """SELECT COUNT(*), COALESCE(SUM(p.bytes), 0)
-                       FROM edit_history_payloads p JOIN edit_history h ON h.id=p.edit_id
-                       WHERE h.workspace_id=?""", (ws,),
-                ).fetchone()
 
-            before = totals()
-            self.conn.execute(
-                """DELETE FROM edit_history
-                    WHERE workspace_id = ? AND undone = 0
-                      AND id NOT IN (
-                          SELECT id FROM edit_history
-                          WHERE workspace_id = ? AND undone = 0
-                          ORDER BY created_at DESC, id DESC LIMIT ?
-                      )""",
-                (ws, ws, max_entries),
-            )
-            if max_payload_bytes is not None:
-                rows = self.conn.execute(
-                    """SELECT p.edit_id, p.bytes
-                       FROM edit_history_payloads p JOIN edit_history h ON h.id=p.edit_id
-                       WHERE h.workspace_id=? AND h.undone=0
-                       ORDER BY h.created_at DESC, h.id DESC""", (ws,)
-                ).fetchall()
-                retained = 0
-                for row in rows:
-                    # Grouping undo is a chain. Once a newer link is
-                    # retired, no older grouping snapshot can be replayed
-                    # against the current structure, even if it would fit.
-                    retained += row["bytes"]
-                    if retained > max_payload_bytes:
-                        # Preserve any photo edits carried by the grouping edit.
-                        self.retire_stale_grouping_entry(row["edit_id"])
-            after = totals()
-        except BaseException:
-            self.conn.execute("ROLLBACK TO retained_history_prune")
-            self.conn.execute("RELEASE retained_history_prune")
-            if owns_transaction:
-                self.conn.rollback()
-            raise
-        else:
-            self.conn.execute("RELEASE retained_history_prune")
-            if owns_transaction:
-                self.conn.commit()
+        def totals():
+            return self.conn.execute(
+                """SELECT COUNT(*), COALESCE(SUM(p.bytes), 0)
+                   FROM edit_history_payloads p JOIN edit_history h ON h.id=p.edit_id
+                   WHERE h.workspace_id=?""", (ws,),
+            ).fetchone()
+
+        before = totals()
+        self.conn.execute(
+            """DELETE FROM edit_history
+                WHERE workspace_id = ? AND undone = 0
+                  AND id NOT IN (
+                      SELECT id FROM edit_history
+                      WHERE workspace_id = ? AND undone = 0
+                      ORDER BY created_at DESC, id DESC LIMIT ?
+                  )""",
+            (ws, ws, max_entries),
+        )
+        if max_payload_bytes is not None:
+            rows = self.conn.execute(
+                """SELECT p.edit_id, p.bytes
+                   FROM edit_history_payloads p JOIN edit_history h ON h.id=p.edit_id
+                   WHERE h.workspace_id=? AND h.undone=0
+                   ORDER BY h.created_at DESC, h.id DESC""", (ws,)
+            ).fetchall()
+            retained = 0
+            for row in rows:
+                # Grouping undo is a chain. Once a newer link is
+                # retired, no older grouping snapshot can be replayed
+                # against the current structure, even if it would fit.
+                retained += row["bytes"]
+                if retained > max_payload_bytes:
+                    # Preserve any photo edits carried by the grouping edit.
+                    self.retire_stale_grouping_entry(row["edit_id"])
+        after = totals()
         return {"grouping_snapshots_retired": before[0] - after[0],
                 "grouping_snapshot_bytes_removed": before[1] - after[1]}
 

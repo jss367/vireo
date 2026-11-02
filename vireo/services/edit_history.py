@@ -6,6 +6,7 @@ use separate types so replay never guesses at those old entries' before-state.
 
 from __future__ import annotations
 
+import contextlib
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from db import Database
+    from repositories.edit_history import EditHistoryRepository
     from services.grouping_history import CacheRestore
 
 
@@ -46,18 +48,28 @@ def atomic_edit[**P, R](
     def decorate(fn: Callable[P, R]) -> Callable[P, R]:
         @wraps(fn)
         def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
-            db = get_db()
-            try:
-                with db.transaction():
-                    result = fn(*args, **kwargs)
-                    status = result[1] if isinstance(result, tuple) else getattr(result, 'status_code', 200)
-                    if status >= 400:
-                        raise _RefusedEdit(result)
-            except _RefusedEdit as refused:
-                return cast('R', refused.result)
-            return result
+            return run_atomic_edit(get_db(), lambda: fn(*args, **kwargs))
         return wrapped
     return decorate
+
+
+def run_atomic_edit[R](db: Database, work: Callable[[], R], *, immediate: bool = False) -> R:
+    """Run ``work()`` as one unit of work and return its response.
+
+    ``atomic_edit`` for a body that is not a whole route. An error response
+    (status 400 or above) rolls the unit back, whatever it had written before
+    deciding to refuse; ``immediate`` takes the writer lock before the first
+    read, as ``Database.transaction`` does.
+    """
+    try:
+        with db.transaction(immediate=immediate):
+            result = work()
+            status = result[1] if isinstance(result, tuple) else getattr(result, 'status_code', 200)
+            if status >= 400:
+                raise _RefusedEdit(result)
+    except _RefusedEdit as refused:
+        return cast('R', refused.result)
+    return result
 
 
 def change_photo_location(
@@ -100,6 +112,23 @@ def prediction_status_item(
 # re-projects the photo's primary subject) belong to services the data layer
 # may not import. Plain per-photo actions still replay through
 # ``Database._apply_undo`` / ``_apply_redo``.
+#
+# Each replay is one savepoint (``_replay_entry``): the entry's writes and
+# its cursor flip apply together or not at all, whether the replay owns its
+# unit of work or runs inside the caller's (the undo/redo routes' prediction
+# decision). A stale cache-linked or identity entry is retired in the
+# enclosing unit after that savepoint rolled back, so the retirement commits
+# with the caller's unit and the replay's partial writes never do.
+
+_GROUPING_STALE = (
+    'That grouping or species action was superseded by newer analysis. '
+    'History has been refreshed; review the next action before trying again.'
+)
+_IDENTITY_STALE = (
+    'That identification was changed elsewhere. History has been refreshed; '
+    'review the next action before trying again.'
+)
+_CACHE_LINKED = frozenset({'pipeline_grouping', 'species_confirm_cache'})
 
 
 def undo_last_edit(db: Database, *, cache_restore: CacheRestore | None = None) -> dict[str, Any] | None:
@@ -108,159 +137,126 @@ def undo_last_edit(db: Database, *, cache_restore: CacheRestore | None = None) -
     Non-undoable entries (prediction_reject, discard) are skipped.
     The entry is marked as undone (not deleted) so it can be redone.
 
-    Stale cache-linked actions are retired and reported without applying
-    another entry. The caller must refresh the controls so the next click
-    names the edit it will actually reverse. Retirement commits on its own;
-    valid combined photo/group edits retain the writer lock until complete.
+    Stale cache-linked and identity actions are retired and reported (the
+    ``*HistoryStale`` exception) without applying another entry. The caller
+    must refresh the controls so the next click names the edit it will
+    actually reverse. The retirement commits with the caller's unit of work,
+    or with this call's own unit when there is none.
 
     ``cache_restore`` keeps the pipeline-cache restoration and regroup lock
-    alive through the caller's outer unit-of-work commit.
+    alive through the caller's outer unit-of-work commit; without one, they
+    last until this call's own commit.
     """
-    found = db.edit_history.next_undo()
-    if not found:
-        return None
-    entry, items = found
-    history = db.edit_history
-
-    if entry['action_type'] == 'pipeline_grouping':
-        from services.grouping_history import (
-            GroupingHistoryStale,
-            apply_grouping_photo_edit,
-            restore_grouping_edit,
-        )
-
-        try:
-            with restore_grouping_edit(db, entry, undo=True, cache_restore=cache_restore):
-                apply_grouping_photo_edit(db, entry, items, undo=True)
-                history.mark_undone(entry['id'])
-        except GroupingHistoryStale:
-            history.retire_stale_grouping_entry(entry['id'])
-            history.commit()
-            raise GroupingHistoryStale(
-                'That grouping or species action was superseded by newer analysis. '
-                'History has been refreshed; review the next action before trying again.'
-            ) from None
-    elif entry['action_type'] == 'species_confirm_cache':
-        from services.grouping_history import (
-            GroupingHistoryStale,
-            restore_species_confirm_cache_edit,
-        )
-
-        try:
-            with restore_species_confirm_cache_edit(db, entry, undo=True, cache_restore=cache_restore):
-                history.mark_undone(entry['id'])
-        except GroupingHistoryStale:
-            history.retire_stale_grouping_entry(entry['id'])
-            history.commit()
-            raise GroupingHistoryStale(
-                'That grouping or species action was superseded by newer analysis. '
-                'History has been refreshed; review the next action before trying again.'
-            ) from None
-    elif entry['action_type'] == 'identity_alternatives':
-        _replay_identity_history(db, entry, items, undo=True)
-    elif entry['action_type'] == subject_verdicts.ACTION_TYPE:
-        with db.transaction():
-            subject_verdicts.replay_history(db, items, undo=True)
-            history.mark_undone(entry['id'])
-    else:
-        with db.transaction():
-            db._apply_undo(entry, items)
-            history.mark_undone(entry['id'])
-    return entry
+    return _replay_next(db, undo=True, cache_restore=cache_restore)
 
 
 def redo_last_undo(db: Database, *, cache_restore: CacheRestore | None = None) -> dict[str, Any] | None:
     """Redo the most recently undone edit. Returns the entry dict, or None.
 
     Replays in chronological order (ASC) so sequential undos are redone
-    correctly. Stale cache-linked actions are retired and reported without
-    replaying another entry, just as in ``undo_last_edit``.
+    correctly. Stale cache-linked and identity actions are retired and
+    reported without replaying another entry, just as in ``undo_last_edit``.
 
     ``cache_restore``: see ``undo_last_edit``.
     """
-    found = db.edit_history.next_redo()
-    if not found:
-        return None
-    entry, items = found
-    history = db.edit_history
+    return _replay_next(db, undo=False, cache_restore=cache_restore)
 
-    if entry['action_type'] == 'pipeline_grouping':
-        from services.grouping_history import (
-            GroupingHistoryStale,
-            apply_grouping_photo_edit,
-            restore_grouping_edit,
-        )
 
-        try:
-            with restore_grouping_edit(db, entry, undo=False, cache_restore=cache_restore):
-                apply_grouping_photo_edit(db, entry, items, undo=False)
-                history.mark_redone(entry['id'])
-        except GroupingHistoryStale:
-            history.retire_stale_grouping_entry(entry['id'])
-            history.commit()
-            raise GroupingHistoryStale(
-                'That grouping or species action was superseded by newer analysis. '
-                'History has been refreshed; review the next action before trying again.'
-            ) from None
-    elif entry['action_type'] == 'species_confirm_cache':
-        from services.grouping_history import (
-            GroupingHistoryStale,
-            restore_species_confirm_cache_edit,
-        )
+def _replay_next(
+    db: Database, *, undo: bool, cache_restore: CacheRestore | None,
+) -> dict[str, Any] | None:
+    from services.grouping_history import CacheRestore
 
-        try:
-            with restore_species_confirm_cache_edit(db, entry, undo=False, cache_restore=cache_restore):
-                history.mark_redone(entry['id'])
-        except GroupingHistoryStale:
-            history.retire_stale_grouping_entry(entry['id'])
-            history.commit()
-            raise GroupingHistoryStale(
-                'That grouping or species action was superseded by newer analysis. '
-                'History has been refreshed; review the next action before trying again.'
-            ) from None
-    elif entry['action_type'] == 'identity_alternatives':
-        _replay_identity_history(db, entry, items, undo=False)
-    elif entry['action_type'] == subject_verdicts.ACTION_TYPE:
+    # Without a caller's ``CacheRestore`` this call scopes one around its own
+    # unit, so a failed commit still puts a restored pipeline cache back.
+    scope = contextlib.nullcontext(cache_restore) if cache_restore is not None else CacheRestore()
+    with scope as restore:
+        stale: Exception | None = None
+        # The caller's unit when there is one (a savepoint inside it), else
+        # this call's own: the retirement below commits with it.
         with db.transaction():
-            subject_verdicts.replay_history(db, items, undo=False)
-            history.mark_redone(entry['id'])
-    else:
-        with db.transaction():
-            db._apply_redo(entry, items)
-            history.mark_redone(entry['id'])
-    return entry
+            history = db.edit_history
+            found = history.next_undo() if undo else history.next_redo()
+            if not found:
+                return None
+            entry, items = found
+            stale = _replay_or_retire(db, entry, items, undo=undo, cache_restore=restore)
+        if stale is not None:
+            raise stale from None
+        return entry
 
 
-def _replay_identity_history(
-    db: Database, entry: dict[str, Any], items: Sequence[Any], *, undo: bool,
-) -> None:
-    """Retire exactly this stale action while retaining the writer lock."""
+def _replay_or_retire(
+    db: Database, entry: dict[str, Any], items: Sequence[Any], *, undo: bool, cache_restore: CacheRestore,
+) -> Exception | None:
+    """Replay ``entry`` as one savepoint, or retire it if it went stale.
+
+    Returns the exception to report for a retired entry, else ``None``.
+    """
+    from services.grouping_history import GroupingHistoryStale
     from services.identity_alternatives import IdentityHistoryStale
 
+    action = entry['action_type']
     history = db.edit_history
-    stale = False
     try:
-        with db.transaction():
-            try:
-                with history.identity_replay():
-                    if undo:
-                        _apply_identity_items(db, items, undo=True)
-                        history.mark_undone(entry['id'])
-                    else:
-                        _apply_identity_items(db, items, undo=False)
-                        history.mark_redone(entry['id'])
-            except IdentityHistoryStale:
-                history.retire_superseded_identity_entry(entry['id'])
-                stale = True
+        _replay_entry(db, entry, items, undo=undo, cache_restore=cache_restore)
+    except GroupingHistoryStale:
+        if action not in _CACHE_LINKED:
+            raise
+        history.retire_stale_grouping_entry(entry['id'])
+        return GroupingHistoryStale(_GROUPING_STALE)
+    except IdentityHistoryStale:
+        if action != 'identity_alternatives':
+            raise
+        history.retire_superseded_identity_entry(entry['id'])
+        return IdentityHistoryStale(_IDENTITY_STALE)
     finally:
-        # SQL savepoint rollback cannot undo Python-side snapshots. A
-        # failed/retired replay must never contaminate a later edit.
-        db.species_provenance.forget_snapshots()
-    if stale:
-        raise IdentityHistoryStale(
-            'That identification was changed elsewhere. History has been refreshed; '
-            'review the next action before trying again.'
-        ) from None
+        if action == 'identity_alternatives':
+            # A failed or retired identity replay must never leave Python-side
+            # provenance snapshots for a later edit to fold in.
+            db.species_provenance.forget_snapshots()
+    return None
+
+
+def _replay_entry(
+    db: Database, entry: dict[str, Any], items: Sequence[Any], *, undo: bool, cache_restore: CacheRestore,
+) -> None:
+    """Apply one entry and flip its cursor, as one savepoint."""
+    from services.grouping_history import (
+        apply_grouping_photo_edit,
+        restore_grouping_edit,
+        restore_species_confirm_cache_edit,
+    )
+
+    history = db.edit_history
+    action = entry['action_type']
+    with db.transaction():
+        if action == 'pipeline_grouping':
+            with restore_grouping_edit(db, entry, undo=undo, cache_restore=cache_restore):
+                apply_grouping_photo_edit(db, entry, items, undo=undo)
+                _flip_cursor(history, entry, undo=undo)
+        elif action == 'species_confirm_cache':
+            with restore_species_confirm_cache_edit(db, entry, undo=undo, cache_restore=cache_restore):
+                _flip_cursor(history, entry, undo=undo)
+        elif action == 'identity_alternatives':
+            _apply_identity_items(db, items, undo=undo)
+            _flip_cursor(history, entry, undo=undo)
+        elif action == subject_verdicts.ACTION_TYPE:
+            subject_verdicts.replay_history(db, items, undo=undo)
+            _flip_cursor(history, entry, undo=undo)
+        else:
+            if undo:
+                db._apply_undo(entry, items)
+            else:
+                db._apply_redo(entry, items)
+            _flip_cursor(history, entry, undo=undo)
+
+
+def _flip_cursor(history: EditHistoryRepository, entry: dict[str, Any], *, undo: bool) -> None:
+    if undo:
+        history.mark_undone(entry['id'])
+    else:
+        history.mark_redone(entry['id'])
 
 
 def _apply_identity_items(db: Database, items: Sequence[Any], *, undo: bool) -> None:

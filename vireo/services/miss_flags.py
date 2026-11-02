@@ -91,13 +91,10 @@ def bulk_reject_miss_category(
     col = repo.miss_column(category)
     ws_id = db.require_workspace_id()
     scope_clause, scope_params = stage_counts.staged_scope_clause(db, photo_ids)
-    owns_transaction = not db.in_transaction
     with db.transaction(immediate=True, join=True):
         affected = repo.select_misses_to_reject(col, ws_id, since, scope_clause, scope_params)
         PhotoReviewService(db).set_flags(
             [item["photo_id"] for item in affected], "rejected",
             description=f"Rejected {len(affected)} miss photos (category={category})",
         )
-    if owns_transaction and affected:
-        db.prune_edit_history()
     return affected

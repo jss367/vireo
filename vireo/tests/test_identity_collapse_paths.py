@@ -115,21 +115,21 @@ def test_collapse_conflicts_keep_pair_data_and_folder_transaction_untouched(db, 
         else:
             keyword = db.add_keyword('Heron', is_species=True)
             db.tag_photo(survivor, keyword, source='manual')
-    # A folder rejection must preserve unrelated writes in its outer transaction.
-    db.conn.execute('UPDATE photos SET rating=4 WHERE id=?', (survivor,))
+    # A rejection must preserve unrelated writes in its caller's unit: the
+    # refused pair rolls back to its own savepoint, nothing further.
     tables = ['photos', 'folders', 'photo_keywords', 'photo_identity_alternatives', 'pending_changes', 'edit_history_items']
-    before = {table: [tuple(r) for r in db.conn.execute(f'SELECT * FROM {table}')] for table in tables}
-    if path == 'folder':
-        with pytest.raises(IdentityMergeConflict):
-            db.folders.merge_into_existing(source, target, str(target_path))
-            db.commit()
-    else:
-        from scanner.companions import _pair_raw_jpeg_companions
-        assert _pair_raw_jpeg_companions(db) == {}
-    for table in tables:
-        assert [tuple(r) for r in db.conn.execute(f'SELECT * FROM {table}')] == before[table]
-    db.conn.rollback()
-    assert (db.photos.get(survivor)['rating'] != 4) == (path == 'folder')
+    with db.transaction():
+        db.conn.execute('UPDATE photos SET rating=4 WHERE id=?', (survivor,))
+        before = {table: [tuple(r) for r in db.conn.execute(f'SELECT * FROM {table}')] for table in tables}
+        if path == 'folder':
+            with pytest.raises(IdentityMergeConflict), db.transaction():
+                db.folders.merge_into_existing(source, target, str(target_path))
+        else:
+            from scanner.companions import _pair_raw_jpeg_companions
+            assert _pair_raw_jpeg_companions(db) == {}
+        for table in tables:
+            assert [tuple(r) for r in db.conn.execute(f'SELECT * FROM {table}')] == before[table]
+    assert db.photos.get(survivor)['rating'] == 4
 
 
 @pytest.mark.parametrize('path', ['folder', 'companion'])
@@ -175,21 +175,24 @@ def test_real_deletion_cascades_identity_and_history_only_for_deleted_photos(db,
 
 @pytest.mark.parametrize('failure', [RuntimeError, KeyboardInterrupt, GeneratorExit])
 def test_identity_replay_cleanup_rolls_back_and_keeps_writer_lock(db, tmp_path, failure):
+    """A replay is a savepoint in its owner's unit: a failure, even a
+    ``BaseException``, undoes exactly the replay and keeps the writer lock."""
     import sqlite3
     _, _, survivor, _, _ = _fixture(db, tmp_path, 'folder')
     original = db.photos.get(survivor)['rating']
-    with pytest.raises(failure), db._edit_history_repository().identity_replay():
-        db.conn.execute('UPDATE photos SET rating=5 WHERE id=?', (survivor,))
-        raise failure('Replay interrupted')
-    assert db.photos.get(survivor)['rating'] == original
-    assert db.conn.in_transaction
-    other = sqlite3.connect(db._db_path, timeout=0)
-    try:
-        with pytest.raises(sqlite3.OperationalError, match='locked'):
-            other.execute('UPDATE photos SET rating=1 WHERE id=?', (survivor,))
-    finally:
-        other.close()
-    db.conn.rollback()
+    with pytest.raises(RuntimeError, match='owner'), db.transaction():
+        with pytest.raises(failure), db.transaction():
+            db.conn.execute('UPDATE photos SET rating=5 WHERE id=?', (survivor,))
+            raise failure('Replay interrupted')
+        assert db.photos.get(survivor)['rating'] == original
+        assert db.conn.in_transaction
+        other = sqlite3.connect(db._db_path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                other.execute('UPDATE photos SET rating=1 WHERE id=?', (survivor,))
+        finally:
+            other.close()
+        raise RuntimeError('owner rolls back')
 
 
 @pytest.mark.parametrize('same_hash', [True, False])
@@ -233,8 +236,11 @@ def test_folder_identity_conflict_rolls_back_earlier_duplicate_carries(db, tmp_p
         save_alternatives(db, [later_target], ['Heron', 'Egret'], 'Target evidence', 'Call')
     assert keyword not in {row['id'] for row in db.photo_keywords.get_for_photos([survivor]).get(survivor, [])}
     before = [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords ORDER BY photo_id,keyword_id')]
-    with pytest.raises(IdentityMergeConflict), db.transaction() if in_unit else contextlib.nullcontext():
-        db.folders.merge_into_existing(source, target, str(target_path))
+    # The merge never opens a savepoint of its own: whoever catches its
+    # refusal runs it in one (on its own, or inside a caller's unit).
+    with db.transaction() if in_unit else contextlib.nullcontext():
+        with pytest.raises(IdentityMergeConflict), db.transaction():
+            db.folders.merge_into_existing(source, target, str(target_path))
     assert [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords ORDER BY photo_id,keyword_id')] == before
     assert db.photos.get(losing) is not None
     assert db.photos.get(later_source) is not None

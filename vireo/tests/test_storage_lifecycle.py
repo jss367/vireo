@@ -746,7 +746,7 @@ def test_grouping_retention_rolls_back_partial_retirement(db, monkeypatch):
         return retire(repository, edit_id)
 
     monkeypatch.setattr(EditHistoryRepository, "retire_stale_grouping_entry", fail_second)
-    with pytest.raises(RuntimeError, match="interrupted"):
+    with pytest.raises(RuntimeError, match="interrupted"), db.transaction():
         db.edit_history.prune(1000, max_payload_bytes=0)
     assert not db.conn.in_transaction
     assert db.edit_history.grouping_payload(first)
@@ -773,20 +773,24 @@ def test_maintenance_keeps_workspace_created_during_the_pass(app_and_db, tmp_pat
     from services.startup_tasks import StartupTasks
 
     app, db = app_and_db
-    prune = Database._prune_edit_history
+    prune = Database.prune_edit_history
     created = []
+
+    def create_workspace():
+        workspace = db.create_workspace("Created during maintenance")
+        db.commit()
+        path = tmp_path / f"pipeline_results_ws{workspace}.json"
+        path.write_text("{}")
+        created.append(path)
 
     def create_during_prune(connection):
         result = prune(connection)
         if not created:
-            workspace = db.create_workspace("Created during maintenance")
-            db.commit()
-            path = tmp_path / f"pipeline_results_ws{workspace}.json"
-            path.write_text("{}")
-            created.append(path)
+            # Once the prune's unit has released the writer lock.
+            connection.after_commit(create_workspace, once=True)
         return result
 
-    monkeypatch.setattr(Database, "_prune_edit_history", create_during_prune)
+    monkeypatch.setattr(Database, "prune_edit_history", create_during_prune)
     monkeypatch.setattr(app._job_runner, "is_cancelled", lambda _id: False)
     orphan = tmp_path / "culling_results_ws999.json"
     orphan.write_text("{}")

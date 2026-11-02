@@ -181,7 +181,7 @@ def test_keys_with_global_only_consumers_remain_global():
     assert SCHEMA["redundancy_threshold"]["scope"] == "global"
     # Detection-padding consumers in app.py use cfg.load().get(...) directly.
     assert SCHEMA["detection_padding"]["scope"] == "global"
-    # Database._prune_edit_history reads cfg.get('max_edit_history').
+    # Database.prune_edit_history reads cfg.get('max_edit_history').
     assert SCHEMA["max_edit_history"]["scope"] == "global"
     # Database.add_keyword reads cfg.get('keyword_case').
     assert SCHEMA["keyword_case"]["scope"] == "global"

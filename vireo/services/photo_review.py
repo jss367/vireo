@@ -77,8 +77,7 @@ class PhotoReviewService:
     def _write_ratings(self, photo_ids: Sequence[int], rating: int, *, is_batch: bool) -> int:
         # The rating, its sidecar work and its undo entry are one unit. Inside
         # a caller's unit or transaction it is a savepoint that leaves the
-        # commit (and the history prune) to that caller.
-        owns_transaction = not self.db.in_transaction
+        # commit to that caller; the history prune follows the commit.
         with self.db.transaction(immediate=True, join=True):
             photos = self.db.photos.get_by_ids(photo_ids)
             old_values = {pid: photos[pid]["rating"] for pid in photo_ids if pid in photos}
@@ -97,10 +96,8 @@ class PhotoReviewService:
                 "rating", description, str(rating),
                 [{"photo_id": pid, "old_value": str(old), "new_value": str(rating)}
                  for pid, old in old_values.items()],
-                is_batch=is_batch, _commit=False,
+                is_batch=is_batch,
             )
-        if owns_transaction:
-            self.db.prune_edit_history()
         return len(old_values)
 
     def set_flags(
@@ -123,7 +120,6 @@ class PhotoReviewService:
         changed, used only for the user-visible count.
         """
         ids = list(keepers) + list(rejects) + list(unflag)
-        owns_transaction = not self.db.in_transaction
         with self.db.transaction(immediate=True, join=True):
             photos = self.db.photos.get_by_ids(ids)
             if any(pid not in photos for pid in ids):
@@ -149,14 +145,12 @@ class PhotoReviewService:
                     self.db.photo_review.set_current_flag_note(photo_ids, flag, summary)
             if items:
                 edit_id = self.db.record_edit(
-                    "flag", summary, "culling_apply", items, is_batch=True, _commit=False,
+                    "flag", summary, "culling_apply", items, is_batch=True,
                 )
                 self.db.photo_review.record_flag_attribution_history(
                     edit_id, effective_ids, before,
                     self.db.photo_review.flag_attributions(effective_ids),
                 )
-        if owns_transaction and items:
-            self.db.prune_edit_history()
         return {"keepers": len(keepers), "rejects": len(rejects), "cleared": len(cleared)}
 
     def _write_flags(
@@ -164,7 +158,6 @@ class PhotoReviewService:
         observed_flags: dict[int, str] | None = None, observed_workspace_id: int | None = None,
         description: str | None = None,
     ) -> int:
-        owns_transaction = not self.db.in_transaction
         with self.db.transaction(immediate=True, join=True):
             # Database caches its workspace when opened. Activation in another
             # request must be checked from persisted state under this writer lock.
@@ -194,7 +187,7 @@ class PhotoReviewService:
             edit_id = self.db.record_edit(
                 "flag", description, flag,
                 [{"photo_id": pid, "old_value": old, "new_value": flag} for pid, old in old_values.items()],
-                is_batch=is_batch, source=source, reason=reason, _commit=False,
+                is_batch=is_batch, source=source, reason=reason,
             )
             self.db.photo_review.set_current_flag_note(
                 valid_ids, flag, description, source=source, reason=reason,
@@ -202,6 +195,4 @@ class PhotoReviewService:
             self.db.photo_review.record_flag_attribution_history(
                 edit_id, valid_ids, before, self.db.photo_review.flag_attributions(valid_ids),
             )
-        if owns_transaction:
-            self.db.prune_edit_history()
         return len(old_values)

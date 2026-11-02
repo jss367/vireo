@@ -5,11 +5,10 @@ newer decisions even when a photo was resolved to the same species again. A shar
 frames together without asserting that every candidate occurs in a frame.
 """
 
-import contextlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection
 from functools import partial
 from typing import Any
 
@@ -80,25 +79,6 @@ def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: 
                     f'UPDATE edit_history_items SET {column}=? WHERE id=?',
                     (json.dumps(data, sort_keys=True), row['id']),
                 )
-
-
-@contextlib.contextmanager
-def identity_merge_transaction(conn: sqlite3.Connection) -> Iterator[None]:
-    """Rollback an entire photo-collapse batch without committing its caller."""
-    started = not conn.in_transaction
-    if started:
-        conn.execute('BEGIN IMMEDIATE')
-    conn.execute('SAVEPOINT identity_photo_merge')
-    succeeded = False
-    try:
-        yield
-        succeeded = True
-    finally:
-        if not succeeded:
-            conn.execute('ROLLBACK TO identity_photo_merge')
-        conn.execute('RELEASE identity_photo_merge')
-        if not succeeded and started:
-            conn.rollback()
 
 
 class IdentityMergeConflict(ValueError):

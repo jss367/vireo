@@ -71,14 +71,14 @@ def _apply_tags(db, photo, answer, marker):
             db.untag_photo(pid, row['id'])
             queue_keyword_remove(db, pid, row['name'])
             db.record_edit('keyword_remove', f'Species review: removed "{row["name"]}"', str(row['id']),
-                           [{'photo_id': pid, 'old_value': str(row['id']), 'new_value': ''}], _commit=False)
+                           [{'photo_id': pid, 'old_value': str(row['id']), 'new_value': ''}])
         for kid in sorted(desired):
             db.tag_photo(pid, kid, source='manual')
             if kid not in existing:
                 name = db.conn.execute('SELECT name FROM keywords WHERE id=?', (kid,)).fetchone()['name']
                 queue_keyword_add(db, pid, name)
                 db.record_edit('keyword_add', f'Species review: added "{name}"', str(kid),
-                               [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}], _commit=False)
+                               [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}])
         result = {'added': len(desired - existing), 'removed': len(removed)}
         db.meta.set(marker, json.dumps({'revision': answer['revision'], 'fingerprint': fingerprint, 'result': result}))
     return result

@@ -24,6 +24,7 @@ from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key
 from photo_payload import render_key_for_recipe
 from services import pending_changes, photo_locations
+from services.edit_history import run_atomic_edit
 from web.location_edits import walk_parent_chain
 from xmp import location_keyword_entries, read_sync_preview_metadata
 
@@ -1283,14 +1284,10 @@ def create_sync_blueprint(get_db: GetDb, json_error: JsonError, get_runner: GetR
                 return json_error("revision required for discard_all")
 
             ws_id = db.require_workspace_id()
-            try:
-                # Validate and delete under one write transaction. This keeps
-                # another request from replacing or adding a pending row
-                # between the revision check and the workspace-wide delete.
-                db.begin_immediate()
+
+            def discard_all() -> ResponseReturnValue:
                 snapshot = _sync_preview_get_snapshot(db, ws_id, revision)
                 if snapshot["revision"] != revision:
-                    db.rollback()
                     return json_error(
                         "pending changes changed since they were reviewed",
                         409,
@@ -1310,17 +1307,14 @@ def create_sync_blueprint(get_db: GetDb, json_error: JsonError, get_runner: GetR
                         "",
                         items,
                         is_batch=len(changes) > 1,
-                        _commit=False,
                     )
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
+                log.info("Discarded all %d pending changes", len(changes))
+                return jsonify({"ok": True, "discarded": len(changes)})
 
-            if changes:
-                db._prune_edit_history()
-            log.info("Discarded all %d pending changes", len(changes))
-            return jsonify({"ok": True, "discarded": len(changes)})
+            # Validate and delete under one write transaction. This keeps
+            # another request from replacing or adding a pending row between
+            # the revision check and the workspace-wide delete.
+            return run_atomic_edit(db, discard_all, immediate=True)
 
         change_ids = body.get("change_ids", [])
         if not change_ids:
@@ -1333,11 +1327,10 @@ def create_sync_blueprint(get_db: GetDb, json_error: JsonError, get_runner: GetR
         # An id repeated across chunks still names just one discarded row.
         change_ids = list(dict.fromkeys(change_ids))
 
-        try:
-            # SQLite reuses pending row ids. Hold the writer lock from the
-            # history lookup through deletion so an id cannot change owners
-            # between those steps, including across chunks and workspaces.
-            db.begin_immediate()
+        # SQLite reuses pending row ids. Hold the writer lock from the
+        # history lookup through deletion so an id cannot change owners
+        # between those steps, including across chunks and workspaces.
+        with db.transaction(immediate=True):
             changes = db.pending_changes.get_by_ids(change_ids)
             pending_changes.clear_pending(
                 db, change_ids, clear_equivalent_flat_removals=True,
@@ -1346,15 +1339,8 @@ def create_sync_blueprint(get_db: GetDb, json_error: JsonError, get_runner: GetR
                 items = _discard_history_items(changes)
                 db.record_edit(
                     'discard', f'Discarded {len(changes)} pending changes',
-                    '', items, is_batch=len(changes) > 1, _commit=False,
+                    '', items, is_batch=len(changes) > 1,
                 )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-
-        if changes:
-            db._prune_edit_history()
         log.info("Discarded %d pending changes", len(changes))
         return jsonify({"ok": True, "discarded": len(changes)})
 

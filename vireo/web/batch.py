@@ -70,7 +70,7 @@ def _batch_location_photo_ids(raw_ids: object) -> tuple[list[int], str | None]:
 
 
 def _finish_batch_location(db: Database, photo_ids: list[int], items: list[JsonDict], location_name: str, new_value: str) -> Response:
-    """Record a batch location edit, commit it, and build the response."""
+    """Record a batch location edit in the route's unit and build the response."""
     if items:
         db.record_edit(
             "photo_location",
@@ -78,10 +78,7 @@ def _finish_batch_location(db: Database, photo_ids: list[int], items: list[JsonD
             new_value,
             items,
             is_batch=True,
-            _commit=False,
         )
-    db.commit()
-    db._prune_edit_history()
     return jsonify({
         "ok": True,
         "updated": len(items),
@@ -316,11 +313,7 @@ def create_batch_blueprint(
                 "from_exif",
                 items,
                 is_batch=True,
-                _commit=False,
             )
-        db.commit()
-        if items:
-            db._prune_edit_history()
 
         payload["updated"] = len(items)
         payload["group_errors"] = group_errors
@@ -411,13 +404,11 @@ def create_batch_blueprint(
                 "best_batch_apply",
                 items,
                 is_batch=True,
-                _commit=False,
             )
             db.photo_review.record_flag_attribution_history(
                 edit_id, photo_ids, before_attributions,
                 db.photo_review.flag_attributions(photo_ids),
             )
-        db._prune_edit_history()
         return jsonify({
             "ok": True,
             "updated": len(items),
@@ -483,9 +474,7 @@ def create_batch_blueprint(
             items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
             if items:
                 db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
-                               str(kid), items, is_batch=True, _commit=False)
-        if items:
-            db._prune_edit_history()
+                               str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(added_ids), "keyword_id": kid})
 
     @blueprint.route("/api/batch/wildlife-excluded", methods=["POST"])
@@ -530,33 +519,32 @@ def create_batch_blueprint(
             if accessible_state[photo_id] != desired
         ]
         items = []
-        for photo_id in changed_ids:
-            old_value = "1" if accessible_state[photo_id] else "0"
-            db.update_photo_wildlife_excluded(
-                photo_id, excluded, verify_workspace=False,
-            )
-            items.append({
-                "photo_id": photo_id,
-                "old_value": old_value,
-                "new_value": "1" if excluded else "0",
-            })
+        # The exclusions and their one undo entry land together.
+        with db.transaction():
+            for photo_id in changed_ids:
+                old_value = "1" if accessible_state[photo_id] else "0"
+                db.update_photo_wildlife_excluded(
+                    photo_id, excluded, verify_workspace=False,
+                )
+                items.append({
+                    "photo_id": photo_id,
+                    "old_value": old_value,
+                    "new_value": "1" if excluded else "0",
+                })
 
-        if items:
-            description = (
-                "Excluded from wildlife classification"
-                if excluded
-                else "Included in wildlife classification"
-            )
-            db.record_edit(
-                "wildlife_excluded",
-                f"{description}: {len(items)} photos",
-                "1" if excluded else "0",
-                items,
-                is_batch=True,
-                _commit=False,
-            )
-            db.commit()
-            db._prune_edit_history()
+            if items:
+                description = (
+                    "Excluded from wildlife classification"
+                    if excluded
+                    else "Included in wildlife classification"
+                )
+                db.record_edit(
+                    "wildlife_excluded",
+                    f"{description}: {len(items)} photos",
+                    "1" if excluded else "0",
+                    items,
+                    is_batch=True,
+                )
 
         return jsonify({
             "ok": True,

@@ -231,7 +231,6 @@ def _commit_species_edit(
         save_results_raw(cached, cache_dir, db.active_workspace_id)
     if cached:
         result["summary"] = cached.get("summary", {})
-    db.after_commit(db._prune_edit_history)
     return jsonify(result)
 
 
@@ -1002,7 +1001,6 @@ class _SpeciesConfirmation:
                 str(kid) if kid is not None else "",
                 items,
                 is_batch=len(changed) > 1,
-                _commit=False,
                 source=(self.provenance or {}).get('reviewer'),
                 reason=(self.provenance or {}).get('reason'),
             )
@@ -1020,7 +1018,6 @@ class _SpeciesConfirmation:
                 str(kid),
                 items,
                 is_batch=len(items) > 1,
-                _commit=False,
                 source=(self.provenance or {}).get('reviewer'),
                 reason=(self.provenance or {}).get('reason'),
             )

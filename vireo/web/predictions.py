@@ -625,7 +625,7 @@ def create_predictions_blueprint(
             db.record_edit(
                 "prediction_status",
                 f'Marked prediction "{pred["species"]}" reviewed',
-                "reviewed", [item], _commit=False,
+                "reviewed", [item],
             )
             return jsonify({"ok": True})
         return prediction_decisions.under_prediction_decision_lock(
@@ -681,7 +681,6 @@ def create_predictions_blueprint(
                 result["species"],
                 items,
                 is_batch=is_batch,
-                _commit=False,
             )
             # Same reason as ``api_accept_prediction``: replace goes through
             # the same grouped expansion, so a looping caller needs the rows
@@ -868,12 +867,8 @@ def create_predictions_blueprint(
                 desc += f" to {photo_count} photos"
             db.record_edit(
                 "prediction_accept", desc, str(keyword_id), items,
-                is_batch=photo_count > 1, _commit=False,
+                is_batch=photo_count > 1,
             )
-        if items:
-            # ``record_edit`` skips its prune under ``_commit=False``; run it
-            # once the decision is durable so history stays bounded.
-            db.after_commit(db._prune_edit_history)
         return jsonify({
             "ok": True,
             "accepted": len({item["photo_id"] for item in items}),
@@ -1630,10 +1625,8 @@ def create_predictions_blueprint(
                 desc += f" on {photo_count} photos"
             db.record_edit(
                 "prediction_status", desc, "rejected", items,
-                is_batch=photo_count > 1, _commit=False,
+                is_batch=photo_count > 1,
             )
-        if items:
-            db.after_commit(db._prune_edit_history)
         return jsonify({
             "ok": True,
             "rejected": len(items),
@@ -1733,7 +1726,7 @@ def create_predictions_blueprint(
                     desc += f' to {len(result["affected"])} photos'
                 db.record_edit(
                     'prediction_accept', desc, str(result['keyword_id']),
-                    items, is_batch=is_batch, _commit=False,
+                    items, is_batch=is_batch,
                 )
             # Name every row this call decided, not just the one in the URL.
             # A grouped accept expands through the burst, so a caller looping
@@ -1803,7 +1796,6 @@ def create_predictions_blueprint(
                     f'Accepted additional subject species: added "{result["species"]}"',
                     str(result["keyword_id"]),
                     _subject_accept_items(result["affected"]),
-                    _commit=False,
                 )
             return jsonify({
                 "ok": True,
@@ -1886,7 +1878,6 @@ def create_predictions_blueprint(
                 'rejected',
                 items,
                 is_batch=len(target_photos) > 1,
-                _commit=False,
             )
             return jsonify({"ok": True, "rejected_prediction_ids": rejected_ids})
         return prediction_decisions.under_prediction_decision_lock(
@@ -2010,7 +2001,7 @@ def create_predictions_blueprint(
             )
         return db.record_edit(
             'flag', desc, 'group_apply', flag_items,
-            is_batch=True, _commit=False,
+            is_batch=True,
         )
 
     def _record_group_pick_accepts(
@@ -2083,7 +2074,6 @@ def create_predictions_blueprint(
                 str(kid) if kid is not None else '',
                 accept_items,
                 is_batch=n > 1,
-                _commit=False,
             )
 
     def _normalize_group_apply_zones(
@@ -2184,9 +2174,6 @@ def create_predictions_blueprint(
         # the baseline.
         for pred_id in removed:
             db.ungroup_prediction(pred_id)
-        # ``record_edit`` skips its prune under ``_commit=False``; run it once
-        # the decision is durable so history stays bounded.
-        db.after_commit(db._prune_edit_history)
         # Reported even when zero so the client can tell "nothing was stale"
         # from an older server that never checked.
         return jsonify({"ok": True, "already_decided": len(stale_photos)})

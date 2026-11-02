@@ -9,6 +9,7 @@ import logging
 import os
 from collections import defaultdict
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from canonical_schema import EXIF_SUMMARY_COLUMNS
@@ -652,7 +653,9 @@ def _try_automatic_companion_merge(
 
     pair_actions: list[Callable[[], None]] = []
     try:
-        with photo_rows.atomic_merge(companion['id']):
+        # A savepoint per pair: a refused pair leaves none of its rows moved
+        # while the pairs before and after it still commit together.
+        with db.transaction(), photo_rows.atomic_merge(companion['id']):
             paired = _merge_companion_into_primary(
                 db, primary, companion, vireo_dir, thumb_cache_dir, pair_actions, photo_rows,
             )
@@ -723,9 +726,13 @@ def _pair_raw_jpeg_companions(
     # commit failure rolls every deletion back and none of them happened.
     merged_ids = _MergedPhotoIds()
 
-    # The deletion chokepoint batches collection rewrites for all pairs;
-    # retain each RAW identity for ownership-checked callback publication.
-    with db.companion_pairing.row_deletion() as photo_rows:
+    # Durable boundary: the whole pass, every successful pair together. It
+    # takes the writer lock before its first read, as the pass always has,
+    # unless it adopts a transaction its caller left open. The deletion
+    # chokepoint batches collection rewrites for all pairs; retain each RAW
+    # identity for ownership-checked callback publication.
+    with db.transaction(immediate=not db.in_transaction), \
+            db.companion_pairing.row_deletion() as photo_rows:
         for (_folder_id, _base), members in groups.items():
             for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
                 if not _try_automatic_companion_merge(
@@ -745,16 +752,13 @@ def _pair_raw_jpeg_companions(
                         post_commit_fs_actions, companion, vireo_dir,
                         thumb_cache_dir, masks_dir=catalog_masks_directory(db._db_path),
                     )
-
-    db.commit_with_retry()
-    # DB state is durable now. Run the collected filesystem operations.
-    _run_post_commit_fs_actions(post_commit_fs_actions)
-    # ``_invalidate_derived_caches`` inside a deferred action issues DB
-    # updates (clears thumb_path / working_copy_path, drops preview_cache
-    # rows). Those auto-opened a new transaction; commit it so the state
-    # is durable and doesn't leak into the caller's next write.
-    if db.in_transaction:
-        db.commit_with_retry()
+        # The collected filesystem operations run once the pairs are durable
+        # (after the caller's commit, when this pass is nested in its unit).
+        # ``_invalidate_derived_caches`` inside a deferred action issues DB
+        # updates (clears thumb_path / working_copy_path, drops preview_cache
+        # rows); they commit together in a unit of their own, so none leaks
+        # into the caller's next write.
+        db.after_commit(partial(_run_post_commit_fs_actions, post_commit_fs_actions), own_unit=True)
     return merged_ids
 
 

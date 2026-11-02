@@ -342,6 +342,7 @@ def test_merge_keyword_into_retargets_edit_history(db, lib):
         "keyword_add", "add Egret", str(src),
         [{"photo_id": p0, "old_value": "", "new_value": str(src)}],
     )
+    db.commit()
     db._merge_keyword_into(src, dst)
     assert db.conn.execute(
         "SELECT new_value FROM edit_history WHERE action_type = 'keyword_add'"
@@ -370,6 +371,7 @@ def test_merge_keyword_into_ignores_non_list_history_keyword_ids(db, lib):
             "species_replace", "Replaced species", str(other),
             [{"photo_id": pid, "old_value": payload, "new_value": str(other)}],
         )
+        db.commit()
 
     db._merge_keyword_into(src, dst)
     db.conn.commit()

@@ -144,11 +144,14 @@ def test_partial_copy_can_retry_without_removing_originals(catalog, monkeypatch)
 
 
 def test_commit_failure_keeps_original_masks_and_history(catalog, monkeypatch):
-    def fail_commit():
+    import unit_of_work
+
+    def fail_commit(_conn):
         raise RuntimeError("commit failed after copies were prepared")
 
     with monkeypatch.context() as patch:
-        patch.setattr(catalog.db, "commit_with_retry", fail_commit)
+        # The pairing pass's unit commits through the unit-of-work machinery.
+        patch.setattr(unit_of_work, "_commit", fail_commit)
         with pytest.raises(RuntimeError, match="commit failed"):
             _pair(catalog)
     catalog.db.rollback()

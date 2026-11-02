@@ -7,6 +7,7 @@ import __future__
 
 import ast
 import contextlib
+import functools
 import os
 from collections import deque
 from pathlib import Path, PurePosixPath
@@ -175,10 +176,26 @@ def test_stale_companion_pair_never_writes_reports_or_cleans(missing):
         "catalog_masks_directory": lambda _: "/invented/masks",
         "_defer_companion_derivative_cleanup": lambda *a, **k: actions.append("cleanup"),
         "_run_post_commit_fs_actions": lambda _: events.append("postcommit"),
+        "partial": functools.partial,
     })
+    depth, waiting = [0], []
+
+    @contextlib.contextmanager
+    def transaction(**_kwargs):
+        depth[0] += 1
+        try:
+            yield
+        finally:
+            depth[0] -= 1
+        if not depth[0]:
+            events.append("commit")
+            while waiting:
+                waiting.pop(0)()
+
     db = SimpleNamespace(companion_pairing=SimpleNamespace(
         row_deletion=deletion, metadata_transfer_row=read, set_companion_path=fake_write),
-        commit_with_retry=lambda: events.append("commit"), in_transaction=False, _db_path="/invented/db")
+        transaction=transaction, after_commit=lambda callback, **_kw: waiting.append(callback),
+        in_transaction=False, _db_path="/invented/db")
     merged = ns["_pair_raw_jpeg_companions"](db, vireo_dir="/invented/vireo", thumb_cache_dir=None)
     assert dict(merged) == ({2: 1} if missing == "neither" else {})
     assert bool(merged.owners) is (missing == "neither")

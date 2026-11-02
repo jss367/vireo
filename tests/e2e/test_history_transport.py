@@ -131,6 +131,7 @@ def test_background_import_tag_refreshes_history_controls(live_server, page, not
     db.record_edit('keyword_add', description, str(keyword_id), [
         {'photo_id': photo_id, 'old_value': '', 'new_value': str(keyword_id)},
     ])
+    db.commit()
     if notification == 'poll':
         with page.expect_response('**/api/jobs'):
             page.clock.fast_forward(15000)

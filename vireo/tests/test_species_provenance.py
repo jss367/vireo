@@ -542,6 +542,7 @@ def test_intermediate_commit_does_not_discard_an_explicit_undo_snapshot(app_and_
     assert db._species_provenance_before
     db.record_edit('keyword_remove', 'Removed Robin', str(kid),
                    [{'photo_id': 1, 'old_value': '', 'new_value': str(kid)}])
+    db.commit()
     undo_last_edit(db)
     assert db.species_provenance.state(1, kid) == before
 
@@ -618,5 +619,6 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
     db.record_edit('keyword_add', 'Independent edit', str(independent), [
         {'photo_id': 1, 'old_value': '', 'new_value': str(independent)},
     ])
+    db.commit()
     undo_last_edit(db)
     assert assignments(client)[candidate]['reason'] == 'New evidence'
