@@ -50,7 +50,7 @@ export async function loadInatStatus(/** @type {number[]} */ photoIds) {
     // Chunk the GET URL so oversized stacks (or any large id set) don't
     // exceed the browser/proxy/server request-target limit and drop the
     // whole page's iNaturalist badges when a stack expansion hydrates a
-    // large member list (Codex P2 on PR #1561). Matches the 500-id cap
+    // large member list. Matches the 500-id cap
     // the /api/photos/by-ids stack-expansion path already uses.
     for (var offset = 0; offset < photoIds.length; offset += 500) {
       var chunk = photoIds.slice(offset, offset + 500);
@@ -224,7 +224,7 @@ export async function _refreshBrowseKeywordState(/** @type {readonly number[]} *
         local.is_species_representative = !!updated.is_species_representative;
         // A prediction accept/reject moves this even though no keyword
         // changed, and the badge would otherwise keep showing the old score
-        // until an unrelated reload (Codex P2 on PR #1670). Skipped for a
+        // until an unrelated reload. Skipped for a
         // stack card whose badge is its leading member's score: /by-ids is
         // unstacked, so it would answer with the cover's own number. Those
         // cards only appear under a confidence sort, which reloads the whole
@@ -415,7 +415,7 @@ export async function batchDelete() {
   // loaded ones only hides the "Also delete N companion files" checkbox, so a
   // disk delete silently leaves those companions behind. Refuse to open the
   // dialog rather than open it with a count that cannot be trusted: a wrong
-  // number here is a file left on disk. Codex P2 on PR #1672.
+  // number here is a file left on disk.
   //
   // The request is async and the grid stays interactive, so the selection can
   // move under us while the count is in flight. A confirm on a dialog backed
@@ -425,7 +425,7 @@ export async function batchDelete() {
   // late. Stamp each request with a monotonic seq and snapshot the ids it
   // asked about — a later request retires the earlier one, and a selection
   // that no longer matches the snapshot means the user has moved on and gets
-  // a fresh ask rather than a stale dialog. Codex P1 on PR #1672.
+  // a fresh ask rather than a stale dialog.
   var seq = ++_batchDeleteRequestSeq;
   var capturedIds = ids.slice();
   var companionCount;
@@ -455,7 +455,6 @@ export async function batchDelete() {
   // and confirming what looked like a one-photo delete would delete the
   // whole batch. Refuse to open on top of any open delete dialog rather
   // than trying to coordinate seq across every showDeleteDialog caller.
-  // Codex P1 on PR #1672.
   var modal = /** @type {HTMLElement} */ (document.getElementById('deleteModal'));
   if (modal && modal.classList.contains('open')) {
     showToast(
@@ -521,7 +520,7 @@ export async function batchDelete() {
 
 /** @type {BrowseCollection[]} */ var _batchCollections = [];
 /** @type {number | null} */ export var _batchCollectionSelectedId = null;
-// Codex P2: generation counter for addToCollection(). Each invocation
+// Generation counter for addToCollection(). Each invocation
 // captures the next value before awaiting /api/collections and bails
 // after the await when a newer invocation has superseded it, so a stale
 // response can't dismiss overlays the user has since opened or reopen
@@ -575,7 +574,7 @@ export async function addToCollection(/** @type {Element | null | undefined} */ 
     setNativeMenuPhotoIdsOverride(null);
     return;
   }
-  // Codex P2: if the user re-triggered Add while this request was pending,
+  // If the user re-triggered Add while this request was pending,
   // the newer invocation will update state and open the dialog on its own
   // response. This stale continuation must not run the overlay dismissals
   // below (which could close a lightbox the user has since opened) or
@@ -598,7 +597,7 @@ export async function addToCollection(/** @type {Element | null | undefined} */ 
   collectionList.innerHTML = listHtml;
   bindBrowseMarkup(collectionList);
   /** @type {HTMLInputElement} */ (document.getElementById('batchCollectionNewName')).value = '';
-  // Codex P2: while the /api/collections request was in flight, the help
+  // While the /api/collections request was in flight, the help
   // overlay (F1 / ? icon), the Report Issue overlay (⚠ nav icon), the
   // command palette (Ctrl/Cmd+K), and the shared lightbox (grid dblclick)
   // all saw no managed dialog on the stack via hasActive() and could have
@@ -682,7 +681,7 @@ export async function confirmBatchCollection() {
   // clearSelection() then hides the batch bar with display:none, so the opener
   // is now an invisible focus target. Move focus to the grid — the stable
   // page control the user came from — so the next Tab starts somewhere real.
-  // Codex P2: the add-photos request between the dialog close and here is
+  // The add-photos request between the dialog close and here is
   // async, so the user may have moved focus to another stable control while
   // it was pending. Only move focus when it is actually on something the
   // batch-bar hide just invalidated — the hidden batch bar or document.body

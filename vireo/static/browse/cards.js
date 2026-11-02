@@ -113,7 +113,7 @@ function renderCardField(/** @type {string} */ field, /** @type {BrowsePhoto} */
         // while the dropdown still reads "AI confidence", and that
         // path sends the cover's own score — so a select-derived label would
         // claim the relevance order came from a number that did not produce
-        // it (Codex P2 on PR #1670).
+        // it.
         var confIsStackLead = p.prediction_confidence_is_stack_lead === true;
         var confTitle = confIsStackLead
           ? 'Confidence of the strongest current species prediction on the frame that leads this stack — the score this stack is sorted by'

@@ -179,7 +179,7 @@ if (window.ResizeObserver) {
     // Saving the first edit reveals the sync banner. That reduces the
     // viewport height, but must not recenter a partly visible selected photo
     // while its filter membership is being refreshed. Actual window/sidebar
-    // resizes still keep the focused photo visible as before.
+    // resizes still keep the focused photo visible.
     var onlySyncBannerChanged = bannerHeight !== gridSyncBannerHeight
       && gridContainer.clientWidth === previousSize[0]
       && Math.abs(gridContainer.clientHeight + bannerHeight

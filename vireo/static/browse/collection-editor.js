@@ -33,11 +33,11 @@ var NUMERIC_RULE_FIELDS = ['rating', 'quality_score', 'sharpness',
    registry (vireo/filter_fields.py) advertises for number/rating fields,
    or a rule saved from the filter bar reopens here showing a different
    operator than the one it runs with — and `between`, whose value is a
-   [low, high] pair, used to be flattened to a single scalar on save. */
+   [low, high] pair, would be flattened to a single scalar on save. */
 var NUMERIC_OPS = ['is', 'is not', '>=', '<=', '>', '<', 'between'];
 
 /* Valid ops per field — must mirror vireo/db.py::_build_collection_query.
-   The UI only shows ops the backend handles; non-matching combos used to
+   The UI only shows ops the backend handles; a non-matching combo would
    silently produce zero matches. */
 /** @type {Record<string, string[]>} */ var FIELD_OPS = {
   all:         ['equals'],
@@ -619,8 +619,8 @@ export async function saveCollection() {
     // This modal only edits rules — the preview and controls never surface
     // the stored visual clause. When editing an existing visual collection,
     // leaving visual_json in place would silently apply a hidden visual
-    // prompt on reopen that the user just previewed without (Codex review
-    // r3623087112). Clear it so the saved collection matches the preview.
+    // prompt on reopen that the user just previewed without. Clear it so
+    // the saved collection matches the preview.
     /** @type {{name: string, rules: BrowseRule, visual?: null}} */ var body = {name: name, rules: rules};
     if (editedId) body.visual = null;
     await safeFetch(url, {
@@ -629,7 +629,7 @@ export async function saveCollection() {
       body: JSON.stringify(body),
     });
     hideCollectionModal();
-    // Codex P2: hideCollectionModal() restores focus to the pre-refresh
+    // hideCollectionModal() restores focus to the pre-refresh
     // context-menu row, but renderCollectionList() replaces every row via
     // innerHTML on the next loadCollections() resolution, detaching the
     // focused opener and dropping activeElement to body. Await the refresh
@@ -641,7 +641,7 @@ export async function saveCollection() {
     var refresh = loadCollections();
     loadCollectionCounts();
     if (editedId != null) {
-      // Codex P2: track user-initiated focus moves after hideCollectionModal
+      // Track user-initiated focus moves after hideCollectionModal
       // restored focus to the opener. If the user navigates to another
       // control (including another collection row that then gets detached
       // by a superseding render) before the eventual render fires, don't
@@ -659,7 +659,7 @@ export async function saveCollection() {
         document.removeEventListener('focusin', onFocusIn, true);
       };
       await refresh;
-      // Codex P2: if another loadCollections() (e.g. a concurrent folder-
+      // If another loadCollections() (e.g. a concurrent folder-
       // health refresh) is still pending when this one resolves,
       // reconcileCollectionLoadRenders() defers our render until the newer
       // generation settles — so the pre-save row stays connected past this
@@ -701,7 +701,7 @@ export async function saveCollection() {
             if (tryRestoreCollectionRowFocus()) teardown();
           });
           observer.observe(list, {childList: true});
-          // Codex P2: anchor observer lifetime to load-state settlement
+          // Anchor observer lifetime to load-state settlement
           // rather than a fixed 5s wall-clock. Stay alive while any
           // superseding collectionLoadGen render is still pending
           // (reconcileCollectionLoadRenders() hasn't advanced the

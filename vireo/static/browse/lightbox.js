@@ -44,7 +44,7 @@ import {
   // read the same as the gesture case even though the two clicks reaffirmed
   // the batch rather than creating it. Consult the pre-first-click snapshot:
   // only mark the gesture when the clicks actually moved the selection onto
-  // this stack. Codex P2 on PR #1672.
+  // this stack.
   var gestureIds = /** @type {HTMLElement | null} */ (e.target.closest('.browse-stack-badge'))
     ? null : browseStackMemberIds(id);
   const preState = selection.takeClickSnapshot();
@@ -217,7 +217,7 @@ export var browseLightboxSession = 0;
 // can say what it stood for. Keyed by photo rather than held in a single
 // slot so the reopen that follows a delete cannot overwrite the entry the
 // delete still needs. Read by the ``lightbox:photodeleted`` listener, and
-// dropped when the lightbox is really closed. Codex P2 on PR #1672.
+// dropped when the lightbox is really closed.
 /** @type {Record<string, number[]>} */ var browseLightboxRepresentedByPhoto = {};
 
 
@@ -337,14 +337,14 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // the only card standing for them — lightboxDelete splices the cover out of
   // `photos` and nothing reprojects the stack. Selected frames have to go
   // with it, or the batch bar keeps counting photos no shortcut can show and
-  // the next rating lands on them unseen. Codex P2 on PR #1672.
+  // the next rating lands on them unseen.
   if (represented) {
     // Recorded while the deleted photo was on screen, and a stack can be
     // reprojected in between: a rating or flag in the lightbox promotes
     // another member, so deleting the demoted photo leaves the stack standing
     // under its new cover. Drop only the ids that no card represents *now* —
     // a bounded check, over this one stack's ids rather than the whole
-    // selection. Codex P2 on PR #1672.
+    // selection.
     var representedNow = new Set();
     state.photos.forEach(function(photo) {
       representedNow.add(photo.id);
@@ -386,7 +386,6 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // Prune the deleted id from each cover's stack metadata (and cached
   // members) so what the card stands for matches what still exists, then
   // repaint the affected badge so its count matches the pruned list.
-  // Codex P2 on PR #1672.
   /** @type {number[]} */ var badgesToRefresh = [];
   state.photos.forEach(function(photo) {
     var stack = photo.browse_stack;
@@ -413,7 +412,7 @@ document.addEventListener('lightbox:photodeleted', function(event) {
     // before ``browseStackMembers`` was pruned above). Dissolve the stack
     // instead: drop the cache, retire the expansion, remove any live tray,
     // and repaint the card so it stops advertising a stack that no longer
-    // exists. Codex P2 on PR #1672.
+    // exists.
     if (stack.count < 2) {
       photo.browse_stack = null;
       delete state.browseStackMembers[cacheKey];
@@ -443,7 +442,7 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // state — because the deleted id was in the members list back then, the
   // whole-stack check that would repaint it as ``selected`` said no. Refresh
   // both from the surviving selection so the count and the paint match what
-  // the user can see. Codex P2 on PR #1672.
+  // the user can see.
   if (badgesToRefresh.length) {
     if (typeof refreshCardSelectionVisuals === 'function') {
       refreshCardSelectionVisuals();
@@ -467,7 +466,6 @@ document.addEventListener('lightbox:photodeleted', function(event) {
 // otherwise re-arm the set-aside gesture, leaving the batch bar counting
 // photos a shortcut cannot see — see the stack-gesture rules for why this
 // close has to actively clean up rather than return unchanged.
-// Codex P2 on PR #1672.
 function browseReconcileEmptyLightboxClose() {
   var pending = browseLightboxStackGesture || browseLightboxStackGestureSpent;
   browseLightboxStackGesture = null;
@@ -490,7 +488,6 @@ function browseReconcileEmptyLightboxClose() {
   // photos the user cannot see. Drop any selected id whose cover has left
   // ``photos`` so the selection matches what is on screen — CORE_PHILOSOPHY
   // "no black boxes", the batch bar has to count photos the user can see.
-  // Codex P2 on PR #1672.
   // Only when the grid holds the whole result set — both ends of it.
   // ``allLoaded`` says the tail is exhausted, which a focused or deep-linked
   // window reaches while ``earliestPage`` is still past 1 and the pages
@@ -501,7 +498,7 @@ function browseReconcileEmptyLightboxClose() {
   // the user's selection — photos that exist and are still perfectly valid
   // members of it. The bounded drop in the ``lightbox:photodeleted`` handler
   // covers the partial-window case, because it knows which ids the deleted
-  // cover actually stood for. Codex P2 on PR #1672.
+  // cover actually stood for.
   if (selection.batchIds.size > 0 && pagination.allLoaded && pagination.earliestPage === 1) {
     var reachable = new Set();
     state.photos.forEach(function(photo) {
@@ -513,7 +510,7 @@ function browseReconcileEmptyLightboxClose() {
       // batch the surviving card still stands for — for example, select two
       // collapsed stacks, expand one, delete every member from its tray
       // lightbox: this empty close would then reduce the untouched second
-      // stack to its cover. Codex P2 on PR #1672.
+      // stack to its cover.
       var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
       stackIds.forEach(function(id) { reachable.add(id); });
       var members = state.browseStackMembers[String(photo.id)] || [];
@@ -531,7 +528,6 @@ function browseReconcileEmptyLightboxClose() {
       if (photo.id === selection.focusedPhotoId) return true;
       // Same reasoning as the reachable sweep: a hidden member of an
       // uncached collapsed stack is still represented by its cover card.
-      // Codex P2 on PR #1672.
       var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
       if (stackIds.indexOf(selection.focusedPhotoId == null ? -1 : selection.focusedPhotoId) !== -1) return true;
       var members = state.browseStackMembers[String(photo.id)] || [];
@@ -563,14 +559,14 @@ document.addEventListener('lightbox:closed', function(event) {
   // across it would outlive its lightbox and be mistaken for the next one. It
   // is set aside instead, and handed back only by a delete that actually
   // happens — which reopens the lightbox on the next photo, so there is a
-  // real close still to come. Codex P2 on PR #1672.
+  // real close still to come.
   var stackGesture = browseLightboxStackGesture;
   var deleteDialogOpen = !!/** @type {HTMLElement | null} */ (document.querySelector('#deleteModal.open'));
   browseLightboxStackGestureSpent = deleteDialogOpen ? stackGesture : null;
   browseLightboxStackGesture = null;
   // The delete dialog is open over this close and the lightbox will reopen on
   // the next photo, so what the viewed photos stood for is still needed. Any
-  // other close is the end of the session. Codex P2 on PR #1672.
+  // other close is the end of the session.
   if (!deleteDialogOpen) browseLightboxRepresentedByPhoto = {};
   if (selection.batchIds.size > 0) {
     // Viewing shortcuts can open the lightbox without collapsing an existing
@@ -584,10 +580,9 @@ document.addEventListener('lightbox:closed', function(event) {
     // "Still the one that gesture made" allows shrinkage: deleting a photo in
     // the lightbox drops it from the selection, and that is this gesture's
     // selection mutated, not someone's batch. Without that, deleting a
-    // stack's cover — its only top-level card — left the hidden members
-    // selected with nothing on screen representing them, and the next batch
-    // shortcut would act on photos the user cannot see.
-    // Codex P2 on PR #1672.
+    // stack's cover — its only top-level card — would leave the hidden
+    // members selected with nothing on screen representing them, and the
+    // next batch shortcut would act on photos the user cannot see.
     const gestureIds = stackGesture && stackGesture.epoch === state.anchorRestoreEpoch
       ? new Set(stackGesture.ids) : null;
     if (!gestureIds || !Array.from(selection.batchIds).every(function(id) {
@@ -597,7 +592,7 @@ document.addEventListener('lightbox:closed', function(event) {
     // so the stack stays selected rather than shrinking to one frame. The
     // gesture is spent either way — reopening the same stack with a viewing
     // shortcut afterwards is a viewing shortcut over a batch, and batches are
-    // preserved. Codex P2 on PR #1672.
+    // preserved.
     if (selection.batchIds.has(photoId)) {
       var stackCoverId = browseStackCoverIdForPhoto(photoId);
       var stackIdx = state.photos.findIndex(function(photo) {

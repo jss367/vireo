@@ -13,7 +13,7 @@ import { loadKeywords } from './sidebar-keywords.js';
 
 // ``folderHealthRefreshSeq`` is initialized above the bootstrapBrowse()
 // invocation so the pre-await snapshot inside bootstrap reads ``0`` instead
-// of ``undefined`` (Codex review r3686317674).
+// of ``undefined``.
 function folderRowsContainScope(/** @type {BrowseFolder[]} */ rows, /** @type {number} */ folderId, /** @type {number} */ scopeId) {
   /** @type {Record<string, BrowseFolder>} */ var byId = {};
   (rows || []).forEach(function(row) { byId[row.id] = row; });
@@ -49,7 +49,7 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
   // (filterByFolder/filterByKeyword/filterByCollection) or the initial
   // collection deep-link replay look stale, and its own guard would then
   // silently discard the requested scope — leaving Browse on the workspace
-  // grid instead of the user's newer selection (Codex review r3684907518).
+  // grid instead of the user's newer selection.
   // folderHealthRefreshSeq below is the only counter this refresh needs.
 
   // Apply the effective ``perPage`` (and other cfg values) before any
@@ -60,7 +60,7 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
   // guard, but the perPage variable it wrote is not, so subsequent
   // pagination computes offsets against the new size while the health
   // refresh loaded page 1 with the old size: photos are silently skipped
-  // or duplicated across the boundary (Codex review r3686912883).
+  // or duplicated across the boundary.
   // applyBrowseConfig is idempotent — safe to call again after bootstrap.
   try { applyBrowseConfig(await _cfgPromise); } catch (e) {}
   if (seq !== state.folderHealthRefreshSeq) return;
@@ -75,7 +75,7 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
   // render*Tree call would clobber the newer render, and the post-await
   // seq check would fire too late to undo the DOM mutation. Guarding
   // *before* render means only the winning generation's data ever reaches
-  // the tree (Codex review r3685193225).
+  // the tree.
   var isCurrent = function() { return seq === state.folderHealthRefreshSeq; };
   var beforeFolderRows = state.browseFolderRows.slice();
   var loaded = await Promise.all([
@@ -92,7 +92,7 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
   // already advanced ``_missingFoldersLastIds`` before dispatching this
   // event, later polls see no transition and never repair the view, so
   // schedule a retry via the same event listener rather than committing
-  // to a decision from stale data (Codex review r3687062925).
+  // to a decision from stale data.
   if (loaded[0] === null) {
     var retryAttempt = detail && Number(detail.refreshRetryAttempt) || 0;
     // Bound the short-term recovery loop. A prolonged/permanent endpoint
@@ -105,7 +105,7 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
       // would then remain on pre-transition data indefinitely. Flag the
       // navbar so the next successful poll fires a synthetic reconciliation
       // event regardless of the ID diff, letting this handler re-attempt
-      // the refresh with a healthy endpoint (Codex review r3687331927).
+      // the refresh with a healthy endpoint.
       markMissingFoldersReconciliationPending();
       return;
     }
@@ -160,13 +160,12 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
   // Preserve the active collection: resetAndLoad's default is to clear
   // ``activeCollectionId`` for non-dashboard scopes, which would kick a user
   // viewing a normal collection back to the unscoped workspace grid whenever
-  // folder health changes (CodeRabbit review r3684913393).
+  // folder health changes.
   var gridReloadStatus = await resetAndLoad({
     preserveCollection: true,
     preserveAnchor: true,
     // Health can move photos in and out of the result set, so let the
-    // server place the anchor rather than paging towards where it used to
-    // be (Codex P1 on PR #1695).
+    // server place the anchor rather than paging towards its old position.
     focusAnchor: true
   });
   if (!isCurrent()) return;

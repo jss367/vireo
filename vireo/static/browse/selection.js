@@ -97,7 +97,7 @@ export function buildBrowseIdsRequest() {
     // export preview — matches the first visible card even when the
     // collection is sorted by name/rating/sharpness/quality or when a
     // stack's quality-ranked cover isn't the earliest member under the
-    // sort (Codex P2 on PR #1561).
+    // sort.
     var idsParams = new URLSearchParams();
     idsParams.set('sort', /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value);
     if (browseStacksEnabled()) idsParams.set('stacks', 'true');
@@ -111,11 +111,10 @@ export function buildBrowseIdsRequest() {
     };
     // Mirror the grid's Stacks projection on the general query path as
     // well — workspace, folder, dashboard-collection, unsaved-filter,
-    // and visual-search Select-all now share the same cover-first
+    // and visual-search Select-all share the same cover-first
     // projection so Best Batch, burst-review, and export preview start
     // from the visible first card even when a stack's quality-ranked
-    // cover isn't the earliest member under the selected sort (Codex
-    // P2 on PR #1561).
+    // cover isn't the earliest member under the selected sort.
     if (browseStacksEnabled()) idsBody.stacks = true;
     var idsVisual = VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
     if (idsVisual) idsBody.visual = idsVisual;
@@ -211,7 +210,7 @@ export function clearSelection() {
   // the previously-open anchor satisfies renderLocationEmpty's owner-in-
   // selection check and resurrects the anchor's Accept line for the whole
   // batch — one click would apply the anchor's GPS-derived place to every
-  // selected photo. Codex P2 on PR #1097.
+  // selected photo.
   clearExifSuggestion();
   // Also drop the ambient detail-photo pointer maybeShowExifSuggestion's
   // post-await path uses as its owner check. Scrubbing the DOM alone isn't
@@ -220,12 +219,12 @@ export function clearSelection() {
   // departed anchor a subsequent Select All that contains that photo
   // re-satisfies both async guards and repaints A's Accept line into the
   // batch inspector — clicking it would apply A's EXIF place to every
-  // selected photo. Codex P2 on PR #1097 (17:04Z follow-up).
+  // selected photo.
   state.detailPhotoId = null;
   // Repaint from the (now empty) selection rather than stripping one class by
   // hand: a stack card can also be carrying the dashed partial mark, and a
-  // hand-rolled scrub that only knew about `selected` left that mark on a
-  // cleared grid. One rule, one function. Codex P2 on PR #1672.
+  // hand-rolled scrub that only knew about `selected` would leave that mark
+  // on a cleared grid. One rule, one function.
   refreshCardSelectionVisuals();
   // If the detail panel is still open after clearing, its actions (setFlag,
   // setColorLabel, addKeyword, etc.) early-return on the null selectedPhotoId
