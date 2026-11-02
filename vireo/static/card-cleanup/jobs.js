@@ -98,9 +98,8 @@ export async function cardCleanupFinishJob(jobId, kind) {
   // that has stopped moving.
   /** @type {HTMLElement} */ (document.getElementById('card-cleanup-phase')).textContent =
     'Checking job status…';
-  // Poll until the job actually reaches a terminal state (CodeRabbit
-  // review): a transient stream drop used to fall into a 30-second poll
-  // that then gave up — re-enabling the buttons while the job kept
+  // Poll until the job actually reaches a terminal state: giving up after
+  // a transient stream drop would re-enable the buttons while the job kept
   // running on the server, exactly the orphaning the busy discipline
   // exists to prevent. Scans and audits here legitimately run for many
   // minutes, so poll indefinitely — 1s for the first 30 attempts, then

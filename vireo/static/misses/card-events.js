@@ -1,7 +1,7 @@
 // The delegated click and double-click listeners for everything render.js
 // draws: section headers (collapse), each section's Reject all button, the
-// cards (select / open) and each card's unflag button. They replace the
-// inline onclick / ondblclick attributes the cards used to carry.
+// cards (select / open) and each card's unflag button; the rendered markup
+// carries no inline handlers.
 // ES module.
 
 import { CATEGORY_ORDER } from './state.js';

@@ -91,7 +91,7 @@ async function startPipeline() {
 
   // The process page sends explicit stage flags: Run always uses the CURRENT
   // toggle values (whether or not a saved process is selected), including
-  // miss_enabled and review_mode which used to be preset-only server-side.
+  // miss_enabled and review_mode.
   var classifyEnabled = /** @type {HTMLInputElement} */ (document.getElementById('enableClassify')).checked;
   var extractEnabled = /** @type {HTMLInputElement} */ (document.getElementById('enableExtract')).checked;
   var eyeKeypointsEnabled = /** @type {HTMLInputElement} */ (document.getElementById('enableEyeKeypoints')).checked;

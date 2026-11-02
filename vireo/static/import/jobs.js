@@ -344,8 +344,8 @@ function retryBodyFromFinishedJob(job) {
   // re-import the files the user deliberately deselected on the parent
   // run. All three fields travel together (see the server-side
   // ``include_paths, previewed_count and checked_count must be sent
-  // together`` gate); sending a subset would 400. Parents from before
-  // ``include_paths`` was persisted omit it and simply retry as before.
+  // together`` gate); sending a subset would 400. A parent that did not
+  // persist ``include_paths`` omits it and retries its whole scope.
   if (Array.isArray(cfg.include_paths) && cfg.include_paths.length
       && typeof cfg.previewed_count === 'number'
       && typeof cfg.checked_count === 'number') {
@@ -395,8 +395,7 @@ async function retryFailedImport(directToNas) {
   // in its body) that the server-side retry exclusivity gate can't catch,
   // and the two runs race over the same card and destination. Mirror what
   // startImport() does: flag first, updateStartGate(), then fetch;
-  // clear the flag on failure so the button re-enables. See PR #1387
-  // Codex review.
+  // clear the flag on failure so the button re-enables.
   importStartPending = true;
   updateStartGate();
   let directAllowed = !directToNas;
