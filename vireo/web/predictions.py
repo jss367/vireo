@@ -735,9 +735,9 @@ def create_predictions_blueprint(
         # what "Accept on 38 Bald Eagle" would tag. Passed through so the
         # endpoint can refuse to accept a row whose grouping (and therefore
         # ``accept_prediction``'s applied species) drifted after the panel
-        # rendered but before the lock. Optional: single-species callers
-        # submit one bucket at a time and omit it, which skips the drift
-        # check.
+        # rendered but before the lock. Omission preserves compatibility,
+        # including grouped rows, but skips drift detection. Grouped callers
+        # must send the rendered species to guard against grouping changes.
         raw_expected = body.get("expected_species")
         expected_species = (
             raw_expected.strip() if isinstance(raw_expected, str) else None
@@ -981,9 +981,9 @@ def create_predictions_blueprint(
         # another tab ungrouping the burst clears ``individual`` votes so
         # ``accept_prediction`` falls back to the raw per-frame label, and
         # per-vote edits can shift the winner. Skip rows whose current
-        # consensus no longer matches. No-op when the caller passes no
-        # species (single-species callers that never render a
-        # multi-species button).
+        # consensus no longer matches. Omission preserves the compatibility
+        # contract even for grouped rows, but cannot detect species drift;
+        # new grouped callers must send the species their button names.
         drifted_ids = _species_drifted_prediction_ids(
             db, _load_prediction_rows(db, pred_ids), expected_species,
         )
@@ -1400,10 +1400,10 @@ def create_predictions_blueprint(
         to one species" precondition below doesn't catch it when *every* row
         drifts to the same new species.
 
-        No-ops when ``expected_species`` is falsy (Review's single-photo
-        routes have no species in hand). Compares resolved identities so
-        common/scientific aliases do not register as drift; unresolved labels
-        compare as text.
+        No-ops when ``expected_species`` is falsy, including grouped rows
+        accepted through the compatibility contract. Grouped callers must
+        send the rendered species to detect drift. Resolved identities admit
+        common/scientific aliases; unresolved labels compare as text.
 
         Returns the drifted-row subset of ``rows`` ids.
         """
