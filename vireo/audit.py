@@ -369,8 +369,8 @@ def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
     root folders the sidecars check scans) is refused. Both sides are
     realpath'd so symlinks can't smuggle a path outside the library.
 
-    ``trash_paths`` is the app's Trash helper (``app._trash_paths``,
-    returning ``(moved, successful, failures)``). Without one, files are
+    ``trash_paths`` is the app's ``TrashService.trash_paths``, returning
+    ``(moved, successful, failures)``. Without one, files are
     unlinked; the route always passes it so a mistaken delete stays
     recoverable.
 

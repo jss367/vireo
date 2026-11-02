@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from duplicate_scan import attach_workspace_names, catalog_cleanup_result, revalidate_scan_result
@@ -30,7 +29,9 @@ if TYPE_CHECKING:
     from flask import Response
     from flask.typing import ResponseReturnValue
     from services.service_types import ErrorResponse, JsonDict, JsonError
-    from web.web_types import AppTrashPaths, CleanupCachedFiles, GetDb, InvalidateMissingOriginals, NetworkRoots
+    from services.trash import TrashService
+    from services.volumes import NetworkRoots
+    from web.web_types import CleanupCachedFiles, GetDb, InvalidateMissingOriginals
 
 log = logging.getLogger(__name__)
 
@@ -42,17 +43,14 @@ def create_duplicates_blueprint(
     get_db: GetDb,
     json_error: JsonError,
     *,
-    trash_paths: AppTrashPaths,
-    network_volume_roots: Callable[[], NetworkRoots],
-    path_on_network_volume: Callable[[str, NetworkRoots], bool],
+    trash: TrashService,
     cleanup_cached_files_for_deleted_photos: CleanupCachedFiles,
     invalidate_missing_originals: InvalidateMissingOriginals,
 ) -> Blueprint:
     """Build the duplicates blueprint.
 
-    ``trash_paths``, ``network_volume_roots`` and ``path_on_network_volume``
-    are app.py's mount-aware Trash helpers, late-bound through that module so
-    tests that patch them there still reach these routes.
+    ``trash`` (the app's ``TrashService``) classifies losers against one
+    mount-table snapshot and moves them to the Trash.
     ``cleanup_cached_files_for_deleted_photos`` (the app's ``PhotoDeletion``)
     unlinks the thumbnails, previews and working copies of deleted photos,
     and ``invalidate_missing_originals`` (the app's ``MissingOriginals``)
@@ -264,7 +262,7 @@ def create_duplicates_blueprint(
         # remount. Local paths keep the existing preflight — a fast, safe
         # stat on the local FS — so the "file already missing" reporting
         # contract for manually-cleaned local losers is preserved.
-        network_roots = network_volume_roots()
+        network_roots = trash.network_volume_roots()
         for pid in photo_ids:
             row = rows_by_id.get(pid)
             if row is None:
@@ -280,7 +278,7 @@ def create_duplicates_blueprint(
                 skipped.append({"id": pid, "reason": "no duplicate winner exists"})
                 continue
             filepath = os.path.join(row["folder_path"] or "", row["filename"] or "")
-            network = path_on_network_volume(filepath, network_roots)
+            network = trash.path_on_network_volume(filepath, network_roots)
             if not network:
                 from audit import confirmed_orphan_ids
 
@@ -297,7 +295,7 @@ def create_duplicates_blueprint(
             # mounted-volume revalidation before their catalog rows can go.
             if not all(distinct_existing_file(
                 filepath, anchor,
-                timeout=2.0 if network or path_on_network_volume(anchor, network_roots) else None,
+                timeout=2.0 if network or trash.path_on_network_volume(anchor, network_roots) else None,
                 allow_missing_source=network,
             ) for anchor in anchors):
                 skipped.append({"id": pid, "reason": "no verified distinct duplicate winner exists"})
@@ -400,7 +398,7 @@ def create_duplicates_blueprint(
         # ``/Volumes`` fallback in ``path_on_network_volume``) would be
         # silently reclassified as local, reintroducing the unbounded-I/O
         # hang this routing exists to prevent.
-        trashed, successful_paths, trash_failures = trash_paths(
+        trashed, successful_paths, trash_failures = trash.trash_paths(
             [filepath for _pid, filepath in trash_candidates],
             already_missing_out=already_missing_paths,
             network_roots=network_roots,
