@@ -394,7 +394,7 @@ def location_options(db: Database) -> list[JsonDict]:
         parents = parents_of(keyword_id)
         options.append({"id": keyword_id, "name": row["name"], "parents": parents})
     # Reserve labels already chosen: a literal name can itself contain the
-    # breadcrumb separator used to qualify another option. The picker matches
+    # breadcrumb separator that qualifies another option. The picker matches
     # without case, so uniqueness must hold without case too.
     max_depth = max((len(o["parents"]) for o in options), default=0)
     for depth in range(max_depth + 1):
