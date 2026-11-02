@@ -307,42 +307,42 @@ def test_source_changes_cross_language_rename_is_mixed(tmp_path):
     assert entries[0][3] == "mixed", entries
 
 
-def test_source_changes_flags_mode_only_change_as_failure(tmp_path):
-    """A ``100644`` -> ``100755`` edit flips a script's executability, so an
-    identical-blob flip must not pass as comment-only. ``--name-status``
-    reports it ``M`` with no mode info, so the checker reads modes from
-    ``--raw`` and marks the entry ``mode_changed``. The fixture flips the
-    executable bit on disk and forces ``core.filemode=true`` so the diff
-    against ``base`` picks it up on filesystems that would otherwise ignore
-    it."""
+@pytest.mark.parametrize("old_executable", [False, True])
+def test_source_changes_flags_mode_only_change_as_failure(tmp_path, monkeypatch, capsys, old_executable):
+    """Index modes exercise both executable-bit flips even without POSIX chmod."""
     env = os.environ | {
         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
     }
-    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True, env=env)
-    subprocess.run(["git", "-C", str(tmp_path), "config", "core.filemode", "true"], check=True, env=env)
-    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", "root"], check=True, env=env)
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args], check=True,
+            capture_output=True, text=True, encoding="utf-8", env=env,
+        ).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    # Ignore filesystem executable bits, as Git normally does on Windows.
+    # update-index still records the intended mode in Git's portable metadata.
+    git("config", "core.filemode", "false")
     script = tmp_path / "run.py"
     script.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
-    script.chmod(0o644)
-    subprocess.run(["git", "-C", str(tmp_path), "add", "run.py"], check=True, env=env)
-    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "base"], check=True, env=env)
-    base = subprocess.run(
-        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True, env=env,
-    ).stdout.strip()
-    script.chmod(0o755)
-    orig_root = checker.ROOT
-    checker.ROOT = tmp_path
-    try:
-        entries = checker._source_changes(base)
-    finally:
-        checker.ROOT = orig_root
-    assert entries, "mode-only change must produce an entry"
-    label, old_path, new_path, suffix, mode_changed = entries[0]
-    assert old_path == "run.py"
-    assert new_path == "run.py"
-    assert suffix == ".py"
-    assert mode_changed, "100644 -> 100755 is a mode change the checker must flag"
+    git("add", "run.py")
+    git("update-index", "--chmod=" + ("+x" if old_executable else "-x"), "run.py")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    blob = git("rev-parse", "HEAD:run.py")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker._source_changes(base) == []
+    assert checker.main() == 0
+    capsys.readouterr()
+    git("update-index", "--chmod=" + ("-x" if old_executable else "+x"), "run.py")
+    assert git("rev-parse", ":run.py") == blob, "fixture must change only mode metadata"
+    entries = checker._source_changes(base)
+    assert entries == [("run.py", "run.py", "run.py", ".py", True)]
+    assert checker.main() == 1
+    assert "run.py: file mode changed" in capsys.readouterr().err
 
 
 def test_source_changes_detects_non_ascii_path(tmp_path):
