@@ -113,7 +113,7 @@ def scientific_synonyms_identity():
     output enrichment therefore has to include this alongside the
     taxonomy digest, or a pre-synonym run compares equal to a
     post-synonym one and the cache skips the work that would fix the
-    raw binomials (Codex #1560 P2).
+    raw binomials.
 
     Derived from the loaded mapping rather than the file bytes so the
     identity describes what lookups will actually use: a missing or
@@ -174,7 +174,7 @@ def _content_range_total(headers):
 def _content_range_start(headers):
     """First byte covered by a Content-Range: bytes <start>-<end>/<total>.
 
-    Returns None when the header is absent or malformed. Used to detect a
+    Returns None when the header is absent or malformed. Detects a
     206 that begins at a different byte than the client's Range request so
     the caller can restart from scratch rather than splice mismatched bytes
     onto its existing ``.partial``.
@@ -2090,7 +2090,7 @@ def download_taxonomy(output_path, progress_callback=None):
 def classify_to_keypoint_group(db, inat_id):
     """Walk a taxon's lineage; return 'Aves' or 'Mammalia' if in ancestry, else None.
 
-    Used to route keypoint-model selection for eye-focus detection. Returns
+    Routes keypoint-model selection for eye-focus detection. Returns
     None for fish, reptiles, insects, invertebrates, or any taxon absent
     from the local taxa table.
 

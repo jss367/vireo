@@ -241,7 +241,7 @@ def generate_thumbnail(
     """Generate a JPEG thumbnail for a photo.
 
     Args:
-        photo_id: database photo id (used as filename)
+        photo_id: database photo id (the default cache filename)
         source_path: path to the original image file
         cache_dir: directory to store thumbnails
         size: max dimension in pixels
@@ -259,7 +259,7 @@ def generate_thumbnail(
             ``None`` so callers can retry a full-size companion JPEG.
         native_size: optional orientation-corrected native ``(width, height)``
             of the photo (see ``render_source.recipe_source_dimensions``),
-            used to scale the recipe's detail pass (sharpen/NR kernels) to
+            which scales the recipe's detail pass (sharpen/NR kernels) to
             this render's resolution.
         cache_name: optional cache filename. The default remains
             ``{photo_id}.jpg``; paired-source views use a distinct filename

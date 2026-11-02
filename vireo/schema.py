@@ -130,7 +130,7 @@ def _add_grouping_payload_bytes(conn):
 
 
 def _add_formerly_lazy_tables(conn):
-    """Create the tables that used to be created on first write.
+    """Create the tables older catalogs created on first write.
 
     ``job_history`` (the job runner), ``preview_cache_invalidations`` (the
     preview cache), ``species_identity_repairs`` and the common-name lookup

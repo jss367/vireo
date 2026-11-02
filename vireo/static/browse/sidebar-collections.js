@@ -97,8 +97,7 @@ function reconcileCollectionLoadRenders() {
   // leaving the collection list stale. Otherwise a health-owned request
   // that observed a just-created collection could be silently dropped by
   // a subsequent mutation-triggered reload that transiently fails, so the
-  // collection stays absent until the next explicit list refresh
-  // (Codex review r3687331931).
+  // collection stays absent until the next explicit list refresh.
   var gen = state.collectionLoadGen;
   while (gen > state.collectionRenderDecisionGen) {
     var loadState = state.collectionLoadStates[gen];
@@ -317,8 +316,8 @@ export function refreshActiveCollectionAfterMembershipChange(/** @type {string[]
   // (the saved photo_ids list plus any user-picked chips). loadCollections()
   // refreshes the sidebar counts but the bar keeps the STALE photo_ids
   // rule until the user manually reopens the collection, so an add/remove
-  // just made from Browse doesn't show up in the current grid (CodeRabbit
-  // review r3620473562). Refetch the collection metadata and reopen so
+  // just made from Browse doesn't show up in the current grid. Refetch the
+  // collection metadata and reopen so
   // the bar's photo_ids expression matches the fresh membership.
   if (state.openedCollectionId) {
     var reopenId = state.openedCollectionId;
@@ -333,8 +332,8 @@ export function refreshActiveCollectionAfterMembershipChange(/** @type {string[]
       // The user can switch scope (folder click, keyword click, filter
       // change) while this fetch is in flight; those paths clear
       // ``openedCollectionId``. Reopening unconditionally would reinstate
-      // the old collection and wipe the user's new scope (Codex review
-      // r3622743705). Only reopen if the same collection is still open.
+      // the old collection and wipe the user's new scope. Only reopen if the
+      // same collection is still open.
       if (state.openedCollectionId === reopenId) {
         filterByCollection(reopenId, { preserveAnchor: false });
       }
@@ -354,7 +353,7 @@ export function refreshActiveCollectionAfterMembershipChange(/** @type {string[]
   // guess (or leaves the photo unscored); accepting a runner-up rejects the
   // old top pick. Either way the photo's sort key AND the number its badge
   // shows have changed, and without reloading the grid keeps the old order
-  // and the old score until a manual re-sort (Codex P2 on PR #1670). Same
+  // and the old score until a manual re-sort. Same
   // options as onSortChanged(), which is the same situation: the order moved
   // under the photo the user is looking at, so hold onto it.
   //
@@ -413,8 +412,7 @@ export async function filterByCollection(/** @type {number} */ id, /** @type {{p
     if (!VireoFilter.isReady()) return;
     // A later sidebar click (folder/keyword/collection) advanced the scope
     // generation while we were waiting for filter-bar init. Applying this
-    // stale collection now would clobber the user's newer selection
-    // (Codex review r3624395785).
+    // stale collection now would clobber the user's newer selection.
     if (state.browseScopeGen !== myScopeGen) return;
   }
   // Guard: degraded (count_error) collections can't resolve their rules.
@@ -456,8 +454,7 @@ export async function filterByCollection(/** @type {number} */ id, /** @type {{p
   // Membership-refresh callers pass {preserveAnchor: false} to avoid paging
   // through the whole refreshed collection looking for a photo that may
   // have just left it; propagate via a distinct reason so the shared
-  // onChange handler skips anchor preservation for that path (Codex review
-  // r3622521603).
+  // onChange handler skips anchor preservation for that path.
   var preserveAnchor = !(options && options.preserveAnchor === false);
   VireoFilter.loadExpression(rules, visual, {
     reason: preserveAnchor ? 'expressionLoaded' : 'expressionRefreshed',
