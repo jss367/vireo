@@ -4397,7 +4397,7 @@ def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
     used to feed the raw alias string into ``compare_prediction_to_keywords``
     and — because taxonomy.json is not available in the test environment —
     fall through the exact-text fallback and mark it a conflict. The fix
-    routes the prediction through ``resolve_species_display_name`` so
+    routes the prediction through ``resolve_species_display`` so
     both sides agree on the canonical root spelling.
     """
     app, db = app_and_db
@@ -14952,7 +14952,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     """When a photo has no attached species tag but a prediction whose label
     is a hierarchy alias (e.g. ``Desert Verdin``), the prediction snapshot
     used to accept curation-source rows must canonicalize through
-    ``resolve_species_display_name``.
+    ``resolve_species_display``.
 
     Regression: highlight buckets canonicalize the prediction label to its
     unique-taxon root before saving (via ``species_curation.add_highlight``), so a
@@ -14977,7 +14977,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     )
     # Species-rank taxon shared by a top-level ``Verdin`` root and a
     # hierarchy alias ``Desert Verdin`` — one canonical taxon, so
-    # ``resolve_species_display_name('Desert Verdin')`` returns ``Verdin``.
+    # ``resolve_species_display('Desert Verdin')`` returns ``Verdin``.
     verdin_taxon = db.conn.execute(
         "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
         "VALUES (2913, 'Auriparus flaviceps', 'Verdin', 'species', 'Animalia')"
@@ -15592,7 +15592,7 @@ def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
     """When two intentionally-distinct species keywords share a NOCASE key
     (legacy general ``Robin`` alongside taxonomy ``robin``), the relabel
     snapshots must key on the SAME spelling ``add_keyword`` will store.
-    ``resolve_species_display_name`` preserves the caller spelling
+    ``resolve_species_display`` preserves the caller spelling
     (``Robin``) for bucket/parse/setter symmetry, but ``add_keyword``'s
     typed lookup picks the taxonomy row (``robin``); before the fix the
     snapshot compared destination curation against ``Robin`` while the
@@ -15745,13 +15745,13 @@ def test_species_highlight_eligibility_accepted_species_exact_match(app_and_db):
     assert pid in (same_spelling.get("Robin") or {})
 
 
-def test_resolve_species_display_name_prefers_taxonomy_over_general_homonym(
+def test_resolve_species_display_prefers_taxonomy_over_general_homonym(
     app_and_db,
 ):
     """When a taxonomy species row and a non-species general row share a
     NOCASE key (e.g. taxonomy ``Common waxbill`` alongside a hand-tagged
     ``Common Waxbill`` general), ``add_keyword(is_species=True)`` picks
-    the taxonomy row. ``resolve_species_display_name`` must mirror that
+    the taxonomy row. ``resolve_species_display`` must mirror that
     pick — otherwise the bucket collection keys prediction-only photos
     under ``Common Waxbill``, curation setters store rows under the
     non-taxonomy spelling, and once the prediction is accepted the
@@ -15774,9 +15774,9 @@ def test_resolve_species_display_name_prefers_taxonomy_over_general_homonym(
     # Every caller spelling must land on the taxonomy row's stored
     # spelling: that's what add_keyword(is_species=True) will pick, and
     # bucket / parse / setter paths all agree on the same string.
-    assert db.resolve_species_display_name("Common Waxbill") == "Common waxbill"
-    assert db.resolve_species_display_name("common waxbill") == "Common waxbill"
-    assert db.resolve_species_display_name("COMMON WAXBILL") == "Common waxbill"
+    assert db.keyword_taxa.resolve_species_display("Common Waxbill") == "Common waxbill"
+    assert db.keyword_taxa.resolve_species_display("common waxbill") == "Common waxbill"
+    assert db.keyword_taxa.resolve_species_display("COMMON WAXBILL") == "Common waxbill"
 
     # Cross-check the invariant: add_keyword(is_species=True) actually
     # returns the taxonomy row — otherwise the resolve fix would be
@@ -15789,7 +15789,7 @@ def test_resolve_species_display_name_prefers_taxonomy_over_general_homonym(
     assert picked_name == "Common waxbill"
 
 
-def test_resolve_species_display_name_promotes_non_species_general_alone(
+def test_resolve_species_display_promotes_non_species_general_alone(
     app_and_db,
 ):
     """When only a non-species general row shares the NOCASE key,
@@ -15809,7 +15809,7 @@ def test_resolve_species_display_name_promotes_non_species_general_alone(
     # promote the general row rather than insert a fresh taxonomy row.
     # Resolve returns the general's stored spelling — the string
     # curation setters must key on.
-    assert db.resolve_species_display_name("common waxbill") == "Common Waxbill"
+    assert db.keyword_taxa.resolve_species_display("common waxbill") == "Common Waxbill"
 
     # add_keyword promotes in place; the row's name doesn't change.
     picked_id = db.add_keyword("common waxbill", is_species=True)
@@ -25324,7 +25324,7 @@ def test_browse_reject_reporter_names_workspace_detach_skips(app_and_db):
 def test_compare_canonical_key_collapses_hierarchy_aliases(app_and_db, tmp_path):
     """Two spellings the DB already calls one species share one key.
 
-    Codex P2 (app.py:16954). ``resolve_species_display_name`` collapses a
+    Codex P2 (app.py:16954). ``resolve_species_display`` collapses a
     hierarchy alias onto its root keyword ("Desert Verdin" -> "Verdin"),
     and ``compare_prediction_to_keywords`` is fed that resolved name — so
     the keyword comparison treats both models as naming the same species.
@@ -25342,7 +25342,7 @@ def test_compare_canonical_key_collapses_hierarchy_aliases(app_and_db, tmp_path)
     ).fetchone()["id"]
 
     # A root ``Verdin`` species keyword with a linked hierarchy leaf
-    # ``Desert Verdin`` under it — the shape resolve_species_display_name
+    # ``Desert Verdin`` under it — the shape resolve_species_display
     # canonicalizes through.
     db.conn.execute(
         "INSERT INTO taxa (id, name, rank) VALUES (555, 'Auriparus flaviceps', 'species')"
@@ -25357,7 +25357,7 @@ def test_compare_canonical_key_collapses_hierarchy_aliases(app_and_db, tmp_path)
         (root_id,),
     )
     db.conn.commit()
-    assert db.resolve_species_display_name("Desert Verdin") == "Verdin", (
+    assert db.keyword_taxa.resolve_species_display("Desert Verdin") == "Verdin", (
         "sanity: the DB resolver collapses the alias onto its root"
     )
 
@@ -25506,7 +25506,7 @@ def test_compare_canonical_display_prefers_db_canonical_for_aliases(
         (root_id,),
     )
     db.conn.commit()
-    assert db.resolve_species_display_name("Desert Verdin") == "Verdin", (
+    assert db.keyword_taxa.resolve_species_display("Desert Verdin") == "Verdin", (
         "sanity: the DB resolver collapses the alias onto its root"
     )
     det_id = db.detections.save(photo_id, [
@@ -25557,7 +25557,7 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
 ):
     """An unresolved binomial keeps the model's own spelling.
 
-    ``resolve_species_display_name``'s last resort applies the keyword-case
+    ``resolve_species_display``'s last resort applies the keyword-case
     convention when no keyword row and no linked taxon match. For a Latin
     binomial the DB has never seen, that rewrites ``Bubulcus ibis`` to
     ``Bubulcus Ibis`` under a title-case convention — a spelling neither the
@@ -25572,15 +25572,15 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
 
     app, db = app_and_db
     # Seed enough title-case species keywords for
-    # detect_keyword_case_convention to pick Title Case (needs >= 3 rows
+    # detect_case_convention to pick Title Case (needs >= 3 rows
     # with multiple words); then predict a lowercase-genus binomial the DB
-    # has never seen — resolve_species_display_name will rewrite it to
+    # has never seen — resolve_species_display will rewrite it to
     # ``Bubulcus Ibis``.
     db.add_keyword("Blue Jay", is_species=True)
     db.add_keyword("Great Cormorant", is_species=True)
     db.add_keyword("Cattle Egret", is_species=True)
     db.commit()
-    resolved = db.resolve_species_display_name("Bubulcus ibis")
+    resolved = db.keyword_taxa.resolve_species_display("Bubulcus ibis")
     assert resolved == "Bubulcus Ibis", (
         f"sanity: title-case convention should re-case the binomial "
         f"(got {resolved!r})"
@@ -25618,7 +25618,7 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
     assert preds["model-a"][0]["canonical_display"] == "Bubulcus ibis"
     # The keyword comparison still uses the case-applying resolution, since
     # that is the spelling add_keyword would land on.
-    assert db.resolve_species_display_name("Bubulcus ibis") == "Bubulcus Ibis"
+    assert db.keyword_taxa.resolve_species_display("Bubulcus ibis") == "Bubulcus Ibis"
 
 
 # -- Multi-species burst confirmation (issue #1298) ---------------------------
@@ -27323,7 +27323,7 @@ def test_accept_legacy_prediction_reuses_unlinked_same_name_keyword(app_and_db):
     Accepting a legacy custom prediction (no ``source_taxon_id`` and not a
     native tol/iNat model) must reuse that existing row through
     ``add_keyword``'s name path rather than route through
-    ``_add_source_species_keyword`` on a name-lookup-inferred taxon id.
+    ``add_source_species`` on a name-lookup-inferred taxon id.
     """
     app, db = app_and_db
     db.conn.execute(
@@ -27362,7 +27362,7 @@ def test_batch_accept_on_all_bare_name_reuses_unlinked_same_name_keyword(app_and
     When every prediction in the bucket is ambiguous or otherwise unacceptable,
     ``_batch_accept_under_lock`` falls through to creating a keyword from
     ``expected_species`` alone. A bare common name is name-only inference, and
-    routing it through ``_add_source_species_keyword`` on a taxonomy-lookup
+    routing it through ``add_source_species`` on a taxonomy-lookup
     taxon id would refuse to reuse an unlinked same-name keyword the async
     ``mark_species_keywords`` pass has not touched yet, minting
     ``California Towhee (taxon 42)`` instead.

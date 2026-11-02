@@ -4,9 +4,11 @@ This module owns the SQL that decides what species (or other taxon) a keyword
 row stands for, and how a species name is spelled:
 
 - species-name resolution: the casing convention the stored species rows use
-  (``detect_case_convention``), the stored spelling ``add_keyword`` would land
-  on (``resolve_species_display``) and the canonical root spelling for a
-  taxon (``species_root_name_for_taxon``);
+  (``detect_case_convention``), the casing ``add_keyword`` applies to a new
+  species name (``species_case_convention``, the configured override or the
+  detected convention, applied by the pure ``apply_species_case_convention``), the
+  stored spelling ``add_keyword`` would land on (``resolve_species_display``)
+  and the canonical root spelling for a taxon (``species_root_name_for_taxon``);
 - keyword-to-taxon linking: the local ``taxa`` id a keyword name resolves to
   (``lookup_taxon_id``), the lineage check that disambiguates a species-rank
   homonym (``resolve_species_by_lineage``), the startup pass that marks and
@@ -18,46 +20,67 @@ row stands for, and how a species name is spelled:
   standing for the species it replaces or removes (``species_root_by_name``,
   ``other_linked_species_names``).
 
-Inserting a keyword (with its case convention and taxon link) is
-``repositories/keywords.py``, which reaches these methods through the
-façade (``Database.resolve_species_display_name``,
-``Database._lookup_taxon_id_for_keyword`` ...); the species photos carry is
-``repositories/photo_species.py``.
-
-The method bodies moved verbatim from ``repositories/keywords.py`` (and
-before that from ``Database``); only their signatures gained annotations.
-``self._DETECT_CASE_CONVENTION`` and ``self._taxon_lookup_variants`` are the
-``db`` module sentinel and helper of those names, injected by
-``Database._keyword_taxon_repository``. Every façade method a moved body
-calls is bound from the ``Database`` instance under its own name (see
-``FACADE_METHODS``) and called as ``self.<name>(...)``, so monkeypatches of
-``Database`` methods keep reaching the moved code. The SQL text, parameter
-order and commit placement are unchanged. Nothing here writes a
-``photo_keywords`` association.
+The repository needs only its connection: keywords and taxa are
+catalog-wide, and the configured ``keyword_case`` override comes through the
+``settings_source`` port. Other repositories that need a species spelling or
+taxon link (``repositories/keywords.py``, ``repositories/species_curation.py``,
+``repositories/keyword_provenance.py``) build one on their own connection.
+Nothing here writes a ``photo_keywords`` association or commits.
 
 Callers reach it through the ``db.keyword_taxa`` accessor, which builds a
-fresh repository per access. Keywords and taxa are catalog-wide, so nothing
-here needs the active workspace. The methods other keyword repositories bind
-from the façade by name keep their ``Database`` wrappers
-(``detect_keyword_case_convention``, ``resolve_species_display_name``,
-``_species_root_name_for_taxon``, ``_lookup_taxon_id_for_keyword``,
-``_resolve_species_by_lineage``).
+fresh repository per access.
 """
 
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
+import settings_source
 from keyword_normalization import normalize_keyword_display
 from repositories.species_taxon_lookup import lookup_taxon_id as _lookup_species_taxon_id
 from repositories.species_taxon_lookup import species_preferring_taxon_match as _species_taxon_match
+from repositories.species_taxon_lookup import taxon_lookup_variants
 
-# ``Database`` methods the moved bodies call through the façade.
-FACADE_METHODS = (
-    "species_case_convention",
-    "_apply_case_convention",
-    "_resolve_species_by_lineage",
-)
+# Sentinel for ``resolve_species_display(case_convention=...)``: absent means
+# "work it out", which is different from an explicit ``None`` ("there is no
+# convention, leave the caller's spelling alone").
+DETECT_CASE_CONVENTION = object()
+
+
+def sentence_case_first_word(word: str) -> str:
+    """Capitalize a first word without mangling mixed-case eponyms.
+
+    ``str.capitalize()`` lowercases everything after the first letter,
+    so a classifier label like ``McKay's bunting`` would come out
+    ``Mckay's bunting``. Preserve existing internal casing unless the
+    word is ALL CAPS (shouty label files), which sentence-cases.
+    """
+    if not word:
+        return word
+    has_case = any(ch.lower() != ch.upper() for ch in word)
+    if has_case and word == word.upper():
+        chars = list(word.lower())
+        for idx, ch in enumerate(chars):
+            if ch.lower() != ch.upper():
+                chars[idx] = ch.upper()
+                break
+        return "".join(chars)
+    return word[0].upper() + word[1:]
+
+
+def apply_species_case_convention(name: str, convention: object) -> str:
+    """Apply a casing convention (``'lower'``, ``'title'``) to a species name."""
+    if convention == "lower":
+        # First word capitalized, rest lowercase: "Black phoebe"
+        words = name.split()
+        if len(words) > 1:
+            first = sentence_case_first_word(words[0])
+            return first + " " + " ".join(w.lower() for w in words[1:])
+        return sentence_case_first_word(name)
+    elif convention == "title":
+        # Title Case: "Black Phoebe"
+        return name.title()
+    return name
 
 
 class _Taxonomy(Protocol):
@@ -67,28 +90,8 @@ class _Taxonomy(Protocol):
 
 
 class KeywordTaxonRepository:
-    # Bound ``Database`` methods that ``__init__`` installs from
-    # ``FACADE_METHODS``, declared so the type checker sees them.
-    species_case_convention: Callable[..., Any]
-    _apply_case_convention: Callable[..., Any]
-    _resolve_species_by_lineage: Callable[..., Any]
-
-    def __init__(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        detect_case_convention_sentinel: object,
-        taxon_lookup_variants: Callable[[str], list[str]],
-        facade: object,
-    ) -> None:
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
-        # ``db`` module names, kept under those names so the moved bodies
-        # read them as ``self.<name>``.
-        self._DETECT_CASE_CONVENTION = detect_case_convention_sentinel
-        self._taxon_lookup_variants = taxon_lookup_variants
-        # Bound ``Database`` methods, kept under their façade names.
-        for name in FACADE_METHODS:
-            setattr(self, name, getattr(facade, name))
 
     # -- species names ---------------------------------------------------------
 
@@ -128,9 +131,23 @@ class KeywordTaxonRepository:
         return None
 
 
+    def species_case_convention(self) -> str | None:
+        """The casing ``add_keyword`` would apply to a brand-new species name.
+
+        The configured override wins; otherwise it is detected from the
+        existing species keywords. Both readings cost a config load and a
+        scan of every species keyword, which is why bulk callers resolve it
+        once and hand it back to ``resolve_species_display`` instead of
+        paying for it per name.
+        """
+        override = settings_source.get("keyword_case")
+        if override and override != "auto":
+            return override
+        return self.detect_case_convention()
+
     def resolve_species_display(
         self, name: str, apply_case_convention: bool = True,
-        *, case_convention: object,
+        *, case_convention: object = DETECT_CASE_CONVENTION,
     ) -> str:
         """Predict the stored species name that add_keyword(is_species=True) would use.
 
@@ -213,11 +230,11 @@ class KeywordTaxonRepository:
             return name
         convention = (
             self.species_case_convention()
-            if case_convention is self._DETECT_CASE_CONVENTION
+            if case_convention is DETECT_CASE_CONVENTION
             else case_convention
         )
         if convention:
-            return self._apply_case_convention(name, convention)
+            return apply_species_case_convention(name, convention)
         return name
 
 
@@ -268,7 +285,7 @@ class KeywordTaxonRepository:
     def species_root_name_for_taxon(self, taxon_id: int | None) -> str | None:
         """Canonical root keyword spelling for a species taxon, if any.
 
-        ``resolve_species_display_name`` uses the same lookup to route
+        ``resolve_species_display`` uses the same lookup to route
         curation keys through the canonical root when only a hierarchy
         alias is stored (e.g. a leaf ``Desert Verdin`` after
         the retired duplicate-species repair detached the top-level
@@ -335,7 +352,7 @@ class KeywordTaxonRepository:
         taxon), and ``is_keyword_species`` already filters those out via
         ``taxon_rank`` for species-specific readers.
         """
-        return _lookup_species_taxon_id(self.conn, name, prefer_species, species_only, variants=self._taxon_lookup_variants)
+        return _lookup_species_taxon_id(self.conn, name, prefer_species, species_only, variants=taxon_lookup_variants)
 
 
     def _species_preferring_taxon_match(
@@ -525,7 +542,7 @@ class KeywordTaxonRepository:
                         "class", "phylum", "kingdom",
                     )
                 ]
-                species_row = self._resolve_species_by_lineage(
+                species_row = self.resolve_species_by_lineage(
                     species_name, expected_ancestors
                 )
                 if species_row:

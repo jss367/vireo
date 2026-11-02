@@ -151,12 +151,15 @@ def setup():
         ),
     }
     ns["__builtins__"]["__import__"] = lambda name, *a, **kw: modules[name] if name in modules else forbidden()
-    repo._lookup_taxon_id_for_keyword = repo.lookup_taxon_id
-    repo._taxon_lookup_variants = lambda name: [name]
-    repo.resolve_species_display_name = lambda name: name
-    repo.species_case_convention = lambda: None
-    repo._apply_case_convention = lambda name, case: name
-    repo.KEYWORD_TYPES = {"general", "taxonomy", "location", "individual", "genre"}
+    ns["taxon_lookup_variants"] = lambda name: [name]
+    ns["apply_species_case_convention"] = lambda name, case: name
+    ns["KEYWORD_TYPES"] = {"general", "taxonomy", "location", "individual", "genre"}
+    ns["TaxonCatalog"] = lambda conn: None
+    taxa = ns["KeywordTaxonRepository"]()
+    taxa.conn = conn
+    taxa.resolve_species_display = lambda name, **kw: name
+    taxa.species_case_convention = lambda: None
+    repo._taxa = taxa
 
     prov = ns["KeywordProvenanceRepository"]()
     prov.conn = conn
@@ -281,7 +284,6 @@ class Checks(unittest.TestCase):
                 ns["__builtins__"]["__import__"] = lambda name, *a, **kw: (
                     types.SimpleNamespace(SpeciesResolver=Resolver) if name == "species_identity" else forbidden()
                 )
-                r.resolve_species_display_name = lambda name: name
                 result = r.add_source_species("Invented bird", 101)
                 self.assertEqual(result == dst, not ambiguous)
                 self.assertEqual(

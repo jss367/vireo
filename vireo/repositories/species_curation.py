@@ -30,11 +30,10 @@ What deliberately stays on ``Database``:
   ``Database._ws_id`` at exactly the points the original code called it, so a
   method that returns early (``get_life_list_best_photo_by_taxon`` on no ids)
   or canonicalizes a species name first still raises when it always did.
-- Composition with other domains. The two façade methods a moved body
-  calls arrive bound, under their ``Database`` names, and the body calls them
-  as ``self.<name>(...)``: ``resolve_species_display_name`` and
-  ``get_folder_subtree_ids``. Monkeypatches of those ``Database`` methods
-  therefore keep taking effect. This domain's own entry points that other
+- Composition with other domains. Species names canonicalize through a
+  ``KeywordTaxonRepository`` on the same connection
+  (``resolve_species_display``); folder subtrees and the effective config
+  arrive bound from ``Database``. This domain's own entry points that other
   methods compose with (``get_class_ancestors``,
   ``next_representative_order``, ``set_global_representative``,
   ``rename_representatives``) are called on the repository itself, so a
@@ -49,6 +48,7 @@ transaction (``with db.transaction():``).
 import json
 
 from keyword_normalization import keyword_match_key
+from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from settings_source import config_value
 from species_memberships import photo_species_memberships
@@ -88,7 +88,7 @@ _HIGHLIGHT_ELIGIBILITY_JOINS = """
 # ambiguous-homonym boundary intact.
 # The prediction subquery also routes ``pr.species`` through
 # the same hierarchy-alias → root canonicalization
-# ``resolve_species_display_name`` applies, so a highlight
+# ``resolve_species_display`` applies, so a highlight
 # saved from a canonicalized prediction bucket (leaf
 # ``Desert Verdin`` bucketed under root ``Verdin`` when the
 # linked taxon has a top-level row) still matches on
@@ -189,7 +189,7 @@ _HIGHLIGHT_PREDICTION_MATCH = f"""
                            AND sh.species = COALESCE(
                                (
                                    -- Root-first, exact spelling:
-                                   -- mirror ``resolve_species_display_name``'s
+                                   -- mirror ``resolve_species_display``'s
                                    -- case 2 preference for an
                                    -- exact-spelling same-name top-level
                                    -- species row. Keeps intentional
@@ -213,7 +213,7 @@ _HIGHLIGHT_PREDICTION_MATCH = f"""
                                (
                                    -- Root-first, NOCASE fallback:
                                    -- mirror
-                                   -- ``resolve_species_display_name``'s
+                                   -- ``resolve_species_display``'s
                                    -- case 1 — when a single same-name
                                    -- top-level species row exists,
                                    -- ``add_highlight`` stored
@@ -237,7 +237,7 @@ _HIGHLIGHT_PREDICTION_MATCH = f"""
                                    -- canonicalize only when the raw
                                    -- prediction label resolves to a
                                    -- unique linked taxon. See
-                                   -- ``resolve_species_display_name``.
+                                   -- ``resolve_species_display``.
                                    SELECT root.name
                                    FROM keywords k_pred
                                    JOIN keywords root
@@ -288,7 +288,6 @@ class SpeciesCurationRepository:
         *,
         chunks,
         life_list_ancestor_suppression_clause,
-        resolve_species_display_name,
         get_folder_subtree_ids,
         effective_config,
     ):
@@ -299,8 +298,10 @@ class SpeciesCurationRepository:
         # ``db._chunks`` itself (its size default is bound at import).
         self._chunks = chunks
         self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE = life_list_ancestor_suppression_clause
+        # Species names canonicalize through the keyword-taxa repository on
+        # the same connection.
+        self._keyword_taxa = KeywordTaxonRepository(conn)
         # Bound ``Database`` methods, kept under their façade names.
-        self.resolve_species_display_name = resolve_species_display_name
         self.get_folder_subtree_ids = get_folder_subtree_ids
         self.effective_config = effective_config
 
@@ -1056,7 +1057,7 @@ class SpeciesCurationRepository:
         loads don't scan every species' representatives.
         """
         if species is not None:
-            species = self.resolve_species_display_name(species)
+            species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         eligibility_filter = ""
         if eligible_only:
@@ -1187,7 +1188,7 @@ class SpeciesCurationRepository:
         accepted. The eligible highlight/life-list queries compare these
         strings exact against ``keywords.name``.
         """
-        species = self.resolve_species_display_name(species)
+        species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         self.conn.execute(
             """INSERT INTO photo_preferences
@@ -1203,7 +1204,7 @@ class SpeciesCurationRepository:
 
     def clear_photo_preference(self, purpose, species):
         """Clear the preferred photo for a species/purpose in this workspace."""
-        species = self.resolve_species_display_name(species)
+        species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         self.conn.execute(
             """DELETE FROM photo_preferences
@@ -1213,7 +1214,7 @@ class SpeciesCurationRepository:
 
     def clear_representative(self, species):
         """Clear all representative photos for a species globally."""
-        species = self.resolve_species_display_name(species)
+        species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         self.conn.execute(
             "DELETE FROM species_representatives WHERE species = ?",
@@ -1246,7 +1247,7 @@ class SpeciesCurationRepository:
         Result shape is ``{species: {photo_id: rank}}``.
         """
         if species is not None:
-            species = self.resolve_species_display_name(species)
+            species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         eligibility_joins = ""
         eligibility_filter = ""
@@ -1290,7 +1291,7 @@ class SpeciesCurationRepository:
 
         def canonicalize(name):
             if name not in cache:
-                cache[name] = self.resolve_species_display_name(name)
+                cache[name] = self._keyword_taxa.resolve_species_display(name)
             return cache[name]
 
         buckets_by_photo = {}
@@ -1320,7 +1321,7 @@ class SpeciesCurationRepository:
         from prediction-cased bucket labels key on the same string the
         keyword row and eligibility queries use.
         """
-        species = self.resolve_species_display_name(species)
+        species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         row = self.conn.execute(
             """SELECT rank FROM species_highlights
@@ -1352,7 +1353,7 @@ class SpeciesCurationRepository:
 
     def promote_highlight(self, species, photo_id):
         """Add a photo to a species' ordered highlights at rank 1."""
-        species = self.resolve_species_display_name(species)
+        species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         rows = self.conn.execute(
             """SELECT photo_id
@@ -1384,7 +1385,7 @@ class SpeciesCurationRepository:
 
     def remove_highlight(self, species, photo_id):
         """Remove a photo from a species' ordered highlights."""
-        species = self.resolve_species_display_name(species)
+        species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         cur = self.conn.execute(
             """DELETE FROM species_highlights
@@ -1395,7 +1396,7 @@ class SpeciesCurationRepository:
 
     def move_highlight(self, species, photo_id, direction):
         """Move a highlighted photo one step up/down within its species."""
-        species = self.resolve_species_display_name(species)
+        species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
         rows = self.conn.execute(
             """SELECT photo_id
