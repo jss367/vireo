@@ -90,6 +90,8 @@ def _canonical_annotation_text(node: ast.expr, aliases: dict[str, str]) -> str:
         return aliases.get(node.id, node.id)
     if isinstance(node, ast.Attribute):
         prefix = _canonical_annotation_text(node.value, aliases)
+        if prefix == "typing" and node.attr == "Any":
+            return "Any"
         return f"{prefix}.{node.attr}"
     if isinstance(node, ast.Subscript):
         value_text = _canonical_annotation_text(node.value, aliases)
@@ -273,4 +275,17 @@ def test_callable_facade_matcher_resolves_import_aliases():
         "fixture.AliasCallableFromTyping.callback",
         "fixture.AliasTypingModule.callback",
         "fixture.QuotedWithAlias.callback",
+    ]
+
+
+def test_callable_facade_matcher_normalizes_module_qualified_any():
+    source = (
+        "from __future__ import annotations\nimport typing as t\nimport collections.abc as cabc\n"
+        "class Typing:\n    callback: t.Callable[..., t.Any]\n"
+        "class Abc:\n    callback: cabc.Callable[..., t.Any]\n"
+        "class Quoted:\n    callback: \"t.Callable[..., t.Any]\"\n"
+        "class Legitimate:\n    callback: t.Callable[[], t.Any]\n"
+    )
+    assert sorted(_callable_facade_offenders(source, "fixture")) == [
+        "fixture.Abc.callback", "fixture.Quoted.callback", "fixture.Typing.callback",
     ]
