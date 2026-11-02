@@ -277,14 +277,13 @@ EMBEDDED_KEYWORDS_BACKFILL_KEY = "embedded_keywords_backfill_v1"
 
 
 def backfill_embedded_keywords(db: Database) -> int:
-    """One-shot import of embedded keywords for photos scanned before scans read them.
+    """One-shot import of embedded keywords for photos whose scan read only sidecars.
 
-    Scans only read keywords from ``.xmp`` sidecars until
-    ``_import_embedded_keywords_for_photo`` existed, and an unchanged file is
-    never re-read, so the keywords Lightroom wrote into JPEGs and DNGs stayed
-    out of the catalog. The scan stored ExifTool's full output in
-    ``exif_data``, so this pass imports them from there without touching the
-    originals. Completion is ``db_meta``-gated; conflicts leave the pass
+    A photo cataloged by a scan that read keywords only from ``.xmp``
+    sidecars lacks the keywords Lightroom wrote into JPEGs and DNGs, and an
+    unchanged file is never re-read. The scan stored ExifTool's full output
+    in ``exif_data``, so this pass imports them from there without touching
+    the originals. Completion is ``db_meta``-gated; conflicts leave the pass
     retryable, while durable offered keys protect prior imports and removals
     on that retry. Returns the number of photos that gained a keyword.
     """
@@ -302,7 +301,7 @@ def backfill_embedded_keywords(db: Database) -> int:
             continue
         before = _photo_keyword_count(db, row["id"])
         try:
-            # Durable boundary: one photo's embedded keywords, as before.
+            # Durable boundary: one photo's embedded keywords per transaction.
             with db.transaction():
                 offered = _import_embedded_keywords_for_photo(
                     db, row["id"], file_meta, raise_on_conflict=True,

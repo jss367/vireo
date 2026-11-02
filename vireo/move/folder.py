@@ -17,7 +17,7 @@ from .folder_target import _FolderMoveTarget
 from .folder_transfer import _FolderTransfer
 from .paths import normalize_destination_name
 
-# The package's one logger, named as before the split.
+# The package's one logger, ``move``, shared by every module in it.
 log = logging.getLogger("move")
 
 

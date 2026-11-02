@@ -119,10 +119,8 @@ def attach_result_text(job):
 
     A stored ``summary`` is kept only when it came from step summaries
     or from the job itself (``result["summary"]``). Anything else was
-    generated from the result dict, and history rows written before
-    the prose describer exist still carry the old ``ok: True,
-    deleted: 28`` form, so those are recomputed from the result here
-    instead of requiring a backfill.
+    generated from the result dict and may be in the raw ``ok: True,
+    deleted: 28`` form, so it is recomputed from the result here.
     """
     result = job.get("result")
     if isinstance(result, str):

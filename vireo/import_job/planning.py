@@ -174,8 +174,8 @@ def _batch_by_destination(
     # destination. Keeping companion groups intact in the same batch is
     # enough because such a group is 2–3 files (RAW + JPEG + occasional
     # sidecar); a group large enough to exceed ``IMPORT_BATCH_SIZE`` on
-    # its own gets split as before (unavoidable, and the same-stem
-    # collision walk still adopts the anchor within one batch).
+    # its own is still split (unavoidable, and the same-stem collision
+    # walk still adopts the anchor within one batch).
     groups = {}
     for f in files:
         rel = build_destination_path(

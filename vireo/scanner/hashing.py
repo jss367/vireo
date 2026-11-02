@@ -106,8 +106,7 @@ def compute_fd_hash(fd: int, chunk_size: int = 65536) -> str:
 def _compute_file_features(path_str: str) -> FileFeatures:
     """Compute (phash, file_hash) for one image.
 
-    Module-level so ProcessPoolExecutor can pickle it. Mirrors the
-    best-effort behavior the main scan loop used to have inline: any
+    Module-level so ProcessPoolExecutor can pickle it. Best-effort: any
     failure yields None for that field rather than raising.
     """
     phash = None

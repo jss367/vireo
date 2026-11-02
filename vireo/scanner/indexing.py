@@ -101,9 +101,8 @@ class _CollectionMembership:
         """Take a just-inserted photo out of collections it never joined.
 
         A static collection can still list the id of a photo that no longer
-        exists (a companion JPEG row an older build inserted and merged
-        away after the pipeline or import collection captured it, or a
-        deletion from before deletes cleaned collections). SQLite hands the
+        exists (a companion JPEG row merged away after a collection captured
+        it, or a delete that did not clean collections). SQLite hands the
         highest freed id to the next insert, which would then appear in
         that collection. A photo that did not exist until now cannot be a
         member of anything, so any listing of its id is stale. Reuse the
@@ -590,20 +589,18 @@ class _FileIndexer:
 
         When the computed hash differs from what was stored before this
         scan, derived caches are stale. Includes the NULL → concrete
-        transition for legacy rows that predate hash tracking — we can't
-        prove their caches match current bytes, so safer to flush and
-        regenerate. Also fires when a file is truncated to zero bytes:
-        file_hash is None in that branch (empty files don't carry
-        duplicate identity), so the plain ``file_hash is not None`` guard
-        would otherwise leave thumbnails and working copies from the old
-        bytes in place. The zero-byte clause covers BOTH non-empty → empty
-        and legacy NULL → empty: a pre-hash row whose file is now
-        truncated still has thumbnails rendered from its old non-empty
-        bytes, and before this fix the previous code path (which stored
-        the concrete empty SHA) would have invalidated it via the NULL →
-        concrete branch. Skips the empty → empty repair case (prev was
-        already the empty SHA) because the bytes didn't actually change.
-        Gated on ``row_already_existed`` so brand-new inserts
+        transition for rows without a stored hash — we can't prove their
+        caches match current bytes, so safer to flush and regenerate. Also
+        fires when a file is truncated to zero bytes: file_hash is None in
+        that branch (empty files don't carry duplicate identity), so the
+        plain ``file_hash is not None`` guard would otherwise leave
+        thumbnails and working copies from the old bytes in place. The
+        zero-byte clause covers BOTH non-empty → empty and NULL → empty: a
+        row without a hash whose file is now truncated still has thumbnails
+        rendered from its old non-empty bytes. Skips the empty → empty
+        repair case (prev was already the empty SHA) because the bytes
+        didn't actually change. Gated on ``row_already_existed`` so
+        brand-new inserts
         (prev_file_hash is always NULL there) don't trigger pointless
         UPDATE + commit round-trips on large initial scans. Requires
         explicit vireo_dir; callers must pass it (scan can't guess

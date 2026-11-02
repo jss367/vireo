@@ -197,8 +197,8 @@ class _KnownCompanionKeeper:
         Import shared-stem XMP too: the RAW can vanish after the JPEG is
         handled, even if it existed at discovery or at this call. Repeating
         the keyword import on the same owner is idempotent and preserves
-        pending removals, just as the old insert-and-merge path did. Runs in
-        the caller's unit of work, which commits the imported keywords.
+        pending removals. Runs in the caller's unit of work, which commits
+        the imported keywords.
         """
         xmp_path = image_path.with_suffix(".xmp")
         if not xmp_path.exists():

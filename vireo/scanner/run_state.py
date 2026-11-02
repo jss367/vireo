@@ -278,11 +278,11 @@ class _ScanTally:
                 merged_count, known_companion_count, processed_count,
             )
 
-        # Report what reached the catalog, not what the walk turned up. These
-        # used to be the same number ("Scan complete: %d photos indexed" logged
-        # ``total``), which reads as a success line and stays reassuring
-        # precisely when the scan achieved nothing — an archive share that
-        # dropped mid-scan logged "984 photos indexed" having indexed zero.
+        # Report what reached the catalog, not what the walk turned up.
+        # Logging the walk total as "N photos indexed" reads as a success
+        # line and stays reassuring precisely when the scan achieved
+        # nothing — an archive share that drops mid-scan would log "984
+        # photos indexed" having indexed zero.
         summary = f"Scan complete: {indexed_count} photos indexed"
         if merged_count:
             summary += f", {merged_count} JPEG(s) merged into their RAW"
