@@ -330,19 +330,19 @@ def _record_checker(
     state: _ImportRunState, checker: DuplicateChecker | None, source_file: Path, dest_folder: str,
     file_hash: str | None,
 ) -> None:
-    """Register a landed/adopted file's identity with the intra-run checker.
+    """Register a source identity for intra-run duplicate detection.
 
-    Without this the checker only sees the pre-run catalog, so a later
-    byte-identical card file with a different basename in the same run
-    is copied/cataloged again instead of being recognized as an
-    intra-run duplicate: every caller passes the
-    landed/adopted ``dest_folder`` and verified ``file_hash``, recorded
-    unconditionally per token. ``DuplicateChecker.record``
-    re-``os.stat``s the source path — on removable media yanked after
-    this file's bytes were verified, that raises ``OSError`` and would
-    kill the whole background job. Swallow it: the run keeps its
-    already-verified landings and only loses the intra-run dedupe
-    optimization.
+    The checker otherwise sees only the pre-run catalog. Callers record
+    landed/adopted files, but rsync's queued-identical skip also records
+    identities before transfer and independent verification. Its
+    ``dest_folder`` and ``file_hash`` are provisional dedupe hints, not
+    proof that destination bytes have landed or passed verification.
+    Transfer verification and catalog validation establish that evidence.
+
+    ``DuplicateChecker.record`` re-``os.stat``s the source path, which can
+    raise ``OSError`` if removable media disappeared. Log and skip that
+    record: existing landings remain intact, and this identity loses its
+    intra-run dedupe optimization.
     """
     if checker is None:
         return
