@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from services import catalog_deletion
+from services import catalog_deletion, keyword_duplicates
 
 if TYPE_CHECKING:
     from db import Database
@@ -61,7 +61,7 @@ def remove_orphans_with_history(db: Database, photo_ids: list[int]) -> JsonDict:
 def clean_keywords_with_history(db: Database) -> int:
     """Record successful duplicate merges in the same transaction as the merge."""
     with db.transaction(immediate=True):
-        merged = db.keyword_tree.merge_duplicates()
+        merged = keyword_duplicates.merge_duplicate_keywords(db)
         if merged:
             db.record_edit(
                 'keyword_clean', f'Merged {merged} duplicate keywords (cannot undo)',

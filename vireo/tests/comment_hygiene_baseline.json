@@ -29,7 +29,6 @@
   "repositories/detections.py": {"used_to": 1},
   "repositories/edit_history.py": {"pr_ref": 1},
   "repositories/keyword_provenance.py": {"moved_verbatim": 1, "used_to": 2},
-  "repositories/keyword_tree.py": {"moved_verbatim": 1},
   "repositories/model_runs.py": {"codex": 6, "pr_ref": 5, "used_to": 2},
   "repositories/photo_keywords.py": {"moved_verbatim": 1},
   "repositories/photo_labels.py": {"used_to": 1},
