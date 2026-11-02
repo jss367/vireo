@@ -335,9 +335,9 @@ def _count(db, table, photo_id):
 def test_remove_orphan_rows_drops_dependents_and_rows_without_committing(db, library):
     gone, kept = library["ids"]["a_ok"], library["ids"]["b_ok"]
     for pid in (gone, kept):
-        db.tag_photo(pid, db.add_keyword(f"kw{pid}"))
+        db.tag_photo(pid, db.keywords.add(f"kw{pid}"))
         db.commit()
-        db.queue_change(pid, "keyword_add", f"kw{pid}")
+        db.pending_changes.queue(pid, "keyword_add", f"kw{pid}")
         db.commit()
         db.conn.execute(
             "INSERT INTO photo_embedded_keyword_offered (photo_id, keyword_key) VALUES (?, 'k')",

@@ -8,9 +8,9 @@ def test_species_groups_preserve_paths_and_chart_drill_down(live_server, page):
     taxon = db.conn.execute(
         "INSERT INTO taxa(name, common_name, rank, inat_id) VALUES ('Testus bird', 'Test bird', 'species', 123)"
     ).lastrowid
-    parent = db.add_keyword('Imported birds')
-    root = db.add_keyword('Test bird', is_species=True)
-    leaf = db.add_keyword('Test Bird', parent_id=parent, is_species=True)
+    parent = db.keywords.add('Imported birds')
+    root = db.keywords.add('Test bird', is_species=True)
+    leaf = db.keywords.add('Test Bird', parent_id=parent, is_species=True)
     db.commit()
     db.conn.execute('UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)', (taxon, root, leaf))
     db.tag_photo(photos[0], root)
@@ -50,7 +50,7 @@ def test_species_groups_preserve_paths_and_chart_drill_down(live_server, page):
 def test_location_preview_combines_only_chosen_match(live_server, page):
     db = live_server['db']
     photos = live_server['data']['photos']
-    source = db.add_keyword('Lake Hodges', kw_type='general')
+    source = db.keywords.add('Lake Hodges', kw_type='general')
     db.commit()
     target = db.upsert_place_chain({
         'place_id': 'test-place', 'name': 'Lake Hodges', 'lat': 33, 'lng': -117,
@@ -72,18 +72,18 @@ def test_location_preview_combines_only_chosen_match(live_server, page):
     expect(preview).to_have_text('No matching location keywords to review.')
     expect(page.locator('#kwBody tr .kw-linked-badge')).to_be_visible()
     assert photo_locations.get_assigned_photo_location(db, photos[0])['place_id'] == 'test-place'
-    assert db.add_keyword('Lake Hodges', _resolve_alias=True) == target
+    assert db.keywords.add('Lake Hodges', _resolve_alias=True) == target
 
 
 def test_merge_toolbar_stays_visible_when_scrolled_and_preserves_coordinates(live_server, page):
     db = live_server['db']
     photos = live_server['data']['photos']
     for index in range(60):
-        kid = db.add_keyword(f'Scroll keyword {index:02d}', kw_type='general')
+        kid = db.keywords.add(f'Scroll keyword {index:02d}', kw_type='general')
         db.tag_photo(photos[0], kid)
         db.commit()
-    source = db.add_keyword('Wing St. Canyon', kw_type='location')
-    target = db.add_keyword('Wing Street Canyon', kw_type='location')
+    source = db.keywords.add('Wing St. Canyon', kw_type='location')
+    target = db.keywords.add('Wing Street Canyon', kw_type='location')
     db.update_keyword(target, latitude=32.7447, longitude=-117.2186)
     db.tag_photo(photos[0], source)
     db.tag_photo(photos[1], source)
@@ -130,13 +130,13 @@ def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(liv
     """
     db = live_server['db']
     photos = live_server['data']['photos']
-    hostile = db.add_keyword('<img src=x onerror="window.__xssRan=1">', kw_type='location')
+    hostile = db.keywords.add('<img src=x onerror="window.__xssRan=1">', kw_type='location')
     # A quote breaks out of an attribute value; escapeHtml serializes a text
     # node and does not encode quotes, so only escapeAttr stops this one.
-    quoted = db.add_keyword('q" onfocus="window.__attrXss=1" autofocus x="',
+    quoted = db.keywords.add('q" onfocus="window.__attrXss=1" autofocus x="',
                             kw_type='location')
-    located = db.add_keyword('Overlook Point', kw_type='location')
-    coordless = db.add_keyword('Overlook Unmapped', kw_type='location')
+    located = db.keywords.add('Overlook Point', kw_type='location')
+    coordless = db.keywords.add('Overlook Unmapped', kw_type='location')
     db.commit()
     db.conn.execute("UPDATE keywords SET place_id = 'place-hostile', latitude = 48.10, "
                     "longitude = 11.50 WHERE id = ?", (hostile,))
@@ -199,7 +199,7 @@ def test_merge_context_menu_keeps_one_rows_name_and_the_others_place(live_server
     """
     db = live_server['db']
     photos = live_server['data']['photos']
-    source = db.add_keyword('Whatcom Falls Park', kw_type='general')
+    source = db.keywords.add('Whatcom Falls Park', kw_type='general')
     db.commit()
     target = db.upsert_place_chain({
         'place_id': 'whatcom-falls', 'name': 'Whatcom Falls Park', 'lat': 48.7504, 'lng': -122.4269,

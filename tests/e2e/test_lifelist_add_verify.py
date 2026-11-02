@@ -25,7 +25,7 @@ def page(browser, page):
 def _seed_large_hawk_life_list(live_server, count=101):
     db = live_server["db"]
     folder_id = live_server["data"]["folders"][0]
-    keyword_id = db.add_keyword("Red-tailed Hawk", is_species=True)
+    keyword_id = db.keywords.add("Red-tailed Hawk", is_species=True)
     db.commit()
     for i in range(count):
         photo_id = photo_ingest.add_photo(
@@ -284,7 +284,7 @@ def test_alphabetical_sort_ignores_leading_okina(live_server, page):
     folder_id = live_server["data"]["folders"][0]
 
     for i, species in enumerate(("Hutton's vireo", "\u02bbapapane", "Java sparrow")):
-        keyword_id = db.add_keyword(species, is_species=True)
+        keyword_id = db.keywords.add(species, is_species=True)
         db.commit()
         photo_id = photo_ingest.add_photo(
             db, folder_id=folder_id,
@@ -344,7 +344,7 @@ def test_taxonomic_group_and_identification_level_filters(live_server, page):
 
     for name, taxon_id in (("Accipiter", accipiter_taxon),
                            ("Red Fox", fox_taxon)):
-        keyword_id = db.add_keyword(name, kw_type="taxonomy")
+        keyword_id = db.keywords.add(name, kw_type="taxonomy")
         db.commit()
         db.conn.execute(
             "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -448,7 +448,7 @@ def test_life_list_merges_aliases_and_opens_same_named_taxa_independently(live_s
     taxon_ids = [db.conn.execute(
         "INSERT INTO taxa (name, rank) VALUES (?, 'species')", (name,),
     ).lastrowid for name in ("Ardea ibis", "Distinctus species")]
-    parent = db.add_keyword("Other taxon")
+    parent = db.keywords.add("Other taxon")
     db.commit()
     for photo, name, taxon, parent_id in zip(
         photos,
@@ -456,7 +456,7 @@ def test_life_list_merges_aliases_and_opens_same_named_taxa_independently(live_s
         (taxon_ids[0], taxon_ids[0], taxon_ids[1]),
         (None, None, parent), strict=True,
     ):
-        keyword = db.add_keyword(name, parent_id=parent_id, is_species=True)
+        keyword = db.keywords.add(name, parent_id=parent_id, is_species=True)
         db.commit()
         db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
         db.tag_photo(photo, keyword)
@@ -476,9 +476,9 @@ def test_life_list_merges_aliases_and_opens_same_named_taxa_independently(live_s
 
 def test_unlinked_life_list_card_pages_its_own_same_named_photos(live_server, page):
     db = live_server["db"]
-    linked = db.add_keyword("Shared Bird", is_species=True)
-    unlinked = db.add_keyword(
-        "Shared Bird", parent_id=db.add_keyword("Unlinked hierarchy"), is_species=True,
+    linked = db.keywords.add("Shared Bird", is_species=True)
+    unlinked = db.keywords.add(
+        "Shared Bird", parent_id=db.keywords.add("Unlinked hierarchy"), is_species=True,
     )
     db.commit()
     taxon = db.conn.execute(

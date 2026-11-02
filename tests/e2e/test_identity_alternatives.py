@@ -96,7 +96,7 @@ def test_failed_save_keeps_evidence_and_can_retry(live_server, page):
 def test_stale_create_form_cannot_edit_a_new_active_workspace(live_server, page):
     ids = open_panel(live_server, page)
     db = live_server['db']
-    kid = db.add_keyword('Tropical Kingbird', is_species=True)
+    kid = db.keywords.add('Tropical Kingbird', is_species=True)
     db.tag_photo(ids[0], kid)
     db.commit()
     before = db.photo_species.get_species_for_photos(ids)
@@ -116,8 +116,8 @@ def test_merged_single_candidate_stays_unconfirmed_until_explicit_resolution(liv
     ids = open_panel(live_server, page)
     db = live_server['db']
     before_species = db.photo_species.get_species_for_photos(ids)
-    source = db.add_keyword('Tropical Kingbird', is_species=True)
-    survivor = db.add_keyword("Couch's Kingbird", is_species=True)
+    source = db.keywords.add('Tropical Kingbird', is_species=True)
+    survivor = db.keywords.add("Couch's Kingbird", is_species=True)
     db.commit()
     target_name = db.keywords.name_of(survivor)
     page.locator('#identitySave').click()
@@ -214,7 +214,7 @@ def test_same_species_aliases_are_rejected_without_losing_form_or_confirmation(l
     ids = open_panel(live_server, page)
     db = live_server['db']
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88001,88001,'Tyrannus melancholicus','Tropical Kingbird','species')")
-    scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    scientific = db.keywords.add('Tyrannus melancholicus', is_species=True)
     db.tag_photo(ids[0], scientific, source='accept')
     db.commit()
     db.photo_review.set_flag(ids[0], 'rejected')

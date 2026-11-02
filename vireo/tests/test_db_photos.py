@@ -544,7 +544,7 @@ def test_listing_filters_agree(db, lib):
     db.photo_review.set_flag(lib["b"], "flagged")
     db.commit()
     db.photo_labels.set(lib["a"], "red")
-    kid = db.add_keyword("Heron")
+    kid = db.keywords.add("Heron")
     db.tag_photo(lib["a"], kid)
     db.tag_photo(lib["b"], kid)
     db.commit()
@@ -886,10 +886,10 @@ def test_resolve_photos_for_delete_companions(db, lib):
 def test_delete_photos_removes_rows_and_dependents(db, lib, cache, monkeypatch):
     pruned = []
     monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
-    kid = db.add_keyword("Heron")
+    kid = db.keywords.add("Heron")
     db.tag_photo(lib["a"], kid)
     db.commit()
-    db.queue_change(lib["a"], "keyword_add", "Heron")
+    db.pending_changes.queue(lib["a"], "keyword_add", "Heron")
     db.commit()
     _detect(db, lib["a"], 0.9, "Heron")
     db.conn.execute(
@@ -1058,7 +1058,7 @@ def test_delete_photos_inside_a_unit_leaves_commit_and_prune_to_its_owner(db, li
 def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache, monkeypatch):
     pruned = []
     monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
-    kid = db.add_keyword("Heron")
+    kid = db.keywords.add("Heron")
     db.tag_photo(lib["a"], kid)
     db.commit()
     db.conn.execute(
@@ -1077,7 +1077,7 @@ def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache,
 
 
 def test_delete_photos_error_inside_a_unit_rolls_back_only_its_savepoint(db, lib, cache):
-    kid = db.add_keyword("Heron")
+    kid = db.keywords.add("Heron")
     db.tag_photo(lib["a"], kid)
     db.commit()
     db.conn.execute(
@@ -1101,7 +1101,7 @@ def test_delete_photos_error_inside_a_unit_rolls_back_only_its_savepoint(db, lib
 def test_delete_photos_resolves_workspace_mid_transaction(db, lib, cache):
     """The active workspace is read after the dependent-row deletes, so a
     missing workspace fails inside the transaction and rolls it back."""
-    kid = db.add_keyword("Heron")
+    kid = db.keywords.add("Heron")
     db.tag_photo(lib["a"], kid)
     db.commit()
     db.set_active_workspace(None)

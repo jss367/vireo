@@ -11,9 +11,9 @@ def _seed_transition(live_server):
     ids = live_server['data']['photos'][:3]
     old, new, other = "Cassin's Kingbird", 'Yellow-rumped Warbler', 'American Wigeon'
     for pid in ids:
-        db.tag_photo(pid, db.add_keyword(old, is_species=True))
+        db.tag_photo(pid, db.keywords.add(old, is_species=True))
         db.commit()
-    db.tag_photo(ids[1], db.add_keyword(other, is_species=True))
+    db.tag_photo(ids[1], db.keywords.add(other, is_species=True))
     db.commit()
     db.photo_review.set_flag(ids[1], 'flagged')
     db.commit()
@@ -88,7 +88,7 @@ def test_preview_cancel_and_stale_revalidation_do_not_apply(live_server, page):
     preview = _open_preview(page, live_server, new)
     # Another review decision after the preview must invalidate the exact set.
     db = live_server['db']
-    db.tag_photo(ids[2], db.add_keyword('Eared Grebe', is_species=True))
+    db.tag_photo(ids[2], db.keywords.add('Eared Grebe', is_species=True))
     db.commit()
     with page.expect_response(lambda response: '/api/encounters/species' in response.url and not response.request.post_data_json.get('preview')) as response:
         preview.locator('.species-preview-apply').click()

@@ -428,7 +428,7 @@ def test_unstamped_tag_photo_is_recorded_as_manual(prov_db):
         prov_db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
-    kid = prov_db.add_keyword("Wildlife", kw_type="genre")
+    kid = prov_db.keywords.add("Wildlife", kw_type="genre")
 
     prov_db.tag_photo(pid, kid)
     prov_db.commit()
@@ -449,7 +449,7 @@ def test_sidecar_import_leaves_provenance_unknown(prov_db):
         prov_db, folder_id=fid, filename="b.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
-    kid = prov_db.add_keyword("Wildlife", kw_type="genre")
+    kid = prov_db.keywords.add("Wildlife", kw_type="genre")
 
     prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_UNKNOWN)
     prov_db.commit()
@@ -474,10 +474,10 @@ def test_duplicate_merge_carries_manual_provenance_to_the_winner(prov_db):
         prov_db, folder_id=fid, filename="l.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
-    hand_added = prov_db.add_keyword("Backlit", kw_type="general")
-    scanned = prov_db.add_keyword("Imported", kw_type="general")
-    shared = prov_db.add_keyword("Shared", kw_type="general")
-    owned = prov_db.add_keyword("Owned", kw_type="general")
+    hand_added = prov_db.keywords.add("Backlit", kw_type="general")
+    scanned = prov_db.keywords.add("Imported", kw_type="general")
+    shared = prov_db.keywords.add("Shared", kw_type="general")
+    owned = prov_db.keywords.add("Owned", kw_type="general")
     prov_db.tag_photo(winner, shared, source=KEYWORD_SOURCE_UNKNOWN)
     prov_db.tag_photo(winner, owned)  # manual
     prov_db.tag_photo(loser, hand_added)
@@ -534,8 +534,8 @@ def test_keyword_merge_folds_provenance_on_overlapping_photos(prov_db):
     weak_dst = _photo("weak_dst.jpg")
     strong_dst = _photo("strong_dst.jpg")
     mid_dst = _photo("mid_dst.jpg")
-    src = prov_db.add_keyword("Heron", kw_type="general")
-    dst = prov_db.add_keyword("Grey Heron", kw_type="general")
+    src = prov_db.keywords.add("Heron", kw_type="general")
+    dst = prov_db.keywords.add("Grey Heron", kw_type="general")
 
     prov_db.tag_photo(weak_dst, dst, source=KEYWORD_SOURCE_UNKNOWN)
     prov_db.tag_photo(weak_dst, src)  # manual
@@ -575,7 +575,7 @@ def test_tag_photo_never_moves_provenance_down_the_lattice(prov_db):
     )
 
     fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
-    kid = prov_db.add_keyword("Wildlife", kw_type="genre")
+    kid = prov_db.keywords.add("Wildlife", kw_type="genre")
     prov_db.commit()
 
     def _stamp(first, second):
@@ -607,7 +607,7 @@ def test_setting_a_photo_location_records_manual_provenance(prov_db):
         prov_db, folder_id=fid, filename="loc.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
-    leaf = prov_db.add_keyword("Yosemite", kw_type="location")
+    leaf = prov_db.keywords.add("Yosemite", kw_type="location")
     prov_db.commit()
 
     prov_db.set_photo_location(pid, leaf)
@@ -628,7 +628,7 @@ def test_manual_stamp_survives_a_later_neutral_retag(prov_db):
         prov_db, folder_id=fid, filename="c.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
-    kid = prov_db.add_keyword("Wildlife", kw_type="genre")
+    kid = prov_db.keywords.add("Wildlife", kw_type="genre")
 
     prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_MANUAL)
     prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_UNKNOWN)

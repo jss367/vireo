@@ -24,7 +24,7 @@ def compare_collection(app_and_db):
         row["id"] for row in
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
-    cardinal = db.add_keyword("Cardinal", is_species=True)
+    cardinal = db.keywords.add("Cardinal", is_species=True)
     db.tag_photo(photo_ids[0], cardinal)
     db.commit()
     for index, photo_id in enumerate(photo_ids):
@@ -172,7 +172,7 @@ def test_refresh_photo_id_picks_up_a_sibling_that_just_joined(app_and_db):
         row["id"] for row in
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
-    bird = db.add_keyword("Bird", is_species=True)
+    bird = db.keywords.add("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
     db.tag_photo(photo_ids[1], bird)
     db.commit()
@@ -289,7 +289,7 @@ def test_a_joining_sibling_that_carries_a_new_model_reassesses(app_and_db):
         row["id"] for row in
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
-    bird = db.add_keyword("Bird", is_species=True)
+    bird = db.keywords.add("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
     db.tag_photo(photo_ids[1], bird)
     db.commit()
@@ -352,7 +352,7 @@ def test_a_widening_refresh_shows_every_model_it_advertises(app_and_db):
         row["id"] for row in
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
-    bird = db.add_keyword("Bird", is_species=True)
+    bird = db.keywords.add("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
     db.commit()
     for photo_id in photo_ids:
@@ -398,7 +398,7 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
         row["id"] for row in
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
-    bird = db.add_keyword("Bird", is_species=True)
+    bird = db.keywords.add("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
     db.commit()
     for photo_id in photo_ids:
@@ -481,7 +481,7 @@ def test_multi_species_counts_real_case_variant_unlinked_keywords(compare_collec
     pid = photo_ids[0]
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id=?", (pid,))
     for index, name in enumerate(["Robin", "robin"]):
-        keyword = db.add_keyword(f"Distinct Robin {index}", is_species=True)
+        keyword = db.keywords.add(f"Distinct Robin {index}", is_species=True)
         db.commit()
         db.conn.execute("UPDATE keywords SET name=? WHERE id=?", (name, keyword))
         db.tag_photo(pid, keyword)

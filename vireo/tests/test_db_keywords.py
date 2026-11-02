@@ -96,17 +96,17 @@ def lib(db, case):
 
 def test_add_keyword_inserts_and_commits_with_the_callers_unit(db, lib):
     with db.transaction():
-        kid = db.add_keyword("Driftwood")
+        kid = db.keywords.add("Driftwood")
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT name, type FROM keywords WHERE id = ?", (kid,)) == [
         ("Driftwood", "general")
     ]
     # Case-insensitive reuse.
-    assert db.add_keyword("driftwood") == kid
+    assert db.keywords.add("driftwood") == kid
 
 
 def test_add_keyword_without_commit_leaves_transaction_open(db, lib):
-    kid = db.add_keyword("Driftwood")
+    kid = db.keywords.add("Driftwood")
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM keywords WHERE id = ?", (kid,)) == [(0,)]
     db.conn.commit()
@@ -136,7 +136,7 @@ def _race_add(db, monkeypatch, insert):
 def _committed_add(other, *args, **kwargs):
     """The concurrent writer's own unit of work: insert and commit."""
     with other.transaction():
-        return other.add_keyword(*args, **kwargs)
+        return other.keywords.add(*args, **kwargs)
 
 
 def test_add_keyword_race_reuses_concurrent_top_level_row(db, lib, monkeypatch):
@@ -145,7 +145,7 @@ def test_add_keyword_race_reuses_concurrent_top_level_row(db, lib, monkeypatch):
     other, state = _race_add(db, monkeypatch, lambda o: _committed_add(o, "Sunrise"))
     try:
         with db.transaction():
-            kid = db.add_keyword("sunrise")
+            kid = db.keywords.add("sunrise")
     finally:
         other.close()
     assert kid == state["winner"]
@@ -159,13 +159,13 @@ def test_add_keyword_race_reuses_concurrent_child_row(db, lib, monkeypatch):
     # With a parent the UNIQUE index does fire; the loser must reuse the
     # winner's row instead of raising IntegrityError.
     with db.transaction():
-        birds = db.add_keyword("Birds")
+        birds = db.keywords.add("Birds")
     other, state = _race_add(
         db, monkeypatch, lambda o: _committed_add(o, "Heron", parent_id=birds),
     )
     try:
         with db.transaction():
-            kid = db.add_keyword("Heron", parent_id=birds)
+            kid = db.keywords.add("Heron", parent_id=birds)
     finally:
         other.close()
     assert kid == state["winner"]
@@ -183,7 +183,7 @@ def test_add_keyword_race_reuse_leaves_the_callers_transaction_open(db, lib, mon
     # UNIQUE(name, parent_id), so IntegrityError never fires.
     other, state = _race_add(db, monkeypatch, lambda o: _committed_add(o, "Sunrise"))
     try:
-        kid = db.add_keyword("sunrise")
+        kid = db.keywords.add("sunrise")
         # The recursion at the ``existing`` fast path must leave the caller's
         # transaction open — the caller (encounters, highlights, import, sync)
         # commits later with its own follow-up writes.
@@ -204,15 +204,15 @@ def test_add_keyword_race_reuse_leaves_the_callers_transaction_open(db, lib, mon
 ])
 def test_add_keyword_promotions_leave_commit_to_caller(db, lib, kwargs):
     with db.transaction():
-        kid = db.add_keyword("Heron")
-    db.add_keyword("Heron", **kwargs)
+        kid = db.keywords.add("Heron")
+    db.keywords.add("Heron", **kwargs)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT type, is_species FROM keywords WHERE id = ?", (kid,)) == [
         ("general", 0)
     ]
     db.conn.rollback()
     with db.transaction():
-        got = db.add_keyword("Heron", **kwargs)
+        got = db.keywords.add("Heron", **kwargs)
     assert got == kid
     assert not db.conn.in_transaction
     want_type = kwargs.get("kw_type", "taxonomy")
@@ -222,42 +222,42 @@ def test_add_keyword_promotions_leave_commit_to_caller(db, lib, kwargs):
 def test_add_keyword_auto_promotes_general_taxon_match(db, lib):
     kid = _raw_kw(db, "American Robin")
     db.conn.commit()
-    assert db.add_keyword("American Robin") == kid
+    assert db.keywords.add("American Robin") == kid
     assert db.conn.in_transaction
     assert _visible(db, "SELECT type FROM keywords WHERE id = ?", (kid,)) == [("general",)]
     db.conn.rollback()
     with db.transaction():
-        assert db.add_keyword("American Robin") == kid
+        assert db.keywords.add("American Robin") == kid
     assert _visible(db, "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
                     (kid,)) == [("taxonomy", 1, 3)]
 
 
 def test_add_keyword_rejects_bad_input(db, lib):
     with pytest.raises(ValueError, match="invalid keyword type"):
-        db.add_keyword("x", kw_type="bogus")
+        db.keywords.add("x", kw_type="bogus")
     with pytest.raises(ValueError, match="empty after normalization"):
-        db.add_keyword("'")
+        db.keywords.add("'")
     with pytest.raises(ValueError, match="requires kw_type='taxonomy'"):
-        db.add_keyword("x", is_species=True, kw_type="genre")
+        db.keywords.add("x", is_species=True, kw_type="genre")
     with pytest.raises(ValueError, match="source_taxon_id requires a species keyword"):
-        db.add_keyword("x", source_taxon_id=5)
+        db.keywords.add("x", source_taxon_id=5)
 
 
 def test_add_keyword_species_links_species_rank_taxon(db, lib):
-    kid = db.add_keyword("american robin", is_species=True)
+    kid = db.keywords.add("american robin", is_species=True)
     assert _kw(db, kid)[2:5] == ("taxonomy", 1, 3)
     # A genus-only match leaves taxon_id NULL on an explicit species add.
-    puma = db.add_keyword("Puma", is_species=True)
+    puma = db.keywords.add("Puma", is_species=True)
     assert _kw(db, puma)[2:5] == ("taxonomy", 1, None)
     # A general add links a higher-rank match and types it taxonomy.
-    genus = db.add_keyword("Turdus")
+    genus = db.keywords.add("Turdus")
     assert _kw(db, genus)[2:5] == ("taxonomy", 1, 2)
 
 
 def test_add_keyword_backfills_existing_species_taxon(db, lib):
     kid = _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=2)
     db.conn.commit()
-    assert db.add_keyword("American Robin", is_species=True) == kid
+    assert db.keywords.add("American Robin", is_species=True) == kid
     assert _kw(db, kid)[4] == 3
 
 
@@ -267,7 +267,7 @@ def test_add_keyword_backfills_existing_species_taxon(db, lib):
 ])
 def test_add_keyword_case_override_for_new_species(db, lib, case, override, expected):
     case(override)
-    kid = db.add_keyword("black PHOEBE", is_species=True)
+    kid = db.keywords.add("black PHOEBE", is_species=True)
     assert _kw(db, kid)[0] == expected
 
 
@@ -275,7 +275,7 @@ def test_add_keyword_detected_case_convention(db, lib):
     for name in ("Black phoebe", "Say's phoebe", "Snowy egret"):
         _raw_kw(db, name, kw_type="taxonomy", is_species=1)
     db.conn.commit()
-    kid = db.add_keyword("Great Blue Heron", is_species=True)
+    kid = db.keywords.add("Great Blue Heron", is_species=True)
     assert _kw(db, kid)[0] == "Great blue heron"
 
 
@@ -287,7 +287,7 @@ def test_add_keyword_resolve_alias_short_circuits(db, lib, monkeypatch):
     monkeypatch.setattr(keywords_module, "resolve_import_alias",
                         lambda m, name, parent, kw_type=None: calls.append(
                             (m, name, parent, kw_type)) or 77)
-    assert db.add_keyword("Leaf", parent_id=None, _resolve_alias=True) == 77
+    assert db.keywords.add("Leaf", parent_id=None, _resolve_alias=True) == 77
     # The helper receives the alias repository on the same connection.
     [(merges, *rest)] = calls
     assert rest == ["Leaf", None, None]
@@ -302,12 +302,12 @@ def test_add_keyword_routes_lookup_and_source_path_through_repositories(db, lib,
     seen = []
     monkeypatch.setattr(KeywordTaxonRepository, "lookup_taxon_id",
                         lambda self, name, **kw: seen.append((name, kw)) or None)
-    db.add_keyword("Mystery")
+    db.keywords.add("Mystery")
     assert seen == [("Mystery", {"prefer_species": True})]
     src = []
     monkeypatch.setattr(KeywordRepository, "add_source_species",
                         lambda self, *a: src.append(a) or 99)
-    assert db.add_keyword("Robin", is_species=True, source_taxon_id=12727) == 99
+    assert db.keywords.add("Robin", is_species=True, source_taxon_id=12727) == 99
     assert src == [("Robin", 12727, None)]
 
 
@@ -482,7 +482,7 @@ def test_lookup_taxon_id_for_keyword(db, lib):
 def test_tag_and_untag_leave_commit_to_caller(db, lib):
     p = lib["p"][0]
     with db.transaction():
-        kid = db.add_keyword("Sunset")
+        kid = db.keywords.add("Sunset")
     db.tag_photo(p, kid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
@@ -499,8 +499,8 @@ def test_tag_and_untag_leave_commit_to_caller(db, lib):
 
 def test_photo_keyword_reads(db, lib):
     p0, p1, p2, _ = lib["p"]
-    a = db.add_keyword("Alpha")
-    b = db.add_keyword("American Robin", is_species=True)
+    a = db.keywords.add("Alpha")
+    b = db.keywords.add("American Robin", is_species=True)
     db.tag_photo(p0, a)
     db.tag_photo(p0, b)
     db.tag_photo(p1, b)
@@ -516,7 +516,7 @@ def test_photo_keyword_reads(db, lib):
 
 def test_keywords_for_photos_chunks(db, lib):
     p0 = lib["p"][0]
-    db.tag_photo(p0, db.add_keyword("Alpha"))
+    db.tag_photo(p0, db.keywords.add("Alpha"))
     statements = _trace(db)
     got = db.photo_keywords.get_for_photos(list(range(10_000, 10_800)) + [p0])
     db.conn.set_trace_callback(None)
@@ -525,7 +525,7 @@ def test_keywords_for_photos_chunks(db, lib):
 
 
 def test_get_keyword_name_reads_the_stored_spelling(db):
-    kid = db.add_keyword("Robin")
+    kid = db.keywords.add("Robin")
     db.conn.execute("UPDATE keywords SET name = 'ROBIN' WHERE id = ?", (kid,))
     assert db.keywords.name_of(kid) == "ROBIN"
     assert db.keywords.name_of(987_654) is None
@@ -547,7 +547,7 @@ def test_get_top_level_species_keyword_prefers_taxonomy_then_lowest_id(db):
     placed = _raw_kw(db, "Robin", _raw_kw(db, "Thrushes"), "taxonomy", 1, taxon_id=3)
     row = db.keywords.top_level_species_keyword("robin")
     assert (row["id"], row["name"]) == (placed, "Robin")
-    assert db.add_keyword("robin", is_species=True) == placed
+    assert db.keywords.add("robin", is_species=True) == placed
     _raw_kw(db, "Robin", _raw_kw(db, "Garden birds"), "taxonomy", 1, taxon_id=3)
     assert db.keywords.top_level_species_keyword("robin")["id"] == general
     _raw_kw(db, "Robin", None, "general")
@@ -558,15 +558,15 @@ def test_get_top_level_species_keyword_prefers_taxonomy_then_lowest_id(db):
 
 
 def test_get_keyword_row_reads_id_name_and_type(db):
-    kid = db.add_keyword("Back garden", kw_type="location")
+    kid = db.keywords.add("Back garden", kw_type="location")
     assert tuple(db.keywords.get_row(kid)) == (kid, "Back garden", "location")
     assert db.keywords.get_row(987_654) is None
 
 
 def test_get_photo_ids_with_keyword_and_chunks(db, lib):
     p0, p1, p2, _ = lib["p"]
-    kid = db.add_keyword("Alpha")
-    other = db.add_keyword("Beta")
+    kid = db.keywords.add("Alpha")
+    other = db.keywords.add("Beta")
     db.tag_photo(p0, kid)
     db.tag_photo(p2, kid)
     db.tag_photo(p1, other)
@@ -605,7 +605,7 @@ def test_species_keyword_identity_rows(db, lib):
 
 
 def test_get_keyword_rename_state_reads_name_species_and_type(db, lib):
-    kid = db.add_keyword("Back garden", kw_type="location")
+    kid = db.keywords.add("Back garden", kw_type="location")
     species = _raw_kw(db, "Robin", is_species=1)
     assert tuple(db.keyword_tree.rename_state(kid)) == ("Back garden", 0, "location")
     assert tuple(db.keyword_tree.rename_state(species)) == ("Robin", 1, "general")
@@ -617,10 +617,10 @@ def test_get_photo_workspaces_with_keyword_lists_each_visible_workspace(db, lib)
     other_ws = db.create_workspace("Other")
     db.commit()
     workspace_folders.add_workspace_folder(db, other_ws, lib["fid"])
-    kid = db.add_keyword("Alpha")
+    kid = db.keywords.add("Alpha")
     db.tag_photo(p0, kid)
     db.tag_photo(p1, kid)
-    db.tag_photo(p2, db.add_keyword("Beta"))
+    db.tag_photo(p2, db.keywords.add("Beta"))
     got = sorted(tuple(r) for r in db.photo_keywords.photo_workspaces_tagged_with(kid))
     assert got == sorted(
         [(p0, lib["ws"]), (p1, lib["ws"]), (p0, other_ws), (p1, other_ws)]
@@ -701,7 +701,7 @@ def test_delete_keyword_detaches_children_unlinks_photos_with_the_callers_unit(d
     db.tag_photo(p0, parent)
     db.tag_photo(p1, child)
     # Writes the caller left open join the unit and share the delete's commit.
-    db.queue_change(p1, "location", "effective")
+    db.pending_changes.queue(p1, "location", "effective")
     with db.transaction():
         db.keyword_tree.delete(parent)
     assert not db.conn.in_transaction
@@ -861,8 +861,8 @@ def test_photo_ids_with_species_rank_keyword(db, lib):
 
 
 def test_get_keyword_parent_rows(db, lib):
-    root = db.add_keyword("Root")
-    child = db.add_keyword("Child", parent_id=root)
+    root = db.keywords.add("Root")
+    child = db.keywords.add("Child", parent_id=root)
     rows = {r["id"]: (r["name"], r["parent_id"]) for r in db.keyword_tree.parent_rows()}
     assert rows[root] == ("Root", None)
     assert rows[child] == ("Child", root)
@@ -871,10 +871,10 @@ def test_get_keyword_parent_rows(db, lib):
 
 def test_species_keywords_and_equivalents(db, lib):
     p0, p1, p2, p3 = lib["p"]
-    root = db.add_keyword("American Robin", is_species=True)
-    birds = db.add_keyword("Birds")
+    root = db.keywords.add("American Robin", is_species=True)
+    birds = db.keywords.add("Birds")
     leaf = _raw_kw(db, "american robin", birds, "taxonomy", 1, taxon_id=3)
-    genus = db.add_keyword("Turdus")
+    genus = db.keywords.add("Turdus")
     db.tag_photo(p0, root)
     db.tag_photo(p1, leaf)
     db.tag_photo(p2, genus)
@@ -882,17 +882,17 @@ def test_species_keywords_and_equivalents(db, lib):
     assert got[p0] == ["American Robin"]
     assert got[p1] == ["American Robin"]
     assert p2 not in got
-    assert db.get_photos_with_equivalent_species([p0, p1, p2], root) == {p0, p1}
-    assert db.get_photos_with_equivalent_species([p0, p1], root,
+    assert db.photo_species.get_photos_with_equivalent_species([p0, p1, p2], root) == {p0, p1}
+    assert db.photo_species.get_photos_with_equivalent_species([p0, p1], root,
                                                  exclude_keyword_ids=[leaf]) == {p0}
-    assert db.get_photos_with_equivalent_species([p0], 999_999) == set()
-    assert db.get_photos_with_equivalent_species([], root) == set()
+    assert db.photo_species.get_photos_with_equivalent_species([p0], 999_999) == set()
+    assert db.photo_species.get_photos_with_equivalent_species([], root) == set()
 
 
 def test_is_keyword_species(db, lib):
-    sp = db.add_keyword("American Robin", is_species=True)
-    genus = db.add_keyword("Turdus")
-    gen = db.add_keyword("Sunset")
+    sp = db.keywords.add("American Robin", is_species=True)
+    genus = db.keywords.add("Turdus")
+    gen = db.keywords.add("Sunset")
     assert db.keyword_taxa.is_species(sp)
     assert not db.keyword_taxa.is_species(genus)
     assert not db.keyword_taxa.is_species(gen)
@@ -901,11 +901,11 @@ def test_is_keyword_species(db, lib):
 
 def test_filter_out_subject_tagged(db, lib, monkeypatch):
     p0, p1, p2, p3 = lib["p"]
-    db.tag_photo(p0, db.add_keyword("American Robin", is_species=True))
+    db.tag_photo(p0, db.keywords.add("American Robin", is_species=True))
     legacy = _raw_kw(db, "Legacy Bird", kw_type="general", is_species=1)
     db.conn.commit()
     db.tag_photo(p1, legacy)
-    db.tag_photo(p2, db.add_keyword("Party", kw_type="genre"))
+    db.tag_photo(p2, db.keywords.add("Party", kw_type="genre"))
     ids = [p3, p2, p1, p0]
     assert db.photo_keywords.filter_out_subject_tagged(ids, []) == ids
     assert db.photo_keywords.filter_out_subject_tagged([], ["taxonomy"]) == []
@@ -921,9 +921,9 @@ def test_filter_out_subject_tagged(db, lib, monkeypatch):
 
 def test_keyword_tree_and_counts(db, lib):
     p0, p1 = lib["p"][:2]
-    birds = db.add_keyword("Birds")
-    heron = db.add_keyword("Heron", parent_id=birds)
-    db.add_keyword("Unused")
+    birds = db.keywords.add("Birds")
+    heron = db.keywords.add("Heron", parent_id=birds)
+    db.keywords.add("Unused")
     db.tag_photo(p0, heron)
     tree = [tuple(r) for r in db.keyword_tree.get_tree()]
     assert tree == [(birds, "Birds", None, "general"), (heron, "Heron", birds, "general")]
@@ -948,10 +948,10 @@ def test_get_all_keywords_counts(db, lib):
     other_fid = workspace_folders.add_folder(db, "/elsewhere", name="elsewhere")
     hidden = photo_ingest.add_photo(db, other_fid, "hidden.jpg", ".jpg", 99, 9.0)
     db.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (other_fid,))
-    birds = db.add_keyword("Birds")
-    herons = db.add_keyword("Herons", parent_id=birds)
-    heron = db.add_keyword("Great Blue Heron", parent_id=herons)
-    egret = db.add_keyword("Great Egret", parent_id=herons)
+    birds = db.keywords.add("Birds")
+    herons = db.keywords.add("Herons", parent_id=birds)
+    heron = db.keywords.add("Great Blue Heron", parent_id=herons)
+    egret = db.keywords.add("Great Egret", parent_id=herons)
     db.tag_photo(p0, heron)
     db.tag_photo(p0, egret)  # one photo under two siblings counts once for each ancestor
     db.tag_photo(p1, egret)
@@ -968,7 +968,7 @@ def test_get_all_keywords_counts(db, lib):
 
 def test_get_all_keywords_counts_without_per_keyword_subqueries(db, lib):
     """A correlated count per keyword re-scanned the workspace's links for every row (~150 s on 65k photos)."""
-    db.tag_photo(lib["p"][0], db.add_keyword("Heron", parent_id=db.add_keyword("Birds")))
+    db.tag_photo(lib["p"][0], db.keywords.add("Heron", parent_id=db.keywords.add("Birds")))
     statements = _trace(db)
     db.keyword_tree.list_all()
     db.conn.set_trace_callback(None)
@@ -979,11 +979,11 @@ def test_get_all_keywords_counts_without_per_keyword_subqueries(db, lib):
 
 def test_get_accepted_species(db, lib):
     p0, p1, p2 = lib["p"][:3]
-    db.tag_photo(p0, db.add_keyword("American Robin", is_species=True))
-    db.tag_photo(p1, db.add_keyword("Cougar", is_species=True))
-    db.tag_photo(p2, db.add_keyword("Egret", is_species=True))
+    db.tag_photo(p0, db.keywords.add("American Robin", is_species=True))
+    db.tag_photo(p1, db.keywords.add("Cougar", is_species=True))
+    db.tag_photo(p2, db.keywords.add("Egret", is_species=True))
     db.conn.execute("UPDATE photos SET latitude = 1, longitude = 2 WHERE id = ?", (p0,))
-    place = db.add_keyword("Park", kw_type="location")
+    place = db.keywords.add("Park", kw_type="location")
     db.conn.execute("UPDATE keywords SET latitude = 1, longitude = 2 WHERE id = ?", (place,))
     db.tag_photo(p1, place)
     assert db.photo_species.get_accepted_species() == ["American Robin", "Cougar"]
@@ -1004,7 +1004,7 @@ def test_ensure_default_genre_keywords_is_idempotent(db):
 
 
 def test_update_keyword_noop_and_invalid(db, lib):
-    kid = db.add_keyword("Sunset")
+    kid = db.keywords.add("Sunset")
     statements = _trace(db)
     assert db.update_keyword(kid, bogus=1) == kid
     db.conn.set_trace_callback(None)
@@ -1019,7 +1019,7 @@ def test_update_keyword_noop_and_invalid(db, lib):
 
 def test_update_keyword_plain_fields_commit_with_the_callers_unit(db, lib):
     with db.transaction():
-        kid = db.add_keyword("Sunset")
+        kid = db.keywords.add("Sunset")
         assert db.update_keyword(kid, latitude=1.5, longitude=2.5) == kid
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT latitude, longitude FROM keywords WHERE id = ?",
@@ -1027,10 +1027,10 @@ def test_update_keyword_plain_fields_commit_with_the_callers_unit(db, lib):
 
 
 def test_update_keyword_rename_promotes_and_links(db, lib):
-    kid = db.add_keyword("Mystery")
+    kid = db.keywords.add("Mystery")
     assert db.update_keyword(kid, name="american robin") == kid
     assert _kw(db, kid)[:5] == ("american robin", None, "taxonomy", 1, 3)
-    tax = db.add_keyword("Cougar", is_species=True)
+    tax = db.keywords.add("Cougar", is_species=True)
     db.update_keyword(tax, name="Turdus migratorius")
     assert _kw(db, tax)[4] == 3
     db.update_keyword(tax, name="Something", type="location")
@@ -1038,7 +1038,7 @@ def test_update_keyword_rename_promotes_and_links(db, lib):
 
 
 def test_update_keyword_retype_resets_is_species(db, lib):
-    kid = db.add_keyword("Robin", is_species=True)
+    kid = db.keywords.add("Robin", is_species=True)
     db.update_keyword(kid, type="taxonomy")  # no transition: untouched
     assert _kw(db, kid)[3] == 1
     db.update_keyword(kid, type="individual")
@@ -1047,8 +1047,8 @@ def test_update_keyword_retype_resets_is_species(db, lib):
 
 def test_update_keyword_merges_into_same_slot_peer(db, lib, monkeypatch):
     p0 = lib["p"][0]
-    keep = db.add_keyword("Heron")
-    dup = db.add_keyword("Egret")
+    keep = db.keywords.add("Heron")
+    dup = db.keywords.add("Egret")
     db.tag_photo(p0, dup)
     merges = []
     real = db._merge_keyword_into
@@ -1063,9 +1063,9 @@ def test_update_keyword_merges_into_same_slot_peer(db, lib, monkeypatch):
     assert merges == [(dup, keep)]
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT keyword_id FROM photo_keywords") == [(keep,)]
-    birds = db.add_keyword("Birds")
-    a = db.add_keyword("A", parent_id=birds)
-    b = db.add_keyword("B", parent_id=birds)
+    birds = db.keywords.add("Birds")
+    a = db.keywords.add("A", parent_id=birds)
+    b = db.keywords.add("B", parent_id=birds)
     assert db.update_keyword(b, name="a") == a
     assert merges[-1] == (b, a)
 
@@ -1076,15 +1076,15 @@ def test_update_keyword_merge_keeps_unrelated_pending_removal(db, lib):
     # "remove Heron": P is still tagged Heron.
     p0, p1 = lib["p"][:2]
     ws = lib["ws"]
-    heron = db.add_keyword("Heron")
-    egret = db.add_keyword("Egret")
+    heron = db.keywords.add("Heron")
+    egret = db.keywords.add("Egret")
     db.tag_photo(p0, heron)
     db.tag_photo(p0, egret)
     db.tag_photo(p1, egret)
     db.untag_photo(p0, egret)
-    db.queue_change(p0, "keyword_remove", "Egret", workspace_id=ws)
+    db.pending_changes.queue(p0, "keyword_remove", "Egret", workspace_id=ws)
     db.commit()
-    db.queue_change(p1, "keyword_add", "Egret", workspace_id=ws)
+    db.pending_changes.queue(p1, "keyword_add", "Egret", workspace_id=ws)
     db.commit()
 
     assert db.update_keyword(egret, name="Heron") == heron
@@ -1112,7 +1112,7 @@ def test_merge_duplicate_keywords_keeps_unrelated_pending_removal(db, lib):
     db.conn.commit()
     db.tag_photo(p0, keep)
     db.tag_photo(p1, dup)
-    db.queue_change(p0, "keyword_remove", "heron", workspace_id=ws)
+    db.pending_changes.queue(p0, "keyword_remove", "heron", workspace_id=ws)
     db.commit()
 
     assert keyword_duplicates.merge_duplicate_keywords(db) >= 1
@@ -1124,14 +1124,14 @@ def test_merge_duplicate_keywords_keeps_unrelated_pending_removal(db, lib):
 
 
 def test_update_keyword_cross_type_child_conflict(db, lib):
-    birds = db.add_keyword("Birds")
-    db.add_keyword("Place", parent_id=birds, kw_type="location")
-    child = db.add_keyword("Other", parent_id=birds)
+    birds = db.keywords.add("Birds")
+    db.keywords.add("Place", parent_id=birds, kw_type="location")
+    child = db.keywords.add("Other", parent_id=birds)
     with pytest.raises(ValueError, match="'location' keyword with that name"):
         db.update_keyword(child, name="place")
     # Top-level cross-type homonyms may coexist.
-    db.add_keyword("Spot", kw_type="location")
-    top = db.add_keyword("Else")
+    db.keywords.add("Spot", kw_type="location")
+    top = db.keywords.add("Else")
     assert db.update_keyword(top, name="Spot") == top
 
 
@@ -1412,15 +1412,12 @@ def test_resolve_species_by_lineage(db, lib):
 # -- structure ----------------------------------------------------------------------------
 
 
-# Still on ``Database``: the forwarders other repositories bind by name
-# (``FACADE_METHODS``), ``untag_photo`` (kept beside ``tag_photo`` for the
-# structural guards that find keyword writers by name), and the coordinated
+# Still on ``Database``: ``untag_photo`` (kept beside ``tag_photo`` for the
+# structural guards that find keyword writers by name) and the coordinated
 # methods that delegate their statements; each mapped to the factory of the
 # repository that holds its SQL.
 _DELEGATING_KEYWORD_METHODS = {
-    "add_keyword": "_keyword_repository",
     "untag_photo": "_photo_keyword_repository",
-    "get_photos_with_equivalent_species": "_photo_species_repository",
     "update_keyword": "_keyword_tree_repository",
 }
 
@@ -1495,6 +1492,8 @@ _REMOVED_KEYWORD_WRAPPERS = (
     "_lookup_taxon_id_for_keyword",
     "_add_source_species_keyword",
     "_resolve_species_by_lineage",
+    "add_keyword",
+    "get_photos_with_equivalent_species",
     "_merge_duplicate_keywords_pass",
     "_rename_keyword_dependents",
     "_reparent_disambiguated",
@@ -1639,21 +1638,22 @@ def test_keyword_repositories_without_facade_methods_take_no_facade():
 def test_keyword_facade_signatures_unchanged():
     sig = {n: calling_signature(getattr(Database, n))
            for n in _DELEGATING_KEYWORD_METHODS}
-    assert sig["add_keyword"] == (
-        "(self, name, parent_id=None, is_species=False, kw_type=None, "
-        "source_taxon_id=None, _resolve_alias=False)"
-    )
     assert sig["untag_photo"] == (
         "(self, photo_id, keyword_id, *, _record_history=False)"
     )
     assert sig["update_keyword"] == "(self, keyword_id, **kwargs)"
-    assert sig["get_photos_with_equivalent_species"] == (
-        "(self, photo_ids, keyword_id, exclude_keyword_ids=None)"
-    )
     from repositories.keyword_taxa import KeywordTaxonRepository
     from repositories.keyword_tree import KeywordTreeRepository
     from repositories.keywords import KeywordRepository
     from repositories.photo_species import PhotoSpeciesRepository
+
+    assert calling_signature(KeywordRepository.add) == (
+        "(self, name, parent_id=None, is_species=False, kw_type=None, "
+        "source_taxon_id=None, _resolve_alias=False)"
+    )
+    assert calling_signature(PhotoSpeciesRepository.get_photos_with_equivalent_species) == (
+        "(self, photo_ids, keyword_id, exclude_keyword_ids=None)"
+    )
 
     assert calling_signature(KeywordTaxonRepository.resolve_species_display).startswith(
         "(self, name, apply_case_convention=True, *, case_convention=<object object"
@@ -1724,7 +1724,7 @@ def _top_level_rows(db, name):
 def test_add_keyword_reuses_species_filed_in_tree(db, lib, kwargs):
     _parent, placed = _placed_robin(db)
     db.conn.commit()
-    assert db.add_keyword("american robin", **kwargs) == placed
+    assert db.keywords.add("american robin", **kwargs) == placed
     assert _top_level_rows(db, "American Robin") == []
 
 
@@ -1732,25 +1732,25 @@ def test_add_keyword_taxonomy_passes_over_top_level_general_for_placed_species(d
     _parent, placed = _placed_robin(db)
     general = _raw_kw(db, "American Robin")
     db.conn.commit()
-    assert db.add_keyword("American Robin", kw_type="taxonomy") == placed
+    assert db.keywords.add("American Robin", kw_type="taxonomy") == placed
     # Promoting the general row would have minted the twin.
     assert _kw(db, general)[2:4] == ("general", 0)
     # A type-agnostic add keeps the top-level row it names.
-    assert db.add_keyword("American Robin") == general
+    assert db.keywords.add("American Robin") == general
 
 
 def test_add_keyword_ambiguous_placed_species_mints_top_level(db, lib):
     _placed_robin(db, "Thrushes")
     _placed_robin(db, "Backyard birds")
     db.conn.commit()
-    kid = db.add_keyword("American Robin", kw_type="taxonomy")
+    kid = db.keywords.add("American Robin", kw_type="taxonomy")
     assert _kw(db, kid)[1:3] == (None, "taxonomy")
 
 
 def test_add_keyword_explicit_general_ignores_placed_species(db, lib):
     _parent, placed = _placed_robin(db)
     db.conn.commit()
-    kid = db.add_keyword("American Robin", kw_type="general")
+    kid = db.keywords.add("American Robin", kw_type="general")
     assert kid != placed
     assert _kw(db, kid)[1:3] == (None, "general")
 
@@ -1795,7 +1795,7 @@ def test_merge_taxonomy_root_twins_folds_top_level_rows_into_tree(db, lib):
     db.tag_photo(p1, placed, source=None)
     db.tag_photo(p1, twin)
     db.tag_photo(p2, placed, source=None)
-    db.queue_change(p1, "keyword_add", "American Robin")
+    db.pending_changes.queue(p1, "keyword_add", "American Robin")
     db.commit()
     pending = _visible(db, "SELECT photo_id, change_type, value FROM pending_changes")
 

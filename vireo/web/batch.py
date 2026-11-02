@@ -456,7 +456,7 @@ def create_batch_blueprint(
             )
             try:
                 with db.transaction():
-                    kid = db.add_keyword(name, kw_type=kw_type)
+                    kid = db.keywords.add(name, kw_type=kw_type)
             except ValueError as exc:
                 return json_error(str(exc))
             # Queue/record the stored spelling (see api_add_keyword).

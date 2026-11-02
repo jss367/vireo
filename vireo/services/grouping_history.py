@@ -670,11 +670,11 @@ def apply_grouping_photo_edit(
         for kid in remove_ids:
             db.untag_photo(pid, kid)
             name = db.edit_history.keyword_name(kid)
-            if name and db.remove_pending_changes(pid, 'keyword_add', name) == 0:
-                db.queue_change(pid, 'keyword_remove', name)
+            if name and db.pending_changes.cancel(pid, 'keyword_add', name) == 0:
+                db.pending_changes.queue(pid, 'keyword_remove', name)
         for kid in add_ids:
             db.tag_photo(pid, kid, source='manual')
             name = db.edit_history.keyword_name(kid)
-            if name and db.remove_pending_changes(pid, 'keyword_remove', name) == 0:
-                db.queue_change(pid, 'keyword_add', name)
+            if name and db.pending_changes.cancel(pid, 'keyword_remove', name) == 0:
+                db.pending_changes.queue(pid, 'keyword_add', name)
     db.species_provenance.replay_history(items, undo=undo)

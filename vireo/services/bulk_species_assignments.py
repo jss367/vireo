@@ -29,9 +29,9 @@ def apply_assignments(
     for assignment in assignments:
         species = assignment['species']
         ids = assignment['photo_ids']
-        kid = db.add_keyword(species, is_species=True)
+        kid = db.keywords.add(species, is_species=True)
         species = db.keywords.name_of(kid) or species
-        already = db.get_photos_with_equivalent_species(ids, kid)
+        already = db.photo_species.get_photos_with_equivalent_species(ids, kid)
         added = [pid for pid in ids if pid not in already]
         for pid in added:
             db.tag_photo(pid, kid, source='manual')

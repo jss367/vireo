@@ -189,7 +189,7 @@ def _tag_all(live_server, photo_ids, species):
     """Tag every photo with `species` as a species keyword directly in the DB,
     so /group/state reports has_species_keyword=True for the whole burst."""
     db = live_server["db"]
-    kid = db.add_keyword(species, is_species=True)
+    kid = db.keywords.add(species, is_species=True)
     db.commit()
     for pid in photo_ids:
         db.tag_photo(pid, kid)
@@ -409,7 +409,7 @@ def test_smart_default_species_checked_when_frame_missing_keyword(live_server, p
     # Confirm the burst as the species in the cache, but only tag TWO of the
     # three frames in the DB — the third is missing the keyword.
     _write_single_burst_cache(live_server, photo_ids, confirmed_species=species)
-    kid = db.add_keyword(species, is_species=True)
+    kid = db.keywords.add(species, is_species=True)
     db.tag_photo(photo_ids[0], kid)
     db.tag_photo(photo_ids[1], kid)
     db.commit()
@@ -673,7 +673,7 @@ def test_keyword_summary_counts_discarded_removals(live_server, page):
     # apply members (removal discarded) are still 3 with one missing.
     _write_single_burst_cache(live_server, photo_ids, confirmed_species=species)
     db = live_server["db"]
-    kid = db.add_keyword(species, is_species=True)
+    kid = db.keywords.add(species, is_species=True)
     db.tag_photo(photo_ids[0], kid)
     db.tag_photo(photo_ids[1], kid)
     db.commit()

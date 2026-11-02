@@ -29,9 +29,9 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
     historical = db.predictions.superseded_ids([
         p["prediction_id"] for photo in evidence for subject in photo["subjects"] for p in subject["predictions"]
     ])
-    already = db.get_photos_with_equivalent_species(source_ids, target["id"]) if target else set()
+    already = db.photo_species.get_photos_with_equivalent_species(source_ids, target["id"]) if target else set()
     if target and edit.old_rows_by_photo:
-        already = db.get_photos_with_equivalent_species(source_ids, target["id"], exclude_keyword_ids={
+        already = db.photo_species.get_photos_with_equivalent_species(source_ids, target["id"], exclude_keyword_ids={
             row["id"] for rows in edit.old_rows_by_photo.values() for row in rows
         })
     import config as cfg

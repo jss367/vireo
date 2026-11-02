@@ -442,7 +442,7 @@ def test_a_failed_joined_set_flag_preserves_history_and_undo_for_caller_species_
 
     fid = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     photo_id = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
-    kid = db.add_keyword("Robin", is_species=True)
+    kid = db.keywords.add("Robin", is_species=True)
     db.tag_photo(photo_id, kid, source="accept", provenance={
         "method": "direct_visual", "reviewer": "Original reviewer",
         "reason": "Clear plumage markings",

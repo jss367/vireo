@@ -1,8 +1,8 @@
 """Persistence for keyword provenance: the association writers and their flows.
 
-This module is the single home, behind the ``Database`` façade, of every
-``photo_keywords`` writer that creates or converges an association, plus the
-flows that call those writers in the middle of their own transaction:
+This module is the single home of every ``photo_keywords`` writer that
+creates or converges an association, plus the flows that call those writers
+in the middle of their own transaction:
 
 - ``tag``: the one association writer (``Database.tag_photo``), whose
   upsert folds the incoming stamp against the existing row;
@@ -10,54 +10,31 @@ flows that call those writers in the middle of their own transaction:
   the survivor and folds provenance where a photo carried both keywords;
 - ``link_keyword_to_place``: attaching a Google place to a keyword, which
   may repoint its associations onto the canonical place row;
-- the flows that call a writer mid-flight: ``upsert_one_keyword`` (merges
-  through ``Database._merge_keyword_into``) and ``accept_prediction`` (tags through
+- the flows that call a writer mid-flight: ``upsert_one_keyword`` and
+  ``upsert_location_parent_chain`` (merge through
+  ``Database._merge_keyword_into``) and ``accept_prediction`` (tags through
   ``Database.tag_photo``, then queues the sidecar change);
 - ``carry_companion_keywords``: RAW/JPEG companion pairing, which copies the
-  JPEG row's associations onto its RAW before the JPEG row is deleted. It
-  has no ``Database`` wrapper; ``scanner`` reaches it through the
-  ``db.keyword_provenance`` accessor.
+  JPEG row's associations onto its RAW before the JPEG row is deleted;
+  ``scanner`` reaches it through the ``db.keyword_provenance`` accessor.
 
 ``test_keyword_provenance_contract`` keys the convergence points to this
 module by their method names here (``tag``, ``merge_keyword_into``,
-``link_keyword_to_place``, ``carry_companion_keywords``).
-``Database._apply_winner_loser_merge`` and ``set_photo_location`` stay on
-``Database`` and re-tag through ``Database.tag_photo``.
+``link_keyword_to_place``, ``carry_companion_keywords``). ``tag`` takes
+``source`` keyword-only and without a default: the fail-safe default
+(``KEYWORD_SOURCE_MANUAL``) lives on ``Database.tag_photo``.
 
-The method bodies were moved verbatim from ``Database``. The only edits are
-the method names above (non-underscore, and ``tag_photo`` -> ``tag`` so the
-façade's forwarding call is not itself a ``.tag_photo(...)`` call site the
-contract would have to allowlist); ``tag`` takes ``source`` keyword-only and
-without a default, because its default (``KEYWORD_SOURCE_MANUAL``) is a
-``db`` constant that can't be written in the def line here -- the façade
-keeps that fail-safe default and always passes it; ``self._ws_id()`` ->
-``self.workspace_id``; ``NAME`` -> ``self.NAME`` for the ``db`` module
-helpers and constants listed in ``__init__`` (the provenance fold among
-them, which stays defined once in ``db.py``); and the two places a body
-handed the ``Database`` itself to a helper
-(``keywords_claim_different_taxa(self, ...)`` in ``merge_keyword_into``,
-``SpeciesResolver(db=self)`` in ``accept_prediction``) now pass ``self.db``,
-the façade, since ``self`` is the repository here. The SQL text, parameter order, chunk sizes and commit placement are
-unchanged.
-
-What deliberately stays on ``Database``:
-
-- Every public and private method name, as a one-line wrapper with the
-  identical signature -- ``tag_photo`` keeps ``source=KEYWORD_SOURCE_MANUAL``
-  (pinned by ``test_tag_photo_defaults_to_manual_provenance``), and
-  ``accept_prediction`` keeps its name for ``test_route_contract``.
-- The provenance lattice (``KEYWORD_SOURCE_*``, ``keyword_source_max*``,
-  ``KEYWORD_SOURCE_CONFLICT_SQL``): public ``db`` API, injected here.
-- The active-workspace state. ``workspace_id`` is resolved lazily through
-  ``Database._ws_id`` at exactly the point ``accept_prediction`` always
-  called it.
-- Composition. Every façade method a moved body calls is bound from the
-  ``Database`` instance under its own name (see ``FACADE_METHODS``) and
-  called as ``self.<name>(...)``, so monkeypatches of ``Database`` methods
-  keep reaching the moved code. That includes the calls these methods make
-  to each other: ``merge_keyword_into`` recurses, and
-  ``upsert_one_keyword`` merges, through ``self._merge_keyword_into``, and ``accept_prediction`` tags through
-  ``self.tag_photo``.
+The flows compose the repositories of the other domains they touch on the
+same connection: keyword rows (``KeywordRepository``), taxon identity
+(``KeywordMergeRepository``, and ``TaxonCatalog`` for ``SpeciesResolver``),
+the species photos carry (``PhotoSpeciesRepository``), predictions,
+species curation, the keyword tree, location rows and the XMP sync queue
+(``SyncRepository``). Two ``Database`` methods are still bound by name
+(``FACADE_METHODS``): ``tag_photo`` and ``_merge_keyword_into``, the
+provenance writers the contract finds by those names, so the calls these
+flows make to each other go through them. The provenance lattice
+(``KEYWORD_SOURCE_*``, ``keyword_source_max*``,
+``KEYWORD_SOURCE_CONFLICT_SQL``) is ``db`` API, injected here.
 
 No writer here commits: the route, job or service that calls it owns the
 transaction (``with db.transaction():``).
@@ -71,6 +48,7 @@ from typing import Any
 
 from compare import compare_prediction_to_keywords
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from repositories.edit_history import edit_prediction_ids
 from repositories.effective_config import active_effective_config
 from repositories.identity_alternatives import retarget_candidate_names
 from repositories.keyword_identity_sql import (
@@ -78,11 +56,16 @@ from repositories.keyword_identity_sql import (
     free_sibling_name,
     keywords_claim_different_taxa,
 )
+from repositories.keyword_merges import KeywordMergeRepository
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.keyword_tree import KeywordTreeRepository
+from repositories.keywords import KeywordRepository, TaxonCatalog
+from repositories.locations import LocationRepository
+from repositories.photo_species import PhotoSpeciesRepository
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.predictions import PredictionRepository
 from repositories.species_curation import SpeciesCurationRepository
+from repositories.sync import SyncRepository
 from settings_source import config_value
 
 log = logging.getLogger(__name__)
@@ -92,16 +75,6 @@ FACADE_METHODS = (
     # The writers and flows here, reached from one another.
     "tag_photo",
     "_merge_keyword_into",
-    # upsert_one_keyword / link_keyword_to_place
-    "_restore_misclassified_location_ancestor",
-    "_upsert_location_parent_chain",
-    # merge_keyword_into
-    "_edit_prediction_ids",
-    # accept_prediction
-    "add_keyword",
-    "get_photos_with_equivalent_species",
-    "queue_change",
-    "remove_pending_changes",
 )
 
 
@@ -900,7 +873,7 @@ def _rewrite_payload_keyword_ids(data, src_id, dst_id):
 
 
 def _reparent_children(
-    conn, src_id, dst_id, *, pending_source_only, db,
+    conn, src_id, dst_id, *, pending_source_only, merges,
     merge_keyword_into, reparent_disambiguated,
 ):
     """Move the source's children under the destination before it is deleted.
@@ -921,7 +894,7 @@ def _reparent_children(
     for child in children:
         merged += _reparent_child(
             conn, child, dst_id,
-            pending_source_only=pending_source_only, db=db,
+            pending_source_only=pending_source_only, merges=merges,
             merge_keyword_into=merge_keyword_into,
             reparent_disambiguated=reparent_disambiguated,
         )
@@ -929,7 +902,7 @@ def _reparent_children(
 
 
 def _reparent_child(
-    conn, child, dst_id, *, pending_source_only, db,
+    conn, child, dst_id, *, pending_source_only, merges,
     merge_keyword_into, reparent_disambiguated,
 ):
     """Reparent one child under ``dst_id``, merging or disambiguating on collision.
@@ -977,7 +950,7 @@ def _reparent_child(
     # disambiguation produced it), and a second
     # UNIQUE(name, parent_id) violation here is uncaught.
     taken = {row["name"] for row in siblings}
-    if keywords_claim_different_taxa(db, existing, child):
+    if keywords_claim_different_taxa(merges, existing, child):
         # Two same-named species rows that resolve to DIFFERENT
         # taxa. A recursive merge keeps the destination's taxon
         # claim (COALESCE folds only fill missing fields), so
@@ -1024,18 +997,108 @@ def _reparent_child(
     return 0
 
 
+
+LOCATION_COMPONENT_RANKS = {
+    "country": 10,
+    "administrative_area_level_1": 20,
+    "administrative_area_level_2": 30,
+    "administrative_area_level_3": 40,
+    "administrative_area_level_4": 50,
+    "administrative_area_level_5": 60,
+    "administrative_area_level_6": 70,
+    "administrative_area_level_7": 80,
+    "locality": 90,
+    "postal_town": 90,
+    "sublocality": 100,
+    "sublocality_level_1": 100,
+    "sublocality_level_2": 110,
+    "sublocality_level_3": 120,
+    "sublocality_level_4": 130,
+    "sublocality_level_5": 140,
+    "neighborhood": 150,
+}
+
+
+def location_component_rank(component):
+    """Return a broad-to-narrow rank for useful location components."""
+    types = component.get("types") if isinstance(component, dict) else []
+    if not isinstance(types, list):
+        return None
+    ranks = [
+        LOCATION_COMPONENT_RANKS[t]
+        for t in types
+        if isinstance(t, str) and t in LOCATION_COMPONENT_RANKS
+    ]
+    if not ranks:
+        return None
+    return min(ranks)
+
+
+def location_parent_components(components, leaf_name="", leaf_types=None):
+    """Return address components suitable for keyword parents.
+
+    Google address components can include street numbers, routes, postal
+    codes, rooms, and other address fragments. Those are useful for a
+    formatted address, but they make noisy keyword parents such as "1200"
+    or "94107". Keep administrative/geographic levels only and sort by
+    component type so postal-code placement in Google's response cannot
+    become the root of the hierarchy.
+    """
+    leaf_type_set = (
+        {t for t in (leaf_types or []) if isinstance(t, str)}
+        if isinstance(leaf_types, list)
+        else set()
+    )
+    candidates = []
+    seen = set()
+    leaf_norm = leaf_name.strip().casefold() if isinstance(leaf_name, str) else ""
+    for index, comp in enumerate(components or []):
+        if not isinstance(comp, dict):
+            continue
+        name = (comp.get("name") or comp.get("long_name") or "").strip()
+        if not name:
+            continue
+        rank = location_component_rank(comp)
+        if rank is None:
+            continue
+        types = tuple(t for t in comp.get("types", []) if isinstance(t, str))
+        candidates.append((rank, index, name, types))
+
+    leaf_component = None
+    if leaf_norm and leaf_type_set:
+        leaf_matches = [
+            item for item in candidates
+            if item[2].casefold() == leaf_norm
+            and any(
+                t in leaf_type_set and t in LOCATION_COMPONENT_RANKS
+                for t in item[3]
+            )
+        ]
+        if leaf_matches:
+            # If a leaf has the same text as multiple admin levels
+            # ("New York" city and state), drop only the narrowest
+            # matching component and keep the broader parent.
+            leaf_component = max(leaf_matches, key=lambda item: item[0])
+
+    normalized = []
+    for candidate in candidates:
+        rank, index, name, _types = candidate
+        if leaf_component is not None and candidate == leaf_component:
+            continue
+        key = (rank, name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append((rank, index, {"name": name}))
+    normalized.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in normalized]
+
+
 class KeywordProvenanceRepository:
     # Bound ``Database`` methods that ``__init__`` installs from
     # ``FACADE_METHODS``, declared so the type checker sees them.
     tag_photo: Callable[..., Any]
     _merge_keyword_into: Callable[..., Any]
-    _restore_misclassified_location_ancestor: Callable[..., Any]
-    _upsert_location_parent_chain: Callable[..., Any]
-    _edit_prediction_ids: Callable[..., Any]
-    add_keyword: Callable[..., Any]
-    get_photos_with_equivalent_species: Callable[..., Any]
-    queue_change: Callable[..., Any]
-    remove_pending_changes: Callable[..., Any]
 
     def __init__(
         self,
@@ -1063,9 +1126,6 @@ class KeywordProvenanceRepository:
         self.keyword_source_max = keyword_source_max
         # ``Database`` class attributes, kept under their class names.
         self.DECIDED_PREDICTION_STATUSES = decided_prediction_statuses
-        # The ``Database`` itself, for the two helpers the moved bodies hand
-        # it to (``keywords_claim_different_taxa`` and ``SpeciesResolver``).
-        self.db = facade
         # Bound ``Database`` methods, kept under their façade names.
         for name in FACADE_METHODS:
             setattr(self, name, getattr(facade, name))
@@ -1078,6 +1138,17 @@ class KeywordProvenanceRepository:
     def _species_curation(self):
         """The species-curation renames, on this connection and workspace."""
         return SpeciesCurationRepository(self.conn, self._resolve_workspace_id)
+
+    def _locations(self):
+        """The location rows, on this connection; root merges go through this repository."""
+        return LocationRepository(
+            self.conn, self._resolve_workspace_id,
+            merge_keyword_into=self._merge_keyword_into,
+        )
+
+    def _pending_changes(self):
+        """The XMP sync queue, on this connection and workspace."""
+        return SyncRepository(self.conn, self._resolve_workspace_id)
 
     def effective_config(self):
         """The global settings with the active workspace's overrides applied."""
@@ -1187,7 +1258,7 @@ class KeywordProvenanceRepository:
         )
         _retarget_edit_history(
             self.conn, src_id, dst_id,
-            chunks=self._chunks, edit_prediction_ids=self._edit_prediction_ids,
+            chunks=self._chunks, edit_prediction_ids=edit_prediction_ids,
             source_max=self.keyword_source_max,
         )
         # Preserve durable authorship before collapsing association conflicts.
@@ -1227,7 +1298,7 @@ class KeywordProvenanceRepository:
         merged += _reparent_children(
             self.conn, src_id, dst_id,
             pending_source_only=pending_source_only,
-            db=self.db,
+            merges=KeywordMergeRepository(self.conn),
             merge_keyword_into=self._merge_keyword_into,
             reparent_disambiguated=KeywordTreeRepository(
                 self.conn, self._resolve_workspace_id,
@@ -1235,6 +1306,42 @@ class KeywordProvenanceRepository:
         )
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (src_id,))
         return merged
+
+    def upsert_location_parent_chain(
+        self,
+        components,
+        leaf_name="",
+        leaf_types=None,
+        exclude_keyword_id=None,
+    ):
+        """Upsert a chain of parent location keywords from ``address_components``.
+
+        Walks broadest → narrowest, returning the list of visited keyword ids
+        in broadest → narrowest order. Returns an empty list if ``components``
+        is empty / all entries lack a name. The deepest (narrowest) parent is
+        ``chain[-1]`` if non-empty. ``exclude_keyword_id`` prevents an
+        existing selected place from being reused as its own parent when its
+        display name differs from the matching address component. Caller is
+        responsible for the surrounding transaction.
+        """
+        chain: list[int] = []
+        parent_id = None
+        for comp in location_parent_components(components, leaf_name, leaf_types):
+            if not comp.get("name"):
+                continue
+            component_id = self.upsert_one_keyword(
+                name=comp["name"],
+                parent_id=parent_id,
+                place_id=None,
+                latitude=None,
+                longitude=None,
+                reuse_location_component=True,
+            )
+            if component_id == exclude_keyword_id:
+                continue
+            parent_id = component_id
+            chain.append(component_id)
+        return chain
 
     def _check_place_link_target(self, keyword_id, details):
         """Reject a place link to a missing or non-location keyword."""
@@ -1365,7 +1472,7 @@ class KeywordProvenanceRepository:
         lng = details.get("lng")
         components = details.get("address_components") or []
 
-        chain = self._upsert_location_parent_chain(
+        chain = self.upsert_location_parent_chain(
             components,
             leaf_name=new_name,
             leaf_types=details.get("types"),
@@ -1477,7 +1584,7 @@ class KeywordProvenanceRepository:
             existing_component is not None
             and (
                 existing_component["type"] == "location"
-                or self._restore_misclassified_location_ancestor(
+                or self._locations().restore_misclassified_ancestor(
                     existing_component["id"],
                     allow_leaf=True,
                 )
@@ -1543,7 +1650,7 @@ class KeywordProvenanceRepository:
                 and clash["place_id"] is None
                 and (
                     clash["type"] == "location"
-                    or self._restore_misclassified_location_ancestor(
+                    or self._locations().restore_misclassified_ancestor(
                         clash["id"],
                         allow_leaf=True,
                     )
@@ -1710,7 +1817,7 @@ class KeywordProvenanceRepository:
                 # Defensive: our narrow SELECT missed it (shouldn't happen,
                 # but reusing it is safe and idempotent).
                 return clash["id"]
-            if self._restore_misclassified_location_ancestor(
+            if self._locations().restore_misclassified_ancestor(
                 clash["id"],
                 allow_leaf=reuse_location_component,
             ):
@@ -1773,7 +1880,7 @@ class KeywordProvenanceRepository:
         if existing:
             if existing["type"] == "location":
                 return existing["id"]
-            if self._restore_misclassified_location_ancestor(
+            if self._locations().restore_misclassified_ancestor(
                 existing["id"],
                 allow_leaf=reuse_location_component,
             ):
@@ -1798,7 +1905,7 @@ class KeywordProvenanceRepository:
             this_pred_id, "accepted",
         )
         old_species = []
-        already_has_species = photo_id in self.get_photos_with_equivalent_species(
+        already_has_species = photo_id in PhotoSpeciesRepository(self.conn, self._resolve_workspace_id).get_photos_with_equivalent_species(
             [photo_id], kid
         )
         if replace_species:
@@ -1806,8 +1913,8 @@ class KeywordProvenanceRepository:
                 self.conn, ws, photo_id, this_pred_id, kid, species,
                 replace_taxonomy,
                 effective_config=self.effective_config,
-                remove_pending_changes=self.remove_pending_changes,
-                queue_change=self.queue_change,
+                remove_pending_changes=self._pending_changes().cancel,
+                queue_change=self._pending_changes().queue,
                 species_root_name_for_taxon=KeywordTaxonRepository(self.conn).species_root_name_for_taxon,
                 rename_species_highlights_species=self._species_curation().rename_highlights,
                 rename_photo_preferences_species=self._species_curation().rename_photo_preferences,
@@ -1817,7 +1924,7 @@ class KeywordProvenanceRepository:
             self.tag_photo(
                 photo_id, kid, source="manual",
             )
-            self.queue_change(photo_id, "keyword_add", species)
+            self._pending_changes().queue(photo_id, "keyword_add", species)
         return _affected_entry(
             photo_id, this_pred_id, old_species, changed_tag,
             replace_species,
@@ -1875,7 +1982,7 @@ class KeywordProvenanceRepository:
         if not pred:
             return None
         from species_identity import SpeciesResolver
-        identity = SpeciesResolver(db=self.db).consensus(pred)
+        identity = SpeciesResolver(db=TaxonCatalog(self.conn)).consensus(pred)
         has_explicit_evidence, source_taxon_id = _explicit_source_taxon(
             pred, identity,
         )
@@ -1891,9 +1998,11 @@ class KeywordProvenanceRepository:
         if not targets:
             return _out_of_scope_result(self.conn, species, identity)
 
-        self.db.predictions.require_identifiable_subjects([pred_id for _, pred_id in targets])
+        PredictionRepository(self.conn, self._resolve_workspace_id).require_identifiable_subjects([pred_id for _, pred_id in targets])
         source_args = {"source_taxon_id": source_taxon_id} if source_taxon_id is not None else {}
-        kid = self.add_keyword(species, is_species=True, **source_args)
+        kid = KeywordRepository(self.conn, self._resolve_workspace_id).add(
+            species, is_species=True, **source_args,
+        )
         species = _stored_keyword_name(self.conn, kid, species)
         # list of {"photo_id", "prediction_id", "old_species"}
         affected = []

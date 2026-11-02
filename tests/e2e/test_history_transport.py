@@ -124,7 +124,7 @@ def test_background_import_tag_refreshes_history_controls(live_server, page, not
     # request tracker. No focus change or foreground edit should be necessary.
     db = live_server['db']
     photo_id = live_server['data']['photos'][0]
-    keyword_id = db.add_keyword('Imported trip')
+    keyword_id = db.keywords.add('Imported trip')
     db.tag_photo(photo_id, keyword_id)
     db.commit()
     description = 'Added Imported trip during import'

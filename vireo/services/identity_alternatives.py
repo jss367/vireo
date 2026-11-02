@@ -126,7 +126,7 @@ def _queue_shared_keyword(
         # flat-only removal must not briefly queue a full hierarchy removal.
         if not flat_only:
             queue(db, photo_id, name, workspace_id=workspace_id)
-        db.queue_change(photo_id, kind, name, workspace_id=workspace_id)
+        db.pending_changes.queue(photo_id, kind, name, workspace_id=workspace_id)
         if may_have_written or db.pending_changes.keyword_sidecar_alias(photo_id, workspace_id, name):
             mark_sync_started(db, photo_id, workspace_id, kind, name)
 
@@ -264,7 +264,7 @@ def resolve_alternatives(db: Database, photo_ids: Sequence[int], species: str) -
     if any(key not in {keyword_match_key(n) for n in states[pid]['candidates']} for pid in photo_ids):
         raise ValueError('Choose one of the recorded alternative species')
     # Use the normal species keyword resolver and provenance/XMP queue.
-    kid = db.add_keyword(species, is_species=True)
+    kid = db.keywords.add(species, is_species=True)
     batch = _IdentityBatch(db)
     names = [name for state in states.values() for name in state['candidates']]
     old_links = batch.links(photo_ids, names)
