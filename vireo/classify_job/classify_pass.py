@@ -546,10 +546,9 @@ class _ClassifyPhotosPass:
         summary is a completed zero-candidate run — the classifier looked
         at this detection, nothing cleared the confidence floor, and the
         match-score row is its output-of-record. Re-running would discard
-        the "nothing in your list fits" verdict this feature exists to
-        preserve, and on an install without weights it would fail model
-        loading instead of reusing the cache (Codex P2 on 22cc0ac). No
-        top-1 to surface — just skip inference for this detection.
+        the "nothing in your list fits" verdict, and on an install without
+        weights it would fail model loading instead of reusing the cache.
+        No top-1 to surface — just skip inference for this detection.
         """
         run_keys = self._runtime_aware_run_keys(detection_id)
         if (self.model.model_name, self.fp) not in run_keys:
@@ -787,10 +786,9 @@ class _ClassifyPhotosPass:
         # Run key without cached rows: mirror the boxed-detection gate
         # above. A measured ``classifier_match_scores`` row for the same
         # triple is a completed zero-candidate run — re-running would
-        # discard the "nothing in your list fits" verdict this feature
-        # exists to preserve, and on an install without weights it would
-        # fail model loading instead of reusing the cache (Codex P2 on
-        # f074d0c). Otherwise the run key is a torn write or a
+        # discard the "nothing in your list fits" verdict, and on an
+        # install without weights it would fail model loading instead of
+        # reusing the cache. Otherwise the run key is a torn write or a
         # deliberately-hidden ``match`` row → fall through to re-classify
         # this full-image detection.
         #

@@ -31,14 +31,12 @@ def regroup_stage(run: PipelineRun) -> None:
     run.runner.update_step(run.job["id"], "regroup", status="running")
     run.update_stages(run.runner, run.job["id"], run.stages)
 
-    # The per-workspace regroup lock is now acquired by the
-    # orchestrator (see run_pipeline_job body) so it spans BOTH
-    # regroup_stage and miss_stage atomically — the inner lock
-    # that used to live here would deadlock against the outer one
-    # (Python locks aren't reentrant). The deferred-update pattern
-    # likewise goes away: runner.update_step is fine to call here
+    # The orchestrator (run_pipeline_job) holds the per-workspace
+    # regroup lock across BOTH regroup_stage and miss_stage, so this
+    # stage must not take it again: Python locks aren't reentrant and
+    # it would deadlock. runner.update_step is safe to call here
     # because nothing under JobRunner._lock acquires the workspace
-    # regroup lock, so there's no cycle to invert.
+    # regroup lock, so there's no lock-order cycle.
     try:
         _run_full_regroup(run)
     except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
@@ -60,9 +58,8 @@ def _skip_regroup_or_review_species(run: PipelineRun) -> None:
     # on the Process page, or an API client sending
     # ``skip_regroup: true`` — must NOT overwrite
     # ``pipeline_results_ws*.json`` with all-REVIEW species
-    # output, since that would silently reintroduce the
-    # culling-pipeline downgrade the reviewer flagged (the
-    # user just wanted to refresh classifications, not turn
+    # output: that would silently downgrade the culling results
+    # (the user just wanted to refresh classifications, not turn
     # the workspace cache into a species-review cache).
     do_species = (
         run.params.review_mode == "species"

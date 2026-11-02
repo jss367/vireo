@@ -24,7 +24,7 @@ def _all_photos_cache_satisfied(
 ) -> bool:
     """True when every classifiable detection already has a matching run.
 
-    Used to short-circuit model resolution when a bundle import (or an
+    Lets the caller short-circuit model resolution when a bundle import (or an
     earlier run) has already produced results for the whole collection.
     A fresh install with no downloaded classifier weights can then reuse
     imported predictions instead of failing with "No model available".
@@ -61,8 +61,8 @@ def _all_photos_cache_satisfied(
     legacy row for a timm classifier is dropped once
     ``label_descriptions.json`` has transitioned from missing to present:
     that mapping is what turns a raw class id into the stored common
-    name, so a pre-heal legacy row's species is stale relative to what
-    a run made today would emit (Codex #1560 P2). Manually reviewed rows
+    name, so a legacy row written without it has a species that is stale
+    relative to what a run made today would emit. Manually reviewed rows
     (real accept/reject decisions, not auto-match) remain authoritative
     across runtime changes — including that enrichment change — until an
     explicit reclassify.
@@ -185,7 +185,7 @@ def _accepts_legacy_runtime(model_identity: dict[str, Any] | None) -> bool:
     # timm row's species is stale relative to what a run made today
     # would emit ("Bubulcus ibis" -> "Western Cattle-Egret"); keeping
     # the exception would leave the scientific names indefinitely
-    # unless the user asked for a forced reclassify (Codex #1560 P2).
+    # unless the user asked for a forced reclassify.
     # The manual-review branch of the runtime filter
     # (``ModelRunsRepository.classifier_cache_run_filter``) still
     # authorizes such rows — an explicit accept/reject is authoritative
