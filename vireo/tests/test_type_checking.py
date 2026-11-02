@@ -5,6 +5,8 @@ import importlib
 import textwrap
 from pathlib import Path
 
+import pytest
+
 REPOSITORIES = Path(__file__).resolve().parents[1] / "repositories"
 
 # ``Callable[..., Any]`` has one meaning but several ways to write it in
@@ -24,7 +26,7 @@ _FORBIDDEN_CALLABLE_FACADE_FORMS = frozenset(
 )
 
 
-def _annotation_text(node: ast.expr) -> str:
+def _annotation_text(node: ast.expr, aliases: dict[str, str] | None = None) -> str:
     """Normalize annotation syntax, recursively unwrapping forward-reference literals.
 
     ``callback: "Callable[..., Any]"`` reaches this function as an
@@ -38,6 +40,9 @@ def _annotation_text(node: ast.expr) -> str:
     """
     while isinstance(node, ast.Constant) and isinstance(node.value, str):
         node = ast.parse(node.value, mode="eval").body
+    for name in ast.walk(node):
+        if isinstance(name, ast.Name) and aliases:
+            name.id = aliases.get(name.id, name.id)
     return ast.unparse(node)
 
 
@@ -45,6 +50,15 @@ def _callable_facade_offenders(source: str, label: str) -> list[str]:
     """Return ``"{label}.{Class}.{attr}"`` for every class attribute whose
     annotation names ``Callable[..., Any]`` in any supported form."""
     tree = ast.parse(source)
+    # Resolve only direct imports of the two names this guard recognizes.
+    # Annotation text and arbitrary imports are never executed.
+    aliases = {
+        item.asname or item.name: item.name
+        for stmt in tree.body if isinstance(stmt, ast.ImportFrom)
+        for item in stmt.names
+        if (stmt.module in {"typing", "collections.abc"} and item.name == "Callable")
+        or (stmt.module == "typing" and item.name == "Any")
+    }
     offenders: list[str] = []
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
@@ -54,7 +68,7 @@ def _callable_facade_offenders(source: str, label: str) -> list[str]:
                 continue
             if not isinstance(stmt.target, ast.Name):
                 continue
-            if _annotation_text(stmt.annotation) in _FORBIDDEN_CALLABLE_FACADE_FORMS:
+            if _annotation_text(stmt.annotation, aliases) in _FORBIDDEN_CALLABLE_FACADE_FORMS:
                 offenders.append(f"{label}.{node.name}.{stmt.target.id}")
     return offenders
 
@@ -152,3 +166,25 @@ def test_annotation_normalization_never_executes_expressions():
         "    callback: \"__import__('untrusted').callback()\"\n"
     )
     assert _callable_facade_offenders(source, "fixture") == []
+
+
+@pytest.mark.parametrize("future", ["", "from __future__ import annotations\n"])
+@pytest.mark.parametrize("quoted", [False, True])
+@pytest.mark.parametrize("imports, annotation", [
+    ("from collections.abc import Callable as C\nfrom typing import Any\n", "C[..., Any]"),
+    ("from typing import Callable as C, Any as A\n", "C[..., A]"),
+])
+def test_callable_facade_matcher_preserves_import_alias_coverage(future, quoted, imports, annotation):
+    if quoted:
+        annotation = repr(annotation)
+    source = future + imports + f"class Repository:\n    callback: {annotation}\n"
+    assert _callable_facade_offenders(source, "fixture") == ["fixture.Repository.callback"]
+
+
+def test_unrelated_imports_and_typed_callables_are_not_forbidden():
+    assert _callable_facade_offenders(
+        "from unrelated import Callable as C\nclass Repository:\n    callback: C[..., Any]\n", "fixture",
+    ) == []
+    assert _callable_facade_offenders(
+        "from typing import Callable as C, Any as A\nclass Repository:\n    callback: C[[], int]\n", "fixture",
+    ) == []
