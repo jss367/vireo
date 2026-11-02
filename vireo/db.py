@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 
 import settings_source
 from keyword_normalization import (
-    keyword_match_key,
     normalize_keyword_display,
 )
 from new_images_cache import get_shared_cache
@@ -2335,16 +2334,11 @@ class Database:
         """Build the keyword-tree repository on this connection.
 
         The active workspace is resolved lazily (``Database._ws_id`` is
-        passed as a resolver). The façade methods its bodies call (the
-        duplicate-merge pass, the dependent-rename carry and the
-        species-curation renames) are handed over bound, under their
-        ``Database`` names, so monkeypatches keep reaching the moved code.
+        passed as a resolver).
         """
         from repositories.keyword_tree import KeywordTreeRepository
 
-        return KeywordTreeRepository(
-            self.conn, self._ws_id, chunks=_chunks, facade=self,
-        )
+        return KeywordTreeRepository(self.conn, self._ws_id)
 
     @property
     def keyword_tree(self) -> KeywordTreeRepository:
@@ -2802,97 +2796,6 @@ class Database:
             longitude=None,
         )
 
-    def _merge_duplicate_keywords_pass(self, ws):
-        """Convergence loop for merge_duplicate_keywords. Caller commits."""
-        total_merged = 0
-        while True:
-            rows = self._keyword_tree_repository().duplicate_scope_rows(ws)
-            grouped = {}
-            for row in rows:
-                key = keyword_match_key(row["name"])
-                if not key:
-                    continue
-                species_bearing = (
-                    row["type"] == "taxonomy" or row["is_species"] == 1
-                )
-                grouped.setdefault(
-                    (key, row["parent_id"], row["type"], species_bearing),
-                    [],
-                ).append(row)
-            dupes = [
-                group for group in grouped.values()
-                if len({row["id"] for row in group}) > 1
-            ]
-            if not dupes:
-                break
-
-            for group in dupes:
-                # Prefer an already-clean spelling when one exists; otherwise
-                # keep the earliest row to preserve the old case-only behavior.
-                ordered = sorted(
-                    group,
-                    key=lambda row: (
-                        normalize_keyword_display(row["name"]) != row["name"],
-                        row["id"],
-                    ),
-                )
-                keep_id = ordered[0]["id"]
-                all_ids = [row["id"] for row in ordered]
-
-                # A prior group in this pass can recursively delete ids
-                # from later groups: merging duplicate parents cascades
-                # into their duplicate children, so a child group whose
-                # keep_id was one of those children is now stale. Skip
-                # groups whose keep_id is gone (the next while iteration
-                # re-queries and picks a fresh survivor) and drop dead
-                # remove_ids so we don't UPDATE photo_keywords toward a
-                # non-existent FK target.
-                alive = self._keyword_tree_repository().live_ids(all_ids)
-                if keep_id not in alive:
-                    continue
-                remove_ids = [x for x in all_ids if x != keep_id and x in alive]
-
-                self.keyword_tree.normalize_row_name(keep_id)
-                for rid in remove_ids:
-                    total_merged += self._merge_keyword_into(
-                        rid, keep_id, pending_source_only=True,
-                    )
-
-        return total_merged
-
-    def _rename_keyword_dependents(self, keyword_id, old_name, new_name):
-        """Carry a keyword row's rename into every string that mirrors its name.
-
-        Pending sidecar edits and the species curation tables store the
-        keyword's spelling rather than its id, so a row renamed without this
-        leaves an unsynced ``keyword_add`` writing the old word into XMP and
-        drops starred photos out of the highlight/life-list queries, which
-        compare those strings exact against ``keywords.name``.
-
-        Scoped to photos that actually carry ``keyword_id`` (and, for pending
-        changes, the workspaces those (photo, keyword) tags belong to), so a
-        separate same-spelling keyword row elsewhere in the DB is never
-        rewritten by side effect. Safe to call either side of the
-        ``keywords`` UPDATE: only ``photo_keywords`` is read, and a name
-        change does not touch it. Caller commits.
-        """
-        return self._keyword_tree_repository().rename_dependents(keyword_id, old_name, new_name)
-
-
-
-    def _reparent_disambiguated(self, child, dst_id, new_name):
-        """Move a colliding child under ``dst_id`` under a free name.
-
-        The three collision branches in ``_merge_keyword_into`` all preserve
-        the migrating row rather than folding it away, which means they all
-        rename it -- and a rename is never just the ``keywords`` row. Pending
-        sidecar edits and the species curation tables key on the spelling, so
-        skipping the dependent migration leaves an unsynced ``keyword_add``
-        writing the retired name into XMP and drops starred photos out of the
-        highlight and life-list queries. Caller commits.
-        """
-        return self._keyword_tree_repository().reparent_disambiguated(child, dst_id, new_name)
-
     def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
 
@@ -3144,47 +3047,6 @@ class Database:
         """
         self.species_curation.set_photo_preference(
             "species_representative", species, photo_id
-        )
-
-    def rename_photo_preferences_species(
-        self,
-        old_species: str,
-        new_species: str,
-        photo_workspace_pairs: Collection[tuple[int, int]] | None = None,
-    ) -> int:
-        """Rename stored representative-photo preferences across workspaces (no commit)."""
-        return self._species_curation_repository().rename_photo_preferences(
-            old_species, new_species, photo_workspace_pairs=photo_workspace_pairs,
-        )
-
-    def rename_species_highlights_species(
-        self,
-        old_species: str,
-        new_species: str,
-        photo_workspace_pairs: Collection[tuple[int, int]] | None = None,
-    ) -> int:
-        """Rename ordered species-highlight rows to a new species bucket (no commit).
-
-        Companion to :meth:`rename_photo_preferences_species` for the
-        ``species_highlights`` table. The rows carry a per-species ``rank``,
-        so we can't just rewrite the ``species`` column — a bucket may
-        already exist for ``new_species`` with its own ranks. Instead, each
-        moved row is deleted from the old bucket and inserted at the end
-        of the new bucket (``MAX(rank) + 1``) while preserving its
-        old-bucket order. Rows whose photo already appears in the new
-        bucket are dropped rather than duplicated.
-
-        When ``photo_workspace_pairs`` is provided, only rows matching
-        those ``(photo_id, workspace_id)`` pairs are moved (used by
-        ``api_update_keyword`` so we only rebucket highlights for photos
-        actually tagged with the renamed keyword). When omitted, all
-        workspaces are rebucketed.
-
-        Returns the count of highlight rows that landed in the new bucket
-        (excludes rows dropped as duplicates).
-        """
-        return self._species_curation_repository().rename_highlights(
-            old_species, new_species, photo_workspace_pairs=photo_workspace_pairs,
         )
 
     # Reads the Highlights relabel snapshots before it moves any curation.

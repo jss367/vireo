@@ -137,12 +137,12 @@ def _queue_keyword_rename_sidecars(db: Database, old_row: Row, new_row: Row, aff
         pairs = [
             (row["photo_id"], row["workspace_id"]) for row in affected
         ]
-        db.rename_photo_preferences_species(
+        db.species_curation.rename_photo_preferences(
             old_name,
             new_name,
             pairs,
         )
-        db.rename_species_highlights_species(
+        db.species_curation.rename_highlights(
             old_name,
             new_name,
             pairs,

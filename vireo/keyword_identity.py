@@ -1179,7 +1179,7 @@ def _apply_merge_overrides(db, target_id, resolved):
     if 'name' in changed:
         # Keep every dependent name string (pending sidecar edits, species
         # curation) in lockstep with the row, exactly as a rename would.
-        db._rename_keyword_dependents(target_id, current['name'], changed['name'])
+        db.keyword_tree.rename_dependents(target_id, current['name'], changed['name'])
     db.keyword_merges.set_fields(target_id, changed)
 
 

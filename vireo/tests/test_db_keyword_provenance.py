@@ -66,6 +66,19 @@ def _raw_tag(db, photo_id, keyword_id, source):
     )
 
 
+def _class_spy(monkeypatch, cls, name):
+    """Record every call to ``cls.<name>`` (minus ``self``) and forward it."""
+    calls = []
+    real = getattr(cls, name)
+
+    def spy(self, *args, **kwargs):
+        calls.append((args, kwargs))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(cls, name, spy)
+    return calls
+
+
 def _spy(monkeypatch, db, name):
     """Record every call to ``db.<name>`` and forward it to the real method."""
     calls = []
@@ -255,7 +268,9 @@ def test_merge_keyword_into_disambiguates_cross_type_children_through_the_facade
     dst_parent = db.add_keyword("Shorebirds")
     child = db.add_keyword("Macro", parent_id=src_parent)
     peer = db.add_keyword("Macro", parent_id=dst_parent, kw_type="individual")
-    calls = _spy(monkeypatch, db, "_reparent_disambiguated")
+    from repositories.keyword_tree import KeywordTreeRepository
+
+    calls = _class_spy(monkeypatch, KeywordTreeRepository, "reparent_disambiguated")
     assert db._merge_keyword_into(src_parent, dst_parent) == 1
     assert len(calls) == 1
     args, kwargs = calls[0]
@@ -314,8 +329,10 @@ def test_merge_keyword_into_retargets_pending_and_curation_through_the_facade(
     db.commit()
     db.queue_change(p1, "keyword_remove", "Egret", workspace_id=ws)
     db.commit()
-    highlights = _spy(monkeypatch, db, "rename_species_highlights_species")
-    prefs = _spy(monkeypatch, db, "rename_photo_preferences_species")
+    from repositories.species_curation import SpeciesCurationRepository
+
+    highlights = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_highlights")
+    prefs = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_photo_preferences")
 
     db._merge_keyword_into(src, dst, pending_source_only=True)
 
@@ -717,8 +734,10 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     db.conn.commit()
     cancels = _spy(monkeypatch, db, "remove_pending_changes")
     queued = _spy(monkeypatch, db, "queue_change")
-    highlights = _spy(monkeypatch, db, "rename_species_highlights_species")
-    prefs = _spy(monkeypatch, db, "rename_photo_preferences_species")
+    from repositories.species_curation import SpeciesCurationRepository
+
+    highlights = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_highlights")
+    prefs = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_photo_preferences")
     from repositories.keyword_provenance import KeywordProvenanceRepository
 
     configs = []

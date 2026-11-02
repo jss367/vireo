@@ -27,7 +27,6 @@ from db import Database
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.species_curation import SpeciesCurationRepository
 from services import photo_ingest, workspace_folders
-from signature_contract import calling_signature
 
 
 def _visible(db, sql, params=()):
@@ -1153,10 +1152,10 @@ def test_workspace_scoped_methods_require_active_workspace(db, method, args):
 @pytest.mark.parametrize("old,new", [("", "B"), ("A", ""), (None, "B"), ("A", "A")])
 def test_renames_ignore_empty_and_identity(db, cur, old, new):
     statements = _trace(db)
-    assert db.rename_photo_preferences_species(old, new) == 0
+    assert db.species_curation.rename_photo_preferences(old, new) == 0
     assert db.species_curation.rename_representatives(old, new) == 0
-    assert db.rename_species_highlights_species(old, new) == 0
-    assert db.rename_photo_preferences_species(old, new, [(1, 1)]) == 0
+    assert db.species_curation.rename_highlights(old, new) == 0
+    assert db.species_curation.rename_photo_preferences(old, new, [(1, 1)]) == 0
     db.conn.set_trace_callback(None)
     assert statements == []
 
@@ -1190,7 +1189,7 @@ def test_rename_photo_preferences_all_workspaces(db, cur):
     # INSERT OR IGNORE: other/custom already has a New Name row, so the old
     # one is dropped rather than moved.
     with db.transaction():
-        assert db.rename_photo_preferences_species("Old Name", "New Name") == 3
+        assert db.species_curation.rename_photo_preferences("Old Name", "New Name") == 3
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -1213,7 +1212,7 @@ def test_rename_photo_preferences_selected_pairs(db, cur):
     p, ws = cur["p"], cur["ws"]
     other = _seed_renames(db, cur)
     with db.transaction():
-        moved = db.rename_photo_preferences_species(
+        moved = db.species_curation.rename_photo_preferences(
             "Old Name", "New Name",
             [(p["robin2"], other), (p["robin2"], other), (p["robin1"], ws),
              (p["puma"], ws)],
@@ -1242,8 +1241,8 @@ def test_rename_photo_preferences_routes_representatives_through_facade(db, cur,
             (old, new, photo_ids)
         ),
     )
-    db.rename_photo_preferences_species("A", "B")
-    db.rename_photo_preferences_species(
+    db.species_curation.rename_photo_preferences("A", "B")
+    db.species_curation.rename_photo_preferences(
         "A", "B", [(p["robin2"], ws), (p["robin1"], ws), (p["robin2"], 99)]
     )
     assert calls == [
@@ -1258,7 +1257,7 @@ def test_rename_photo_preferences_leaves_commit_to_caller(db, cur, pairs):
     _seed_renames(db, cur)
     if pairs == "selected":
         pairs = [(p["robin1"], ws)]
-    db.rename_photo_preferences_species("Old Name", "New Name", pairs)
+    db.species_curation.rename_photo_preferences("Old Name", "New Name", pairs)
     assert db.conn.in_transaction
     assert _visible(
         db, "SELECT COUNT(*) FROM photo_preferences WHERE species = 'New Name'"
@@ -1346,7 +1345,7 @@ def test_rename_species_highlights_all_workspaces(db, cur):
     p, ws = cur["p"], cur["ws"]
     other = _seed_highlight_renames(db, cur)
     with db.transaction():
-        assert db.rename_species_highlights_species("Old Name", "New Name") == 4
+        assert db.species_curation.rename_highlights("Old Name", "New Name") == 4
     assert not db.conn.in_transaction
     assert _visible(
         db,
@@ -1365,7 +1364,7 @@ def test_rename_species_highlights_all_workspaces(db, cur):
 def test_rename_species_highlights_selected_pairs(db, cur):
     p, ws = cur["p"], cur["ws"]
     other = _seed_highlight_renames(db, cur)
-    moved = db.rename_species_highlights_species(
+    moved = db.species_curation.rename_highlights(
         "Old Name", "New Name",
         [(p["card1"], ws), (p["robin1"], ws), (p["card1"], ws),
          (p["plain"], other), (p["robin1"], 999)],
@@ -1389,7 +1388,7 @@ def test_rename_species_highlights_chunks_selected_photos(db, cur):
     _seed_highlight_renames(db, cur)
     pairs = [(pid, ws) for pid in range(10_000, 10_800)] + [(p["card1"], ws)]
     statements = _trace(db)
-    assert db.rename_species_highlights_species("Old Name", "New Name", pairs) == 1
+    assert db.species_curation.rename_highlights("Old Name", "New Name", pairs) == 1
     db.conn.set_trace_callback(None)
     distinct = list(dict.fromkeys(s.strip() for s in statements))
     assert len([s for s in distinct if "AND photo_id IN (" in s]) == 2
@@ -1401,7 +1400,7 @@ def test_rename_species_highlights_leave_commit_to_caller(db, cur, pairs):
     _seed_highlight_renames(db, cur)
     if pairs == "selected":
         pairs = [(p["robin1"], ws)]
-    db.rename_species_highlights_species("Old Name", "New Name", pairs)
+    db.species_curation.rename_highlights("Old Name", "New Name", pairs)
     assert db.conn.in_transaction
     assert _visible(
         db, "SELECT COUNT(*) FROM species_highlights WHERE species = 'Old Name'"
@@ -1412,12 +1411,12 @@ def test_rename_species_highlights_no_source_rows(db, cur):
     p, ws = cur["p"], cur["ws"]
     _seed_highlight_renames(db, cur)
     statements = _trace(db)
-    assert db.rename_species_highlights_species(
+    assert db.species_curation.rename_highlights(
         "Old Name", "New Name", [(p["card2"], ws)]
     ) == 0
     db.conn.set_trace_callback(None)
     assert not any("MAX(rank)" in s for s in statements)
-    assert db.rename_species_highlights_species("Missing", "New Name") == 0
+    assert db.species_curation.rename_highlights("Missing", "New Name") == 0
 
 
 # -- relabel and eligibility reads --------------------------------------------------------
@@ -1506,11 +1505,10 @@ def test_life_list_preference_eligibility(db, cur):
 # -- structure ----------------------------------------------------------------------------
 
 
-# Still forwarders on ``Database``: ``KeywordTreeRepository`` and
-# ``KeywordProvenanceRepository`` bind these from the façade by name
-# (``FACADE_METHODS``), so patches of the ``Database`` methods reach the
-# keyword renames and merges that call them.
-_DELEGATING_SPECIES_CURATION_METHODS = (
+# Forwarders this domain kept on ``Database`` while keyword repositories
+# bound them by name; the keyword renames and merges build a
+# ``SpeciesCurationRepository`` on their own connection now.
+_REMOVED_SPECIES_CURATION_FORWARDERS = (
     "rename_photo_preferences_species",
     "rename_species_highlights_species",
 )
@@ -1565,16 +1563,9 @@ def _self_attrs(fn):
     }
 
 
-@pytest.mark.parametrize("name", _DELEGATING_SPECIES_CURATION_METHODS)
-def test_species_curation_method_delegates_to_repository(name):
-    attrs = _self_attrs(getattr(Database, name))
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to "
-        "SpeciesCurationRepository"
-    )
-    assert "_species_curation_repository" in attrs, (
-        f"Database.{name} no longer delegates to SpeciesCurationRepository"
-    )
+@pytest.mark.parametrize("name", _REMOVED_SPECIES_CURATION_FORWARDERS)
+def test_species_curation_renames_have_no_forwarder_on_database(name):
+    assert not hasattr(Database, name), f"Database.{name} came back; call db.species_curation"
 
 
 def test_species_curation_has_no_other_forwarding_wrappers_on_database():
@@ -1615,8 +1606,8 @@ def test_species_curation_repository_never_touches_keyword_writers():
 def test_species_curation_signatures_unchanged():
     from repositories.species_curation import SpeciesCurationRepository
 
-    sig = {n: calling_signature(getattr(Database, n))
-           for n in _DELEGATING_SPECIES_CURATION_METHODS}
+    sig = {n: str(inspect.signature(getattr(SpeciesCurationRepository, n)))
+           for n in ("rename_photo_preferences", "rename_highlights")}
     sig.update({
         f"repo.{n}": str(inspect.signature(getattr(SpeciesCurationRepository, n)))
         for n in ("get_highlights_candidates", "set_photo_preference",
@@ -1634,10 +1625,10 @@ def test_species_curation_signatures_unchanged():
     assert sig["repo.move_highlight"] == (
         "(self, species, photo_id, direction)"
     )
-    assert sig["rename_photo_preferences_species"] == (
+    assert sig["rename_photo_preferences"] == (
         "(self, old_species, new_species, photo_workspace_pairs=None)"
     )
-    assert sig["rename_species_highlights_species"] == (
+    assert sig["rename_highlights"] == (
         "(self, old_species, new_species, photo_workspace_pairs=None)"
     )
     assert sig["repo.rename_representatives"] == (
