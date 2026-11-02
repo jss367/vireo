@@ -797,6 +797,26 @@ def select(
     explain: bool = False,
     own_base: str | None = None,
 ) -> Selection:
+    """Select for the diff ``base``..``head``, plus ``ALWAYS_RUN_TESTS``."""
+    sel = _select_for_diff(base, head, impact, cwd, explain, own_base)
+    if sel.mode == "full":
+        return sel
+    for test in ALWAYS_RUN_TESTS:
+        if _show(head, test, cwd) is not None:
+            sel.files.add(test)
+            sel.mode = "subset"
+            sel.note(f"{test}: always run")
+    return sel
+
+
+def _select_for_diff(
+    base: str,
+    head: str,
+    impact: ImpactMap | None,
+    cwd: Path,
+    explain: bool,
+    own_base: str | None,
+) -> Selection:
     """Select for the diff ``base``..``head``, ``base`` being the map commit.
 
     With ``own_base`` (see ``resolve_own_base``), only files that also
@@ -946,10 +966,6 @@ def select(
 
     if sel.mode == "full":
         return sel
-    for test in ALWAYS_RUN_TESTS:
-        if _show(head, test, cwd) is not None:
-            sel.files.add(test)
-            sel.note(f"{test}: always run")
     if not sel.files and not sel.ids:
         sel.mode = "none"
         sel.note("no unit test exercises the changed files")
