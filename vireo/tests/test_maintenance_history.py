@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
+from services import keyword_tagging
 
 
 def _photo(db, tmp_path):
@@ -31,7 +32,7 @@ def _duplicates(db):
     for name, pid in zip(('Heron', 'heron'), pids, strict=True):
         kid = db.conn.execute("INSERT INTO keywords(name, type) VALUES (?, 'general')", (name,)).lastrowid
         ids.append(kid)
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
         db.commit()
     return ids
 

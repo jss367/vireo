@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from PIL import Image
 from repositories.folders import FolderRepository
-from services import pending_changes, photo_ingest, photo_locations, workspace_folders
+from services import keyword_tagging, pending_changes, photo_ingest, photo_locations, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 
 
@@ -506,7 +506,7 @@ def test_sync_from_xmp_updates_db(tmp_path):
 
     # Import initial keyword
     kid = db.keywords.add('Sparrow')
-    db.tag_photo(pid, kid)
+    keyword_tagging.tag_photo(db, pid, kid)
     db.commit()
 
     # Replace the XMP sidecar with a different keyword set.
@@ -537,7 +537,7 @@ def test_sync_from_xmp_keeps_keywords_when_the_sidecar_cannot_be_read(
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.ensure_default_workspace())
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"Sparrow"})
-    db.tag_photo(pid, db.keywords.add("Sparrow"))
+    keyword_tagging.tag_photo(db, pid, db.keywords.add("Sparrow"))
     db.commit()
 
     os.remove(xmp_path)
@@ -621,8 +621,8 @@ def test_sync_from_xmp_flat_removal_preserves_same_name_hierarchy(tmp_path):
     flat = db.keywords.add("Wildlife")
     parent = db.keywords.add("Animals")
     nested = db.keywords.add("Wildlife", parent_id=parent)
-    db.tag_photo(pid, flat)
-    db.tag_photo(pid, nested)
+    keyword_tagging.tag_photo(db, pid, flat)
+    keyword_tagging.tag_photo(db, pid, nested)
     db.commit()
     db.pending_changes.queue(pid, "keyword_remove_flat", "Wildlife")
     db.commit()
@@ -647,7 +647,7 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'sparrow'})
 
     kid = db.keywords.add('Sparrow')
-    db.tag_photo(pid, kid)
+    keyword_tagging.tag_photo(db, pid, kid)
     db.commit()
 
     os.remove(xmp_path)
@@ -679,7 +679,7 @@ def test_sync_from_xmp_preserves_tag_when_only_edge_quote_differs(tmp_path):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'apapane'})
 
     kid = db.keywords.add('apapane')
-    db.tag_photo(pid, kid)
+    keyword_tagging.tag_photo(db, pid, kid)
     db.commit()
 
     os.remove(xmp_path)
@@ -711,7 +711,7 @@ def test_sync_from_xmp_skips_xmp_keywords_that_normalize_to_empty(tmp_path):
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Sparrow'})
 
     kid = db.keywords.add('Sparrow')
-    db.tag_photo(pid, kid)
+    keyword_tagging.tag_photo(db, pid, kid)
     db.commit()
 
     os.remove(xmp_path)
@@ -1312,8 +1312,8 @@ def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
     kid_by_type = {row['type']: row['id'] for row in rows}
     assert set(kid_by_type) == {'taxonomy', 'individual'}
 
-    db.tag_photo(pid, kid_by_type['taxonomy'])
-    db.tag_photo(pid, kid_by_type['individual'])
+    keyword_tagging.tag_photo(db, pid, kid_by_type['taxonomy'])
+    keyword_tagging.tag_photo(db, pid, kid_by_type['individual'])
     db.commit()
 
     os.remove(xmp_path)
@@ -3510,7 +3510,7 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
     db.set_active_workspace(db.ensure_default_workspace())
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     keyword = db.keywords.add('Osprey')
-    db.tag_photo(pid, keyword, source='manual')
+    keyword_tagging.tag_photo(db, pid, keyword, source='manual')
     db.commit()
     db.pending_changes.queue(pid, 'keyword_add', 'Osprey')
     db.commit()

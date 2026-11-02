@@ -29,7 +29,7 @@ from export import (
     sanitize_filename,
 )
 from PIL import Image
-from services import catalog_deletion, gps_locations, photo_ingest, photo_locations, workspace_folders
+from services import catalog_deletion, gps_locations, keyword_tagging, photo_ingest, photo_locations, workspace_folders
 
 
 def test_resolve_template_original():
@@ -293,7 +293,7 @@ def export_env(tmp_path):
 
     # Add a species keyword to p1
     k = db.keywords.add("Red-tailed Hawk", is_species=True)
-    db.tag_photo(p1, k)
+    keyword_tagging.tag_photo(db, p1, k)
     db.commit()
 
     return {
@@ -602,7 +602,7 @@ def test_export_photos_embeds_only_selected_metadata(export_env, monkeypatch):
         ),
     )
     second_species = env["db"].keywords.add("Northern Flicker", is_species=True)
-    env["db"].tag_photo(env["p1"], second_species)
+    keyword_tagging.tag_photo(env["db"], env["p1"], second_species)
     env['db'].commit()
     env["db"].conn.commit()
 
@@ -713,7 +713,7 @@ def test_export_photos_uses_assigned_keyword_location(export_env):
         "UPDATE keywords SET latitude=?, longitude=? WHERE id=?",
         (32.92, -117.25, location_id),
     )
-    env["db"].tag_photo(env["p1"], location_id)
+    keyword_tagging.tag_photo(env["db"], env["p1"], location_id)
     env['db'].commit()
     env["db"].conn.commit()
 

@@ -11,6 +11,7 @@ from services import (
     browse_queries,
     catalog_deletion,
     detection_store,
+    keyword_tagging,
     missing_originals,
     pending_changes,
     photo_ingest,
@@ -2043,7 +2044,7 @@ def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
     birds = db.keywords.add("1Birds")
     family = db.keywords.add("Penduline tits", parent_id=birds)
     nested = db.keywords.add("Verdin", parent_id=family)
-    db.tag_photo(nested_photo, nested)
+    keyword_tagging.tag_photo(db, nested_photo, nested)
     db.commit()
 
     resp = client.post(
@@ -2085,7 +2086,7 @@ def test_batch_species_keyword_reuses_hierarchical_taxon(app_and_db):
     ]
     family = db.keywords.add("Penduline tits", parent_id=db.keywords.add("1Birds"))
     nested = db.keywords.add("Verdin", parent_id=family)
-    db.tag_photo(nested_photo, nested)
+    keyword_tagging.tag_photo(db, nested_photo, nested)
     db.commit()
 
     resp = client.post("/api/batch/keyword", json={
@@ -2674,7 +2675,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     )
     parent = db.keywords.add("Penduline tits")
     nested = db.keywords.add("Verdin", parent_id=parent)
-    db.tag_photo(photo_id, nested)
+    keyword_tagging.tag_photo(db, photo_id, nested)
     db.commit()
     # A top-level twin from before add_keyword reused the placed row.
     root = db.conn.execute(
@@ -2771,7 +2772,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
     )
     parent = db.keywords.add("Penduline tits")
     nested = db.keywords.add("Verdin", parent_id=parent)
-    db.tag_photo(photo_id, nested)
+    keyword_tagging.tag_photo(db, photo_id, nested)
     db.commit()
     # A top-level twin from before add_keyword reused the placed row.
     root = db.conn.execute(
@@ -2853,7 +2854,7 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
     # per-model accept below runs the no_tag path.
     parent = db.keywords.add("Penduline tits")
     nested = db.keywords.add("Verdin", parent_id=parent)
-    db.tag_photo(photo_id, nested)
+    keyword_tagging.tag_photo(db, photo_id, nested)
     db.keywords.add("Verdin", is_species=True)
     db.commit()
 
@@ -3052,7 +3053,7 @@ def test_encounter_species_records_only_newly_tagged(app_and_db):
 
     # Pre-tag the first photo with the species keyword directly.
     kid = db.keywords.add("Blue Jay", is_species=True)
-    db.tag_photo(photo_ids[0], kid)
+    keyword_tagging.tag_photo(db, photo_ids[0], kid)
     db.commit()
 
     _seed_encounter_cache(app, db, photo_ids)
@@ -3093,7 +3094,7 @@ def test_encounter_species_replacement_only_for_changed_photos(app_and_db):
     sparrow_id = db.conn.execute(
         "SELECT id FROM keywords WHERE name='Sparrow' AND is_species=1"
     ).fetchone()["id"]
-    db.untag_photo(photo_ids[-1], sparrow_id)
+    keyword_tagging.untag_photo(db, photo_ids[-1], sparrow_id)
     db.commit()
     db.conn.execute("DELETE FROM edit_history")
     db.conn.commit()
@@ -3187,8 +3188,8 @@ def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db)
     nested = db.keywords.add("Verdin", parent_id=parent)
     alternate_parent = db.keywords.add("Desert birds")
     alternate_nested = db.keywords.add("Verdin", parent_id=alternate_parent)
-    db.tag_photo(photo_id, nested)
-    db.tag_photo(photo_id, alternate_nested)
+    keyword_tagging.tag_photo(db, photo_id, nested)
+    keyword_tagging.tag_photo(db, photo_id, alternate_nested)
     db.commit()
     _seed_encounter_cache(
         app, db, [photo_id], confirmed_species="Verdin",
@@ -3262,8 +3263,8 @@ def test_encounter_species_replacement_retags_same_taxon_alias(app_and_db):
         (nested_verdin,),
     )
     db.conn.commit()
-    db.tag_photo(photo_id, root_verdin)
-    db.tag_photo(photo_id, nested_verdin)
+    keyword_tagging.tag_photo(db, photo_id, root_verdin)
+    keyword_tagging.tag_photo(db, photo_id, nested_verdin)
     db.commit()
     _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
 
@@ -3339,7 +3340,7 @@ def test_encounter_species_replacement_preserves_linked_homonym(app_and_db):
         "VALUES ('Robin', ?, 1, 'taxonomy', 400)",
         (hierarchy_parent,),
     ).lastrowid
-    db.tag_photo(photo_id, linked_homonym)
+    keyword_tagging.tag_photo(db, photo_id, linked_homonym)
     db.commit()
     db.conn.commit()
 
@@ -3416,8 +3417,8 @@ def test_encounter_species_replacement_preserves_legacy_homonym(app_and_db):
         "WHERE id = ?",
         (legacy_leaf,),
     )
-    db.tag_photo(photo_id, old_root)
-    db.tag_photo(photo_id, legacy_leaf)
+    keyword_tagging.tag_photo(db, photo_id, old_root)
+    keyword_tagging.tag_photo(db, photo_id, legacy_leaf)
     db.commit()
     db.conn.commit()
 
@@ -3490,7 +3491,7 @@ def test_encounter_species_replacement_scopes_hierarchy_fallback_to_submitted_ph
         (unrelated_leaf,),
     )
     db.conn.commit()
-    db.tag_photo(photo_id, attached_leaf)
+    keyword_tagging.tag_photo(db, photo_id, attached_leaf)
     db.commit()
     _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
 
@@ -3570,8 +3571,8 @@ def test_encounter_species_replacement_resolves_hierarchy_fallback_per_photo(
         (leaf_b,),
     )
     db.conn.commit()
-    db.tag_photo(photo_a, leaf_a)
-    db.tag_photo(photo_b, leaf_b)
+    keyword_tagging.tag_photo(db, photo_a, leaf_a)
+    keyword_tagging.tag_photo(db, photo_b, leaf_b)
     db.commit()
     _seed_encounter_cache(
         app, db, [photo_a, photo_b], confirmed_species="Verdin",
@@ -3650,7 +3651,7 @@ def test_encounter_species_replacement_skips_unrelated_root_when_only_leaf_attac
         (attached_leaf,),
     )
     db.conn.commit()
-    db.tag_photo(photo_id, attached_leaf)
+    keyword_tagging.tag_photo(db, photo_id, attached_leaf)
     db.commit()
     _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
 
@@ -3728,7 +3729,7 @@ def test_encounter_species_replacement_removes_repaired_alias_leaf(app_and_db):
         (attached_leaf,),
     )
     db.conn.commit()
-    db.tag_photo(photo_id, attached_leaf)
+    keyword_tagging.tag_photo(db, photo_id, attached_leaf)
     db.commit()
     # Cached ``confirmed_species`` is the canonical root display name
     # (``Verdin``) — the encounter was confirmed under that name before
@@ -3827,7 +3828,7 @@ def test_encounter_species_replacement_finds_taxonomy_only_previous(app_and_db):
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
-    db.tag_photo(photo_id, prev_kid)
+    keyword_tagging.tag_photo(db, photo_id, prev_kid)
     db.commit()
 
     _seed_encounter_cache(app, db, [photo_id], confirmed_species="apapane")
@@ -4287,7 +4288,7 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
     species_id = db.keywords.add("Cardinal", is_species=True)
-    db.tag_photo(photo_id, species_id)
+    keyword_tagging.tag_photo(db, photo_id, species_id)
     db.commit()
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Single Photo", rules)
@@ -4333,7 +4334,7 @@ def test_compare_flags_pending_match_as_needs_review(app_and_db):
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
     species_id = db.keywords.add("Cardinal", is_species=True)
-    db.tag_photo(photo_id, species_id)
+    keyword_tagging.tag_photo(db, photo_id, species_id)
     db.commit()
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Pending Match", rules)
@@ -4363,7 +4364,7 @@ def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
     species_id = db.keywords.add("Cardinal", is_species=True)
-    db.tag_photo(photo_id, species_id)
+    keyword_tagging.tag_photo(db, photo_id, species_id)
     db.commit()
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Accepted Matches", rules)
@@ -4422,7 +4423,7 @@ def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
         "VALUES ('Desert Verdin', ?, 1, 'taxonomy', 2912)",
         (parent,),
     ).lastrowid
-    db.tag_photo(photo_id, leaf)
+    keyword_tagging.tag_photo(db, photo_id, leaf)
     db.commit()
     db.conn.commit()
 
@@ -4463,8 +4464,8 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
 
     old_one = db.keywords.add("Old Species One", is_species=True)
     old_two = db.keywords.add("Old Species Two", is_species=True)
-    db.tag_photo(photo_ids[0], old_one)
-    db.tag_photo(photo_ids[1], old_two)
+    keyword_tagging.tag_photo(db, photo_ids[0], old_one)
+    keyword_tagging.tag_photo(db, photo_ids[1], old_two)
     db.commit()
 
     first_det = db.detections.save(photo_ids[0], [
@@ -4527,7 +4528,7 @@ def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
     old_kid = db.keywords.add("Old Species", is_species=True)
-    db.tag_photo(photo_id, old_kid)
+    keyword_tagging.tag_photo(db, photo_id, old_kid)
     db.commit()
     db.species_curation.add_highlight("Old Species", photo_id)
     db.set_species_representative("Old Species", photo_id)
@@ -7227,7 +7228,7 @@ def test_text_search_returns_ranked_enriched_results(app_and_db, monkeypatch):
     )
     db.commit()
     species_id = db.keywords.add("Search Cardinal", is_species=True)
-    db.tag_photo(p1, species_id)
+    keyword_tagging.tag_photo(db, p1, species_id)
     db.commit()
 
     resp = client.get("/api/photos/search?q=bird&threshold=0.15")
@@ -8117,7 +8118,7 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
     k = cur.lastrowid
     # Tag a photo in the current workspace with the variant
     photos = db.photos.list_page()
-    db.tag_photo(photos[0]["id"], k)
+    keyword_tagging.tag_photo(db, photos[0]["id"], k)
     db.commit()
 
     # Create workspace B with its own folder and photo
@@ -8133,7 +8134,7 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
     )
     db.conn.commit()
     k_b = cur_b.lastrowid
-    db.tag_photo(pid_b, k_b)
+    keyword_tagging.tag_photo(db, pid_b, k_b)
     db.commit()
 
     # Switch back to default workspace for the API call
@@ -8172,8 +8173,8 @@ def test_keyword_duplicates_scoped_by_slot(app_and_db):
     missouri = db.keywords.add("Missouri")
     sfd_il = db.keywords.add("Springfield", parent_id=illinois)
     sfd_mo = db.keywords.add("Springfield", parent_id=missouri)
-    db.tag_photo(p1, sfd_il)
-    db.tag_photo(p2, sfd_mo)
+    keyword_tagging.tag_photo(db, p1, sfd_il)
+    keyword_tagging.tag_photo(db, p2, sfd_mo)
     db.commit()
 
     # Same name at root but different type — species vs general
@@ -8189,8 +8190,8 @@ def test_keyword_duplicates_scoped_by_slot(app_and_db):
         ("Robin",),
     )
     db.conn.commit()
-    db.tag_photo(p1, cur1.lastrowid)
-    db.tag_photo(p2, cur2.lastrowid)
+    keyword_tagging.tag_photo(db, p1, cur1.lastrowid)
+    keyword_tagging.tag_photo(db, p2, cur2.lastrowid)
     db.commit()
 
     # Same name/parent/type but different effective species identity. Legacy
@@ -8202,7 +8203,7 @@ def test_keyword_duplicates_scoped_by_slot(app_and_db):
         ("robin",),
     ).lastrowid
     db.conn.commit()
-    db.tag_photo(p1, species_general)
+    keyword_tagging.tag_photo(db, p1, species_general)
     db.commit()
 
     with app.test_client() as c:
@@ -8227,7 +8228,7 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
     db.commit()
     # Tag a photo in workspace A with the child only
     photos_a = db.photos.list_page()
-    db.tag_photo(photos_a[0]["id"], k_hawk)
+    keyword_tagging.tag_photo(db, photos_a[0]["id"], k_hawk)
     db.commit()
 
     # Create workspace B with its own folder, photo, and keyword "Penguin"
@@ -8238,7 +8239,7 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k_penguin = db.keywords.add("Penguin")
-    db.tag_photo(pid_b, k_penguin)
+    keyword_tagging.tag_photo(db, pid_b, k_penguin)
     db.commit()
 
     # Switch back to workspace A
@@ -8583,7 +8584,7 @@ def test_rename_keyword_queues_sidecar_changes(app_and_db):
     db.commit()
     # conftest photos: p1 is in folder '/photos/2024'
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, kid)
+    keyword_tagging.tag_photo(db, p1, kid)
     db.commit()
     # Clear any prior pending changes
     db.conn.execute("DELETE FROM pending_changes")
@@ -8612,7 +8613,7 @@ def test_rename_keyword_normalizes_edge_quotes_and_queues_clean_name(app_and_db)
     kid = db.keywords.add("OldBird")
     db.commit()
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, kid)
+    keyword_tagging.tag_photo(db, p1, kid)
     db.commit()
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -8709,7 +8710,7 @@ def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     apapane_id = db.keywords.add("apapane")
     other_id = db.keywords.add("Other")
-    db.tag_photo(p1, other_id)
+    keyword_tagging.tag_photo(db, p1, other_id)
     db.commit()
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -8785,7 +8786,7 @@ def test_rename_keyword_does_not_merge_across_types_toplevel(app_and_db):
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     taxonomy_id = db.keywords.add("apapane", kw_type="taxonomy")
     other_id = db.keywords.add("Other", kw_type="individual")
-    db.tag_photo(p1, other_id)
+    keyword_tagging.tag_photo(db, p1, other_id)
     db.commit()
 
     resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
@@ -8848,7 +8849,7 @@ def test_rename_keyword_updates_photo_preferences(app_and_db):
     kid = db.keywords.add("OldBird", is_species=True)
     db.commit()
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, kid)
+    keyword_tagging.tag_photo(db, p1, kid)
     db.commit()
     db.species_curation.set_photo_preference("life_list", "OldBird", p1)
     db.species_curation.set_photo_preference("highlights", "OldBird", p1)
@@ -8868,7 +8869,7 @@ def test_rename_keyword_updates_species_representative(app_and_db):
     kid = db.keywords.add("OldBird", is_species=True)
     db.commit()
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, kid)
+    keyword_tagging.tag_photo(db, p1, kid)
     db.commit()
     db.species_curation.set_photo_preference("species_representative", "OldBird", p1)
     db.commit()
@@ -8888,7 +8889,7 @@ def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
     rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
     p_old = rows[0]["id"]
     p_new = rows[1]["id"]
-    db.tag_photo(p_old, kid_old)
+    keyword_tagging.tag_photo(db, p_old, kid_old)
     db.commit()
     db.species_curation.set_photo_preference("life_list", "OldBird", p_old)
     db.species_curation.set_photo_preference("life_list", "NewBird", p_new)
@@ -8908,8 +8909,8 @@ def test_rename_keyword_updates_species_highlights(app_and_db):
     db.commit()
     rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
     p1, p2 = rows[0]["id"], rows[1]["id"]
-    db.tag_photo(p1, kid)
-    db.tag_photo(p2, kid)
+    keyword_tagging.tag_photo(db, p1, kid)
+    keyword_tagging.tag_photo(db, p2, kid)
     db.commit()
     db.species_curation.add_highlight("OldBird", p1)
     db.species_curation.add_highlight("OldBird", p2)
@@ -8934,9 +8935,9 @@ def test_rename_keyword_species_highlights_merge_into_existing_target(app_and_db
     p_target = rows[0]["id"]
     p_moving_a = rows[1]["id"]
     p_moving_b = rows[2]["id"]
-    db.tag_photo(p_target, kid_new)
-    db.tag_photo(p_moving_a, kid_old)
-    db.tag_photo(p_moving_b, kid_old)
+    keyword_tagging.tag_photo(db, p_target, kid_new)
+    keyword_tagging.tag_photo(db, p_moving_a, kid_old)
+    keyword_tagging.tag_photo(db, p_moving_b, kid_old)
     db.commit()
     db.species_curation.add_highlight("NewBird", p_target)
     db.species_curation.add_highlight("OldBird", p_moving_a)
@@ -8962,9 +8963,9 @@ def test_rename_keyword_species_highlights_dedupe_existing_photo(app_and_db):
     rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
     p_target = rows[0]["id"]
     p_shared = rows[1]["id"]
-    db.tag_photo(p_target, kid_new)
-    db.tag_photo(p_shared, kid_old)
-    db.tag_photo(p_shared, kid_new)
+    keyword_tagging.tag_photo(db, p_target, kid_new)
+    keyword_tagging.tag_photo(db, p_shared, kid_old)
+    keyword_tagging.tag_photo(db, p_shared, kid_new)
     db.commit()
     db.species_curation.add_highlight("NewBird", p_target)
     db.species_curation.add_highlight("NewBird", p_shared)
@@ -9006,7 +9007,7 @@ def test_rename_species_highlights_species_chunks_scoped_photo_ids(
             db, folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
             file_size=1, file_mtime=float(i),
         )
-        db.tag_photo(pid, kid_old)
+        keyword_tagging.tag_photo(db, pid, kid_old)
         db.commit()
         db.species_curation.add_highlight("OldBird", pid)
         db.commit()
@@ -9180,7 +9181,7 @@ def _seed_anianiau_bucket(db):
             db, folder_id=fid, filename=f"{label}.jpg", extension='.jpg',
             file_size=1000 + i, file_mtime=float(i), timestamp=ts,
         )
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
         db.commit()
         _set_photo_quality_flag(db, pid, quality=quality, flag=flag)
         ids[label] = pid
@@ -9332,7 +9333,7 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
         file_size=1003, file_mtime=4.0, timestamp='2024-01-04T10:00:00',
     )
     for pid in (scored_a, scored_b, unscored_rep, unscored_tail):
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
         db.commit()
     _set_photo_quality_flag(db, scored_a, quality=0.9)
     _set_photo_quality_flag(db, scored_b, quality=0.4)
@@ -9412,8 +9413,8 @@ def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_d
     rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
     species_photo = rows[0]["id"]
     place_photo = rows[1]["id"]
-    db.tag_photo(species_photo, species_kid)
-    db.tag_photo(place_photo, place_kid)
+    keyword_tagging.tag_photo(db, species_photo, species_kid)
+    keyword_tagging.tag_photo(db, place_photo, place_kid)
     db.commit()
     db.species_curation.set_photo_preference("life_list", "Robin", species_photo)
     db.commit()
@@ -9431,7 +9432,7 @@ def test_delete_keyword_queues_sidecar_removals(app_and_db):
     kid = db.keywords.add("ToDelete")
     db.commit()
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, kid)
+    keyword_tagging.tag_photo(db, p1, kid)
     db.commit()
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -9455,7 +9456,7 @@ def test_rename_with_invalid_type_queues_nothing(app_and_db):
     kid = db.keywords.add("StableKeyword")
     db.commit()
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p1, kid)
+    keyword_tagging.tag_photo(db, p1, kid)
     db.commit()
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -9490,8 +9491,8 @@ def test_rename_keyword_queues_for_all_workspaces(app_and_db):
     kid = db.keywords.add("SharedBird")
     db.commit()
     p_ws1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p_ws1, kid)
-    db.tag_photo(p_ws2, kid)
+    keyword_tagging.tag_photo(db, p_ws1, kid)
+    keyword_tagging.tag_photo(db, p_ws2, kid)
     db.commit()
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -9533,8 +9534,8 @@ def test_delete_keyword_queues_for_all_workspaces(app_and_db):
     kid = db.keywords.add("SharedDelete")
     db.commit()
     p_ws1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.tag_photo(p_ws1, kid)
-    db.tag_photo(p_ws2, kid)
+    keyword_tagging.tag_photo(db, p_ws1, kid)
+    keyword_tagging.tag_photo(db, p_ws2, kid)
     db.commit()
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -10415,7 +10416,7 @@ def test_selection_keyword_suggestions_return_partial_and_shared_keywords(app_an
     shared_id = db.keywords.add("Shared selection keyword")
     db.commit()
     for photo_id in ids:
-        db.tag_photo(photo_id, shared_id)
+        keyword_tagging.tag_photo(db, photo_id, shared_id)
         db.commit()
     resp = client.post(
         "/api/selection/keyword-suggestions",
@@ -10454,7 +10455,7 @@ def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
         for idx in range(1000)
     ]
     keyword_id = db.keywords.add("Large Suggestion")
-    db.tag_photo(ids[0], keyword_id)
+    keyword_tagging.tag_photo(db, ids[0], keyword_id)
     db.commit()
     client = app.test_client()
 
@@ -13706,7 +13707,7 @@ def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
         "VALUES (?, 'taxonomy.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, taxonomy_kid)
+    keyword_tagging.tag_photo(db, pid, taxonomy_kid)
     db.commit()
     det = db.detections.save(
         pid,
@@ -13757,7 +13758,7 @@ def test_highlights_confirm_ignores_higher_rank_taxonomy_keyword(app_and_db):
         "VALUES (?, 'genus.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, genus_kid)
+    keyword_tagging.tag_photo(db, pid, genus_kid)
     db.commit()
     det = db.detections.save(
         pid,
@@ -13804,7 +13805,7 @@ def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
         (fid,),
     ).lastrowid
     existing_kid = db.keywords.add("House Sparrow", is_species=True)
-    db.tag_photo(pid2, existing_kid)
+    keyword_tagging.tag_photo(db, pid2, existing_kid)
     db.commit()
     det1 = db.detections.save(
         pid1,
@@ -13858,7 +13859,7 @@ def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
         "VALUES (?, 'relabel.jpg', 0.8, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, old_kid)
+    keyword_tagging.tag_photo(db, pid, old_kid)
     db.commit()
     det = db.detections.save(
         pid,
@@ -13905,8 +13906,8 @@ def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
         "VALUES (?, 'undo-relabel.jpg', 0.8, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, old_kid)
-    db.tag_photo(pid, old_taxonomy_kid)
+    keyword_tagging.tag_photo(db, pid, old_kid)
+    keyword_tagging.tag_photo(db, pid, old_taxonomy_kid)
     db.commit()
     det = db.detections.save(
         pid,
@@ -14035,8 +14036,8 @@ def test_highlights_relabel_moves_species_highlights_to_new_bucket(app_and_db):
         "VALUES (?, 'h2.jpg', 0.8, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(p1, old_kid)
-    db.tag_photo(p2, old_kid)
+    keyword_tagging.tag_photo(db, p1, old_kid)
+    keyword_tagging.tag_photo(db, p2, old_kid)
     db.commit()
     db.species_curation.add_highlight("Bald Eagle", p1)
     db.species_curation.add_highlight("Bald Eagle", p2)
@@ -14078,8 +14079,8 @@ def test_highlights_relabel_merges_into_existing_new_species_bucket(app_and_db):
         "VALUES (?, 'moving.jpg', 0.8, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(p_dest, new_kid)
-    db.tag_photo(p_moving, db.keywords.add("Bald Eagle", is_species=True))
+    keyword_tagging.tag_photo(db, p_dest, new_kid)
+    keyword_tagging.tag_photo(db, p_moving, db.keywords.add("Bald Eagle", is_species=True))
     db.commit()
     db.species_curation.add_highlight("Golden Eagle", p_dest)
     db.species_curation.add_highlight("Bald Eagle", p_moving)
@@ -14118,7 +14119,7 @@ def test_highlights_relabel_migrates_species_representative(app_and_db):
         "VALUES (?, 'rep.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, old_kid)
+    keyword_tagging.tag_photo(db, pid, old_kid)
     db.commit()
     db.set_species_representative("Bald Eagle", pid)
     db.commit()
@@ -14156,7 +14157,7 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
         "VALUES (?, 'undo-cur.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, old_kid)
+    keyword_tagging.tag_photo(db, pid, old_kid)
     db.commit()
     db.set_species_representative("Bald Eagle", pid)
     db.species_curation.add_highlight("Bald Eagle", pid)
@@ -14219,8 +14220,8 @@ def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
         "VALUES (?, 'rank-2.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(p1, old_kid)
-    db.tag_photo(p2, old_kid)
+    keyword_tagging.tag_photo(db, p1, old_kid)
+    keyword_tagging.tag_photo(db, p2, old_kid)
     db.commit()
     db.species_curation.add_highlight("Old Rank Bird", p1)
     db.species_curation.add_highlight("Old Rank Bird", p2)
@@ -14338,7 +14339,7 @@ def test_highlights_relabel_undo_preserves_existing_destination_highlight(app_an
         "VALUES (?, 'both.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, old_kid)
+    keyword_tagging.tag_photo(db, pid, old_kid)
     db.commit()
     # Highlighted under both species before the relabel.
     db.species_curation.add_highlight("Both Bird A", pid)
@@ -14393,7 +14394,7 @@ def test_highlights_relabel_undo_restores_representative_over_collision(app_and_
         "VALUES (?, 'incumbent.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(p_moving, old_kid)
+    keyword_tagging.tag_photo(db, p_moving, old_kid)
     db.commit()
     db.set_species_representative("Rep Old", p_moving)
     db.set_species_representative("Rep New", p_incumbent)
@@ -14444,8 +14445,8 @@ def test_highlights_relabel_undo_preserves_preexisting_target_representative(
         "VALUES (?, 'both.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, old_kid)
-    db.tag_photo(pid, new_kid)
+    keyword_tagging.tag_photo(db, pid, old_kid)
+    keyword_tagging.tag_photo(db, pid, new_kid)
     db.commit()
     db.set_species_representative("Rep Both A", pid)
     db.set_species_representative("Rep Both B", pid)
@@ -14499,7 +14500,7 @@ def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
         "VALUES (?, 'xrep.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, old_kid)
+    keyword_tagging.tag_photo(db, pid, old_kid)
     db.commit()
     # Select the representative from workspace B, so the compatibility
     # photo_preferences row lives under ws_b — not under ws_a where we
@@ -14574,8 +14575,8 @@ def test_highlights_relabel_ignores_stale_representative_rows(app_and_db):
         "VALUES (?, 'stale.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, stale_kid)
-    db.tag_photo(pid, current_kid)
+    keyword_tagging.tag_photo(db, pid, stale_kid)
+    keyword_tagging.tag_photo(db, pid, current_kid)
     db.commit()
     # Select the Bald Eagle rep from ws_b — the compat pref row lives
     # under ws_b, so the active workspace ws_a's preference-rename pass
@@ -14593,7 +14594,7 @@ def test_highlights_relabel_ignores_stale_representative_rows(app_and_db):
     # Untag Bald Eagle from the photo. The global species_representatives
     # row remains, so the photo now carries only Osprey as a taxonomy
     # keyword but still has a stale (Bald Eagle, pid) rep row.
-    db.untag_photo(pid, stale_kid)
+    keyword_tagging.untag_photo(db, pid, stale_kid)
     db.commit()
 
     stale_before = db.conn.execute(
@@ -14652,8 +14653,8 @@ def test_highlights_relabel_ignores_stale_representative_with_local_pref(app_and
         "VALUES (?, 'stalepref.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, stale_kid)
-    db.tag_photo(pid, current_kid)
+    keyword_tagging.tag_photo(db, pid, stale_kid)
+    keyword_tagging.tag_photo(db, pid, current_kid)
     db.commit()
     # Set both reps from the active workspace so each has a local
     # compat pref row in ws_id. This makes the stale row travel through
@@ -14665,7 +14666,7 @@ def test_highlights_relabel_ignores_stale_representative_with_local_pref(app_and
     # both remain (untag_photo does not clear either), so the photo now
     # carries only Osprey as a taxonomy keyword but retains stale
     # (Bald Eagle, pid) rows in both tables.
-    db.untag_photo(pid, stale_kid)
+    keyword_tagging.untag_photo(db, pid, stale_kid)
     db.commit()
 
     stale_pref = db.conn.execute(
@@ -14731,12 +14732,12 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     # photo now carries no taxonomy but retains stale curation for Old
     # Bird — a legitimate scenario Codex flagged for prediction-only
     # relabels.
-    db.tag_photo(pid, stale_kid)
+    keyword_tagging.tag_photo(db, pid, stale_kid)
     db.commit()
     db.set_species_representative("Old Bird", pid)
     db.species_curation.add_highlight("Old Bird", pid)
     db.commit()
-    db.untag_photo(pid, stale_kid)
+    keyword_tagging.untag_photo(db, pid, stale_kid)
     db.commit()
     # Prediction added AFTER untag so the "predicted-only" relabel path
     # runs (has_old_species stays False → action_type = "keyword_add").
@@ -14809,7 +14810,7 @@ def test_highlights_relabel_preserves_higher_rank_taxonomy_curation(app_and_db):
         "VALUES (?, 'higherrank.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, family_kid)
+    keyword_tagging.tag_photo(db, pid, family_kid)
     db.commit()
     # Curation on the family-rank keyword: a highlight and a global
     # representative. Both must stay under 'Corvids' after the relabel
@@ -14913,7 +14914,7 @@ def test_highlights_relabel_canonicalizes_hierarchy_leaf_source(app_and_db):
         "VALUES (?, 'leaf.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, leaf_kid)
+    keyword_tagging.tag_photo(db, pid, leaf_kid)
     db.commit()
     # Curation is keyed under the canonical root spelling — this is how
     # existing highlight/representative rows survive duplicate repair.
@@ -15086,7 +15087,7 @@ def test_highlights_relabel_does_not_fold_non_ascii_case_variants(app_and_db):
         (fid,),
     ).lastrowid
     # Photo currently carries `Éclair`.
-    db.tag_photo(pid, kid_upper)
+    keyword_tagging.tag_photo(db, pid, kid_upper)
     db.commit()
     # Stale species_highlights row keyed to the DIFFERENT species `éclair`
     # — SQLite treats it as unrelated to the tagged `Éclair`. The photo
@@ -15151,7 +15152,7 @@ def test_highlights_relabel_queues_remove_for_non_ascii_case_variant(app_and_db)
         "VALUES (?, 'nonascii-remove.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, kid_upper)
+    keyword_tagging.tag_photo(db, pid, kid_upper)
     db.commit()
     db.conn.commit()
 
@@ -15227,8 +15228,8 @@ def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
         "VALUES (?, 'secondary.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(p_primary, old_kid)
-    db.tag_photo(p_secondary, old_kid)
+    keyword_tagging.tag_photo(db, p_primary, old_kid)
+    keyword_tagging.tag_photo(db, p_secondary, old_kid)
     db.commit()
     # Select secondary first so primary ends up newest and lists first.
     db.set_species_representative("Order Bird", p_secondary)
@@ -15284,8 +15285,8 @@ def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
         "VALUES (?, 'target_primary.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(p_source, old_kid)
-    db.tag_photo(p_target_primary, new_kid)
+    keyword_tagging.tag_photo(db, p_source, old_kid)
+    keyword_tagging.tag_photo(db, p_target_primary, new_kid)
     db.commit()
     # Select p_source (in the old species) first so p_target_primary
     # takes the newer selected_order in the shared global counter and
@@ -15629,7 +15630,7 @@ def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
         "VALUES (?, 'moving.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    db.tag_photo(pid, old_kid)
+    keyword_tagging.tag_photo(db, pid, old_kid)
     db.commit()
     db.species_curation.add_highlight("Legacy Species", pid)
     db.commit()
@@ -18662,7 +18663,7 @@ def test_build_explorer_payload_rollup(db):
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.keywords.add('Song Sparrow')
-    db.tag_photo(p, k)
+    keyword_tagging.tag_photo(db, p, k)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza melodia'], k))
@@ -18727,12 +18728,12 @@ def test_build_explorer_payload_multi_found_species_rollup(db):
                       file_size=1, file_mtime=2.0)
     # Tag BOTH Melospiza species as found (two keywords, one per taxon).
     k1 = db.keywords.add('Song Sparrow')
-    db.tag_photo(p1, k1)
+    keyword_tagging.tag_photo(db, p1, k1)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza melodia'], k1))
     k2 = db.keywords.add('Swamp Sparrow')
-    db.tag_photo(p2, k2)
+    keyword_tagging.tag_photo(db, p2, k2)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza georgiana'], k2))
@@ -18768,7 +18769,7 @@ def test_build_explorer_species_leaf(db):
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.keywords.add('Song Sparrow')
-    db.tag_photo(p, k)
+    keyword_tagging.tag_photo(db, p, k)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza melodia'], k))
@@ -18821,7 +18822,7 @@ def test_build_explorer_rank_families(db):
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.keywords.add('Song Sparrow')
-    db.tag_photo(p, k)
+    keyword_tagging.tag_photo(db, p, k)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza melodia'], k))
@@ -18854,7 +18855,7 @@ def test_build_explorer_rank_species_has_photo(db):
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.keywords.add('Song Sparrow')
-    db.tag_photo(p, k)
+    keyword_tagging.tag_photo(db, p, k)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza melodia'], k))
@@ -18941,7 +18942,7 @@ def test_explorer_uncounted_identifications_are_class_aware_and_reasoned(db):
             "WHERE id=?",
             (taxon_id, keyword_id),
         )
-        db.tag_photo(photo_id, keyword_id)
+        keyword_tagging.tag_photo(db, photo_id, keyword_id)
         db.commit()
     db.conn.commit()
 
@@ -19099,7 +19100,7 @@ def test_selection_prediction_suggestions_aggregates_by_species(app_and_db):
     photo_c, _ = _seed_prediction_photo(db, "sel-c.jpg", "Osprey", 0.72)
 
     kid = db.keywords.add("Bald Eagle", is_species=True)
-    db.tag_photo(photo_a, kid)
+    keyword_tagging.tag_photo(db, photo_a, kid)
     db.commit()
 
     resp = client.post(
@@ -19276,8 +19277,8 @@ def test_batch_accept_on_all_tags_full_selection_with_one_undo(app_and_db):
     )
     eagle = db.keywords.add("Bald Eagle", is_species=True)
     osprey = db.keywords.add("Osprey", is_species=True)
-    db.tag_photo(existing, eagle)
-    db.tag_photo(other, osprey)
+    keyword_tagging.tag_photo(db, existing, eagle)
+    keyword_tagging.tag_photo(db, other, osprey)
     db.commit()
     selection = [predicted, other, existing, unclassified]
     payload = {
@@ -19312,7 +19313,7 @@ def test_batch_accept_on_all_without_acceptable_predictions(app_and_db):
     app, db = app_and_db
     photo, _ = _seed_prediction_photo(db, "all-conflict.jpg", "Bald Eagle", 0.9)
     osprey = db.keywords.add("Osprey", is_species=True)
-    db.tag_photo(photo, osprey)
+    keyword_tagging.tag_photo(db, photo, osprey)
     db.commit()
     response = app.test_client().post("/api/predictions/batch-accept", json={
         "prediction_ids": [], "expected_species": "Bald Eagle", "photo_ids": [photo],
@@ -20480,7 +20481,7 @@ def test_selection_prediction_suggestions_flips_status_on_already_keyworded_phot
     )
     # Manually keyword one photo before running the aggregator.
     kid = db.keywords.add("Bald Eagle", is_species=True)
-    db.tag_photo(photo_keyworded, kid)
+    keyword_tagging.tag_photo(db, photo_keyworded, kid)
     db.commit()
 
     resp = client.post(
@@ -20734,7 +20735,7 @@ def test_selection_prediction_suggestions_recomputes_ambiguity_after_keyword_edi
     # the stored category stays "new" but the photo now carries a
     # different species.
     conflict_kid = db.keywords.add("TestZanclusbeta", is_species=True)
-    db.tag_photo(stale_photo, conflict_kid)
+    keyword_tagging.tag_photo(db, stale_photo, conflict_kid)
     db.commit()
 
     resp = client.post(
@@ -20804,7 +20805,7 @@ def test_batch_accept_revalidates_ambiguity_after_keywords_move(app_and_db):
     # Elsewhere, between render and click: a conflicting species lands on one
     # of the two photos. Nothing touches prediction status.
     conflict_kid = db.keywords.add("TestZanclusbeta", is_species=True)
-    db.tag_photo(stale_photo, conflict_kid)
+    keyword_tagging.tag_photo(db, stale_photo, conflict_kid)
     db.commit()
     assert db.predictions.get_rows(photo_ids=[stale_photo], status="pending")
 
@@ -21537,7 +21538,7 @@ def test_predictions_api_effective_category_reflects_current_keywords(
         db, "eff-cat-clean.jpg", "TestZanclusalpha", 0.9,
     )
     conflict_kid = db.keywords.add("TestZanclusbeta", is_species=True)
-    db.tag_photo(conflicted_photo, conflict_kid)
+    keyword_tagging.tag_photo(db, conflicted_photo, conflict_kid)
     db.commit()
 
     conflicted_resp = client.get(
@@ -22028,7 +22029,7 @@ def test_browse_predictions_stay_acceptable_when_keywords_agree(app_and_db):
     photo_id, _ = _seed_prediction_photo(db, "agree-cat.jpg", "Bald Eagle", 0.9)
     pred_id = _prediction_id(db, photo_id, "Bald Eagle")
     kid = db.keywords.add("Bald Eagle", is_species=True)
-    db.tag_photo(photo_id, kid)
+    keyword_tagging.tag_photo(db, photo_id, kid)
     db.commit()
 
     resp = client.post(
@@ -22067,7 +22068,7 @@ def test_browse_clears_stale_ambiguity_when_keywords_no_longer_conflict(app_and_
     db.conn.commit()
     # ...and the photo now carries the predicted species instead.
     kid = db.keywords.add("Bald Eagle", is_species=True)
-    db.tag_photo(photo_id, kid)
+    keyword_tagging.tag_photo(db, photo_id, kid)
     db.commit()
 
     resp = client.get(f"/api/predictions?photo_ids={photo_id}")
@@ -22182,7 +22183,7 @@ def test_keyword_no_subject_names_still_conflicts(app_and_db):
         db, "unexplained.jpg", "Common Greenshank", "Little Egret",
     )
     egret = _prediction_id(db, photo_id, "Little Egret")
-    db.tag_photo(photo_id, db.keywords.add("Spotted Redshank", is_species=True))
+    keyword_tagging.tag_photo(db, photo_id, db.keywords.add("Spotted Redshank", is_species=True))
     db.commit()
 
     entry = _suggestion_for(client, [photo_id], "Little Egret")
@@ -22206,7 +22207,7 @@ def test_same_subject_disagreement_stays_ambiguous(app_and_db):
                       labels_fingerprint="fp2")
     db.commit()
     common = _prediction_id(db, photo_id, "Common Redshank")
-    db.tag_photo(photo_id, db.keywords.add("Spotted Redshank", is_species=True))
+    keyword_tagging.tag_photo(db, photo_id, db.keywords.add("Spotted Redshank", is_species=True))
     db.commit()
 
     entry = _suggestion_for(client, [photo_id], "Common Redshank")
@@ -25650,7 +25651,7 @@ def test_encounter_species_add_mode_keeps_existing_species(app_and_db):
     teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.commit()
     for pid in burst_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -25706,8 +25707,8 @@ def test_encounter_species_replace_named_previous_on_two_species_burst(app_and_d
     wigeon = db.keywords.add("American Wigeon", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
-        db.tag_photo(pid, wigeon)
+        keyword_tagging.tag_photo(db, pid, teal)
+        keyword_tagging.tag_photo(db, pid, wigeon)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -25761,7 +25762,7 @@ def test_encounter_species_replace_rejects_unknown_previous(app_and_db):
     mallard = db.keywords.add("Mallard", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, mallard)
+        keyword_tagging.tag_photo(db, pid, mallard)
         db.commit()
     resp = client.post("/api/encounters/species", json={
         "species": "Gadwall", "photo_ids": photo_ids,
@@ -25794,8 +25795,8 @@ def test_encounter_species_remove_mode_untags_one_species(app_and_db):
     wigeon = db.keywords.add("American Wigeon", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
-        db.tag_photo(pid, wigeon)
+        keyword_tagging.tag_photo(db, pid, teal)
+        keyword_tagging.tag_photo(db, pid, wigeon)
         db.commit()
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -25850,7 +25851,7 @@ def test_encounter_species_remove_last_species_clears_encounter_confirmation(app
     teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -25893,8 +25894,8 @@ def test_encounter_species_replace_detaches_only_when_no_species_shared(app_and_
     wigeon = db.keywords.add("American Wigeon", is_species=True)
     db.commit()
     for pid in burst_ids:
-        db.tag_photo(pid, teal)
-        db.tag_photo(pid, wigeon)
+        keyword_tagging.tag_photo(db, pid, teal)
+        keyword_tagging.tag_photo(db, pid, wigeon)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -25940,7 +25941,7 @@ def test_encounter_species_remove_last_burst_species_leaves_explicit_empty_overr
     teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -25992,7 +25993,7 @@ def test_encounter_species_ignores_candidate_override_when_resolving_previous(ap
     teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -26152,10 +26153,10 @@ def test_encounter_species_remove_detaches_when_no_overlap_remains(app_and_db):
     wigeon = db.keywords.add("American Wigeon", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
     for pid in burst_ids:
-        db.tag_photo(pid, wigeon)
+        keyword_tagging.tag_photo(db, pid, wigeon)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -26202,8 +26203,8 @@ def test_encounter_species_remove_rejects_species_not_confirmed(app_and_db):
     mallard = db.keywords.add("Mallard", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
-        db.tag_photo(pid, mallard)
+        keyword_tagging.tag_photo(db, pid, teal)
+        keyword_tagging.tag_photo(db, pid, mallard)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -26246,12 +26247,12 @@ def test_encounter_species_add_on_mixed_burst_confirms_shared_set(app_and_db):
     gadwall = db.keywords.add("Gadwall", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
-    db.tag_photo(mixed_ids[0], gadwall)
+    keyword_tagging.tag_photo(db, mixed_ids[0], gadwall)
     db.commit()
     for pid in uniform_ids:
-        db.tag_photo(pid, gadwall)
+        keyword_tagging.tag_photo(db, pid, gadwall)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -26314,10 +26315,10 @@ def test_encounter_species_mixed_burst_keeps_edited_baseline(app_and_db):
     gadwall = db.keywords.add("Gadwall", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
-        db.tag_photo(pid, wigeon)
+        keyword_tagging.tag_photo(db, pid, teal)
+        keyword_tagging.tag_photo(db, pid, wigeon)
         db.commit()
-    db.tag_photo(burst_ids[0], gadwall)
+    keyword_tagging.tag_photo(db, burst_ids[0], gadwall)
     db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -26384,7 +26385,7 @@ def test_encounter_species_remove_undo_refreshes_pipeline_cache(app_and_db):
     teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
 
     # Remove teal from the first burst — this is the new species_replace path.
@@ -26457,7 +26458,7 @@ def test_encounter_species_remove_redo_refreshes_pipeline_cache(app_and_db):
     teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
 
     client.post("/api/encounters/species", json={
@@ -26501,7 +26502,7 @@ def _remove_teal_from_cached_burst(app, db):
     teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
     resp = app_client.post("/api/encounters/species", json={
         "species": "Green-winged Teal", "photo_ids": photo_ids[:2],
@@ -26606,7 +26607,7 @@ def test_undo_redo_entry_id_differs_across_separate_history_entries(app_and_db):
     chat = db.keywords.add("Yellow-breasted Chat", is_species=True)
     db.commit()
     for pid in photo_ids[:1]:
-        db.tag_photo(pid, chat)
+        keyword_tagging.tag_photo(db, pid, chat)
         db.commit()
     resp = client.post("/api/encounters/species", json={
         "species": "Yellow-breasted Chat", "photo_ids": photo_ids[:1],
@@ -26642,10 +26643,10 @@ def test_encounter_species_remove_redo_with_disjoint_extras_keeps_empty_override
     wigeon = db.keywords.add("American Wigeon", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
-    db.tag_photo(burst_ids[0], gadwall)
-    db.tag_photo(burst_ids[1], wigeon)
+    keyword_tagging.tag_photo(db, burst_ids[0], gadwall)
+    keyword_tagging.tag_photo(db, burst_ids[1], wigeon)
     db.commit()
 
     empty = {"species": None, "confirmed": False, "species_list": []}
@@ -26689,9 +26690,9 @@ def test_encounter_species_replace_does_not_confirm_list_entry_missing_from_a_fr
     wigeon = db.keywords.add("American Wigeon", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
-    db.tag_photo(burst_ids[0], wigeon)
+    keyword_tagging.tag_photo(db, burst_ids[0], wigeon)
     db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -26733,7 +26734,7 @@ def test_encounter_species_encounter_scoped_replace_rebuilds_child_burst_overrid
     teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, teal)
+        keyword_tagging.tag_photo(db, pid, teal)
         db.commit()
 
     resp = client.post("/api/encounters/species", json={
@@ -26783,7 +26784,7 @@ def test_pipeline_results_overlay_refreshes_confirmed_species_list(app_and_db):
     with open(path, "w") as f:
         _json.dump(data, f)
     teal = db.keywords.add("Green-winged Teal", is_species=True)
-    db.tag_photo(photo_ids[0], teal)
+    keyword_tagging.tag_photo(db, photo_ids[0], teal)
     db.commit()
     expected = db.photo_species.get_species_for_photos(photo_ids)
 
@@ -26842,7 +26843,7 @@ def test_compare_preserves_exact_keyword_match_with_incomplete_taxonomy(
     app, db = app_and_db
     photo_id = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()[0]
     keyword = db.keywords.add("Test Parrot", is_species=True)
-    db.tag_photo(photo_id, keyword)
+    keyword_tagging.tag_photo(db, photo_id, keyword)
     db.commit()
     det_id = db.detections.save(photo_id, [
         {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9},
@@ -26912,7 +26913,7 @@ def test_selection_prediction_species_identity_merges_names_and_accepts(
     existing_kid = None
     if already_tagged:
         existing_kid = db.keywords.add(common, is_species=True, source_taxon_id=42)
-        db.tag_photo(photos[0], existing_kid)
+        keyword_tagging.tag_photo(db, photos[0], existing_kid)
         db.commit()
     db.conn.commit()
     response = client.post("/api/selection/prediction-suggestions", json={"photo_ids": photos})
@@ -26980,7 +26981,7 @@ def test_batch_accept_prefers_named_keyword_among_same_taxon_aliases(
         native_id = next(row["id"] for row in db.predictions.get_rows(photo_ids=[photo]) if row["model"] == "iNat21")
         prediction_ids.extend([native_id, legacy_id] if inat_first else [legacy_id, native_id])
     if already_tagged:
-        db.tag_photo(photos[0], alias_id)
+        keyword_tagging.tag_photo(db, photos[0], alias_id)
         db.commit()
     extra, _ = _seed_prediction_photo(db, "slider-no-pending.jpg", "Pond Slider", .9, status="rejected")
     selection = [*photos, extra]
@@ -27156,10 +27157,10 @@ def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db
     # Simulate the user tagging photo_b with the OTHER alias after acceptance,
     # then merging the two aliases together. Photo_b's ``alias_id`` tag is a
     # user action the accept never created.
-    db.tag_photo(photo_b, alias_id)
+    keyword_tagging.tag_photo(db, photo_b, alias_id)
     db.commit()
     assert alias_id in [k["id"] for k in db.photo_keywords.get_for_photo(photo_b)]
-    db._merge_keyword_into(common_id, alias_id)
+    db.keyword_provenance.merge_keyword_into(common_id, alias_id)
     db.conn.commit()
     # After the merge photo_b carries the surviving alias_id only.
     assert [k["id"] for k in db.photo_keywords.get_for_photo(photo_b)] == [alias_id]
@@ -27197,7 +27198,7 @@ def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_s
     # Either the survivor was manually tagged before acceptance, or the
     # source has an older tag-adding edit and the survivor is added later.
     # These exercise both merge-history cleanup DELETEs.
-    db.tag_photo(photo_b, common_id if earlier_source_add else alias_id)
+    keyword_tagging.tag_photo(db, photo_b, common_id if earlier_source_add else alias_id)
     db.commit()
     if earlier_source_add:
         db.record_edit("keyword_add", "Add source", str(common_id), [{
@@ -27214,13 +27215,13 @@ def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_s
     assert json.loads(item["old_value"])["no_tag"] is True
     assert item["new_value"] == str(common_id)
     if earlier_source_add:
-        db.tag_photo(photo_b, alias_id)
+        keyword_tagging.tag_photo(db, photo_b, alias_id)
         db.commit()
         later_edit = db.record_edit("keyword_add", "Add survivor", str(alias_id), [{
             "photo_id": photo_b, "old_value": "", "new_value": str(alias_id),
         }])
         db.commit()
-    db._merge_keyword_into(common_id, alias_id)
+    db.keyword_provenance.merge_keyword_into(common_id, alias_id)
     db.conn.commit()
     if earlier_source_add:
         # The later redundant add is retained as an empty history entry.

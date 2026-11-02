@@ -4,7 +4,7 @@ import re
 
 import pytest
 from playwright.sync_api import expect
-from services import workspace_folders
+from services import keyword_tagging, workspace_folders
 
 
 def open_panel(live_server, page):
@@ -97,7 +97,7 @@ def test_stale_create_form_cannot_edit_a_new_active_workspace(live_server, page)
     ids = open_panel(live_server, page)
     db = live_server['db']
     kid = db.keywords.add('Tropical Kingbird', is_species=True)
-    db.tag_photo(ids[0], kid)
+    keyword_tagging.tag_photo(db, ids[0], kid)
     db.commit()
     before = db.photo_species.get_species_for_photos(ids)
     other = db.create_workspace('Another shared workspace')
@@ -124,7 +124,7 @@ def test_merged_single_candidate_stays_unconfirmed_until_explicit_resolution(liv
     group = page.locator('#identityAlternativesGroups article')
     expect(group).to_have_count(1)
     group.get_by_role('button', name='Edit alternatives and evidence').click()
-    db._merge_keyword_into(source, survivor)
+    db.keyword_provenance.merge_keyword_into(source, survivor)
     db.commit()
     with page.expect_response(lambda response: response.url.endswith('/api/identity-alternatives') and response.request.method == 'POST') as response:
         page.locator('#identitySave').click()
@@ -215,7 +215,7 @@ def test_same_species_aliases_are_rejected_without_losing_form_or_confirmation(l
     db = live_server['db']
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88001,88001,'Tyrannus melancholicus','Tropical Kingbird','species')")
     scientific = db.keywords.add('Tyrannus melancholicus', is_species=True)
-    db.tag_photo(ids[0], scientific, source='accept')
+    keyword_tagging.tag_photo(db, ids[0], scientific, source='accept')
     db.commit()
     db.photo_review.set_flag(ids[0], 'rejected')
     db.commit()

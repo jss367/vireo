@@ -2,7 +2,7 @@
 import json
 
 from page_scripts import page_with_scripts
-from services import review_decisions
+from services import keyword_tagging, review_decisions
 from services.edit_history import redo_last_undo, undo_last_edit
 
 _DET = {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
@@ -657,9 +657,9 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     kid_live = db.keywords.add('Coyote Live', is_species=True)
     kid_rejected = db.keywords.add('Coyote Rejected', is_species=True)
     kid_untagged = db.keywords.add('Coyote Untagged', is_species=True)
-    db.tag_photo(live_pid, kid_live)
-    db.tag_photo(rejected_pid, kid_rejected)
-    db.tag_photo(photos[2]['id'], kid_untagged)
+    keyword_tagging.tag_photo(db, live_pid, kid_live)
+    keyword_tagging.tag_photo(db, rejected_pid, kid_rejected)
+    keyword_tagging.tag_photo(db, photos[2]['id'], kid_untagged)
     db.commit()
     db.set_species_representative('Coyote Live', live_pid)
     db.set_species_representative('Coyote Rejected', rejected_pid)
@@ -669,7 +669,7 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     # Preference rows themselves remain intact (undo-friendly).
     db.photo_review.set_flag(rejected_pid, 'rejected')
     db.commit()
-    db.untag_photo(photos[2]['id'], kid_untagged)
+    keyword_tagging.untag_photo(db, photos[2]['id'], kid_untagged)
     db.commit()
 
     client = app.test_client()
@@ -696,7 +696,7 @@ def test_get_predictions_species_rule_keeps_disagreement_rows(app_and_db):
     photos = db.photos.list_page()
     # Confirmed species keyword on p1.
     robin_id = db.keywords.add('Robin', is_species=True)
-    db.tag_photo(photos[0]['id'], robin_id)
+    keyword_tagging.tag_photo(db, photos[0]['id'], robin_id)
     db.commit()
     # Pending prediction proposes Sparrow — the reviewer wants to see it.
     det = _make_detection(db, photos[0]['id'])

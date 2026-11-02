@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from scanner import ScanControl, ScanHooks, ScanOptions
-from services import catalog_deletion, dashboard_stats, photo_ingest, workspace_folders
+from services import catalog_deletion, dashboard_stats, keyword_tagging, photo_ingest, workspace_folders
 from services.edit_history import undo_last_edit
 
 requires_exiftool = pytest.mark.skipif(
@@ -1047,7 +1047,7 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
             "UPDATE photos SET exif_data = ? WHERE id = ?",
             (json.dumps(meta), photo_id),
         )
-    db.tag_photo(already, db.keywords.add("Egret"))
+    keyword_tagging.tag_photo(db, already, db.keywords.add("Egret"))
     db.commit()
     db.conn.commit()
 
@@ -3319,7 +3319,7 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     )
     # Add a keyword to the JPEG
     kw_id = db.keywords.add("Robin")
-    db.tag_photo(jpeg_id, kw_id)
+    keyword_tagging.tag_photo(db, jpeg_id, kw_id)
     db.commit()
     db.conn.commit()
 
@@ -3468,12 +3468,12 @@ def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_r
     metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
                         else {"Subject": ["Robin"]})}
     _import_embedded_keywords_for_photo(db, jpeg, metadata)
-    db.tag_photo(jpeg, db.keywords.add("Field note"))
+    keyword_tagging.tag_photo(db, jpeg, db.keywords.add("Field note"))
     db.commit()
     if removed_on_raw:
         _import_embedded_keywords_for_photo(db, raw, metadata)
         for keyword in db.photo_keywords.get_for_photo(raw):
-            db.untag_photo(raw, keyword["id"])
+            keyword_tagging.untag_photo(db, raw, keyword["id"])
             db.commit()
 
     _pair_raw_jpeg_companions(db)
@@ -9139,7 +9139,7 @@ def test_unchanged_companion_recovers_embedded_keywords_without_churn(
     # Once the user removes these offered tags, even a full re-extraction
     # must respect the durable suppression, without needing a pending queue.
     for keyword in cat.db.photo_keywords.get_for_photo(cat.raw_id):
-        cat.db.untag_photo(cat.raw_id, keyword["id"])
+        keyword_tagging.untag_photo(cat.db, cat.raw_id, keyword["id"])
         cat.db.commit()
     assert cat.db.pending_changes.keyword_removal_keys(cat.raw_id) == set()
     cat.scan(incremental=False)

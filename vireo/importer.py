@@ -8,6 +8,7 @@ from pathlib import Path
 from catalog import read_catalog
 from keyword_identity import validate_import_locations
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from services import keyword_tagging
 from xmp import write_sidecar
 
 # Error strings kept on the job result; the rest are counted in errors_total.
@@ -262,7 +263,7 @@ def _import_photo_keywords(db, photo, kw_data, file_path, write_xmp):
             for index, part in enumerate(parts):
                 kid = db.keywords.add(part, parent_id=parent_id, _resolve_alias=index == len(parts) - 1)
                 parent_id = kid
-            db.tag_photo(photo["id"], parent_id, source="manual")
+            keyword_tagging.tag_photo(db, photo["id"], parent_id, source="manual")
             hierarchy_leaf_keys.add(keyword_match_key(parts[-1]))
 
         # Hierarchical leaves already represent their flat spelling.
@@ -275,7 +276,7 @@ def _import_photo_keywords(db, photo, kw_data, file_path, write_xmp):
             # Lightroom catalog metadata was explicitly authored outside
             # Vireo. Keep that provenance on the association even when
             # write_xmp=False leaves no sidecar or pending change.
-            db.tag_photo(photo["id"], kid, source="manual")
+            keyword_tagging.tag_photo(db, photo["id"], kid, source="manual")
             existing_keys.add(keyword_match_key(kw_name))
 
     # Write XMP if requested. Build normalized keyword sets so the

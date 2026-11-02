@@ -15,7 +15,7 @@ from keyword_normalization import keyword_match_key
 from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_label_file, save_labels
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
-from services import detection_store, photo_ingest, review_decisions, workspace_folders
+from services import detection_store, keyword_tagging, photo_ingest, review_decisions, workspace_folders
 from species_identity import (
     PREDICTION_TAXONOMY_COLUMNS,
     SpeciesResolver,
@@ -981,7 +981,7 @@ def test_review_keeps_homonymous_predictions_and_confirmed_tags_distinct(db, tmp
             "INSERT INTO keywords (name, is_species, type, taxon_id, source_taxon_id) "
             "SELECT ?, 1, 'taxonomy', id, inat_id FROM taxa WHERE inat_id = ?", (display, tid),
         ).lastrowid
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
         db.commit()
     data = payload()
     assert data["encounters"][0]["species_confirmed"] == same_taxon
@@ -1006,7 +1006,7 @@ def _confirmed_species_photo(db, tmp_path, entry, name="photo.jpg"):
     local = db.conn.execute("SELECT id FROM taxa WHERE inat_id = ?", (entry["taxon_id"],)).fetchone()["id"]
     db.conn.execute("UPDATE keywords SET taxon_id = ?, source_taxon_id = ? WHERE id = ?",
                     (local, entry["taxon_id"], keyword_id))
-    db.tag_photo(pid, keyword_id)
+    keyword_tagging.tag_photo(db, pid, keyword_id)
     db.commit()
     return pid
 
@@ -1152,7 +1152,7 @@ def test_partially_confirmed_encounter_keeps_a_same_name_taxon_visible(db, tmp_p
         "INSERT INTO keywords (name, is_species, type, taxon_id, source_taxon_id) "
         "SELECT ?, 1, 'taxonomy', id, inat_id FROM taxa WHERE inat_id = ?", (display, 18976),
     ).lastrowid
-    db.tag_photo(pids[0], keyword_id)
+    keyword_tagging.tag_photo(db, pids[0], keyword_id)
     db.commit()
 
     photos = load_photo_features(db)

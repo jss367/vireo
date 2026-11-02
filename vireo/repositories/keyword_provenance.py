@@ -4,37 +4,37 @@ This module is the single home of every ``photo_keywords`` writer that
 creates or converges an association, plus the flows that call those writers
 in the middle of their own transaction:
 
-- ``tag``: the one association writer (``Database.tag_photo``), whose
-  upsert folds the incoming stamp against the existing row;
+- ``tag``: the one association writer (behind
+  ``services.keyword_tagging.tag_photo``), whose upsert folds the incoming
+  stamp against the existing row;
 - ``merge_keyword_into``: a keyword merge, which repoints associations onto
   the survivor and folds provenance where a photo carried both keywords;
 - ``link_keyword_to_place``: attaching a Google place to a keyword, which
   may repoint its associations onto the canonical place row;
-- the flows that call a writer mid-flight: ``upsert_one_keyword`` and
-  ``upsert_location_parent_chain`` (merge through
-  ``Database._merge_keyword_into``) and ``accept_prediction`` (tags through
-  ``Database.tag_photo``, then queues the sidecar change);
+- the flows that call a writer mid-flight: ``upsert_one_keyword``,
+  ``upsert_location_parent_chain`` and ``merge_duplicate_location_roots``
+  (merge through ``merge_keyword_into``) and ``accept_prediction`` (tags
+  through ``tag``, then queues the sidecar change);
 - ``carry_companion_keywords``: RAW/JPEG companion pairing, which copies the
   JPEG row's associations onto its RAW before the JPEG row is deleted;
   ``scanner`` reaches it through the ``db.keyword_provenance`` accessor.
 
 ``test_keyword_provenance_contract`` keys the convergence points to this
 module by their method names here (``tag``, ``merge_keyword_into``,
-``link_keyword_to_place``, ``carry_companion_keywords``). ``tag`` takes
-``source`` keyword-only and without a default: the fail-safe default
-(``KEYWORD_SOURCE_MANUAL``) lives on ``Database.tag_photo``.
+``link_keyword_to_place``, ``carry_companion_keywords``) and reads the
+``source`` of every call of ``tag``. ``tag`` takes ``source`` keyword-only
+and without a default: the fail-safe default (``KEYWORD_SOURCE_MANUAL``)
+lives on ``services.keyword_tagging.tag_photo``.
 
-The flows compose the repositories of the other domains they touch on the
-same connection: keyword rows (``KeywordRepository``), taxon identity
+The repository takes its connection and, optionally, the workspace resolver
+(``Database._ws_id``); the catalog-wide writers never resolve it. The flows
+compose the repositories of the other domains they touch on the same
+connection: keyword rows (``KeywordRepository``), taxon identity
 (``KeywordMergeRepository``, and ``TaxonCatalog`` for ``SpeciesResolver``),
 the species photos carry (``PhotoSpeciesRepository``), predictions,
 species curation, the keyword tree, location rows and the XMP sync queue
-(``SyncRepository``). Two ``Database`` methods are still bound by name
-(``FACADE_METHODS``): ``tag_photo`` and ``_merge_keyword_into``, the
-provenance writers the contract finds by those names, so the calls these
-flows make to each other go through them. The provenance lattice
-(``KEYWORD_SOURCE_*``, ``keyword_source_max*``,
-``KEYWORD_SOURCE_CONFLICT_SQL``) is ``db`` API, injected here.
+(``SyncRepository``). The provenance lattice comes from
+``repositories.keyword_source``, the one definition ``db`` re-exports.
 
 No writer here commits: the route, job or service that calls it owns the
 transaction (``with db.transaction():``).
@@ -43,11 +43,10 @@ transaction (``with db.transaction():``).
 import json
 import logging
 import sqlite3
-from collections.abc import Callable
-from typing import Any
 
 from compare import compare_prediction_to_keywords
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from repositories import chunks
 from repositories.edit_history import edit_prediction_ids
 from repositories.effective_config import active_effective_config
 from repositories.identity_alternatives import retarget_candidate_names
@@ -57,12 +56,18 @@ from repositories.keyword_identity_sql import (
     keywords_claim_different_taxa,
 )
 from repositories.keyword_merges import KeywordMergeRepository
+from repositories.keyword_source import (
+    KEYWORD_SOURCE_CONFLICT_SQL,
+    keyword_source_max,
+    keyword_source_max_sql,
+)
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.keyword_tree import KeywordTreeRepository
 from repositories.keywords import KeywordRepository, TaxonCatalog
 from repositories.locations import LocationRepository
 from repositories.photo_species import PhotoSpeciesRepository
 from repositories.prediction_review import prediction_review_join, prediction_review_status
+from repositories.prediction_rules import DECIDED_PREDICTION_STATUSES
 from repositories.predictions import PredictionRepository
 from repositories.species_curation import SpeciesCurationRepository
 from repositories.sync import SyncRepository
@@ -70,12 +75,6 @@ from settings_source import config_value
 
 log = logging.getLogger(__name__)
 
-# ``Database`` methods the moved bodies call through the façade.
-FACADE_METHODS = (
-    # The writers and flows here, reached from one another.
-    "tag_photo",
-    "_merge_keyword_into",
-)
 
 
 # -- merge_keyword_into steps -------------------------------------------------
@@ -909,7 +908,7 @@ def _reparent_child(
 
     A child whose name matches an existing sibling under the destination
     merges into that sibling recursively (through the façade's
-    ``_merge_keyword_into``) only when both share the same ``type`` and do
+    ``merge_keyword_into``) only when both share the same ``type`` and do
     not claim different taxa or different Google places — "Birds > Heron"
     and "birds > Heron" must converge on one Heron. Match uses
     ``keyword_match_key`` (ASCII case fold on the display-normalized name),
@@ -1094,41 +1093,17 @@ def location_parent_components(components, leaf_name="", leaf_types=None):
     return [item[2] for item in normalized]
 
 
-class KeywordProvenanceRepository:
-    # Bound ``Database`` methods that ``__init__`` installs from
-    # ``FACADE_METHODS``, declared so the type checker sees them.
-    tag_photo: Callable[..., Any]
-    _merge_keyword_into: Callable[..., Any]
+def _no_workspace():
+    raise RuntimeError("No active workspace set")
 
-    def __init__(
-        self,
-        conn,
-        resolve_workspace_id,
-        *,
-        chunks,
-        keyword_source_manual,
-        keyword_source_conflict_sql,
-        keyword_source_max_sql,
-        keyword_source_max,
-        decided_prediction_statuses,
-        facade,
-    ):
+
+class KeywordProvenanceRepository:
+    def __init__(self, conn, resolve_workspace_id=None):
         self.conn = conn
-        self._resolve_workspace_id = resolve_workspace_id
-        # ``db`` module helpers and constants, kept under their module names
-        # so the moved bodies read them as ``self.<name>``. ``_chunks`` is
-        # ``db._chunks`` itself (its size default is bound at import), and
-        # the provenance fold is ``db``'s own, so there is still exactly one.
-        self._chunks = chunks
-        self.KEYWORD_SOURCE_MANUAL = keyword_source_manual
-        self.KEYWORD_SOURCE_CONFLICT_SQL = keyword_source_conflict_sql
-        self.keyword_source_max_sql = keyword_source_max_sql
-        self.keyword_source_max = keyword_source_max
-        # ``Database`` class attributes, kept under their class names.
-        self.DECIDED_PREDICTION_STATUSES = decided_prediction_statuses
-        # Bound ``Database`` methods, kept under their façade names.
-        for name in FACADE_METHODS:
-            setattr(self, name, getattr(facade, name))
+        # ``Database._ws_id``, uncalled. The catalog-wide writers (``tag``,
+        # ``carry_companion_keywords``) never resolve it, so a repository
+        # built without one (``MovesMergeRepository``'s carry) serves them.
+        self._resolve_workspace_id = resolve_workspace_id or _no_workspace
 
     @property
     def workspace_id(self):
@@ -1141,10 +1116,7 @@ class KeywordProvenanceRepository:
 
     def _locations(self):
         """The location rows, on this connection; root merges go through this repository."""
-        return LocationRepository(
-            self.conn, self._resolve_workspace_id,
-            merge_keyword_into=self._merge_keyword_into,
-        )
+        return LocationRepository(self.conn, self._resolve_workspace_id)
 
     def _pending_changes(self):
         """The XMP sync queue, on this connection and workspace."""
@@ -1188,7 +1160,7 @@ class KeywordProvenanceRepository:
         self.conn.execute(
             "INSERT INTO photo_keywords "
             "(photo_id, keyword_id, source, species_provenance) "
-            "VALUES (?, ?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
+            "VALUES (?, ?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
             (photo_id, keyword_id, source, species_provenance),
         )
 
@@ -1215,7 +1187,7 @@ class KeywordProvenanceRepository:
             self.conn.execute(
                 "INSERT INTO photo_keywords "
                 "(photo_id, keyword_id, source, species_provenance) "
-                "VALUES (?, ?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
+                "VALUES (?, ?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
                 (primary_id, kw["id"], kw["source"], kw["species_provenance"]),
             )
 
@@ -1252,14 +1224,14 @@ class KeywordProvenanceRepository:
         _retarget_source_spelling(
             self.conn, src, dst, src_id, dst_id,
             pending_source_only=pending_source_only,
-            chunks=self._chunks,
+            chunks=chunks,
             rename_species_highlights_species=self._species_curation().rename_highlights,
             rename_photo_preferences_species=self._species_curation().rename_photo_preferences,
         )
         _retarget_edit_history(
             self.conn, src_id, dst_id,
-            chunks=self._chunks, edit_prediction_ids=edit_prediction_ids,
-            source_max=self.keyword_source_max,
+            chunks=chunks, edit_prediction_ids=edit_prediction_ids,
+            source_max=keyword_source_max,
         )
         # Preserve durable authorship before collapsing association conflicts.
         # UPDATE OR IGNORE below leaves the destination row untouched when a
@@ -1274,7 +1246,7 @@ class KeywordProvenanceRepository:
         )
         self.conn.execute(
             f"""UPDATE photo_keywords AS dst_pk
-               SET source = {self.keyword_source_max_sql(
+               SET source = {keyword_source_max_sql(
                    "dst_pk.source", src_source_sql,
                )}, species_provenance = COALESCE(dst_pk.species_provenance,
                    (SELECT species_provenance FROM photo_keywords src_pk
@@ -1299,7 +1271,7 @@ class KeywordProvenanceRepository:
             self.conn, src_id, dst_id,
             pending_source_only=pending_source_only,
             merges=KeywordMergeRepository(self.conn),
-            merge_keyword_into=self._merge_keyword_into,
+            merge_keyword_into=self.merge_keyword_into,
             reparent_disambiguated=KeywordTreeRepository(
                 self.conn, self._resolve_workspace_id,
             ).reparent_disambiguated,
@@ -1342,6 +1314,72 @@ class KeywordProvenanceRepository:
             parent_id = component_id
             chain.append(component_id)
         return chain
+
+    def merge_duplicate_location_roots(self):
+        """Collapse same-name ``type='location'`` roots into a single row.
+
+        Retyping a place-bearing taxonomy root at startup can leave two
+        location rows with the same ``name`` and ``parent_id IS NULL``
+        because SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
+        NULL parents. Multiple coordless duplicates without any competing
+        place-bearing root describe the same neutral hierarchy anchor and
+        must collapse so children stay under one shared parent.
+
+        Whenever any place-bearing root exists at this name, coordless
+        roots are neutral hierarchy anchors that
+        ``_upsert_one_keyword`` installs (or preserves) for
+        component-only references — Google's per-component
+        ``address_components`` carry no ``place_id``, so we cannot prove
+        which specific Google place the caller meant. Merging a
+        coordless anchor into the place-bearing root would silently
+        reparent its descendants under that Google place — the wrong
+        answer once a second same-name Google place appears. Leave
+        place-bearing roots and their coordless anchors alone; only
+        consolidate coordless duplicates so ambiguous children still
+        share one shared parent.
+
+        Each duplicate folds into its survivor through ``merge_keyword_into``.
+        """
+        duplicates = self.conn.execute(
+            "SELECT name FROM keywords "
+            "WHERE type = 'location' AND parent_id IS NULL "
+            "GROUP BY name HAVING COUNT(*) > 1"
+        ).fetchall()
+        merged = 0
+        for dup in duplicates:
+            candidates = self.conn.execute(
+                "SELECT id, place_id, latitude, longitude FROM keywords "
+                "WHERE name = ? AND parent_id IS NULL AND type = 'location' "
+                "ORDER BY id",
+                (dup["name"],),
+            ).fetchall()
+            if len(candidates) < 2:
+                continue
+            place_bearing = [c for c in candidates if c["place_id"] is not None]
+            coordless = [c for c in candidates if c["place_id"] is None]
+            if place_bearing:
+                # Any place-bearing root at this name means coordless
+                # anchors cannot be safely merged into it: address
+                # components have no place_id, so coordless-anchor
+                # descendants may refer to a different Google place with
+                # the same name. Preserve place-bearing roots alongside
+                # coordless anchors; only collapse coordless duplicates
+                # into a single shared anchor.
+                if len(coordless) < 2:
+                    continue
+                survivor_id = coordless[0]["id"]
+                for cand in coordless[1:]:
+                    merged += self.merge_keyword_into(
+                        cand["id"], survivor_id,
+                    )
+                continue
+            # No place-bearing roots — every candidate is coordless.
+            # Legacy duplicate anchors describe the same neutral parent
+            # and can safely merge into the oldest survivor.
+            survivor_id = candidates[0]["id"]
+            for cand in candidates[1:]:
+                merged += self.merge_keyword_into(cand["id"], survivor_id)
+        return merged
 
     def _check_place_link_target(self, keyword_id, details):
         """Reject a place link to a missing or non-location keyword."""
@@ -1415,7 +1453,7 @@ class KeywordProvenanceRepository:
             f"""INSERT INTO photo_keywords (photo_id, keyword_id, source, species_provenance)
                            SELECT photo_id, ?, source, species_provenance
                            FROM photo_keywords WHERE keyword_id = ?
-                           {self.KEYWORD_SOURCE_CONFLICT_SQL}""",
+                           {KEYWORD_SOURCE_CONFLICT_SQL}""",
             (canonical_id, keyword_id),
         )
         self.conn.execute(
@@ -1603,7 +1641,7 @@ class KeywordProvenanceRepository:
                 # reusing the hierarchy row. Merge the suffixed row
                 # into the hierarchy row and let it own the place
                 # metadata so future assignments settle on one row.
-                self._merge_keyword_into(
+                self.merge_keyword_into(
                     existing_place["id"], existing_component["id"],
                 )
             self.conn.execute(
@@ -1921,7 +1959,7 @@ class KeywordProvenanceRepository:
             )
         changed_tag = not already_has_species
         if changed_tag:
-            self.tag_photo(
+            self.tag(
                 photo_id, kid, source="manual",
             )
             self._pending_changes().queue(photo_id, "keyword_add", species)
@@ -1993,7 +2031,7 @@ class KeywordProvenanceRepository:
         targets = _acceptance_targets(
             self.conn, ws, pred, prediction_id,
             limited_photo_ids, limited_pred_ids,
-            self.DECIDED_PREDICTION_STATUSES,
+            DECIDED_PREDICTION_STATUSES,
         )
         if not targets:
             return _out_of_scope_result(self.conn, species, identity)

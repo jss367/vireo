@@ -1,3 +1,4 @@
+from services import keyword_tagging
 from sync import sync_from_xmp, sync_to_xmp
 from test_identity_alternatives import CANDIDATES, current_group, resolve, save
 from test_sync import _setup_photo_with_xmp
@@ -19,7 +20,7 @@ def test_resolution_preserves_retained_taxonomy_alias_hierarchy(app_and_db, tmp_
     hierarchy = CANDIDATES[0] + '|' + scientific
     write_sidecar(path, flat_keywords={CANDIDATES[0], scientific}, hierarchical_keywords={hierarchy})
     assert save(client, [pid]).status_code == 200
-    db.tag_photo(pid, alias, source='accept')
+    keyword_tagging.tag_photo(db, pid, alias, source='accept')
     db.commit()
     assert resolve(client, current_group(client)).status_code == 200
     assert db.conn.execute('SELECT 1 FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (pid, alias)).fetchone()

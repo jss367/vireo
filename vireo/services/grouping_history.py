@@ -9,6 +9,8 @@ import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from services import keyword_tagging
+
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -668,12 +670,12 @@ def apply_grouping_photo_edit(
         new_ids = [int(item["new_value"])] if item["new_value"] else []
         remove_ids, add_ids = (new_ids, old_ids) if undo else (old_ids, new_ids)
         for kid in remove_ids:
-            db.untag_photo(pid, kid)
+            keyword_tagging.untag_photo(db, pid, kid)
             name = db.edit_history.keyword_name(kid)
             if name and db.pending_changes.cancel(pid, 'keyword_add', name) == 0:
                 db.pending_changes.queue(pid, 'keyword_remove', name)
         for kid in add_ids:
-            db.tag_photo(pid, kid, source='manual')
+            keyword_tagging.tag_photo(db, pid, kid, source='manual')
             name = db.edit_history.keyword_name(kid)
             if name and db.pending_changes.cancel(pid, 'keyword_remove', name) == 0:
                 db.pending_changes.queue(pid, 'keyword_add', name)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from services import keyword_tagging
 from services.encounter_confirmation import apply_scope
 from services.grouping_history import record_grouping_edit
 from services.pending_changes import queue_keyword_add
@@ -34,7 +35,7 @@ def apply_assignments(
         already = db.photo_species.get_photos_with_equivalent_species(ids, kid)
         added = [pid for pid in ids if pid not in already]
         for pid in added:
-            db.tag_photo(pid, kid, source='manual')
+            keyword_tagging.tag_photo(db, pid, kid, source='manual')
             queue_keyword_add(db, pid, species, workspace_id=db.require_workspace_id())
             items.append({'photo_id': pid, 'old_value': '', 'new_value': str(kid)})
         result = assignment_result(db, kid, ids, added=added, removed=set(),

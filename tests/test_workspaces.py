@@ -4,6 +4,7 @@ import pytest
 from services import (
     dashboard_stats,
     keyword_duplicates,
+    keyword_tagging,
     moves_merge,
     photo_ingest,
     workspace_config,
@@ -841,8 +842,8 @@ def test_count_keywords_scoped_by_workspace(db):
                          file_size=100, file_mtime=1.0)
     k1 = db.keywords.add("Robin")
     k2 = db.keywords.add("Jay")
-    db.tag_photo(pid_a, k1)
-    db.tag_photo(pid_a, k2)
+    keyword_tagging.tag_photo(db, pid_a, k1)
+    keyword_tagging.tag_photo(db, pid_a, k2)
     db.commit()
 
     # Workspace B with a different folder and photo
@@ -853,7 +854,7 @@ def test_count_keywords_scoped_by_workspace(db):
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k3 = db.keywords.add("Hawk")
-    db.tag_photo(pid_b, k3)
+    keyword_tagging.tag_photo(db, pid_b, k3)
     db.commit()
 
     db.set_active_workspace(ws_a)
@@ -882,7 +883,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
     k1 = db.keywords.add("Robin")
-    db.tag_photo(pid_a, k1)
+    keyword_tagging.tag_photo(db, pid_a, k1)
     db.commit()
 
     ws_b = db.create_workspace("B")
@@ -892,7 +893,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
     k2 = db.keywords.add("Hawk")
-    db.tag_photo(pid_b, k2)
+    keyword_tagging.tag_photo(db, pid_b, k2)
     db.commit()
 
     db.set_active_workspace(ws_a)
@@ -918,8 +919,8 @@ def test_keyword_tree_scoped_by_workspace(db):
                          file_size=100, file_mtime=1.0)
     k1 = db.keywords.add("Robin")
     k2 = db.keywords.add("Jay")
-    db.tag_photo(pid_a, k1)
-    db.tag_photo(pid_a, k2)
+    keyword_tagging.tag_photo(db, pid_a, k1)
+    keyword_tagging.tag_photo(db, pid_a, k2)
     db.commit()
 
     ws_b = db.create_workspace("B")
@@ -929,7 +930,7 @@ def test_keyword_tree_scoped_by_workspace(db):
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k3 = db.keywords.add("Hawk")
-    db.tag_photo(pid_b, k3)
+    keyword_tagging.tag_photo(db, pid_b, k3)
     db.commit()
 
     db.set_active_workspace(ws_a)
@@ -1042,11 +1043,11 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
     k_sparrow_lc = db.conn.execute("SELECT id FROM keywords WHERE name='sparrow'").fetchone()[0]
 
     # Tag Cardinal/cardinal on photos in workspace A
-    db.tag_photo(pid_a, k_cardinal)
-    db.tag_photo(pid_a, k_cardinal_lc)
+    keyword_tagging.tag_photo(db, pid_a, k_cardinal)
+    keyword_tagging.tag_photo(db, pid_a, k_cardinal_lc)
     # Tag Sparrow/sparrow on photos in workspace B
-    db.tag_photo(pid_b, k_sparrow)
-    db.tag_photo(pid_b, k_sparrow_lc)
+    keyword_tagging.tag_photo(db, pid_b, k_sparrow)
+    keyword_tagging.tag_photo(db, pid_b, k_sparrow_lc)
     db.commit()
 
     # Merge in workspace A — should only merge Cardinal pair
@@ -1230,8 +1231,8 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     clean = db.conn.execute(
         "SELECT id FROM keywords WHERE name = 'apapane'"
     ).fetchone()[0]
-    db.tag_photo(pid_a, quoted)
-    db.tag_photo(pid_b, clean)
+    keyword_tagging.tag_photo(db, pid_a, quoted)
+    keyword_tagging.tag_photo(db, pid_b, clean)
     db.commit()
 
     # Queue an unsynced keyword_add under the legacy spelling. Simulates a
@@ -1299,8 +1300,8 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     clean = db.conn.execute(
         "SELECT id FROM keywords WHERE name = 'apapane'"
     ).fetchone()[0]
-    db.tag_photo(pid_a, quoted)
-    db.tag_photo(pid_b, clean)
+    keyword_tagging.tag_photo(db, pid_a, quoted)
+    keyword_tagging.tag_photo(db, pid_b, clean)
 
     merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
@@ -1350,8 +1351,8 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     ascii_variant = db.conn.execute(
         "SELECT id FROM keywords WHERE name = ?", ("'apapane",)
     ).fetchone()[0]
-    db.tag_photo(pid_a, quoted)
-    db.tag_photo(pid_b, ascii_variant)
+    keyword_tagging.tag_photo(db, pid_a, quoted)
+    keyword_tagging.tag_photo(db, pid_b, ascii_variant)
     db.commit()
 
     # Seed curation under the legacy spelling on both variants: a
@@ -1454,8 +1455,8 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     legacy_id = db.conn.execute(
         "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
     ).fetchone()[0]
-    db.tag_photo(pid_survivor, survivor_id)
-    db.tag_photo(pid_legacy, legacy_id)
+    keyword_tagging.tag_photo(db, pid_survivor, survivor_id)
+    keyword_tagging.tag_photo(db, pid_legacy, legacy_id)
     db.commit()
 
     # Curation keyed on the legacy source spelling for the photo tagged with
@@ -1569,8 +1570,8 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     a_ascii = db.conn.execute(
         "SELECT id FROM keywords WHERE name = ?", ("'apapane",)
     ).fetchone()[0]
-    db.tag_photo(pid_a, a_quoted)
-    db.tag_photo(pid_a, a_ascii)
+    keyword_tagging.tag_photo(db, pid_a, a_quoted)
+    keyword_tagging.tag_photo(db, pid_a, a_ascii)
     db.commit()
 
     # A SEPARATE legacy keyword row that is only tagged in workspace B. Cleanup
@@ -1584,7 +1585,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
         ("‘apapane",),
     ).fetchone()[0]
     assert b_quoted not in (a_quoted, a_ascii)
-    db.tag_photo(pid_b, b_quoted)
+    keyword_tagging.tag_photo(db, pid_b, b_quoted)
     db.commit()
 
     # Seed curation in BOTH workspaces under the legacy spelling and a
@@ -1691,8 +1692,8 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     masze_id = db.keywords.add("Maße")
     db.commit()
     assert masse_id != masze_id
-    db.tag_photo(pid_a, masse_id)
-    db.tag_photo(pid_b, masze_id)
+    keyword_tagging.tag_photo(db, pid_a, masse_id)
+    keyword_tagging.tag_photo(db, pid_b, masze_id)
 
     merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
@@ -1739,8 +1740,8 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
     lower_id = db.keywords.add("éclair")
     db.commit()
     assert upper_id != lower_id
-    db.tag_photo(pid_a, upper_id)
-    db.tag_photo(pid_b, lower_id)
+    keyword_tagging.tag_photo(db, pid_a, upper_id)
+    keyword_tagging.tag_photo(db, pid_b, lower_id)
 
     merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
@@ -1792,7 +1793,7 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
     for row in db.conn.execute(
         "SELECT id FROM keywords WHERE name IN ('Springfield', 'Macro', 'macro')"
     ).fetchall():
-        db.tag_photo(pid, row[0])
+        keyword_tagging.tag_photo(db, pid, row[0])
         db.commit()
 
     merged = keyword_duplicates.merge_duplicate_keywords(db)
@@ -1834,8 +1835,8 @@ def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
         "VALUES ('robin', 'general', 0)"
     ).lastrowid
     db.conn.commit()
-    db.tag_photo(pid_species, species_id)
-    db.tag_photo(pid_plain, plain_id)
+    keyword_tagging.tag_photo(db, pid_species, species_id)
+    keyword_tagging.tag_photo(db, pid_plain, plain_id)
     db.commit()
 
     assert keyword_duplicates.merge_duplicate_keywords(db) == 0
@@ -1881,7 +1882,7 @@ def test_merge_duplicate_keywords_reparents_children(db):
     for row in db.conn.execute(
         "SELECT id FROM keywords WHERE LOWER(name) = 'heron'"
     ).fetchall():
-        db.tag_photo(pid, row[0])
+        keyword_tagging.tag_photo(db, pid, row[0])
         db.commit()
 
     merged = keyword_duplicates.merge_duplicate_keywords(db)
@@ -1931,8 +1932,8 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
         "SELECT id FROM keywords WHERE name='Heron' AND parent_id=?", (lower,)).fetchone()[0]
     db.conn.commit()
 
-    db.tag_photo(pid1, h1)
-    db.tag_photo(pid2, h2)
+    keyword_tagging.tag_photo(db, pid1, h1)
+    keyword_tagging.tag_photo(db, pid2, h2)
 
     merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
@@ -1983,7 +1984,7 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     for row in db.conn.execute(
         "SELECT id FROM keywords WHERE LOWER(name) = 'heron'"
     ).fetchall():
-        db.tag_photo(pid, row[0])
+        keyword_tagging.tag_photo(db, pid, row[0])
         db.commit()
 
     # Keep every child in the same species-bearing slot; this test exercises
@@ -2060,8 +2061,8 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     ).fetchone()[0]
     db.conn.commit()
 
-    db.tag_photo(pid_general, m_general)
-    db.tag_photo(pid_genre, m_genre)
+    keyword_tagging.tag_photo(db, pid_general, m_general)
+    keyword_tagging.tag_photo(db, pid_genre, m_genre)
 
     keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
@@ -2132,7 +2133,7 @@ def test_keyword_tree_includes_ancestors(db):
     hawk = db.keywords.add("Red-tailed Hawk", parent_id=raptors)
 
     # Only tag the leaf (mimics scanner behavior)
-    db.tag_photo(pid, hawk)
+    keyword_tagging.tag_photo(db, pid, hawk)
     db.commit()
 
     db.set_active_workspace(ws)

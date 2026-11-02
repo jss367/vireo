@@ -25,7 +25,7 @@ import uuid
 import pytest
 from db import Database
 from repositories.sync import SyncRepository
-from services import pending_changes, photo_ingest, workspace_folders
+from services import keyword_tagging, pending_changes, photo_ingest, workspace_folders
 from signature_contract import calling_signature
 
 
@@ -1094,9 +1094,9 @@ def test_count_queued_location_photos(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     place = db.keywords.add("Pond", kw_type="location")
     plain = db.keywords.add("Heron")
-    db.tag_photo(lib["a"], place)
-    db.tag_photo(lib["b"], plain)
-    db.tag_photo(lib["c"], place)
+    keyword_tagging.tag_photo(db, lib["a"], place)
+    keyword_tagging.tag_photo(db, lib["b"], plain)
+    keyword_tagging.tag_photo(db, lib["c"], place)
     db.commit()
     _insert(db, lib["a"], "location", "x", ws)
     _insert(db, lib["a"], "location", "y", ws)

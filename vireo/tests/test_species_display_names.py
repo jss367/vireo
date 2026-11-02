@@ -4,6 +4,7 @@ import json
 
 import pytest
 from mcp_server import photo_detail
+from services import keyword_tagging
 
 
 @pytest.fixture
@@ -18,7 +19,7 @@ def starling_photo(app_and_db):
     # Unused taxonomy aliases need not overwhelm the photo's saved names.
     db.conn.execute("INSERT INTO taxa_common_names (taxon_id, name, locale) "
                     "VALUES (6424, 'cost', 'en')")
-    db.tag_photo(1, leaf)
+    keyword_tagging.tag_photo(db, 1, leaf)
     provenance = {'method': 'direct_visual', 'reviewer': 'Test reviewer',
                   'reason': 'Speckled plumage', 'supporting_photo_ids': [1]}
     db.species_provenance.set(1, leaf, provenance)
@@ -56,7 +57,7 @@ def test_aliases_follow_taxon_not_common_name(starling_photo):
                     "VALUES (6425, 'Other species', 'European Starling', 'species')")
     other = db.keywords.add('Different bird', kw_type='taxonomy', is_species=True)
     db.conn.execute('UPDATE keywords SET taxon_id=6425 WHERE id=?', (other,))
-    db.tag_photo(1, other)
+    keyword_tagging.tag_photo(db, 1, other)
     rows = {a['keyword_id']: a for a in db.species_provenance.assignments(1)}
     assert 'Different bird' not in rows[leaf]['synonyms']
     assert rows[other]['synonyms'] == ['Different bird']
@@ -67,7 +68,7 @@ def test_missing_common_name_and_unlinked_keywords(starling_photo):
     _, db, leaf, _ = starling_photo
     db.conn.execute('UPDATE taxa SET common_name=NULL WHERE id=6424')
     unlinked = db.keywords.add('Unresolved bird', is_species=True)
-    db.tag_photo(1, unlinked)
+    keyword_tagging.tag_photo(db, 1, unlinked)
     rows = {a['keyword_id']: a for a in db.species_provenance.assignments(1)}
     assert rows[leaf]['display_name'] == 'Sturnus vulgaris'
     assert 'European starling' in rows[leaf]['synonyms']

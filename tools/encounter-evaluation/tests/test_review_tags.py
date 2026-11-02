@@ -6,7 +6,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from services.edit_history import undo_last_edit
 
 from encounter_eval.common import write_json
@@ -38,7 +38,7 @@ def writable_queue(tmp_path):
         genus = db.keywords.add('Plegadis', kw_type='taxonomy')
         db.conn.execute('UPDATE keywords SET taxon_id=3 WHERE id=?', (genus,))
         for kid in [old, genre, genus]:
-            db.tag_photo(pid, kid)
+            keyword_tagging.tag_photo(db, pid, kid)
     run = tmp_path/'run'
     manifest = prepare(path, run, workspace=ws)
     for entry in manifest['sessions']:
@@ -167,7 +167,7 @@ def test_retry_after_library_commit_does_not_repeat_or_overwrite_later_edits(wri
     assert save_and_sync(queue, pid, ['inat:102'])['status'] == 'pending'
     added = (keywords(db, pid) - preserved).pop()
     with db.transaction():
-        db.untag_photo(pid, added)  # An explicit later user edit must survive retry.
+        keyword_tagging.untag_photo(db, pid, added)  # An explicit later user edit must survive retry.
     monkeypatch.setattr(review_tags, '_apply_tags', original)
     with connect(queue) as conn:
         assert sync_review_tags(conn, pid)['status'] == 'applied'

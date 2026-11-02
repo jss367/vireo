@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from test_site_publish import _seed_publish_app
 from wait import wait_for_job_via_client
 
@@ -109,7 +109,7 @@ def test_export_has_no_species_limit_and_disambiguates_filenames(tmp_path, monke
         Image.new('RGB', (8, 8)).save(meta['photos_dir'] / name)
         pid = photo_ingest.add_photo(db, folder_id=folder, filename=name, extension='.jpg',
                            file_size=1, file_mtime=1)
-        db.tag_photo(pid, keyword)
+        keyword_tagging.tag_photo(db, pid, keyword)
         db.commit()
     duplicate_folder = tmp_path / 'duplicates'
     duplicate_folder.mkdir()

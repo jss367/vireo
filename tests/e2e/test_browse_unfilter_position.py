@@ -1,7 +1,7 @@
 """Turning filters off keeps the current photo in view across lazy pages."""
 
 import pytest
-from services import photo_ingest
+from services import keyword_tagging, photo_ingest
 
 from e2e.test_browse_filterbar import _open_browse
 from e2e.test_browse_sort_keeps_selection import _stall_first_focused_query
@@ -28,10 +28,10 @@ def _prepare(page, live_server, action, photo_link=False):
         )
         ids.append(photo_id)
         if keyword and i >= 120:
-            db.tag_photo(photo_id, keyword)
+            keyword_tagging.tag_photo(db, photo_id, keyword)
             db.commit()
         if i < 120:
-            db.tag_photo(photo_id, place)
+            keyword_tagging.tag_photo(db, photo_id, place)
             db.commit()
         elif action == "color":
             db.photo_labels.set(photo_id, "red")

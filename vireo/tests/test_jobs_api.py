@@ -8445,7 +8445,6 @@ def test_import_pause_waits_for_tag_transaction_to_commit(
 ):
     """Tag writes reach a transaction boundary before honoring Pause."""
     import import_job
-    from db import Database
 
     app, db = app_and_db
     runner = app._job_runner
@@ -8471,7 +8470,9 @@ def test_import_pause_waits_for_tag_transaction_to_commit(
             "errors": [],
         }
 
-    original_tag_photo = Database.tag_photo
+    from services import keyword_tagging
+
+    original_tag_photo = keyword_tagging.tag_photo
 
     # Forward *args/**kwargs rather than restating tag_photo's signature: this
     # stub is about pause timing, and a hardcoded `source=None` default here
@@ -8489,7 +8490,7 @@ def test_import_pause_waits_for_tag_transaction_to_commit(
             assert release_tag_write.wait(timeout=synchronization_timeout(2))
 
     monkeypatch.setattr(import_job, "run_import_job", imported_result)
-    monkeypatch.setattr(Database, "tag_photo", pause_after_uncommitted_tag)
+    monkeypatch.setattr(keyword_tagging, "tag_photo", pause_after_uncommitted_tag)
     response = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),

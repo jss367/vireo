@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.request import urlopen
 
 from playwright.sync_api import expect
+from services import keyword_tagging
 
 
 def test_browse_init_reads_folder_health_from_single_snapshot(
@@ -1359,7 +1360,7 @@ def test_load_keywords_renders_older_success_after_newer_failure(
 
     keyword_name = "Fallback keyword"
     keyword_id = db.keywords.add(keyword_name)
-    db.tag_photo(live_server["data"]["photos"][0], keyword_id)
+    keyword_tagging.tag_photo(db, live_server["data"]["photos"][0], keyword_id)
     db.commit()
     page.evaluate("() => { window._failedKeywordLoad = pageModules.sidebarKeywords.loadKeywords(); }")
     page.wait_for_timeout(200)
