@@ -42,6 +42,8 @@ import re
 import sqlite3
 
 from repositories import UNSET
+from repositories.effective_config import active_effective_config, subject_types
+from repositories.folder_subtrees import folder_subtree_ids
 from repositories.keyword_identity_sql import identity_sql
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
@@ -55,9 +57,6 @@ class CollectionRepository:
         conn,
         resolve_workspace_id,
         *,
-        effective_config,
-        get_subject_types,
-        get_folder_subtree_ids,
         chunks,
         escape_like,
         path_for_subtree_match,
@@ -81,10 +80,6 @@ class CollectionRepository:
     ):
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
-        # Bound ``Database`` methods, kept under their façade names.
-        self.effective_config = effective_config
-        self.get_subject_types = get_subject_types
-        self.get_folder_subtree_ids = get_folder_subtree_ids
         # ``db`` module helpers and constants, kept under their module names
         # so the moved bodies read them as ``self.<name>``. ``_chunks`` is
         # ``db._chunks`` itself (its size default is bound at import), not a
@@ -115,6 +110,18 @@ class CollectionRepository:
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
+
+    def effective_config(self):
+        """The global settings with the active workspace's overrides applied."""
+        return active_effective_config(self.conn, self._resolve_workspace_id)
+
+    def get_subject_types(self):
+        """The keyword types that count as 'identified' in the active workspace."""
+        return subject_types(self.effective_config())
+
+    def get_folder_subtree_ids(self, folder_id):
+        """``folder_id`` plus its descendants visible in the active workspace."""
+        return folder_subtree_ids(self.conn, self.workspace_id, folder_id)
 
     def add(self, name, rules_json, visual_json=None):
         """Insert a smart collection. Returns the collection id.

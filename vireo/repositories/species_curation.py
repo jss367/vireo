@@ -30,10 +30,11 @@ What deliberately stays on ``Database``:
   ``Database._ws_id`` at exactly the points the original code called it, so a
   method that returns early (``get_life_list_best_photo_by_taxon`` on no ids)
   or canonicalizes a species name first still raises when it always did.
-- Composition with other domains. Species names canonicalize through a
-  ``KeywordTaxonRepository`` on the same connection
-  (``resolve_species_display``); folder subtrees and the effective config
-  arrive bound from ``Database``. This domain's own entry points that other
+- Composition with other domains, on the same connection: species names
+  canonicalize through a ``KeywordTaxonRepository``
+  (``resolve_species_display``), folder subtrees come from
+  ``repositories.folder_subtrees.folder_subtree_ids`` and the detector floor from
+  ``repositories.effective_config``. This domain's own entry points that other
   methods compose with (``get_class_ancestors``,
   ``next_representative_order``, ``set_global_representative``,
   ``rename_representatives``) are called on the repository itself, so a
@@ -48,6 +49,8 @@ transaction (``with db.transaction():``).
 import json
 
 from keyword_normalization import keyword_match_key
+from repositories.effective_config import active_effective_config
+from repositories.folder_subtrees import folder_subtree_ids
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from settings_source import config_value
@@ -288,8 +291,6 @@ class SpeciesCurationRepository:
         *,
         chunks,
         life_list_ancestor_suppression_clause,
-        get_folder_subtree_ids,
-        effective_config,
     ):
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
@@ -301,14 +302,15 @@ class SpeciesCurationRepository:
         # Species names canonicalize through the keyword-taxa repository on
         # the same connection.
         self._keyword_taxa = KeywordTaxonRepository(conn)
-        # Bound ``Database`` methods, kept under their façade names.
-        self.get_folder_subtree_ids = get_folder_subtree_ids
-        self.effective_config = effective_config
 
     @property
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
+
+    def effective_config(self):
+        """The global settings with the active workspace's overrides applied."""
+        return active_effective_config(self.conn, self._resolve_workspace_id)
 
     def _detector_floor(self):
         return config_value(self.effective_config(), "detector_confidence")
@@ -360,7 +362,7 @@ class SpeciesCurationRepository:
             folder_filter = ""
             folder_params = ()
         else:
-            subtree = self.get_folder_subtree_ids(folder_id)
+            subtree = folder_subtree_ids(self.conn, self.workspace_id, folder_id)
             placeholders = ",".join("?" for _ in subtree)
             folder_filter = f"AND p.folder_id IN ({placeholders})"
             folder_params = tuple(subtree)

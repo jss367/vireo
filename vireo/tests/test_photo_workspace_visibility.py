@@ -785,7 +785,7 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
         tree = {row["id"]: row for row in db.folders.tree()}
         assert tree[day]["parent_id"] == parent
         assert gap not in tree
-        assert set(db.get_folder_subtree_ids(parent)) == {parent, day}
+        assert set(db.folders.subtree_ids(parent)) == {parent, day}
         assert set(db.photos.get_ids(folder_id=parent)) == {root_photo, shared}
         assert {row["id"] for row in db.photos.list_page(folder_id=parent)} == {root_photo, shared}
         assert browse_queries.get_browse_summary(db, folder_id=parent)["filtered_total"] == 2

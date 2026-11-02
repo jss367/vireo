@@ -19,9 +19,7 @@ pre-commit folder links, and publish that stale result for the full TTL.
 Inside a caller's unit the link is a savepoint of it, and the invalidation
 waits for the caller's commit.
 
-The SQL is ``WorkspaceFolderRepository``'s (``db.workspace_folders``);
-``Database.get_folder_subtree_ids`` stays on the façade because
-``PhotoRepository`` binds it by name.
+The SQL is ``WorkspaceFolderRepository``'s (``db.workspace_folders``).
 """
 
 from __future__ import annotations

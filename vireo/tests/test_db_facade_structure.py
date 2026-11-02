@@ -305,7 +305,7 @@ def test_set_progress_handler_interrupts_and_clears(db):
 # never raise it. Methods that coordinate more than one call (``add_photo``
 # resolving duplicates after the insert, cross-domain composition) are not
 # forwarders and are not counted.
-FORWARDING_WRAPPER_LIMIT = 18
+FORWARDING_WRAPPER_LIMIT = 17
 
 
 def _is_forwarding_wrapper(fn):
@@ -389,16 +389,14 @@ FACADE_BINDING_MODULES = {
 }
 
 FACTORY_CALLBACKS = {
-    "_collection_repository": {"effective_config", "get_folder_subtree_ids", "get_subject_types"},
-    "_culling_repository": {"effective_config"},
+    "_folder_repository": {"<Database>"},
     "_keyword_provenance_repository": {"<Database>"},
     "_keyword_tree_repository": {"<Database>"},
-    "_location_repository": {"_build_query_from_rules", "_merge_keyword_into", "get_folder_subtree_ids"},
+    "_location_repository": {"_build_query_from_rules", "_merge_keyword_into"},
     "_masks_features_repository": {"_safe_remove_mask_file"},
     "_moves_merge_repository": {"_carry_keyword_associations_for_merge"},
     "_photos_repository": {"<Database>"},
     "_prediction_repository": {"<Database>"},
-    "_species_curation_repository": {"effective_config", "get_folder_subtree_ids"},
 }
 
 # The active-workspace resolver a factory may hand over: a repository takes the
@@ -454,13 +452,31 @@ def _factory_callbacks():
                     and node.func.id.endswith("Repository")):
                 continue
             for arg in [*node.args, *(kw.value for kw in node.keywords)]:
-                if isinstance(arg, ast.Name) and arg.id == "self":
-                    found.setdefault(fn.name, set()).add("<Database>")
-                for sub in ast.walk(arg):
-                    if (isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name)
-                            and sub.value.id == "self" and sub.attr in methods
-                            and sub.attr not in WORKSPACE_RESOLVERS):
-                        found.setdefault(fn.name, set()).add(sub.attr)
+                found_in = _callbacks_in(arg, methods)
+                if found_in:
+                    found.setdefault(fn.name, set()).update(found_in)
+    return found
+
+
+def _callbacks_in(expr, methods):
+    """The ``Database`` callbacks an argument expression hands over.
+
+    A bare ``self`` anywhere in it (passed directly, or closed over by a
+    lambda) is ``<Database>``; ``self.<method>`` is that method unless it is
+    the workspace resolver. ``self.conn``, domain accessors (properties) and
+    class constants are not callbacks.
+    """
+    parents = {child: node for node in ast.walk(expr) for child in ast.iter_child_nodes(node)}
+    found = set()
+    for sub in ast.walk(expr):
+        if not (isinstance(sub, ast.Name) and sub.id == "self"):
+            continue
+        parent = parents.get(sub)
+        if isinstance(parent, ast.Attribute) and parent.value is sub:
+            if parent.attr in methods and parent.attr not in WORKSPACE_RESOLVERS:
+                found.add(parent.attr)
+        else:
+            found.add("<Database>")
     return found
 
 
@@ -482,3 +498,15 @@ def test_backbinding_detectors_match_known_shapes():
     assert _binds_the_facade(ast.parse("FACADE_METHODS = ('a',)"))
     assert _binds_the_facade(ast.parse("class R:\n    def __init__(self, conn, *, facade):\n        pass"))
     assert not _binds_the_facade(ast.parse("class R:\n    def __init__(self, conn):\n        pass"))
+    methods = {"effective_config", "_ws_id"}
+
+    def callbacks(src):
+        return _callbacks_in(ast.parse(src, mode="eval").body, methods)
+
+    assert callbacks("self") == {"<Database>"}
+    assert callbacks("lambda a: helper(self, a)") == {"<Database>"}
+    assert callbacks("self.effective_config") == {"effective_config"}
+    assert callbacks("self._ws_id") == set()
+    assert callbacks("self.conn") == set()
+    assert callbacks("self.moves_merge.transfer_gps_review") == set()
+    assert callbacks("self.PHOTO_COLS") == set()

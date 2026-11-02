@@ -71,6 +71,7 @@ from typing import Any
 
 from compare import compare_prediction_to_keywords
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from repositories.effective_config import active_effective_config
 from repositories.identity_alternatives import retarget_candidate_names
 from repositories.keyword_identity_sql import (
     embedded_keyword_associations_for_merge,
@@ -98,7 +99,6 @@ FACADE_METHODS = (
     "rename_species_highlights_species",
     # accept_prediction
     "add_keyword",
-    "effective_config",
     "get_photos_with_equivalent_species",
     "update_prediction_status",
     "queue_change",
@@ -1037,7 +1037,6 @@ class KeywordProvenanceRepository:
     rename_photo_preferences_species: Callable[..., Any]
     rename_species_highlights_species: Callable[..., Any]
     add_keyword: Callable[..., Any]
-    effective_config: Callable[..., Any]
     get_photos_with_equivalent_species: Callable[..., Any]
     update_prediction_status: Callable[..., Any]
     queue_change: Callable[..., Any]
@@ -1080,6 +1079,10 @@ class KeywordProvenanceRepository:
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
+
+    def effective_config(self):
+        """The global settings with the active workspace's overrides applied."""
+        return active_effective_config(self.conn, self._resolve_workspace_id)
 
     def tag(
         self, photo_id, keyword_id, *, source, species_provenance=None,

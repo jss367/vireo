@@ -156,7 +156,7 @@ def create_pipeline_blueprint(
         for fid in folder_ids:
             if not db.workspace_folders.visible_ids(db.active_workspace_id, [fid]):
                 return [], json_error("folder not found", 404)
-            subtree_ids.update(db.get_folder_subtree_ids(fid))
+            subtree_ids.update(db.folders.subtree_ids(fid))
             # Intersect the path-based descendants with the workspace's
             # folder set so nothing leaks in from another workspace that
             # happens to share a path prefix.
@@ -876,7 +876,7 @@ def create_pipeline_blueprint(
             # so legacy folders with parent_id=NULL under the selected root
             # would be silently omitted and the "N not in saved review"
             # banner would understate the scope.
-            subtree_ids = set(db.get_folder_subtree_ids(folder_id))
+            subtree_ids = set(db.folders.subtree_ids(folder_id))
             subtree_ids.update(db.workspace_folders.visible_ids(db.active_workspace_id, db.folders.subtree_ids_by_path(folder_id)))
             photo_ids = [
                 r["id"]
@@ -2375,7 +2375,7 @@ class _PipelineLaunch:
         Reject folders the active workspace has no claim on (mirrors
         the rescan guard): a stale UI or crafted request must not
         pollute this workspace with another workspace's scan output.
-        get_folder_subtree_ids itself refuses to walk out of the
+        folder_subtree_ids itself refuses to walk out of the
         active workspace, so unrelated descendants can never leak in.
         """
         db = self.db
@@ -2386,8 +2386,8 @@ class _PipelineLaunch:
                 return set(), self.json_error("folder not found", 404)
             # Union — a workspace can link both a root and a nested
             # folder, so the same descendant can appear twice.
-            subtree_ids.update(db.get_folder_subtree_ids(fid))
-            # get_folder_subtree_ids walks folders.parent_id only, so
+            subtree_ids.update(db.folders.subtree_ids(fid))
+            # folder_subtree_ids walks folders.parent_id only, so
             # legacy rows whose parent_id is NULL — but whose paths sit
             # under the requested folder — never appear. Every other
             # subtree consumer in db.py (folder deletion, rescan,
