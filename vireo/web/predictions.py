@@ -1200,8 +1200,11 @@ def create_predictions_blueprint(
         return db.predictions.current_status(pred_id)
 
     def _superseded_prediction_ids(db: Database, pred_ids: list[int]) -> set[int]:
-        """Which of ``pred_ids`` are not on their detection's newest label set.
+        """Which of ``pred_ids`` are not on their detection's newest label set for their classifier model.
 
+        Scoped per ``(detection_id, classifier_model)``: a row stays current
+        relative to its own model even when another model's row is newer, so
+        two models' labels for one detection do not supersede each other.
         Reported apart from ambiguity: a superseded row needs no decision,
         the panel refresh shows the current row in its place.
         """
