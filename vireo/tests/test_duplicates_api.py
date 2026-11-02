@@ -1,6 +1,7 @@
 """API tests for /api/duplicates/scan and /api/duplicates/apply."""
 import os
 
+import pytest
 from services import catalog_deletion, photo_ingest, workspace_folders
 from wait import wait_for_job_via_client
 
@@ -439,19 +440,18 @@ def test_delete_loser_files_chunks_large_id_lists(app_and_db, tmp_path, monkeypa
     the chunking path without seeding 1000 photos: the test still proves the
     endpoint splits the query.
 
-    The duplicates blueprint calls ``sql_chunks.chunked`` (re-exported as
-    ``app._chunked``), whose chunk size is a default argument bound when the
-    function was defined. Patching the ``SQL_PARAM_CHUNK`` constant therefore
-    changes nothing; patching the function's defaults reaches the same object
-    the blueprint calls.
+    The duplicates blueprint calls ``sql_chunks.chunked``, whose chunk size
+    is a default argument bound when the function was defined. Patching the
+    ``SQL_PARAM_CHUNK`` constant therefore changes nothing; patching the
+    function's defaults reaches the same object the blueprint calls.
     """
     import os
 
-    import app as app_module
+    import sql_chunks
 
-    monkeypatch.setattr(app_module._chunked, "__defaults__", (2,))
+    monkeypatch.setattr(sql_chunks.chunked, "__defaults__", (2,))
     # Guard against the patch silently becoming a no-op again.
-    assert [len(c) for c in app_module._chunked(list(range(5)))] == [2, 2, 1]
+    assert [len(c) for c in sql_chunks.chunked(list(range(5)))] == [2, 2, 1]
 
     app, db = app_and_db
     loser_ids = []
@@ -516,18 +516,17 @@ def test_delete_loser_files_validates_input(app_and_db):
 
 
 def test_delete_loser_files_skips_isfile_preflight_on_network_paths(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """Duplicate cleanup must never stat a network path from the request
     thread. On an unhealthy SMB share ``os.path.isfile`` can block
     indefinitely, and a failed stat would be misread as "already missing"
     and drop the DB row for a photo that reappears when the mount comes
     back. Classify the path via the bounded mount table first and hand
-    network candidates straight to ``_trash_paths``.
+    network candidates straight to ``trash_paths``.
     """
     import os
 
-    import app as app_module
 
     app, db = app_and_db
     _w, l, _wp, loser_path = _seed_pair_with_real_files(db, tmp_path, "NETDUP")
@@ -535,9 +534,7 @@ def test_delete_loser_files_skips_isfile_preflight_on_network_paths(
     # Advertise the loser's folder as a network mount so the classifier
     # routes it through the safe path.
     volume_root = os.path.dirname(loser_path)
-    monkeypatch.setattr(
-        app_module, "_network_volume_roots", lambda: {volume_root},
-    )
+    fake_trash.report_network_roots({volume_root})
 
     real_isfile = os.path.isfile
     stat_calls = []
@@ -550,7 +547,7 @@ def test_delete_loser_files_skips_isfile_preflight_on_network_paths(
             )
         return real_isfile(path)
 
-    monkeypatch.setattr(app_module.os.path, "isfile", guarded_isfile)
+    monkeypatch.setattr(os.path, "isfile", guarded_isfile)
 
     trash_calls = []
 
@@ -564,7 +561,7 @@ def test_delete_loser_files_skips_isfile_preflight_on_network_paths(
                 os.remove(path)
         return len(paths), set(paths), []
 
-    monkeypatch.setattr(app_module, "_trash_paths", record_trash)
+    fake_trash.handle_trash(record_trash)
 
     client = app.test_client()
     resp = client.post(
@@ -575,7 +572,7 @@ def test_delete_loser_files_skips_isfile_preflight_on_network_paths(
     body = resp.get_json()
     assert body["trashed"] == 1
     assert body["failed"] == []
-    # Endpoint delegated the loser's network path to _trash_paths without
+    # Endpoint delegated the loser's network path to trash_paths without
     # first stat'ing it — the safety-net assertion in guarded_isfile would
     # have failed the test otherwise.
     assert trash_calls == [[loser_path]]
@@ -585,12 +582,48 @@ def test_delete_loser_files_skips_isfile_preflight_on_network_paths(
     ).fetchone() is None
 
 
+@pytest.mark.parametrize("snapshot", ["custom mount", None])
+def test_delete_loser_files_hands_its_mount_snapshot_to_trash(
+    app_and_db, tmp_path, fake_trash, snapshot,
+):
+    """The endpoint classifies losers against one mount-table snapshot and
+    passes that snapshot, including an explicit ``None`` for a failed query,
+    to ``trash_paths``. Leaving it out would make ``trash_paths`` query the
+    mount table again; if that second query succeeds after the share
+    detached, a custom mount point (``/Users/me/mnt/photos``) the endpoint
+    already routed as network-backed would be reclassified as local, and the
+    unbounded in-process I/O this routing exists to prevent would follow.
+    """
+    app, db = app_and_db
+    _w, loser, _wp, loser_path = _seed_pair_with_real_files(db, tmp_path, "SNAPSHOT")
+    roots = {os.path.dirname(loser_path)} if snapshot else None
+    fake_trash.report_network_roots(roots)
+
+    def trash_loser(paths, **_kwargs):
+        for path in paths:
+            os.remove(path)
+        return len(paths), set(paths), []
+
+    fake_trash.handle_trash(trash_loser)
+
+    resp = app.test_client().post(
+        "/api/duplicates/delete-loser-files", json={"photo_ids": [loser]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["trashed"] == 1
+    assert fake_trash.trashed_paths == [[loser_path]]
+    call = fake_trash.trash_calls[0]
+    assert "network_roots" in call.kwargs
+    assert call.kwargs["network_roots"] is roots
+
+
 def test_delete_loser_files_reports_already_missing_network_losers_as_skipped(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """A network loser that is already absent on the still-mounted share must
     produce an explicit terminal outcome. Without preserving the "file
-    already missing" signal, ``_trash_paths`` would return the path in
+    already missing" signal, ``trash_paths`` would return the path in
     ``successful`` with ``trashed=0`` and the endpoint would answer
     ``{trashed: 0, skipped: [], failed: []}`` — the UI's
     ``trashOneLoserFile`` has no matching branch and the card stays stuck
@@ -598,20 +631,17 @@ def test_delete_loser_files_reports_already_missing_network_losers_as_skipped(
     """
     import os
 
-    import app as app_module
 
     app, db = app_and_db
     _w, l, _wp, loser_path = _seed_pair_with_real_files(db, tmp_path, "NETMISS")
     os.remove(loser_path)
 
     # Advertise the loser's folder as a network mount so the endpoint
-    # routes it through _trash_paths without stat'ing it first.
+    # routes it through trash_paths without stat'ing it first.
     volume_root = os.path.dirname(loser_path)
-    monkeypatch.setattr(
-        app_module, "_network_volume_roots", lambda: {volume_root},
-    )
+    fake_trash.report_network_roots({volume_root})
 
-    # Real _trash_paths behaviour when Finder reports "missing" for a
+    # Real trash_paths behaviour when Finder reports "missing" for a
     # still-mounted network volume: path lands in ``successful`` but
     # ``moved`` is zero, and ``already_missing_out`` is populated.
     def already_missing_trash(
@@ -623,7 +653,7 @@ def test_delete_loser_files_reports_already_missing_network_losers_as_skipped(
             already_missing_out.update(paths)
         return 0, set(paths), []
 
-    monkeypatch.setattr(app_module, "_trash_paths", already_missing_trash)
+    fake_trash.handle_trash(already_missing_trash)
 
     client = app.test_client()
     resp = client.post(
@@ -641,6 +671,8 @@ def test_delete_loser_files_reports_already_missing_network_losers_as_skipped(
     ), body
     assert body["trashed"] == 0
     assert body["failed"] == []
+    # The network loser went to the Trash call instead of a local stat.
+    assert fake_trash.trashed_paths == [[loser_path]]
     # DB row is dropped so the disk-cleanup-summary count reflects it.
     assert db.conn.execute(
         "SELECT 1 FROM photos WHERE id=?", (l,),
@@ -1250,12 +1282,11 @@ def test_keep_endpoint_validates_input(app_and_db):
     assert resp.status_code == 404
 
 
-def test_keep_endpoint_waits_out_a_cleanup_in_progress(app_and_db, tmp_path, monkeypatch):
+def test_keep_endpoint_waits_out_a_cleanup_in_progress(app_and_db, tmp_path, monkeypatch, fake_trash):
     """A copy cleanup has already chosen to trash can't be promoted to the
     kept one while that cleanup is still moving it to Trash."""
     import threading
 
-    import app as app_module
     import web.duplicates as duplicates_web
     from testing.waits import synchronization_timeout
 
@@ -1274,7 +1305,7 @@ def test_keep_endpoint_waits_out_a_cleanup_in_progress(app_and_db, tmp_path, mon
             os.remove(path)
         return len(paths), set(paths), []
 
-    monkeypatch.setattr(app_module, "_trash_paths", slow_trash)
+    fake_trash.handle_trash(slow_trash)
     monkeypatch.setattr(duplicates_web, "KEEP_CLEANUP_WAIT_SECS", 0.05)
     cleanup = {}
 

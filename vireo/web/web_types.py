@@ -1,13 +1,12 @@
 """Type names for what ``create_app`` injects into the blueprint factories.
 
 Nothing here runs: each name describes something a factory receives
-(``app.config``, a getter, one of app.py's late-bound helpers, or a bound
-method of a per-app service object such as ``MissingOriginals``,
-``PhotoDeletion``, ``FolderMoves``, ``PipelineChain``, ``VisualScope`` or
-``RenderCache``) as the blueprints call it, so a factory can say what it
-receives without importing those services at runtime. Shapes the services
-already name (``JsonError``, ``JobWork``, ``PathOutcome``) are reused from
-there.
+(``app.config``, a getter, or a bound method of a per-app service object
+such as ``MissingOriginals``, ``PhotoDeletion``, ``FolderMoves``,
+``PipelineChain``, ``VisualScope`` or ``RenderCache``) as the blueprints call
+it, so a factory can say what it receives without importing those services
+at runtime. Shapes the services
+already name (``JsonError``, ``JobWork``) are reused from there.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
     from jobs import JobRunner
     from services.folder_moves import FolderMoveRequest, MoveChain, StagedTransfer
-    from services.photo_deletion import BatchDeleteResult, DeleteProgress, PathOutcome
+    from services.photo_deletion import BatchDeleteResult, DeleteProgress
     from services.service_types import JobDict, JobResult, JobWork, JsonDict
     from services.visual_scope import VisualClause
 
@@ -47,23 +46,9 @@ type GuardMoveFolder = Callable[[Database, int], str | None]
 # ``RenderCache.invalidate_photo_render_cache``.
 type InvalidatePhotoRenderCache = Callable[[Database, Iterable[int]], None]
 
-# app.py's mount-table snapshot: the network-volume roots, or None when the
-# mount table could not be read (callers then treat ``/Volumes`` as network).
-type NetworkRoots = set[str] | None
-
 # ``PipelineChain.chain_after_move``: enqueue the NAS moves a chained
 # process run asked for, once that run ends.
 type ChainAfterMove = Callable[[JobDict, JobResult, JsonDict, int], None]
-
-
-class AppTrashPaths(Protocol):
-    """``app._trash_paths`` (late-bound): ``(moved, successful, failures)``."""
-
-    def __call__(
-        self, filepaths: Sequence[str],
-        progress_callback: Callable[[int, int, str], None] | None = None,
-        already_missing_out: set[str] | None = None, network_roots: NetworkRoots = ...,
-    ) -> PathOutcome: ...
 
 
 class EnqueueProcessJob(Protocol):
