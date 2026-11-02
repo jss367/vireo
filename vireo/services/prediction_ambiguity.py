@@ -61,7 +61,7 @@ def effective_category_resolver(db: Database, photo_ids: Iterable[int | None]) -
     same helpers Compare uses rather than a raw keyword query:
 
     * ``get_species_keywords_for_photos`` canonicalizes a hierarchy alias
-      through its linked taxon's root, and ``resolve_species_display_name``
+      through its linked taxon's root, and ``resolve_species_display``
       does the same for the prediction label. Comparing raw
       ``keywords.name`` text would make a photo tagged with the leaf
       ``Desert Verdin`` read as *conflicting* with a ``Verdin``
@@ -164,7 +164,7 @@ def _category_resolver(
         if identity.scientific_name:
             return identity.scientific_name
         if species not in resolved:
-            resolved[species] = db.resolve_species_display_name(identity.display_name)
+            resolved[species] = db.keyword_taxa.resolve_species_display(identity.display_name)
         return resolved[species]
 
     keyword_names: dict[int, list[tuple[str, str]]] = {}

@@ -305,7 +305,7 @@ def test_set_progress_handler_interrupts_and_clears(db):
 # never raise it. Methods that coordinate more than one call (``add_photo``
 # resolving duplicates after the insert, cross-domain composition) are not
 # forwarders and are not counted.
-FORWARDING_WRAPPER_LIMIT = 24
+FORWARDING_WRAPPER_LIMIT = 18
 
 
 def _is_forwarding_wrapper(fn):
@@ -364,3 +364,121 @@ def test_forwarding_wrapper_detector_matches_known_shapes():
     assert not _is_forwarding_wrapper(parse(
         "def f(self, x):\n    pid = self._photos_repository().add(x)\n    self.resolve(pid)\n    return pid"
     ))
+
+
+# -- repositories depend only downward ----------------------------------------------
+
+# A repository takes its connection, the workspace resolver and the pure
+# helpers or constants it needs; it never receives the ``Database`` or calls
+# back into it. Logic that needs another domain composes that domain's
+# repository on the same connection, or moves to a service. Two kinds of
+# back-binding remain, each an exact inventory that may only shrink:
+#
+# - ``FACADE_BINDING_MODULES``: repository modules that copy ``Database``
+#   methods onto themselves by name (``FACADE_METHODS``) or take the
+#   ``Database`` itself as a ``facade`` argument.
+# - ``FACTORY_CALLBACKS``: the ``Database`` methods each ``Database`` method
+#   still hands to a repository constructor, keyed by the handing method.
+#   Domain accessors (properties that build another repository) and class
+#   constants are not callbacks and are not listed.
+FACADE_BINDING_MODULES = {
+    "keyword_provenance",
+    "keyword_tree",
+    "photos",
+    "predictions",
+}
+
+FACTORY_CALLBACKS = {
+    "_collection_repository": {"effective_config", "get_folder_subtree_ids", "get_subject_types"},
+    "_culling_repository": {"effective_config"},
+    "_keyword_provenance_repository": {"<Database>"},
+    "_keyword_tree_repository": {"<Database>"},
+    "_location_repository": {"_build_query_from_rules", "_merge_keyword_into", "get_folder_subtree_ids"},
+    "_masks_features_repository": {"_safe_remove_mask_file"},
+    "_moves_merge_repository": {"_carry_keyword_associations_for_merge"},
+    "_photos_repository": {"<Database>"},
+    "_prediction_repository": {"<Database>"},
+    "_species_curation_repository": {"effective_config", "get_folder_subtree_ids"},
+}
+
+# The active-workspace resolver a factory may hand over: a repository takes the
+# workspace id or this resolver, never anything else of the façade.
+WORKSPACE_RESOLVERS = {"_ws_id"}
+
+
+def _repository_modules():
+    from pathlib import Path
+
+    root = Path(inspect.getsourcefile(Database)).parent / "repositories"
+    for path in sorted(root.glob("*.py")):
+        yield path.stem, ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _binds_the_facade(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "FACADE_METHODS"
+            for target in node.targets
+        ):
+            return True
+        if isinstance(node, ast.arg) and node.arg == "facade":
+            return True
+    return False
+
+
+def test_facade_binding_repositories_only_shrink():
+    binding = {name for name, tree in _repository_modules() if _binds_the_facade(tree)}
+    assert binding == FACADE_BINDING_MODULES, (
+        "Repository modules that bind Database methods by name (FACADE_METHODS) "
+        "or take the Database as `facade` changed. A repository composes other "
+        "repositories on its own connection, or the cross-domain logic moves to "
+        "a service; never add one. When you remove one, drop it from "
+        "FACADE_BINDING_MODULES.\n"
+        f"  found:    {sorted(binding)}\n"
+        f"  expected: {sorted(FACADE_BINDING_MODULES)}"
+    )
+
+
+def _factory_callbacks():
+    methods = {
+        fn.name for fn in _database_methods()
+        if not any(
+            isinstance(d, ast.Name) and d.id in ("property", "staticmethod")
+            for d in fn.decorator_list
+        )
+    }
+    found = {}
+    for fn in _database_methods():
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id.endswith("Repository")):
+                continue
+            for arg in [*node.args, *(kw.value for kw in node.keywords)]:
+                if isinstance(arg, ast.Name) and arg.id == "self":
+                    found.setdefault(fn.name, set()).add("<Database>")
+                for sub in ast.walk(arg):
+                    if (isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name)
+                            and sub.value.id == "self" and sub.attr in methods
+                            and sub.attr not in WORKSPACE_RESOLVERS):
+                        found.setdefault(fn.name, set()).add(sub.attr)
+    return found
+
+
+def test_repository_factories_hand_over_no_database_callbacks():
+    found = _factory_callbacks()
+    assert found == FACTORY_CALLBACKS, (
+        "The Database methods handed to repository constructors changed. A "
+        "repository must not call back into Database: import the helper it "
+        "needs, build the other domain's repository on its own connection, or "
+        "move the composition to a service. When you remove a callback, drop "
+        "it from FACTORY_CALLBACKS.\n"
+        f"  found:    {found}\n"
+        f"  expected: {FACTORY_CALLBACKS}"
+    )
+
+
+def test_backbinding_detectors_match_known_shapes():
+    """Pin both detectors so the inventories count what they claim to."""
+    assert _binds_the_facade(ast.parse("FACADE_METHODS = ('a',)"))
+    assert _binds_the_facade(ast.parse("class R:\n    def __init__(self, conn, *, facade):\n        pass"))
+    assert not _binds_the_facade(ast.parse("class R:\n    def __init__(self, conn):\n        pass"))

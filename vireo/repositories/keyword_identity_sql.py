@@ -93,22 +93,29 @@ def embedded_keyword_associations_for_merge(conn, losing_id, survivor_id, *,
         yield {**dict(row), 'species_provenance': evidence_for_photo_copy(row['species_provenance'], losing_id)}
 
 
-def resolve_import_alias(db, name, parent_id, *, kw_type=None):
+def resolve_import_alias(merges, name, parent_id, *, kw_type=None):
+    """Resolve a reviewed import alias for ``name`` under ``parent_id``.
+
+    ``merges`` is a ``KeywordMergeRepository`` (``db.keyword_merges``).
+    """
     parts = [name]
     seen = set()
     while parent_id is not None and parent_id not in seen:
         seen.add(parent_id)
-        row = db.keyword_merges.name_and_parent(parent_id)
+        row = merges.name_and_parent(parent_id)
         if row is None:
             return None
         parts.append(row['name'])
         parent_id = row['parent_id']
-    return resolve_import_path(db, list(reversed(parts)), kw_type=kw_type)
+    return resolve_import_path(merges, list(reversed(parts)), kw_type=kw_type)
 
 
-def resolve_import_path(db, parts, *, kw_type=None, linked_locations_only=False):
-    """Resolve reviewed import paths without overriding an explicit type."""
-    row = db.keyword_merges.alias_target(path_key(parts), kw_type, linked_locations_only)
+def resolve_import_path(merges, parts, *, kw_type=None, linked_locations_only=False):
+    """Resolve reviewed import paths without overriding an explicit type.
+
+    ``merges`` is a ``KeywordMergeRepository`` (``db.keyword_merges``).
+    """
+    row = merges.alias_target(path_key(parts), kw_type, linked_locations_only)
     if row:
         return row['keyword_id']
     if len(parts) != 1:
@@ -117,20 +124,20 @@ def resolve_import_path(db, parts, *, kw_type=None, linked_locations_only=False)
     # leaf only when every matching alias/live identity agrees on its target.
     name = keyword_match_key(parts[0])
     candidates = {
-        row['keyword_id'] for row in db.keyword_merges.alias_paths_of_type(kw_type)
+        row['keyword_id'] for row in merges.alias_paths_of_type(kw_type)
         if keyword_match_key(json.loads(row['path_json'])[-1]) == name
     }
     if not candidates:
         return None
     candidates.update(
-        row['id'] for row in db.keyword_merges.ids_and_names_of_type(kw_type)
+        row['id'] for row in merges.ids_and_names_of_type(kw_type)
         if keyword_match_key(row['name']) == name
     )
     if len(candidates) != 1:
         return None
     target_id = candidates.pop()
     if linked_locations_only:
-        target = db.keyword_merges.type_and_place(target_id)
+        target = merges.type_and_place(target_id)
         if target['type'] != 'location' or target['place_id'] is None:
             return None
     return target_id

@@ -371,11 +371,11 @@ def _remap_identity_history(conn: sqlite3.Connection, losing_id: int, survivor_i
 class IdentityAlternativesRepository:
     def __init__(
         self, conn: sqlite3.Connection, workspace_id: Callable[[], int], *,
-        lookup_taxon_id: Callable[..., int | None], keyword_source_conflict_sql: str,
+        keyword_source_conflict_sql: str,
     ) -> None:
         self.conn = conn
         self._workspace_id = workspace_id
-        self._lookup_taxon_id = lookup_taxon_id
+        self._lookup_taxon_id = partial(lookup_species_taxon_id, conn)
         self._keyword_source_conflict_sql = keyword_source_conflict_sql
 
     def merge_candidate_names(self, losing: int, survivor: int) -> list[str] | None:

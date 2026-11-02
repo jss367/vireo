@@ -1119,7 +1119,7 @@ def _confirmed_hierarchy_aliases(
                               hierarchical_keywords, additive=False)
     for hierarchy in hierarchical_keywords:
         parts = hierarchy.split('|')
-        resolved = resolve_import_path(db, parts)
+        resolved = resolve_import_path(db.keyword_merges, parts)
         if resolved is not None:
             aliases_by_key[keyword_match_key(parts[-1])].add(resolved)
     return aliases_by_key

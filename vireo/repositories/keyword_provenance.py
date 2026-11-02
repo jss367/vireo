@@ -77,6 +77,7 @@ from repositories.keyword_identity_sql import (
     free_sibling_name,
     keywords_claim_different_taxa,
 )
+from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from settings_source import config_value
 
@@ -102,7 +103,6 @@ FACADE_METHODS = (
     "update_prediction_status",
     "queue_change",
     "remove_pending_changes",
-    "_species_root_name_for_taxon",
 )
 
 
@@ -237,7 +237,7 @@ def _fold_keyword_metadata(conn, src, dst, dst_id):
     else:
         # Fold ``source_taxon_id`` alongside ``taxon_id``: a
         # source row can carry an iNat id without a resolved local
-        # taxon (see ``_add_source_species_keyword``), and
+        # taxon (see ``add_source_species``), and
         # ``keywords_claim_different_taxa`` treats a bare
         # ``source_taxon_id`` as identity. Without this COALESCE
         # the recursive child collapse would drop the only
@@ -1042,7 +1042,6 @@ class KeywordProvenanceRepository:
     update_prediction_status: Callable[..., Any]
     queue_change: Callable[..., Any]
     remove_pending_changes: Callable[..., Any]
-    _species_root_name_for_taxon: Callable[..., Any]
 
     def __init__(
         self,
@@ -1803,7 +1802,7 @@ class KeywordProvenanceRepository:
                 effective_config=self.effective_config,
                 remove_pending_changes=self.remove_pending_changes,
                 queue_change=self.queue_change,
-                species_root_name_for_taxon=self._species_root_name_for_taxon,
+                species_root_name_for_taxon=KeywordTaxonRepository(self.conn).species_root_name_for_taxon,
                 rename_species_highlights_species=self.rename_species_highlights_species,
                 rename_photo_preferences_species=self.rename_photo_preferences_species,
             )
@@ -1979,7 +1978,7 @@ def _explicit_source_taxon(pred, identity):
 
     A pure name lookup can flag a same-name keyword the async
     ``mark_species_keywords`` pass has not linked yet. Routing the
-    accept through ``_add_source_species_keyword`` on that inferred
+    accept through ``add_source_species`` on that inferred
     id refuses to reuse the unlinked row and mints a suffixed
     duplicate; only explicit prediction evidence (a stored
     ``source_taxon_id`` or a native tol/iNat scientific name)

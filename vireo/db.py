@@ -17,9 +17,8 @@ from keyword_normalization import (
     normalize_keyword_display,
 )
 from new_images_cache import get_shared_cache
-from repositories.keyword_identity_sql import resolve_import_alias
+from repositories.keywords import KEYWORD_TYPES
 from repositories.prediction_review import prediction_review_join, prediction_review_status
-from repositories.species_taxon_lookup import taxon_lookup_variants
 from unit_of_work import (
     GuardedConnection,
     InOwnUnit,
@@ -280,11 +279,6 @@ class MissingPhotosCancelled(RuntimeError):
     """Raised when a Missing Originals filesystem scan is cancelled."""
 
 
-def _taxon_lookup_variants(name: str) -> list[str]:
-    """Return the normal punctuation-tolerant species lookup variants."""
-    return taxon_lookup_variants(name)
-
-
 def _path_for_subtree_match(value: str) -> str:
     """Normalize a stored path for platform-neutral subtree prefix matching."""
     return value.replace("\\", "/").rstrip("/")
@@ -300,12 +294,6 @@ def _escape_like(s: str) -> str:
     and scanner.py).
     """
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-# Sentinel for ``resolve_species_display_name(case_convention=...)``: absent
-# means "work it out", which is different from an explicit ``None`` ("there is
-# no convention, leave the caller's spelling alone").
-_DETECT_CASE_CONVENTION = object()
 
 
 def _is_keyword_word_char(ch):
@@ -494,14 +482,6 @@ _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE = """
     )
 """
 
-
-# Canonical set of keyword type values stored in keywords.type.
-# - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
-# - individual: a named person, pet, or otherwise tracked individual
-# - location: a named location ("Yosemite", "backyard")
-# - genre: a non-subject visual category ("Landscape", "Sunset")
-# - general: catch-all/free-form tag (the legacy default)
-KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "general"})
 
 # --- Browse stacks -----------------------------------------------------
 # Defaults for the Stacks toggle's burst grouping, mirroring
@@ -1705,7 +1685,6 @@ class Database:
             life_list_ancestor_suppression_clause=(
                 _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
             ),
-            resolve_species_display_name=self.resolve_species_display_name,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
             effective_config=self.effective_config,
         )
@@ -2661,10 +2640,9 @@ class Database:
 
         A domain accessor, not a cached attribute: every access builds a
         fresh repository, whose scoped methods resolve the workspace at use.
-        Do not retain one across a workspace switch. The methods the keyword
-        repositories bind from the façade by name (``FACADE_METHODS``:
-        ``add_keyword``, ``resolve_species_display_name`` ...) keep their
-        ``Database`` wrappers, as does ``untag_photo`` beside ``tag_photo``.
+        Do not retain one across a workspace switch. ``add_keyword`` keeps
+        its ``Database`` wrapper while ``repositories/keyword_provenance.py``
+        binds it by name, as does ``untag_photo`` beside ``tag_photo``.
         """
         return self._keyword_repository()
 
@@ -2672,39 +2650,21 @@ class Database:
         """Build the keyword repository on this connection.
 
         The active workspace is resolved lazily (``Database._ws_id`` is
-        passed as a resolver), so methods keep raising at the point they
-        always did. Every façade method a moved body calls is handed over
-        bound, under its ``Database`` name, so monkeypatches keep reaching
-        the moved code; the ``db`` module names the bodies read
-        (``resolve_import_alias``, ``KEYWORD_TYPES``) are read here, at call
-        time.
+        passed as a resolver), so scoped methods raise only when they run
+        without one.
         """
         from repositories.keywords import KeywordRepository
 
-        return KeywordRepository(
-            self.conn,
-            self._ws_id,
-            keyword_types=KEYWORD_TYPES,
-            resolve_import_alias=resolve_import_alias,
-            facade=self,
-        )
+        return KeywordRepository(self.conn, self._ws_id)
 
     def _keyword_taxon_repository(self) -> KeywordTaxonRepository:
         """Build the keyword species-name and taxon-link repository on this connection.
 
-        Catalog-wide: nothing in it needs the active workspace. The façade
-        methods its bodies call are handed over bound, under their
-        ``Database`` names; the detection sentinel and the taxon-name variant
-        helper are read here, at call time.
+        Catalog-wide: it needs only the connection.
         """
         from repositories.keyword_taxa import KeywordTaxonRepository
 
-        return KeywordTaxonRepository(
-            self.conn,
-            detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
-            taxon_lookup_variants=_taxon_lookup_variants,
-            facade=self,
-        )
+        return KeywordTaxonRepository(self.conn)
 
     @property
     def keyword_taxa(self) -> KeywordTaxonRepository:
@@ -2712,11 +2672,7 @@ class Database:
 
         A domain accessor, not a cached attribute: every access builds a
         fresh repository through ``_keyword_taxon_repository``. Catalog-wide,
-        so it needs no active workspace. The lookups other keyword
-        repositories bind by name (``detect_keyword_case_convention``,
-        ``resolve_species_display_name``, ``_species_root_name_for_taxon``,
-        ``_lookup_taxon_id_for_keyword``, ``_resolve_species_by_lineage``)
-        keep their ``Database`` wrappers.
+        so it needs no active workspace.
         """
         return self._keyword_taxon_repository()
 
@@ -2777,7 +2733,7 @@ class Database:
         """Unresolved candidate identities; never confirmed species keywords."""
         from repositories.identity_alternatives import IdentityAlternativesRepository
         return IdentityAlternativesRepository(
-            self.conn, self._ws_id, lookup_taxon_id=self._lookup_taxon_id_for_keyword,
+            self.conn, self._ws_id,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
@@ -2862,192 +2818,6 @@ class Database:
         from repositories.keyword_merges import KeywordMergeRepository
 
         return KeywordMergeRepository(self.conn)
-
-    def detect_keyword_case_convention(self) -> str | None:
-        """Detect the casing convention used by existing species keywords.
-
-        Returns:
-            'title' if most are Title Case (e.g. "Black Phoebe")
-            'lower' if most are lowercase after first word (e.g. "Black phoebe")
-            'upper' if most are ALL CAPS
-            None if not enough data to determine
-        """
-        return self._keyword_taxon_repository().detect_case_convention()
-
-    def _apply_case_convention(self, name, convention):
-        """Apply a casing convention to a species name."""
-        if convention == "lower":
-            # First word capitalized, rest lowercase: "Black phoebe"
-            words = name.split()
-            if len(words) > 1:
-                first = self._sentence_case_first_word(words[0])
-                return first + " " + " ".join(w.lower() for w in words[1:])
-            return self._sentence_case_first_word(name)
-        elif convention == "title":
-            # Title Case: "Black Phoebe"
-            return name.title()
-        return name
-
-    @staticmethod
-    def _sentence_case_first_word(word):
-        """Capitalize a first word without mangling mixed-case eponyms.
-
-        ``str.capitalize()`` lowercases everything after the first letter,
-        so a classifier label like ``McKay's bunting`` would come out
-        ``Mckay's bunting``. Preserve existing internal casing unless the
-        word is ALL CAPS (shouty label files), which sentence-cases.
-        """
-        if not word:
-            return word
-        has_case = any(ch.lower() != ch.upper() for ch in word)
-        if has_case and word == word.upper():
-            chars = list(word.lower())
-            for idx, ch in enumerate(chars):
-                if ch.lower() != ch.upper():
-                    chars[idx] = ch.upper()
-                    break
-            return "".join(chars)
-        return word[0].upper() + word[1:]
-
-    def resolve_species_display_name(
-        self,
-        name: str,
-        apply_case_convention: bool = True,
-        case_convention: object = _DETECT_CASE_CONVENTION,
-    ) -> str:
-        """Predict the stored species name that add_keyword(is_species=True) would use.
-
-        Species relabel endpoints snapshot curation dst_existed before
-        add_keyword actually runs, so they need to know the final stored
-        spelling in advance. Cases:
-
-        1. A single species-bearing root keyword row matches (SQLite
-           ASCII NOCASE) → preserve that stored spelling; existing
-           curation rows key on it. A non-species general homonym with
-           the same NOCASE key (e.g. a hand-tagged ``Common Waxbill``
-           general alongside a taxonomy ``Common waxbill``) is ignored
-           here — add_keyword's typed lookup prefers the taxonomy row,
-           so returning the general's spelling would key curation onto a
-           string add_keyword never stores.
-        2. Multiple species-bearing stored spellings match the same
-           NOCASE key (intentional homonyms — e.g. legacy general
-           ``Robin`` (is_species=1) alongside taxonomy ``robin``) →
-           preserve the caller's spelling. Silently picking one would
-           route bucket/curation writes across genuinely different
-           species rows, so the eligibility check (which compares
-           ``bucket["species"]`` to this result exactly) would then
-           reject requests coming from the other homonym's bucket.
-           Bucket collection, API parse, and DB setters all funnel
-           through this call, so preserving keeps them agreeing on the
-           same string. (Callers that need the exact spelling
-           add_keyword will land on after promotion — e.g. relabel
-           snapshots — apply add_keyword's ORDER BY themselves.)
-        3. No species-bearing row but a non-species general row shares
-           the NOCASE key → return that general's spelling.
-           add_keyword(is_species=True) would find and promote that row
-           in place, keeping its name, so curation must key on the same
-           string.
-        4. No matching root keyword row → apply the same species-casing
-           convention that add_keyword applies for new species keywords,
-           so pre-existing curation from predictions (which inserted
-           `Black Phoebe`) is matched even when the request submits
-           `black phoebe`.
-
-        A hierarchy leaf whose spelling differs from its root alias is also
-        canonicalized through a unique linked taxon. This keeps accepted
-        hierarchy buckets and species curation on the same root key while the
-        photo itself retains the hierarchy-bearing keyword association.
-
-        Pass ``apply_case_convention=False`` to skip case 4 and return the
-        caller's own spelling when nothing is stored. Callers that *display*
-        the result want "the spelling some row actually holds, or the name I
-        gave you" — case 4 mints a spelling (``Bubulcus ibis`` ->
-        ``Bubulcus Ibis``) that no row anywhere carries, which is fine for
-        predicting where add_keyword will land but wrong to show a user as
-        though a model or the catalog had said it.
-        """
-        return self._keyword_taxon_repository().resolve_species_display(
-            name, apply_case_convention=apply_case_convention, case_convention=case_convention,
-        )
-
-    def species_case_convention(self) -> str | None:
-        """The casing ``add_keyword`` would apply to a brand-new species name.
-
-        The configured override wins; otherwise it is detected from the
-        existing species keywords. Both readings cost a config load and a
-        scan of every species keyword, which is why bulk callers resolve it
-        once and hand it back to ``resolve_species_display_name`` instead of
-        paying for it per name.
-        """
-        override = settings_source.get("keyword_case")
-        if override and override != "auto":
-            return override
-        return self.detect_keyword_case_convention()
-
-    def _species_root_name_for_taxon(self, taxon_id):
-        """Canonical root keyword spelling for a species taxon, if any.
-
-        ``resolve_species_display_name`` uses the same lookup to route
-        curation keys through the canonical root when only a hierarchy
-        alias is stored (e.g. a leaf ``Desert Verdin`` after
-        the retired duplicate-species repair detached the top-level
-        ``Verdin``). Callers with the taxon id in hand can skip the
-        name-based lookup and go straight to the root row.
-        """
-        return self._keyword_taxon_repository().species_root_name_for_taxon(taxon_id)
-
-    def _lookup_taxon_id_for_keyword(
-        self, name, prefer_species=False, species_only=False,
-    ):
-        """Return the local taxa.id matching a keyword name, if any.
-
-        When ``prefer_species`` is true, break ties in favor of a
-        ``rank='species'`` taxon. A catalog can hold homonyms across ranks
-        (for example a common species ``Puma`` alongside the genus
-        ``Puma``); without a preference, an unordered ``LIMIT 1`` can bind
-        an ``is_species=True`` keyword to the non-species taxon, and every
-        downstream ``rank='species'`` filter (Life List, Compare, Explorer)
-        then silently drops the photo even though the accept appeared to
-        succeed.
-
-        When ``prefer_species`` is true, the direct ``taxa`` match is only
-        returned immediately if it is species-rank. Otherwise the
-        ``taxa_common_names`` fallback is still consulted for a species-rank
-        alternate name before the higher-rank direct hit wins.
-        ``populate_taxa_db_from_json`` explicitly indexes alternate English
-        names in ``taxa_common_names``, so accepting an alternate species
-        label that collides with a genus/family can and does happen.
-
-        ``species_only`` tightens ``prefer_species`` from "prefer" to
-        "require": if no lookup variant surfaces a species-rank taxon,
-        return ``None`` instead of falling back to the higher-rank hit.
-        Explicit-species callers (``is_species=True`` inserts and rebinds
-        along ``add_keyword``'s taxonomy path) must set this — the row
-        gets stamped ``is_species=1`` unconditionally once ``taxon_id``
-        is returned, and downstream rank readers restrict to
-        ``t.rank = 'species' OR t.rank IS NULL``. Silently binding an
-        accepted species to a genus/family would make the just-created
-        tag invisible to Life List, Compare, Explorer, and highlight /
-        preference eligibility; leaving ``taxon_id`` NULL keeps the
-        ``rank IS NULL`` branch honoring the tag until a genuine
-        species-rank match becomes available.
-
-        General-keyword auto-detect callers (``is_species=False`` INSERT
-        path, rename auto-promotion) must NOT set ``species_only``: they
-        legitimately link general/typed keywords to family/genus taxa
-        (e.g. a hand-tagged ``Penduline tits`` linked to the family
-        taxon), and ``is_keyword_species`` already filters those out via
-        ``taxon_rank`` for species-specific readers.
-        """
-        return self._keyword_taxon_repository().lookup_taxon_id(
-            name, prefer_species=prefer_species, species_only=species_only,
-        )
-
-    def _add_source_species_keyword(self, name, source_taxon_id, parent_id=None):
-        """Bind accepted source evidence without reassigning same-name tags (no commit)."""
-        return self._keyword_repository().add_source_species(
-            name, source_taxon_id, parent_id=parent_id,
-        )
 
     def add_keyword(
         self,
@@ -3837,7 +3607,7 @@ class Database:
                 # get filtered out by the rank='species' Life List /
                 # Compare queries.
                 taxon_id = (
-                    self._lookup_taxon_id_for_keyword(
+                    self.keyword_taxa.lookup_taxon_id(
                         new_name, prefer_species=True,
                     )
                     if name_changed else None
@@ -5411,20 +5181,6 @@ class Database:
         "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
         "lens": ("MIN(p.lens)", "LOWER(p.lens)"),
     }
-
-    def _resolve_species_by_lineage(self, species_name, expected_ancestors):
-        """Pick the species-rank taxon matching ``species_name`` and lineage.
-
-        Every candidate, including a sole local row, must contain every name
-        in ``expected_ancestors``. A taxonomy name index can retain only the
-        wrong side of a homonym, so candidate count alone is not evidence that
-        the local row belongs to the lookup's lineage. Missing lineage context,
-        zero matches, or multiple matches all return ``None`` rather than
-        permanently crediting the wrong Life List species/class.
-        """
-        return self._keyword_taxon_repository().resolve_species_by_lineage(
-            species_name, expected_ancestors,
-        )
 
     # ------ iNaturalist submissions ------
 

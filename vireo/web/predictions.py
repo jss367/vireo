@@ -1103,7 +1103,7 @@ def create_predictions_blueprint(
             # Only bind the resolved taxon when ``expected_species``
             # carried an explicit ``(scientific)``/``(taxon N)``
             # qualifier. A bare common name is name-only inference,
-            # and routing it through ``_add_source_species_keyword``
+            # and routing it through ``add_source_species``
             # refuses to reuse an unlinked same-name keyword the async
             # ``mark_species_keywords`` pass has not touched yet,
             # minting a suffixed duplicate such as
