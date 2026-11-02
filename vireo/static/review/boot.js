@@ -51,7 +51,7 @@ async function initializeReviewPage() {
     // without exposing this scope the handoff menu would offer Misses under
     // a Review-collection view and land on workspace-wide misses matching
     // the chip \u2014 with bulk reject/recompute enabled against photos
-    // outside the source collection (Codex review r3627997828).
+    // outside the source collection.
     getScope: function() {
       if (currentCollection === 'all') {
         return { folder_id: null, collection_id: null };

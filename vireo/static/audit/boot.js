@@ -1,6 +1,6 @@
 // Page startup: the module the template loads. Binds the tabs, the action
-// buttons that used to carry inline handlers and the delegated row buttons,
-// then loads the summary and the Integrity tab.
+// buttons and the delegated row buttons, then loads the summary and the
+// Integrity tab.
 // ES module.
 
 import { byId } from './helpers.js';

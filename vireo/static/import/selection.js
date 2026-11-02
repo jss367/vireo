@@ -87,7 +87,7 @@ function refreshImportFolderHeaders() {
     // scope, so read it off the label the renderer put beside the box —
     // from its data attribute, not by stripping the trailing count out of
     // its text: with "Hide duplicates" on, that text ends in
-    // "· N duplicates hidden" (#1382) and the regex left the tooltip
+    // "· N duplicates hidden" and a regex would leave the tooltip
     // reading "Every file in card-a (0) · 2 duplicates hidden is a…".
     const labelEl = folderCheck.parentElement?.querySelector('span');
     const name = labelEl

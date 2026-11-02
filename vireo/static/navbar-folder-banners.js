@@ -6,13 +6,14 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
 let _missingBannerDismissedCount = 0;
 export const missingFolders = {
   // Snapshot of missing-folder ids from the last /api/folders/missing poll.
-  // The server's own _folder_health_loop (app.py) flips folders ok\u2194missing on
+  // The server's own folder-health loop (MissingOriginals.folder_health_loop)
+  // flips folders ok\u2194missing on
   // its 10-minute cadence with no client involvement, so the modal's
   // /api/folders/check-health POST is only one of two paths that mutate this
   // set. Without a diff here a long-lived Browse view would keep serving its
   // pre-flip photo grid until the user manually reopened the modal or
   // reloaded \u2014 the background reconnect that just restored the folder would
-  // never reach the page (Codex review r3685083009).
+  // never reach the page.
   /** @type {number[] | null} */
   lastIds: null,
   // Race guards for the two paths that observe the missing-folder set —
@@ -30,16 +31,14 @@ export const missingFolders = {
   //   * ``missingFolders.mutationInFlight`` counts running POSTs. A GET
   //     whose response arrives while > 0 has observed pre-mutation state
   //     and must skip its snapshot update / dispatch — the POST is the
-  //     freshness authority and will fire the event itself
-  //     (Codex review r3685627312).
+  //     freshness authority and will fire the event itself.
   //   * ``missingFolders.mutationEpoch`` bumps when a POST finishes. A
   //     GET snapshots it at start and skips if it changed by completion —
   //     catches the case where a POST started AFTER the GET and completed
   //     BEFORE it (also stale for the GET).
-  // Together, these preserve r3685515796's guarantee — a stale GET can
-  // never overwrite a fresher POST — while also giving the POST
-  // precedence over GETs that happen to start after it
-  // (Codex review r3685627312).
+  // Together, these guarantee a stale GET can never overwrite a fresher
+  // POST, while also giving the POST precedence over GETs that happen to
+  // start after it.
   observationGen: 0,
   mutationGen: 0,
   mutationInFlight: 0,
@@ -49,7 +48,7 @@ export const missingFolders = {
   // grid/tree is still on screen but ``missingFolders.lastIds`` has already
   // advanced to the post-transition IDs. The normal 10-minute poll then sees
   // unchanged IDs and never re-emits, so the page stays stale until an
-  // unrelated health flip or a reload (Codex review r3687331927). This flag
+  // unrelated health flip or a reload. This flag
   // tells the next successful poll to dispatch a synthetic reconciliation
   // event regardless of the ID diff, so Browse can retry the refresh once the
   // endpoint recovers.
@@ -89,8 +88,8 @@ function _missingFolderIdsDiffer(prev, curr) {
 // Fire vireo:folder-health-changed based on the transition of the
 // workspace-scoped missing-folder ID set — not on the modal POST's
 // ``changed`` count, which reflects a global scan and would trigger a
-// spurious Browse reset when a folder in another workspace flipped
-// (Codex review r3685295409). Returns whether an event was dispatched.
+// spurious Browse reset when a folder in another workspace flipped.
+// Returns whether an event was dispatched.
 /** @param {number[] | null} prevIds @param {number[]} currentIds @param {string} source */
 function _dispatchFolderHealthChangeFromIds(prevIds, currentIds, source) {
   if (prevIds === null) return false;
@@ -114,7 +113,7 @@ function _dispatchFolderHealthChangeFromIds(prevIds, currentIds, source) {
 // its GET starts while the in-flight counter is still > 0, then finishes
 // after our finally bumps the mutation epoch (stale by both checks). The
 // banner would then keep showing the pre-check state until the next
-// 10-minute poll (Codex review r3686095481). Updating from the POST's
+// 10-minute poll. Updating from the POST's
 // authoritative response bypasses the guards entirely.
 /** @param {{id: number}[]} folders */
 function _updateMissingFoldersBanner(folders) {
@@ -183,14 +182,14 @@ export function _reconcileMissingFoldersInitSnapshot(
 // counter — which would happen when two POSTs overlap and the newer
 // one fails while the older one is still pending. A firehose safety
 // bound (100 × 50ms = 5s) keeps this from spinning forever if a hung
-// fetch somehow leaves the counter stuck (Codex review r3686778064).
+// fetch somehow leaves the counter stuck.
 //
 // If the counter never reaches zero within 5s we drop the recovery
 // entirely instead of firing ``checkMissingFolders()`` anyway: its
 // own in-flight guard would reject the GET, wasting a round-trip and
 // giving the false impression that recovery ran. The 10-minute
 // background poll is the only remaining fallback for a genuinely
-// hung POST (Codex review r3686842771).
+// hung POST.
 export let _missingFoldersRecoveryScheduled = false;
 export function _scheduleMissingFoldersRecovery() {
   if (_missingFoldersRecoveryScheduled) return;
@@ -223,7 +222,7 @@ export async function checkMissingFolders() {
       resp.headers.get('X-Vireo-Folder-Health-Version'));
     /** @type {NavMissingFolder[]} */ const folders = await resp.json();
     // A newer GET started while this fetch was pending \u2014 its result
-    // supersedes ours (Codex review r3685515796). Skip the whole
+    // supersedes ours. Skip the whole
     // response: banner too, since a stale banner update would just
     // paint a false state that the newer GET is about to overwrite
     // anyway.
@@ -233,10 +232,10 @@ export async function checkMissingFolders() {
     // freshness authority and this GET may only reflect pre-mutation
     // truth. Skip snapshot + dispatch + banner so a pre-commit read
     // can't paint the banner ahead of the POST or fire a false
-    // ``wentMissing`` for a transition the POST will handle
-    // (Codex review r3685627312). The POST paints the banner directly
-    // from its own authoritative response via _updateMissingFoldersBanner
-    // — see r3686095481 for why it can't safely delegate back here.
+    // ``wentMissing`` for a transition the POST will handle. The POST
+    // paints the banner directly from its own authoritative response via
+    // _updateMissingFoldersBanner — see that helper for why it can't
+    // safely delegate back here.
     if (missingFolders.mutationInFlight > 0 ||
         mutationEpochAtStart !== missingFolders.mutationEpoch) return;
     // Prefer the server's monotonic observation ordering. The client version
@@ -258,8 +257,7 @@ export async function checkMissingFolders() {
     // is still on pre-transition data. Force a synthetic reconciliation so
     // Browse re-attempts the refresh now that the endpoint is answering
     // again. Empty restored/wentMissing routes through the conservative
-    // reload path in ``folderHealthTouchesActiveScope`` (Codex review
-    // r3687331927).
+    // reload path in ``folderHealthTouchesActiveScope``.
     if (!dispatched && missingFolders.reconciliationPending) {
       document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
         detail: { restored: [], wentMissing: [], source: 'poll-reconcile' },
@@ -288,9 +286,8 @@ checkMissingFolders();
 /** @type {NavMissingPhoto[]} */ let _missingPhotosCache = [];
 let _missingPhotosBannerDismissedCount = 0;
 // Both the banner and modal read cached /api/photos/missing status. A slow
-// earlier fetch returning after a newer one used to overwrite fresh state
-// with stale results — leaving the banner showing ghosts the user just
-// deleted.
+// earlier fetch returning after a newer one must not overwrite fresh state
+// with stale results — the banner would show ghosts the user just deleted.
 //
 // Cache writes share a single monotonic id across both flows, so only the
 // most-recently-started fetch (regardless of which flow issued it) can
@@ -301,9 +298,9 @@ let _missingPhotosCacheFetchId = 0;
 let _missingPhotosBannerFetchId = 0;
 let _missingPhotosModalFetchId = 0;
 export let _missingPhotosBannerInFlight = false;
-// Separate timer handles per target: a banner status poll firing while the
-// modal is waiting on a long scan used to cancel the modal's own poll (they
-// shared a single handle), leaving the modal stuck on "Checking missing
+// Separate timer handles per target: with one shared handle, a banner status
+// poll firing while the modal is waiting on a long scan would cancel the
+// modal's own poll, leaving the modal stuck on "Checking missing
 // originals…" until the user closed and reopened it.
 /** @type {ReturnType<typeof setTimeout> | null} */ export let _missingPhotosBannerStatusPoll = null;
 /** @type {ReturnType<typeof setTimeout> | null} */ let _missingPhotosModalStatusPoll = null;
@@ -426,8 +423,8 @@ export function dismissMissingPhotosBanner() {
 // delayed background job and the banner only renders cached results. After the
 // initial run, keep re-checking so a long-lived tab still picks up files
 // deleted, or skipped earlier because a heavy job was active, but only while
-// the window is visible: a hidden window left open overnight used to re-stat
-// the whole library every 30 minutes for a banner nobody was reading.
+// the window is visible: otherwise a hidden window left open overnight would
+// re-stat the whole library every 30 minutes for a banner nobody was reading.
 //
 // Read any existing cache immediately: this app spans multiple pages, so each
 // navigation resets the delayed POST timer. Without this cheap cache-only GET,
@@ -966,8 +963,8 @@ export async function loadMissingFolders() {
   // Own mutation gen (POST-vs-POST supersession) and in-flight counter —
   // the shared observation gen the GET poll uses is deliberately NOT
   // bumped here: a POST that started earlier must not be discarded just
-  // because a later GET (e.g. from closeMissingFoldersModal) bumped it
-  // (Codex review r3685627312). GET-vs-POST supersession is handled
+  // because a later GET (e.g. from closeMissingFoldersModal) bumped it.
+  // GET-vs-POST supersession is handled
   // instead via ``missingFolders.mutationInFlight`` + ``…MutationEpoch``.
   const myMutationGen = ++missingFolders.mutationGen;
   missingFolders.mutationInFlight++;
@@ -984,37 +981,36 @@ export async function loadMissingFolders() {
     // pre-check empty grid after a drive or network share reconnects.
     //
     // Dispatch on the workspace-scoped missing-ID transition rather than
-    // ``data.changed``. Two motivations, both from Codex review of 31acc79:
+    // ``data.changed``, for two reasons:
     //   * ``check_folder_health()`` scans every folder in the database and
     //     returns a global change count, so a flip in another workspace's
     //     folder would trigger a needless Browse reset here — clearing the
     //     user's active selection and detail view even though the active
-    //     dataset did not change (r3685295409).
+    //     dataset did not change.
     //   * When the modal is used to relocate a missing folder, the
     //     ``/api/folders/<id>/relocate`` endpoint has already flipped the
     //     folder to ``ok`` by the time this POST runs, so ``data.changed``
     //     is zero — but the workspace's missing set did change and Browse
-    //     still needs to repopulate (r3685295405).
+    //     still needs to repopulate.
     // A newer POST superseded this one (rare — modal reopened before this
     // POST finished). Skip *everything* below — snapshot, dispatch,
     // banner, modal rendering. The newer POST is the freshness authority
     // and will paint the correct rows/error when it settles; letting a
-    // stale POST run past its guard used to overwrite the newer POST's
+    // stale POST run past its guard would overwrite the newer POST's
     // "Checking folders…" placeholder with pre-mutation rows or a false
-    // failure message (Codex review r3686095489).
+    // failure message.
     //
     // But *client-side* issuance order isn't a freshness guarantee for
     // /api/folders/check-health, which mutates the DB and then reads the
     // post-mutation missing set: if the filesystem changed between the
     // two server-side scans, the discarded response can represent the
     // final committed state while the newer-issued POST's already-
-    // dispatched result is now stale. Successful superseded requests
-    // scheduled no reconciliation, leaving the snapshot, banner, and
-    // Browse grid wrong until the ten-minute poll. Schedule a poll to
-    // fire once every in-flight POST has settled — the same wait-for-
-    // settle helper the catch path uses — so one GET reconciles with
-    // whatever the server actually committed last (Codex review
-    // r3686912886).
+    // dispatched result is now stale. Without a reconciliation, the
+    // snapshot, banner, and Browse grid would stay wrong until the
+    // ten-minute poll. Schedule a poll to fire once every in-flight POST
+    // has settled — the same wait-for-settle helper the catch path uses —
+    // so one GET reconciles with whatever the server actually committed
+    // last.
     if (myMutationGen !== missingFolders.mutationGen) {
       _scheduleMissingFoldersRecovery();
       return;
@@ -1038,15 +1034,14 @@ export async function loadMissingFolders() {
       prevIds, currentIds, 'check-health');
     // Narrow initial-load race: the user opened this modal before the
     // page-load ``checkMissingFolders()`` finished AND before /api/browse/init
-    // seeded the snapshot, so no ID baseline exists yet. Preserve the pre-fix
-    // behavior in that window — a status flip in the active workspace still
-    // needs to reach Browse — but gate on ``workspace_changed`` (server-side
+    // seeded the snapshot, so no ID baseline exists yet. A status flip in the
+    // active workspace still needs to reach Browse in that window, so gate on
+    // ``workspace_changed`` (server-side
     // computed pre-vs-post-check diff of THIS workspace's missing set)
     // instead of ``data.changed`` (a global count across all workspaces).
     // Without the workspace-scoped gate this fallback would fire for a
     // cross-workspace flip and blow away the active selection / detail view
-    // for a transition that never touched the active dataset
-    // (Codex review r3686191131).
+    // for a transition that never touched the active dataset.
     if (!dispatched && prevIds === null && data.workspace_changed) {
       document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
         detail: { restored: [], wentMissing: [], source: 'check-health' },
@@ -1054,8 +1049,8 @@ export async function loadMissingFolders() {
     }
     // Update the banner directly from this POST's authoritative response
     // rather than tail-calling checkMissingFolders(). See the helper's
-    // comment for the race that made the delegation unrecoverable when
-    // the modal was closed mid-POST (Codex review r3686095481). Runs for
+    // comment for the race that makes the delegation unrecoverable when
+    // the modal is closed mid-POST. Runs for
     // both empty and non-empty results so the banner is right regardless
     // of whether closeMissingFoldersModal's own GET was rejected by our
     // in-flight guard.
@@ -1104,7 +1099,7 @@ export async function loadMissingFolders() {
   } catch (e) {
     // Same stale guard as the success path — a superseded POST must not
     // overwrite the newer POST's in-flight "Checking folders…" placeholder
-    // with a false failure message (Codex review r3686095489).
+    // with a false failure message.
     if (myMutationGen === missingFolders.mutationGen) {
       container.innerHTML = '<p style="color:var(--text-secondary);">Failed to check folders.</p>';
     }
@@ -1116,20 +1111,18 @@ export async function loadMissingFolders() {
     // ten-minute interval. Schedule a poll AFTER the finally so it runs
     // once ``missingFolders.mutationInFlight`` has been decremented (and
     // ``missingFolders.mutationEpoch`` bumped) — otherwise its own
-    // in-flight guard rejects it (Codex review r3686605299).
+    // in-flight guard rejects it.
     //
     // Additionally, wait for *every* overlapping POST to settle before
     // running the poll: if a newer POST failed while an older POST is
     // still pending, decrementing our own counter only takes it from
     // 2→1, checkMissingFolders still sees ``> 0`` and rejects, and the
     // older POST is later discarded by its mutation-gen guard — leaving
-    // no request to update the snapshot until the ten-minute interval
-    // (Codex review r3686778064).
+    // no request to update the snapshot until the ten-minute interval.
     _scheduleMissingFoldersRecovery();
   } finally {
     // Decrement + bump epoch in the finally so any GET whose ``await``
-    // straddled this POST — start OR end — sees the change and defers
-    // (Codex review r3685627312).
+    // straddled this POST — start OR end — sees the change and defers.
     missingFolders.mutationInFlight--;
     missingFolders.mutationEpoch++;
   }
