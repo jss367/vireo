@@ -68,7 +68,47 @@ def _collect_import_aliases(tree: ast.Module) -> dict[str, str]:
     return aliases
 
 
-def _canonical_annotation_text(node: ast.expr, aliases: dict[str, str]) -> str:
+def _collect_module_aliases(tree: ast.Module) -> dict[str, ast.expr]:
+    """Return a map ``{local_name: value_ast_expr}`` for module-level aliases.
+
+    A repository could sidestep the import-alias ratchet by defining
+    ``FacadeMethod = Callable[..., Any]`` once and declaring
+    ``callback: FacadeMethod`` on every class, which the old runtime
+    equality check caught (``FacadeMethod`` evaluates to the same object
+    as ``Callable[..., Any]``) but a plain AST text comparison does not.
+    The canonicalizer resolves these names by substituting the alias's
+    right-hand side AST and recursing, so an aliased forbidden form
+    reads as the forbidden form.
+
+    Collected forms, all at module top level:
+      * ``FacadeMethod = Callable[..., Any]`` — ``ast.Assign``, single Name target.
+      * ``FacadeMethod: TypeAlias = Callable[..., Any]`` — ``ast.AnnAssign`` with a value.
+      * ``type FacadeMethod = Callable[..., Any]`` — ``ast.TypeAlias`` (PEP 695).
+
+    Class-body and function-body assignments are deliberately skipped:
+    those are scoped bindings, not aliases a class annotation at module
+    scope would reach.
+    """
+    module_aliases: dict[str, ast.expr] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    module_aliases[target.id] = stmt.value
+        elif isinstance(stmt, ast.AnnAssign):
+            if isinstance(stmt.target, ast.Name) and stmt.value is not None:
+                module_aliases[stmt.target.id] = stmt.value
+        elif isinstance(stmt, ast.TypeAlias) and isinstance(stmt.name, ast.Name):
+            module_aliases[stmt.name.id] = stmt.value
+    return module_aliases
+
+
+def _canonical_annotation_text(
+    node: ast.expr,
+    aliases: dict[str, str],
+    module_aliases: dict[str, ast.expr] | None = None,
+    _visited: frozenset[str] = frozenset(),
+) -> str:
     """Return the dotted/subscript source form of ``node`` with aliases resolved.
 
     ``callback: "Callable[..., Any]"`` reaches this function as an
@@ -76,20 +116,33 @@ def _canonical_annotation_text(node: ast.expr, aliases: dict[str, str]) -> str:
     so the matcher sees the same canonical form as the bare declaration.
     A ``Name`` whose id is in ``aliases`` is substituted for its canonical
     name, so ``C[..., A]`` with ``C`` aliasing ``Callable`` and ``A``
-    aliasing ``Any`` reads as ``Callable[..., Any]``.
+    aliasing ``Any`` reads as ``Callable[..., Any]``. A ``Name`` whose id
+    is in ``module_aliases`` is resolved to the aliased expression and
+    canonicalized recursively; ``_visited`` guards against a cycle such
+    as ``A = B; B = A`` so a self-referential alias canonicalizes to the
+    name rather than looping.
     """
+    if module_aliases is None:
+        module_aliases = {}
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         try:
             inner = ast.parse(node.value.strip(), mode="eval").body
         except SyntaxError:
             return node.value.strip()
-        return _canonical_annotation_text(inner, aliases)
+        return _canonical_annotation_text(inner, aliases, module_aliases, _visited)
     if isinstance(node, ast.Constant) and node.value is Ellipsis:
         return "..."
     if isinstance(node, ast.Name):
+        if node.id in module_aliases and node.id not in _visited:
+            return _canonical_annotation_text(
+                module_aliases[node.id],
+                aliases,
+                module_aliases,
+                _visited | {node.id},
+            )
         return aliases.get(node.id, node.id)
     if isinstance(node, ast.Attribute):
-        prefix = _canonical_annotation_text(node.value, aliases)
+        prefix = _canonical_annotation_text(node.value, aliases, module_aliases, _visited)
         # ``typing.Any`` (bare or via a module alias such as ``import typing
         # as t`` -> ``t.Any``) is semantically the same as a bare ``Any``;
         # the forbidden set only carries the bare form, so normalize the
@@ -99,11 +152,14 @@ def _canonical_annotation_text(node: ast.expr, aliases: dict[str, str]) -> str:
             return "Any"
         return f"{prefix}.{node.attr}"
     if isinstance(node, ast.Subscript):
-        value_text = _canonical_annotation_text(node.value, aliases)
-        slice_text = _canonical_annotation_text(node.slice, aliases)
+        value_text = _canonical_annotation_text(node.value, aliases, module_aliases, _visited)
+        slice_text = _canonical_annotation_text(node.slice, aliases, module_aliases, _visited)
         return f"{value_text}[{slice_text}]"
     if isinstance(node, ast.Tuple):
-        return ", ".join(_canonical_annotation_text(elt, aliases) for elt in node.elts)
+        return ", ".join(
+            _canonical_annotation_text(elt, aliases, module_aliases, _visited)
+            for elt in node.elts
+        )
     return ast.unparse(node)
 
 
@@ -112,6 +168,7 @@ def _callable_facade_offenders(source: str, label: str) -> list[str]:
     annotation names ``Callable[..., Any]`` in any supported form."""
     tree = ast.parse(source)
     aliases = _collect_import_aliases(tree)
+    module_aliases = _collect_module_aliases(tree)
     offenders: list[str] = []
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
@@ -121,7 +178,7 @@ def _callable_facade_offenders(source: str, label: str) -> list[str]:
                 continue
             if not isinstance(stmt.target, ast.Name):
                 continue
-            text = _canonical_annotation_text(stmt.annotation, aliases)
+            text = _canonical_annotation_text(stmt.annotation, aliases, module_aliases)
             if text in _FORBIDDEN_CALLABLE_FACADE_FORMS:
                 offenders.append(f"{label}.{node.name}.{stmt.target.id}")
     return offenders
@@ -300,4 +357,94 @@ def test_callable_facade_matcher_resolves_import_aliases():
         "fixture.AliasTypingModule.callback",
         "fixture.AliasTypingModuleQualifiedAny.callback",
         "fixture.QuotedWithAlias.callback",
+    ]
+
+
+def test_callable_facade_matcher_resolves_module_level_aliases():
+    """Inert fixture: the matcher must catch the forbidden form when the
+    repository bound ``Callable[..., Any]`` to a module-level name and
+    declared the class attribute as that name.
+
+    The three shapes cover the ways to spell a module-level alias:
+    plain assignment (``FacadeMethod = Callable[..., Any]``), annotated
+    assignment with ``TypeAlias`` (``FacadeMethod: TypeAlias = Callable
+    [..., Any]``), and PEP 695 ``type`` statement (``type AliasPep695
+    = Callable[..., Any]``). ``AliasedThroughAlias`` chains an alias
+    through another alias so the resolver recurses, ``AliasQuoted``
+    puts the aliased name inside a quoted annotation to prove the
+    quote-handling branch recurses too, and ``AliasImportAlias``
+    composes an import alias with a module-level alias.
+
+    Negative controls: ``PlainTuple`` is a module-level alias that
+    resolves to an unrelated type (``tuple[int, str]``) so the matcher
+    must not sweep it in on name alone; ``Cycle`` and ``CycleIndirect``
+    exercise self-referential aliases (``A = A`` / ``A = B; B = A``)
+    so the recursion guard terminates and the result is the alias name,
+    which is not in the forbidden set.
+    """
+    source = textwrap.dedent(
+        """
+        from __future__ import annotations
+
+        from collections.abc import Callable
+        from typing import Any, TypeAlias
+        from typing import Callable as TC
+
+
+        FacadeMethod = Callable[..., Any]
+        AnnotatedAlias: TypeAlias = Callable[..., Any]
+        type AliasPep695 = Callable[..., Any]
+        ChainedAlias = FacadeMethod
+        ImportAliased = TC[..., Any]
+
+        Unrelated = tuple[int, str]
+        A = A
+        B = C
+        C = B
+
+
+        class AliasedPlain:
+            callback: FacadeMethod
+
+
+        class AliasedAnnotated:
+            callback: AnnotatedAlias
+
+
+        class AliasedPep695:
+            callback: AliasPep695
+
+
+        class AliasedThroughAlias:
+            callback: ChainedAlias
+
+
+        class AliasImportAlias:
+            callback: ImportAliased
+
+
+        class AliasQuoted:
+            callback: "FacadeMethod"
+
+
+        class UnrelatedAlias:
+            callback: Unrelated
+
+
+        class Cycle:
+            callback: A
+
+
+        class CycleIndirect:
+            callback: B
+        """
+    )
+    offenders = _callable_facade_offenders(source, "fixture")
+    assert sorted(offenders) == [
+        "fixture.AliasImportAlias.callback",
+        "fixture.AliasQuoted.callback",
+        "fixture.AliasedAnnotated.callback",
+        "fixture.AliasedPep695.callback",
+        "fixture.AliasedPlain.callback",
+        "fixture.AliasedThroughAlias.callback",
     ]
