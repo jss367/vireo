@@ -1,7 +1,7 @@
 """Filesystem-aware path containment.
 
-Extracted from the import endpoint's destination-inside-source guard
-(PR #1107) so the card-cleanup overlap guard makes identical decisions.
+Shared by the import endpoint's destination-inside-source guard and the
+card-cleanup overlap guard, so both make identical decisions.
 ``realpath`` alone is not enough: macOS/Windows default filesystems are
 case-insensitive but realpath does not case-normalize, and FAT/exFAT
 removable media on Linux are case-insensitive under a case-sensitive
@@ -70,11 +70,10 @@ def fs_is_case_insensitive(path):
     path), whereas a false negative on a case-insensitive
     filesystem accepts a case-collision destination inside the
     card and lets ``safe_to_format`` later green-light
-    formatting while the archive lives on it. The reviewer's
-    example: an SD card whose root contains only numeric
-    top-level directories (Nikon-style ``100``/``101``/``102``)
-    has no alpha-containing entry to probe with. See PR #1107
-    review.
+    formatting while the archive lives on it. For example, an
+    SD card whose root contains only numeric top-level
+    directories (Nikon-style ``100``/``101``/``102``) has no
+    alpha-containing entry to probe with.
     """
     try:
         cache_key = (os.path.realpath(path), os.stat(path).st_dev)

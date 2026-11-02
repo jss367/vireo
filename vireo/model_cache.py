@@ -1,6 +1,6 @@
 """Process-wide refcounted cache for loaded model objects.
 
-Used to share a single loaded Classifier / TimmClassifier / ONNX session
+Shares a single loaded Classifier / TimmClassifier / ONNX session
 across concurrent pipeline runs so two pipelines using the same model
 don't double up on VRAM. When the last user releases an entry, an idle
 timer arms; if no one re-acquires within ``idle_secs`` seconds the
@@ -262,9 +262,8 @@ class ModelCache:
         # ``_pause_checkpoint``; the parking would happen while
         # this thread still owns ``entry.load_lock``, and any
         # unpaused peer waiting for the same cache key would
-        # then block for the whole pause window (Codex
-        # discussion_r3790941020 — sibling of the
-        # ``acquire_session_cache_lock`` fix in ``e3693467``).
+        # then block for the whole pause window (the same
+        # hazard ``acquire_session_cache_lock`` guards against).
         # Rebind the resource cancel probe to the pure-cancel
         # probe (never parks on pause) for the factory call,
         # matching the pattern the session-cache lock's

@@ -6,9 +6,9 @@ pinning a version, and verify integrity against the SHA256 digest the GitHub
 API publishes alongside each asset.
 
 There is deliberately no code-signature check: darktable does not successfully
-notarize its macOS builds (upstream issue #19295) and its Windows installer is
-unsigned, so a fail-closed signature check would reject every legitimate
-download.  See docs/superpowers/specs/2026-07-26-darktable-download-design.md.
+notarize its macOS builds (https://github.com/darktable-org/darktable/issues/19295)
+and its Windows installer is unsigned, so a fail-closed signature check would
+reject every legitimate download.  See docs/superpowers/specs/2026-07-26-darktable-download-design.md.
 """
 
 import hashlib

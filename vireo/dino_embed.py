@@ -185,7 +185,7 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
     data_path = model_path + ".data"
 
     # Require BOTH files to short-circuit.  A lingering stub-only
-    # ``model.onnx`` from a pre-#550 UI download (or a past partial
+    # ``model.onnx`` from an older UI download (or a past partial
     # download) must NOT skip the sidecar fetch — otherwise ONNX Runtime
     # keeps crashing with ``model_path must not be empty`` on every
     # pipeline run and the broken state never self-heals.
@@ -366,10 +366,9 @@ def embed_batch(images, variant="vit-b14"):
 
     DINOv2 ONNX is forced onto CPU on Apple Silicon (CoreML crashes on
     external-data models, see ``onnx_runtime.create_session``). Per-call
-    overhead — preprocessing + ORT session.run setup — is non-trivial, so
-    the pipeline's "subject crop + global proxy" pattern previously paid
-    that cost twice per photo. Batching them into one call cuts that
-    overhead in half.
+    overhead — preprocessing + ORT session.run setup — is non-trivial, and
+    the pipeline's "subject crop + global proxy" pattern would pay it twice
+    per photo. Batching them into one call cuts that overhead in half.
 
     Args:
         images: non-empty list of PIL Images. Each is resized + center
@@ -457,7 +456,7 @@ def blob_to_embedding(blob, variant="vit-b14"):
 
     Args:
         blob: bytes from the database
-        variant: DINOv2 variant (used to validate expected dimension)
+        variant: DINOv2 variant (validates the expected dimension)
 
     Returns:
         numpy float32 array of shape (embedding_dim,)

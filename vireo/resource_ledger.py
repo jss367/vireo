@@ -531,9 +531,7 @@ def process_usable_cpu_count():
     - ``_cgroup_cpu_quota_cpus`` for a Docker/Kubernetes CFS bandwidth
       quota that leaves the affinity set alone
       (``os.process_cpu_count`` reads affinity, not the cgroup quota
-      — verified against CPython source; a fresh Codex review flagged
-      that the earlier revision documented quota support it did not
-      actually deliver).
+      — verified against CPython source).
 
     Returns ``None`` when no process-scoped signal is available
     (Darwin/Windows on old Python, no cgroup, unlimited quota, etc.),

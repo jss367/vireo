@@ -537,7 +537,7 @@ class _FeatureLoad:
             }
 
     def load_subject_evidence(self):
-        # Photos the detector has actually been run on. Used to gate
+        # Photos the detector has actually been run on. Gates
         # subject_absent below — a photo with no detector_runs row hasn't been
         # evaluated yet (e.g. first-time regroup with skip_classify=True, or
         # photos imported after the last classify run). Treating those as
@@ -622,10 +622,10 @@ class _FeatureLoad:
         sees a mixed confirmed_set and marks an already-confirmed encounter or
         burst as unconfirmed, so already-reviewed groups reappear for review
         even though every photo carries the same taxon.
-        ``get_species_keywords_for_photos`` applies the same rank filter
+        ``get_species_keywords_for_photos`` applies the rank filter
         ``(is_species = 1 OR type = 'taxonomy')`` and
-        ``(t.rank = 'species' OR t.rank IS NULL)`` this query used to run
-        inline, deduplicates by ``taxon_id``, and maps hierarchy leaves to
+        ``(t.rank = 'species' OR t.rank IS NULL)``, deduplicates by
+        ``taxon_id``, and maps hierarchy leaves to
         the canonical root spelling — so life-list, highlights, and the
         encounter confirmation flag all key off the same string. For photos
         with multiple species tags we keep the alphabetically-first entry so
@@ -1531,9 +1531,9 @@ def _serialize_encounter(enc, prior_empty_photo_ids):
         for burst in enc["bursts"]:
             burst_ids = [p["id"] for p in burst]
             # Derive species_override from per-photo confirmations so that
-            # burst-confirmed indicators survive a regroup. Previously this
-            # was always None, wiping per-burst confirmation state every
-            # time a slider moved even though the underlying tags persist.
+            # burst-confirmed indicators survive a regroup. Leaving it None
+            # would wipe per-burst confirmation state every time a slider
+            # moved even though the underlying tags persist.
             burst_override = _burst_species_override(
                 burst, burst_ids, prior_empty_photo_ids,
             )
@@ -1553,7 +1553,7 @@ def serialize_results(results, prior_results=None):
 
     Args:
         results: dict from run_full_pipeline()
-        prior_results: previously-serialized cache, used to preserve the
+        prior_results: previously-serialized cache, which preserves the
             explicit-empty burst sentinel across regroups. When a burst had
             its last species removed, the endpoint records
             ``empty_species_override()`` so the untagged photos do not
@@ -2301,13 +2301,12 @@ def _classify_review_readiness(
     if usable_embeddings < feature_target:
         out["enhancing_missing"].append("embeddings")
     # Only surface an eye-keypoint gap when the workspace has eye detection
-    # turned on. With the new default off, an eye-disabled workspace's
-    # Process flow deliberately skips the stage, so warning that results
-    # were "computed without eye keypoints and should re-run" would tell
-    # the user their run is degraded because of a feature they chose not
-    # to use — the exact kind of misleading readiness signal
-    # CORE_PHILOSOPHY.md's "no black boxes" rule forbids. Regression for
-    # Codex thread PRRT_kwDORn8c-s6QOH4L.
+    # turned on. Eye detection is off by default, and an eye-disabled
+    # workspace's Process flow deliberately skips the stage, so warning that
+    # results were "computed without eye keypoints and should re-run" would
+    # tell the user their run is degraded because of a feature they chose
+    # not to use — the exact kind of misleading readiness signal
+    # CORE_PHILOSOPHY.md's "no black boxes" rule forbids.
     if eye_detect_enabled and eye_attempts < eye_target:
         out["enhancing_missing"].append("eye_keypoints")
     if cov["classified"] < feature_target:
@@ -2499,7 +2498,7 @@ def _current_primary_mask_for_eye(db, row, iw, ih):
     # them, between the worklist build and this lock. Persisting an
     # eye_kp_fingerprint against ``row`` in that state would strand the
     # photo with results attributed to a subject that is no longer the
-    # effective primary (Codex P2 r4056478554).
+    # effective primary.
     if selected is None or selected["id"] != row["detection_id"]:
         return None
     mask_path = db.masks_features.photo_mask_path(row["id"])

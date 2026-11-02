@@ -730,8 +730,8 @@ def purge_cached_files_for_recycled_id(
     derivative in ``~/.vireo`` is keyed by bare photo id
     (``thumbnails/<id>.jpg``, ``working/<id>.jpg``, ``masks/<id>.png``, …),
     so a new photo that inherits a freed id silently adopts the *previous*
-    photo's pixels: the Life List card for a gull renders whatever bird
-    used to own that row.
+    photo's pixels: the Life List card for a gull renders whichever bird
+    owned that row before.
 
     Delete paths are supposed to unlink these files, but the surface
     area is wide — ``FolderRepository.merge_into_existing``,
@@ -756,11 +756,10 @@ def purge_cached_files_for_recycled_id(
     ``serve_thumbnail`` / prepared-render / external-DNG freshness gates
     all compare ``cached_mtime >= source_mtime``, so a survivor pinned to
     ``file_mtime - 1`` is provably rejected regardless of what the source
-    mtime happens to be. When ``file_mtime`` is unavailable (older
-    single-id callers) we fall back to ``0``, which works for any source
-    with a positive mtime — the case the reviewer specifically flagged is
-    a source at or below the Unix epoch, and callers on the ingest path
-    do have ``file_mtime`` in hand.
+    mtime happens to be. When ``file_mtime`` is unavailable (single-id
+    callers) we fall back to ``0``, which works for any source with a
+    positive mtime; only a source at or below the Unix epoch defeats it,
+    and callers on the ingest path do have ``file_mtime`` in hand.
     """
     masks_dir = catalog_masks_directory(getattr(db, "_db_path", None))
     if not thumb_cache_dir:

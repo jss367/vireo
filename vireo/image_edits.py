@@ -270,7 +270,7 @@ def _apply_recipe_impl(
     degraded render fails toward "no local edits", never toward applying a
     region edit to the whole frame.
 
-    ``detail_scale`` overrides the scale used to convert ``local.mask.feather``
+    ``detail_scale`` overrides the scale that converts ``local.mask.feather``
     (native pixels) into a blur sigma for the tone pass. Callers that also
     override the scale for the detail pass (e.g. the edit-preview endpoint,
     which strips crop from the recipe but wants the saved-render scale) must
@@ -586,7 +586,7 @@ def local_weight_map(
     [0,1] array, or None when the recipe has no local section or the mask
     cannot be trusted to line up (same disable conditions as rendering).
 
-    ``detail_scale`` overrides the scale used to convert the recipe's
+    ``detail_scale`` overrides the scale that converts the recipe's
     feather amount into pixels. Use it when the caller has already
     stripped crop from ``recipe`` to align with an uncropped preview
     (the edit-mask-preview endpoint does this) so the feather still

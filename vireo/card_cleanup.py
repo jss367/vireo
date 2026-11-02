@@ -47,7 +47,7 @@ INITIAL_MANIFEST_REVISION = 1
 # a FIFO the same way, so a plain O_RDONLY there is safe.
 O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
-# Codex P1: os.open on Windows defaults to text mode. compute_fd_hash
+# os.open on Windows defaults to text mode. compute_fd_hash
 # reads through os.read, and the CRT would translate CRLF↔LF and treat
 # Ctrl-Z (0x1A) as EOF in text mode — producing a different digest from
 # compute_file_hash's "rb" open for any RAW/JPEG file containing those
@@ -288,7 +288,7 @@ KEEP_NOT_IN_CATALOG = "not in catalog — not imported yet"
 # reason.  It intentionally does not send users through the workspace-wide
 # integrity audit.
 KEEP_NOT_VERIFIED = "archive copy has not been checksum-verified"
-# Codex P2: distinguished from KEEP_NOT_VERIFIED so the callout does NOT
+# Distinguished from KEEP_NOT_VERIFIED so the callout does NOT
 # offer to re-verify these — the archive rows have already been checked
 # and the verdict was modified/corrupt/unreadable. Re-running verify
 # reproduces the same bad verdict rather than establishing an "ok" copy;
@@ -347,7 +347,7 @@ def _qualify_ok_row(row, card_st, contains_check):
     if (ast.st_size != row["file_size"]
             or ast.st_mtime != row["file_mtime"]):
         return None, KEEP_ARCHIVE_CHANGED
-    # Bind the containment decision to the statted object (Codex P1):
+    # Bind the containment decision to the statted object:
     # realpath() and os.stat() above are two separate path walks. A
     # parent directory swapped between them means containment
     # approved one target while the metadata gate measured another —
@@ -368,7 +368,7 @@ def _qualify_ok_row(row, card_st, contains_check):
 
 def _final_keep_reason(reason, saw_never_checked, saw_check_failed):
     """The keep reason when no catalog row qualified."""
-    # NULL-hash-status wins over a specific ok-row reason (Codex P2): the
+    # NULL-hash-status wins over a specific ok-row reason: the
     # unchecked row is verify's next lever, so the entry must land in the
     # KEEP_NOT_VERIFIED bucket the callout keys off. Otherwise the reason
     # already reflects the closest-to-success signal we have, and
@@ -405,7 +405,7 @@ def qualify_rows(rows, source_root_real, card_path, contains_check=None):
     if contains_check is None:
         def contains_check(child_real):
             return path_guard.contains_resolved(source_root_real, child_real)
-    # Codex P2: KEEP_NOT_VERIFIED reads to the user as "the audit hasn't
+    # KEEP_NOT_VERIFIED reads to the user as "the audit hasn't
     # run yet — running it would unblock this", so it must apply only when
     # a NULL hash_status row is why the file is being kept. Rows with a
     # non-NULL, non-"ok" status (modified/corrupt/unreadable) have already
@@ -413,12 +413,12 @@ def qualify_rows(rows, source_root_real, card_path, contains_check=None):
     # and the remedy lives on the Audit page, so those rows fall back to
     # KEEP_ARCHIVE_HASH_FAILED instead.
     #
-    # Priority (also Codex P2): a specific reason from an "ok" row that
-    # failed a later gate USED TO win over KEEP_NOT_VERIFIED, but that hid
-    # entries whose unchecked sibling row could still be verified.
-    # KEEP_NOT_VERIFIED now takes precedence whenever we saw a
+    # Priority: KEEP_NOT_VERIFIED takes precedence over a specific reason
+    # from an "ok" row that failed a later gate whenever we saw a
     # never-checked row that verify could still try — the unchecked row
-    # might have a different archive path that clears the same gate.
+    # might have a different archive path that clears the same gate, and
+    # preferring the ok-row reason would hide that the entry can still be
+    # verified.
     # verify_manifest_archives itself does not persist a bad verdict when
     # the archive fails a gate before hashing, so trying it is free of
     # side effects; the ok-row's specific reason is only preferred when
@@ -566,33 +566,23 @@ class _ScopedArchiveVerify:
         return False
 
     def drop_gone_deletable_entries(self):
-        """Codex P2: a prior delete_verified run on this scan unlinks card
-        files but never rewrites the manifest, so its deletable entries
-        sit here even though their card paths are gone. If we left them
-        in, the totals recomputed below would still credit their bytes
-        to the deletable bucket and the refreshed UI would re-enable
-        Delete asking the user to confirm counts that include files
-        already deleted from the card. Drop entries whose card path is
-        gone; a transient stat error (mount hiccup, EACCES) preserves
-        the entry so a NAS blip cannot shrink the preview.
+        """Drop deletable entries whose card file is gone; keep changed ones.
 
-        Codex P2 (follow-up): the FileNotFoundError-only check misses
-        files delete_verified skipped for size/mtime/type mismatches
-        (SKIP_CHANGED / SKIP_NOT_REGULAR / SKIP_SYMLINK). lstat still
-        succeeds for those files, so the stale entry would stay in the
-        deletable bucket, inflate totals, and re-enable Delete for a
-        count the delete-time gates will refuse. Mirror the cheap gates
-        here so the refreshed preview matches what delete would accept.
-        Content-changed-but-metadata-matching is still caught by
-        delete_verified's own hash pass — expensive re-hashing here
-        would defeat the point of scoped verification.
+        A delete_verified run unlinks card files but never rewrites the
+        manifest, so its deletable entries stay here after their card
+        paths are gone; left in, they would inflate the recomputed
+        totals and re-enable Delete for files already deleted. Only a
+        confirmed-absent path (FileNotFoundError) leaves the manifest; a
+        transient stat error (mount hiccup, EACCES) keeps the entry so a
+        NAS blip cannot shrink the preview.
 
-        Codex P2 (follow-up 2): dropping a changed-but-still-present
-        card entry hid a file that still exists on the card, so the
-        kept-list and totals undercounted what would remain after
-        deletion. Reclassify those entries into the kept bucket with
-        the corresponding SKIP_* reason instead; only a confirmed-
-        absent path (FileNotFoundError above) leaves the manifest.
+        An entry delete_verified would skip for a size/mtime/type change
+        (SKIP_CHANGED / SKIP_NOT_REGULAR / SKIP_SYMLINK) still exists on
+        the card, so it moves to the kept bucket with that SKIP_* reason
+        rather than inflating the deletable totals or vanishing from the
+        kept list. These are the cheap delete-time gates; content changes
+        with matching metadata are caught by delete_verified's own hash
+        pass, and re-hashing here would defeat scoped verification.
 
         Pending entries with a removed card file are handled in the
         promotion loop below via _card_gate_promotion_block's
@@ -713,7 +703,7 @@ class _ScopedArchiveVerify:
         try:
             archive_real = os.path.realpath(archive_path)
         except (OSError, ValueError):
-            # Codex P2: keep hash_status NULL when we can't even
+            # Keep hash_status NULL when we can't even
             # reach the archive path. Marking unreadable here is
             # permanent — after a transiently-down mount comes
             # back, a re-scan would classify the row as a prior
@@ -742,8 +732,8 @@ class _ScopedArchiveVerify:
             archive_fd = os.open(
                 archive_path, os.O_RDONLY | O_NONBLOCK | O_BINARY)
         except (OSError, ValueError):
-            # Same rationale as the realpath branch above (Codex
-            # P2): a stat that can't see the file — the common
+            # Same rationale as the realpath branch above: a stat
+            # that can't see the file — the common
             # symptom of a disconnected NAS mount — means the
             # archive is unreachable, not corrupt. Leave the row
             # unchecked so targeted verification can retry once
@@ -776,7 +766,7 @@ class _ScopedArchiveVerify:
             # than unreachable; the fd itself would have
             # failed at open() in the mount-down case.
             #
-            # Codex P2 (follow-up): outcome_reason must match
+            # outcome_reason must match
             # what qualify_rows will return for the row we
             # just persisted as 'unreadable' — KEEP_ARCHIVE_
             # HASH_FAILED. Leaving it at the initial KEEP_
@@ -794,7 +784,7 @@ class _ScopedArchiveVerify:
             # we can hash. Marking unreadable is intentional;
             # a subsequent audit is the right remedy.
             #
-            # Codex P2 (follow-up): see the fstat branch above.
+            # outcome_reason: see the fstat branch above.
             self._record_failure(row, expected_hash, "unreadable", outcome)
             return None
 
@@ -821,7 +811,7 @@ class _ScopedArchiveVerify:
             after = os.fstat(archive_fd)
             after_real = os.path.realpath(archive_path)
         except (OSError, ValueError):
-            # Codex P2 (follow-up): see the earlier fstat
+            # See the earlier fstat
             # branch — outcome_reason must reflect the
             # persisted 'unreadable' verdict so the
             # promotion loop does not override qualify_rows'
@@ -836,7 +826,7 @@ class _ScopedArchiveVerify:
                       read, outcome):
         """Record the verdict for a hashed archive; True once verified."""
         before, after = read.before, read.after
-        # Codex P1: the pinned fd's fstat describes the object we
+        # The pinned fd's fstat describes the object we
         # actually hashed, but an atomic replace under the same
         # name during compute_fd_hash would leave that fd pointing
         # at the old (now-unlinked) inode. before/after fstat then
@@ -911,7 +901,7 @@ class _ScopedArchiveVerify:
 
     def _refresh_pending_entry(self, entry, expected_hash, rows):
         """Re-bucket one pending entry; True when it left the card."""
-        # Codex P2 (follow-up 3): qualify_rows only inspects catalog
+        # qualify_rows only inspects catalog
         # rows — it cannot see that this card file has been replaced,
         # resized, or turned into a symlink since the scan. Promoting
         # a changed pending entry to the deletable bucket would let
@@ -943,7 +933,7 @@ class _ScopedArchiveVerify:
             self.stats["unblocked_files"] += 1
             self.stats["unblocked_bytes"] += entry.get("size", 0)
         elif reason == KEEP_NOT_VERIFIED:
-            # Codex P2: qualify_rows saw a viable unchecked row
+            # qualify_rows saw a viable unchecked row
             # after our attempt, so verify still has a lever here.
             # Overwriting with this run's transient
             # KEEP_ARCHIVE_UNREACHABLE/CHANGED would push the entry
@@ -954,7 +944,7 @@ class _ScopedArchiveVerify:
             # "nothing needs checking" until the user re-scans the
             # card. Keep the entry in the retry-eligible bucket.
             #
-            # Codex P2 (follow-up): the exception is when this
+            # The exception is when this
             # run proved every unchecked row for the hash is a
             # same-source alias / hardlink of the card file — no
             # independent archive copy exists, so there IS no
@@ -1150,7 +1140,7 @@ def _card_stat_gate(path, entry):
         return None, _failed(path, e)
     if stat_mod.S_ISLNK(st.st_mode):
         return None, _skipped(path, SKIP_SYMLINK)
-    # Codex P2: not just symlinks — any non-regular replacement must
+    # Not just symlinks — any non-regular replacement must
     # be rejected BEFORE compute_file_hash. A scanned zero-byte photo
     # replaced by a FIFO (or socket/device) with size 0 and mtime
     # forced back to the manifest value would pass the S_ISLNK reject
@@ -1215,7 +1205,7 @@ def _card_hash_gate(path, entry, st):
 
 def _final_path_gate(path, entry, st, contains_check):
     """Post-hash containment and identity recheck; ``None`` when it passes."""
-    # Path gate (Codex P1): a parent directory swapped for a symlink
+    # Path gate: a parent directory swapped for a symlink
     # DURING the card hash can redirect this pathname to a
     # byte-identical file outside the scanned source — bytes hash
     # identically, both archive gates pass, but os.remove would
@@ -1240,7 +1230,7 @@ def _final_path_gate(path, entry, st, contains_check):
         return _failed(path, e)
     if stat_mod.S_ISLNK(st2.st_mode):
         return _skipped(path, SKIP_SYMLINK)
-    # Codex P2 (mirror of gate 1): a swap for a FIFO/socket/device
+    # Mirror of gate 1: a swap for a FIFO/socket/device
     # after the final hash would pass the S_ISLNK reject and the
     # dev/inode baseline (a new inode fails that check anyway), but
     # defence-in-depth: keep both gates identical so an added
@@ -1306,7 +1296,7 @@ def delete_verified(db, manifest, progress_cb=None, should_cancel=None):
     The manifest must come from load_manifest (validated); raw dicts are
     not a supported input.
     """
-    # Use the manifest's source_root verbatim (Codex P1 review) — it was
+    # Use the manifest's source_root as stored — it was
     # realpath'd at scan time (see scan_card) and persisted as the
     # canonical anchor. Re-resolving here would follow a post-scan symlink
     # swap of the root itself (e.g. /Volumes/CARD/DCIM renamed and replaced

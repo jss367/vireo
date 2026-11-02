@@ -241,12 +241,12 @@ def _merge_catalog_keywords(catalog_paths, photos_by_path, strategy, pause_callb
 def _import_photo_keywords(db, photo, kw_data, file_path, write_xmp):
     """Tag one photo with its merged catalog keywords (and write its sidecar)."""
     # Import keywords into DB. Skip entries that normalize to `""`
-    # (a lone smart quote, whitespace) — add_keyword() rejects those
-    # after this PR, and the surrounding try/except would otherwise
+    # (a lone smart quote, whitespace) — add_keyword() rejects those,
+    # and the surrounding try/except would otherwise
     # count the whole photo as failed rather than just dropping the
     # malformed keyword.
     # Durable boundary: one photo's catalog tags commit together, before
-    # its sidecar is written (a failed write keeps the tags, as before).
+    # its sidecar is written (a failed write keeps the tags).
     with db.transaction():
         validate_import_locations(db, photo['id'], kw_data['flat_keywords'], kw_data['hierarchical_keywords'])
         # Import hierarchical keywords. Skip an entry whose chain

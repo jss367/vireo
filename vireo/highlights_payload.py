@@ -238,7 +238,7 @@ def _sort_photos_with_representatives_first(photos, representative_order):
 def bucket_best_score(photos):
     """Return the highest highlight_score in a bucket, or None if empty.
 
-    Used to rank buckets on the Highlights page. Reads the max across all
+    Ranks buckets on the Highlights page. Reads the max across all
     photos so a pick-first (or user-preferred) reorder at photos[0] can't
     demote a species by anchoring the bucket score to a lower-scored photo.
     """
@@ -1058,8 +1058,8 @@ def _life_list_species_entry(
     # Life List curation order is explicit representative selection,
     # then Picks (the P flag), then the existing highlight/algorithmic
     # ranking. Keep ranked positions as the final tie-breaker so
-    # multiple Picks retain their quality order and non-Picks behave
-    # exactly as before.
+    # multiple Picks retain their quality order and non-Picks keep the
+    # highlight/algorithmic order.
     ranked_position = {
         photo["id"]: idx for idx, photo in enumerate(photos)
     }

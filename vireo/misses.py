@@ -321,7 +321,7 @@ def preview_misses_for_workspace(db, pipeline_config, detector_confidence=None,
         photo["miss_no_subject"] = int(flags["no_subject"])
         photo["miss_clipped"] = int(flags["clipped"])
         photo["miss_oof"] = int(flags["oof"])
-        # Stamp the floor actually used to derive this card so the "No
+        # Stamp the floor that actually derived this card so the "No
         # detection above N%" message on the Misses page reflects the
         # live-preview slider rather than the previously saved
         # missConfig fallback.  Mirrors ``miss_flags.list_misses`` for persisted

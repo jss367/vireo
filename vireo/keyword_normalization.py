@@ -120,7 +120,7 @@ def normalize_keyword_display(name: str) -> str:
     # Fold internal typographic apostrophes LAST, after the edge strips have
     # had their chance to delete them outright. Doing it earlier would turn a
     # leading `’` into `'` and still strip it, but running last keeps the
-    # edge-case behavior identical to before this fold existed.
+    # edge strips independent of this fold.
     value = value.translate(_APOSTROPHE_FOLD)
     return value
 
@@ -161,7 +161,7 @@ def folded_species_key(species):
 
 
 def species_match_key(species):
-    """Return the equivalence key used to decide whether two species agree.
+    """Return the equivalence key that decides whether two species agree.
 
     This is the rule that decides whether a burst is unanimous. It differs
     from ``keyword_match_key`` only for names that normalize away entirely
