@@ -103,8 +103,8 @@ registerPageHooks({
 });
 
 /* ---------- Markup ---------- */
-// The controls that used to carry inline on*= handlers (data-browse-on, see
-// markup.js) and the comparison overlay's (_photo_compare.html).
+// The controls named by data-browse-on (see markup.js) and the comparison
+// overlay's (_photo_compare.html).
 bindBrowseMarkup();
 VireoBrowseCompare.bindControls(document, function() { return browseCompare; });
 
@@ -147,12 +147,11 @@ async function bootstrapBrowse() {
   // from the fresh post-flip state. Populating ``photos`` / rendering the
   // sidebars from this pre-flip response afterwards would silently
   // overwrite that fresher refresh with stale data — leaving the grid
-  // empty until another event or a manual reload (Codex review
-  // r3685515800). Snapshotting here (outside the try) also lets the
-  // catch below recompute the flag when the init request rejects: the
-  // in-try assignment used to be skipped by the throw, leaving the
-  // finally-region guard to release the load lock the concurrent health
-  // refresh's ``loadPhotos`` still owned (Codex review r3686191138).
+  // empty until another event or a manual reload. Snapshotting here
+  // (outside the try) also lets the catch below recompute the flag when
+  // the init request rejects: a throw skips the in-try assignment, which
+  // would leave the finally-region guard to release the load lock the
+  // concurrent health refresh's ``loadPhotos`` still owns.
   var bootstrapHealthSeq = state.folderHealthRefreshSeq;
   // The sort <select> is in the DOM before init resolves, so the user can
   // change it (or edit a restored filter) while /api/browse/init is pending.
@@ -160,7 +159,7 @@ async function bootstrapBrowse() {
   // window and starts its own loadPhotos(); this bootstrap must not paint its
   // now-abandoned dataset over that, nor release the ``loading`` mutex the
   // newer load holds — the same stale-window hazard the deep-link loader
-  // guards against (Codex review r3792769108).
+  // guards against.
   var bootstrapWindowIsCurrent = claimBrowseWindow();
   // Parse URL scope params BEFORE the first await. A folder-health event that
   // fires while ``_cfgPromise`` is still pending runs
@@ -171,7 +170,7 @@ async function bootstrapBrowse() {
   // healthChangedDuringInit guard below — for a plain collection deep link
   // the browseFilterInitPromise.then replay reopens it, but a folder-only
   // deep link has no such replay, so Browse would render unscoped despite
-  // ``?folder_id=N`` in the URL (Codex review r3686605296). Assigning here
+  // ``?folder_id=N`` in the URL. Assigning here
   // means any concurrent refresh sees the right scope.
   var pageParams = new URLSearchParams(window.location.search);
   var initialFolderId = parseInt(pageParams.get('folder_id') || '', 10);
@@ -210,8 +209,8 @@ async function bootstrapBrowse() {
     // that runs between /api/browse/init and the first navbar poll leaves
     // the poll's null-baseline branch returning false — later polls then
     // see the same IDs and never dispatch, so Browse stays showing the
-    // pre-flip state until another transition or a reload (Codex review
-    // r3686191141). The navbar helper compares its baseline version at init
+    // pre-flip state until another transition or a reload. The navbar
+    // helper compares its baseline version at init
     // request start and completion: a poll/POST already applied before the
     // request is older than init, while one applied during the request remains
     // authoritative.
@@ -219,10 +218,9 @@ async function bootstrapBrowse() {
     // When a differing poll snapshot lands while init is in flight, init may
     // contain pre-flip photos/folders. Dispatch the init→now transition so
     // refreshBrowseAfterFolderHealthChange takes over, and mark the
-    // health-changed flag so the guarded render path skips init's stale data
-    // (Codex review r3686452019). Conversely, a poll applied before this
-    // request is known older and the helper adopts init directly
-    // (Codex review r3687277899).
+    // health-changed flag so the guarded render path skips init's stale data.
+    // Conversely, a poll applied before this request is known older and the
+    // helper adopts init directly.
     if (Array.isArray(data.missing_folder_ids)) {
       var initWasStale = _reconcileMissingFoldersInitSnapshot(
         data.missing_folder_ids,
@@ -290,21 +288,20 @@ async function bootstrapBrowse() {
     });
     // Snapshot the scope generation BEFORE we register the .then so we can
     // tell whether a user sidebar click advanced it while init was pending.
-    // The bootstrap deep-link/persisted replay below unconditionally called
-    // filterByCollection/resetAndLoad, which bumps browseScopeGen and made
-    // any queued sidebar click (e.g. collection B awaiting init) resume as
-    // stale \u2014 reopening the URL's collection A over the user's later
-    // selection (Codex review r3624637674).
+    // Running the bootstrap deep-link/persisted replay below unconditionally
+    // would call filterByCollection/resetAndLoad, which bumps browseScopeGen
+    // and makes any queued sidebar click (e.g. collection B awaiting init)
+    // resume as stale \u2014 reopening the URL's collection A over the user's
+    // later selection.
     var bootstrapScopeGen = state.browseScopeGen;
     state.browseFilterInitPromise.then(function() {
       // A user sidebar click (folder/keyword/collection) may have changed
       // scope while init was pending. Their newer selection is authoritative
-      // for the collection deep-link replay below — reopening the URL's
-      // collection over the user's later selection is the bug in Codex
-      // review r3624637674. But we must still apply any restored/URL filter
-      // chips: returning early here left them rendered in the bar without
-      // ever running through resetAndLoad, so the grid didn't match the
-      // visible chips until the user edited them (Codex review r3624766665).
+      // for the collection deep-link replay below, which must not reopen the
+      // URL's collection over it. But we must still apply any restored/URL
+      // filter chips: returning early here would leave them rendered in the
+      // bar without ever running through resetAndLoad, so the grid wouldn't
+      // match the visible chips until the user edited them.
       var scopeChanged = state.browseScopeGen !== bootstrapScopeGen;
       VireoFilter.setResultTotal(pagination.underlyingTotal);
       // Collection deep links must open showing exactly that collection \u2014
@@ -330,16 +327,16 @@ async function bootstrapBrowse() {
       // A ?collection_id=...&rating_min=4 (or &date_from=..., etc.) link
       // compiles the URL filter params into rules above; if we then called
       // filterByCollection() its loadExpression() would REPLACE state.root
-      // with the saved collection rules and silently drop the URL filters
-      // (Codex review r3620935211). Treat the collection as a composable
+      // with the saved collection rules and silently drop the URL filters.
+      // Treat the collection as a composable
       // dashboard-style scope for this case: keep the URL filter chips
       // and scope /api/photos/query by the collection alongside them.
       //
       // Exception — visual collections: /api/photos/query's collection
       // restriction evaluates ``rules`` only, not ``visual_json``. Composing
       // URL filters this way would silently drop the visual clause and
-      // widen to every metadata match with the URL filter (Codex review
-      // r3621403147). Fall through to filterByCollection() instead so the
+      // widen to every metadata match with the URL filter. Fall through to
+      // filterByCollection() instead so the
       // saved rules + visual expression loads correctly; the URL filter
       // chips are cleared because loadExpression() replaces state.root, so
       // surface a toast so the drop isn't silent.
@@ -359,7 +356,7 @@ async function bootstrapBrowse() {
       // [&rating_min=...]): /api/browse/init and /api/photos/query both restrict
       // by the collection's ``rules`` and ignore ``visual_json`` in the dashboard
       // scope path, so keeping dashboardCollectionScope=true would silently widen
-      // to every metadata match (Codex review r3621519730). Drop the scope so we
+      // to every metadata match. Drop the scope so we
       // fall through to filterByCollection() and the saved rules + visual
       // expression loads correctly; any URL filter chips are cleared by
       // loadExpression() replacing state.root, so surface a toast if we dropped
@@ -389,7 +386,7 @@ async function bootstrapBrowse() {
       // runs and the offline-photos notice stays hidden — users cannot reveal
       // the offline members until another action reloads the grid. Force a
       // scoped /api/photos/query here so ``loadPhotos`` populates the
-      // availability state from the response (Codex review r3839992513).
+      // availability state from the response.
       if (VireoFilter.hasFilters() ||
           (state.activeCollectionId && state.dashboardCollectionScope && !scopeChanged)) {
         resetAndLoad();
@@ -399,12 +396,11 @@ async function bootstrapBrowse() {
   } catch(e) {
     // /api/browse/init rejected — recompute healthChangedDuringInit so the
     // finally-region guard below correctly defers to a concurrent health
-    // refresh that owns the load lock. The assignment inside the try was
-    // skipped by the throw, and without recomputing here we would clear
+    // refresh that owns the load lock. The throw skipped the assignment
+    // inside the try, and without recomputing here we would clear
     // ``loading`` even though the health refresh's ``loadPhotos`` still
     // holds the mutex, letting the intersection observer fire a duplicate
-    // page-1 request against the same ``loadEpoch``
-    // (Codex review r3686191138).
+    // page-1 request against the same ``loadEpoch``.
     healthChangedDuringInit = state.folderHealthRefreshSeq !== bootstrapHealthSeq;
     /** @type {HTMLElement} */ (document.getElementById('loadingState')).textContent = 'Error loading.';
   }
@@ -415,8 +411,8 @@ async function bootstrapBrowse() {
   // ``loading`` here would release the mutex that concurrent loadPhotos
   // still holds, letting the newly-rearmed observer fire a second page-1
   // request against the same ``loadEpoch``; both responses append and the
-  // grid ends up with duplicated cards and off-by-one pagination
-  // (Codex review r3685627307). The same reasoning applies when a filter or
+  // grid ends up with duplicated cards and off-by-one pagination.
+  // The same reasoning applies when a filter or
   // sort change claimed the window mid-init: its loadPhotos owns ``loading``
   // and releases it in its own finally.
   if (!healthChangedDuringInit && bootstrapWindowIsCurrent()) {
@@ -434,7 +430,7 @@ async function bootstrapBrowse() {
 // Cap retry loops so a folder that keeps flapping (health event on every
 // interval) can't spin this indefinitely — after this many stale
 // interruptions, fall through to whatever refreshBrowseAfterFolderHealthChange
-// last rendered rather than deep-link forever (Codex review r3686778061).
+// last rendered rather than deep-link forever.
 var _DEEP_LINK_MAX_RETRIES = 5;
 export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // A focused deep link must expose the requested photo as a top-level card.
@@ -449,7 +445,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // owns the ``loading`` mutex. Rendering pre-flip data from initData or
   // releasing ``loading`` here would either clobber that fresher refresh
   // or let the intersection observer fire a duplicate page-1 request
-  // against the same loadEpoch (Codex review r3686696351).
+  // against the same loadEpoch.
   var deepLinkHealthSeq = state.folderHealthRefreshSeq;
   var isDeepLinkHealthCurrent = function() {
     return state.folderHealthRefreshSeq === deepLinkHealthSeq;
@@ -488,7 +484,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     // the folder-scoped grid (and, once earliestPage is set below, leave the
     // "N earlier photos aren't loaded" banner counting against a dataset that
     // is no longer on screen). Claiming discards every load started before
-    // this point (Codex review r3792769108).
+    // this point.
     var deepLinkWindowIsCurrent = claimBrowseWindow();
     finishLoad = pagination.beginLoad();
     // Navigate to the photo's folder
@@ -545,7 +541,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
       // baseline was already present before this request, but dispatches an
       // init→current transition when a newer observation landed in flight;
       // the subsequent isDeepLinkHealthCurrent check then skips stale render
-      // data (Codex reviews r3686696347 and r3687277899).
+      // data.
       if (Array.isArray(initData.missing_folder_ids)) {
         _reconcileMissingFoldersInitSnapshot(
           initData.missing_folder_ids,
@@ -638,8 +634,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // A concurrent refreshBrowseAfterFolderHealthChange() owns ``loading``
   // and rearms the observer itself when its loadPhotos settles; releasing
   // ``loading`` here would let a second page-1 request race against the
-  // same loadEpoch, producing duplicate cards and off-by-one pagination
-  // (Codex review r3686696351).
+  // same loadEpoch, producing duplicate cards and off-by-one pagination.
   if (isDeepLinkHealthCurrent() &&
       (!isDeepLinkDatasetCurrent || isDeepLinkDatasetCurrent())) {
     finishLoad();
@@ -662,7 +657,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // retry — otherwise the deep-link is silently abandoned and Browse is
   // left on whatever the refresh happened to load (usually the unscoped
   // workspace grid, with the target photo never scrolled into view and
-  // VireoFilter uninitialized) (Codex review r3686778061).
+  // VireoFilter uninitialized).
   for (var attempt = 0; attempt < _DEEP_LINK_MAX_RETRIES; attempt++) {
     var wasSuperseded = await _runPhotoDeepLink(photoId);
     if (!wasSuperseded) return;

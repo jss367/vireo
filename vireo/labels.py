@@ -262,18 +262,18 @@ def disambiguate_labels(records):
 
     ``records`` is a list of ``(name, identity_or_None)`` in source order.
     Groups that name a single taxon (or carry no source identity at all)
-    are collapsed exactly as before, so their prompt text — and therefore
-    ``compute_fingerprint`` and every cached run keyed on it — is
-    unchanged. A group naming two or more taxa is rewritten to ``Common
+    collapse to one prompt, so their prompt text — and therefore
+    ``compute_fingerprint`` and every cached run keyed on it — does not
+    depend on this rewrite. A group naming two or more taxa is rewritten to ``Common
     Name (Scientific name)`` per taxon, which ``SpeciesResolver`` already
     reads back as explicit taxon evidence.
 
     Returns ``(names, identities, disambiguated, dropped, sources)``.
-    ``dropped`` holds prompts no source can pin to one taxon — a label
-    file written before this rewrite existed stores only
-    ``{"ambiguous": True}`` for those, discarding the scientific names
-    needed to split them, so they are left out rather than poisoning the
-    run. Re-downloading the list recovers them. ``sources`` maps each
+    ``dropped`` holds prompts no source can pin to one taxon — an older
+    label file stores only ``{"ambiguous": True}`` for those, discarding
+    the scientific names needed to split them, so they are left out
+    rather than poisoning the run. Re-downloading the list recovers them.
+    ``sources`` maps each
     surviving prompt to the indices of the records that produced it,
     which is the only exact answer to "did this file back a class" —
     every proxy for it (the name, the taxon, the collision group) is
@@ -787,43 +787,9 @@ def set_active_labels(labels_files):
 def load_merged_labels(label_sets):
     """Read and merge species from multiple label sets.
 
-    Thin wrapper around ``load_merged_labels_with_metas`` that discards the
-    consumed-metas list. Prefer the ``_with_metas`` variant when the caller
-    needs to know which sets actually contributed to the returned labels —
-    e.g. to name label sources without claiming a file that was deleted
-    between the caller's existence check and this loader's read.
-
-    Args:
-        label_sets: list of metadata dicts, each with a 'labels_file' key.
-
-    Returns:
-        sorted, deduplicated list of species name strings.
-
-    Dedupes by the same ASCII-NOCASE key that ``add_prediction``,
-    alternative dedupe, and burst consensus use downstream — matching
-    SQLite's ``COLLATE NOCASE`` semantics via ``keyword_match_key``.
-    Some bundled label files carry curly apostrophes (`Bosc's
-    Fringe-toed lizard`, `Geoffroy's Tamarin`) while others use the
-    plain ASCII form, and hand-edited sets can differ only in case
-    (`Say's Phoebe` vs `Say's phoebe`). Handing the classifier two
-    spellings of the same species feeds its softmax two near-duplicate
-    classes that split probability between them — because each result
-    is thresholded independently in ``_build_custom_results``, a valid
-    prediction can fall below the configured threshold or lose an
-    alternative slot. Grouping by ``normalize_keyword_display`` alone
-    would miss the case-only collision because that helper preserves
-    case; ``keyword_match_key`` composes it with the same ASCII-only
-    lowercase table SQLite uses.
-
-    The fold decides only which of two COLLIDING spellings to drop; a
-    label whose folded key is unique keeps its original source spelling.
-    That distinction matters because ``compute_fingerprint(labels)``
-    hashes this exact list and ``classifier_runs`` is keyed on the
-    result: rewriting a non-colliding label (e.g. the lone `Bosc's
-    Fringe-toed lizard` in california-us-reptiles, or `'Anianiau` in the
-    Hawaii set) would change the fingerprint of five of the six shipped
-    label sets and strand ~70k cached runs, re-running inference over
-    the whole catalog for no dedupe benefit.
+    ``load_merged_labels_with_metas`` without the consumed-metas list; use
+    that variant when the caller names label sources. Returns the sorted,
+    deduplicated species names (see it for the dedupe rules).
     """
     labels, _ = load_merged_labels_with_metas(label_sets)
     return labels
@@ -987,8 +953,25 @@ def _read_label_set_records(label_sets):
 def load_merged_labels_with_metas(label_sets):
     """Read and merge species, returning the metadata of the sets consumed.
 
-    Same as ``load_merged_labels`` (see its docstring for dedupe/fingerprint
-    semantics), plus a second return value: the sublist of ``label_sets``
+    ``label_sets`` is a list of metadata dicts, each with a ``labels_file``
+    key. Returns the sorted, deduplicated species names, deduped by the
+    ASCII-NOCASE key (``keyword_match_key``) that ``add_prediction``,
+    alternative dedupe and burst consensus use, matching SQLite's ``COLLATE
+    NOCASE``. Label files mix curly and ASCII apostrophes (`Bosc's
+    Fringe-toed lizard`) and hand-edited sets can differ only in case
+    (`Say's Phoebe` vs `Say's phoebe`); two spellings of one species would
+    split the softmax between near-duplicate classes, and since
+    ``_build_custom_results`` thresholds each independently a valid
+    prediction could fall below the threshold or lose an alternative slot.
+
+    The fold decides only which of two COLLIDING spellings to drop; a label
+    whose folded key is unique keeps its source spelling, because
+    ``compute_fingerprint(labels)`` hashes this exact list and
+    ``classifier_runs`` is keyed on it. Rewriting a non-colliding label
+    would change the fingerprint of most shipped label sets and re-run
+    inference over the whole catalog for no dedupe benefit.
+
+    The second return value is the sublist of ``label_sets``
     whose file was actually opened and read in this same pass. Sets whose
     file is missing at read time — the ``load_merged_labels`` code path
     already skips them silently — are dropped from the returned metadata

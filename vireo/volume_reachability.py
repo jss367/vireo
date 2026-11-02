@@ -308,7 +308,7 @@ def mount_root_candidates(path: str) -> MountRootCandidates:
     to require of it (missing entirely vs. present but not actually
     mounted).
 
-    Windows mapped drives and UNC paths (Codex #1388 P2 r3663816324) are
+    Windows mapped drives and UNC paths are
     documented storage layouts in ``docs/WINDOWS_SUPPORT.md``; without
     detecting them, a disconnected SMB share on Windows would fall
     through to folder-scoped skips and classify would keep reissuing
@@ -330,7 +330,7 @@ def mount_root_candidates(path: str) -> MountRootCandidates:
         normalized_posix = normalized.replace("\\", "/")
     # Also probe the symlink-resolved form so a catalog alias like
     # ``/photos`` pointing into ``/Volumes/NAS/photos`` retains its
-    # mount-shaped prefix (Codex #1388 P2 r3664891998). Resolution is
+    # mount-shaped prefix. Resolution is
     # *lexical up to the mount root*: components are followed one at a time
     # and the walk stops as soon as the accumulated prefix is mount-shaped,
     # so no ``lstat`` ever crosses into the share itself. ``os.path.realpath``
@@ -867,7 +867,7 @@ _MAX_GENERIC_PROBES = _MAX_NETWORK_PROBES
 # root -> True if the root was a real mount point the last time it was seen
 # online. A Linux mount point directory survives the share detaching, so a
 # bare ``isdir`` would call a dead ``/mnt/NAS`` healthy; remembering that it
-# *used to be* a mount lets the stub be recognised. Roots that were never a
+# was a mount when last seen online lets the stub be recognised. Roots that were never a
 # mount (an ordinary local ``/mnt/photos`` folder) stay plain directories.
 _MOUNT_BASELINE = {}
 _MOUNT_BASELINE_LOCK = threading.Lock()
@@ -1132,8 +1132,8 @@ class VolumeReachability:
     only add latency.
 
     Reachable answers are cached for ``ttl_seconds``; offline answers for
-    ``offline_ttl_seconds`` (matching the new-images error backoff so a
-    dropped share is retried at the same cadence as before). ``mark_offline``
+    ``offline_ttl_seconds`` (matching the new-images error backoff, so a
+    dropped share is retried at that cadence). ``mark_offline``
     lets a caller that observed an offline error mid-walk publish it, so the
     next poll fails fast instead of walking into the same dead share.
     """

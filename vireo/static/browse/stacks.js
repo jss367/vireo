@@ -100,8 +100,8 @@ export function browseStackMemberRange(/** @type {number | null} */ anchorId, /*
 // card paints a claim the action will not honour. Cmd-clicking a stack's
 // cover out of the tray and then collapsing leaves the focus on that cover
 // while the set holds only the other frames, and reading the two as an "or"
-// painted the whole stack as selected while a rating would have skipped the
-// frame on top. Codex P2 on PR #1672.
+// would paint the whole stack as selected while a rating would skip the
+// frame on top.
 export function browseSelectionIncludes(/** @type {number} */ id) {
   return selection.batchIds.size > 0
     ? selection.batchIds.has(id)
@@ -600,7 +600,7 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
     if (tray) tray.remove();
     if (badge) badge.setAttribute('aria-expanded', 'false');
     // A collapsed tray cannot keep a single-photo focus on one of its hidden
-    // members: grid/lightbox navigation now uses the top-level cover list.
+    // members: grid/lightbox navigation uses the top-level cover list.
     // Hand that focus back to the visible cover while retaining the warm
     // member cache for a cheap re-expand and for batch state reconciliation.
     if (selectedHiddenMember) {
@@ -762,7 +762,6 @@ export function selectBrowseStackMember(/** @type {MouseEvent | null} */ event, 
   // the reverse direction: member anchor + Shift-click on a top-level
   // card). selectPhoto's shift branch folds the click target into the
   // resulting range so the hidden member always ends up in the selection.
-  // Codex P2 on PR #1561.
   // stackAware: false — a tray click is the way to pick one frame out of a
   // stack, including the cover frame, so it must never expand back to the
   // whole stack the way clicking the collapsed card does.
