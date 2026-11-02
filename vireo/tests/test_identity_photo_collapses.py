@@ -4,7 +4,7 @@ import pytest
 from db import Database
 from repositories.identity_alternatives import IdentityMergeConflict
 from scanner.companions import _pair_raw_jpeg_companions
-from services import photo_ingest, workspace_folders
+from services import folder_merges, photo_ingest, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
@@ -62,7 +62,7 @@ def test_folder_merge_keeps_resolved_tags_provenance_pending_and_history(catalog
         db.commit()
     if not active:
         db.set_active_workspace(None)
-    db.folders.merge_into_existing(source, target, path)
+    folder_merges.merge_into_existing(db, source, target, path)
     db.commit()
     assert db.active_workspace_id == (first if active else None)
     db.set_active_workspace(first)
@@ -95,7 +95,7 @@ def test_folder_merge_conflict_rolls_back_earlier_duplicate_and_all_pending(cata
         save_alternatives(db, [survivor2], CANDIDATES, 'Distinct evidence', 'Video')
     before = rows(db)
     with pytest.raises(IdentityMergeConflict, match='conflicting identity'), db.transaction():
-        db.folders.merge_into_existing(source, target, path)
+        folder_merges.merge_into_existing(db, source, target, path)
     assert not db.conn.in_transaction
     assert rows(db) == before
     assert db.photos.get(losing) is not None and db.photos.get(survivor) is not None
@@ -164,7 +164,7 @@ def test_collapse_does_not_reintroduce_candidate_outvoted_by_newer_visible_revie
     with db.transaction():
         save_alternatives(db, [survivor], CANDIDATES, 'Newer uncertain review', 'Audio')
     if kind == 'folder':
-        db.folders.merge_into_existing(source, target, path)
+        folder_merges.merge_into_existing(db, source, target, path)
         db.commit()
     else:
         assert _pair_raw_jpeg_companions(db) == {losing: survivor}
@@ -199,7 +199,7 @@ def test_folder_collapse_repairs_alias_intents_in_both_visible_workspaces(catalo
     old_token = db.conn.execute("SELECT change_token FROM pending_changes WHERE photo_id=? AND change_type='keyword_add' AND value=?", (losing, scientific_name)).fetchone()[0]
     db.conn.execute("UPDATE pending_changes SET sync_started=1 WHERE change_token=?", (old_token,))
     db.commit()
-    db.folders.merge_into_existing(source, target, path)
+    folder_merges.merge_into_existing(db, source, target, path)
     db.commit()
     assert not db.conn.execute('SELECT 1 FROM pending_changes WHERE change_token=?', (old_token,)).fetchone()
     assert not db.conn.execute("SELECT 1 FROM pending_changes WHERE photo_id=? AND change_type='keyword_add' AND value=?", (survivor, CANDIDATES[0])).fetchone()

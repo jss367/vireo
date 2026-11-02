@@ -275,7 +275,7 @@ def create_folders_blueprint(
                     409,
                 )
             # Staging a descendant rebases its folders.path under local-folders/,
-            # so a folders.path subtree scan (as db.folders.relocate does) no
+            # so a folders.path subtree scan (as folder_merges.relocate does) no
             # longer sees it — while local_folder_mappings.source_path still
             # points at the pre-relocation location. Without this check the
             # relocate would rewrite the ancestor while the manifest keeps

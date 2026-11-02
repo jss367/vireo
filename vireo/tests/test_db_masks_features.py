@@ -22,7 +22,7 @@ import config as cfg
 import db as db_module
 import pytest
 from db import Database
-from repositories.masks_features import MaskQuality, MasksFeaturesRepository, PipelineFeatures
+from repositories.masks_features import MaskQuality, MasksFeaturesRepository, PipelineFeatures, safe_remove_mask_file
 from services import detection_store, photo_ingest, subject_masks, workspace_folders
 
 BOX = (0.1, 0.2, 0.3, 0.4)
@@ -364,22 +364,22 @@ def test_safe_remove_mask_file_removes_only_inside_masks_dir(db, tmp_path):
     inside = _mask_file(db, "a.png")
     outside = tmp_path / "outside.png"
     outside.write_bytes(b"x")
-    db._safe_remove_mask_file(None)
-    db._safe_remove_mask_file("")
-    db._safe_remove_mask_file(str(outside))
+    safe_remove_mask_file(db._masks_dir_real(), None)
+    safe_remove_mask_file(db._masks_dir_real(), "")
+    safe_remove_mask_file(db._masks_dir_real(), str(outside))
     assert outside.exists()
     # The masks directory itself is inside the root but is not a file.
-    db._safe_remove_mask_file(_masks_dir(db))
+    safe_remove_mask_file(db._masks_dir_real(), _masks_dir(db))
     assert os.path.isdir(_masks_dir(db))
-    db._safe_remove_mask_file(os.path.join(_masks_dir(db), "missing.png"))
-    db._safe_remove_mask_file(inside)
+    safe_remove_mask_file(db._masks_dir_real(), os.path.join(_masks_dir(db), "missing.png"))
+    safe_remove_mask_file(db._masks_dir_real(), inside)
     assert not os.path.exists(inside)
 
 
 def test_safe_remove_mask_file_refuses_without_masks_dir(db):
     inside = _mask_file(db, "a.png")
     db._db_path = ":memory:"
-    db._safe_remove_mask_file(inside)
+    safe_remove_mask_file(db._masks_dir_real(), inside)
     assert os.path.exists(inside)
 
 
@@ -394,13 +394,13 @@ def test_safe_remove_mask_file_tolerates_os_errors(db, monkeypatch):
         return real_realpath(p, *args, **kwargs)
 
     monkeypatch.setattr(os.path, "realpath", realpath)
-    db._safe_remove_mask_file(unresolvable)
+    safe_remove_mask_file(db._masks_dir_real(), unresolvable)
 
     def boom(path):
         raise OSError("busy")
 
     monkeypatch.setattr(os, "remove", boom)
-    db._safe_remove_mask_file(inside)
+    safe_remove_mask_file(db._masks_dir_real(), inside)
     assert os.path.exists(inside)
 
 
@@ -1282,7 +1282,7 @@ def test_masks_features_is_a_fresh_repository_on_the_connection_per_access(db):
     assert first is not second
     assert first.conn is db.conn
     assert first.workspace_id_fn == db._ws_id
-    assert first.remove_file == db._safe_remove_mask_file
+    assert first.masks_dir == db._masks_dir_real()
     assert not hasattr(first, "commit_with_retry")
 
 
@@ -1331,15 +1331,23 @@ def test_mask_workflow_delegates_to_repository(name):
     assert not hasattr(Database, name), f"Database.{name} came back; call subject_masks.{name}"
 
 
-@pytest.mark.parametrize("name", ["_masks_dir_real", "_safe_remove_mask_file"])
-def test_mask_file_helpers_hold_no_sql(name):
-    """The containment check reads ``_db_path`` state and stays on ``Database``."""
-    assert "conn" not in _self_attrs(getattr(Database, name))
+def test_mask_file_helpers_hold_no_sql():
+    """The masks-directory root reads ``_db_path`` state and stays on ``Database``."""
+    assert "conn" not in _self_attrs(Database._masks_dir_real)
+    assert not hasattr(Database, "_safe_remove_mask_file")
 
 
-def test_cleanup_deletes_remove_files_through_the_facade():
-    """Every cleanup delete gets ``_safe_remove_mask_file`` from the factory."""
-    assert "_safe_remove_mask_file" in _self_attrs(Database._masks_features_repository)
+def test_cleanup_deletes_remove_files_inside_the_masks_dir(db, monkeypatch):
+    """The factory hands over the masks directory as a value, and the
+    repository's file deletes go through the containment check with it."""
+    import repositories.masks_features as module
+
+    assert "_masks_dir_real" in _self_attrs(Database._masks_features_repository)
+    calls = []
+    monkeypatch.setattr(module, "safe_remove_mask_file",
+                        lambda masks_dir, path: calls.append((masks_dir, path)))
+    db.masks_features.remove_file("/x/a.png")
+    assert calls == [(db._masks_dir_real(), "/x/a.png")]
 
 
 @pytest.mark.parametrize("name", [

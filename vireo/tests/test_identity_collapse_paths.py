@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import catalog_deletion, moves_merge, photo_ingest, workspace_folders
+from services import catalog_deletion, folder_merges, moves_merge, photo_ingest, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
@@ -63,7 +63,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     db.commit()
     before = db.identity_alternatives.for_photos([losing], include_resolved=True)[losing]
     if path == 'folder':
-        db.folders.merge_into_existing(source, target, str(target_path))
+        folder_merges.merge_into_existing(db, source, target, str(target_path))
         db.commit()
     else:
         from scanner.companions import _pair_raw_jpeg_companions
@@ -123,7 +123,7 @@ def test_collapse_conflicts_keep_pair_data_and_folder_transaction_untouched(db, 
         before = {table: [tuple(r) for r in db.conn.execute(f'SELECT * FROM {table}')] for table in tables}
         if path == 'folder':
             with pytest.raises(IdentityMergeConflict), db.transaction():
-                db.folders.merge_into_existing(source, target, str(target_path))
+                folder_merges.merge_into_existing(db, source, target, str(target_path))
         else:
             from scanner.companions import _pair_raw_jpeg_companions
             assert _pair_raw_jpeg_companions(db) == {}
@@ -142,7 +142,7 @@ def test_collapse_keeps_current_tags_for_redo_only_identity_history(db, tmp_path
         saved = save_alternatives(db, [losing], ['Heron', 'Egret'], 'Redo evidence', 'Bill')
     undo_last_edit(db)
     if path == 'folder':
-        db.folders.merge_into_existing(source, target, str(target_path))
+        folder_merges.merge_into_existing(db, source, target, str(target_path))
         db.commit()
     else:
         from scanner.companions import _pair_raw_jpeg_companions
@@ -240,7 +240,7 @@ def test_folder_identity_conflict_rolls_back_earlier_duplicate_carries(db, tmp_p
     # refusal runs it in one (on its own, or inside a caller's unit).
     with db.transaction() if in_unit else contextlib.nullcontext():
         with pytest.raises(IdentityMergeConflict), db.transaction():
-            db.folders.merge_into_existing(source, target, str(target_path))
+            folder_merges.merge_into_existing(db, source, target, str(target_path))
     assert [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords ORDER BY photo_id,keyword_id')] == before
     assert db.photos.get(losing) is not None
     assert db.photos.get(later_source) is not None
