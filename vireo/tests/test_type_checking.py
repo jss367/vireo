@@ -33,7 +33,7 @@ def _collect_import_aliases(tree: ast.Module) -> dict[str, frozenset[str]]:
 
     Only names relevant to ``Callable[..., Any]`` detection are tracked:
     aliases of ``Callable`` and ``Any``, and aliases of the ``typing``
-    and ``collections.abc`` modules through which the two names may be
+    and ``collections`` / ``collections.abc`` modules through which they may be
     accessed. A local name that no tracked import binds is omitted and
     the canonicalizer treats it as its own canonical form.
 
@@ -72,6 +72,8 @@ def _collect_import_aliases(tree: ast.Module) -> dict[str, frozenset[str]]:
             for alias in node.names:
                 if alias.name == "typing":
                     raw.setdefault(alias.asname or "typing", set()).add("typing")
+                elif alias.name == "collections":
+                    raw.setdefault(alias.asname or "collections", set()).add("collections")
                 elif alias.name == "collections.abc" and alias.asname is not None:
                     # ``import collections.abc`` without ``as`` binds the
                     # top-level ``collections`` name; the dotted access
@@ -766,3 +768,20 @@ def test_callable_facade_matcher_deliberately_rejects_uncorrelated_candidates():
         "Callable[..., Any]", "Any[..., Callable]",
     })
     assert _callable_facade_offenders(correlated, "fixture") == ["fixture.Example.callback"]
+
+
+def test_callable_facade_matcher_resolves_top_level_collections_alias():
+    """Parse aliases without executing imports or quoted annotations."""
+    source = textwrap.dedent('''
+        from typing import Any
+        import collections as c
+        class Forbidden:
+            direct: c.abc.Callable[..., Any]
+            quoted: "c.abc.Callable[..., Any]"
+        class Allowed:
+            specific: c.abc.Callable[[], int]
+            values: c.abc.Iterable[Any]
+    ''')
+    assert _callable_facade_offenders(source, "fixture") == [
+        "fixture.Forbidden.direct", "fixture.Forbidden.quoted",
+    ]

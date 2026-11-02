@@ -133,13 +133,40 @@ _PROVENANCE_REPOSITORY_CLASS = "KeywordProvenanceRepository"
 _ENTRY_POINT = ("services/keyword_tagging.py", "tag_photo")
 
 
-def _builds_provenance_repository(node):
-    """``<...>.keyword_provenance`` or ``KeywordProvenanceRepository(...)``."""
+def _provenance_repository_constructors(tree):
+    """Recognize constructor imports as syntax, without importing modules.
+
+    Collect all relevant import bindings conservatively across branches,
+    as the existing receiver-alias scan does for assignments.
+    """
+    module = "repositories.keyword_provenance"
+    names = {_PROVENANCE_REPOSITORY_CLASS}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                local = alias.asname or alias.name
+                if node.module == module and alias.name == _PROVENANCE_REPOSITORY_CLASS:
+                    names.add(local)
+                elif node.module == "repositories" and alias.name == "keyword_provenance":
+                    names.add(f"{local}.{_PROVENANCE_REPOSITORY_CLASS}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == module:
+                    names.add(f"{alias.asname or module}.{_PROVENANCE_REPOSITORY_CLASS}")
+                elif alias.name == "repositories":
+                    local = alias.asname or alias.name
+                    names.add(f"{local}.keyword_provenance.{_PROVENANCE_REPOSITORY_CLASS}")
+    return names
+
+
+def _builds_provenance_repository(node, constructors):
+    """A provenance accessor or an imported repository constructor call."""
     if isinstance(node, ast.Attribute) and node.attr == "keyword_provenance":
         return True
     return (
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id == _PROVENANCE_REPOSITORY_CLASS
+        isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Name, ast.Attribute))
+        and ast.unparse(node.func) in constructors
     )
 
 
@@ -151,16 +178,17 @@ def _writer_calls(rel, tree):
     fourth positional argument. The repository writer ``tag`` takes it
     keyword-only, through any receiver that is a provenance repository.
     """
+    constructors = _provenance_repository_constructors(tree)
     aliases: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and _builds_provenance_repository(node.value):
+        if isinstance(node, ast.Assign) and _builds_provenance_repository(node.value, constructors):
             aliases.update(
                 target.id for target in node.targets if isinstance(target, ast.Name)
             )
         elif (
             isinstance(node, ast.AnnAssign)
             and node.value is not None
-            and _builds_provenance_repository(node.value)
+            and _builds_provenance_repository(node.value, constructors)
             and isinstance(node.target, ast.Name)
         ):
             aliases.add(node.target.id)
@@ -182,7 +210,7 @@ def _writer_calls(rel, tree):
             continue
         receiver = func.value
         on_repository = (
-            _builds_provenance_repository(receiver)
+            _builds_provenance_repository(receiver, constructors)
             or (isinstance(receiver, ast.Name) and receiver.id in aliases)
             or (rel == _PROVENANCE_MODULE
                 and isinstance(receiver, ast.Name) and receiver.id == "self")
@@ -744,3 +772,43 @@ def test_writer_call_scan_finds_every_way_to_reach_the_writer():
     self_tree = ast.parse("def f(self):\n    self.tag(1, 2, source=None)\n")
     assert [_declared_source(src) for _, src in _writer_calls(_PROVENANCE_MODULE, self_tree)] == [None]
     assert list(_writer_calls("repositories/other.py", self_tree)) == []
+
+
+def test_writer_call_scan_resolves_constructor_imports():
+    """Only recognized repository import paths identify aliased constructors."""
+    tree = ast.parse(
+        "from repositories.keyword_provenance import KeywordProvenanceRepository as Repo\n"
+        "import repositories.keyword_provenance as kp\n"
+        "import repositories.keyword_provenance\n"
+        "import repositories as repos\n"
+        "from repositories import keyword_provenance as provenance\n"
+        "from unrelated import KeywordProvenanceRepository as Other\n"
+        "import unrelated as other\n"
+        "def write(conn):\n"
+        "    Repo(conn).tag(1, 2, source=None)\n"
+        "    kp.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    repositories.keyword_provenance.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    repos.keyword_provenance.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    provenance.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    alias = Repo(conn)\n"
+        "    alias.tag(1, 2, source='manual')\n"
+        "    annotated: Repo = kp.KeywordProvenanceRepository(conn)\n"
+        "    annotated.tag(1, 2, source='accept')\n"
+        "    Other(conn).tag(1, 2, source=None)\n"
+        "    other.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    kp.UnrelatedRepository(conn).tag(1, 2, source=None)\n"
+        "    Repo(conn).get(1)\n"
+    )
+    found = [
+        (ast.unparse(call.func), _declared_source(source))
+        for call, source in _writer_calls("services/example.py", tree)
+    ]
+    assert found == [
+        ("Repo(conn).tag", None),
+        ("kp.KeywordProvenanceRepository(conn).tag", None),
+        ("repositories.keyword_provenance.KeywordProvenanceRepository(conn).tag", None),
+        ("repos.keyword_provenance.KeywordProvenanceRepository(conn).tag", None),
+        ("provenance.KeywordProvenanceRepository(conn).tag", None),
+        ("alias.tag", "manual"),
+        ("annotated.tag", "accept"),
+    ]
