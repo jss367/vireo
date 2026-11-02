@@ -25,9 +25,15 @@ def test_no_repository_declares_methods_bound_from_the_facade():
         for name, cls in inspect.getmembers(module, inspect.isclass):
             if cls.__module__ != module.__name__:
                 continue
+            # ``inspect.get_annotations(cls, eval_str=True)`` resolves string
+            # annotations against the class's own module globals, so a
+            # declaration in a ``from __future__ import annotations`` module
+            # stored as ``"Callable[..., Any]"`` is compared as the type it
+            # names, not as a string that will never equal the type.
+            annotations = inspect.get_annotations(cls, eval_str=True)
             offenders += [
                 f"{path.stem}.{name}.{attr}"
-                for attr, annotation in getattr(cls, "__annotations__", {}).items()
+                for attr, annotation in annotations.items()
                 if annotation == Callable[..., Any]
             ]
     assert not offenders, offenders
