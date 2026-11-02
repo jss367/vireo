@@ -33,6 +33,7 @@ import argparse
 import ast
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -130,7 +131,7 @@ def _js(src: str) -> dict:
     if not src:
         return {"tokens": [], "comments": []}
     res = subprocess.run(
-        ["node", "-e", JS_TOKENS, str(ROOT)], input=src, capture_output=True, text=True, check=True
+        ["node", "-e", JS_TOKENS, str(ROOT)], input=src, capture_output=True, encoding="utf-8", check=True
     )
     return json.loads(res.stdout)
 
@@ -164,7 +165,15 @@ def js_differs(old: str, new: str) -> str | None:
 
 
 def _git(*args: str) -> str:
-    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    path_records = "-z" in args
+    result = subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True,
+        encoding=None if path_records else "utf-8", check=True,
+    )
+    if not path_records:
+        return result.stdout  # Same UTF-8/universal-newline contract as read_text.
+    # Git for Windows emits UTF-8 paths; POSIX records retain filesystem bytes.
+    return result.stdout.decode("utf-8") if os.name == "nt" else os.fsdecode(result.stdout)
 
 
 def _suffix_of(path: str) -> str:

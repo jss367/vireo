@@ -324,6 +324,87 @@ def test_source_changes_detects_non_ascii_path(tmp_path):
         checker.ROOT = orig_root
     assert entries, "non-ASCII source file must not be dropped by name parsing"
     label, old_path, new_path, suffix = entries[0]
-    assert old_path == "naïve.py"
-    assert new_path == "naïve.py"
+    assert old_path == "naïve.py", (ascii(old_path), ascii("naïve.py"))
+    assert new_path == "naïve.py", (ascii(new_path), ascii("naïve.py"))
     assert suffix == ".py"
+
+
+@pytest.mark.parametrize("name", ["naïve.py", "鳥.py"])
+def test_git_decoding_preserves_unicode_names_and_blobs(tmp_path, monkeypatch, name):
+    """Model an ANSI subprocess default; Git paths/blobs must not use it."""
+    before = "LABEL = 'café'\n"
+    _run_in_fixture(tmp_path, (name, before))
+    (tmp_path / name).write_text(before + "# prose\n", encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    entries = checker._source_changes("HEAD")
+    assert entries[0][1] == name, (ascii(entries[0][1]), ascii(name))
+    assert entries[0][2] == name, (ascii(entries[0][2]), ascii(name))
+    assert checker._git("show", f"HEAD:{name}") == before
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker.main() == 0
+    (tmp_path / name).write_text("LABEL = 'thrush'\n", encoding="utf-8")
+    assert checker.main() == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Opaque byte/control-character filenames are POSIX-only")
+@pytest.mark.parametrize("raw_name", [b"opaque-\xff.py", b"line\rbreak.py"])
+def test_git_paths_preserve_opaque_posix_bytes(tmp_path, monkeypatch, raw_name):
+    name = os.fsdecode(raw_name)
+    _run_in_fixture(tmp_path, (name, "VALUE = 1\n"))
+    (tmp_path / name).write_text("VALUE = 2\n", encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    entries = checker._source_changes("HEAD")
+    assert os.fsencode(entries[0][1]) == raw_name
+    assert os.fsencode(entries[0][2]) == raw_name
+    assert checker._git("show", f"HEAD:{name}") == "VALUE = 1\n"
+
+
+def test_js_protocol_is_utf8_under_non_utf8_default(monkeypatch):
+    """Exercise real pipes with a UTF-8 peer, without requiring Node in Python CI."""
+    real_run = subprocess.run
+    peer = (
+        "import json, sys; "
+        "source = sys.stdin.buffer.read().decode('utf-8'); "
+        "sys.stdout.buffer.write(json.dumps({'source': source}, ensure_ascii=False).encode('utf-8'))"
+    )
+    def utf8_peer(_args, **kwargs):
+        return real_run([sys.executable, "-c", peer], **kwargs)
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    monkeypatch.setattr(subprocess, "run", utf8_peer)
+    source = "const bird = '鳥'; // naïve"
+    assert checker._js(source) == {"source": source}
+
+
+@needs_node
+def test_js_unicode_semantics_under_non_utf8_default(monkeypatch):
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    # An ANSI input pipe makes both bytes decode to U+FFFD in Node's UTF-8 reader.
+    assert checker.js_differs("const x = 'é';", "const x = 'ö';") is not None
+    comments = checker._js("const bird = '鳥'; // naïve")["comments"]
+    assert [c["text"] if isinstance(c, dict) else c for c in comments] == [" naïve"]
+
+
+def test_git_windows_path_records_use_the_utf8_protocol(monkeypatch):
+    from types import SimpleNamespace
+
+    text = "M\0naïve.py\0"
+    def wrong_filesystem_decoder(_data):
+        pytest.fail("Git for Windows path records must be decoded as UTF-8")
+    monkeypatch.setattr(checker, "os", SimpleNamespace(name="nt", fsdecode=wrong_filesystem_decoder))
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(stdout=text.encode("utf-8")))
+    assert checker._git("diff", "--name-status", "-z", "HEAD") == text
+
+
+def test_git_source_text_matches_working_tree_utf8_newlines(tmp_path, monkeypatch):
+    _run_in_fixture(tmp_path)
+    data = "LABEL = 'café'\r\nVALUE = 1\r".encode()
+    path = tmp_path / "lines.py"
+    path.write_bytes(data)
+    result = subprocess.run(
+        ["git", "-C", str(tmp_path), "hash-object", "-w", "--stdin"],
+        input=data, capture_output=True, check=True,
+    )
+    blob = result.stdout.decode("ascii").strip()
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    assert checker._git("show", blob) == path.read_text(encoding="utf-8")
