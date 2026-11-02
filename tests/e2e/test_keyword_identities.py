@@ -1,5 +1,5 @@
 from playwright.sync_api import expect
-from services import photo_locations
+from services import keyword_tagging, photo_locations
 
 
 def test_species_groups_preserve_paths_and_chart_drill_down(live_server, page):
@@ -13,9 +13,9 @@ def test_species_groups_preserve_paths_and_chart_drill_down(live_server, page):
     leaf = db.keywords.add('Test Bird', parent_id=parent, is_species=True)
     db.commit()
     db.conn.execute('UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)', (taxon, root, leaf))
-    db.tag_photo(photos[0], root)
-    db.tag_photo(photos[0], leaf)
-    db.tag_photo(photos[1], leaf)
+    keyword_tagging.tag_photo(db, photos[0], root)
+    keyword_tagging.tag_photo(db, photos[0], leaf)
+    keyword_tagging.tag_photo(db, photos[1], leaf)
     db.commit()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -57,8 +57,8 @@ def test_location_preview_combines_only_chosen_match(live_server, page):
         'address_components': [{'name': 'San Diego', 'types': ['locality']}],
     })
     db.commit()
-    db.tag_photo(photos[0], source)
-    db.tag_photo(photos[1], target)
+    keyword_tagging.tag_photo(db, photos[0], source)
+    keyword_tagging.tag_photo(db, photos[1], target)
     db.commit()
     page.goto(live_server['url'] + '/keywords')
     page.locator('#kwSearch').fill('Lake Hodges')
@@ -80,14 +80,14 @@ def test_merge_toolbar_stays_visible_when_scrolled_and_preserves_coordinates(liv
     photos = live_server['data']['photos']
     for index in range(60):
         kid = db.keywords.add(f'Scroll keyword {index:02d}', kw_type='general')
-        db.tag_photo(photos[0], kid)
+        keyword_tagging.tag_photo(db, photos[0], kid)
         db.commit()
     source = db.keywords.add('Wing St. Canyon', kw_type='location')
     target = db.keywords.add('Wing Street Canyon', kw_type='location')
     db.update_keyword(target, latitude=32.7447, longitude=-117.2186)
-    db.tag_photo(photos[0], source)
-    db.tag_photo(photos[1], source)
-    db.tag_photo(photos[1], target)
+    keyword_tagging.tag_photo(db, photos[0], source)
+    keyword_tagging.tag_photo(db, photos[1], source)
+    keyword_tagging.tag_photo(db, photos[1], target)
     db.commit()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -145,7 +145,7 @@ def test_merge_map_escapes_keyword_names_and_clears_a_coordless_places_point(liv
     db.conn.execute("UPDATE keywords SET place_id = 'place-coordless' WHERE id = ?", (coordless,))
     db.conn.commit()
     for index, keyword in enumerate((hostile, located, coordless, quoted)):
-        db.tag_photo(photos[index % len(photos)], keyword)
+        keyword_tagging.tag_photo(db, photos[index % len(photos)], keyword)
         db.commit()
 
     errors = []
@@ -206,8 +206,8 @@ def test_merge_context_menu_keeps_one_rows_name_and_the_others_place(live_server
         'address_components': [{'name': 'Bellingham', 'types': ['locality']}],
     })
     db.commit()
-    db.tag_photo(photos[0], source)
-    db.tag_photo(photos[1], target)
+    keyword_tagging.tag_photo(db, photos[0], source)
+    keyword_tagging.tag_photo(db, photos[1], target)
     db.commit()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))

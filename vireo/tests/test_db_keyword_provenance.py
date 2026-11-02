@@ -31,7 +31,7 @@ from db import (
     KEYWORD_SOURCE_UNKNOWN,
     Database,
 )
-from services import photo_ingest, review_decisions, workspace_folders
+from services import keyword_tagging, photo_ingest, review_decisions, workspace_folders
 from signature_contract import calling_signature
 
 
@@ -113,7 +113,7 @@ def test_tag_photo_commits_with_the_callers_unit(db, lib):
     p0 = lib["p"][0]
     with db.transaction():
         kid = db.keywords.add("Driftwood")
-        db.tag_photo(p0, kid)
+        keyword_tagging.tag_photo(db, p0, kid)
     assert not db.conn.in_transaction
     assert _visible(
         db, "SELECT photo_id, keyword_id, source FROM photo_keywords",
@@ -123,7 +123,7 @@ def test_tag_photo_commits_with_the_callers_unit(db, lib):
 def test_tag_photo_leaves_commit_to_caller(db, lib):
     p0 = lib["p"][0]
     kid = db.keywords.add("Driftwood")
-    db.tag_photo(p0, kid, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(db, p0, kid, source=KEYWORD_SOURCE_UNKNOWN)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
     db.conn.rollback()
@@ -152,8 +152,8 @@ def test_tag_photo_retag_stores_the_lattice_max(db, lib, first, second, expected
     p0 = lib["p"][0]
     with db.transaction():
         kid = db.keywords.add("Wildlife", kw_type="genre")
-        db.tag_photo(p0, kid, source=first)
-        db.tag_photo(p0, kid, source=second)
+        keyword_tagging.tag_photo(db, p0, kid, source=first)
+        keyword_tagging.tag_photo(db, p0, kid, source=second)
     assert _visible(
         db, "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
         (p0, kid),
@@ -168,14 +168,14 @@ def test_merge_keyword_into_leaves_commit_to_caller(db, lib):
     with db.transaction():
         src = db.keywords.add("Egret")
         dst = db.keywords.add("Heron")
-        db.tag_photo(p0, src)
-    assert db._merge_keyword_into(src, dst) == 1
+        keyword_tagging.tag_photo(db, p0, src)
+    assert db.keyword_provenance.merge_keyword_into(src, dst) == 1
     assert db.conn.in_transaction
     # Nothing is visible to another connection until the caller commits.
     assert _visible(db, "SELECT id FROM keywords WHERE id = ?", (src,)) == [(src,)]
     db.conn.rollback()
     assert _source(db, p0, src) == "manual"
-    db._merge_keyword_into(src, dst)
+    db.keyword_provenance.merge_keyword_into(src, dst)
     db.conn.commit()
     assert _visible(db, "SELECT id FROM keywords WHERE id = ?", (src,)) == []
     assert _visible(
@@ -206,7 +206,7 @@ def test_merge_keyword_into_folds_provenance(db, lib, src_source, dst_source, ex
     if dst_source != "<absent>":
         _raw_tag(db, p0, dst, dst_source)
     db.conn.commit()
-    db._merge_keyword_into(src, dst)
+    db.keyword_provenance.merge_keyword_into(src, dst)
     db.conn.commit()
     assert _visible(
         db, "SELECT keyword_id, source FROM photo_keywords WHERE photo_id = ?", (p0,),
@@ -224,7 +224,7 @@ def test_merge_keyword_into_moves_import_aliases_and_metadata(db, lib):
         "INSERT INTO keyword_import_aliases (path_key, path_json, keyword_id) "
         "VALUES ('egret', '[\"Egret\"]', ?)", (src,),
     )
-    db._merge_keyword_into(src, dst)
+    db.keyword_provenance.merge_keyword_into(src, dst)
     row = db.conn.execute(
         "SELECT is_species, latitude, longitude, source_taxon_id FROM keywords "
         "WHERE id = ?", (dst,),
@@ -241,18 +241,22 @@ def test_merge_keyword_into_recurses_through_the_facade(db, lib, monkeypatch):
     dst_parent = db.keywords.add("Shorebirds")
     src_child = db.keywords.add("Heron", parent_id=src_parent)
     dst_child = db.keywords.add("heron", parent_id=dst_parent)
-    db.tag_photo(p0, src_child)
-    db.tag_photo(p1, dst_child, source=KEYWORD_SOURCE_UNKNOWN)
-    db.tag_photo(p1, src_child)
+    keyword_tagging.tag_photo(db, p0, src_child)
+    keyword_tagging.tag_photo(db, p1, dst_child, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(db, p1, src_child)
 
-    calls = _spy(monkeypatch, db, "_merge_keyword_into")
-    # The top-level call enters through the class, past the spy; the
-    # recursion into the colliding child must come back through the façade.
-    merged = Database._merge_keyword_into(
-        db, src_parent, dst_parent, pending_source_only=True,
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    calls = _class_spy(monkeypatch, KeywordProvenanceRepository, "merge_keyword_into")
+    # The recursion into the colliding child runs through the same writer.
+    merged = db.keyword_provenance.merge_keyword_into(
+        src_parent, dst_parent, pending_source_only=True,
     )
     assert merged == 2
-    assert calls == [((src_child, dst_child), {"pending_source_only": True})]
+    assert calls == [
+        ((src_parent, dst_parent), {"pending_source_only": True}),
+        ((src_child, dst_child), {"pending_source_only": True}),
+    ]
     db.conn.commit()
     assert _visible(db, "SELECT id FROM keywords WHERE id IN (?, ?)",
                     (src_parent, src_child)) == []
@@ -271,7 +275,7 @@ def test_merge_keyword_into_disambiguates_cross_type_children_through_the_facade
     from repositories.keyword_tree import KeywordTreeRepository
 
     calls = _class_spy(monkeypatch, KeywordTreeRepository, "reparent_disambiguated")
-    assert db._merge_keyword_into(src_parent, dst_parent) == 1
+    assert db.keyword_provenance.merge_keyword_into(src_parent, dst_parent) == 1
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert (args[0]["id"], args[1], args[2]) == (child, dst_parent, f"Macro (id-{child})")
@@ -308,7 +312,7 @@ def test_merge_keyword_into_keeps_distinct_taxa_apart_through_the_alias_reposito
         return real(merges, row)
 
     monkeypatch.setattr(keyword_identity, "taxon_identity", spy)
-    assert db._merge_keyword_into(src_parent, dst_parent) == 1
+    assert db.keyword_provenance.merge_keyword_into(src_parent, dst_parent) == 1
     # The taxon identities are read through the alias repository on the same
     # connection, never through the Database.
     from repositories.keyword_merges import KeywordMergeRepository
@@ -329,8 +333,8 @@ def test_merge_keyword_into_retargets_pending_and_curation_through_the_facade(
     ws = lib["ws"]
     src = db.keywords.add("Egret", is_species=True)
     dst = db.keywords.add("Heron", is_species=True)
-    db.tag_photo(p0, src)
-    db.tag_photo(p1, dst)
+    keyword_tagging.tag_photo(db, p0, src)
+    keyword_tagging.tag_photo(db, p1, dst)
     db.pending_changes.queue(p0, "keyword_add", "Egret", workspace_id=ws)
     db.commit()
     db.pending_changes.queue(p1, "keyword_remove", "Egret", workspace_id=ws)
@@ -340,7 +344,7 @@ def test_merge_keyword_into_retargets_pending_and_curation_through_the_facade(
     highlights = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_highlights")
     prefs = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_photo_preferences")
 
-    db._merge_keyword_into(src, dst, pending_source_only=True)
+    db.keyword_provenance.merge_keyword_into(src, dst, pending_source_only=True)
 
     pairs = sorted([(p0, ws), (p1, ws)])
     for calls in (highlights, prefs):
@@ -360,13 +364,13 @@ def test_merge_keyword_into_retargets_edit_history(db, lib):
     p0 = lib["p"][0]
     src = db.keywords.add("Egret")
     dst = db.keywords.add("Heron")
-    db.tag_photo(p0, src)
+    keyword_tagging.tag_photo(db, p0, src)
     db.record_edit(
         "keyword_add", "add Egret", str(src),
         [{"photo_id": p0, "old_value": "", "new_value": str(src)}],
     )
     db.commit()
-    db._merge_keyword_into(src, dst)
+    db.keyword_provenance.merge_keyword_into(src, dst)
     assert db.conn.execute(
         "SELECT new_value FROM edit_history WHERE action_type = 'keyword_add'"
     ).fetchone()[0] == str(dst)
@@ -384,9 +388,9 @@ def test_merge_keyword_into_ignores_non_list_history_keyword_ids(db, lib):
     other = db.keywords.add("Gull")
     # The string case only mis-matched when one of its characters equals src.
     assert src < 10
-    db.tag_photo(p0, src)
-    db.tag_photo(p0, dst)  # p0 already carries the survivor
-    db.tag_photo(p1, src)
+    keyword_tagging.tag_photo(db, p0, src)
+    keyword_tagging.tag_photo(db, p0, dst)  # p0 already carries the survivor
+    keyword_tagging.tag_photo(db, p1, src)
     as_str = json.dumps({"keyword_id": other, "keyword_ids": f"{other}{src}"})
     as_int = json.dumps({"keyword_id": other, "keyword_ids": src})
     for pid, payload in ((p0, as_str), (p1, as_int)):
@@ -396,7 +400,7 @@ def test_merge_keyword_into_ignores_non_list_history_keyword_ids(db, lib):
         )
         db.commit()
 
-    db._merge_keyword_into(src, dst)
+    db.keyword_provenance.merge_keyword_into(src, dst)
     db.conn.commit()
 
     assert db.conn.execute(
@@ -458,7 +462,9 @@ def test_upsert_one_keyword_merges_suffixed_place_row_through_the_facade(
     _raw_tag(db, p1, suffixed, KEYWORD_SOURCE_UNKNOWN)
     _raw_tag(db, p1, component, KEYWORD_SOURCE_ACCEPT)
     db.conn.commit()
-    calls = _spy(monkeypatch, db, "_merge_keyword_into")
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    calls = _class_spy(monkeypatch, KeywordProvenanceRepository, "merge_keyword_into")
 
     got = db.keyword_provenance.upsert_one_keyword(
         "California", None, place_id="place-00000042", latitude=5.0,
@@ -527,11 +533,11 @@ def test_link_keyword_to_place_merges_into_canonical_and_folds_provenance(db, li
     kid = db.get_or_create_text_location("Home")
     child = db.keyword_provenance.upsert_one_keyword("Garden", kid)
     db.conn.commit()
-    db.tag_photo(p0, kid)  # manual
-    db.tag_photo(p0, canonical, source=KEYWORD_SOURCE_UNKNOWN)
-    db.tag_photo(p1, kid, source=KEYWORD_SOURCE_UNKNOWN)
-    db.tag_photo(p2, kid, source=KEYWORD_SOURCE_ACCEPT)
-    db.tag_photo(p2, canonical)  # manual
+    keyword_tagging.tag_photo(db, p0, kid)  # manual
+    keyword_tagging.tag_photo(db, p0, canonical, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(db, p1, kid, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(db, p2, kid, source=KEYWORD_SOURCE_ACCEPT)
+    keyword_tagging.tag_photo(db, p2, canonical)  # manual
     db.commit()
 
     with db.transaction():
@@ -625,7 +631,9 @@ def test_accept_prediction_tags_manual_and_queues_add_through_the_facade(
     p0 = lib["p"][0]
     pid = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
-    tags = _spy(monkeypatch, db, "tag_photo")
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    tags = _class_spy(monkeypatch, KeywordProvenanceRepository, "tag")
     from repositories.sync import SyncRepository
 
     queued = _class_spy(monkeypatch, SyncRepository, "queue")
@@ -674,7 +682,7 @@ def test_accept_prediction_leaves_commit_to_caller(db, lib):
 def test_replace_species_requires_explicit_taxonomy_before_writes(db, lib):
     p0 = lib["p"][0]
     old_keyword = db.keywords.add("Jay", is_species=True)
-    db.tag_photo(p0, old_keyword)
+    keyword_tagging.tag_photo(db, p0, old_keyword)
     prediction = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
     before = db.conn.total_changes
@@ -716,12 +724,13 @@ def test_accept_prediction_rolls_back_when_queueing_fails(db, lib, monkeypatch):
 def test_accept_prediction_already_tagged_is_status_only(db, lib, monkeypatch):
     p0 = lib["p"][0]
     kid = db.keywords.add("Robin", is_species=True)
-    db.tag_photo(p0, kid, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(db, p0, kid, source=KEYWORD_SOURCE_UNKNOWN)
     pid = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
+    from repositories.keyword_provenance import KeywordProvenanceRepository
     from repositories.sync import SyncRepository
 
-    tags = _spy(monkeypatch, db, "tag_photo")
+    tags = _class_spy(monkeypatch, KeywordProvenanceRepository, "tag")
     queued = _class_spy(monkeypatch, SyncRepository, "queue")
     result = review_decisions.accept_prediction(db, pid)
     assert tags == [] and queued == []
@@ -741,8 +750,8 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     ws = lib["ws"]
     jay = db.keywords.add("Jay", is_species=True)
     wren = db.keywords.add("Wren", is_species=True)
-    db.tag_photo(p0, jay)
-    db.tag_photo(p1, wren)
+    keyword_tagging.tag_photo(db, p0, jay)
+    keyword_tagging.tag_photo(db, p1, wren)
     db.pending_changes.queue(p1, "keyword_add", "Wren", workspace_id=ws)
     db.commit()
     db.conn.execute(
@@ -867,19 +876,13 @@ def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
 # -- structure ----------------------------------------------------------------------------
 
 
-# Still forwarders on ``Database``: ``tag_photo`` (the provenance contract's
-# fail-safe default lives on it) and ``_merge_keyword_into`` (bound into the
-# repositories by name). ``accept_prediction`` is a decision writer of
-# ``services.review_decisions``.
-_DELEGATING_PROVENANCE_METHODS = (
-    "tag_photo",
-    "_merge_keyword_into",
-)
-
-# Reached through ``db.keyword_provenance`` now, under their repository names.
+# Reached through ``db.keyword_provenance`` or ``services.keyword_tagging``
+# now; ``Database`` keeps none of the provenance writers.
 _REMOVED_PROVENANCE_WRAPPERS = {
     "link_keyword_to_place": "link_keyword_to_place",
     "_upsert_one_keyword": "upsert_one_keyword",
+    "_merge_keyword_into": "merge_keyword_into",
+    "tag_photo": "tag",
 }
 
 
@@ -901,14 +904,6 @@ def _module_tree():
     return module, ast.parse(inspect.getsource(module))
 
 
-def _repository_methods(tree):
-    cls = next(
-        n for n in tree.body
-        if isinstance(n, ast.ClassDef) and n.name == "KeywordProvenanceRepository"
-    )
-    return {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
-
-
 def test_keyword_provenance_has_no_removed_wrappers_on_database():
     from repositories.keyword_provenance import KeywordProvenanceRepository
 
@@ -917,220 +912,30 @@ def test_keyword_provenance_has_no_removed_wrappers_on_database():
             f"Database.{name} came back; call db.keyword_provenance.{method}"
         )
         assert callable(getattr(KeywordProvenanceRepository, method))
+    assert not hasattr(Database, "untag_photo")
     accessor = Database.__dict__["keyword_provenance"]
     assert isinstance(accessor, property)
     assert "_keyword_provenance_repository" in _self_attrs(accessor.fget)
 
 
-@pytest.mark.parametrize("name", _DELEGATING_PROVENANCE_METHODS)
-def test_provenance_method_delegates_to_repository(name):
-    attrs = _self_attrs(getattr(Database, name))
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to "
-        "KeywordProvenanceRepository"
-    )
-    assert "_keyword_provenance_repository" in attrs, (
-        f"Database.{name} no longer delegates to KeywordProvenanceRepository"
-    )
+def test_keyword_provenance_repository_takes_no_facade(db):
+    import repositories.keyword_provenance as module
 
-
-def test_keyword_provenance_repository_routes_facade_calls_through_database(db):
-    from repositories.keyword_provenance import FACADE_METHODS
-
+    assert not hasattr(module, "FACADE_METHODS")
+    params = inspect.signature(module.KeywordProvenanceRepository).parameters
+    assert list(params) == ["conn", "resolve_workspace_id"]
     repo = db._keyword_provenance_repository()
-    for name in FACADE_METHODS:
-        assert getattr(repo, name) == getattr(db, name), name
+    assert repo.conn is db.conn
     assert not hasattr(repo, "db")
-
-
-def test_keyword_provenance_facade_names_never_shadow_repository_methods():
-    module, tree = _module_tree()
-    assert not set(_repository_methods(tree)) & set(module.FACADE_METHODS)
-
-
-def _facade_exposed_repository_methods(database_class):
-    """Repository attributes a ``Database`` method reaches on a built repository.
-
-    ``database_class`` is the ``ast.ClassDef`` of ``Database``. A method is
-    façade-exposed when some ``Database`` method calls it on
-    ``self._keyword_provenance_repository()`` or the ``self.keyword_provenance``
-    accessor -- directly, or through a local name bound to either.
-    """
-
-    def builds_repository(node):
-        return (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_keyword_provenance_repository"
-        ) or (
-            isinstance(node, ast.Attribute)
-            and node.attr == "keyword_provenance"
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "self"
-        )
-
-    exposed = set()
-    for fn in database_class.body:
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        bound = set()
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Assign) and builds_repository(node.value):
-                bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
-            elif (isinstance(node, (ast.AnnAssign, ast.NamedExpr))
-                  and builds_repository(node.value)
-                  and isinstance(node.target, ast.Name)):
-                bound.add(node.target.id)
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Attribute) and (
-                builds_repository(node.value)
-                or (isinstance(node.value, ast.Name) and node.value.id in bound)
-            ):
-                exposed.add(node.attr)
-    return exposed
-
-
-def _self_references_to(repository_class, names):
-    """``(method, attr)`` for every ``self.<attr>`` in ``names``, in any method.
-
-    Every method body is walked, private helpers and nested closures
-    included, so a helper cannot launder a call the writer itself may not make.
-    """
-    return sorted(
-        (fn.name, node.attr)
-        for fn in repository_class.body
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
-        for node in ast.walk(fn)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name) and node.value.id == "self"
-        and node.attr in names
-    )
-
-
-def _database_class_tree():
-    import db as db_module
-
-    tree = ast.parse(inspect.getsource(db_module))
-    return next(
-        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Database"
-    )
-
-
-def test_moved_writers_reach_each_other_only_through_the_facade():
-    """Calls between the writers go through their ``Database`` names, so a
-    monkeypatch of ``Database._merge_keyword_into`` / ``tag_photo`` still
-    intercepts the recursion, the mid-flight merges and the accept's tag.
-
-    The rule covers the repository methods ``Database`` delegates to (derived
-    from ``db.py``, not listed here): no repository method may reach one of
-    them as ``self.<name>``. Private helpers the façade does not expose are
-    ordinary decomposition and may be called through ``self``; they are held
-    to the same rule, so they can't be a back door around it.
-    (``getattr(self, ...)`` would need a bare ``self``, which
-    ``test_keyword_provenance_repository_never_hands_itself_out_as_the_database``
-    forbids.)
-    """
-    _module, tree = _module_tree()
-    methods = _repository_methods(tree)
-    repository_class = next(
-        n for n in tree.body
-        if isinstance(n, ast.ClassDef) and n.name == "KeywordProvenanceRepository"
-    )
-    database_class = _database_class_tree()
-    # The repository methods behind the forwarders still bound by name
-    # (``FACADE_METHODS``). Other ``Database`` methods that compose the
-    # repository (``upsert_place_chain``) call it like any other caller.
-    forwarders = ast.ClassDef(
-        name="Database", bases=[], keywords=[], decorator_list=[],
-        body=[n for n in database_class.body
-              if isinstance(n, ast.FunctionDef) and n.name in _DELEGATING_PROVENANCE_METHODS],
-    )
-    exposed = _facade_exposed_repository_methods(forwarders)
-
-    # The derivation finds every wrapper's target, and nothing that isn't a
-    # repository method.
-    wrappers = {n.name: n for n in database_class.body
-                if isinstance(n, ast.FunctionDef)}
-    for name in _DELEGATING_PROVENANCE_METHODS:
-        wrapper = ast.ClassDef(name="Database", bases=[], keywords=[],
-                               body=[wrappers[name]], decorator_list=[])
-        assert _facade_exposed_repository_methods(wrapper), name
-    assert exposed <= set(methods), exposed - set(methods)
-
-    assert not _self_references_to(repository_class, exposed)
-    expected = {
-        "merge_keyword_into": "_merge_keyword_into",
-        "_claim_location_component_for_place": "_merge_keyword_into",
-        "_accept_target_row": "tag_photo",
-    }
-    for name, facade_name in expected.items():
-        assert (name, facade_name) in _self_references_to(
-            repository_class, {facade_name}), (name, facade_name)
-
-
-_SYNTHETIC_DATABASE = """
-class Database:
-    def tag_photo(self, photo_id, keyword_id, source="manual"):
-        self._keyword_provenance_repository().tag(photo_id, keyword_id, source=source)
-
-    def accept_prediction(self, prediction_id):
-        repo = self._keyword_provenance_repository()
-        return repo.accept_prediction(prediction_id)
-
-    def _keyword_provenance_repository(self):
-        return KeywordProvenanceRepository(self.conn)
-"""
-
-_SYNTHETIC_REPOSITORY = """
-class KeywordProvenanceRepository:
-    def tag(self, photo_id, keyword_id, *, source):
-        self.conn.execute("INSERT ...")
-
-    def accept_prediction(self, prediction_id):
-        photo_id = self._resolve_photo(prediction_id)
-        self.tag_photo(photo_id, 1, source="accept")
-
-    def _resolve_photo(self, prediction_id):
-        return self.conn.execute("SELECT ...", (prediction_id,)).fetchone()[0]
-"""
-
-
-def _synthetic_violations(repository_source):
-    database_class = ast.parse(_SYNTHETIC_DATABASE).body[0]
-    repository_class = ast.parse(textwrap.dedent(repository_source)).body[0]
-    return _self_references_to(
-        repository_class, _facade_exposed_repository_methods(database_class))
-
-
-def test_facade_call_check_derives_exposed_methods_from_the_wrappers():
-    database_class = ast.parse(_SYNTHETIC_DATABASE).body[0]
-    assert _facade_exposed_repository_methods(database_class) == {
-        "tag", "accept_prediction",
-    }
-
-
-def test_facade_call_check_allows_private_helpers_and_facade_routes():
-    assert _synthetic_violations(_SYNTHETIC_REPOSITORY) == []
-
-
-def test_facade_call_check_rejects_a_direct_call_to_an_exposed_method():
-    source = _SYNTHETIC_REPOSITORY.replace(
-        'self.tag_photo(photo_id, 1, source="accept")',
-        'self.tag(photo_id, 1, source="accept")',
-    )
-    assert _synthetic_violations(source) == [("accept_prediction", "tag")]
-
-
-def test_facade_call_check_rejects_an_exposed_call_hidden_in_a_private_helper():
-    source = _SYNTHETIC_REPOSITORY.replace(
-        'return self.conn.execute("SELECT ...", (prediction_id,)).fetchone()[0]',
-        "return self.accept_prediction(prediction_id)",
-    )
-    assert _synthetic_violations(source) == [("_resolve_photo", "accept_prediction")]
+    # Built without a resolver, the catalog-wide writers still work and the
+    # scoped reads raise as they do with no active workspace.
+    bare = module.KeywordProvenanceRepository(db.conn)
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        bare.workspace_id  # noqa: B018
 
 
 def test_keyword_provenance_repository_does_not_import_db():
-    """The fold stays defined once in ``db`` and is injected, not re-imported."""
+    """The fold is defined once in ``repositories.keyword_source``; ``db`` re-exports it."""
     _module, tree = _module_tree()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1139,19 +944,20 @@ def test_keyword_provenance_repository_does_not_import_db():
             assert node.module != "db"
 
 
-def test_keyword_provenance_repository_injects_the_db_fold(db):
+def test_keyword_provenance_repository_uses_the_one_fold():
     import db as db_module
+    import repositories.keyword_provenance as module
+    import repositories.keyword_source as keyword_source
 
-    repo = db._keyword_provenance_repository()
-    assert repo.keyword_source_max_sql is db_module.keyword_source_max_sql
-    assert repo.KEYWORD_SOURCE_CONFLICT_SQL is db_module.KEYWORD_SOURCE_CONFLICT_SQL
-    assert repo.KEYWORD_SOURCE_MANUAL == db_module.KEYWORD_SOURCE_MANUAL
-    assert repo._chunks is db_module._chunks
+    for name in ("keyword_source_max_sql", "keyword_source_max",
+                 "KEYWORD_SOURCE_CONFLICT_SQL"):
+        assert getattr(module, name) is getattr(keyword_source, name), name
+        assert getattr(db_module, name) is getattr(keyword_source, name), name
 
 
-def test_keyword_provenance_repository_never_hands_itself_out_as_the_database():
-    """Moved bodies that passed ``self`` (the Database) to a helper must pass
-    ``self.db`` now; a bare ``self`` argument would hand over the repository."""
+def test_keyword_provenance_repository_never_hands_itself_out():
+    """A bare ``self`` argument would hand the repository to a helper that
+    expects something else; the flows pass the repositories they build."""
     _module, tree = _module_tree()
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     bare = [
@@ -1161,29 +967,29 @@ def test_keyword_provenance_repository_never_hands_itself_out_as_the_database():
                  and parents[node].value is node)
         and not isinstance(parents.get(node), ast.arguments)
     ]
-    # The only one is ``__init__`` storing the façade (``setattr(self, ...)``).
-    assert len(bare) == 1
+    assert bare == []
 
 
-def test_keyword_provenance_facade_signatures_unchanged():
+def test_keyword_provenance_signatures():
     # Pin the calling contract independently of annotations, which are
     # checked by the annotation ratchet and the static API fixtures.
-    sig = {n: calling_signature(getattr(Database, n)) for n in _DELEGATING_PROVENANCE_METHODS}
-    assert sig == {
-        "tag_photo": (
-            "(self, photo_id, keyword_id, source='manual', "
-            "*, provenance=None, species_provenance=None, _record_provenance=False)"
-        ),
-        "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",
-    }
-    from services import review_decisions
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+    from services import keyword_tagging, review_decisions
 
+    assert calling_signature(keyword_tagging.tag_photo) == (
+        "(db, photo_id, keyword_id, source='manual', "
+        "*, provenance=None, species_provenance=None, _record_provenance=False)"
+    )
+    assert calling_signature(keyword_tagging.untag_photo) == (
+        "(db, photo_id, keyword_id, *, _record_history=False)"
+    )
+    assert str(inspect.signature(KeywordProvenanceRepository.merge_keyword_into)) == (
+        "(self, src_id, dst_id, *, pending_source_only=False)"
+    )
     assert calling_signature(review_decisions.accept_prediction) == (
         "(db, prediction_id, replace_species=False, photo_ids=None, "
         "prediction_ids=None, species_taxonomy=Ellipsis)"
     )
-    from repositories.keyword_provenance import KeywordProvenanceRepository
-
     assert str(inspect.signature(KeywordProvenanceRepository.link_keyword_to_place)) == (
         "(self, keyword_id, details)"
     )
@@ -1191,9 +997,8 @@ def test_keyword_provenance_facade_signatures_unchanged():
         "(self, name, parent_id, place_id=None, latitude=None, longitude=None, "
         "reuse_location_component=False)"
     )
-    # The repository's ``tag`` has no default to fall back on: the façade's
-    # fail-safe ``'manual'`` is the only one.
-
+    # The repository's ``tag`` has no default to fall back on: the entry
+    # point's fail-safe ``'manual'`` is the only one.
     params = inspect.signature(KeywordProvenanceRepository.tag).parameters
     assert params["source"].default is inspect.Parameter.empty
     assert params["source"].kind is inspect.Parameter.KEYWORD_ONLY
@@ -1209,13 +1014,13 @@ def _reaches_provenance_repository(node):
     }
 
 
-def test_only_the_database_facade_builds_the_provenance_repository():
-    """Callers go through ``Database.tag_photo`` and friends, never the repo.
+def test_only_the_data_layer_builds_the_provenance_repository():
+    """Outside the data layer, writes go through ``db.keyword_provenance``.
 
-    ``test_keyword_provenance_contract`` finds provenance-neutral tagging by
-    scanning for ``.tag_photo(...)`` calls. A caller that built this
-    repository and called ``.tag(...)`` itself would skip that scan and the
-    façade's fail-safe ``source`` default, so only ``db.py`` may build it.
+    ``test_keyword_provenance_contract`` scans every write for its declared
+    provenance, through the accessor, a built repository or a local bound to
+    either. Keeping construction inside ``db.py`` and ``repositories/``
+    keeps those writes where the repositories' own tests pin them.
     """
     from pathlib import Path
 
@@ -1223,9 +1028,7 @@ def test_only_the_database_facade_builds_the_provenance_repository():
     offenders = []
     for path in sorted(vireo_dir.rglob("*.py")):
         rel = path.relative_to(vireo_dir)
-        if rel.parts[0] in {"tests", "testing"} or rel.as_posix() in {
-            "db.py", "repositories/keyword_provenance.py",
-        }:
+        if rel.parts[0] in {"tests", "testing", "repositories"} or rel.as_posix() == "db.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         offenders.extend(

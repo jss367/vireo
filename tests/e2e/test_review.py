@@ -3,6 +3,7 @@ from urllib.parse import quote, urlsplit
 
 import pytest
 from playwright.sync_api import expect
+from services import keyword_tagging
 
 
 def test_review_page_loads_with_predictions(live_server, page):
@@ -235,7 +236,7 @@ def test_second_subject_card_is_not_shown_as_disagreeing(live_server, page):
     db.predictions.add(egret_det, "Little Egret", 0.9, "bioclip",
                       category="disagreement", labels_fingerprint="fp1")
     db.commit()
-    db.tag_photo(photo_id, db.keywords.add("Spotted Redshank", is_species=True))
+    keyword_tagging.tag_photo(db, photo_id, db.keywords.add("Spotted Redshank", is_species=True))
     db.commit()
     egret = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (egret_det,),

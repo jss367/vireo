@@ -14,6 +14,7 @@ from keyword_identity import (
 )
 from keyword_normalization import keyword_match_key
 from metadata import embedded_keywords
+from services import keyword_tagging
 from xmp import read_keyword_snapshot
 
 if TYPE_CHECKING:
@@ -242,7 +243,7 @@ def _import_keyword_lists(
         # it out itself — so this is one of the few writers that declines to
         # claim manual authorship.
         assert parent_id is not None  # A valid hierarchy has at least one segment.
-        db.tag_photo(photo_id, parent_id, source=KEYWORD_SOURCE_UNKNOWN)
+        keyword_tagging.tag_photo(db, photo_id, parent_id, source=KEYWORD_SOURCE_UNKNOWN)
         hierarchy_leaf_keys.add(keyword_match_key(parts[-1]))
 
     # Also add any flat keywords not already covered by hierarchy. Compare
@@ -269,7 +270,7 @@ def _import_keyword_lists(
             continue
         kid = db.keywords.add(kw, _resolve_alias=True)
         # Same ambiguity as the hierarchical branch above.
-        db.tag_photo(photo_id, kid, source=KEYWORD_SOURCE_UNKNOWN)
+        keyword_tagging.tag_photo(db, photo_id, kid, source=KEYWORD_SOURCE_UNKNOWN)
         existing_keys.add(key)
 
 

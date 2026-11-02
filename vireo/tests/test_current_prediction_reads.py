@@ -1,7 +1,7 @@
 """Regression coverage for the remaining current-prediction ranking surfaces."""
 
 import pytest
-from services import photo_ingest, review_decisions, workspace_folders
+from services import keyword_tagging, photo_ingest, review_decisions, workspace_folders
 
 
 @pytest.fixture
@@ -104,7 +104,7 @@ def test_highlight_eligibility_tracks_ranking_but_keeps_saved_choices_and_keywor
     assert db.species_curation.get_highlights() == {"Current": {pid: 1}}
     # A user's accepted keyword remains eligible even when all detector evidence is hidden.
     keyword = db.keywords.add("Current", is_species=True)
-    db.tag_photo(pid, keyword, source="manual")
+    keyword_tagging.tag_photo(db, pid, keyword, source="manual")
     db.commit()
     assert db.species_curation.get_highlights(eligible_only=True) == {"Current": {pid: 1}}
 

@@ -4,7 +4,7 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 
 def _create_test_catalog(path, root_path, photos_with_keywords):
@@ -550,7 +550,7 @@ def test_execute_import_rolls_back_a_photos_partial_tags_on_failure(tmp_path, mo
     fid = workspace_folders.add_folder(db, root, name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
                                  file_size=100, file_mtime=1.0)
-    real_tag = db.tag_photo
+    real_tag = keyword_tagging.tag_photo
     calls = []
 
     def tag_then_fail(*args, **kwargs):
@@ -559,7 +559,7 @@ def test_execute_import_rolls_back_a_photos_partial_tags_on_failure(tmp_path, mo
             raise sqlite3.OperationalError("disk I/O error")
         return real_tag(*args, **kwargs)
 
-    monkeypatch.setattr(db, "tag_photo", tag_then_fail)
+    monkeypatch.setattr(keyword_tagging, "tag_photo", tag_then_fail)
     result = execute_import([cat_path], db, write_xmp=False)
 
     assert len(calls) == 2

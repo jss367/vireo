@@ -12,6 +12,7 @@ import sqlite3
 
 import pytest
 import unit_of_work
+from services import keyword_tagging
 from unit_of_work import TransactionOwnershipError
 
 
@@ -443,7 +444,7 @@ def test_a_failed_joined_set_flag_preserves_history_and_undo_for_caller_species_
     fid = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     photo_id = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
     kid = db.keywords.add("Robin", is_species=True)
-    db.tag_photo(photo_id, kid, source="accept", provenance={
+    keyword_tagging.tag_photo(db, photo_id, kid, source="accept", provenance={
         "method": "direct_visual", "reviewer": "Original reviewer",
         "reason": "Clear plumage markings",
     })
@@ -452,7 +453,7 @@ def test_a_failed_joined_set_flag_preserves_history_and_undo_for_caller_species_
     db.commit()
 
     db.begin_immediate()
-    db.untag_photo(photo_id, kid, _record_history=True)
+    keyword_tagging.untag_photo(db, photo_id, kid, _record_history=True)
     assert db.species_provenance.state(photo_id, kid) is None
     assert (photo_id, kid) in db._species_provenance_before
     with pytest.raises(FlagConflict):

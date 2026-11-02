@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 from PIL import Image
 from scanner import ScanOptions
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from services.edit_history import undo_last_edit
 
 
@@ -142,7 +142,7 @@ def test_deleted_keyword_does_not_block_undo(app_and_db):
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     kid = db.keywords.add("Removed then deleted")
-    db.tag_photo(pid, kid)
+    keyword_tagging.tag_photo(db, pid, kid)
     db.commit()
     client = app.test_client()
     assert client.delete(f"/api/photos/{pid}/keywords/{kid}").status_code == 200
@@ -502,20 +502,21 @@ def test_scans_reuse_catalog_folder_for_path_aliases(db, tmp_path, alias_kind):
 
 
 def test_batch_keyword_rolls_back_failed_write(app_and_db, monkeypatch):
-    from db import Database
 
     app, db = app_and_db
     ids = [p["id"] for p in db.photos.list_page()]
     kid = db.keywords.add("Atomic batch")
     db.commit()
-    original = Database.tag_photo
+    from services import keyword_tagging
 
-    def fail_second(self, photo_id, keyword_id, *args, **kwargs):
+    original = keyword_tagging.tag_photo
+
+    def fail_second(database, photo_id, keyword_id, *args, **kwargs):
         if photo_id == ids[1]:
             raise sqlite3.OperationalError("simulated write failure")
-        return original(self, photo_id, keyword_id, *args, **kwargs)
+        return original(database, photo_id, keyword_id, *args, **kwargs)
 
-    monkeypatch.setattr(Database, "tag_photo", fail_second)
+    monkeypatch.setattr(keyword_tagging, "tag_photo", fail_second)
     response = app.test_client().post("/api/batch/keyword", json={"photo_ids": ids, "keyword_id": kid})
     assert response.status_code == 500
     assert db.conn.execute("SELECT COUNT(*) FROM photo_keywords WHERE keyword_id=?", (kid,)).fetchone()[0] == 0

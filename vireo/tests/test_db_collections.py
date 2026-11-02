@@ -22,7 +22,7 @@ from repositories.collections import (
     GPS_WITHOUT_LOCATION_KEYWORD_RULES,
     NEEDS_IDENTIFICATION_RULES,
 )
-from services import browse_queries, photo_ingest, review_decisions, workspace_folders
+from services import browse_queries, keyword_tagging, photo_ingest, review_decisions, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -752,7 +752,7 @@ def test_keyword_identity_rule(db, folder):
     a = _photo(db, folder, "a.jpg")
     _photo(db, folder, "b.jpg")
     kid = db.keywords.add("Heron")
-    db.tag_photo(a, kid)
+    keyword_tagging.tag_photo(db, a, kid)
     db.commit()
     identity = db.conn.execute(
         f"SELECT {identity_sql('k')} FROM keywords k WHERE k.id = ?", (kid,)
@@ -940,9 +940,9 @@ def test_keyword_filter_values(db, folder):
     b = _photo(db, folder, "b.jpg")
     kid = db.keywords.add("Sunset")
     other = db.keywords.add("Sunrise")
-    db.tag_photo(a, kid)
-    db.tag_photo(b, kid)
-    db.tag_photo(b, other)
+    keyword_tagging.tag_photo(db, a, kid)
+    keyword_tagging.tag_photo(db, b, kid)
+    keyword_tagging.tag_photo(db, b, other)
     db.commit()
     assert db.collections.get_filter_field_values("keyword", q="sun") == [
         {"value": "Sunset", "count": 2},
@@ -1257,7 +1257,7 @@ def test_top_predicted_species_matches_summary(db, folder):
             )
     db.conn.commit()
     # Conflicting saved metadata must not change a prediction drill-down.
-    db.tag_photo(hawk, db.keywords.add("Robin", is_species=True))
+    keyword_tagging.tag_photo(db, hawk, db.keywords.add("Robin", is_species=True))
     db.commit()
     def rule(species):
         return [{"field": "top_predicted_species", "op": "is", "value": species}]

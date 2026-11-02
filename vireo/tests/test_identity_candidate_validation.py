@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import pytest
+from services import keyword_tagging
 from services.identity_alternatives import save_alternatives
 from test_identity_alternatives import current_group, save
 from test_sync import _setup_photo_with_xmp
@@ -36,7 +37,7 @@ def test_equivalent_species_candidates_rejected_before_any_domain_write(app_and_
     client = app.test_client()
     names, confirmed = _aliases(db, kind)
     photo, sidecar = _setup_photo_with_xmp(tmp_path, db, keywords={db.keywords.name_of(confirmed), 'Unrelated note'})
-    db.tag_photo(photo, confirmed, source='accept')
+    keyword_tagging.tag_photo(db, photo, confirmed, source='accept')
     db.commit()
     db.photo_review.set_flag(photo, 'rejected')
     db.commit()

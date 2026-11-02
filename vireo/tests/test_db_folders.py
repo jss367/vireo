@@ -28,7 +28,14 @@ from db import Database, MissingPhotosCancelled
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.stats import StatsRepository
-from services import catalog_deletion, folder_merges, missing_originals, photo_ingest, workspace_folders
+from services import (
+    catalog_deletion,
+    folder_merges,
+    keyword_tagging,
+    missing_originals,
+    photo_ingest,
+    workspace_folders,
+)
 
 
 class _RecordingCache:
@@ -841,7 +848,7 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
     moved = _photo(db, source, "moved.jpg")
     phantom = _photo(db, source, "phantom.jpg")
     kw = db.keywords.add("K")
-    db.tag_photo(dup, kw)
+    keyword_tagging.tag_photo(db, dup, kw)
     db.commit()
     witness = _photo(db, target, "w.jpg")
     _set_provenance(db, witness, "/src")
@@ -1079,7 +1086,7 @@ def test_folder_merge_respects_embedded_keyword_removals(
     if removed_on_survivor:
         _import_embedded_keywords_for_photo(db, survivor, metadata)
         for keyword in db.photo_keywords.get_for_photo(survivor):
-            db.untag_photo(survivor, keyword["id"])
+            keyword_tagging.untag_photo(db, survivor, keyword["id"])
             db.commit()
 
     folder_merges.merge_into_existing(db, source, target, str(target_dir))

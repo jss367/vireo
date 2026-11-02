@@ -82,6 +82,11 @@ def setup():
         "db.py",
         ns,
         methods={"Database": {"merge_taxonomy_root_twins", "transaction", "in_transaction", "begin_immediate"}},
+        functions=set(),
+    )
+    load(
+        "repositories/keyword_source.py",
+        ns,
         functions={"keyword_source_rank", "keyword_source_max", "keyword_source_rank_sql", "keyword_source_max_sql"},
     )
     load(
@@ -165,7 +170,7 @@ def setup():
 
     prov = ns["KeywordProvenanceRepository"]()
     prov.conn = conn
-    prov._chunks = lambda xs: [list(xs)[i : i + 100] for i in range(0, len(xs), 100)]
+    ns["chunks"] = lambda xs: [list(xs)[i : i + 100] for i in range(0, len(xs), 100)]
     ns["edit_prediction_ids"] = lambda *_a: []
     ns["KeywordMergeRepository"] = lambda conn: types.SimpleNamespace(
         inat_id_of_taxon=lambda taxon_id: conn.execute(
@@ -176,12 +181,9 @@ def setup():
         rename_highlights=forbidden, rename_photo_preferences=forbidden,
     )
     prov._resolve_workspace_id = forbidden
-    prov.keyword_source_max_sql = ns["keyword_source_max_sql"]
-    prov.keyword_source_max = ns["keyword_source_max"]
-    prov._merge_keyword_into = prov.merge_keyword_into
     ns["KeywordTreeRepository"].__init__ = lambda self, conn, resolve_workspace_id: None
     ns["KeywordTreeRepository"].reparent_disambiguated = forbidden
-    db._merge_keyword_into = prov.merge_keyword_into
+    db.keyword_provenance = prov
 
     def kw(name="Invented bird", parent=None, taxon=1, source=None, kind="taxonomy"):
         return conn.execute(
@@ -330,7 +332,7 @@ class Checks(unittest.TestCase):
         c.execute("INSERT INTO photo_keywords(photo_id,keyword_id,source) VALUES(1,?,'manual')", (a,))
         c.commit()
         before = list(c.iterdump())
-        real = d._merge_keyword_into
+        real = d.keyword_provenance.merge_keyword_into
         calls = []
 
         def merge(src, dst, **kwargs):
@@ -339,7 +341,7 @@ class Checks(unittest.TestCase):
                 raise RuntimeError("invented merge failure")
             return real(src, dst, **kwargs)
 
-        d._merge_keyword_into = merge
+        d.keyword_provenance = types.SimpleNamespace(merge_keyword_into=merge)
         # The startup repair owns the unit; a failure part-way rolls it back.
         with self.assertRaisesRegex(RuntimeError, "invented merge failure"), d.transaction(immediate=True):
             d.merge_taxonomy_root_twins()

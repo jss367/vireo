@@ -4,7 +4,7 @@ import pytest
 from db import Database
 from repositories.identity_alternatives import IdentityMergeConflict
 from scanner.companions import _pair_raw_jpeg_companions
-from services import folder_merges, photo_ingest, workspace_folders
+from services import folder_merges, keyword_tagging, photo_ingest, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
@@ -49,7 +49,7 @@ def test_folder_merge_keeps_resolved_tags_provenance_pending_and_history(catalog
     db.commit()
     db.photo_visibility.grant(second, [losing])
     unrelated = db.keywords.add('American Robin', is_species=True)
-    db.tag_photo(survivor, unrelated, source='manual')
+    keyword_tagging.tag_photo(db, survivor, unrelated, source='manual')
     db.commit()
     db.photo_review.set_flag(survivor, 'rejected')
     db.commit()
@@ -107,7 +107,7 @@ def test_companion_pairing_keeps_identity_tags_and_normal_history(catalog, tmp_p
     folder = workspace_folders.add_folder(db, str(tmp_path))
     primary, companion = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')
     unrelated = db.keywords.add('American Robin', is_species=True)
-    db.tag_photo(primary, unrelated)
+    keyword_tagging.tag_photo(db, primary, unrelated)
     db.commit()
     with db.transaction():
         edit = save_alternatives(db, [companion], CANDIDATES, 'Uncertain call', 'Audio')
@@ -155,7 +155,7 @@ def test_collapse_does_not_reintroduce_candidate_outvoted_by_newer_visible_revie
         folder = workspace_folders.add_folder(db, str(tmp_path))
         survivor, losing = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')
     keyword = db.keywords.add(CANDIDATES[0], is_species=True)
-    db.tag_photo(losing, keyword)
+    keyword_tagging.tag_photo(db, losing, keyword)
     db.commit()
     db.pending_changes.queue(losing, 'keyword_add', CANDIDATES[0])
     db.commit()
@@ -190,7 +190,7 @@ def test_folder_collapse_repairs_alias_intents_in_both_visible_workspaces(catalo
     scientific_name = db.keywords.name_of(scientific)
     with db.transaction():
         save_alternatives(db, [losing], CANDIDATES, 'Uncertain', 'Audio')
-        db.tag_photo(losing, scientific, source='manual')
+        keyword_tagging.tag_photo(db, losing, scientific, source='manual')
         resolve_alternatives(db, [losing], CANDIDATES[0])
     db.pending_changes.queue(survivor, 'keyword_add', CANDIDATES[0], workspace_id=first)
     db.commit()

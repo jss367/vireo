@@ -19,7 +19,7 @@ from datetime import datetime
 import pytest
 from db import Database
 from repositories.audit import AuditRepository
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 
 def _other_conn(db):
@@ -335,7 +335,7 @@ def _count(db, table, photo_id):
 def test_remove_orphan_rows_drops_dependents_and_rows_without_committing(db, library):
     gone, kept = library["ids"]["a_ok"], library["ids"]["b_ok"]
     for pid in (gone, kept):
-        db.tag_photo(pid, db.keywords.add(f"kw{pid}"))
+        keyword_tagging.tag_photo(db, pid, db.keywords.add(f"kw{pid}"))
         db.commit()
         db.pending_changes.queue(pid, "keyword_add", f"kw{pid}")
         db.commit()

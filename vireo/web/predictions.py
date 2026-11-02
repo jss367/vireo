@@ -28,7 +28,7 @@ from photo_payload import (
     attach_species_representatives,
     render_key_for_recipe,
 )
-from services import prediction_decisions, review_decisions
+from services import keyword_tagging, prediction_decisions, review_decisions
 from services.edit_history import prediction_status_item
 from services.pending_changes import queue_keyword_add
 from services.prediction_ambiguity import ambiguous_prediction_ids, effective_category_resolver, prediction_is_ambiguous
@@ -1116,7 +1116,7 @@ def create_predictions_blueprint(
         for photo_id in all_photo_ids:
             if photo_id in already_tagged:
                 continue
-            db.tag_photo(photo_id, keyword_id, source="manual")
+            keyword_tagging.tag_photo(db, photo_id, keyword_id, source="manual")
             items.append({
                 "photo_id": photo_id,
                 "old_value": json.dumps({"keyword_only": True}),
@@ -1863,7 +1863,7 @@ def create_predictions_blueprint(
                     db.photo_review.set_flag(pid, "flagged")
                     if pid in already_has_species:
                         continue
-                    db.tag_photo(pid, kid, source="manual")
+                    keyword_tagging.tag_photo(db, pid, kid, source="manual")
                     db.pending_changes.queue(
                         pid, "keyword_add", local_species,
                     )

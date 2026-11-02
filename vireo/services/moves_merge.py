@@ -10,11 +10,11 @@ workspace's sync-only grants for the sync engine, and
 ``query_move_rule_matches`` reads the photos a move rule selects under the
 workspace-effective detector floor.
 
-``Database._move_location_state_for_merge`` and
-``_carry_keyword_associations_for_merge`` stay on ``Database`` with the
-keyword workflows: the moves repository factory binds the second by name, and
-both re-tag through ``Database.tag_photo``, the keyword-provenance contract's
-writer.
+``Database._move_location_state_for_merge`` stays on ``Database`` and the
+keyword-association carry is ``MovesMergeRepository
+.carry_keyword_associations_for_merge``; both re-tag through the provenance
+writer (``KeywordProvenanceRepository.tag``), whose every call the
+keyword-provenance contract reads.
 """
 
 from __future__ import annotations

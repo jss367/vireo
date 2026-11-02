@@ -7,7 +7,7 @@ in ``db.py`` or in ``repositories/locations.py``. They pin commit
 boundaries, error types and messages, return shapes, the order in which the
 active workspace is resolved, chunking, and the façade calls
 (``tag_photo``, ``queue_change``,
-``build_query_from_rules``, ``_merge_keyword_into``) that must stay
+``build_query_from_rules``) that must stay
 patchable on ``Database``.
 """
 
@@ -20,7 +20,7 @@ import textwrap
 
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, KEYWORD_SOURCE_MANUAL, Database
-from services import gps_locations, photo_ingest, photo_locations, workspace_folders
+from services import gps_locations, keyword_tagging, photo_ingest, photo_locations, workspace_folders
 
 # -- helpers ------------------------------------------------------------------
 
@@ -611,7 +611,10 @@ def test_set_photo_location_tags_through_facade_in_one_transaction(
         assert db.conn.in_transaction
         raise RuntimeError("tag failed")
 
-    monkeypatch.setattr(db, "tag_photo", boom)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "tag",
+                        lambda _repo, *a, **k: boom(*a, **k))
     with pytest.raises(RuntimeError, match="tag failed"), db.transaction():
         db.set_photo_location(pid, new)
     assert calls == [(pid, new, KEYWORD_SOURCE_MANUAL)]
@@ -955,14 +958,16 @@ def test_repair_merges_coordless_duplicate_roots_through_facade(
     pid = _photo(db, fid, "a.jpg")
     _link(db, pid, second)
 
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
     merges = []
-    real_merge = db._merge_keyword_into
+    real_merge = KeywordProvenanceRepository.merge_keyword_into
 
-    def recorder(src, dst, *args, **kwargs):
+    def recorder(repo, src, dst, *args, **kwargs):
         merges.append((src, dst))
-        return real_merge(src, dst, *args, **kwargs)
+        return real_merge(repo, src, dst, *args, **kwargs)
 
-    monkeypatch.setattr(db, "_merge_keyword_into", recorder)
+    monkeypatch.setattr(KeywordProvenanceRepository, "merge_keyword_into", recorder)
     with caplog.at_level(logging.INFO, logger="db"), db.transaction():
         assert db.repair_misclassified_location_ancestors() == 0
     assert merges == [(second, first), (third, first)]
@@ -980,9 +985,9 @@ def test_repair_merges_coordless_duplicate_roots_through_facade(
 def test_repair_keeps_place_bearing_root_and_single_coordless_anchor(db):
     placed = _kw(db, "Turkey", place_id="pl-turkey", lat=39.0, lng=35.0)
     anchor = _kw(db, "Turkey")
-    assert db.locations.merge_duplicate_roots() == 0
+    assert db.keyword_provenance.merge_duplicate_location_roots() == 0
     extra = _kw(db, "Turkey")
-    assert db.locations.merge_duplicate_roots() == 1
+    assert db.keyword_provenance.merge_duplicate_location_roots() == 1
     ids = [
         r[0] for r in db.conn.execute(
             "SELECT id FROM keywords WHERE name = 'Turkey' ORDER BY id"
@@ -1035,11 +1040,11 @@ def test_get_first_linked_location_keywords_picks_lowest_rowid(db, fid):
     p1 = _photo(db, fid, "b.jpg")
     p2 = _photo(db, fid, "c.jpg")
     # Link order, not keyword id or coordinates, decides the "first" leaf.
-    db.tag_photo(p0, general)
-    db.tag_photo(p0, first)
-    db.tag_photo(p0, later)
-    db.tag_photo(p1, later)
-    db.tag_photo(p2, general)
+    keyword_tagging.tag_photo(db, p0, general)
+    keyword_tagging.tag_photo(db, p0, first)
+    keyword_tagging.tag_photo(db, p0, later)
+    keyword_tagging.tag_photo(db, p1, later)
+    keyword_tagging.tag_photo(db, p2, general)
     db.commit()
     leaves = db.locations.get_first_linked_leaves([p0, p1, p2])
     assert set(leaves) == {p0, p1}
@@ -1051,7 +1056,7 @@ def test_get_first_linked_location_keywords_picks_lowest_rowid(db, fid):
 def test_get_first_linked_location_keywords_chunks_by_400(db, fid):
     place = _kw(db, "Pond")
     pid = _photo(db, fid, "a.jpg")
-    db.tag_photo(pid, place)
+    keyword_tagging.tag_photo(db, pid, place)
     db.commit()
     statements = _trace(db)
     leaves = db.locations.get_first_linked_leaves(list(range(100_000, 100_400)) + [pid])
@@ -1186,12 +1191,8 @@ def test_location_backfill_queues_through_the_facade():
 @pytest.mark.parametrize(
     ("name", "facade_calls"),
     [
-        (
-            "_location_repository",
-            {"_merge_keyword_into"},
-        ),
         ("repair_misclassified_location_ancestors", {"_location_repository"}),
-        ("set_photo_location", {"tag_photo"}),
+        ("set_photo_location", {"keyword_provenance"}),
         ("upsert_place_chain", {"keyword_provenance"}),
         ("get_or_create_text_location", {"keyword_provenance"}),
     ],
@@ -1202,14 +1203,16 @@ def test_cross_domain_calls_stay_on_the_facade(name, facade_calls):
     assert facade_calls <= attrs
 
 
-def test_set_photo_location_tags_as_an_attribute_call():
-    """The provenance contract only recognises ``self.tag_photo(...)`` calls."""
+def test_set_photo_location_tags_through_the_provenance_writer():
+    """The provenance contract reads the ``source`` of every
+    ``<...>.keyword_provenance.tag(...)`` call."""
     fn, _attrs = _self_attrs("set_photo_location")
     calls = [
         node for node in ast.walk(fn)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "tag_photo"
+        and node.func.attr == "tag"
+        and ast.unparse(node.func.value) == "self.keyword_provenance"
     ]
     assert len(calls) == 1
     source = {kw.arg: kw.value for kw in calls[0].keywords}["source"]
@@ -1250,7 +1253,7 @@ def test_location_leaf_remains_coherent_during_keyword_change(db, fid, monkeypat
             writer.keyword_tree.delete(selected)
             writer.commit()
         else:
-            writer._merge_keyword_into(selected, remaining)
+            writer.keyword_provenance.merge_keyword_into(selected, remaining)
             writer.commit()
         changed.append(True)
 

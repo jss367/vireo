@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from services import keyword_tagging
+
 from .common import configure_repo, digest
 from .review import metadata, same_photo
 
@@ -68,12 +70,12 @@ def _apply_tags(db, photo, answer, marker):
         existing = {r['id'] for r in rows}
         removed = [r for r in rows if r['id'] not in desired and db.keyword_taxa.is_species(r['id'])] if answer['status'] == 'complete' else []
         for row in removed:
-            db.untag_photo(pid, row['id'])
+            keyword_tagging.untag_photo(db, pid, row['id'])
             queue_keyword_remove(db, pid, row['name'])
             db.record_edit('keyword_remove', f'Species review: removed "{row["name"]}"', str(row['id']),
                            [{'photo_id': pid, 'old_value': str(row['id']), 'new_value': ''}])
         for kid in sorted(desired):
-            db.tag_photo(pid, kid, source='manual')
+            keyword_tagging.tag_photo(db, pid, kid, source='manual')
             if kid not in existing:
                 name = db.conn.execute('SELECT name FROM keywords WHERE id=?', (kid,)).fetchone()['name']
                 queue_keyword_add(db, pid, name)

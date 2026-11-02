@@ -5,6 +5,7 @@ import time
 
 import pytest
 from playwright.sync_api import expect
+from services import keyword_tagging
 
 
 def _held_route(page, held):
@@ -125,7 +126,7 @@ def test_background_import_tag_refreshes_history_controls(live_server, page, not
     db = live_server['db']
     photo_id = live_server['data']['photos'][0]
     keyword_id = db.keywords.add('Imported trip')
-    db.tag_photo(photo_id, keyword_id)
+    keyword_tagging.tag_photo(db, photo_id, keyword_id)
     db.commit()
     description = 'Added Imported trip during import'
     db.record_edit('keyword_add', description, str(keyword_id), [

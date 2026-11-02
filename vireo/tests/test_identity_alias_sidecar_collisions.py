@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from db import Database
 from scanner.companions import _pair_raw_jpeg_companions
-from services import folder_merges, moves_merge, workspace_folders
+from services import folder_merges, keyword_tagging, moves_merge, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 from sync import sync_from_xmp, sync_to_xmp
@@ -84,15 +84,15 @@ def test_drained_alias_confirmation_survives_collision_sync_reimport_and_history
         db.commit()
         db.conn.execute('UPDATE keywords SET taxon_id=88002 WHERE id=?', (higher,))
         note = db.keywords.add('Unrelated note')
-        db.tag_photo(survivor, higher, source='manual')
-        db.tag_photo(survivor, note, source='manual')
+        keyword_tagging.tag_photo(db, survivor, higher, source='manual')
+        keyword_tagging.tag_photo(db, survivor, note, source='manual')
         db.commit()
         db.photo_review.set_flag(survivor, 'rejected')
         db.commit()
         with db.transaction():
             save_alternatives(db, [losing], [candidate, 'Uncataloged other bird'], 'Retain the call evidence', 'Audio')
             # Normal resolution retains an already attached equivalent spelling.
-            db.tag_photo(losing, alias, source='accept')
+            keyword_tagging.tag_photo(db, losing, alias, source='accept')
             edit = resolve_alternatives(db, [losing], candidate)
         alias_name = db.keywords.name_of(alias)
         state = db.identity_alternatives.for_photos([losing], include_resolved=True)[losing]

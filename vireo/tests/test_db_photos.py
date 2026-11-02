@@ -20,7 +20,14 @@ import config as cfg
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, Database
 from repositories.photo_sql import PHOTO_COLS, PHOTO_DETAIL_COLS
-from services import browse_queries, catalog_deletion, duplicate_resolution, photo_ingest, workspace_folders
+from services import (
+    browse_queries,
+    catalog_deletion,
+    duplicate_resolution,
+    keyword_tagging,
+    photo_ingest,
+    workspace_folders,
+)
 
 
 @pytest.fixture
@@ -545,8 +552,8 @@ def test_listing_filters_agree(db, lib):
     db.commit()
     db.photo_labels.set(lib["a"], "red")
     kid = db.keywords.add("Heron")
-    db.tag_photo(lib["a"], kid)
-    db.tag_photo(lib["b"], kid)
+    keyword_tagging.tag_photo(db, lib["a"], kid)
+    keyword_tagging.tag_photo(db, lib["b"], kid)
     db.commit()
     db.conn.execute(
         "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id = ?",
@@ -887,7 +894,7 @@ def test_delete_photos_removes_rows_and_dependents(db, lib, cache, monkeypatch):
     pruned = []
     monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
     kid = db.keywords.add("Heron")
-    db.tag_photo(lib["a"], kid)
+    keyword_tagging.tag_photo(db, lib["a"], kid)
     db.commit()
     db.pending_changes.queue(lib["a"], "keyword_add", "Heron")
     db.commit()
@@ -1059,7 +1066,7 @@ def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache,
     pruned = []
     monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
     kid = db.keywords.add("Heron")
-    db.tag_photo(lib["a"], kid)
+    keyword_tagging.tag_photo(db, lib["a"], kid)
     db.commit()
     db.conn.execute(
         "CREATE TEMP TRIGGER block_photo_delete BEFORE DELETE ON photos "
@@ -1078,7 +1085,7 @@ def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache,
 
 def test_delete_photos_error_inside_a_unit_rolls_back_only_its_savepoint(db, lib, cache):
     kid = db.keywords.add("Heron")
-    db.tag_photo(lib["a"], kid)
+    keyword_tagging.tag_photo(db, lib["a"], kid)
     db.commit()
     db.conn.execute(
         "CREATE TEMP TRIGGER block_photo_delete BEFORE DELETE ON photos "
@@ -1102,7 +1109,7 @@ def test_delete_photos_resolves_workspace_mid_transaction(db, lib, cache):
     """The active workspace is read after the dependent-row deletes, so a
     missing workspace fails inside the transaction and rolls it back."""
     kid = db.keywords.add("Heron")
-    db.tag_photo(lib["a"], kid)
+    keyword_tagging.tag_photo(db, lib["a"], kid)
     db.commit()
     db.set_active_workspace(None)
     statements = _trace(db)
