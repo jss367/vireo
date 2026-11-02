@@ -90,6 +90,13 @@ def _canonical_annotation_text(node: ast.expr, aliases: dict[str, str]) -> str:
         return aliases.get(node.id, node.id)
     if isinstance(node, ast.Attribute):
         prefix = _canonical_annotation_text(node.value, aliases)
+        # ``typing.Any`` (bare or via a module alias such as ``import typing
+        # as t`` -> ``t.Any``) is semantically the same as a bare ``Any``;
+        # the forbidden set only carries the bare form, so normalize the
+        # qualified access here. ``Any`` lives only in ``typing``, so no
+        # analogous rule is needed for ``collections.abc``.
+        if prefix == "typing" and node.attr == "Any":
+            return "Any"
         return f"{prefix}.{node.attr}"
     if isinstance(node, ast.Subscript):
         value_text = _canonical_annotation_text(node.value, aliases)
@@ -181,6 +188,14 @@ def test_callable_facade_matcher_catches_every_quoting_form():
             callback: collections.abc.Callable[..., Any]
 
 
+        class DottedTypingBothQualified:
+            callback: typing.Callable[..., typing.Any]
+
+
+        class DottedAbcQualifiedAny:
+            callback: collections.abc.Callable[..., typing.Any]
+
+
         class Legitimate:
             resolve_workspace_id: Callable[[], int]
         """
@@ -189,7 +204,9 @@ def test_callable_facade_matcher_catches_every_quoting_form():
     assert sorted(offenders) == [
         "fixture.Bare.callback",
         "fixture.DottedAbc.callback",
+        "fixture.DottedAbcQualifiedAny.callback",
         "fixture.DottedTyping.callback",
+        "fixture.DottedTypingBothQualified.callback",
         "fixture.Quoted.callback",
     ]
 
@@ -242,8 +259,16 @@ def test_callable_facade_matcher_resolves_import_aliases():
             callback: t.Callable[..., Any]
 
 
+        class AliasTypingModuleQualifiedAny:
+            callback: t.Callable[..., t.Any]
+
+
         class AliasAbcModule:
             callback: cabc.Callable[..., Any]
+
+
+        class AliasAbcModuleQualifiedAny:
+            callback: cabc.Callable[..., t.Any]
 
 
         class AbcSubmoduleAttribute:
@@ -267,10 +292,12 @@ def test_callable_facade_matcher_resolves_import_aliases():
         "fixture.AbcSubmoduleAliased.callback",
         "fixture.AbcSubmoduleAttribute.callback",
         "fixture.AliasAbcModule.callback",
+        "fixture.AliasAbcModuleQualifiedAny.callback",
         "fixture.AliasAny.callback",
         "fixture.AliasBoth.callback",
         "fixture.AliasCallableFromAbc.callback",
         "fixture.AliasCallableFromTyping.callback",
         "fixture.AliasTypingModule.callback",
+        "fixture.AliasTypingModuleQualifiedAny.callback",
         "fixture.QuotedWithAlias.callback",
     ]
