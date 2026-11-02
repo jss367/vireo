@@ -5,14 +5,16 @@ dump identically on both sides and the shebang and ``# coding:`` declaration
 must match (both pick the interpreter or decoder that runs the file, and the
 AST drops them). For every JavaScript file, acorn's token stream (comments
 excluded) must be identical, with regular-expression tokens compared by their
-pattern and flags rather than collapsed to ``[object Object]``. Comments that
+pattern and flags rather than collapsed to ``[object Object]``, and the
+hashbang line is compared separately because acorn drops it. Comments that
 tools read are compared too, because the AST and the token stream both drop
 them: Python ``noqa`` (``ruff: noqa`` too, and ``NOQA`` case-insensitively)
 / ``type:`` / ``pyright:`` / ``pragma`` / ``fmt:`` / ``broad:`` pragmas,
-ESLint and ``@ts-`` directives, and JSDoc type tags. Added, deleted and
-renamed source files are compared the same way, against an empty counterpart
-(or across both paths for a rename), so a diff is comment-only only when
-every A/M/D/R source file is.
+ESLint and ``@ts-`` directives (``@ts-expect-error`` included), and JSDoc
+type tags with ``@import`` module sources captured separately so changing
+the source is detected. Added, deleted and renamed source files are compared
+the same way, against an empty counterpart (or across both paths for a
+rename), so a diff is comment-only only when every A/M/D/R source file is.
 
     python scripts/check_comment_only_diff.py [--base origin/main]
 
@@ -39,8 +41,9 @@ PY_PRAGMA = re.compile(
     re.I,
 )
 PY_CODING = re.compile(r"coding[=:]\s*([-\w.]+)")
-JS_DIRECTIVE = re.compile(r"^\s*(eslint[\w-]*\b.*|@ts-\w+|global\s.*|globals\s.*)$", re.S)
+JS_DIRECTIVE = re.compile(r"^\s*(eslint[\w-]*\b.*|@ts-[\w-]+\b.*|global\s.*|globals\s.*)$", re.S)
 JSDOC_TAG = re.compile(r"@(\w+)\s*(\{[^\n]*\})?\s*(\[?[\w$.]*)")
+JSDOC_IMPORT_SRC = re.compile(r"""@import\b[^\n]*?(['"][^'"\n]+['"])""")
 
 JS_TOKENS = r"""
 const acorn = require(process.argv[1] + '/node_modules/acorn');
@@ -137,10 +140,18 @@ def _js_load_bearing(comments: list[str]) -> Counter:
         if text.startswith("*"):
             for tag in JSDOC_TAG.findall(text):
                 found["jsdoc " + " ".join(part for part in tag if part)] += 1
+            for src in JSDOC_IMPORT_SRC.findall(text):
+                found["jsdoc import source " + src] += 1
     return found
 
 
+def _js_shebang(src: str) -> str:
+    return src.splitlines()[0] if src.startswith("#!") else ""
+
+
 def js_differs(old: str, new: str) -> str | None:
+    if _js_shebang(old) != _js_shebang(new):
+        return f"shebang changed: {_js_shebang(old)!r} -> {_js_shebang(new)!r}"
     before, after = _js(old), _js(new)
     if before["tokens"] != after["tokens"]:
         return "code (token stream without comments) changed"

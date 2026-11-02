@@ -69,6 +69,7 @@ _JS_REGEX_AFTER_WORD = {
     "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
     "case", "do", "else", "yield", "await",
 }
+_JS_BINDING_KW = {"const", "let", "var"}
 _JS_IDENT = re.compile(r"[A-Za-z_$\u0080-￿][\w$\u0080-￿]*")
 _JS_NUMBER = re.compile(r"0[xXoObB][\da-fA-F_]+n?|(?:\d[\d_]*\.?[\d_]*|\.\d[\d_]*)(?:[eE][+-]?\d+)?n?")
 
@@ -78,13 +79,17 @@ def js_comment_texts(src: str) -> list[str]:
 
     A small lexer that skips strings, template literals (with nested
     substitutions) and regular-expression literals, so ``//`` inside a URL
-    string is not a comment. ``test_js_lexer_matches_acorn`` checks it
-    against acorn on every first-party script when acorn is installed.
+    string is not a comment. A contextual keyword rebound as an identifier
+    (``const of = 8; of / 2``) stays an identifier for the rest of the file
+    so its following ``/`` is division, not a regex. ``test_js_lexer_matches_acorn``
+    checks it against acorn on every first-party script when acorn is installed.
     """
     comments: list[str] = []
     i, n = 0, len(src)
     regex_ok = True
     braces: list[str] = []
+    bound: set[str] = set()
+    expect_binding = False
 
     def template(j: int) -> tuple[int, bool]:
         while j < n:
@@ -149,7 +154,16 @@ def js_comment_texts(src: str) -> list[str]:
         elif c in ")]":
             i, regex_ok = i + 1, False
         elif match := _JS_IDENT.match(src, i):
-            i, regex_ok = match.end(), match.group() in _JS_REGEX_AFTER_WORD
+            word = match.group()
+            i = match.end()
+            if expect_binding:
+                bound.add(word)
+                regex_ok = False
+            elif word in bound:
+                regex_ok = False
+            else:
+                regex_ok = word in _JS_REGEX_AFTER_WORD
+            expect_binding = word in _JS_BINDING_KW
         elif (c.isdigit() or (c == "." and src[i + 1 : i + 2].isdigit())) and (match := _JS_NUMBER.match(src, i)):
             i, regex_ok = match.end(), False
         elif src.startswith(("++", "--"), i):
@@ -244,6 +258,12 @@ def test_only_comments_and_docstrings_are_read():
     assert count_matches(python_comment_texts(py)) == {"codex": 1, "used_to": 1, "review_id": 1}
     js = "const u = 'http://x/#1234'; // Codex\nconst t = `a ${'b' /* PR #12 */} //c`;\nconst r = /\\/\\//g; /* used to */\n"
     assert js_comment_texts(js) == [" Codex", " PR #12 ", " used to "]
+
+
+def test_js_lexer_contextual_keyword_rebound_as_identifier():
+    """A contextual keyword like ``of`` rebound as an identifier is division, not regex."""
+    assert js_comment_texts("const of = 8; of / 2; // Codex\n") == [" Codex"]
+    assert js_comment_texts("for (const x of /foo/) { /* keep */ }\n") == [" keep "]
 
 
 def test_js_lexer_matches_acorn():
