@@ -493,7 +493,7 @@ def test_quick_flags_multi_select_combines(live_server, page):
 def test_missing_tag_shortcuts_combine_and_distinguish_gps(live_server, page):
     db = live_server["db"]
     photos = live_server["data"]["photos"]
-    place = db.add_keyword("City Park", kw_type="location")
+    place = db.keywords.add("City Park", kw_type="location")
     # A named place without coordinates counts as tagged; GPS alone does not.
     db.tag_photo(photos[0], place)
     db.tag_photo(photos[1], place)
@@ -576,7 +576,7 @@ def test_missing_shortcuts_preserve_multiple_existing_clauses(live_server, page,
     """Adding a shortcut must not reduce missing-both rules to missing-either."""
     db = live_server["db"]
     photos = live_server["data"]["photos"]
-    place = db.add_keyword("City Park", kw_type="location")
+    place = db.keywords.add("City Park", kw_type="location")
     db.tag_photo(photos[0], place)
     db.tag_photo(photos[1], place)
     db.commit()

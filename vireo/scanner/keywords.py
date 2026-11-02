@@ -235,7 +235,7 @@ def _import_keyword_lists(
             continue
         parent_id = None
         for index, part in enumerate(parts):
-            kid = db.add_keyword(part, parent_id=parent_id, _resolve_alias=index == len(parts) - 1)
+            kid = db.keywords.add(part, parent_id=parent_id, _resolve_alias=index == len(parts) - 1)
             parent_id = kid
         # Tag with the leaf keyword. A sidecar term is genuinely ambiguous —
         # the user may have typed it in Lightroom, or Vireo may have written
@@ -267,7 +267,7 @@ def _import_keyword_lists(
             continue
         if key in existing_keys:
             continue
-        kid = db.add_keyword(kw, _resolve_alias=True)
+        kid = db.keywords.add(kw, _resolve_alias=True)
         # Same ambiguity as the hierarchical branch above.
         db.tag_photo(photo_id, kid, source=KEYWORD_SOURCE_UNKNOWN)
         existing_keys.add(key)

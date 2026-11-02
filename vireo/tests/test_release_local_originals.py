@@ -42,7 +42,7 @@ def test_release_preserves_sources_metadata_and_generated_assets(client_with_pho
     db.commit()
     db.set_photo_edit_recipe(pid, {"rotation": 90})
     db.commit()
-    keyword = db.add_keyword("Hawk")
+    keyword = db.keywords.add("Hawk")
     db.tag_photo(pid, keyword)
     db.commit()
     before = dict(db.photos.get(pid))

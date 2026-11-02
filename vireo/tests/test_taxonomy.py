@@ -188,7 +188,7 @@ def test_mark_species_keywords_normalizes_smart_apostrophes(tmp_path):
     tax_path = _create_mock_taxonomy(str(tmp_path))
     tax = Taxonomy(tax_path)
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("Lincoln’s Sparrow")
+    kid = db.keywords.add("Lincoln’s Sparrow")
     db.commit()
 
     updated = db.keyword_taxa.mark_species(tax)
@@ -1523,7 +1523,7 @@ def test_populate_taxa_db_from_json_sets_parent_id(tmp_path):
 
     # After populating, auto-detect via add_keyword should now type
     # "Song Sparrow" as taxonomy and link taxon_id.
-    kid = db.add_keyword("Song sparrow")
+    kid = db.keywords.add("Song sparrow")
     db.commit()
     kw = db.conn.execute(
         "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -1718,7 +1718,7 @@ def test_populate_taxa_db_from_json_prunes_stale_taxa(tmp_path):
 
     # Simulate a keyword referring to the soon-to-be-removed taxon (the
     # classifier-added-keyword path sets keywords.taxon_id).
-    kid = db.add_keyword("Deleted species", is_species=True)
+    kid = db.keywords.add("Deleted species", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -2068,7 +2068,7 @@ def test_populate_taxa_db_from_json_enables_auto_detect(tmp_path):
     populate_taxa_db_from_json(db, tax_path)
 
     # Simulate XMP sync path: add_keyword without is_species.
-    kid = db.add_keyword("Mallard")
+    kid = db.keywords.add("Mallard")
     db.commit()
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)

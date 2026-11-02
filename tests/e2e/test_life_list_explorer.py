@@ -85,7 +85,7 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
 
     # A family keyword on a photo that also has a descendant species is
     # redundant and must not appear in the disclosure.
-    redundant_id = db.add_keyword("Hummingbirds", kw_type="taxonomy")
+    redundant_id = db.keywords.add("Hummingbirds", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id=?, is_species=1 WHERE id=?",
@@ -98,7 +98,7 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
         db, folder_id=folder_id, filename="broad-only.jpg", extension=".jpg",
         file_size=1, file_mtime=10.0,
     )
-    broad_id = db.add_keyword("Reference gap", kw_type="taxonomy")
+    broad_id = db.keywords.add("Reference gap", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id=?, is_species=1 WHERE id=?",
@@ -111,7 +111,7 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
         db, folder_id=folder_id, filename="hybrid.jpg", extension=".jpg",
         file_size=1, file_mtime=11.0,
     )
-    unmatched_id = db.add_keyword("Mystery hybrid", kw_type="taxonomy")
+    unmatched_id = db.keywords.add("Mystery hybrid", kw_type="taxonomy")
     db.tag_photo(unmatched_photo, unmatched_id)
     db.commit()
     db.conn.commit()

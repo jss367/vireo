@@ -655,9 +655,9 @@ def test_keyword_hierarchy(tmp_path):
     """Keywords support parent-child hierarchy."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    birds = db.add_keyword('Birds')
-    raptors = db.add_keyword('Raptors', parent_id=birds)
-    hawk = db.add_keyword('Red-tailed hawk', parent_id=raptors)
+    birds = db.keywords.add('Birds')
+    raptors = db.keywords.add('Raptors', parent_id=birds)
+    hawk = db.keywords.add('Red-tailed hawk', parent_id=raptors)
     db.commit()
 
     # Keywords need photos in the workspace to appear in the tree
@@ -683,7 +683,7 @@ def test_tag_and_untag_photo(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    kid = db.add_keyword('Cardinal')
+    kid = db.keywords.add('Cardinal')
 
     db.tag_photo(pid, kid)
     db.commit()
@@ -707,9 +707,9 @@ def test_pending_changes_queue(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
-    db.queue_change(pid, 'rating', '4')
+    db.pending_changes.queue(pid, 'rating', '4')
     db.commit()
-    db.queue_change(pid, 'keyword_add', 'Cardinal')
+    db.pending_changes.queue(pid, 'keyword_add', 'Cardinal')
     db.commit()
 
     changes = db.pending_changes.list_all()
@@ -755,7 +755,7 @@ def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
     db.conn.commit()
     # An edit queued during the copy still needs to be reported: it will
     # now be over the NAS connection.
-    db.queue_change(pid, "keyword_add", "Osprey")
+    db.pending_changes.queue(pid, "keyword_add", "Osprey")
     db.commit()
 
     # A folder-id scan of the ORIGINAL staging folder now misses the edit
@@ -788,11 +788,11 @@ def test_staged_sync_scope_by_photos_separates_sibling_workspaces(tmp_path):
         db, folder_id=fid, filename='b.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    db.queue_change(shared, "keyword_add", "Osprey")
+    db.pending_changes.queue(shared, "keyword_add", "Osprey")
     db.commit()
-    db.queue_change(shared, "keyword_add", "Kestrel", workspace_id=ws2)
+    db.pending_changes.queue(shared, "keyword_add", "Kestrel", workspace_id=ws2)
     db.commit()
-    db.queue_change(other_only, "keyword_add", "Egret", workspace_id=ws2)
+    db.pending_changes.queue(other_only, "keyword_add", "Egret", workspace_id=ws2)
     db.commit()
 
     changes, here, elsewhere, overlap = db.pending_changes.staged_scope_by_photos(
@@ -834,7 +834,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
         file_size=100, file_mtime=1.0,
     )
 
-    original_token = db.queue_change(pid, 'keyword_add', 'Osprey')
+    original_token = db.pending_changes.queue(pid, 'keyword_add', 'Osprey')
     db.commit()
     (original_row,) = db.pending_changes.list_all()
     original_id = original_row['id']
@@ -847,7 +847,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
     db.conn.execute(
         "DELETE FROM pending_changes WHERE id = ?", (original_id,),
     )
-    replacement_token = db.queue_change(pid, 'keyword_add', 'Kestrel')
+    replacement_token = db.pending_changes.queue(pid, 'keyword_add', 'Kestrel')
     db.commit()
     (replacement_row,) = db.pending_changes.list_all()
     assert replacement_row['id'] == original_id, (
@@ -896,7 +896,7 @@ def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
     )
     db.conn.commit()
     (legacy,) = db.pending_changes.list_all()
-    tokened_token = db.queue_change(pid, 'keyword_add', 'Fresh')
+    tokened_token = db.pending_changes.queue(pid, 'keyword_add', 'Fresh')
     db.commit()
     tokened_id = next(
         row['id'] for row in db.pending_changes.list_all()
@@ -946,8 +946,8 @@ def test_get_photos_keyword_search(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='cardinal.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='sparrow.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    k1 = db.add_keyword('Cardinal')
-    k2 = db.add_keyword('Sparrow')
+    k1 = db.keywords.add('Cardinal')
+    k2 = db.keywords.add('Sparrow')
     db.tag_photo(p1, k1)
     db.tag_photo(p2, k2)
     db.commit()
@@ -967,11 +967,11 @@ def test_get_photos_keyword_multi_token(tmp_path):
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p3 = photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.tag_photo(p1, db.add_keyword('Red-billed leiothrix'))
-    db.tag_photo(p2, db.add_keyword('Northern Cardinal'))
+    db.tag_photo(p1, db.keywords.add('Red-billed leiothrix'))
+    db.tag_photo(p2, db.keywords.add('Northern Cardinal'))
     # p3 holds each token in a *separate* keyword.
-    db.tag_photo(p3, db.add_keyword('Reddish'))
-    db.tag_photo(p3, db.add_keyword('Billboard'))
+    db.tag_photo(p3, db.keywords.add('Reddish'))
+    db.tag_photo(p3, db.keywords.add('Billboard'))
     db.commit()
 
     # "red bill" matches the hyphenated single keyword (p1) and the
@@ -1011,9 +1011,9 @@ def test_get_photos_keyword_whole_word_excludes_embedded_token(tmp_path):
         db, folder_id=fid, filename='eastern-phoebe.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    db.tag_photo(western, db.add_keyword('Western Gull'))
-    db.tag_photo(common, db.add_keyword('Common Tern'))
-    db.tag_photo(eastern, db.add_keyword('Eastern Phoebe'))
+    db.tag_photo(western, db.keywords.add('Western Gull'))
+    db.tag_photo(common, db.keywords.add('Common Tern'))
+    db.tag_photo(eastern, db.keywords.add('Eastern Phoebe'))
     db.commit()
 
     assert {
@@ -1063,8 +1063,8 @@ def test_add_keyword_idempotent(tmp_path):
     """add_keyword returns existing id if keyword already exists."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    id1 = db.add_keyword('Birds')
-    id2 = db.add_keyword('Birds')
+    id1 = db.keywords.add('Birds')
+    id2 = db.keywords.add('Birds')
     db.commit()
     assert id1 == id2
 
@@ -1528,8 +1528,8 @@ def test_collection_photos_keyword_rule(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='sparrow.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    k1 = db.add_keyword('Red-tailed hawk')
-    k2 = db.add_keyword('Song sparrow')
+    k1 = db.keywords.add('Red-tailed hawk')
+    k2 = db.keywords.add('Song sparrow')
     db.tag_photo(p1, k1)
     db.tag_photo(p2, k2)
     db.commit()
@@ -1669,7 +1669,7 @@ def test_collection_untagged_rule(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='tagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='untagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    kid = db.add_keyword('Bird')
+    kid = db.keywords.add('Bird')
     db.tag_photo(p1, kid)
     db.commit()
 
@@ -1823,8 +1823,8 @@ def test_collection_has_species_rule(tmp_path):
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='location_only.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p3 = photo_ingest.add_photo(db, folder_id=fid, filename='no_tags.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
-    k_species = db.add_keyword('Northern cardinal', is_species=True)
-    k_location = db.add_keyword('The Park', is_species=False)
+    k_species = db.keywords.add('Northern cardinal', is_species=True)
+    k_location = db.keywords.add('The Park', is_species=False)
     db.tag_photo(p1, k_species)
     db.tag_photo(p2, k_location)
     db.commit()
@@ -1859,7 +1859,7 @@ def test_has_subject_rule_matches_photos_without_subject_keywords(tmp_path, monk
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
-    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    scene_kid = db.keywords.add("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)  # p1 is identified, p2 is not
     db.commit()
 
@@ -1920,7 +1920,7 @@ def test_default_needs_identification_excludes_not_wildlife(tmp_path, monkeypatc
                               extension='.jpg', file_size=100, file_mtime=1.0)
     db.update_photo_wildlife_excluded(not_wildlife, True)
     db.commit()
-    genre_kid = db.add_keyword("Landscape", kw_type="genre")
+    genre_kid = db.keywords.add("Landscape", kw_type="genre")
     db.tag_photo(identified, genre_kid)
     db.commit()
 
@@ -1956,7 +1956,7 @@ def test_has_subject_rule_value_one_matches_identified_photos(tmp_path, monkeypa
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
-    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    scene_kid = db.keywords.add("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
     db.commit()
 
@@ -1990,7 +1990,7 @@ def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_pa
                       file_size=100, file_mtime=1.0)
     # Tag with a genre keyword anyway — but with empty subject_types, no
     # type counts as identifying, so this photo still does not match.
-    scene_kid = db.add_keyword("Landscape", kw_type="genre")
+    scene_kid = db.keywords.add("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
     db.commit()
 
@@ -2171,7 +2171,7 @@ def test_add_keyword_is_species(tmp_path):
     """add_keyword with is_species=True marks the keyword."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword('Song sparrow', is_species=True)
+    kid = db.keywords.add('Song sparrow', is_species=True)
     db.commit()
     row = db.conn.execute("SELECT is_species FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row['is_species'] == 1
@@ -2181,12 +2181,12 @@ def test_add_keyword_updates_is_species(tmp_path):
     """add_keyword updates is_species on existing keyword if newly marked."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword('Song sparrow', is_species=False)
+    kid = db.keywords.add('Song sparrow', is_species=False)
     db.commit()
     row = db.conn.execute("SELECT is_species FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row['is_species'] == 0
 
-    kid2 = db.add_keyword('Song sparrow', is_species=True)
+    kid2 = db.keywords.add('Song sparrow', is_species=True)
     db.commit()
     assert kid2 == kid
     row = db.conn.execute("SELECT is_species FROM keywords WHERE id = ?", (kid,)).fetchone()
@@ -2203,7 +2203,7 @@ def test_mark_species_keywords_sets_type_taxonomy(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     # A keyword that arrived without is_species=True (e.g., from XMP sync).
-    kid = db.add_keyword('Green heron')
+    kid = db.keywords.add('Green heron')
     db.commit()
     row = db.conn.execute(
         "SELECT is_species, type FROM keywords WHERE id = ?", (kid,)
@@ -2239,8 +2239,8 @@ def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    location_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    location_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="location",
     )
     db.commit()
@@ -2291,11 +2291,11 @@ def test_repair_misclassified_location_ancestors_restores_legacy_homonym(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
-    db.add_keyword(
+    db.keywords.add(
         "San Diego County", parent_id=state_id, kw_type="location",
     )
     db.commit()
@@ -2322,14 +2322,14 @@ def test_repair_misclassified_location_ancestors_restores_adjacent_nodes(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
-    county_id = db.add_keyword(
+    county_id = db.keywords.add(
         "San Diego County", parent_id=state_id, kw_type="taxonomy",
     )
-    db.add_keyword(
+    db.keywords.add(
         "San Diego", parent_id=county_id, kw_type="location",
     )
     db.commit()
@@ -2370,8 +2370,8 @@ def test_repair_misclassified_location_ancestors_ignores_pure_taxonomy_root(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    genus_id = db.add_keyword("Ardea", kw_type="taxonomy")
-    db.add_keyword("Ardea alba", parent_id=genus_id, kw_type="taxonomy")
+    genus_id = db.keywords.add("Ardea", kw_type="taxonomy")
+    db.keywords.add("Ardea alba", parent_id=genus_id, kw_type="taxonomy")
     db.commit()
 
     assert db.repair_misclassified_location_ancestors() == 0
@@ -2386,8 +2386,8 @@ def test_repair_misclassified_location_ancestors_restores_place_leaf(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
     db.commit()
@@ -2407,11 +2407,11 @@ def test_repair_misclassified_location_ancestors_restores_root_chain(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="taxonomy")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="taxonomy")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
-    db.add_keyword(
+    db.keywords.add(
         "San Diego County", parent_id=state_id, kw_type="location",
     )
     db.commit()
@@ -2446,12 +2446,12 @@ def test_repair_misclassified_location_ancestors_ignores_taxonomy_root_with_loca
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    genus_id = db.add_keyword("Ardea", kw_type="taxonomy")
+    genus_id = db.keywords.add("Ardea", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET is_species = 1 WHERE id = ?", (genus_id,),
     )
-    db.add_keyword("Backyard", parent_id=genus_id, kw_type="location")
+    db.keywords.add("Backyard", parent_id=genus_id, kw_type="location")
     db.commit()
 
     assert db.repair_misclassified_location_ancestors() == 0
@@ -2480,11 +2480,11 @@ def test_repair_misclassified_location_ancestors_preserves_coordless_root_beside
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    coordless_root = db.add_keyword("United States", kw_type="location")
-    legacy_park_id = db.add_keyword(
+    coordless_root = db.keywords.add("United States", kw_type="location")
+    legacy_park_id = db.keywords.add(
         "Legacy Park", parent_id=coordless_root, kw_type="location",
     )
-    place_bearing_root = db.add_keyword("United States", kw_type="taxonomy")
+    place_bearing_root = db.keywords.add("United States", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
@@ -2496,7 +2496,7 @@ def test_repair_misclassified_location_ancestors_preserves_coordless_root_beside
             place_bearing_root,
         ),
     )
-    stale_state = db.add_keyword(
+    stale_state = db.keywords.add(
         "California", parent_id=place_bearing_root, kw_type="location",
     )
     db.commit()
@@ -2561,11 +2561,11 @@ def test_repair_misclassified_location_ancestors_preserves_children_of_both_root
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    coordless_root = db.add_keyword("United States", kw_type="location")
-    coordless_state = db.add_keyword(
+    coordless_root = db.keywords.add("United States", kw_type="location")
+    coordless_state = db.keywords.add(
         "California", parent_id=coordless_root, kw_type="location",
     )
-    place_bearing_root = db.add_keyword("United States", kw_type="taxonomy")
+    place_bearing_root = db.keywords.add("United States", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
@@ -2577,7 +2577,7 @@ def test_repair_misclassified_location_ancestors_preserves_children_of_both_root
             place_bearing_root,
         ),
     )
-    place_bearing_state = db.add_keyword(
+    place_bearing_state = db.keywords.add(
         "California", parent_id=place_bearing_root, kw_type="location",
     )
     db.commit()
@@ -2650,8 +2650,8 @@ def test_repair_misclassified_location_ancestors_disambiguates_distinct_place_ch
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    coordless_root_a = db.add_keyword("United States", kw_type="location")
-    springfield_illinois = db.add_keyword(
+    coordless_root_a = db.keywords.add("United States", kw_type="location")
+    springfield_illinois = db.keywords.add(
         "Springfield", parent_id=coordless_root_a, kw_type="location",
     )
     db.commit()
@@ -2667,7 +2667,7 @@ def test_repair_misclassified_location_ancestors_disambiguates_distinct_place_ch
         "VALUES (?, NULL, 'location', 0) RETURNING id",
         ("United States",),
     ).fetchone()["id"]
-    springfield_missouri = db.add_keyword(
+    springfield_missouri = db.keywords.add(
         "Springfield", parent_id=coordless_root_b, kw_type="location",
     )
     db.commit()
@@ -2740,13 +2740,13 @@ def test_repair_misclassified_location_ancestors_keeps_distinct_place_roots(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    natural_root = db.add_keyword("Georgia", kw_type="location")
+    natural_root = db.keywords.add("Georgia", kw_type="location")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ? WHERE id = ?",
         ("georgia-country", natural_root),
     )
-    homonym_root = db.add_keyword("Georgia", kw_type="taxonomy")
+    homonym_root = db.keywords.add("Georgia", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ? WHERE id = ?",
@@ -2781,13 +2781,13 @@ def test_place_upsert_avoids_ambiguous_place_bearing_root_parent(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    state_id = db.add_keyword("Georgia", kw_type="location")
+    state_id = db.keywords.add("Georgia", kw_type="location")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ? WHERE id = ?",
         ("georgia-state", state_id),
     )
-    country_id = db.add_keyword("Georgia", kw_type="taxonomy")
+    country_id = db.keywords.add("Georgia", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ?, type = 'location', is_species = 0, "
@@ -2845,13 +2845,13 @@ def test_place_upsert_prefers_coordless_root_over_place_bearing_peer(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("Georgia", kw_type="location")
+    country_id = db.keywords.add("Georgia", kw_type="location")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ? WHERE id = ?",
         ("georgia-country", country_id),
     )
-    coordless_id = db.add_keyword("Georgia", kw_type="taxonomy")
+    coordless_id = db.keywords.add("Georgia", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'location', is_species = 0, "
@@ -2899,7 +2899,7 @@ def test_repair_preserves_coordless_anchor_beside_distinct_place_roots(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    state_id = db.add_keyword("Georgia", kw_type="location")
+    state_id = db.keywords.add("Georgia", kw_type="location")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ? WHERE id = ?",
@@ -2920,7 +2920,7 @@ def test_repair_preserves_coordless_anchor_beside_distinct_place_roots(
         "VALUES (?, NULL, 'location', 0) RETURNING id",
         ("Georgia",),
     ).fetchone()["id"]
-    child_id = db.add_keyword(
+    child_id = db.keywords.add(
         "Ambiguous Park", parent_id=coordless_id, kw_type="location",
     )
     db.commit()
@@ -2962,7 +2962,7 @@ def test_place_upsert_avoids_lone_place_bearing_root_for_component_only_parent(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    state_id = db.add_keyword("Georgia", kw_type="location")
+    state_id = db.keywords.add("Georgia", kw_type="location")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ? WHERE id = ?",
@@ -3028,7 +3028,7 @@ def test_repair_preserves_coordless_anchor_beside_single_place_bearing_root(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    state_id = db.add_keyword("Georgia", kw_type="location")
+    state_id = db.keywords.add("Georgia", kw_type="location")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ? WHERE id = ?",
@@ -3039,7 +3039,7 @@ def test_repair_preserves_coordless_anchor_beside_single_place_bearing_root(
         "VALUES (?, NULL, 'location', 0) RETURNING id",
         ("Georgia",),
     ).fetchone()["id"]
-    ambiguous_child = db.add_keyword(
+    ambiguous_child = db.keywords.add(
         "Ambiguous Park", parent_id=coordless_id, kw_type="location",
     )
     db.commit()
@@ -3075,7 +3075,7 @@ def test_repair_still_merges_coordless_duplicates_alongside_place_roots(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    state_id = db.add_keyword("Georgia", kw_type="location")
+    state_id = db.keywords.add("Georgia", kw_type="location")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET place_id = ? WHERE id = ?",
@@ -3096,7 +3096,7 @@ def test_repair_still_merges_coordless_duplicates_alongside_place_roots(
         "VALUES (?, NULL, 'location', 0) RETURNING id",
         ("Georgia",),
     ).fetchone()["id"]
-    child_id = db.add_keyword(
+    child_id = db.keywords.add(
         "Old Anchor Child", parent_id=coordless_dup, kw_type="location",
     )
     db.commit()
@@ -3136,7 +3136,7 @@ def test_merge_keyword_into_transfers_coords_with_place_id(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     try:
-        src_id = db.add_keyword("United States", kw_type="location")
+        src_id = db.keywords.add("United States", kw_type="location")
         db.commit()
         db.conn.execute(
             "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
@@ -3184,8 +3184,8 @@ def test_merge_keyword_into_preserves_manual_association_source(tmp_path):
         db, folder_id=fid, filename="source.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    keep_id = db.add_keyword("Wildlife", kw_type="genre")
-    merge_id = db.add_keyword("wildlife duplicate", kw_type="genre")
+    keep_id = db.keywords.add("Wildlife", kw_type="genre")
+    merge_id = db.keywords.add("wildlife duplicate", kw_type="genre")
     db.tag_photo(both, keep_id)
     db.tag_photo(both, merge_id, source="manual")
     db.tag_photo(source_only, merge_id, source="manual")
@@ -3211,14 +3211,14 @@ def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
-    county_id = db.add_keyword(
+    county_id = db.keywords.add(
         "San Diego County", parent_id=state_id, kw_type="taxonomy",
     )
-    db.add_keyword(
+    db.keywords.add(
         "San Diego", parent_id=county_id, kw_type="location",
     )
     db.commit()
@@ -3272,11 +3272,11 @@ def test_place_upsert_reuses_misclassified_administrative_leaf(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
-    county_id = db.add_keyword(
+    county_id = db.keywords.add(
         "San Diego County", parent_id=state_id, kw_type="location",
     )
     db.commit()
@@ -3342,8 +3342,8 @@ def test_place_upsert_restores_place_bearing_legacy_location(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
     db.commit()
@@ -3387,7 +3387,7 @@ def test_place_upsert_reuses_root_administrative_location(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
+    country_id = db.keywords.add("United States", kw_type="location")
     db.commit()
 
     selected_id = db.upsert_place_chain({
@@ -3423,8 +3423,8 @@ def test_place_upsert_repairs_root_administrative_location(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="taxonomy")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="taxonomy")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="location",
     )
     db.commit()
@@ -3462,7 +3462,7 @@ def test_place_upsert_does_not_reuse_leaf_as_parent(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
+    country_id = db.keywords.add("United States", kw_type="location")
     db.commit()
     state_id = db.keyword_provenance.upsert_one_keyword(
         "California",
@@ -3500,8 +3500,8 @@ def test_place_upsert_repairs_taxonomy_root_while_building_parents(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="taxonomy")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="taxonomy")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="location",
     )
     db.commit()
@@ -3538,8 +3538,8 @@ def test_place_upsert_repairs_coordless_taxonomy_leaf_component(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
     db.commit()
@@ -3581,7 +3581,7 @@ def test_place_upsert_does_not_retype_root_taxonomy_homonym(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    turkey_species = db.add_keyword("Turkey", kw_type="taxonomy")
+    turkey_species = db.keywords.add("Turkey", kw_type="taxonomy")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET is_species = 1 WHERE id = ?", (turkey_species,),
@@ -3644,8 +3644,8 @@ def test_place_upsert_reconciles_suffixed_admin_duplicate_with_hierarchy_row(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    country_id = db.add_keyword("United States", kw_type="location")
-    coordless_state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    coordless_state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="location",
     )
     db.commit()
@@ -3717,7 +3717,7 @@ def test_mark_species_keywords_links_local_taxon_id(tmp_path):
         "SELECT id FROM taxa WHERE inat_id = 5017"
     ).fetchone()['id']
 
-    kid = db.add_keyword('Green heron')
+    kid = db.keywords.add('Green heron')
     db.commit()
 
     class FakeTaxonomy:
@@ -3746,7 +3746,7 @@ def test_mark_species_keywords_fixes_type_taxonomy_with_is_species_zero(tmp_path
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword('Green heron')
+    kid = db.keywords.add('Green heron')
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET is_species = 0, type = 'taxonomy' WHERE id = ?", (kid,)
@@ -3791,7 +3791,7 @@ def test_mark_species_keywords_backfills_taxon_id_on_existing_taxonomy(tmp_path)
     ).fetchone()['id']
 
     # Simulate classifier-added keyword: type='taxonomy' but taxon_id=NULL.
-    kid = db.add_keyword('Gadwall', is_species=True)
+    kid = db.keywords.add('Gadwall', is_species=True)
     db.commit()
     row = db.conn.execute(
         "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -3824,7 +3824,7 @@ def test_mark_species_keywords_retypes_when_is_species_already_set(tmp_path):
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword('Green heron')
+    kid = db.keywords.add('Green heron')
     db.commit()
     # Simulate the pre-fix state: is_species set by a prior (now-removed)
     # backfill pass that didn't update `type`.
@@ -3994,7 +3994,7 @@ def test_default_gps_without_location_keyword_collection_matches_expected_photos
         "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id IN (?, ?)",
         (needs_location, has_location),
     )
-    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    loc_kw = db.keywords.add("Yosemite", kw_type="location")
     db.tag_photo(has_location, loc_kw)
     db.commit()
 
@@ -4038,7 +4038,7 @@ def test_has_location_keyword_rule_and_no_location_information_definition(tmp_pa
         "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id IN (?, ?)",
         (gps_no_keyword, gps_with_keyword),
     )
-    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    loc_kw = db.keywords.add("Yosemite", kw_type="location")
     db.tag_photo(no_gps_with_keyword, loc_kw)
     db.tag_photo(gps_with_keyword, loc_kw)
     db.commit()
@@ -4153,7 +4153,7 @@ def test_get_dashboard_stats_with_data(tmp_path):
     ])
 
     # Add keywords
-    kid = db.add_keyword('Robin', is_species=True)
+    kid = db.keywords.add('Robin', is_species=True)
     db.tag_photo(pids[0], kid)
     db.tag_photo(pids[1], kid)
     db.commit()
@@ -5486,8 +5486,8 @@ def test_update_prediction_group_info(tmp_path):
 def test_is_keyword_species(tmp_path):
     """Checks if a keyword is marked as species."""
     db, _ = _make_workspace_with_photos(tmp_path, [{}])
-    kid_species = db.add_keyword('Robin', is_species=True)
-    kid_location = db.add_keyword('The Park', is_species=False)
+    kid_species = db.keywords.add('Robin', is_species=True)
+    kid_location = db.keywords.add('The Park', is_species=False)
     db.commit()
 
     assert db.keyword_taxa.is_species(kid_species) is True
@@ -5632,8 +5632,8 @@ def test_get_geolocated_photos_keyword_search_options(tmp_path):
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
-    db.tag_photo(p1, db.add_keyword('Western Tanager'))
-    db.tag_photo(p2, db.add_keyword('Common Tern'))
+    db.tag_photo(p1, db.keywords.add('Western Tanager'))
+    db.tag_photo(p2, db.keywords.add('Common Tern'))
     db.commit()
 
     # Keyword filtering on Map now uses the shared rule vocabulary (the
@@ -6282,7 +6282,7 @@ def test_keywords_type_column_exists(tmp_path):
     """Keywords table has type column defaulting to 'general'."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("test")
+    kid = db.keywords.add("test")
     db.commit()
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)
@@ -6294,7 +6294,7 @@ def test_keywords_location_columns_exist(tmp_path):
     """Keywords table has latitude and longitude columns."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("Central Park")
+    kid = db.keywords.add("Central Park")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET latitude = 40.7829, longitude = -73.9654 WHERE id = ?",
@@ -6318,7 +6318,7 @@ def test_keywords_taxon_id_column_exists(tmp_path):
         "VALUES (1, 'Animalia', 'Animals', 'kingdom', 'Animalia')"
     )
     tid = db.conn.execute("SELECT id FROM taxa WHERE inat_id = 1").fetchone()["id"]
-    kid = db.add_keyword("Animals")
+    kid = db.keywords.add("Animals")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
@@ -6335,7 +6335,7 @@ def test_is_species_migrated_to_taxonomy_type(tmp_path):
     """Existing is_species=1 keywords get type='taxonomy' after migration."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("Cardinal", is_species=True)
+    kid = db.keywords.add("Cardinal", is_species=True)
     db.commit()
     row = db.conn.execute(
         "SELECT type, is_species FROM keywords WHERE id = ?", (kid,)
@@ -6348,7 +6348,7 @@ def test_add_keyword_individual_type(tmp_path):
     """A keyword can be created with type='individual' via direct SQL update."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("John Doe")
+    kid = db.keywords.add("John Doe")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'individual' WHERE id = ?", (kid,)
@@ -6368,7 +6368,7 @@ def test_keyword_tree_includes_type(tmp_path):
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    kid = db.add_keyword('Cardinal', is_species=True)
+    kid = db.keywords.add('Cardinal', is_species=True)
     db.tag_photo(pid, kid)
     db.commit()
 
@@ -6386,7 +6386,7 @@ def test_photo_keywords_includes_type(tmp_path):
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     # Use a name that isn't pre-seeded as a default genre keyword.
-    kid = db.add_keyword('MyTag')
+    kid = db.keywords.add('MyTag')
     db.tag_photo(pid, kid)
     db.commit()
 
@@ -6592,7 +6592,7 @@ def test_undo_last_edit_keyword_add(tmp_path):
     """Undo removes a manual add; redo restores its durable provenance."""
     db, pids = _make_db_with_photos(tmp_path)
     pid = pids[0]
-    kid = db.add_keyword('Eagle')
+    kid = db.keywords.add('Eagle')
     db.tag_photo(pid, kid, source="manual")
     db.commit()
     db.record_edit('keyword_add', 'Added keyword "Eagle"', str(kid),
@@ -6615,7 +6615,7 @@ def test_undo_last_edit_keyword_remove(tmp_path):
     """undo_last_edit re-adds keyword that was removed."""
     db, pids = _make_db_with_photos(tmp_path)
     pid = pids[0]
-    kid = db.add_keyword('Hawk')
+    kid = db.keywords.add('Hawk')
     db.tag_photo(pid, kid)
     # Now remove it and record the edit
     db.untag_photo(pid, kid)
@@ -6988,7 +6988,7 @@ def test_add_keyword_auto_detects_taxonomy(tmp_path):
         "INSERT INTO taxa (id, name, common_name, rank) VALUES (1, 'Cardinalis cardinalis', 'Northern Cardinal', 'species')"
     )
     db.conn.commit()
-    kid = db.add_keyword("Northern Cardinal")
+    kid = db.keywords.add("Northern Cardinal")
     db.commit()
     row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row["type"] == "taxonomy"
@@ -7003,7 +7003,7 @@ def test_add_keyword_auto_detects_taxonomy_via_scientific_name(tmp_path):
         "INSERT INTO taxa (id, name, common_name, rank) VALUES (1, 'Cardinalis cardinalis', 'Northern Cardinal', 'species')"
     )
     db.conn.commit()
-    kid = db.add_keyword("Cardinalis cardinalis")
+    kid = db.keywords.add("Cardinalis cardinalis")
     db.commit()
     row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row["type"] == "taxonomy"
@@ -7021,7 +7021,7 @@ def test_add_keyword_auto_detects_taxonomy_via_alt_common_name(tmp_path):
         "INSERT INTO taxa_common_names (taxon_id, name) VALUES (1, 'Redbird')"
     )
     db.conn.commit()
-    kid = db.add_keyword("Redbird")
+    kid = db.keywords.add("Redbird")
     db.commit()
     row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row["type"] == "taxonomy"
@@ -7039,7 +7039,7 @@ def test_add_keyword_auto_detects_taxonomy_with_smart_apostrophe(tmp_path):
     )
     db.conn.commit()
 
-    kid = db.add_keyword("Say’s phoebe")
+    kid = db.keywords.add("Say’s phoebe")
     db.commit()
     row = db.conn.execute(
         "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -7053,7 +7053,7 @@ def test_add_keyword_promotes_existing_general_smart_apostrophe_taxon(tmp_path):
     """A legacy general row is promoted when auto-detect can now resolve it."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("Say’s phoebe")
+    kid = db.keywords.add("Say’s phoebe")
     db.commit()
     db.conn.execute(
         "INSERT INTO taxa (id, name, common_name, rank) "
@@ -7062,7 +7062,7 @@ def test_add_keyword_promotes_existing_general_smart_apostrophe_taxon(tmp_path):
     )
     db.conn.commit()
 
-    assert db.add_keyword("Say’s phoebe") == kid
+    assert db.keywords.add("Say’s phoebe") == kid
     row = db.conn.execute(
         "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?", (kid,)
     ).fetchone()
@@ -7075,7 +7075,7 @@ def test_add_keyword_no_auto_detect_for_general(tmp_path):
     """add_keyword defaults to general when name doesn't match a taxon."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("favorite")
+    kid = db.keywords.add("favorite")
     db.commit()
     row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row["type"] == "general"
@@ -7542,9 +7542,9 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = workspace_folders.add_folder(db, "/photos")
     pid = photo_ingest.add_photo(db, fid, "verdin.jpg", ".jpg", 100, 1.0)
-    parent = db.add_keyword("Penduline tits")
-    nested = db.add_keyword("Verdin", parent_id=parent)
-    stale = db.add_keyword("Sparrow", is_species=True)
+    parent = db.keywords.add("Penduline tits")
+    nested = db.keywords.add("Verdin", parent_id=parent)
+    stale = db.keywords.add("Sparrow", is_species=True)
     db.commit()
     _top_level_species_twin(db, "Verdin", taxa["Verdin"])
     db.tag_photo(pid, nested)
@@ -7587,9 +7587,9 @@ def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
     _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = workspace_folders.add_folder(db, "/photos")
     pid = photo_ingest.add_photo(db, fid, "verdin.jpg", ".jpg", 100, 1.0)
-    parent = db.add_keyword("Penduline tits")
-    nested = db.add_keyword("Verdin", parent_id=parent)
-    stale = db.add_keyword("Sparrow", is_species=True)
+    parent = db.keywords.add("Penduline tits")
+    nested = db.keywords.add("Verdin", parent_id=parent)
+    stale = db.keywords.add("Sparrow", is_species=True)
     db.tag_photo(pid, nested)
     db.tag_photo(pid, stale)
     db.commit()
@@ -7651,8 +7651,8 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
     )
     fid = workspace_folders.add_folder(db, "/photos")
     pid = photo_ingest.add_photo(db, fid, "verdin.jpg", ".jpg", 100, 1.0)
-    parent = db.add_keyword("Penduline tits")
-    nested = db.add_keyword("Desert Verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    nested = db.keywords.add("Desert Verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -7662,7 +7662,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
     # Root species row exists (canonical curation key) but is NOT tagged on
     # the photo — the post-repair layout after the redundant root was
     # detached.
-    db.add_keyword("Verdin", is_species=True)
+    db.keywords.add("Verdin", is_species=True)
     db.commit()
     db.conn.commit()
     db.tag_photo(pid, nested)
@@ -7894,7 +7894,7 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
         db, folder_id=folder_id, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    wigeon_id = db.add_keyword("American Wigeon", is_species=True)
+    wigeon_id = db.keywords.add("American Wigeon", is_species=True)
     db.tag_photo(photo_id, wigeon_id)
     db.commit()
     detection_id = db.detections.save(
@@ -7959,8 +7959,8 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
         db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    wigeon = db.add_keyword("American Wigeon", is_species=True)
-    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    wigeon = db.keywords.add("American Wigeon", is_species=True)
+    stale_teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.tag_photo(pid, wigeon)
     db.tag_photo(pid, stale_teal)
     db.commit()
@@ -8020,8 +8020,8 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
     )
     # The photo carries a stale species tag left over from when the neighbour
     # was previously classified as Green-winged Teal.
-    fresh_wigeon = db.add_keyword("American Wigeon", is_species=True)
-    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    fresh_wigeon = db.keywords.add("American Wigeon", is_species=True)
+    stale_teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.tag_photo(pid, fresh_wigeon)
     db.tag_photo(pid, stale_teal)
     db.commit()
@@ -8092,8 +8092,8 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
     )
     # Photo carries the neighbour's species under the normalized (clean)
     # spelling — the shape add_keyword actually writes.
-    apapane = db.add_keyword("apapane", is_species=True)
-    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    apapane = db.keywords.add("apapane", is_species=True)
+    stale = db.keywords.add("Green-winged Teal", is_species=True)
     db.tag_photo(pid, apapane)
     db.tag_photo(pid, stale)
     db.commit()
@@ -8153,7 +8153,7 @@ def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
     )
     # Photo carries a stale species tag whose only backing on the neighbour
     # is an 'alternative' prediction row.
-    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    stale = db.keywords.add("Green-winged Teal", is_species=True)
     db.tag_photo(pid, stale)
     db.commit()
 
@@ -8218,7 +8218,7 @@ def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
     )
     # Photo carries a stale species tag whose only backing on the neighbour
     # is a below-threshold detection.
-    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    stale = db.keywords.add("Green-winged Teal", is_species=True)
     db.tag_photo(pid, stale)
     db.commit()
 
@@ -8277,8 +8277,8 @@ def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
         db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    wigeon = db.add_keyword("American Wigeon", is_species=True)
-    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    wigeon = db.keywords.add("American Wigeon", is_species=True)
+    stale = db.keywords.add("Green-winged Teal", is_species=True)
     db.tag_photo(pid, wigeon)
     db.tag_photo(pid, stale)
     db.commit()
@@ -8426,9 +8426,9 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
     # keyword — the shape a photo picks up from a prior curation pass. It
     # also carries an unrelated stale species that only the target box's
     # (soon-to-be-replaced) old identity supported.
-    wigeon = db.add_keyword("American Wigeon", is_species=True)
-    anatidae = db.add_keyword("Anatidae", kw_type="taxonomy")
-    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    wigeon = db.keywords.add("American Wigeon", is_species=True)
+    anatidae = db.keywords.add("Anatidae", kw_type="taxonomy")
+    stale_teal = db.keywords.add("Green-winged Teal", is_species=True)
     db.tag_photo(pid, wigeon)
     db.tag_photo(pid, anatidae)
     db.tag_photo(pid, stale_teal)
@@ -8568,7 +8568,9 @@ def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
     def fail_add_keyword(*args, **kwargs):
         raise RuntimeError("simulated accept failure")
 
-    monkeypatch.setattr(db, "add_keyword", fail_add_keyword)
+    from repositories.keywords import KeywordRepository
+
+    monkeypatch.setattr(KeywordRepository, "add", fail_add_keyword)
     with pytest.raises(RuntimeError, match="simulated accept failure"):
         review_decisions.accept_prediction(db, pred["id"])
 
@@ -11077,8 +11079,8 @@ def test_count_keywords_in_workspace_includes_missing(tmp_path):
     fid = workspace_folders.add_folder(db, "/photos", name="photos")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
-    k1 = db.add_keyword("Cardinal")
-    k2 = db.add_keyword("Sparrow")
+    k1 = db.keywords.add("Cardinal")
+    k2 = db.keywords.add("Sparrow")
     db.tag_photo(pid, k1)
     db.tag_photo(pid, k2)
     db.commit()
@@ -11831,7 +11833,7 @@ def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
 
     # Attach a keyword to the COLLIDED staged photo so the delete must clear
     # photo_keywords first; without the fix this raises a FK error.
-    kw = db.add_keyword("Osprey")
+    kw = db.keywords.add("Osprey")
     db.tag_photo(dup_pid, kw)
     db.commit()
 
@@ -12629,7 +12631,7 @@ def test_merge_staged_tree_intra_staged_after_phantom_replacement_case_alias(
     # deterministic: without the fix, the remap
     # ``UPDATE pending_changes SET photo_id = <dead phantom>``
     # trips ``pending_changes.photo_id``'s foreign key.
-    db.queue_change(second_pid, "keyword_add", "Owl")
+    db.pending_changes.queue(second_pid, "keyword_add", "Owl")
     db.commit()
 
     # Force the merge to treat the target volume as case-insensitive so
@@ -14244,7 +14246,7 @@ def test_merge_staged_tree_flat_only_cleanup_does_not_fight_a_keyword_add(
         db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
-    kw = db.add_keyword("Birds")
+    kw = db.keywords.add("Birds")
     db.tag_photo(dup_pid, kw)
     db.commit()
     _queue_keyword_change(db, dup_pid, "keyword_add", "Birds",
@@ -14568,7 +14570,7 @@ def test_merge_staged_tree_carries_keyword_add_association(db, tmp_path):
         db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
-    kw = db.add_keyword("Birds")
+    kw = db.keywords.add("Birds")
     db.tag_photo(dup_pid, kw)
     db.commit()
     db.conn.execute(
@@ -14609,7 +14611,7 @@ def test_merge_staged_tree_carries_keyword_remove_association(db, tmp_path):
         db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
-    kw = db.add_keyword("Birds")
+    kw = db.keywords.add("Birds")
     db.tag_photo(survivor_pid, kw)
     db.commit()
     db.conn.execute(
@@ -14650,7 +14652,7 @@ def test_merge_staged_tree_keyword_association_follows_chronology(
         db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
-    kw = db.add_keyword("Birds")
+    kw = db.keywords.add("Birds")
     db.tag_photo(dup_pid, kw)
     db.commit()
     db.conn.execute(
@@ -16227,7 +16229,7 @@ def test_collection_vireo_native_fields(tmp_path):
         "WHERE id = ?",
         (p2,),
     )
-    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    loc_kw = db.keywords.add("Yosemite", kw_type="location")
     db.tag_photo(p2, loc_kw)
     db.commit()
     db.conn.execute(
@@ -17263,7 +17265,7 @@ def test_add_keyword_accepts_valid_types(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    kid = db.add_keyword("Charlie", kw_type="individual")
+    kid = db.keywords.add("Charlie", kw_type="individual")
     db.commit()
     row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row["type"] == "individual"
@@ -17276,7 +17278,7 @@ def test_add_keyword_rejects_unknown_type(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     with pytest.raises(ValueError, match="invalid keyword type"):
-        db.add_keyword("BadType", kw_type="alien")
+        db.keywords.add("BadType", kw_type="alien")
         db.commit()
 
 
@@ -17286,7 +17288,7 @@ def test_add_keyword_explicit_taxonomy_for_unknown_name_skips_taxa_lookup(tmp_pa
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    kid = db.add_keyword("DefinitelyNotASpecies42", kw_type="taxonomy")
+    kid = db.keywords.add("DefinitelyNotASpecies42", kw_type="taxonomy")
     db.commit()
     row = db.conn.execute(
         "SELECT type, taxon_id, is_species FROM keywords WHERE id = ?", (kid,)
@@ -17304,7 +17306,7 @@ def test_add_keyword_is_species_with_non_taxonomy_type_raises(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     with pytest.raises(ValueError, match="is_species=True requires kw_type='taxonomy'"):
-        db.add_keyword("Mismatch", is_species=True, kw_type="general")
+        db.keywords.add("Mismatch", is_species=True, kw_type="general")
         db.commit()
 
 
@@ -17314,7 +17316,7 @@ def test_add_keyword_explicit_taxonomy_sets_is_species(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    kid = db.add_keyword("Some Bird", kw_type="taxonomy")
+    kid = db.keywords.add("Some Bird", kw_type="taxonomy")
     db.commit()
     row = db.conn.execute(
         "SELECT type, is_species FROM keywords WHERE id = ?", (kid,)
@@ -17330,12 +17332,12 @@ def test_add_keyword_existing_general_upgrades_to_requested_type(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     # Use a name that isn't pre-seeded as a default genre keyword.
-    kid1 = db.add_keyword("Cityscape")
+    kid1 = db.keywords.add("Cityscape")
     db.commit()
     row1 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid1,)).fetchone()
     assert row1["type"] == "general"
 
-    kid2 = db.add_keyword("Cityscape", kw_type="genre")
+    kid2 = db.keywords.add("Cityscape", kw_type="genre")
     db.commit()
     assert kid2 == kid1
     row2 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid2,)).fetchone()
@@ -17348,7 +17350,7 @@ def test_add_keyword_existing_general_upgrades_to_taxonomy_sets_is_species(tmp_p
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    kid1 = db.add_keyword("Mystery Bird")
+    kid1 = db.keywords.add("Mystery Bird")
     db.commit()
     row1 = db.conn.execute(
         "SELECT type, is_species FROM keywords WHERE id = ?", (kid1,)
@@ -17356,7 +17358,7 @@ def test_add_keyword_existing_general_upgrades_to_taxonomy_sets_is_species(tmp_p
     assert row1["type"] == "general"
     assert row1["is_species"] == 0
 
-    kid2 = db.add_keyword("Mystery Bird", kw_type="taxonomy")
+    kid2 = db.keywords.add("Mystery Bird", kw_type="taxonomy")
     db.commit()
     assert kid2 == kid1
     row2 = db.conn.execute(
@@ -17384,7 +17386,7 @@ def test_add_keyword_taxonomy_preserves_individual_type_and_is_species(tmp_path)
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
 
-    kid_individual = db.add_keyword("Charlie", kw_type="individual")
+    kid_individual = db.keywords.add("Charlie", kw_type="individual")
     db.commit()
     row1 = db.conn.execute(
         "SELECT type, is_species FROM keywords WHERE id = ?", (kid_individual,)
@@ -17392,7 +17394,7 @@ def test_add_keyword_taxonomy_preserves_individual_type_and_is_species(tmp_path)
     assert row1["type"] == "individual"
     assert row1["is_species"] == 0
 
-    kid_taxonomy = db.add_keyword("Charlie", kw_type="taxonomy")
+    kid_taxonomy = db.keywords.add("Charlie", kw_type="taxonomy")
     db.commit()
     # A new row is created — the original individual row was not a
     # candidate for the typed lookup.
@@ -17465,8 +17467,8 @@ def test_filter_out_subject_tagged_excludes_tagged_photos(tmp_path):
                       file_size=100, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    scene_kid = db.add_keyword("Landscape", kw_type="genre")
-    gen_kid = db.add_keyword("note", kw_type="general")
+    scene_kid = db.keywords.add("Landscape", kw_type="genre")
+    gen_kid = db.keywords.add("note", kw_type="general")
     db.tag_photo(p1, scene_kid)
     db.tag_photo(p2, gen_kid)
     db.commit()
@@ -17567,7 +17569,7 @@ def test_update_keyword_rejects_non_string_type(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    kid = db.add_keyword("Tag", kw_type="general")
+    kid = db.keywords.add("Tag", kw_type="general")
     db.commit()
     with pytest.raises(ValueError, match="Invalid keyword type"):
         db.update_keyword(kid, type=[])
@@ -17599,7 +17601,7 @@ def test_filter_out_subject_tagged_chunks_large_input(tmp_path, monkeypatch):
     # 25 photos, alternating tagged/untagged so the result spans multiple
     # chunks under our forced chunk size of 10.
     monkeypatch.setattr(Database, "_FILTER_SUBJECT_CHUNK", 10)
-    genre_kid = db.add_keyword("Landscape", kw_type="genre")
+    genre_kid = db.keywords.add("Landscape", kw_type="genre")
     db.commit()
     pids = []
     for i in range(25):
@@ -17694,7 +17696,7 @@ def test_tag_photo_with_taxonomy_keyword_does_not_add_wildlife_genre(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    species_kid = db.add_keyword("Northern cardinal", is_species=True)
+    species_kid = db.keywords.add("Northern cardinal", is_species=True)
 
     db.tag_photo(p1, species_kid)
     db.commit()
@@ -17730,7 +17732,7 @@ def test_manual_keyword_add_stamps_durable_provenance(tmp_path):
         db, folder_id=fid, filename="p1.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    kid = db.add_keyword("House Sparrow", is_species=True)
+    kid = db.keywords.add("House Sparrow", is_species=True)
 
     db.tag_photo(p1, kid, source=KEYWORD_SOURCE_UNKNOWN)
     db.commit()
@@ -17776,9 +17778,9 @@ def test_pending_keyword_removal_keys_distinguish_flat_and_hierarchical(tmp_path
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    db.queue_change(p1, "keyword_remove_flat", "Wildlife")
+    db.pending_changes.queue(p1, "keyword_remove_flat", "Wildlife")
     db.commit()
-    db.queue_change(p1, "keyword_remove", "House Sparrow")
+    db.pending_changes.queue(p1, "keyword_remove", "House Sparrow")
     db.commit()
 
     assert db.pending_changes.keyword_removal_keys(p1) == {
@@ -17827,7 +17829,7 @@ def test_tag_photo_multiple_species_store_only_taxonomy_terms(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    sp_a = db.add_keyword("Robin", is_species=True)
+    sp_a = db.keywords.add("Robin", is_species=True)
     db.tag_photo(p1, sp_a)
     db.commit()
 
@@ -17860,7 +17862,7 @@ def test_tag_photo_no_op_retag_keeps_single_taxonomy_association(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    sp = db.add_keyword("Robin", is_species=True)
+    sp = db.keywords.add("Robin", is_species=True)
 
     db.tag_photo(p1, sp)
     db.tag_photo(p1, sp)
@@ -17941,11 +17943,11 @@ def test_add_keyword_is_species_with_no_kw_type_treats_as_taxonomy(tmp_path):
     db.set_active_workspace(db.create_workspace("ws"))
 
     # User has 'Robin' typed as 'individual' (their kid).
-    kid_individual = db.add_keyword("Robin", kw_type="individual")
+    kid_individual = db.keywords.add("Robin", kw_type="individual")
 
     # Classifier accept-prediction flow calls add_keyword with
     # is_species=True and no kw_type.
-    kid_taxonomy = db.add_keyword("Robin", is_species=True)
+    kid_taxonomy = db.keywords.add("Robin", is_species=True)
     db.commit()
 
     assert kid_taxonomy != kid_individual, (
@@ -17974,8 +17976,8 @@ def test_add_keyword_is_species_promotes_general_row(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
 
-    kid = db.add_keyword("Robin", kw_type="general")
-    kid2 = db.add_keyword("Robin", is_species=True)
+    kid = db.keywords.add("Robin", kw_type="general")
+    kid2 = db.keywords.add("Robin", is_species=True)
     db.commit()
     assert kid2 == kid, "general row should be promoted in place"
     row = db.conn.execute(
@@ -18001,11 +18003,11 @@ def test_add_keyword_kw_type_falls_through_when_only_other_types_exist(tmp_path)
 
     # User has 'Backyard' typed as 'location' (a place they care about).
     # No 'general' or 'genre' Backyard exists.
-    kid_location = db.add_keyword("Backyard", kw_type="location")
+    kid_location = db.keywords.add("Backyard", kw_type="location")
 
     # Caller asks for genre Backyard (e.g. via the lightbox flow tagging
     # a photo as a Backyard scene). The location row must NOT be returned.
-    kid_genre = db.add_keyword("Backyard", kw_type="genre")
+    kid_genre = db.keywords.add("Backyard", kw_type="genre")
     db.commit()
     assert kid_genre != kid_location, (
         "add_keyword('Backyard', kw_type='genre') returned the existing "
@@ -18051,7 +18053,7 @@ def test_add_keyword_no_kw_type_prefers_canonical_genre_over_location(tmp_path):
     db.conn.commit()
 
     # No kw_type supplied. Must deterministically return the 'genre' row.
-    kid = db.add_keyword("Landscape")
+    kid = db.keywords.add("Landscape")
     db.commit()
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)
@@ -18081,7 +18083,7 @@ def test_add_keyword_no_kw_type_prefers_taxonomy_over_general(tmp_path):
     )
     db.conn.commit()
 
-    kid = db.add_keyword("Robin")
+    kid = db.keywords.add("Robin")
     db.commit()
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)
@@ -18139,7 +18141,7 @@ def test_ensure_default_genre_keywords_seeds_canonical_row_despite_typed_collisi
     # add_keyword's lookup must deterministically pick the genre row
     # when kw_type='genre' is supplied (otherwise the route flow gets
     # the wrong-typed row non-deterministically).
-    sunset_id = db.add_keyword("Sunset", kw_type="genre")
+    sunset_id = db.keywords.add("Sunset", kw_type="genre")
     db.commit()
     sunset_type = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (sunset_id,)
@@ -19282,7 +19284,7 @@ def test_update_keyword_rename_general_to_matching_taxon_auto_retypes(tmp_path):
     taxa = _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
 
     # User adds a typo'd keyword that does NOT match any taxon.
-    kid = db.add_keyword("Lesser scaub")
+    kid = db.keywords.add("Lesser scaub")
     db.commit()
     pre = db.conn.execute(
         "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -19321,7 +19323,7 @@ def test_update_keyword_rename_general_to_matching_taxon_visible_to_species_quer
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    kid = db.add_keyword("Lesser scaub")  # typo, no taxon match
+    kid = db.keywords.add("Lesser scaub")  # typo, no taxon match
     db.tag_photo(pid, kid)
     db.commit()
 
@@ -19348,7 +19350,7 @@ def test_get_species_keywords_includes_taxonomy_typed_without_is_species(tmp_pat
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    kid = db.add_keyword("Lesser Scaup")
+    kid = db.keywords.add("Lesser Scaup")
     db.tag_photo(pid, kid)
     db.commit()
     db.conn.execute(
@@ -19377,10 +19379,10 @@ def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    birds = db.add_keyword("1Birds")
-    family = db.add_keyword("Penduline tits", parent_id=birds)
-    nested = db.add_keyword("Verdin", parent_id=family)
-    root = db.add_keyword("Verdin", is_species=True)
+    birds = db.keywords.add("1Birds")
+    family = db.keywords.add("Penduline tits", parent_id=birds)
+    nested = db.keywords.add("Verdin", parent_id=family)
+    root = db.keywords.add("Verdin", is_species=True)
     db.tag_photo(pid, family)
     db.tag_photo(pid, nested)
     db.tag_photo(pid, root)
@@ -19392,7 +19394,7 @@ def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
     assert db.keyword_taxa.is_species(family) is False
     assert db.keyword_taxa.is_species(nested) is True
     assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Verdin"]}
-    assert db.get_photos_with_equivalent_species([pid], root) == {pid}
+    assert db.photo_species.get_photos_with_equivalent_species([pid], root) == {pid}
 
     rows = {row["id"]: row for row in db.photo_keywords.get_for_photos([pid])[pid]}
     assert rows[family]["taxon_rank"] == "family"
@@ -19411,8 +19413,8 @@ def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
         db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    parent = db.add_keyword("Penduline tits")
-    nested = db.add_keyword("Verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    nested = db.keywords.add("Verdin", parent_id=parent)
     db.commit()
     root = _top_level_species_twin(db, "Verdin", taxa["Verdin"])
     db.conn.execute(
@@ -19426,7 +19428,7 @@ def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
     assert db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (root,),
     ).fetchone()["taxon_id"] == taxa["Verdin"]
-    assert db.get_photos_with_equivalent_species([pid], root) == {pid}
+    assert db.photo_species.get_photos_with_equivalent_species([pid], root) == {pid}
 
 
 def test_equivalent_species_skips_unlinked_row_when_homonym_taxon_exists(tmp_path):
@@ -19474,8 +19476,8 @@ def test_equivalent_species_skips_unlinked_row_when_homonym_taxon_exists(tmp_pat
     db.commit()
 
     # Neither linked target should treat the unlinked homonym as equivalent.
-    assert db.get_photos_with_equivalent_species([pid], european) == set()
-    assert db.get_photos_with_equivalent_species([pid], american) == set()
+    assert db.photo_species.get_photos_with_equivalent_species([pid], european) == set()
+    assert db.photo_species.get_photos_with_equivalent_species([pid], american) == set()
 
     # Once the ambiguous legacy row is linked to the taxon that the target
     # resolves to, equivalence is authoritative again.
@@ -19483,8 +19485,8 @@ def test_equivalent_species_skips_unlinked_row_when_homonym_taxon_exists(tmp_pat
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
         (taxa["American Robin"], legacy),
     )
-    assert db.get_photos_with_equivalent_species([pid], american) == {pid}
-    assert db.get_photos_with_equivalent_species([pid], european) == set()
+    assert db.photo_species.get_photos_with_equivalent_species([pid], american) == {pid}
+    assert db.photo_species.get_photos_with_equivalent_species([pid], european) == set()
 
 
 def test_equivalent_species_unlinked_target_skips_linked_homonym(tmp_path):
@@ -19522,7 +19524,7 @@ def test_equivalent_species_unlinked_target_skips_linked_homonym(tmp_path):
 
     # Accepting/confirming the unlinked legacy target must not fold in the
     # linked homonym row, or the confirm would skip tagging.
-    assert db.get_photos_with_equivalent_species(
+    assert db.photo_species.get_photos_with_equivalent_species(
         [pid], legacy_target,
     ) == set()
 
@@ -19534,7 +19536,7 @@ def test_equivalent_species_unlinked_target_skips_linked_homonym(tmp_path):
     )
     db.tag_photo(other, legacy_target)
     db.commit()
-    assert db.get_photos_with_equivalent_species(
+    assert db.photo_species.get_photos_with_equivalent_species(
         [pid, other], legacy_target,
     ) == {other}
 
@@ -19546,15 +19548,15 @@ def test_species_display_name_resolves_hierarchy_alias_through_taxon(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
-    parent = db.add_keyword("Penduline tits")
-    nested = db.add_keyword("Desert Verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    nested = db.keywords.add("Desert Verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
         "WHERE id = ?",
         (taxa["Verdin"], nested),
     )
-    db.add_keyword("Verdin", is_species=True)
+    db.keywords.add("Verdin", is_species=True)
     db.commit()
     db.conn.commit()
 
@@ -19574,7 +19576,7 @@ def test_species_display_name_can_skip_the_case_convention_last_resort(tmp_path)
     db = Database(str(tmp_path / "test.db"))
     # Three Title Case species keywords make 'title' the detected convention.
     for name in ("Black Phoebe", "Barn Owl", "Blue Jay"):
-        db.add_keyword(name, is_species=True)
+        db.keywords.add(name, is_species=True)
         db.commit()
     db.conn.commit()
     assert db.keyword_taxa.detect_case_convention() == "title"
@@ -19609,8 +19611,8 @@ def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path)
         db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    parent = db.add_keyword("Penduline tits")
-    nested = db.add_keyword("verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    nested = db.keywords.add("verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -19649,8 +19651,8 @@ def test_species_keywords_preserves_attached_root_alias_spelling(tmp_path):
     )
     # Create the sibling root first so it has the lower id and would win a
     # naive ``ORDER BY id`` canonicalization.
-    db.add_keyword("Verdin", is_species=True)
-    sci_root = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.keywords.add("Verdin", is_species=True)
+    sci_root = db.keywords.add("Auriparus flaviceps", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
@@ -19683,8 +19685,8 @@ def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
         db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    parent = db.add_keyword("Something")
-    nested = db.add_keyword("foo", parent_id=parent)
+    parent = db.keywords.add("Something")
+    nested = db.keywords.add("foo", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
@@ -19726,8 +19728,8 @@ def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
         db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    parent = db.add_keyword("Penduline tits")
-    nested = db.add_keyword("verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    nested = db.keywords.add("verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -19766,14 +19768,14 @@ def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
     # Root alias (attached to the photo) must survive dedup; ``add_keyword``
     # would collapse the second same-key row, so create the two roots with
     # distinct spellings and back-link both to the same taxon directly.
-    alias = db.add_keyword("Auriparus flaviceps", is_species=True)
+    alias = db.keywords.add("Auriparus flaviceps", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
         "WHERE id = ?",
         (taxa["Verdin"], alias),
     )
-    other_root = db.add_keyword("Verdin", is_species=True)
+    other_root = db.keywords.add("Verdin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -19803,8 +19805,8 @@ def test_species_display_name_uses_leaf_spelling_when_no_root_exists(tmp_path):
     taxa = _seed_taxa(
         db, [(9876, "Sayornis nigricans", "Black Phoebe")]
     )
-    parent = db.add_keyword("Tyrant flycatchers")
-    leaf = db.add_keyword("black phoebe", parent_id=parent)
+    parent = db.keywords.add("Tyrant flycatchers")
+    leaf = db.keywords.add("black phoebe", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -19884,8 +19886,8 @@ def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
         db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    parent = db.add_keyword("Something")
-    nested = db.add_keyword("foo", parent_id=parent)
+    parent = db.keywords.add("Something")
+    nested = db.keywords.add("foo", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
@@ -19911,7 +19913,7 @@ def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
 
-    kid = db.add_keyword("Misc thing")
+    kid = db.keywords.add("Misc thing")
     db.update_keyword(kid, name="Still misc")
     db.commit()
 
@@ -19933,7 +19935,7 @@ def test_update_keyword_rename_taxonomy_to_different_taxon_updates_taxon_id(tmp_
         (7001, "Aythya marila", "Greater Scaup"),
     ])
 
-    kid = db.add_keyword("Lesser Scaup")
+    kid = db.keywords.add("Lesser Scaup")
     db.commit()
     pre = db.conn.execute(
         "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -19961,7 +19963,7 @@ def test_update_keyword_rename_taxonomy_to_unknown_name_keeps_taxon_id(tmp_path)
     db = Database(str(tmp_path / "test.db"))
     taxa = _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
 
-    kid = db.add_keyword("Lesser Scaup")
+    kid = db.keywords.add("Lesser Scaup")
     db.commit()
     pre_taxon_id = taxa["Lesser Scaup"]
     assert db.conn.execute(
@@ -19989,7 +19991,7 @@ def test_update_keyword_rename_location_keyword_preserves_type_and_taxon_id(tmp_
     _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
 
     # Add a general keyword, then user marks it as 'location'.
-    kid = db.add_keyword("Backyard")
+    kid = db.keywords.add("Backyard")
     db.update_keyword(kid, type="location")
     db.commit()
     pre = db.conn.execute(
@@ -20017,7 +20019,7 @@ def test_update_keyword_no_name_change_does_not_touch_type(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
 
-    kid = db.add_keyword("Backyard")
+    kid = db.keywords.add("Backyard")
     # Just change type — name stays 'Backyard'.
     db.update_keyword(kid, type="location")
     db.commit()
@@ -20038,7 +20040,7 @@ def test_update_keyword_explicit_location_type_clears_species_flag(tmp_path):
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("California", kw_type="taxonomy")
+    kid = db.keywords.add("California", kw_type="taxonomy")
     db.commit()
     before = db.conn.execute(
         "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
@@ -20086,7 +20088,7 @@ def test_update_keyword_explicit_type_and_taxon_id_kwargs_win(tmp_path):
         (7001, "Aythya marila", "Greater Scaup"),
     ])
 
-    kid = db.add_keyword("Misc")  # general, no taxon
+    kid = db.keywords.add("Misc")  # general, no taxon
     # Caller renames AND explicitly sets type+taxon_id to a different taxon.
     # Auto-detect would pick "Lesser Scaup" -> taxa["Lesser Scaup"], but
     # the explicit kwargs must override.
@@ -20115,7 +20117,7 @@ def test_update_keyword_rename_with_explicit_non_taxonomy_type_skips_taxon_link(
     db = Database(str(tmp_path / "test.db"))
     _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
 
-    kid = db.add_keyword("Lesser scaub")  # general, no taxon match
+    kid = db.keywords.add("Lesser scaub")  # general, no taxon match
     db.commit()
     pre = db.conn.execute(
         "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -20150,7 +20152,7 @@ def test_update_keyword_rename_taxonomy_to_explicit_non_taxonomy_type_does_not_r
         (7001, "Aythya marila", "Greater Scaup"),
     ])
 
-    kid = db.add_keyword("Lesser Scaup")
+    kid = db.keywords.add("Lesser Scaup")
     db.commit()
     pre_taxon_id = taxa["Lesser Scaup"]
     assert db.conn.execute(
@@ -20180,7 +20182,7 @@ def test_update_keyword_rename_with_empty_taxa_table_no_op(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     # No _seed_taxa call — taxa table is empty.
 
-    kid = db.add_keyword("Lesser scaub")
+    kid = db.keywords.add("Lesser scaub")
     db.update_keyword(kid, name="Lesser Scaup")
     db.commit()
 
@@ -20205,7 +20207,7 @@ def test_update_keyword_idempotent_name_update_does_not_auto_retype(tmp_path):
     # doesn't get auto-typed on insert. This mirrors a realistic
     # scenario: user added "Lesser Scaup" as a freeform tag before
     # downloading taxonomy.
-    kid = db.add_keyword("Lesser Scaup")
+    kid = db.keywords.add("Lesser Scaup")
     db.commit()
     pre = db.conn.execute(
         "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -20237,7 +20239,7 @@ def test_update_keyword_rename_normalizes_edge_quotes(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        kid = db.add_keyword("apapane")
+        kid = db.keywords.add("apapane")
         db.update_keyword(kid, name="‘apapane")
         db.commit()
 
@@ -20257,7 +20259,7 @@ def test_update_keyword_rename_rejects_empty_after_normalization(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        kid = db.add_keyword("Real Keyword")
+        kid = db.keywords.add("Real Keyword")
         db.commit()
 
         with pytest.raises(ValueError):
@@ -20283,7 +20285,7 @@ def test_update_keyword_rename_preserves_okina(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        kid = db.add_keyword("Placeholder")
+        kid = db.keywords.add("Placeholder")
         db.update_keyword(kid, name="ʻApapane")
         db.commit()
 
@@ -20314,7 +20316,7 @@ def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
         )
         taxonomy_id = cur.lastrowid
         # A separate top-level general `apapane` row also exists.
-        general_id = db.add_keyword("apapane", kw_type="general")
+        general_id = db.keywords.add("apapane", kw_type="general")
         db.commit()
         assert general_id != taxonomy_id
 
@@ -20366,7 +20368,7 @@ def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
         )
         taxonomy_id = cur.lastrowid
         # General peer at the same slot.
-        general_id = db.add_keyword("apapane", kw_type="general")
+        general_id = db.keywords.add("apapane", kw_type="general")
         db.commit()
         assert general_id != taxonomy_id
 
@@ -20576,8 +20578,8 @@ def test_merge_keyword_into_retargets_edit_history(tmp_path):
         )
 
         # Survivor and about-to-be-merged source of the same type.
-        keep_id = db.add_keyword("Robin", kw_type="general")
-        merge_id = db.add_keyword("robin variant", kw_type="general")
+        keep_id = db.keywords.add("Robin", kw_type="general")
+        merge_id = db.keywords.add("robin variant", kw_type="general")
         # Both photos are tagged with merge_id so undo has something to hit.
         db.tag_photo(pid, merge_id)
         db.tag_photo(pid_replace, merge_id)
@@ -20669,8 +20671,8 @@ def test_merge_keyword_into_dedupes_keyword_ids_after_retarget(tmp_path):
             file_size=100, file_mtime=1.0,
         )
 
-        keep_id = db.add_keyword("Robin", kw_type="general")
-        merge_id = db.add_keyword("robin variant", kw_type="general")
+        keep_id = db.keywords.add("Robin", kw_type="general")
+        merge_id = db.keywords.add("robin variant", kw_type="general")
         db.tag_photo(pid, merge_id)
         db.commit()
 
@@ -20720,8 +20722,8 @@ def test_merge_keyword_into_preserves_prediction_accept_old_value(tmp_path):
             file_size=100, file_mtime=1.0,
         )
 
-        keep_id = db.add_keyword("Sparrow", kw_type="general")
-        merge_id = db.add_keyword("sparrow variant", kw_type="general")
+        keep_id = db.keywords.add("Sparrow", kw_type="general")
+        merge_id = db.keywords.add("sparrow variant", kw_type="general")
         db.commit()
 
         # Contrive a prediction_accept edit whose item.old_value (the
@@ -20787,8 +20789,8 @@ def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
             file_size=100, file_mtime=1.0,
         )
 
-        keep_id = db.add_keyword("Robin", kw_type="general")
-        merge_id = db.add_keyword("robin variant", kw_type="general")
+        keep_id = db.keywords.add("Robin", kw_type="general")
+        merge_id = db.keywords.add("robin variant", kw_type="general")
 
         # pid_had_both already carries the survivor before the add.
         db.tag_photo(pid_had_both, keep_id)
@@ -20871,8 +20873,8 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tm
             db, folder_id=fid, filename="src.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        keep_id = db.add_keyword("Robin", kw_type="general")
-        merge_id = db.add_keyword("robin variant", kw_type="general")
+        keep_id = db.keywords.add("Robin", kw_type="general")
+        merge_id = db.keywords.add("robin variant", kw_type="general")
         db.tag_photo(pid_had_both, keep_id)
         db.tag_photo(pid_had_both, merge_id)
         db.tag_photo(pid_only_src, merge_id)
@@ -20950,8 +20952,8 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept
             db, folder_id=fid, filename="src.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        keep_id = db.add_keyword("Robin", kw_type="general")
-        merge_id = db.add_keyword("robin variant", kw_type="general")
+        keep_id = db.keywords.add("Robin", kw_type="general")
+        merge_id = db.keywords.add("robin variant", kw_type="general")
         db.tag_photo(pid_had_both, keep_id)
         db.tag_photo(pid_had_both, merge_id)
         db.tag_photo(pid_only_src, merge_id)
@@ -23486,7 +23488,7 @@ def test_get_keywords_for_photos_chunks_and_dedups_large_input(tmp_path):
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    kid = db.add_keyword("Robin", kw_type="general")
+    kid = db.keywords.add("Robin", kw_type="general")
     db.tag_photo(pid, kid)
     db.commit()
 
@@ -23806,14 +23808,14 @@ def test_life_list_taxon_ids_scope(db):
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                       file_size=1, file_mtime=2.0, timestamp='2024-01-02T00:00:00')
     # Matched species keyword (linked to Song Sparrow taxon)
-    k1 = db.add_keyword('Song Sparrow')
+    k1 = db.keywords.add('Song Sparrow')
     db.tag_photo(p1, k1)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza melodia'], k1))
     db.conn.commit()
     # Unmatched species keyword (is_species but no taxon_id)
-    k2 = db.add_keyword('Mystery Warbler')
+    k2 = db.keywords.add('Mystery Warbler')
     db.tag_photo(p2, k2)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1 WHERE id=?", (k2,))
@@ -23838,7 +23840,7 @@ def test_life_list_taxon_ids_excludes_non_species_matches(db):
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     # Tag with a keyword that links to the Melospiza *genus*, not a species.
-    k = db.add_keyword('Melospiza sp.')
+    k = db.keywords.add('Melospiza sp.')
     db.tag_photo(p, k)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
@@ -23866,8 +23868,8 @@ def test_life_list_uncounted_suppresses_redundant_ancestor_per_photo(db):
         db, folder_id=fid, filename='broad.jpg', extension='.jpg',
         file_size=1, file_mtime=2.0,
     )
-    family_kw = db.add_keyword('New World sparrows', kw_type='taxonomy')
-    species_kw = db.add_keyword('Song Sparrow', kw_type='taxonomy')
+    family_kw = db.keywords.add('New World sparrows', kw_type='taxonomy')
+    species_kw = db.keywords.add('Song Sparrow', kw_type='taxonomy')
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
@@ -23934,8 +23936,8 @@ def test_life_list_uncounted_filter_targets_only_unsuppressed_photos(db):
         db, folder_id=fid, filename='rejected.jpg', extension='.jpg',
         file_size=1, file_mtime=3.0,
     )
-    family_kw = db.add_keyword('New World sparrows', kw_type='taxonomy')
-    species_kw = db.add_keyword('Song Sparrow', kw_type='taxonomy')
+    family_kw = db.keywords.add('New World sparrows', kw_type='taxonomy')
+    species_kw = db.keywords.add('Song Sparrow', kw_type='taxonomy')
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
@@ -23979,7 +23981,7 @@ def test_life_list_taxon_ids_excludes_rejected(db):
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
-    k = db.add_keyword('Song Sparrow')
+    k = db.keywords.add('Song Sparrow')
     db.tag_photo(p, k)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
@@ -24040,7 +24042,7 @@ def test_best_photo_by_taxon(db):
     db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.2, p1))
     db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.9, p2))
     db.conn.commit()
-    k = db.add_keyword('Song Sparrow')
+    k = db.keywords.add('Song Sparrow')
     db.tag_photo(p1, k)
     db.tag_photo(p2, k)
     db.commit()
@@ -24062,7 +24064,7 @@ def test_best_photo_by_taxon_chunks_large_id_list(db):
     fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
-    k = db.add_keyword('Song Sparrow')
+    k = db.keywords.add('Song Sparrow')
     db.tag_photo(p, k)
     db.commit()
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
@@ -24153,7 +24155,7 @@ def test_add_species_keyword_prefers_species_rank_over_genus_homonym(tmp_path):
         "SELECT id FROM taxa WHERE rank = 'species'"
     ).fetchone()["id"]
 
-    kid = db.add_keyword("Puma", is_species=True)
+    kid = db.keywords.add("Puma", is_species=True)
     db.commit()
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -24185,7 +24187,7 @@ def test_add_general_keyword_promoted_to_species_prefers_species_rank(tmp_path):
         "SELECT id FROM taxa WHERE rank = 'species'"
     ).fetchone()["id"]
 
-    kid = db.add_keyword("Puma")
+    kid = db.keywords.add("Puma")
     db.commit()
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -24217,7 +24219,7 @@ def test_rename_keyword_to_matching_taxon_prefers_species_rank(tmp_path):
         "SELECT id FROM taxa WHERE rank = 'species'"
     ).fetchone()["id"]
 
-    kid = db.add_keyword("Cougar")
+    kid = db.keywords.add("Cougar")
     db.update_keyword(kid, name="Puma")
     db.commit()
 
@@ -24260,7 +24262,7 @@ def test_add_species_rebinds_existing_row_from_higher_rank_to_species(tmp_path):
 
     # Legacy row: correctly typed taxonomy species but bound to the
     # non-species-rank genus taxon.
-    kid = db.add_keyword("Puma", is_species=True)
+    kid = db.keywords.add("Puma", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -24274,7 +24276,7 @@ def test_add_species_rebinds_existing_row_from_higher_rank_to_species(tmp_path):
 
     # Accepting the species again should rebind onto the species-rank
     # taxon rather than leaving the higher-rank homonym in place.
-    same = db.add_keyword("Puma", is_species=True)
+    same = db.keywords.add("Puma", is_species=True)
     db.commit()
     assert same == kid
     row = db.conn.execute(
@@ -24308,7 +24310,7 @@ def test_add_species_preserves_species_taxon_over_species_taxon(tmp_path):
         "SELECT id FROM taxa WHERE inat_id = 7000"
     ).fetchone()["id"]
 
-    kid = db.add_keyword("Robin", is_species=True)
+    kid = db.keywords.add("Robin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -24316,7 +24318,7 @@ def test_add_species_preserves_species_taxon_over_species_taxon(tmp_path):
     )
     db.conn.commit()
 
-    same = db.add_keyword("Robin", is_species=True)
+    same = db.keywords.add("Robin", is_species=True)
     db.commit()
     assert same == kid
     row = db.conn.execute(
@@ -24362,7 +24364,7 @@ def test_promote_general_row_with_higher_rank_taxon_rebinds_to_species(tmp_path)
     kid = cur.lastrowid
     db.conn.commit()
 
-    same = db.add_keyword("Puma")
+    same = db.keywords.add("Puma")
     db.commit()
     assert same == kid
     row = db.conn.execute(
@@ -24400,7 +24402,7 @@ def test_add_species_prefers_alternate_common_name_over_higher_rank_direct(tmp_p
     )
     db.conn.commit()
 
-    kid = db.add_keyword("Boa", is_species=True)
+    kid = db.keywords.add("Boa", is_species=True)
     db.commit()
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -24432,7 +24434,7 @@ def test_add_species_leaves_taxon_null_when_only_higher_rank_matches(tmp_path):
     )
     db.conn.commit()
 
-    kid = db.add_keyword("Corvidae", is_species=True)
+    kid = db.keywords.add("Corvidae", is_species=True)
     db.commit()
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -24483,7 +24485,7 @@ def test_add_species_preserves_higher_rank_taxon_when_no_species_match(tmp_path)
     db.conn.commit()
 
     # Re-adding as a taxonomy keyword must NOT clear the family link.
-    same = db.add_keyword("Corvidae", is_species=True)
+    same = db.keywords.add("Corvidae", is_species=True)
     db.commit()
     assert same == kid
     row = db.conn.execute(
@@ -24496,7 +24498,7 @@ def test_add_species_preserves_higher_rank_taxon_when_no_species_match(tmp_path)
 
     # The same guarantee must hold for the kw_type='taxonomy' variant
     # taken by other callers.
-    same_typed = db.add_keyword("Corvidae", kw_type="taxonomy")
+    same_typed = db.keywords.add("Corvidae", kw_type="taxonomy")
     db.commit()
     assert same_typed == kid
     row = db.conn.execute(
@@ -24961,14 +24963,14 @@ def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
     # Root "Verdin" + hierarchy leaf "Desert Verdin" both bound to the
     # same species taxon. resolve_species_display canonicalizes
     # "Desert Verdin" through the shared taxon to root "Verdin".
-    root = db.add_keyword("Verdin", is_species=True)
+    root = db.keywords.add("Verdin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
         (taxa["Verdin"], root),
     )
-    parent = db.add_keyword("Penduline tits")
-    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    leaf = db.keywords.add("Desert Verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -25033,22 +25035,22 @@ def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path
         "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
     )
     # Leaf "Desert Verdin" bound to the Verdin species taxon.
-    parent = db.add_keyword("Penduline tits")
-    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    leaf = db.keywords.add("Desert Verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
         "WHERE id = ?",
         (taxa["Verdin"], leaf),
     )
-    verdin_root = db.add_keyword("Verdin", is_species=True)
+    verdin_root = db.keywords.add("Verdin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
         (taxa["Verdin"], verdin_root),
     )
     # Unrelated root "American Robin" bound to a different species taxon.
-    robin_root = db.add_keyword("American Robin", is_species=True)
+    robin_root = db.keywords.add("American Robin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -25104,16 +25106,16 @@ def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_pa
         "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
     )
     # Two hierarchy leaves both named "Robin" but linked to distinct taxa.
-    parent_a = db.add_keyword("Old World")
-    leaf_a = db.add_keyword("Robin", parent_id=parent_a)
+    parent_a = db.keywords.add("Old World")
+    leaf_a = db.keywords.add("Robin", parent_id=parent_a)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
         "WHERE id = ?",
         (taxa["European Robin"], leaf_a),
     )
-    parent_b = db.add_keyword("New World")
-    leaf_b = db.add_keyword("Robin", parent_id=parent_b)
+    parent_b = db.keywords.add("New World")
+    leaf_b = db.keywords.add("Robin", parent_id=parent_b)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -25121,13 +25123,13 @@ def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_pa
         (taxa["American Robin"], leaf_b),
     )
     # Corresponding roots for each linked taxon.
-    american_root = db.add_keyword("American Robin", is_species=True)
+    american_root = db.keywords.add("American Robin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
         (taxa["American Robin"], american_root),
     )
-    european_root = db.add_keyword("European Robin", is_species=True)
+    european_root = db.keywords.add("European Robin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -25190,8 +25192,8 @@ def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
         file_size=100, file_mtime=1.0,
     )
     # Photo carries only a Verdin hierarchy leaf.
-    parent = db.add_keyword("Penduline tits")
-    nested = db.add_keyword("verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    nested = db.keywords.add("verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -25202,7 +25204,7 @@ def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
     # Root named "American Robin" bound to that species' taxon — its
     # taxon_id does NOT match the leaf's taxon, so the taxon-linked
     # fallback must reject the pairing.
-    robin_root = db.add_keyword("American Robin", is_species=True)
+    robin_root = db.keywords.add("American Robin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -25249,7 +25251,7 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
     # Top-level species root named "Robin" linked to the American Robin
     # taxon (this is the row ``resolve_species_display`` case 1
     # returns for the label "Robin").
-    root = db.add_keyword("Robin", is_species=True)
+    root = db.keywords.add("Robin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -25258,15 +25260,15 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
     # A hierarchy leaf also named "Robin" but linked to a DIFFERENT taxon
     # (European Robin), plus a canonical root for that taxon whose
     # stored spelling differs from the prediction label.
-    parent = db.add_keyword("Old World")
-    leaf = db.add_keyword("Robin", parent_id=parent)
+    parent = db.keywords.add("Old World")
+    leaf = db.keywords.add("Robin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
         "WHERE id = ?",
         (taxa["European Robin"], leaf),
     )
-    european_root = db.add_keyword("European Robin", is_species=True)
+    european_root = db.keywords.add("European Robin", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
@@ -25347,7 +25349,7 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     # not yet rebound). ``mark_species_keywords`` would rebind it during
     # a startup pass, but until then it stays higher-rank while still
     # flagged is_species/taxonomy.
-    kid = db.add_keyword("Puma")
+    kid = db.keywords.add("Puma")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
@@ -25757,9 +25759,9 @@ def test_universal_filter_species_any_match(tmp_path):
                          file_size=100, file_mtime=1.0)
     single = photo_ingest.add_photo(db, folder_id=fid, filename='single.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    heron = db.add_keyword('Great Blue Heron', is_species=True)
-    egret = db.add_keyword('Snowy Egret', is_species=True)
-    plain = db.add_keyword('wetlands')
+    heron = db.keywords.add('Great Blue Heron', is_species=True)
+    egret = db.keywords.add('Snowy Egret', is_species=True)
+    plain = db.keywords.add('wetlands')
     db.tag_photo(multi, heron)
     db.tag_photo(multi, egret)
     db.tag_photo(single, heron)
@@ -25786,7 +25788,7 @@ def test_universal_filter_species_contains_escapes_like_metacharacters(tmp_path)
     db, fid = _filter_db(tmp_path)
     only = photo_ingest.add_photo(db, folder_id=fid, filename='only.jpg', extension='.jpg',
                         file_size=100, file_mtime=1.0)
-    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    heron = db.keywords.add('Great Blue Heron', is_species=True)
     db.tag_photo(only, heron)
     db.commit()
 
@@ -25814,7 +25816,7 @@ def test_universal_filter_keyword_contains_escapes_like_metacharacters(tmp_path)
                           file_size=100, file_mtime=1.0)
     untagged = photo_ingest.add_photo(db, folder_id=fid, filename='untagged.jpg', extension='.jpg',
                             file_size=100, file_mtime=1.0)
-    k = db.add_keyword('Red-tailed hawk')
+    k = db.keywords.add('Red-tailed hawk')
     db.tag_photo(tagged, k)
     db.commit()
 
@@ -25849,13 +25851,13 @@ def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_p
     # top-level root "Verdin". Leaf spelling ("Auriparus flaviceps") is
     # distinct from root ("Verdin"), so a raw ``k.name`` predicate cannot
     # rescue the match — canonicalization through ``taxon_id`` is required.
-    parent = db.add_keyword("Penduline tits")
-    leaf = db.add_keyword("Auriparus flaviceps", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    leaf = db.keywords.add("Auriparus flaviceps", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
         "WHERE id=?", (taxa["Verdin"], leaf))
-    db.add_keyword("Verdin", is_species=True)  # auto-links taxon_id
+    db.keywords.add("Verdin", is_species=True)  # auto-links taxon_id
     db.commit()
     db.conn.commit()
     db.tag_photo(pid, leaf)
@@ -26598,7 +26600,7 @@ def test_browse_stacks_split_an_untagged_frame_out_of_a_tagged_run(tmp_path):
     the frame folds it back into the run.
     """
     db, fid = _filter_db(tmp_path)
-    eagle = db.add_keyword("Bald Eagle", is_species=True, kw_type="taxonomy")
+    eagle = db.keywords.add("Bald Eagle", is_species=True, kw_type="taxonomy")
     db.commit()
     tagged_a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", eagle)
     tagged_b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", eagle)
@@ -26620,8 +26622,8 @@ def test_browse_stacks_split_an_untagged_frame_out_of_a_tagged_run(tmp_path):
 def test_browse_stacks_break_at_a_species_change(tmp_path):
     """Default ``break`` mode ends the run wherever the species changes."""
     db, fid = _filter_db(tmp_path)
-    eagle = db.add_keyword("Bald Eagle", is_species=True, kw_type="taxonomy")
-    hawk = db.add_keyword("Red-tailed Hawk", is_species=True, kw_type="taxonomy")
+    eagle = db.keywords.add("Bald Eagle", is_species=True, kw_type="taxonomy")
+    hawk = db.keywords.add("Red-tailed Hawk", is_species=True, kw_type="taxonomy")
     db.commit()
     first = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", eagle)
     middle = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", hawk)
@@ -26637,8 +26639,8 @@ def test_browse_stacks_break_at_a_species_change(tmp_path):
 def test_browse_stacks_partition_mode_regroups_an_interleaved_run(tmp_path):
     """``partition`` keeps one stack per keyword set instead of fragmenting."""
     db, fid = _filter_db(tmp_path)
-    eagle = db.add_keyword("Bald Eagle", is_species=True, kw_type="taxonomy")
-    hawk = db.add_keyword("Red-tailed Hawk", is_species=True, kw_type="taxonomy")
+    eagle = db.keywords.add("Bald Eagle", is_species=True, kw_type="taxonomy")
+    hawk = db.keywords.add("Red-tailed Hawk", is_species=True, kw_type="taxonomy")
     db.commit()
     first = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", eagle)
     middle = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", hawk)
@@ -26656,8 +26658,8 @@ def test_browse_stacks_partition_mode_regroups_an_interleaved_run(tmp_path):
 def test_browse_stacks_break_at_a_location_change(tmp_path):
     """Location keywords join the burst identity alongside species."""
     db, fid = _filter_db(tmp_path)
-    kodiak = db.add_keyword("Kodiak Island", kw_type="location")
-    homer = db.add_keyword("Homer", kw_type="location")
+    kodiak = db.keywords.add("Kodiak Island", kw_type="location")
+    homer = db.keywords.add("Homer", kw_type="location")
     db.commit()
     a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", kodiak)
     b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", kodiak)
@@ -26724,7 +26726,7 @@ def test_collapse_browse_stack_photo_ids_matches_the_sql_projection(tmp_path):
     reversing the input must not change the grouping.
     """
     db, fid = _filter_db(tmp_path)
-    eagle = db.add_keyword("Bald Eagle", is_species=True, kw_type="taxonomy")
+    eagle = db.keywords.add("Bald Eagle", is_species=True, kw_type="taxonomy")
     db.commit()
     a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00", eagle)
     b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01", eagle)
@@ -27394,7 +27396,7 @@ def test_get_filter_field_values_counts_respect_rules(tmp_path):
     values = db.collections.get_filter_field_values("camera_model", q="son")
     assert values == [{"value": "Sony A1", "count": 2}]
     # Keyword and species values come from the keyword tables.
-    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    heron = db.keywords.add('Great Blue Heron', is_species=True)
     db.tag_photo(ids[0], heron)
     db.commit()
     assert db.collections.get_filter_field_values("species") == [
@@ -27530,8 +27532,8 @@ def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
     # Photo p_leaf: tagged only with a hierarchy leaf linked to Verdin taxon.
     p_leaf = photo_ingest.add_photo(db, folder_id=fid, filename='leaf.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    parent = db.add_keyword("Penduline tits")
-    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    leaf = db.keywords.add("Desert Verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
@@ -27539,7 +27541,7 @@ def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
     # Photo p_root: tagged with the top-level root directly (auto-links).
     p_root = photo_ingest.add_photo(db, folder_id=fid, filename='root.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    root_kid = db.add_keyword("Verdin", is_species=True)
+    root_kid = db.keywords.add("Verdin", is_species=True)
     db.tag_photo(p_leaf, leaf)
     db.tag_photo(p_root, root_kid)
     db.commit()
@@ -27577,8 +27579,8 @@ def test_get_filter_field_values_species_preserves_attached_root_spelling(tmp_pa
     fid = workspace_folders.add_folder(db, '/photos', name='photos')
     taxa = _seed_taxa(db, [(9999, "Corvus brachyrhynchos", "American Crow")])
     # Two top-level roots for the same taxon: one earlier, one later.
-    root_early = db.add_keyword("American Crow", is_species=True)
-    root_late = db.add_keyword("crow (american)", is_species=True)
+    root_early = db.keywords.add("American Crow", is_species=True)
+    root_late = db.keywords.add("crow (american)", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET taxon_id=? WHERE id=?",
@@ -27593,8 +27595,8 @@ def test_get_filter_field_values_species_preserves_attached_root_spelling(tmp_pa
     # canonicalizes to the MIN(id) root (existing behavior).
     p_leaf = photo_ingest.add_photo(db, folder_id=fid, filename='leaf.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    parent = db.add_keyword("Corvids")
-    leaf = db.add_keyword("Northeastern Crow", parent_id=parent)
+    parent = db.keywords.add("Corvids")
+    leaf = db.keywords.add("Northeastern Crow", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
@@ -27746,9 +27748,9 @@ def test_universal_filter_species_matches_by_displayed_root_name(tmp_path):
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='v.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    root_kw = db.add_keyword("Verdin", is_species=True)
-    parent = db.add_keyword("Penduline tits")
-    leaf = db.add_keyword("Auriparus flaviceps", parent_id=parent)
+    root_kw = db.keywords.add("Verdin", is_species=True)
+    parent = db.keywords.add("Penduline tits")
+    leaf = db.keywords.add("Auriparus flaviceps", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
@@ -27794,8 +27796,8 @@ def test_universal_filter_species_matches_rootless_hierarchy_leaf(tmp_path):
                        file_size=100, file_mtime=1.0)
     other = photo_ingest.add_photo(db, folder_id=fid, filename='other.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    parent = db.add_keyword("Penduline tits")
-    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    leaf = db.keywords.add("Desert Verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
@@ -27847,14 +27849,14 @@ def test_universal_filter_species_multi_root_isolates_attached_spelling(tmp_path
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     # Create ``Verdin`` first so it wins MIN(id) — the sibling root
     # ``Auriparus flaviceps`` gets a higher id.
-    verdin_root = db.add_keyword("Verdin", is_species=True)
-    sci_root = db.add_keyword("Auriparus flaviceps", is_species=True)
+    verdin_root = db.keywords.add("Verdin", is_species=True)
+    sci_root = db.keywords.add("Auriparus flaviceps", is_species=True)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
         "WHERE id=?", (taxa["Verdin"], sci_root))
-    parent = db.add_keyword("Penduline tits")
-    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    parent = db.keywords.add("Penduline tits")
+    leaf = db.keywords.add("Desert Verdin", parent_id=parent)
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
@@ -27910,7 +27912,7 @@ def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
     p_none = photo_ingest.add_photo(db, folder_id=fid, filename='none.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     # Legacy shape: type='taxonomy', is_species=0, taxon linked to a species.
-    legacy_kw = db.add_keyword("Verdin")
+    legacy_kw = db.keywords.add("Verdin")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET type='taxonomy', is_species=0, taxon_id=? "
@@ -27918,7 +27920,7 @@ def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
     db.conn.commit()
     db.tag_photo(p_legacy, legacy_kw)
     # Newer shape: is_species=1 flag.
-    flag_kw = db.add_keyword("Great Blue Heron", is_species=True)
+    flag_kw = db.keywords.add("Great Blue Heron", is_species=True)
     db.tag_photo(p_flag, flag_kw)
     db.commit()
 
@@ -27951,7 +27953,7 @@ def test_universal_filter_species_count(tmp_path):
     ])
 
     def _species_kw(name, taxon, parent_id=None):
-        kw = db.add_keyword(name, parent_id=parent_id)
+        kw = db.keywords.add(name, parent_id=parent_id)
         db.commit()
         db.conn.execute(
             "UPDATE keywords SET type='taxonomy', is_species=0, taxon_id=? "
@@ -27961,11 +27963,11 @@ def test_universal_filter_species_count(tmp_path):
 
     verdin = _species_kw("Verdin", taxa["Verdin"])
     heron = _species_kw("Great Blue Heron", taxa["Great Blue Heron"])
-    birds = db.add_keyword("Birds")
+    birds = db.keywords.add("Birds")
     db.commit()
     # Hierarchy leaf for the same taxon as the ``Verdin`` root above.
     verdin_leaf = _species_kw("Verdin", taxa["Verdin"], parent_id=birds)
-    tucson = db.add_keyword("Tucson")
+    tucson = db.keywords.add("Tucson")
     db.commit()
 
     none_p = photo_ingest.add_photo(db, folder_id=fid, filename='none.jpg', extension='.jpg',
@@ -28019,8 +28021,8 @@ def test_universal_filter_species_count_unlinked_keywords(tmp_path):
     differently-spelled offline species tags count as two, and the field
     still works in a catalog with no taxonomy at all."""
     db, fid = _filter_db(tmp_path)
-    robin = db.add_keyword("Robin", is_species=True)
-    wren = db.add_keyword("Wren", is_species=True)
+    robin = db.keywords.add("Robin", is_species=True)
+    wren = db.keywords.add("Wren", is_species=True)
     db.commit()
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='legacy.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
@@ -28130,7 +28132,7 @@ def test_get_photo_location_paths_stops_at_a_non_location_parent(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.ensure_default_workspace())
     pid, leaf, _folder = _located_photo(db, tmp_path, "a.jpg", ["Kumeyaay Lake"])
-    general = db.add_keyword("Trips")
+    general = db.keywords.add("Trips")
     db.commit()
     db.conn.execute(
         "UPDATE keywords SET parent_id = ? WHERE id = ?", (general, leaf),
@@ -28257,7 +28259,7 @@ def test_has_pending_location_change(tmp_path):
     pid, _leaf, _folder = _located_photo(db, tmp_path, "a.jpg", ["Kumeyaay Lake"])
 
     assert db.locations.has_pending_change(pid) is False
-    db.queue_change(pid, "location", "effective")
+    db.pending_changes.queue(pid, "location", "effective")
     db.commit()
     assert db.locations.has_pending_change(pid) is True
     db.close()

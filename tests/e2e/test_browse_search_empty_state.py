@@ -1358,7 +1358,7 @@ def test_load_keywords_renders_older_success_after_newer_failure(
     assert held, "older keyword-tree request was never issued"
 
     keyword_name = "Fallback keyword"
-    keyword_id = db.add_keyword(keyword_name)
+    keyword_id = db.keywords.add(keyword_name)
     db.tag_photo(live_server["data"]["photos"][0], keyword_id)
     db.commit()
     page.evaluate("() => { window._failedKeywordLoad = pageModules.sidebarKeywords.loadKeywords(); }")

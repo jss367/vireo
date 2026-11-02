@@ -18,23 +18,20 @@ photo carry":
 - ``get_accepted_species``: the species on the active workspace's
   geolocated photos, for the map's species filter.
 
-Nothing here writes. The method bodies moved verbatim from
-``repositories/keywords.py`` (and before that from ``Database``); only their
-signatures gained annotations. ``self._chunks`` is ``db._chunks``, injected by
-``Database._photo_species_repository``, and ``workspace_id`` resolves the
-active workspace lazily through ``Database._ws_id`` at exactly the point the
-original code called it. The SQL text, parameter order and chunk sizes are
-unchanged.
+Nothing here writes. The repository takes its connection and the workspace
+resolver (``Database._ws_id``), resolved lazily where a read is scoped;
+id lists are chunked with ``repositories.chunks``.
 
 Callers reach it through the ``db.photo_species`` accessor, which builds a
 fresh repository per access; do not hold one across a workspace switch.
 """
 
 import sqlite3
-from collections.abc import Callable, Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable
 from typing import Any
 
 from keyword_normalization import keyword_match_key
+from repositories import chunks
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 
 
@@ -43,19 +40,14 @@ class PhotoSpeciesRepository:
         self,
         conn: sqlite3.Connection,
         resolve_workspace_id: Callable[[], int],
-        *,
-        chunks: Callable[..., Iterator[list[Any]]],
     ) -> None:
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
-        # ``db._chunks`` itself (its size default is bound at import), kept
-        # under its module name so the moved bodies read ``self._chunks``.
-        self._chunks = chunks
 
     def confirmation_species_evidence(self, photo_ids: Collection[int]) -> list[dict[str, Any]]:
         """Attached species provenance read by confirmation-summary refreshes."""
         result = []
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             marks = ",".join("?" for _ in chunk)
             result.extend(dict(row) for row in self.conn.execute(
                 f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
@@ -81,7 +73,7 @@ class PhotoSpeciesRepository:
         """
         result = []
         ws = self.workspace_id
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             marks = ",".join("?" for _ in chunk)
             photos = self.conn.execute(
                 f"SELECT id, filename, timestamp, flag FROM photos WHERE id IN ({marks})",
@@ -137,7 +129,7 @@ class PhotoSpeciesRepository:
             "AND (is_species=1 OR type='taxonomy') ORDER BY id",
         ) if keyword_match_key(row["name"]) in keys]
         result = []
-        for chunk in self._chunks(ids):
+        for chunk in chunks(ids):
             marks = ",".join("?" for _ in chunk)
             result.extend(dict(row) for row in self.conn.execute(
                 f"""SELECT k.id, k.name, k.parent_id, k.type, k.is_species,
@@ -188,7 +180,7 @@ class PhotoSpeciesRepository:
         photo_ids = list(dict.fromkeys(photo_ids))
         chosen = {}
         source_keys = {}
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"""SELECT pk.photo_id, k.id, k.name, k.parent_id,
@@ -254,7 +246,7 @@ class PhotoSpeciesRepository:
         }
         canonical_roots = {}
         if taxon_ids:
-            for chunk in self._chunks(list(taxon_ids)):
+            for chunk in chunks(list(taxon_ids)):
                 placeholders = ",".join("?" for _ in chunk)
                 root_rows = self.conn.execute(
                     f"""SELECT taxon_id, name FROM keywords
@@ -295,7 +287,7 @@ class PhotoSpeciesRepository:
         Same keyword filter as :meth:`species_rank_keywords_for_photo`.
         """
         found = set()
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             found.update(
                 row["photo_id"] for row in self.conn.execute(
@@ -363,7 +355,7 @@ class PhotoSpeciesRepository:
         homonym_conflict = self._species_homonym_conflict(
             target, keyword_id, target_key,
         )
-        for chunk in self._chunks(ids):
+        for chunk in chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             if target["taxon_id"] is not None:
                 result.update(self._linked_species_photo_ids(
@@ -507,7 +499,7 @@ class PhotoSpeciesRepository:
         chunk's rows come root rows first, then by keyword id.
         """
         rows = []
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             if linked_root_taxon is not None:
                 rows.extend(self.conn.execute(
@@ -550,7 +542,7 @@ class PhotoSpeciesRepository:
         come by photo, then root rows first, then by keyword id.
         """
         rows = []
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT pk.photo_id, k.id, k.name, k.taxon_id

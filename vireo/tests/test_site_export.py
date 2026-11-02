@@ -101,7 +101,7 @@ def test_complete_export_preserves_albums_metadata_and_workspace_scope(tmp_path,
 
 def test_export_has_no_species_limit_and_disambiguates_filenames(tmp_path, monkeypatch):
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
-    keyword = db.add_keyword('Northern Cardinal', is_species=True)
+    keyword = db.keywords.add('Northern Cardinal', is_species=True)
     db.commit()
     folder = workspace_folders.add_folder(db, str(meta['photos_dir']), name='photos')
     for i in range(201):

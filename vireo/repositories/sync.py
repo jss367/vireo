@@ -4,23 +4,18 @@ Callers reach it as ``db.pending_changes`` (a fresh repository per access,
 see ``Database.pending_changes``); the reads and the simple writes have no
 forwarding wrappers on ``Database``.
 
-``Database`` owns the active-workspace state and the composition: it decides
-when cancelling a captured keyword queues its inverse (``remove_pending_changes``,
-which checks :meth:`keyword_sidecar_alias` on its own repository and queues
-through ``Database.queue_change``), when a clear also drops equivalent flat
-removals (``clear_pending`` and ``clear_pending_by_token``, through
-:meth:`clear_equivalent_flat_removals` on their repository), and whether
-flag sync is on. ``queue_change`` stays a ``Database`` method because the
-keyword-provenance and location repositories bind it from the façade by
-name, so a patch of ``Database.queue_change`` keeps reaching them; queue
-changes through it rather than :meth:`queue`. This repository owns the SQL.
+Queue a change with :meth:`queue` and cancel one with :meth:`cancel`, which
+queues the inverse of a captured keyword intent that may already have
+reached a sidecar (it checks :meth:`keyword_sidecar_alias`). ``Database``
+owns the active-workspace state and decides whether flag sync is on;
+``services/pending_changes.py`` decides when a clear also drops equivalent
+flat removals (``clear_pending`` and ``clear_pending_by_token``, through
+:meth:`clear_equivalent_flat_removals`).
 
 The active workspace is resolved lazily. Several of these methods only
 consult it once a row turns up (the staged sync scopes or the sync
-claim), and the façade never resolved it
-earlier than that, so the repository takes the resolver
-(``Database._ws_id``) rather than an id and reads ``self.workspace_id`` at
-exactly the points the original code called ``self._ws_id()``. Methods that
+claim), so the repository takes the resolver (``Database._ws_id``) rather
+than an id and resolves it only at those points. Methods that
 take an optional ``workspace_id`` fall back to it the same way.
 
 No method here commits: the route, job or service that queues or retires
@@ -461,6 +456,38 @@ class SyncRepository:
                  AND value = ? COLLATE NOCASE""",
             (photo_id, value),
         )]
+
+    def cancel(
+        self,
+        photo_id: int,
+        change_type: str | None = None,
+        value: str | None = None,
+        workspace_id: int | None = None,
+    ) -> int:
+        """Delete matching pending changes, preserving captured keyword intents.
+
+        Return the number of rows removed.
+
+        If a keyword may already have reached a writer, cancelling it queues
+        its inverse in the same transaction. The inverse is also marked as
+        possibly written: further toggles must keep explicit repair work
+        until a sync acknowledges it, even if the first write fails.
+
+        """
+        ws_id = workspace_id if workspace_id is not None else self._resolve_workspace_id()
+        repo = self
+        removed = repo.delete_matching(
+            photo_id, ws_id, change_type=change_type, value=value,
+        )
+        inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
+        for row in removed:
+            if row["change_type"] in inverse and (
+                row["sync_started"] or repo.keyword_sidecar_alias(photo_id, ws_id, row["value"])
+            ):
+                kind = inverse[row["change_type"]]
+                self.queue(photo_id, kind, row["value"], workspace_id=ws_id)
+                repo.mark_sync_started(photo_id, ws_id, kind, row["value"])
+        return len(removed)
 
     def delete_matching(
         self,

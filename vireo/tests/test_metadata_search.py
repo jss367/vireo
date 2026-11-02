@@ -51,9 +51,9 @@ def catalog(tmp_path, monkeypatch):
                     "Subject": ["removed-keyword"], "Rating": 99999},
         }), ids["hawk"]),
     )
-    db.tag_photo(ids["hawk"], db.add_keyword("Perched"))
-    db.tag_photo(ids["owl"], db.add_keyword("Perched"))
-    db.tag_photo(ids["owl"], db.add_keyword("Barn Owl", is_species=True))
+    db.tag_photo(ids["hawk"], db.keywords.add("Perched"))
+    db.tag_photo(ids["owl"], db.keywords.add("Perched"))
+    db.tag_photo(ids["owl"], db.keywords.add("Barn Owl", is_species=True))
     db.commit()
     taxon_id = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank) VALUES ('Tyto alba', 'Western Barn Owl', 'species')"
@@ -287,7 +287,7 @@ def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
     classifier guess on some other detection (a Wood duck found by "least"
     through a stray "Least Grebe" box)."""
     db, ids = catalog
-    genus = db.add_keyword("Tyto", is_species=True)
+    genus = db.keywords.add("Tyto", is_species=True)
     db.commit()
     genus_taxon = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank) VALUES ('Tyto', 'Masked owls', 'genus')"

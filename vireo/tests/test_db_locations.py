@@ -462,10 +462,10 @@ def test_photo_location_paths_walk_share_and_stop(db, fid):
 def test_has_pending_location_change_reads_across_workspaces(db, fid):
     pid = _photo(db, fid, "a.jpg")
     assert db.locations.has_pending_change(pid) is False
-    db.queue_change(pid, "rating", "3")
+    db.pending_changes.queue(pid, "rating", "3")
     db.commit()
     assert db.locations.has_pending_change(pid) is False
-    db.queue_change(pid, "location", "effective")
+    db.pending_changes.queue(pid, "location", "effective")
     db.commit()
     db.set_active_workspace(db.create_workspace("Other"))
     assert db.locations.has_pending_change(pid) is True
@@ -483,7 +483,7 @@ def test_queue_location_changes_backfill_commits_and_is_idempotent(db, fid):
     kid = _kw(db, "Park")
     _link(db, a, kid)
     _link(db, b, kid)
-    db.queue_change(a, "location", "effective")
+    db.pending_changes.queue(a, "location", "effective")
     db.commit()
 
     assert photo_locations.queue_location_changes_for_tagged_photos(db) == {
@@ -515,7 +515,9 @@ def test_queue_location_changes_route_through_facade_queue_change(
         calls.append((photo_id, change_type, value, workspace_id))
         return photo_id == a
 
-    monkeypatch.setattr(db, "queue_change", recorder)
+    from repositories.sync import SyncRepository
+
+    monkeypatch.setattr(SyncRepository, "queue", lambda _repo, *a, **k: recorder(*a, **k))
     with caplog.at_level(logging.INFO, logger="services.photo_locations"):
         result = photo_locations.queue_location_changes_for_tagged_photos(db)
     ws = db._ws_id()
@@ -538,14 +540,16 @@ def test_queue_location_changes_failure_leaves_no_partial_batch(db, fid, monkeyp
     _link(db, a, kid)
     _link(db, b, kid)
     db.commit()
-    real = db.queue_change
+    from repositories.sync import SyncRepository
 
-    def fail_on_b(photo_id, *args, **kwargs):
+    real = SyncRepository.queue
+
+    def fail_on_b(repo, photo_id, *args, **kwargs):
         if photo_id == b:
             raise sqlite3.OperationalError("disk I/O error")
-        return real(photo_id, *args, **kwargs)
+        return real(repo, photo_id, *args, **kwargs)
 
-    monkeypatch.setattr(db, "queue_change", fail_on_b)
+    monkeypatch.setattr(SyncRepository, "queue", fail_on_b)
     with pytest.raises(sqlite3.OperationalError):
         photo_locations.queue_location_changes_for_tagged_photos(db)
     assert not db.conn.in_transaction
@@ -715,7 +719,9 @@ def test_upsert_place_chain_rolls_back_on_failure(db, monkeypatch):
 
 
 def test_location_parent_components_skip_noise(db):
-    parents = db._location_parent_components(
+    from repositories.keyword_provenance import location_component_rank, location_parent_components
+
+    parents = location_parent_components(
         [
             "not-a-dict",
             {"long_name": "  ", "types": ["country"]},
@@ -727,7 +733,7 @@ def test_location_parent_components_skip_noise(db):
         ],
     )
     assert parents == [{"name": "USA"}, {"name": "California"}]
-    assert Database._location_component_rank("nope") is None
+    assert location_component_rank("nope") is None
 
 
 def test_get_or_create_text_location_rejects_none_and_commits_with_the_callers_unit(db):
@@ -838,7 +844,7 @@ def test_get_or_create_text_location_matches_case_insensitively(db):
     # path must agree, or one place splits into two keyword rows.
     kid = db.get_or_create_text_location("Paris")
     assert db.get_or_create_text_location("paris") == kid
-    assert db.add_keyword("PARIS", kw_type="location") == kid
+    assert db.keywords.add("PARIS", kw_type="location") == kid
     assert db.conn.execute(
         "SELECT COUNT(*) FROM keywords WHERE name = 'Paris' COLLATE NOCASE"
     ).fetchone()[0] == 1
@@ -895,9 +901,9 @@ def test_restore_misclassified_ancestor_does_not_commit(db):
     db.conn.commit()
     pure = _kw(db, "Aves", kw_type="taxonomy")
 
-    assert db._restore_misclassified_location_ancestor(pure) is False
-    assert db._restore_misclassified_location_ancestor(state) is False
-    assert db._restore_misclassified_location_ancestor(state, allow_leaf=True) is True
+    assert db.locations.restore_misclassified_ancestor(pure) is False
+    assert db.locations.restore_misclassified_ancestor(state) is False
+    assert db.locations.restore_misclassified_ancestor(state, allow_leaf=True) is True
     assert db.conn.in_transaction
     row = db.conn.execute(
         "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?", (state,),
@@ -1090,14 +1096,11 @@ def test_gps_discrepancy_rows_pick_the_sync_leaf_and_review(db, fid):
 
 # Database methods whose SQL moved to repositories/locations.py and that stay
 # on Database: the ones that compose other domains (keyword upserts,
-# ``tag_photo``, the sync queue) or that another repository binds by name
-# (``_restore_misclassified_location_ancestor`` is in
-# ``repositories.keyword_provenance.FACADE_METHODS``). None may reach the
-# connection directly again. ``link_keyword_to_place`` is not here: it is a
+# ``tag_photo``, the sync queue). None may reach the connection directly
+# again. ``link_keyword_to_place`` is not here: it is a
 # photo_keywords writer, so it delegates to KeywordProvenanceRepository
 # (test_keyword_provenance_contract keys it to repositories/keyword_provenance.py).
 _DELEGATING_LOCATION_METHODS = (
-    "_restore_misclassified_location_ancestor",
     "repair_misclassified_location_ancestors",
     "upsert_place_chain",
     "set_photo_location",
@@ -1177,7 +1180,7 @@ def test_location_read_lives_in_a_service(name):
 def test_location_backfill_queues_through_the_facade():
     """The backfill queues through ``Database.queue_change`` (a FACADE_METHODS name)."""
     source = inspect.getsource(photo_locations.queue_location_changes_for_tagged_photos)
-    assert "queue_change=db.queue_change" in source
+    assert "queue_change=db.pending_changes.queue" in source
 
 
 @pytest.mark.parametrize(
@@ -1187,12 +1190,9 @@ def test_location_backfill_queues_through_the_facade():
             "_location_repository",
             {"_merge_keyword_into"},
         ),
-        (
-            "repair_misclassified_location_ancestors",
-            {"_restore_misclassified_location_ancestor"},
-        ),
+        ("repair_misclassified_location_ancestors", {"_location_repository"}),
         ("set_photo_location", {"tag_photo"}),
-        ("upsert_place_chain", {"_upsert_location_parent_chain", "keyword_provenance"}),
+        ("upsert_place_chain", {"keyword_provenance"}),
         ("get_or_create_text_location", {"keyword_provenance"}),
     ],
 )

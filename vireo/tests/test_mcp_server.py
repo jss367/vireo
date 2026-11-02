@@ -308,7 +308,7 @@ def test_species_preview_binds_existing_assignment_evidence(mcp, app_and_db):
     server, db, _ = mcp
     app, _ = app_and_db
     _seed_encounter_cache(app, db, [1, 2])
-    keyword = db.add_keyword("Mallard", is_species=True)
+    keyword = db.keywords.add("Mallard", is_species=True)
     db.tag_photo(1, keyword)
     db.commit()
     provenance = {"method": "direct_visual", "reviewer": "Agent", "reason": "Visible plumage"}
@@ -331,7 +331,7 @@ def test_species_tools_preserve_existing_user_evidence_in_mixed_selection(mcp, a
     server, db, _ = mcp
     app, _ = app_and_db
     _seed_encounter_cache(app, db, [1, 2, 3])
-    keyword = db.add_keyword("Robin", is_species=True)
+    keyword = db.keywords.add("Robin", is_species=True)
     db.tag_photo(1, keyword)
     db.commit()
     assert app.test_client().post(f"/api/photos/1/species/{keyword}/provenance", json={
@@ -741,8 +741,8 @@ def test_add_and_remove_keyword(mcp):
 
 def test_search_keywords_matches_substrings_and_builds_paths(mcp):
     server, db, _ = mcp
-    parent = db.add_keyword("Owls")
-    child = db.add_keyword("Barn owl", parent_id=parent)
+    parent = db.keywords.add("Owls")
+    child = db.keywords.add("Barn owl", parent_id=parent)
     # The tree holds keywords used by photos in the workspace plus their
     # ancestors, so tagging the child surfaces the parent too.
     db.tag_photo(db.photos.list_page()[0]["id"], child)

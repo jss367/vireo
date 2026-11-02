@@ -681,7 +681,7 @@ def _seed_two_adjacent_stacks(db, ids):
                 "UPDATE photos SET timestamp = ? WHERE id = ?",
                 ((base + datetime.timedelta(seconds=offset)).isoformat(), photo_id),
             )
-    keyword_id = db.add_keyword("Merlin", is_species=True)
+    keyword_id = db.keywords.add("Merlin", is_species=True)
     db.commit()
     for photo_id in ids[:2]:
         db.tag_photo(photo_id, keyword_id)

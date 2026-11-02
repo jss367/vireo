@@ -128,9 +128,9 @@ def browse_seed(db_path, thumb_dir, photos_root):
             db.commit()
 
     # Add keywords and tag some photos
-    k_eagle = db.add_keyword("Eagle", is_species=True)
-    k_robin = db.add_keyword("Robin", is_species=True)
-    k_sparrow = db.add_keyword("Sparrow", is_species=True)
+    k_eagle = db.keywords.add("Eagle", is_species=True)
+    k_robin = db.keywords.add("Robin", is_species=True)
+    k_sparrow = db.keywords.add("Sparrow", is_species=True)
 
     db.tag_photo(photos[0], k_eagle)
     db.tag_photo(photos[1], k_eagle)

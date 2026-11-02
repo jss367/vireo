@@ -543,7 +543,7 @@ def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
 
 def test_queue_change_uses_workspace(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
-    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.pending_changes.queue(photo_id, "keyword_add", "Robin")
     db.commit()
     row = db.conn.execute(
         "SELECT workspace_id FROM pending_changes WHERE photo_id = ?", (photo_id,)
@@ -553,7 +553,7 @@ def test_queue_change_uses_workspace(db_with_workspace):
 
 def test_get_pending_changes_scoped(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
-    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.pending_changes.queue(photo_id, "keyword_add", "Robin")
     db.commit()
     ws2 = db.create_workspace("Other")
     db.commit()
@@ -565,7 +565,7 @@ def test_get_pending_changes_scoped(db_with_workspace):
 
 def test_count_pending_changes_scoped(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
-    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.pending_changes.queue(photo_id, "keyword_add", "Robin")
     db.commit()
     assert db.pending_changes.count() == 1
     ws2 = db.create_workspace("Other")
@@ -576,16 +576,16 @@ def test_count_pending_changes_scoped(db_with_workspace):
 
 def test_queue_change_dedup_within_workspace(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
-    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.pending_changes.queue(photo_id, "keyword_add", "Robin")
     db.commit()
-    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.pending_changes.queue(photo_id, "keyword_add", "Robin")
     db.commit()
     assert db.pending_changes.count() == 1
 
 
 def test_cascade_delete_removes_pending_changes(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
-    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.pending_changes.queue(photo_id, "keyword_add", "Robin")
     db.commit()
     workspace_lifecycle.delete_workspace(db, ws_id)
     count = db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0]
@@ -839,8 +839,8 @@ def test_count_keywords_scoped_by_workspace(db):
     workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    k1 = db.add_keyword("Robin")
-    k2 = db.add_keyword("Jay")
+    k1 = db.keywords.add("Robin")
+    k2 = db.keywords.add("Jay")
     db.tag_photo(pid_a, k1)
     db.tag_photo(pid_a, k2)
     db.commit()
@@ -852,7 +852,7 @@ def test_count_keywords_scoped_by_workspace(db):
     workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    k3 = db.add_keyword("Hawk")
+    k3 = db.keywords.add("Hawk")
     db.tag_photo(pid_b, k3)
     db.commit()
 
@@ -867,7 +867,7 @@ def test_count_keywords_empty_workspace(db):
     """A workspace with no photos returns 0 keywords."""
     ws = db.create_workspace("Empty")
     db.commit()
-    db.add_keyword("Robin")  # global keyword, no photos in this workspace
+    db.keywords.add("Robin")  # global keyword, no photos in this workspace
     db.commit()
     db.set_active_workspace(ws)
     assert db.keywords.count() == 0
@@ -881,7 +881,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
-    k1 = db.add_keyword("Robin")
+    k1 = db.keywords.add("Robin")
     db.tag_photo(pid_a, k1)
     db.commit()
 
@@ -891,7 +891,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
-    k2 = db.add_keyword("Hawk")
+    k2 = db.keywords.add("Hawk")
     db.tag_photo(pid_b, k2)
     db.commit()
 
@@ -916,8 +916,8 @@ def test_keyword_tree_scoped_by_workspace(db):
     workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    k1 = db.add_keyword("Robin")
-    k2 = db.add_keyword("Jay")
+    k1 = db.keywords.add("Robin")
+    k2 = db.keywords.add("Jay")
     db.tag_photo(pid_a, k1)
     db.tag_photo(pid_a, k2)
     db.commit()
@@ -928,7 +928,7 @@ def test_keyword_tree_scoped_by_workspace(db):
     workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    k3 = db.add_keyword("Hawk")
+    k3 = db.keywords.add("Hawk")
     db.tag_photo(pid_b, k3)
     db.commit()
 
@@ -951,7 +951,7 @@ def test_keyword_tree_empty_workspace(db):
     """Empty workspace returns no keywords even if keywords exist globally."""
     ws = db.create_workspace("Empty")
     db.commit()
-    db.add_keyword("Robin")
+    db.keywords.add("Robin")
     db.commit()
     db.set_active_workspace(ws)
     tree = db.keyword_tree.get_tree()
@@ -1064,21 +1064,21 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
 
 def test_add_keyword_normalizes_stray_edge_quotes(db):
     """New keywords should not preserve accidental leading/trailing quote marks."""
-    keyword_id = db.add_keyword("\u2018apapane'")
+    keyword_id = db.keywords.add("\u2018apapane'")
     db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
     ).fetchone()
     assert row["name"] == "apapane"
-    assert db.add_keyword("apapane") == keyword_id
+    assert db.keywords.add("apapane") == keyword_id
 
 
 def test_add_keyword_preserves_leading_okina(db):
     """Modifier-letter okinas (U+02BB/U+02BC) are letters inside legitimate
     species names like \u02bbApapane and must not be stripped."""
     for name in ("\u02bbApapane", "\u02bcHawai\u02bbi", "\u02bbI\u02bbiwi"):
-        keyword_id = db.add_keyword(name)
+        keyword_id = db.keywords.add(name)
         db.commit()
         row = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
@@ -1093,14 +1093,14 @@ def test_add_keyword_normalizes_acute_accent_edge_variant(db):
     is stripped before NFKC runs, ``´apapane`` normalizes to a
     stranded leading combining acute (`́apapane`) that survives the
     post-NFKC strip and creates a nearly-invisible distinct keyword."""
-    kid = db.add_keyword("´apapane")
+    kid = db.keywords.add("´apapane")
     db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (kid,)
     ).fetchone()
     assert row["name"] == "apapane"
-    assert db.add_keyword("apapane") == kid
+    assert db.keywords.add("apapane") == kid
 
 
 def test_add_keyword_normalizes_acute_accent_with_leading_whitespace(db):
@@ -1109,14 +1109,14 @@ def test_add_keyword_normalizes_acute_accent_with_leading_whitespace(db):
     the pre-NFKC edge-quote strip must still see the acute. Otherwise
     NFKC decomposes it to a leading combining mark U+0301 that survives
     the later strip and produces a nearly-invisible variant."""
-    kid = db.add_keyword(" ´apapane")
+    kid = db.keywords.add(" ´apapane")
     db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (kid,)
     ).fetchone()
     assert row["name"] == "apapane"
-    assert db.add_keyword("apapane") == kid
+    assert db.keywords.add("apapane") == kid
 
 
 def test_add_keyword_folds_internal_typographic_apostrophe(db):
@@ -1130,7 +1130,7 @@ def test_add_keyword_folds_internal_typographic_apostrophe(db):
     Folding in the storage form (not just the match key) keeps
     keyword_match_key in lockstep with the SQL dedupe.
     """
-    kid = db.add_keyword("Say's phoebe", is_species=True)
+    kid = db.keywords.add("Say's phoebe", is_species=True)
     db.commit()
 
     row = db.conn.execute(
@@ -1138,7 +1138,7 @@ def test_add_keyword_folds_internal_typographic_apostrophe(db):
     ).fetchone()
     assert row["name"] == "Say's phoebe"
     # The curly variant must resolve to the SAME row, not insert a new one.
-    assert db.add_keyword("Say\u2019s phoebe", is_species=True) == kid
+    assert db.keywords.add("Say\u2019s phoebe", is_species=True) == kid
     assert db.conn.execute(
         "SELECT COUNT(*) c FROM keywords WHERE name LIKE 'Say%phoebe'"
     ).fetchone()["c"] == 1
@@ -1146,14 +1146,14 @@ def test_add_keyword_folds_internal_typographic_apostrophe(db):
 
 def test_add_keyword_folds_curly_apostrophe_when_curly_arrives_first(db):
     """Fold direction must not depend on insertion order."""
-    kid = db.add_keyword("Cassin\u2019s kingbird", is_species=True)
+    kid = db.keywords.add("Cassin\u2019s kingbird", is_species=True)
     db.commit()
 
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (kid,)
     ).fetchone()
     assert row["name"] == "Cassin's kingbird"
-    assert db.add_keyword("Cassin's kingbird", is_species=True) == kid
+    assert db.keywords.add("Cassin's kingbird", is_species=True) == kid
 
 
 def test_add_keyword_preserves_okina_against_apostrophe_folding(db):
@@ -1162,7 +1162,7 @@ def test_add_keyword_preserves_okina_against_apostrophe_folding(db):
     edge-quote strip does not reach)."""
     for name in ("Hawai\u02bbi \u02bbamakihi", "\u02bbI\u02bbiwi",
                  "Lili\u02bbuokalani Gardens", "Hawai\u02bci"):
-        kid = db.add_keyword(name)
+        kid = db.keywords.add(name)
         db.commit()
         row = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (kid,)
@@ -1174,7 +1174,7 @@ def test_add_keyword_preserves_okina_against_apostrophe_folding(db):
 
 def test_add_keyword_preserves_internal_acute_accent(db):
     """U+00B4 should be stripped only at the edges, not inside a keyword."""
-    keyword_id = db.add_keyword("O\u00b4Brien")
+    keyword_id = db.keywords.add("O\u00b4Brien")
     db.commit()
 
     row = db.conn.execute(
@@ -1188,7 +1188,7 @@ def test_add_keyword_preserves_private_use_area_character(db):
     in a keyword. Prior implementations reserved it as an internal sentinel
     for U+00B4 protection, which meant a lone U+E000 in the input round-tripped
     as U+00B4 (data corruption)."""
-    keyword_id = db.add_keyword("a\ue000b")
+    keyword_id = db.keywords.add("a\ue000b")
     db.commit()
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
@@ -1197,7 +1197,7 @@ def test_add_keyword_preserves_private_use_area_character(db):
 
     # A lone U+E000 keyword should also survive intact (no accidental
     # substitution to U+00B4 by the sentinel round-trip).
-    keyword_id = db.add_keyword("\ue000")
+    keyword_id = db.keywords.add("\ue000")
     db.commit()
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
@@ -1236,14 +1236,14 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
 
     # Queue an unsynced keyword_add under the legacy spelling. Simulates a
     # tag applied before this normalization pass landed.
-    db.queue_change(pid_a, "keyword_add", "\u2018apapane")
+    db.pending_changes.queue(pid_a, "keyword_add", "\u2018apapane")
     db.commit()
     # Also queue a duplicate under the destination name so we exercise the
     # dedupe branch (the merge must drop the source row without producing
     # two identical pending entries).
-    db.queue_change(pid_b, "keyword_add", "apapane")
+    db.pending_changes.queue(pid_b, "keyword_add", "apapane")
     db.commit()
-    db.queue_change(pid_b, "keyword_add", "\u2018apapane")
+    db.pending_changes.queue(pid_b, "keyword_add", "\u2018apapane")
     db.commit()
 
     keyword_duplicates.merge_duplicate_keywords(db)
@@ -1263,7 +1263,7 @@ def test_add_keyword_rejects_name_that_normalizes_to_empty(db):
     which would otherwise insert an invisible keyword row."""
     for empty in ("'", '"', "\u2018", "\u201c\u201d", "'\"'"):
         try:
-            db.add_keyword(empty)
+            db.keywords.add(empty)
             db.commit()
         except ValueError:
             pass
@@ -1687,8 +1687,8 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
                          file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
-    masse_id = db.add_keyword("Masse")
-    masze_id = db.add_keyword("Maße")
+    masse_id = db.keywords.add("Masse")
+    masze_id = db.keywords.add("Maße")
     db.commit()
     assert masse_id != masze_id
     db.tag_photo(pid_a, masse_id)
@@ -1735,8 +1735,8 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
                          file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
-    upper_id = db.add_keyword("Éclair")
-    lower_id = db.add_keyword("éclair")
+    upper_id = db.keywords.add("Éclair")
+    lower_id = db.keywords.add("éclair")
     db.commit()
     assert upper_id != lower_id
     db.tag_photo(pid_a, upper_id)
@@ -2127,9 +2127,9 @@ def test_keyword_tree_includes_ancestors(db):
                        file_size=100, file_mtime=1.0)
 
     # Create hierarchy: Birds > Raptors > Red-tailed Hawk
-    birds = db.add_keyword("Birds")
-    raptors = db.add_keyword("Raptors", parent_id=birds)
-    hawk = db.add_keyword("Red-tailed Hawk", parent_id=raptors)
+    birds = db.keywords.add("Birds")
+    raptors = db.keywords.add("Raptors", parent_id=birds)
+    hawk = db.keywords.add("Red-tailed Hawk", parent_id=raptors)
 
     # Only tag the leaf (mimics scanner behavior)
     db.tag_photo(pid, hawk)
@@ -2158,7 +2158,7 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip")
     db.commit()
-    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.pending_changes.queue(photo_id, "keyword_add", "Robin")
     db.commit()
 
     ws2 = db.create_workspace("Target")
@@ -2199,7 +2199,7 @@ def test_move_folders_bumps_source_pending_changes_version(db_with_workspace):
     away instead of returning 409 (Codex review, PR #1483).
     """
     db, ws1, folder_id, photo_id = db_with_workspace
-    db.queue_change(photo_id, "rating", "5")
+    db.pending_changes.queue(photo_id, "rating", "5")
     db.commit()
     ws2 = db.create_workspace("Target")
     db.commit()

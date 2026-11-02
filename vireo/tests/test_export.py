@@ -292,7 +292,7 @@ def export_env(tmp_path):
     db.commit()
 
     # Add a species keyword to p1
-    k = db.add_keyword("Red-tailed Hawk", is_species=True)
+    k = db.keywords.add("Red-tailed Hawk", is_species=True)
     db.tag_photo(p1, k)
     db.commit()
 
@@ -601,7 +601,7 @@ def test_export_photos_embeds_only_selected_metadata(export_env, monkeypatch):
             400.0, 5.6, 0.002, 800, env["p1"],
         ),
     )
-    second_species = env["db"].add_keyword("Northern Flicker", is_species=True)
+    second_species = env["db"].keywords.add("Northern Flicker", is_species=True)
     env["db"].tag_photo(env["p1"], second_species)
     env['db'].commit()
     env["db"].conn.commit()
@@ -707,7 +707,7 @@ def test_export_photos_uses_assigned_keyword_location(export_env):
         pytest.skip("ExifTool is not available")
 
     env = export_env
-    location_id = env["db"].add_keyword("Torrey Pines", kw_type="location")
+    location_id = env["db"].keywords.add("Torrey Pines", kw_type="location")
     env['db'].commit()
     env["db"].conn.execute(
         "UPDATE keywords SET latitude=?, longitude=? WHERE id=?",
@@ -859,7 +859,7 @@ def test_export_metadata_categories_remain_independent(export_env, selected):
     if not exiftool_available():
         pytest.skip("ExifTool is not available")
     env = export_env
-    location = env["db"].add_keyword("Réserve", kw_type="location")
+    location = env["db"].keywords.add("Réserve", kw_type="location")
     env['db'].commit()
     env["db"].set_photo_location(env["p1"], location)
     env["db"].conn.execute("UPDATE photos SET exif_data=?, latitude=?, longitude=? WHERE id=?", (

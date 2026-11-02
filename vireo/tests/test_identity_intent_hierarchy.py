@@ -12,8 +12,8 @@ def test_resolution_preserves_retained_taxonomy_alias_hierarchy(app_and_db, tmp_
         "INSERT INTO taxa(id, inat_id, name, common_name, rank) VALUES (90001, 90001, ?, ?, 'species')",
         (scientific, CANDIDATES[0]),
     )
-    root = db.add_keyword(CANDIDATES[0], is_species=True)
-    alias = db.add_keyword(scientific, parent_id=root, is_species=True)
+    root = db.keywords.add(CANDIDATES[0], is_species=True)
+    alias = db.keywords.add(scientific, parent_id=root, is_species=True)
     db.commit()
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     hierarchy = CANDIDATES[0] + '|' + scientific

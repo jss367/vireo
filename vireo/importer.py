@@ -260,7 +260,7 @@ def _import_photo_keywords(db, photo, kw_data, file_path, write_xmp):
                 continue
             parent_id = None
             for index, part in enumerate(parts):
-                kid = db.add_keyword(part, parent_id=parent_id, _resolve_alias=index == len(parts) - 1)
+                kid = db.keywords.add(part, parent_id=parent_id, _resolve_alias=index == len(parts) - 1)
                 parent_id = kid
             db.tag_photo(photo["id"], parent_id, source="manual")
             hierarchy_leaf_keys.add(keyword_match_key(parts[-1]))
@@ -271,7 +271,7 @@ def _import_photo_keywords(db, photo, kw_data, file_path, write_xmp):
         for kw_name in kw_data["flat_keywords"]:
             if not keyword_match_key(kw_name) or keyword_match_key(kw_name) in existing_keys:
                 continue
-            kid = db.add_keyword(kw_name, _resolve_alias=True)
+            kid = db.keywords.add(kw_name, _resolve_alias=True)
             # Lightroom catalog metadata was explicitly authored outside
             # Vireo. Keep that provenance on the association even when
             # write_xmp=False leaves no sidecar or pending change.

@@ -1078,7 +1078,7 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             from_species=from_species,
         )
         relabel.snapshot_curation()
-        kid = db.add_keyword(species, is_species=True)
+        kid = db.keywords.add(species, is_species=True)
         relabel.adopt_stored_spelling(kid)
         relabel.retag_photos(kid)
         relabel.rename_curation()
