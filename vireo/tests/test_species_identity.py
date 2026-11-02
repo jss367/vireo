@@ -535,7 +535,7 @@ def test_pipeline_agrees_across_models_and_preserves_native_identity(db, tmp_pat
     photos = load_photo_features(db)
     assert len(photos) == 1
     assert {p[0] for p in photos[0]["species_top5"]} == {"Red-crowned Parrot"}
-    assert db._lookup_taxon_id_for_keyword("Red-crowned Amazon", species_only=True) is not None
+    assert db.keyword_taxa.lookup_taxon_id("Red-crowned Amazon", species_only=True) is not None
 
 
 def test_cached_names_refresh_without_rewriting_confirmations(taxonomy):

@@ -40,7 +40,7 @@ def keyword_paths(rows):
 
 def resolve_merge_target(db, merge):
     """Follow subsequent merges through the durable source-path alias."""
-    return resolve_import_path(db, merge['source_path']) or merge['target_id']
+    return resolve_import_path(db.keyword_merges, merge['source_path']) or merge['target_id']
 
 
 def filter_removed_import_aliases(db, photo_id, flat_keywords, hierarchical_keywords,
@@ -142,13 +142,13 @@ def validate_import_locations(db, photo_id, flat_keywords, hierarchical_keywords
         if any(not keyword_match_key(part) for part in parts):
             continue
         hierarchy_leaves.add(keyword_match_key(parts[-1]))
-        target = resolve_import_path(db, parts, linked_locations_only=True)
+        target = resolve_import_path(db.keyword_merges, parts, linked_locations_only=True)
         if target is not None:
             targets.add(target)
     flat_keys = {keyword_match_key(name) for name in flat_keywords}
     for name in flat_keywords:
         if keyword_match_key(name) not in hierarchy_leaves:
-            target = resolve_import_path(db, [name], linked_locations_only=True)
+            target = resolve_import_path(db.keyword_merges, [name], linked_locations_only=True)
             if target is not None:
                 targets.add(target)
     if not targets:

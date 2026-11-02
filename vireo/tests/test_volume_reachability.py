@@ -322,15 +322,11 @@ def test_generic_probe_returns_isdir_result(tmp_path, monkeypatch):
     assert vr._probe_root_generic(str(tmp_path / "empty"), timeout=1) is True
 
 
-def test_app_reexports_probe_machinery_by_historical_names():
-    """``app`` and ``pipeline_job`` keep their private aliases so existing
-    call sites and tests continue to see one shared probe registry."""
-    import app as app_module
+def test_pipeline_job_reexports_mount_roots_by_historical_name():
+    """``pipeline_job`` keeps its private alias so its call sites and tests
+    see the same mount-root extraction."""
     import pipeline_job
 
-    assert app_module._network_root_reachable is vr.network_root_reachable
-    assert app_module._NETWORK_PROBES is vr._NETWORK_PROBES
-    assert app_module._NETWORK_PROBE_LOCK is vr._NETWORK_PROBE_LOCK
     assert pipeline_job._archive_mount_root_candidates is vr.mount_root_candidates
 
 
@@ -1229,3 +1225,215 @@ def test_a_generic_probe_started_before_the_recheck_does_not_block_it(monkeypatc
             vr._GENERIC_PROBES.pop(root, None)
             vr._GENERIC_PROBE_EPOCHS.pop(root, None)
             vr._FORGOTTEN_GENERIC_PROBES.discard(stuck)
+
+
+def test_network_root_reachable_uses_bounded_subprocess(monkeypatch):
+    """The reachability probe must run out-of-process with a bounded
+    timeout — an in-process ``os.stat`` on the mount root would still
+    block indefinitely when the SMB server is unresponsive, which is the
+    exact case the probe is supposed to detect.
+    """
+    from types import SimpleNamespace
+
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="Directory\n", stderr="")
+
+    assert vr.network_root_reachable("/Volumes/NAS", run=fake_run) is True
+    assert captured["argv"][0] == "/usr/bin/stat"
+    assert "/Volumes/NAS" in captured["argv"]
+    assert captured["timeout"] == vr.MOUNT_QUERY_TIMEOUT_SECS
+
+
+def test_network_root_reachable_fails_closed_on_timeout(monkeypatch):
+    """A timeout on the probe means the mount did not respond — treat as
+    unreachable so callers fail closed instead of accepting a
+    possibly-spurious Finder ``missing`` outcome.
+    """
+    import subprocess
+
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+
+    assert (
+        vr.network_root_reachable("/Volumes/NAS", run=fake_run)
+        is False
+    )
+
+
+def test_network_root_reachable_does_not_wait_to_reap_timeout(monkeypatch):
+    """A wedged probe is reaped off-thread after the caller returns."""
+    import subprocess
+    import threading
+
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    reaper_started = threading.Event()
+    release_reaper = threading.Event()
+    reaper_finished = threading.Event()
+
+    class WedgedProcess:
+        returncode = None
+
+        def communicate(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(["stat"], timeout)
+            reaper_started.set()
+            release_reaper.wait(timeout=synchronization_timeout(2))
+            reaper_finished.set()
+            return "", ""
+
+        def kill(self):
+            return None
+
+    assert vr.network_root_reachable(
+        "/Volumes/NAS", popen=lambda *args, **kwargs: WedgedProcess(),
+    ) is False
+    assert not reaper_finished.is_set()
+    assert reaper_started.wait(timeout=synchronization_timeout(1))
+    release_reaper.set()
+    assert reaper_finished.wait(timeout=synchronization_timeout(1))
+
+
+def test_network_root_reachable_reuses_abandoned_probe(monkeypatch):
+    """Retries for a wedged root must not spawn more children or reapers."""
+    import subprocess
+    import threading
+    import time
+
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    release_reaper = threading.Event()
+    popen_calls = []
+
+    class WedgedProcess:
+        returncode = None
+
+        def communicate(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(["stat"], timeout)
+            release_reaper.wait(timeout=synchronization_timeout(2))
+            return "", ""
+
+        def kill(self):
+            return None
+
+    class HealthyProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "Directory\n", ""
+
+    def fake_popen(*args, **kwargs):
+        popen_calls.append(args)
+        if len(popen_calls) == 1:
+            return WedgedProcess()
+        return HealthyProcess()
+
+    root = "/Volumes/NAS"
+    root_key = os.path.normcase(os.path.normpath(root))
+    try:
+        assert vr.network_root_reachable(root, popen=fake_popen) is False
+        assert vr.network_root_reachable(root, popen=fake_popen) is False
+        assert len(popen_calls) == 1
+    finally:
+        release_reaper.set()
+
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with vr._NETWORK_PROBE_LOCK:
+            if root_key not in vr._NETWORK_PROBES:
+                break
+        time.sleep(0.01)
+
+    assert vr.network_root_reachable(root, popen=fake_popen) is True
+    assert len(popen_calls) == 2
+
+
+def test_network_root_reachable_caps_abandoned_probes(monkeypatch):
+    """Distinct wedged roots cannot grow the process/thread count forever."""
+    import subprocess
+    import threading
+    import time
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(vr, "_MAX_NETWORK_PROBES", 2)
+    release_reapers = threading.Event()
+    popen_calls = []
+
+    class WedgedProcess:
+        returncode = None
+
+        def communicate(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(["stat"], timeout)
+            release_reapers.wait(timeout=synchronization_timeout(2))
+            return "", ""
+
+        def kill(self):
+            return None
+
+    def fake_popen(*args, **kwargs):
+        popen_calls.append(args)
+        return WedgedProcess()
+
+    roots = ["/Volumes/NAS-1", "/Volumes/NAS-2"]
+    root_keys = [
+        os.path.normcase(os.path.normpath(root))
+        for root in roots
+    ]
+    try:
+        for root in roots:
+            assert (
+                vr.network_root_reachable(root, popen=fake_popen)
+                is False
+            )
+        assert (
+            vr.network_root_reachable(
+                "/Volumes/NAS-3", popen=fake_popen,
+            )
+            is False
+        )
+        assert len(popen_calls) == 2
+    finally:
+        release_reapers.set()
+
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with vr._NETWORK_PROBE_LOCK:
+            if not any(key in vr._NETWORK_PROBES for key in root_keys):
+                break
+        time.sleep(0.01)
+
+    with vr._NETWORK_PROBE_LOCK:
+        assert not any(key in vr._NETWORK_PROBES for key in root_keys)
+
+
+def test_network_root_reachable_returns_false_off_mac(monkeypatch):
+    """The probe only runs on macOS. On other platforms callers already
+    do not route through Finder, so the probe never needs to answer
+    ``True`` and must not spawn a subprocess.
+    """
+
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    called = []
+
+    def fake_run(*a, **k):
+        called.append(a)
+        raise AssertionError("subprocess must not run off macOS")
+
+    assert (
+        vr.network_root_reachable("/mnt/nas", run=fake_run)
+        is False
+    )
+    assert called == []

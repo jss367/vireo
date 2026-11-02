@@ -120,8 +120,8 @@ def _trash_case(platform, original, *, confirmed_gone=False):
 
     logger = SimpleNamespace(warning=Mock(side_effect=RuntimeError("invented logger failure")))
     fn = _selected(
-        "app.py", "send_fallback_to_trash", sys=SimpleNamespace(platform=platform),
-        _path_confirmed_gone=lambda *args: confirmed_gone, log=logger,
+        "services/trash.py", "send_fallback_to_trash", sys=SimpleNamespace(platform=platform),
+        volumes=SimpleNamespace(path_confirmed_gone=lambda *args: confirmed_gone), log=logger,
         __builtins__={**vars(builtins), "__import__": fake_import},
     )
     owner = SimpleNamespace(

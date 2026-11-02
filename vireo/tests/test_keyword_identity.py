@@ -1416,7 +1416,7 @@ def test_merge_does_not_alias_a_retired_path_a_survivor_still_lives_at(catalog):
     live = keyword_paths(rows)[beta_bird]
     assert live == ['Alpha', 'Bird']
     # The twin's own hierarchy must not resolve to the disambiguated row.
-    assert resolve_import_path(db, live) != alpha_bird
+    assert resolve_import_path(db.keyword_merges, live) != alpha_bird
 
 
 def test_conflict_guard_ignores_pre_existing_locations_on_a_general_merge(catalog):
@@ -1544,7 +1544,7 @@ def test_source_alias_yields_to_an_unrelated_live_path(catalog):
     assert db.conn.execute(
         'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
         (path_key(['trip a']),)).fetchone() is None
-    assert resolve_import_path(db, ['trip a']) != kept
+    assert resolve_import_path(db.keyword_merges, ['trip a']) != kept
 
 
 def test_case_variant_sources_still_alias_to_their_shared_target(catalog):
@@ -2349,13 +2349,13 @@ def test_flat_merge_alias_does_not_override_ambiguous_live_identity(catalog):
     db.commit()
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
-    assert resolve_import_path(db, ['Robin']) == target
+    assert resolve_import_path(db.keyword_merges, ['Robin']) == target
     people = db.add_keyword('People', kw_type='individual')
     db.add_keyword('Robin', parent_id=people, kw_type='individual')
     db.commit()
-    assert resolve_import_path(db, ['Robin']) is None
-    assert resolve_import_path(db, ['Robin'], kw_type='taxonomy') == target
-    assert resolve_import_path(db, ['Old parent', 'Robin']) == target
+    assert resolve_import_path(db.keyword_merges, ['Robin']) is None
+    assert resolve_import_path(db.keyword_merges, ['Robin'], kw_type='taxonomy') == target
+    assert resolve_import_path(db.keyword_merges, ['Old parent', 'Robin']) == target
 
 
 def test_manual_merge_rejects_case_insensitive_sibling_collision(catalog):

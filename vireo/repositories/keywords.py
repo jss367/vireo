@@ -25,19 +25,13 @@ The rest of the keyword domain lives beside it, each behind its own
 - ``repositories/keyword_merges.py`` (``db.keyword_merges``): the statements
   behind ``keyword_identity``'s import aliases and explicit merges.
 
-The method bodies were moved verbatim from ``Database``. The only edits are
-``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
-the ``db`` module helpers and constants listed in ``__init__``, and the two
-places a body handed the ``Database`` itself to a helper
-(``resolve_import_alias(self, ...)`` in ``add``, ``SpeciesResolver(db=self)``
-in ``add_source_species``) now pass ``self.db``, the façade, since ``self``
-is the repository here. The SQL text, parameter order and commit placement
-are unchanged.
-
-Callers reach it through the ``db.keywords`` accessor, which builds a fresh
-repository per access. The methods ``FACADE_METHODS`` binds back from the
-façade (``add_keyword``, ``resolve_species_display_name`` ...) keep their
-``Database`` wrappers.
+The repository depends only on its connection and the workspace resolver.
+``add`` composes with the species-name and taxon lookups of a
+``KeywordTaxonRepository`` and the import-alias lookups of a
+``KeywordMergeRepository``, both built on the same connection, and hands
+``SpeciesResolver`` a ``TaxonCatalog`` (the ``db_meta`` and ``taxa``
+repositories) rather than the ``Database``. The active workspace is resolved
+lazily through the resolver ``Database._keyword_repository`` passes.
 
 What lives in ``repositories/keyword_provenance.py`` instead: the
 ``photo_keywords`` writers that create or converge an association
@@ -48,70 +42,51 @@ methods that call ``_merge_keyword_into`` in the middle of their own work
 association itself; a structural test fails if it ever references one of
 those writers.
 
-What deliberately stays on ``Database``:
-
-- The active-workspace state. ``workspace_id`` is resolved lazily through
-  ``Database._ws_id`` at exactly the points the original code called it.
-- Composition. Every façade method a moved body calls is bound from the
-  ``Database`` instance under its own name (see ``FACADE_METHODS``), and the
-  body calls it as ``self.<name>(...)``, so monkeypatches of ``Database``
-  methods keep reaching the moved code. That includes the species-name and
-  taxon lookups ``add`` composes with, which live in
-  ``repositories/keyword_taxa.py`` and are reached through the façade.
-- The methods with no SQL of their own (``_apply_case_convention``,
-  ``_sentence_case_first_word``, ``species_case_convention``).
-
 No method here commits: the route, job or service that adds a keyword owns
 the unit of work (``db.transaction()``).
 """
 
 import sqlite3
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from keyword_normalization import normalize_keyword_display
-from repositories.keyword_identity_sql import identity_sql
+from repositories.keyword_identity_sql import identity_sql, resolve_import_alias
+from repositories.keyword_merges import KeywordMergeRepository
+from repositories.keyword_taxa import KeywordTaxonRepository, apply_species_case_convention
+from repositories.meta import MetaRepository
+from repositories.taxa import TaxaRepository
 
-# ``Database`` methods the moved bodies call through the façade.
-FACADE_METHODS = (
-    "_apply_case_convention",
-    "resolve_species_display_name",
-    "species_case_convention",
-    "_lookup_taxon_id_for_keyword",
-    "_add_source_species_keyword",
-)
+# Canonical set of keyword type values stored in keywords.type.
+# - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
+# - individual: a named person, pet, or otherwise tracked individual
+# - location: a named location ("Yosemite", "backyard")
+# - genre: a non-subject visual category ("Landscape", "Sunset")
+# - general: catch-all/free-form tag (the legacy default)
+KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "general"})
+
+
+class TaxonCatalog:
+    """The ``db_meta`` and ``taxa`` repositories ``SpeciesResolver`` reads.
+
+    ``SpeciesResolver(db=...)`` only reads ``.meta`` and ``.taxa``; this
+    hands it those on one connection instead of the ``Database``.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.meta = MetaRepository(conn)
+        self.taxa = TaxaRepository(conn)
 
 
 class KeywordRepository:
-    # Bound ``Database`` methods that ``__init__`` installs from
-    # ``FACADE_METHODS``, declared so the type checker sees them.
-    _apply_case_convention: Callable[..., Any]
-    resolve_species_display_name: Callable[..., Any]
-    species_case_convention: Callable[..., Any]
-    _lookup_taxon_id_for_keyword: Callable[..., Any]
-    _add_source_species_keyword: Callable[..., Any]
-
     def __init__(
         self,
-        conn,
-        resolve_workspace_id,
-        *,
-        keyword_types,
-        resolve_import_alias,
-        facade,
-    ):
+        conn: sqlite3.Connection,
+        resolve_workspace_id: Callable[[], int],
+    ) -> None:
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
-        # ``db`` module helpers and constants, kept under their module names
-        # so the moved bodies read them as ``self.<name>``.
-        self.KEYWORD_TYPES = keyword_types
-        self.resolve_import_alias = resolve_import_alias
-        # The ``Database`` itself, for the two helpers the moved bodies hand
-        # it to (``resolve_import_alias`` and ``SpeciesResolver``).
-        self.db = facade
-        # Bound ``Database`` methods, kept under their façade names.
-        for name in FACADE_METHODS:
-            setattr(self, name, getattr(facade, name))
+        self._taxa = KeywordTaxonRepository(conn)
 
     @property
     def workspace_id(self):
@@ -210,7 +185,9 @@ class KeywordRepository:
             (self.workspace_id,),
         ).fetchone()[0]
 
-    def add_source_species(self, name, source_taxon_id, parent_id=None):
+    def add_source_species(
+        self, name: str, source_taxon_id: int, parent_id: int | None = None,
+    ) -> int:
         """Bind accepted source evidence without reassigning same-name tags."""
         if type(source_taxon_id) is not int or not 0 < source_taxon_id < (1 << 63):
             raise ValueError("source_taxon_id must be a positive SQLite integer")
@@ -250,8 +227,8 @@ class KeywordRepository:
         else:
             from species_identity import SpeciesResolver
             raw_name = name.removesuffix(f" (taxon {source_taxon_id})")
-            identity = SpeciesResolver(db=self.db).resolve(raw_name, source={"taxon_id": source_taxon_id})
-            display = self.resolve_species_display_name(identity.display_name)
+            identity = SpeciesResolver(db=TaxonCatalog(self.conn)).resolve(raw_name, source={"taxon_id": source_taxon_id})
+            display = self._taxa.resolve_species_display(identity.display_name)
             candidate = display
             suffix = 0
             while self.conn.execute(
@@ -265,10 +242,17 @@ class KeywordRepository:
                 "VALUES (?, ?, 1, 'taxonomy', ?, ?)",
                 (candidate, parent_id, local_id, source_taxon_id),
             ).lastrowid
-        return kid
+        return cast(int, kid)
 
-    def add(self, name, parent_id=None, is_species=False, kw_type=None, source_taxon_id=None,
-                    _resolve_alias=False):
+    def add(
+        self,
+        name: str,
+        parent_id: int | None = None,
+        is_species: bool = False,
+        kw_type: str | None = None,
+        source_taxon_id: int | None = None,
+        _resolve_alias: bool = False,
+    ) -> int:
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
 
         If a keyword with the same name but different casing exists, reuses
@@ -288,7 +272,7 @@ class KeywordRepository:
                      Manual additions must not inherit imported keyword aliases,
                      and a leaf alias must not relocate a new parent chain.
         """
-        if kw_type is not None and kw_type not in self.KEYWORD_TYPES:
+        if kw_type is not None and kw_type not in KEYWORD_TYPES:
             raise ValueError(f"invalid keyword type: {kw_type!r}")
         # Normalization choke point: every keywords.name write funnels
         # through here (or update_keyword / _upsert_one_keyword), and the
@@ -304,14 +288,16 @@ class KeywordRepository:
         if not name:
             raise ValueError("keyword name is empty after normalization")
         if _resolve_alias and not is_species and source_taxon_id is None and kw_type in (None, 'location'):
-            resolved = self.resolve_import_alias(self.db, name, parent_id, kw_type=kw_type)
+            resolved = resolve_import_alias(
+                KeywordMergeRepository(self.conn), name, parent_id, kw_type=kw_type,
+            )
             if resolved is not None:
                 return resolved
         is_species, kw_type = self._reconcile_species_type(is_species, kw_type)
         if source_taxon_id is not None:
             if not is_species:
                 raise ValueError("source_taxon_id requires a species keyword")
-            return self._add_source_species_keyword(name, source_taxon_id, parent_id)
+            return self.add_source_species(name, source_taxon_id, parent_id)
         # Case-insensitive lookup with type-aware matching:
         #
         # When kw_type is supplied, only same-type or 'general' rows are
@@ -390,7 +376,7 @@ class KeywordRepository:
             # via the taxonomy promotion below, so binding to a
             # higher-rank homonym would silently hide the accepted
             # keyword behind every downstream rank='species' filter.
-            taxon_id = self._lookup_taxon_id_for_keyword(
+            taxon_id = self._taxa.lookup_taxon_id(
                 name, species_only=True,
             )
             if taxon_id:
@@ -421,7 +407,7 @@ class KeywordRepository:
             # genus / family / class Life List filters — mirroring the
             # startup preservation in :meth:`mark_species_keywords`.
         if kw_type is None and not is_species and existing["type"] == "general":
-            taxon_id = self._lookup_taxon_id_for_keyword(
+            taxon_id = self._taxa.lookup_taxon_id(
                 name, prefer_species=True,
             )
             if taxon_id:
@@ -477,9 +463,9 @@ class KeywordRepository:
         if is_species:
             # The configured override, else the convention detected from the
             # existing species keywords.
-            convention = self.species_case_convention()
+            convention = self._taxa.species_case_convention()
             if convention:
-                name = self._apply_case_convention(name, convention)
+                name = apply_species_case_convention(name, convention)
 
         # Explicit species/taxonomy inserts still need their taxonomy link.
         # The earlier kw_type reconciliation turns is_species=True into
@@ -493,7 +479,7 @@ class KeywordRepository:
         # NULL when no species-rank match exists keeps the tag visible
         # to readers via the ``t.rank IS NULL`` branch.
         taxon_id = (
-            self._lookup_taxon_id_for_keyword(name, species_only=True)
+            self._taxa.lookup_taxon_id(name, species_only=True)
             if kw_type == 'taxonomy'
             else None
         )
@@ -503,7 +489,7 @@ class KeywordRepository:
             if is_species:
                 kw_type = 'taxonomy'
             else:
-                taxon_id = self._lookup_taxon_id_for_keyword(
+                taxon_id = self._taxa.lookup_taxon_id(
                     name, prefer_species=True,
                 )
                 if taxon_id:
@@ -547,7 +533,7 @@ class KeywordRepository:
                 lookup_name, parent_id, is_species=lookup_is_species,
                 kw_type=lookup_kw_type,
             )
-        return cur.lastrowid
+        return cast(int, cur.lastrowid)
 
     def _find_add_candidate(self, name, parent_id, kw_type):
         """The row ``add`` reuses for ``name`` under ``parent_id``, or None."""
@@ -618,7 +604,7 @@ class KeywordRepository:
             (name,),
         ).fetchone() is None:
             return None
-        requested = self._lookup_taxon_id_for_keyword(name, species_only=True)
+        requested = self._taxa.lookup_taxon_id(name, species_only=True)
         if requested is None:
             return None
         rows = self.conn.execute(
@@ -678,7 +664,7 @@ class KeywordRepository:
                 "SELECT id, name, parent_id, type, is_species, taxon_id, source_taxon_id "
                 "FROM keywords WHERE id=?", (candidate["id"],),
             ).fetchone()
-        inferred = self._lookup_taxon_id_for_keyword(name, species_only=True)
+        inferred = self._taxa.lookup_taxon_id(name, species_only=True)
         taxon_ids = {tid for tid in (inferred, keyword["taxon_id"] if keyword else None) if tid is not None}
         taxa = []
         if taxon_ids:

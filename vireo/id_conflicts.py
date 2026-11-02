@@ -142,12 +142,12 @@ class _SpeciesNames:
         # Resolved once for the whole build: detecting it re-reads the config and
         # scans every species keyword, and a collection can hold thousands of
         # distinct model labels that each need it.
-        self.case_convention = db.species_case_convention()
+        self.case_convention = db.keyword_taxa.species_case_convention()
 
     def resolved_names(self, raw_species):
         """``(comparison_name, stored_name)`` for one raw model label.
 
-        ``resolve_species_display_name``'s last resort scans every
+        ``resolve_species_display``'s last resort scans every
         species keyword to detect the case convention, and a collection
         can carry tens of thousands of predictions spread over a handful
         of distinct labels — memoize per label so that scan happens once
@@ -164,10 +164,10 @@ class _SpeciesNames:
         cached = self._resolved_name_cache.get(key)
         if cached is None:
             cached = (
-                self.db.resolve_species_display_name(
+                self.db.keyword_taxa.resolve_species_display(
                     raw_species, case_convention=self.case_convention,
                 ),
-                self.db.resolve_species_display_name(
+                self.db.keyword_taxa.resolve_species_display(
                     raw_species, apply_case_convention=False,
                 ),
             )
@@ -185,7 +185,7 @@ class _SpeciesNames:
 
         When nothing resolves — no local taxonomy, or neither
         spelling indexed — fall back to normalized text, preferring
-        ``db_species``. That is ``resolve_species_display_name``'s
+        ``db_species``. That is ``resolve_species_display``'s
         output, which collapses a hierarchy alias onto its root
         keyword ("Desert Verdin" -> "Verdin"); the keyword comparison
         right above already treats those as one species, so keying

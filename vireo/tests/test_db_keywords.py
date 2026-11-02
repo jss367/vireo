@@ -280,26 +280,33 @@ def test_add_keyword_detected_case_convention(db, lib):
 
 
 def test_add_keyword_resolve_alias_short_circuits(db, lib, monkeypatch):
-    import db as dbmod
+    import repositories.keywords as keywords_module
+    from repositories.keyword_merges import KeywordMergeRepository
 
     calls = []
-    monkeypatch.setattr(dbmod, "resolve_import_alias",
-                        lambda d, name, parent, kw_type=None: calls.append(
-                            (d, name, parent, kw_type)) or 77)
+    monkeypatch.setattr(keywords_module, "resolve_import_alias",
+                        lambda m, name, parent, kw_type=None: calls.append(
+                            (m, name, parent, kw_type)) or 77)
     assert db.add_keyword("Leaf", parent_id=None, _resolve_alias=True) == 77
-    # The helper receives the Database itself, not some other handle.
-    assert calls == [(db, "Leaf", None, None)]
+    # The helper receives the alias repository on the same connection.
+    [(merges, *rest)] = calls
+    assert rest == ["Leaf", None, None]
+    assert isinstance(merges, KeywordMergeRepository)
+    assert merges.conn is db.conn
 
 
-def test_add_keyword_routes_lookup_and_source_path_through_facade(db, lib, monkeypatch):
+def test_add_keyword_routes_lookup_and_source_path_through_repositories(db, lib, monkeypatch):
+    from repositories.keyword_taxa import KeywordTaxonRepository
+    from repositories.keywords import KeywordRepository
+
     seen = []
-    monkeypatch.setattr(db, "_lookup_taxon_id_for_keyword",
-                        lambda name, **kw: seen.append((name, kw)) or None)
+    monkeypatch.setattr(KeywordTaxonRepository, "lookup_taxon_id",
+                        lambda self, name, **kw: seen.append((name, kw)) or None)
     db.add_keyword("Mystery")
     assert seen == [("Mystery", {"prefer_species": True})]
     src = []
-    monkeypatch.setattr(db, "_add_source_species_keyword",
-                        lambda *a: src.append(a) or 99)
+    monkeypatch.setattr(KeywordRepository, "add_source_species",
+                        lambda self, *a: src.append(a) or 99)
     assert db.add_keyword("Robin", is_species=True, source_taxon_id=12727) == 99
     assert src == [("Robin", 12727, None)]
 
@@ -307,16 +314,16 @@ def test_add_keyword_routes_lookup_and_source_path_through_facade(db, lib, monke
 # -- source-taxon species keywords ---------------------------------------------------------
 
 
-def test_add_source_species_keyword_validates_id(db, lib):
+def test_add_source_species_validates_id(db, lib):
     for bad in (0, -1, 1 << 63, "5", 5.0, True):
         with pytest.raises(ValueError, match="positive SQLite integer"):
-            db._add_source_species_keyword("x", bad)
+            db.keywords.add_source_species("x", bad)
 
 
-def test_add_source_species_keyword_rebinds_existing(db, lib):
+def test_add_source_species_rebinds_existing(db, lib):
     kid = _raw_kw(db, "Robin", kw_type="general", taxon_id=3)
     db.conn.commit()
-    got = db._add_source_species_keyword("Robin", 12727)
+    got = db.keywords.add_source_species("Robin", 12727)
     assert got == kid
     assert db.conn.in_transaction
     assert _kw(db, kid)[2:] == ("taxonomy", 1, 3, 12727)
@@ -324,8 +331,9 @@ def test_add_source_species_keyword_rebinds_existing(db, lib):
     db.conn.commit()
 
 
-def test_add_source_species_keyword_suffixes_same_name_rows(db, lib, monkeypatch):
+def test_add_source_species_suffixes_same_name_rows(db, lib, monkeypatch):
     import species_identity
+    from repositories.keywords import TaxonCatalog
 
     class _Identity:
         display_name = "Cougar"
@@ -344,10 +352,14 @@ def test_add_source_species_keyword_suffixes_same_name_rows(db, lib, monkeypatch
     _raw_kw(db, "Cougar (taxon 42007)", kw_type="location")
     db.conn.commit()
     with db.transaction():
-        kid = db._add_source_species_keyword("Cougar (taxon 42007)", 42007)
+        kid = db.keywords.add_source_species("Cougar (taxon 42007)", 42007)
     assert not db.conn.in_transaction
     assert _kw(db, kid) == ("Cougar (taxon 42007) (2)", None, "taxonomy", 1, 5, 42007)
-    assert resolver_dbs == [db]
+    # The resolver reads db_meta and taxa through repositories on db.conn,
+    # never through the Database.
+    [catalog] = resolver_dbs
+    assert isinstance(catalog, TaxonCatalog)
+    assert catalog.meta.conn is db.conn and catalog.taxa.conn is db.conn
 
 
 def test_relink_source_species_keywords(db, lib):
@@ -365,98 +377,103 @@ def test_relink_source_species_keywords(db, lib):
 # -- species-name resolution ---------------------------------------------------------------
 
 
-def test_resolve_species_display_name_cases(db, lib):
-    assert db.resolve_species_display_name("'") == ""
+def test_resolve_species_display_cases(db, lib):
+    assert db.keyword_taxa.resolve_species_display("'") == ""
     _raw_kw(db, "Common waxbill", kw_type="taxonomy", is_species=1)
-    assert db.resolve_species_display_name("COMMON WAXBILL") == "Common waxbill"
+    assert db.keyword_taxa.resolve_species_display("COMMON WAXBILL") == "Common waxbill"
     # Two species-bearing homonyms: caller's spelling wins when it matches
     # one, else it is kept verbatim.
     _raw_kw(db, "Robin", kw_type="general", is_species=1)
     _raw_kw(db, "robin", kw_type="taxonomy", is_species=1)
-    assert db.resolve_species_display_name("Robin") == "Robin"
-    assert db.resolve_species_display_name("ROBIN") == "ROBIN"
+    assert db.keyword_taxa.resolve_species_display("Robin") == "Robin"
+    assert db.keyword_taxa.resolve_species_display("ROBIN") == "ROBIN"
     # A general-only row keeps its own spelling.
     _raw_kw(db, "Sunset glow")
-    assert db.resolve_species_display_name("sunset GLOW") == "Sunset glow"
+    assert db.keyword_taxa.resolve_species_display("sunset GLOW") == "Sunset glow"
 
 
-def test_resolve_species_display_name_hierarchy_leaf(db, lib):
+def test_resolve_species_display_hierarchy_leaf(db, lib):
     parent = _raw_kw(db, "Birds")
     _raw_kw(db, "Desert Verdin", parent, "taxonomy", 1, taxon_id=3)
     db.conn.commit()
     # No root row for the taxon: the leaf's own spelling.
-    assert db.resolve_species_display_name("desert verdin") == "Desert Verdin"
+    assert db.keyword_taxa.resolve_species_display("desert verdin") == "Desert Verdin"
     _raw_kw(db, "Verdin", None, "taxonomy", 1, taxon_id=3)
-    assert db.resolve_species_display_name("desert verdin") == "Verdin"
+    assert db.keyword_taxa.resolve_species_display("desert verdin") == "Verdin"
 
 
-def test_resolve_species_display_name_case_convention_paths(db, lib, case, monkeypatch):
-    assert db.resolve_species_display_name("bubulcus ibis",
+def test_resolve_species_display_case_convention_paths(db, lib, case, monkeypatch):
+    assert db.keyword_taxa.resolve_species_display("bubulcus ibis",
                                            apply_case_convention=False) == "bubulcus ibis"
-    assert db.resolve_species_display_name("bubulcus ibis",
+    assert db.keyword_taxa.resolve_species_display("bubulcus ibis",
                                            case_convention="title") == "Bubulcus Ibis"
-    assert db.resolve_species_display_name("bubulcus ibis",
+    assert db.keyword_taxa.resolve_species_display("bubulcus ibis",
                                            case_convention=None) == "bubulcus ibis"
     case("lower")
-    assert db.resolve_species_display_name("Bubulcus Ibis") == "Bubulcus ibis"
+    assert db.keyword_taxa.resolve_species_display("Bubulcus Ibis") == "Bubulcus ibis"
+    from repositories.keyword_taxa import KeywordTaxonRepository
+
     calls = []
-    monkeypatch.setattr(db, "species_case_convention", lambda: calls.append(1) or "title")
-    assert db.resolve_species_display_name("snowy egret") == "Snowy Egret"
+    monkeypatch.setattr(KeywordTaxonRepository, "species_case_convention",
+                        lambda self: calls.append(1) or "title")
+    assert db.keyword_taxa.resolve_species_display("snowy egret") == "Snowy Egret"
     assert calls == [1]
 
 
 def test_species_case_convention(db, lib, case):
-    assert db.species_case_convention() is None
+    assert db.keyword_taxa.species_case_convention() is None
     case("title")
-    assert db.species_case_convention() == "title"
+    assert db.keyword_taxa.species_case_convention() == "title"
 
 
 def test_detect_keyword_case_convention(db, lib):
-    assert db.detect_keyword_case_convention() is None
+    assert db.keyword_taxa.detect_case_convention() is None
     for name in ("Black Phoebe", "Snowy Egret", "Heron"):
         _raw_kw(db, name, kw_type="taxonomy", is_species=1)
-    assert db.detect_keyword_case_convention() == "title"
+    assert db.keyword_taxa.detect_case_convention() == "title"
     for name in ("Great egret", "Say's phoebe", "Tree swallow"):
         _raw_kw(db, name, kw_type="taxonomy", is_species=1)
-    assert db.detect_keyword_case_convention() == "lower"
+    assert db.keyword_taxa.detect_case_convention() == "lower"
     _raw_kw(db, "Blue Jay", kw_type="taxonomy", is_species=1)
-    assert db.detect_keyword_case_convention() is None
+    assert db.keyword_taxa.detect_case_convention() is None
     _raw_kw(db, "Emu", kw_type="taxonomy", is_species=1)
-    assert db.detect_keyword_case_convention() is None
+    assert db.keyword_taxa.detect_case_convention() is None
 
 
-def test_apply_case_convention_helpers(db):
-    assert db._apply_case_convention("mcKay's BUNTING", "lower") == "McKay's bunting"
-    assert db._apply_case_convention("HERON", "lower") == "Heron"
-    assert db._apply_case_convention("snowy egret", "title") == "Snowy Egret"
-    assert db._apply_case_convention("snowy egret", "upper") == "snowy egret"
-    assert Database._sentence_case_first_word("") == ""
-    assert Database._sentence_case_first_word("123") == "123"
+def test_apply_case_convention_helpers():
+    from repositories.keyword_taxa import apply_species_case_convention, sentence_case_first_word
+
+    assert apply_species_case_convention("mcKay's BUNTING", "lower") == "McKay's bunting"
+    assert apply_species_case_convention("HERON", "lower") == "Heron"
+    assert apply_species_case_convention("snowy egret", "title") == "Snowy Egret"
+    assert apply_species_case_convention("snowy egret", "upper") == "snowy egret"
+    assert sentence_case_first_word("") == ""
+    assert sentence_case_first_word("123") == "123"
 
 
 def test_species_root_name_for_taxon(db, lib):
-    assert db._species_root_name_for_taxon(None) is None
-    assert db._species_root_name_for_taxon(3) is None
+    assert db.keyword_taxa.species_root_name_for_taxon(None) is None
+    assert db.keyword_taxa.species_root_name_for_taxon(3) is None
     _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=3)
-    assert db._species_root_name_for_taxon(3) == "American Robin"
+    assert db.keyword_taxa.species_root_name_for_taxon(3) == "American Robin"
 
 
 def test_lookup_taxon_id_for_keyword(db, lib):
-    assert db._lookup_taxon_id_for_keyword("american robin") == 3
-    assert db._lookup_taxon_id_for_keyword("Nope") is None
+    assert db.keyword_taxa.lookup_taxon_id("american robin") == 3
+    assert db.keyword_taxa.lookup_taxon_id("Nope") is None
     # prefer_species falls back to the higher-rank direct hit.
-    assert db._lookup_taxon_id_for_keyword("Puma", prefer_species=True) == 4
-    assert db._lookup_taxon_id_for_keyword("Puma", species_only=True) is None
+    assert db.keyword_taxa.lookup_taxon_id("Puma", prefer_species=True) == 4
+    assert db.keyword_taxa.lookup_taxon_id("Puma", species_only=True) is None
     db.conn.execute(
         "INSERT INTO taxa_common_names (taxon_id, name) VALUES (5, 'Mountain lion')"
     )
     db.conn.execute(
         "INSERT INTO taxa_common_names (taxon_id, name) VALUES (4, 'Big cats')"
     )
-    assert db._lookup_taxon_id_for_keyword("mountain lion") == 5
-    assert db._lookup_taxon_id_for_keyword("mountain lion", species_only=True) == 5
-    assert db._lookup_taxon_id_for_keyword("big cats", prefer_species=True) == 4
-    assert db._lookup_taxon_id_for_keyword("big cats", species_only=True) is None
+    assert db.keyword_taxa.lookup_taxon_id("mountain lion") == 5
+    assert db.keyword_taxa.lookup_taxon_id("mountain lion", species_only=True) == 5
+    assert db.keyword_taxa.lookup_taxon_id("big cats", prefer_species=True) == 4
+    assert db.keyword_taxa.lookup_taxon_id("big cats", species_only=True) is None
 
 
 # -- tagging -------------------------------------------------------------------------------
@@ -1360,44 +1377,41 @@ def test_mark_species_keywords_links_subspecies_through_lineage(db, lib, monkeyp
         "lineage_names": ["Aves", "Turdus", "Turdus migratorius", "T. m. migratorius"],
         "lineage_ranks": ["class", "genus", "species", "subspecies"],
     }})
+    from repositories.keyword_taxa import KeywordTaxonRepository
+
     calls = []
-    real = db._resolve_species_by_lineage
-    monkeypatch.setattr(db, "_resolve_species_by_lineage",
-                        lambda n, a: calls.append((n, a)) or real(n, a))
+    real = KeywordTaxonRepository.resolve_species_by_lineage
+    monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_by_lineage",
+                        lambda self, n, a: calls.append((n, a)) or real(self, n, a))
     assert db.keyword_taxa.mark_species(tax) == 1
     assert calls == [("Turdus migratorius", ["Aves", "Turdus"])]
     assert _kw(db, kid)[4] == 3
 
 
 def test_resolve_species_by_lineage(db, lib):
-    assert db._resolve_species_by_lineage("Nope", ["Aves"]) is None
-    assert db._resolve_species_by_lineage("Turdus migratorius", []) is None
-    assert db._resolve_species_by_lineage("Turdus migratorius", ["Aves"])["id"] == 3
-    assert db._resolve_species_by_lineage("Turdus migratorius", ["Mammalia"]) is None
+    assert db.keyword_taxa.resolve_species_by_lineage("Nope", ["Aves"]) is None
+    assert db.keyword_taxa.resolve_species_by_lineage("Turdus migratorius", []) is None
+    assert db.keyword_taxa.resolve_species_by_lineage("Turdus migratorius", ["Aves"])["id"] == 3
+    assert db.keyword_taxa.resolve_species_by_lineage("Turdus migratorius", ["Mammalia"]) is None
     # A dangling parent pointer ends the walk.
     db.conn.execute("PRAGMA foreign_keys = OFF")
     _taxon(db, 9, "Orphan species", "species", 777)
     db.conn.execute("PRAGMA foreign_keys = ON")
-    assert db._resolve_species_by_lineage("Orphan species", ["Aves"]) is None
+    assert db.keyword_taxa.resolve_species_by_lineage("Orphan species", ["Aves"]) is None
     # Two matching homonyms are ambiguous.
     _taxon(db, 10, "Turdus migratorius", "species", 2)
-    assert db._resolve_species_by_lineage("Turdus migratorius", ["Aves"]) is None
+    assert db.keyword_taxa.resolve_species_by_lineage("Turdus migratorius", ["Aves"]) is None
 
 
 # -- structure ----------------------------------------------------------------------------
 
 
-# Still on ``Database``: the forwarders bound into the keyword repositories by
-# name (``FACADE_METHODS``), ``untag_photo`` (kept beside ``tag_photo`` for the
+# Still on ``Database``: the forwarders other repositories bind by name
+# (``FACADE_METHODS``), ``untag_photo`` (kept beside ``tag_photo`` for the
 # structural guards that find keyword writers by name), and the coordinated
 # methods that delegate their statements; each mapped to the factory of the
 # repository that holds its SQL.
 _DELEGATING_KEYWORD_METHODS = {
-    "detect_keyword_case_convention": "_keyword_taxon_repository",
-    "resolve_species_display_name": "_keyword_taxon_repository",
-    "_species_root_name_for_taxon": "_keyword_taxon_repository",
-    "_lookup_taxon_id_for_keyword": "_keyword_taxon_repository",
-    "_add_source_species_keyword": "_keyword_repository",
     "add_keyword": "_keyword_repository",
     "_merge_duplicate_keywords_pass": "_keyword_tree_repository",
     "_rename_keyword_dependents": "_keyword_tree_repository",
@@ -1405,8 +1419,11 @@ _DELEGATING_KEYWORD_METHODS = {
     "untag_photo": "_photo_keyword_repository",
     "get_photos_with_equivalent_species": "_photo_species_repository",
     "update_keyword": "_keyword_tree_repository",
-    "_resolve_species_by_lineage": "_keyword_taxon_repository",
 }
+
+# The keyword-domain repositories that still bind ``Database`` methods by name
+# (``FACADE_METHODS``). The others take no façade at all.
+_KEYWORD_REPOSITORIES_WITH_FACADE_METHODS = {"repositories.keyword_tree"}
 
 # Every keyword-domain repository: its module, class, ``Database`` accessor
 # and the factory the accessor builds it through.
@@ -1466,6 +1483,15 @@ _REMOVED_KEYWORD_WRAPPERS = (
     "record_embedded_keyword_offered",
     "transfer_embedded_keyword_offered_for_merge",
     "mark_species_keywords",
+    "detect_keyword_case_convention",
+    "resolve_species_display_name",
+    "species_case_convention",
+    "_apply_case_convention",
+    "_sentence_case_first_word",
+    "_species_root_name_for_taxon",
+    "_lookup_taxon_id_for_keyword",
+    "_add_source_species_keyword",
+    "_resolve_species_by_lineage",
 )
 
 # The provenance writers and the methods that call ``_merge_keyword_into``
@@ -1577,7 +1603,7 @@ def test_keyword_repository_never_references_provenance_writers(module_name):
 
 @pytest.mark.parametrize("module_name", sorted(
     name for name in _KEYWORD_REPOSITORIES
-    if name not in ("repositories.photo_keywords", "repositories.photo_species")
+    if name in _KEYWORD_REPOSITORIES_WITH_FACADE_METHODS
 ))
 def test_keyword_repository_routes_facade_calls_through_database(db, module_name):
     import importlib
@@ -1591,11 +1617,14 @@ def test_keyword_repository_routes_facade_calls_through_database(db, module_name
 
 
 def test_keyword_repositories_without_facade_methods_take_no_facade():
-    import repositories.photo_keywords as photo_keywords
-    import repositories.photo_species as photo_species
+    import importlib
 
-    for module in (photo_keywords, photo_species):
-        assert not hasattr(module, "FACADE_METHODS")
+    for module_name in set(_KEYWORD_REPOSITORIES) - _KEYWORD_REPOSITORIES_WITH_FACADE_METHODS:
+        module = importlib.import_module(module_name)
+        assert not hasattr(module, "FACADE_METHODS"), module_name
+        class_name = _KEYWORD_REPOSITORIES[module_name][0]
+        params = inspect.signature(getattr(module, class_name)).parameters
+        assert "facade" not in params, module_name
 
 
 def test_keyword_facade_signatures_unchanged():
@@ -1605,24 +1634,27 @@ def test_keyword_facade_signatures_unchanged():
         "(self, name, parent_id=None, is_species=False, kw_type=None, "
         "source_taxon_id=None, _resolve_alias=False)"
     )
-    assert sig["resolve_species_display_name"].startswith(
-        "(self, name, apply_case_convention=True, case_convention=<object object"
-    )
-    assert sig["_add_source_species_keyword"] == (
-        "(self, name, source_taxon_id, parent_id=None)"
-    )
     assert sig["untag_photo"] == (
         "(self, photo_id, keyword_id, *, _record_history=False)"
     )
     assert sig["update_keyword"] == "(self, keyword_id, **kwargs)"
-    assert sig["_lookup_taxon_id_for_keyword"] == (
-        "(self, name, prefer_species=False, species_only=False)"
-    )
     assert sig["get_photos_with_equivalent_species"] == (
         "(self, photo_ids, keyword_id, exclude_keyword_ids=None)"
     )
+    from repositories.keyword_taxa import KeywordTaxonRepository
     from repositories.keyword_tree import KeywordTreeRepository
+    from repositories.keywords import KeywordRepository
     from repositories.photo_species import PhotoSpeciesRepository
+
+    assert calling_signature(KeywordTaxonRepository.resolve_species_display).startswith(
+        "(self, name, apply_case_convention=True, *, case_convention=<object object"
+    )
+    assert calling_signature(KeywordRepository.add_source_species) == (
+        "(self, name, source_taxon_id, parent_id=None)"
+    )
+    assert calling_signature(KeywordTaxonRepository.lookup_taxon_id) == (
+        "(self, name, prefer_species=False, species_only=False)"
+    )
 
     params = inspect.signature(PhotoSpeciesRepository.get_species_for_photos).parameters
     assert [(p.name, p.default) for p in params.values()] == [
@@ -1650,8 +1682,8 @@ def test_keyword_repository_never_hands_itself_out_as_the_database(module_name):
                  and parents[node].value is node)
         and not isinstance(parents.get(node), ast.arguments)
     ]
-    # The only one is ``KeywordRepository.__init__`` storing the façade
-    # (``setattr(self, ...)``); the repositories without façade methods
+    # The only one is ``__init__`` storing the façade (``setattr(self,
+    # ...)``) in a repository that still binds façade methods; the others
     # have none.
     assert len(bare) == (1 if hasattr(module, "FACADE_METHODS") else 0)
 
@@ -1714,19 +1746,19 @@ def test_add_keyword_explicit_general_ignores_placed_species(db, lib):
     assert _kw(db, kid)[1:3] == (None, "general")
 
 
-def test_add_source_species_keyword_binds_species_filed_in_tree(db, lib):
+def test_add_source_species_binds_species_filed_in_tree(db, lib):
     _parent, placed = _placed_robin(db)
     db.conn.commit()
-    assert db._add_source_species_keyword("American Robin", 12727) == placed
+    assert db.keywords.add_source_species("American Robin", 12727) == placed
     assert _kw(db, placed)[4:] == (3, 12727)
     assert _top_level_rows(db, "American Robin") == []
 
 
-def test_add_source_species_keyword_ambiguous_placed_rows_mint_top_level(db, lib):
+def test_add_source_species_ambiguous_placed_rows_mint_top_level(db, lib):
     _placed_robin(db, "Thrushes")
     _placed_robin(db, "Backyard birds")
     db.conn.commit()
-    kid = db._add_source_species_keyword("American Robin", 12727)
+    kid = db.keywords.add_source_species("American Robin", 12727)
     assert _kw(db, kid)[1] is None
 
 

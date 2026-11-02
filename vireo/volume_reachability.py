@@ -24,9 +24,9 @@ path reachable right now?"*:
 * :func:`is_offline_error` classifies an ``OSError`` as "the volume went
   away" (as opposed to a per-file permission or corruption problem).
 
-Both the pipeline (``pipeline_job``) and the Flask app (``app``) import the
-moved helpers under their historical private names, so their existing call
-sites and tests are unaffected.
+The pipeline (``pipeline_job``) imports these helpers under its historical
+private names; ``services.trash`` calls :func:`network_root_reachable`
+through this module before it accepts a Finder "missing" answer.
 """
 import contextlib
 import errno

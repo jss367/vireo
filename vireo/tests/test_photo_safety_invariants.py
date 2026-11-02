@@ -419,16 +419,14 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         return hashes
 
     def _deleter(self):
-        import app as app_module
+        from fake_trash import FakeTrash
         from services.photo_deletion import PhotoDeletion
 
-        return PhotoDeletion(
-            {"THUMB_CACHE_DIR": self.thumbs},
-            chunked=app_module._chunked,
-            trash_paths=self._trash_paths,
-            snapshot_parent_device=app_module._snapshot_parent_device,
-            path_confirmed_gone=app_module._path_confirmed_gone,
-        )
+        # The machine's own Trash folder stands in for the OS Trash; the
+        # mount-identity checks permanent delete makes stay real.
+        trash = FakeTrash()
+        trash.handle_trash(self._trash_paths)
+        return PhotoDeletion({"THUMB_CACHE_DIR": self.thumbs}, trash=trash)
 
     def _trash_paths(self, filepaths, progress_callback=None, already_missing_out=None,
                      **_kwargs):

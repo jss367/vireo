@@ -19557,7 +19557,7 @@ def test_species_display_name_resolves_hierarchy_alias_through_taxon(tmp_path):
     db.commit()
     db.conn.commit()
 
-    assert db.resolve_species_display_name("Desert Verdin") == "Verdin"
+    assert db.keyword_taxa.resolve_species_display("Desert Verdin") == "Verdin"
 
 
 def test_species_display_name_can_skip_the_case_convention_last_resort(tmp_path):
@@ -19576,19 +19576,19 @@ def test_species_display_name_can_skip_the_case_convention_last_resort(tmp_path)
         db.add_keyword(name, is_species=True)
         db.commit()
     db.conn.commit()
-    assert db.detect_keyword_case_convention() == "title"
+    assert db.keyword_taxa.detect_case_convention() == "title"
 
     # Unknown name: the default resolution invents Title Case, the display
     # resolution hands the caller's own spelling straight back.
-    assert db.resolve_species_display_name("Bubulcus ibis") == "Bubulcus Ibis"
-    assert db.resolve_species_display_name(
+    assert db.keyword_taxa.resolve_species_display("Bubulcus ibis") == "Bubulcus Ibis"
+    assert db.keyword_taxa.resolve_species_display(
         "Bubulcus ibis", apply_case_convention=False,
     ) == "Bubulcus ibis"
 
     # Stored names are unaffected — both forms return the row's spelling,
     # including through a case-insensitive match.
     for apply_case in (True, False):
-        assert db.resolve_species_display_name(
+        assert db.keyword_taxa.resolve_species_display(
             "black phoebe", apply_case_convention=apply_case,
         ) == "Black Phoebe"
 
@@ -19632,7 +19632,7 @@ def test_species_keywords_preserves_attached_root_alias_spelling(tmp_path):
     also has a differently-spelled sibling root row, the returned name must
     be the *attached* root's stored spelling, not whichever sibling root
     happens to sort first. Curation writes still go through
-    ``resolve_species_display_name()``, which preserves an exact root-name
+    ``resolve_species_display()``, which preserves an exact root-name
     match, so Browse/Compare and representative attachment would otherwise
     report the sibling root while representative/highlight rows are keyed
     under the actually attached alias. Only hierarchy leaves need the root
@@ -19789,7 +19789,7 @@ def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
 def test_species_display_name_uses_leaf_spelling_when_no_root_exists(tmp_path):
     """When a linked hierarchy leaf's canonical taxon has no top-level
     root keyword (for example a hierarchy-only accept whose top-level
-    ``Black Phoebe`` was never created), ``resolve_species_display_name``
+    ``Black Phoebe`` was never created), ``resolve_species_display``
     must return the matched leaf's stored spelling. The case-convention
     fallback would otherwise mint ``Black Phoebe`` from a submitted
     ``black phoebe`` while the photo only carries the leaf ``black
@@ -19812,7 +19812,7 @@ def test_species_display_name_uses_leaf_spelling_when_no_root_exists(tmp_path):
     )
     db.conn.commit()
 
-    assert db.resolve_species_display_name("black phoebe") == "black phoebe"
+    assert db.keyword_taxa.resolve_species_display("black phoebe") == "black phoebe"
 
 
 def test_photo_life_list_species_preserves_linked_homonyms(tmp_path):
@@ -24074,20 +24074,16 @@ def test_best_photo_by_taxon_chunks_large_id_list(db):
     assert all(k in {ids['Melospiza melodia']} for k in best)  # no spurious keys
 
 
-def test_apply_case_convention_preserves_mixed_case_eponym(tmp_path):
+def test_apply_case_convention_preserves_mixed_case_eponym():
     """The 'lower' convention must not mangle mixed-case first words:
     `McKay's bunting` keeps its internal capital, ALL-CAPS label-file
     spellings sentence-case, plain words capitalize as before."""
-    from db import Database
-    db = Database(str(tmp_path / "test.db"))
-    try:
-        conv = db._apply_case_convention
-        assert conv("McKay's bunting", "lower") == "McKay's bunting"
-        assert conv("MALLARD DUCK", "lower") == "Mallard duck"
-        assert conv("black phoebe", "lower") == "Black phoebe"
-        assert conv("mallard", "lower") == "Mallard"
-    finally:
-        db.close()
+    from repositories.keyword_taxa import apply_species_case_convention as conv
+
+    assert conv("McKay's bunting", "lower") == "McKay's bunting"
+    assert conv("MALLARD DUCK", "lower") == "Mallard duck"
+    assert conv("black phoebe", "lower") == "Black phoebe"
+    assert conv("mallard", "lower") == "Mallard"
 
 
 def test_curation_setters_canonicalize_species_casing(tmp_path):
@@ -24939,7 +24935,7 @@ def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match
 
 
 def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
-    """``resolve_species_display_name`` routes a linked hierarchy alias
+    """``resolve_species_display`` routes a linked hierarchy alias
     (e.g. ``Desert Verdin`` bound to the ``Verdin`` species taxon) to the
     canonical root spelling, so ``species_curation.add_highlight`` /
     ``collect_highlight_buckets`` store an unconfirmed prediction's
@@ -24962,7 +24958,7 @@ def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
         "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
     )
     # Root "Verdin" + hierarchy leaf "Desert Verdin" both bound to the
-    # same species taxon. resolve_species_display_name canonicalizes
+    # same species taxon. resolve_species_display canonicalizes
     # "Desert Verdin" through the shared taxon to root "Verdin".
     root = db.add_keyword("Verdin", is_species=True)
     db.commit()
@@ -24994,7 +24990,7 @@ def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
     db.conn.commit()
 
     # species_curation.add_highlight canonicalizes the label via
-    # resolve_species_display_name — the leaf's linked taxon resolves
+    # resolve_species_display — the leaf's linked taxon resolves
     # back to root "Verdin", so the highlight lands under "Verdin".
     db.species_curation.add_highlight("Desert Verdin", pid)
     stored = db.conn.execute(
@@ -25225,7 +25221,7 @@ def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
 
 def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_path):
     """The prediction-only highlight fallback must mirror
-    ``resolve_species_display_name``'s root-first preference: when a
+    ``resolve_species_display``'s root-first preference: when a
     top-level species root shares the prediction label with a hierarchy
     leaf that points at a different taxon, the reload canonicalization
     must return the root's stored spelling, not the leaf's root spelling.
@@ -25250,7 +25246,7 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
         "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
     )
     # Top-level species root named "Robin" linked to the American Robin
-    # taxon (this is the row ``resolve_species_display_name`` case 1
+    # taxon (this is the row ``resolve_species_display`` case 1
     # returns for the label "Robin").
     root = db.add_keyword("Robin", is_species=True)
     db.commit()
@@ -25292,7 +25288,7 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
         (did,),
     )
     # ``species_curation.add_highlight`` funnels through
-    # ``resolve_species_display_name``, which returns "Robin" (root-first)
+    # ``resolve_species_display``, which returns "Robin" (root-first)
     # for the label "Robin".
     db.species_curation.add_highlight("Robin", pid)
     db.conn.commit()
