@@ -270,8 +270,7 @@ export function browseFilterReloadOptions(/** @type {BrowseFilterChange | undefi
   // Loading a saved expression replaces the result set wholesale, so the
   // anchor's old position says nothing about where it landed — or whether
   // the expression contains it at all. Ask the server, the same way a
-  // re-sort does; paging towards it would walk the replacement result set
-  // (Codex P1 on PR #1695).
+  // re-sort does; paging towards it would walk the replacement result set.
   if (reason === 'expressionLoaded') {
     return { preserveAnchor: true, focusAnchor: true };
   }
@@ -284,9 +283,8 @@ export function browseFilterReloadOptions(/** @type {BrowseFilterChange | undefi
    The card the user is holding comes first; for a stack the other frames
    they picked follow, because any of them places the same card. Chunked to
    what one lookup accepts, and never emptied by that bound — the frames
-   past the first chunk are asked about in a further lookup, not discarded
-   (Codex P2 on PR #1695). Empty when the reload has no anchor to place or
-   is not a focused one. */
+   past the first chunk are asked about in a further lookup, not discarded.
+   Empty when the reload has no anchor to place or is not a focused one. */
 function browseFocusCandidateChunks(/** @type {BrowseAnchor | null} */ anchor, /** @type {boolean} */ focusAnchor) {
   if (!anchor || !focusAnchor) return [];
   var candidates = [anchor.photoId];
@@ -380,15 +378,14 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   // active, so the batch-tagging case still falls through to the viewport
   // anchor below; when a single photo is selected and the edit did not
   // remove it, restoring the selection and detail panel matches the
-  // documented fallback behavior (Codex review r4012897727).
+  // documented fallback behavior.
   var anchor = (preserveAnchor || preserveScroll)
     ? captureSelectedPhotoAnchor()
     : null;
   // A reload arriving while a focused one is still in flight has nothing to
   // capture from the DOM — the older reload cleared the selection and tore
   // down the cards synchronously before its await. The target it was aiming
-  // at is still the target, so forward it rather than dropping back to page 1
-  // (Codex review r4021334323).
+  // at is still the target, so forward it rather than dropping back to page 1.
   //
   // What decides whether the anchor may be forwarded is the *scope*, not who
   // is asking. A sidebar folder/keyword/collection click bumps
@@ -398,7 +395,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   // change, and equally a folder-health refresh or a cleared quick search,
   // both of which ask to keep the user's place via ``preserveAnchor`` and
   // would otherwise invalidate the in-flight sort and lose its selection for
-  // good (Codex reviews on PR #1658).
+  // good.
   if (state.pendingFocusAnchor && state.pendingFocusAnchorScopeGen !== state.browseScopeGen) {
     state.pendingFocusAnchor = null;
   }
@@ -408,7 +405,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   // so the scope-generation guard above cannot see it; without dropping the
   // holder here, a following focused sort would adopt the stale anchor and
   // resurrect a selection the intervening reset just cleared, whenever the
-  // photo still matched the new filter (Codex review r4021838076).
+  // photo still matched the new filter.
   if (!focusAnchor && !preserveAnchor && !preserveScroll) {
     state.pendingFocusAnchor = null;
   }
@@ -432,7 +429,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   // matching keyword, say. Capture the viewport anchor alongside the
   // selected-photo one so that when the paged scan below runs out of
   // budget without finding the id, we can still hold position instead of
-  // resetting to ``scrollTop = 0`` (Codex review r4013123608).
+  // resetting to ``scrollTop = 0``.
   var scrollAnchor = preserveScroll
     ? captureBrowseViewportAnchor()
     : null;
@@ -468,8 +465,8 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   if (anchor || scrollAnchor) state.anchorScanDepth++;
   try {
     // A stack anchor offers every frame the user picked, so the reload can
-    // be placed by one it kept even when the frame we aimed at is gone
-    // (Codex P2 on PR #1695). One lookup takes a bounded number of
+    // be placed by one it kept even when the frame we aimed at is gone.
+    // One lookup takes a bounded number of
     // candidates — they become bound parameters in one ``IN`` clause — and
     // nothing bounds how many frames a burst holds, so the frames past that
     // are asked about in a further lookup rather than dropped: a saved
@@ -477,7 +474,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
     // the user rated, say) and that is still the selection it should
     // restore. Only a chunk that places nothing costs another request, so
     // every stack short enough to ask about at once — which is all of them,
-    // in practice — is one request, as before.
+    // in practice — is one request.
     var focusChunks = browseFocusCandidateChunks(anchor, /** @type {boolean} */ focusAnchor);
     var initialLoadStatus;
     for (var chunkAt = 0; chunkAt < Math.max(1, focusChunks.length); chunkAt++) {
@@ -500,7 +497,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
     // lookup target as well as a selection: handed a hidden frame,
     // ``loadUntilPhotoRendered`` would expand that stack's tray to reach it,
     // so a plain re-sort would leave the collapsed stack the user selected
-    // standing open (Codex P2 on PR #1695).
+    // standing open.
     if (anchor && focusAnchor && state.browseResolvedFocusPhotoId != null) {
       var resolvedCover = anchor.stackSelection
         ? loadedBrowseStackCoverForPhoto(state.browseResolvedFocusPhotoId)
@@ -564,7 +561,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
     // just-went-missing photo in the reloaded dataset with ``folder_status``
     // set to a non-``ok``/``partial`` value. Restoring the selection there
     // would let updateBatchBar() expose Develop/Export/Delete against a
-    // supposedly read-only photo (Codex review r3839992514).
+    // supposedly read-only photo.
     var anchorPhoto = findBrowsePhoto(anchor.photoId);
     var anchorCoverId = browseStackCoverIdForPhoto(anchor.photoId);
     var anchorGridId = anchorCoverId == null ? anchor.photoId : anchorCoverId;
@@ -583,7 +580,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
     // the selection whenever an edit merged a neighbouring frame into the
     // burst: undo/redo re-runs the query and ``afterHistoryChange`` folds the
     // pre-action ids back in on top, so a later batch export or delete would
-    // act on a frame the user never selected (Codex P2 on PR #1695). The
+    // act on a frame the user never selected. The
     // intersection is also why the ids cannot simply be replayed: a frame
     // this reload dropped from the group is no longer part of the card the
     // user is looking at, and a stack with only some of its frames selected
@@ -672,8 +669,8 @@ export function updatePreviousPhotosButton() {
     // With Stacks on the grid pages logical items, not photos, so this
     // offset counts cards — and a single card can stand for a whole burst.
     // Calling them photos would undercount, badly: fifty earlier stacks can
-    // be hundreds of frames. Say what the number actually counts (Codex
-    // review on PR #1658; CORE_PHILOSOPHY, "no black boxes").
+    // be hundreds of frames. Say what the number actually counts
+    // (CORE_PHILOSOPHY, "no black boxes").
     var noun = browseStacksEnabled()
       ? (offset === 1 ? 'card' : 'cards')
       : (offset === 1 ? 'photo' : 'photos');
@@ -709,13 +706,13 @@ function buildBrowsePageRequest(/** @type {number} */ page, /** @type {number} *
   // The other frames of a focused stack card. Any of them places the same
   // card, so a reload that dropped the frame we asked about first can still
   // be placed by one it kept — in the same request, rather than one retry
-  // per frame (Codex P2 on PR #1695).
+  // per frame.
   //
   // Trimmed to what one lookup accepts. Every candidate becomes a bound
   // parameter in one ``IN`` clause, so an over-long list would come back a
   // 400 — and this request runs after the window has been cleared, which
-  // would leave the grid empty and the selection gone (Codex P2 on
-  // PR #1695). Callers that have more frames than this send the rest in a
+  // would leave the grid empty and the selection gone. Callers that have
+  // more frames than this send the rest in a
   // further lookup (``browseFocusCandidateChunks``); the trim here is what
   // makes *this request* valid, not where the extra frames go.
   var focusPhotoIds = (requestOptions && requestOptions.focusPhotoIds

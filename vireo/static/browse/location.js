@@ -198,8 +198,8 @@ async function _afterLocationMutation(/** @type {number[]} */ photoIds, /** @typ
   // Bump the location-mutation epoch so any in-flight reverse-geocode from an
   // earlier maybeShowExifSuggestion(A) bails out of its post-await paint. Every
   // save/clear/accept path funnels through here, so this is the single choke
-  // point where the batch-save-during-pending-geocode race can be closed.
-  // Codex P2 on PR #1097 (17:39Z): open A → Cmd-click B → save batch location
+  // point where the batch-save-during-pending-geocode race can be closed:
+  // open A → Cmd-click B → save batch location
   // for {A,B} → geocode resolves. renderBatchInspector rehides #locationFilled,
   // so the DOM-only guard in maybeShowExifSuggestion can't tell the batch was
   // just given a location and repaints A's stale Accept line.
@@ -420,7 +420,7 @@ export async function clearPhotoLocation() {
 // Scrub the inline EXIF suggestion line (hide, empty innerHTML, drop the
 // data-photo-id owner tag). Every scrub site must go through this helper so
 // they can't silently diverge — e.g. if a future scrub also needs to clear a
-// stored placeId. Codex nitpick on PR #1097.
+// stored placeId.
 export function clearExifSuggestion() {
   var sugg = /** @type {HTMLElement} */ (document.getElementById('locationExifSuggestion'));
   if (!sugg) return;
@@ -483,7 +483,7 @@ export function renderLocationFilled(/** @type {BrowseLocation | null} */ loc) {
   // and leaving it (hidden) in #locationEmpty makes it stale state: open A
   // (suggestion fetched) → open B with a saved location → Cmd-click A would
   // otherwise resurrect A's Accept line for the {B, A} batch and overwrite
-  // B's location (Codex P2 on PR #1097). Clear it at the source instead.
+  // B's location. Clear it at the source instead.
   clearExifSuggestion();
 }
 
@@ -504,8 +504,8 @@ export function renderLocationEmpty(/** @type {{preserveExifSuggestion?: boolean
   // instead (preserveExifSuggestion) so the anchor's suggestion stays
   // acceptable for the whole selection — but only while the photo that
   // produced it is still in the selection. Otherwise Accept would apply
-  // that anchor's GPS-derived location to unrelated photos (Codex P1 on
-  // PR #1097: open A → Cmd-click B → Cmd-click A to drop → Cmd-click C).
+  // that anchor's GPS-derived location to unrelated photos (open A →
+  // Cmd-click B → Cmd-click A to drop → Cmd-click C).
   var sugg = /** @type {HTMLElement} */ (document.getElementById('locationExifSuggestion'));
   if (!sugg) return;
   var keepSugg = false;
@@ -560,7 +560,7 @@ export async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | un
     //      renderBatchInspector never touches detailPhotoId, so the anchor
     //      pointer could still match while getActiveSelection() no longer
     //      includes A. Accept posts to getActiveSelection(), so the guard
-    //      must recheck selection membership too. Codex P1 on PR #1097.
+    //      must recheck selection membership too.
     //   3. Slow response for a photo the user has left behind by closing
     //      the detail panel, clearing the batch, or Cmd-click-dropping the
     //      anchor, then Select All that brings the departed photo back
@@ -568,17 +568,17 @@ export async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | un
     //      enough on its own: without also nulling detailPhotoId the
     //      pointer keeps matching after Select All re-includes the photo,
     //      and Accept would apply the departed anchor's EXIF place to the
-    //      whole batch. Those sites now null detailPhotoId, so the first
-    //      guard catches this race too. Codex P2 on PR #1097 (17:04Z).
+    //      whole batch. Those sites also null detailPhotoId, so the first
+    //      guard catches this race too.
     if (state.detailPhotoId !== requestPhotoId) return;
     if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
     // Fourth race: while we were awaiting reverse-geocode, the user saved
     // a location for this photo (via the input, a keyword pick, or a batch
     // op). Every mutation path funnels through _afterLocationMutation, which
-    // bumps locationMutationEpoch. If it moved, bail. (Codex P2 on PR #1097
-    // at 17:39Z: save-batch-location-during-pending-geocode overwriting the
-    // just-saved batch location. The DOM `!filled.hidden` check below alone
-    // can't catch that — after a batch save, _afterLocationMutation runs
+    // bumps locationMutationEpoch. If it moved, bail; otherwise the pending
+    // geocode would overwrite the just-saved batch location. (The DOM
+    // `!filled.hidden` check below alone can't catch that — after a batch
+    // save, _afterLocationMutation runs
     // renderBatchInspector → renderLocationEmpty, which rehides
     // #locationFilled, so the paint sneaks through.)
     if (locationMutationEpoch !== requestEpoch) return;

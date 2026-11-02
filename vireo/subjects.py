@@ -89,9 +89,9 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
     if not detections:
         # Migrated catalogs have legacy subject-derived fields on ``photos``
         # without any ``photo_subject_state`` row. Triggering ``sync_primary``
-        # only when that row exists made the intended cleanup a no-op there,
+        # only when that row exists would make the cleanup a no-op there,
         # leaving stale mask/quality/DINO/eye state attached to a photo with
-        # no detections. Check either signal (Codex r4056698678).
+        # no detections. Check either signal.
         stale = db.subjects.has_stale_primary_state(photo_id)
         if stale:
             with acquire_photo_mask(photo_id):

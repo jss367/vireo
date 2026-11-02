@@ -8,14 +8,12 @@ The API layer resolves a process **id** into these flags server-side so the
 import page, the process page, and import->process chaining all share one
 vocabulary.
 
-This module no longer owns the strategy *list* — that now lives in the DB and
-is user-editable. What remains here is:
+The strategy *list* lives in the DB and is user-editable. This module holds:
 
   * ``_BASE`` — the "everything on" baseline (also the column defaults for a
     brand-new process).
-  * ``SEED_PROCESSES`` — the four processes inserted once on first run. They
-    keep the semantics of the former hardcoded ``STRATEGIES`` dict. The default
-    user-facing seed is "Identify birds": detect/classify birds and write
+  * ``SEED_PROCESSES`` — the four processes inserted once on first run. The
+    default user-facing seed is "Identify birds": detect/classify birds and write
     lightweight species-review results, but skip the experimental
     quality/culling stack (SAM2 masks, DINO embeddings, eye focus, quality
     triage). The full quality pipeline remains available as the "Full" seed.
@@ -72,7 +70,7 @@ _BASE = {
 
 # Inserted once into ``saved_processes`` on first run (db_meta-guarded so a
 # user who deletes all processes never gets them back). Order here is the
-# ``sort_order`` used to render the process/import pickers.
+# ``sort_order`` of the process/import pickers.
 SEED_PROCESSES = [
     {
         "name": "Identify birds",
