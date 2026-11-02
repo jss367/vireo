@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 import places
 from db import Database
 from keyword_normalization import keyword_match_key, normalize_keyword_display
-from services import workspace_lifecycle
+from services import keyword_tagging, workspace_lifecycle
 from services.import_locations import (
     LocationChoiceError,
     apply_location_choices,
@@ -942,7 +942,7 @@ class ImportService:
                     exists = thread_db.photo_keywords.association_row(photo_id, keyword_id)
                     if exists is not None:
                         continue
-                    thread_db.tag_photo(
+                    keyword_tagging.tag_photo(thread_db, 
                         photo_id, keyword_id, source="manual",
                     )
                     self._queue_import_keyword_add(

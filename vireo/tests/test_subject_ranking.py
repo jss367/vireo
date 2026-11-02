@@ -4,7 +4,7 @@ import io
 import numpy as np
 import pytest
 from PIL import Image
-from services import detection_store, photo_ingest, review_decisions, workspace_folders
+from services import detection_store, keyword_tagging, photo_ingest, review_decisions, workspace_folders
 from subject_analysis import analyze_detection
 from subject_ranking import SubjectComparison, parse_comparison, resolve_subject
 
@@ -135,7 +135,7 @@ def test_photo_keyword_and_pending_top_prediction_do_not_confirm_subject(compari
         review_decisions.update_prediction_status(db, row["id"], "pending")
         db.commit()
     keyword = db.keywords.add(TARGET, is_species=True)
-    db.tag_photo(pids[0], keyword)
+    keyword_tagging.tag_photo(db, pids[0], keyword)
     db.commit()
     pack = _pack(app, pids, requested_species=TARGET)
     card = next(c for c in pack["cards"] if c["id"] == pids[0])

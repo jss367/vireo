@@ -31,7 +31,7 @@ from highlights_payload import (
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
-from services import prediction_decisions, review_decisions
+from services import keyword_tagging, prediction_decisions, review_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 from species_memberships import photo_species_memberships
 from web.request_args import request_bool_arg
@@ -371,7 +371,7 @@ class _HighlightsRelabel:
         if old_primary is not None:
             self.has_old_species = True
         for old in old_rows:
-            db.untag_photo(pid, old["id"], _record_history=True)
+            keyword_tagging.untag_photo(db, pid, old["id"], _record_history=True)
             # Compare by keyword id: SQLite's NOCASE is ASCII-only,
             # so `Éclair` and `éclair` live as distinct rows with
             # distinct ids, but Python `.lower()` folds them equal.
@@ -385,7 +385,7 @@ class _HighlightsRelabel:
                     db, pid, old["name"], workspace_id=self.ws_id,
                 )
 
-        db.tag_photo(pid, kid, source="manual")
+        keyword_tagging.tag_photo(db, pid, kid, source="manual")
         queue_keyword_add(db, pid, self.species, workspace_id=self.ws_id)
         self.items.append({
             "photo_id": pid,

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import browse_queries, photo_ingest, review_decisions, workspace_folders
+from services import browse_queries, keyword_tagging, photo_ingest, review_decisions, workspace_folders
 
 
 def parse_queries(queries, options=None):
@@ -51,9 +51,9 @@ def catalog(tmp_path, monkeypatch):
                     "Subject": ["removed-keyword"], "Rating": 99999},
         }), ids["hawk"]),
     )
-    db.tag_photo(ids["hawk"], db.keywords.add("Perched"))
-    db.tag_photo(ids["owl"], db.keywords.add("Perched"))
-    db.tag_photo(ids["owl"], db.keywords.add("Barn Owl", is_species=True))
+    keyword_tagging.tag_photo(db, ids["hawk"], db.keywords.add("Perched"))
+    keyword_tagging.tag_photo(db, ids["owl"], db.keywords.add("Perched"))
+    keyword_tagging.tag_photo(db, ids["owl"], db.keywords.add("Barn Owl", is_species=True))
     db.commit()
     taxon_id = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank) VALUES ('Tyto alba', 'Western Barn Owl', 'species')"
@@ -218,7 +218,7 @@ def test_metadata_search_sees_edits_and_scopes(catalog):
     assert db.collections.query_photo_ids(rules) == []
     rules[0]["value"] = "Resting"
     assert set(db.collections.query_photo_ids(rules)) == {ids["hawk"], ids["owl"]}
-    db.untag_photo(ids["hawk"], keyword_id)
+    keyword_tagging.untag_photo(db, ids["hawk"], keyword_id)
     db.commit()
     assert db.collections.query_photo_ids(rules) == [ids["owl"]]
     collection = db.collections.add("Resting birds", json.dumps(rules))
@@ -293,7 +293,7 @@ def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
         "INSERT INTO taxa (name, common_name, rank) VALUES ('Tyto', 'Masked owls', 'genus')"
     ).lastrowid
     db.conn.execute("UPDATE keywords SET taxon_id=? WHERE id=?", (genus_taxon, genus))
-    db.tag_photo(ids["robin"], genus)
+    keyword_tagging.tag_photo(db, ids["robin"], genus)
     db.commit()
     for name in ("owl", "hawk", "robin", "empty"):
         det = db.detections.save(ids[name], [

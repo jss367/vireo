@@ -1,31 +1,33 @@
 """Type-checker declarations that must track runtime wiring."""
 
 import importlib
+import inspect
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
-import pytest
+REPOSITORIES = Path(__file__).resolve().parents[1] / "repositories"
 
 
-@pytest.mark.parametrize(
-    "module_name, class_name",
-    [
-        ("repositories.keyword_provenance", "KeywordProvenanceRepository"),
-    ],
-)
-def test_facade_method_declarations_match_facade_methods(module_name, class_name):
-    """Each repository declares exactly the façade methods ``__init__`` installs.
+def test_no_repository_declares_methods_bound_from_the_facade():
+    """No repository binds ``Database`` methods onto itself, so none declares one.
 
-    ``__init__`` binds every name in ``FACADE_METHODS`` with ``setattr``,
-    which basedpyright cannot see, so the class body declares them. A name
-    added to ``FACADE_METHODS`` without a declaration is invisible to the
-    type checker; a declaration left behind after a name is removed claims
-    an attribute that no longer exists.
+    A repository that copied ``Database`` methods onto itself with
+    ``setattr`` had to declare each as a ``Callable[..., Any]`` class
+    annotation for basedpyright to see it. Repositories depend only
+    downward now (``test_db_facade_structure.FACADE_BINDING_MODULES`` is
+    empty), so such a declaration claims an attribute nothing installs.
     """
-    module = importlib.import_module(module_name)
-    cls = getattr(module, class_name)
-    declared = {
-        name for name, annotation in cls.__annotations__.items()
-        if annotation == Callable[..., Any]
-    }
-    assert declared == set(module.FACADE_METHODS)
+    offenders = []
+    for path in sorted(REPOSITORIES.glob("*.py")):
+        module = importlib.import_module(f"repositories.{path.stem}")
+        assert not hasattr(module, "FACADE_METHODS"), path.stem
+        for name, cls in inspect.getmembers(module, inspect.isclass):
+            if cls.__module__ != module.__name__:
+                continue
+            offenders += [
+                f"{path.stem}.{name}.{attr}"
+                for attr, annotation in getattr(cls, "__annotations__", {}).items()
+                if annotation == Callable[..., Any]
+            ]
+    assert not offenders, offenders

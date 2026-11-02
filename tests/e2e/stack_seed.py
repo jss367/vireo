@@ -11,6 +11,8 @@ properties instead of a shared id.
 
 import datetime
 
+from services import keyword_tagging
+
 # One second between frames: well inside the 3s default browse_stack_time_gap,
 # and ascending, so the run reads in the order the caller listed the photos.
 STACK_STEP_SECONDS = 1
@@ -71,6 +73,6 @@ def seed_browse_stack(db, photo_ids, start=None):
                 "UPDATE photos SET timestamp = ? WHERE id = ?", (timestamp, photo_id)
             )
             for keyword_id in keyword_ids:
-                db.tag_photo(photo_id, keyword_id)
+                keyword_tagging.tag_photo(db, photo_id, keyword_id)
                 db.commit()
     return timestamps

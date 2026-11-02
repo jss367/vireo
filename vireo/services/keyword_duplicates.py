@@ -11,7 +11,7 @@ wrong place/kind.
 
 The scope and liveness reads are ``KeywordTreeRepository``'s
 (``duplicate_scope_rows``, ``live_ids``, ``normalize_row_name``); each merge
-runs through ``Database._merge_keyword_into``, the provenance-folding
+runs through ``KeywordProvenanceRepository.merge_keyword_into``, the provenance-folding
 keyword merge. Nothing here commits: the caller's unit of work owns the
 pass, and an exception rolls every pending merge back.
 """
@@ -99,7 +99,7 @@ def merge_duplicate_keywords_pass(db: Database, ws: int) -> int:
 
             db.keyword_tree.normalize_row_name(keep_id)
             for rid in remove_ids:
-                total_merged += db._merge_keyword_into(
+                total_merged += db.keyword_provenance.merge_keyword_into(
                     rid, keep_id, pending_source_only=True,
                 )
 

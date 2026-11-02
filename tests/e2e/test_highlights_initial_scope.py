@@ -17,7 +17,7 @@ from urllib.request import urlopen
 
 import pytest
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import keyword_tagging, photo_ingest
 
 from e2e.module_pages import expose_page_modules
 from e2e.viewport_test_support import install_viewport_test_helpers
@@ -1028,7 +1028,7 @@ def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_s
     _seed_quality_scores_and_species(db, data)
 
     perch_kid = db.keywords.add("Perched portrait")
-    db.tag_photo(data["photos"][1], perch_kid)
+    keyword_tagging.tag_photo(db, data["photos"][1], perch_kid)
     db.commit()
     db.conn.commit()
 

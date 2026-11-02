@@ -14,7 +14,7 @@ from repositories.collections import BrowseStackConfig, CollectionRepository, no
 from repositories.photos import PhotoRepository
 from repositories.species_provenance import SpeciesProvenanceRepository
 from repositories.storage import StorageRepository
-from services import review_decisions
+from services import keyword_tagging, review_decisions
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.workspace_config import browse_stack_settings
 
@@ -59,6 +59,6 @@ def check_path_input(path: Path) -> None:
 def check_invalid_calls(db: Database) -> None:
     db.set_active_workspace("1")  # pyright: ignore[reportArgumentType]
     db.keywords.add("Robin", parent_id="1")  # pyright: ignore[reportArgumentType]
-    db.tag_photo(1, None)  # pyright: ignore[reportArgumentType]
+    keyword_tagging.tag_photo(db, 1, None)  # pyright: ignore[reportArgumentType]
     db.commit()
     db.record_edit("rating", "Rated photo", "5", [None])  # pyright: ignore[reportArgumentType]

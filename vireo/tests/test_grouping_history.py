@@ -6,6 +6,7 @@ import os
 
 import pytest
 from pipeline import load_results_raw, save_results_raw
+from services import keyword_tagging
 
 
 def _seed(db):
@@ -317,7 +318,7 @@ def test_cache_only_species_confirm_is_undone_before_older_grouping_edit(app_and
     for pid in ids:
         # Already-tagged rows raise; ignore.
         with contextlib.suppress(Exception):
-            db.tag_photo(pid, kid, source='manual')
+            keyword_tagging.tag_photo(db, pid, kid, source='manual')
             db.commit()
     db.conn.commit()
 
@@ -398,7 +399,7 @@ def test_cache_only_burst_confirm_that_auto_detaches_is_undoable(app_and_db):
     ).fetchone()[0]
     for pid in ids:
         with contextlib.suppress(Exception):
-            db.tag_photo(pid, kid, source='manual')
+            keyword_tagging.tag_photo(db, pid, kid, source='manual')
             db.commit()
     db.conn.commit()
     # Seed the cache so the encounter is confirmed as Sparrow — the confirm
@@ -450,7 +451,7 @@ def test_cache_only_confirm_rolls_back_when_cache_write_fails(
     ).fetchone()[0]
     for pid in ids:
         with contextlib.suppress(Exception):
-            db.tag_photo(pid, kid, source='manual')
+            keyword_tagging.tag_photo(db, pid, kid, source='manual')
             db.commit()
     db.conn.commit()
 
@@ -490,7 +491,7 @@ def test_confirm_history_preserves_cleared_override(app_and_db, undo_before_clea
     ).fetchone()[0]
     for pid in ids:
         with contextlib.suppress(Exception):
-            db.tag_photo(pid, kid, source='manual')
+            keyword_tagging.tag_photo(db, pid, kid, source='manual')
             db.commit()
     db.conn.commit()
     # Seed a burst-level previous override so undo of the confirmation
@@ -559,7 +560,7 @@ def test_species_confirmation_restores_cache_on_commit_failure(
         kid = db.keywords.add('Cardinal', is_species=True)
         db.commit()
         for pid in ids:
-            db.tag_photo(pid, kid)
+            keyword_tagging.tag_photo(db, pid, kid)
             db.commit()
     before = _load(db)
     if auto_detach:
@@ -652,7 +653,7 @@ def _seed_species_confirm_cache_entry(db, client, ids):
     kid = db.keywords.add('Cardinal', is_species=True)
     db.commit()
     for pid in ids:
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
         db.commit()
     db.conn.commit()
     assert client.post('/api/encounters/species', json={
@@ -768,7 +769,7 @@ def test_keyword_changing_auto_detach_is_one_atomic_history_action(app_and_db, r
         old_kid = db.keywords.add('Sparrow', is_species=True)
         db.commit()
         for pid in ids[:2]:
-            db.tag_photo(pid, old_kid)
+            keyword_tagging.tag_photo(db, pid, old_kid)
             db.commit()
     save_results_raw(before, os.path.dirname(db._db_path), db._ws_id())
     keywords_before = {pid: [row["id"] for row in db.photo_keywords.get_for_photo(pid)] for pid in ids}
@@ -886,7 +887,7 @@ def test_pipeline_results_refresh_species_from_database_after_confirm_and_undo(a
     ids, cached = _seed(db)
     for pid in ids:
         for keyword in db.photo_keywords.get_for_photo(pid):
-            db.untag_photo(pid, keyword['id'])
+            keyword_tagging.untag_photo(db, pid, keyword['id'])
             db.commit()
     for photo in cached['photos']:
         photo['confirmed_species'] = 'Stale cached label'
@@ -999,7 +1000,7 @@ def test_species_confirmation_without_split_restores_labels_and_keywords(app_and
         kid = db.keywords.add('Sparrow', is_species=True)
         db.commit()
         for pid in ids:
-            db.tag_photo(pid, kid)
+            keyword_tagging.tag_photo(db, pid, kid)
             db.commit()
         before['encounters'][0].update(confirmed_species='Sparrow', species_confirmed=True)
     save_results_raw(before, os.path.dirname(db._db_path), db._ws_id())

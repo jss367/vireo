@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from classify_job import ClassifyParams, run_classify_job
 from PIL import Image
-from services import detection_store, photo_ingest, review_decisions, workspace_folders
+from services import detection_store, keyword_tagging, photo_ingest, review_decisions, workspace_folders
 
 
 def test_classify_params_is_dataclass():
@@ -5408,7 +5408,7 @@ def _setup_two_photo_classify_workspace(tmp_path):
 
     # Tag p1 with a genre keyword so it should be filtered out by the skip-gate.
     scene_kid = db.keywords.add("Landscape", kw_type="genre")
-    db.tag_photo(p1, scene_kid)
+    keyword_tagging.tag_photo(db, p1, scene_kid)
     db.commit()
 
     col_id = db.collections.add(
@@ -5663,7 +5663,7 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
     )
     # Tag p1 with a genre keyword so the skip-gate filters it out.
     scene_kid = db.keywords.add("Landscape", kw_type="genre")
-    db.tag_photo(p1, scene_kid)
+    keyword_tagging.tag_photo(db, p1, scene_kid)
     db.commit()
     col_id = db.collections.add(
         "static-only-tagged",
@@ -5743,7 +5743,7 @@ def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
     )
     # Tag with a genre keyword so the subject-skip gate filters it out.
     scene_kid = db.keywords.add("Landscape", kw_type="genre")
-    db.tag_photo(p1, scene_kid)
+    keyword_tagging.tag_photo(db, p1, scene_kid)
     db.commit()
     col_id = db.collections.add(
         "static-only-tagged",

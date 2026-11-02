@@ -23,7 +23,7 @@ from db import Database
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.workspace_folders import WorkspaceFolderRepository
-from services import moves_merge, photo_ingest, workspace_folders
+from services import keyword_tagging, moves_merge, photo_ingest, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 
 
@@ -420,8 +420,8 @@ def test_move_location_state_without_loser_change_keeps_survivor(db, two_photos)
     loser, survivor = two_photos
     here = db.keywords.add("Here", kw_type="location")
     there = db.keywords.add("There", kw_type="location")
-    db.tag_photo(loser, here)
-    db.tag_photo(survivor, there)
+    keyword_tagging.tag_photo(db, loser, here)
+    keyword_tagging.tag_photo(db, survivor, there)
     assert db._move_location_state_for_merge(loser, survivor) is False
     assert _kw_ids(db, survivor) == [there]
 
@@ -430,8 +430,8 @@ def test_move_location_state_newer_survivor_change_wins(db, two_photos):
     loser, survivor = two_photos
     here = db.keywords.add("Here", kw_type="location")
     there = db.keywords.add("There", kw_type="location")
-    db.tag_photo(loser, here)
-    db.tag_photo(survivor, there)
+    keyword_tagging.tag_photo(db, loser, here)
+    keyword_tagging.tag_photo(db, survivor, there)
     _queue(db, loser, "location", "", "2026-01-01 00:00:00")
     _queue(db, survivor, "location", "", "2026-01-02 00:00:00")
     assert db._move_location_state_for_merge(loser, survivor) is False
@@ -444,9 +444,9 @@ def test_move_location_state_newer_loser_replaces_location_tags_only(
     here = db.keywords.add("Here", kw_type="location")
     there = db.keywords.add("There", kw_type="location")
     general = db.keywords.add("Backlit", kw_type="general")
-    db.tag_photo(loser, here)
-    db.tag_photo(survivor, there)
-    db.tag_photo(survivor, general)
+    keyword_tagging.tag_photo(db, loser, here)
+    keyword_tagging.tag_photo(db, survivor, there)
+    keyword_tagging.tag_photo(db, survivor, general)
     _queue(db, survivor, "location", "", "2026-01-01 00:00:00")
     _queue(db, loser, "location", "", "2026-01-02 00:00:00")
 
@@ -467,7 +467,7 @@ def test_move_location_state_newer_loser_replaces_location_tags_only(
 def test_move_location_state_untagged_loser_clears_survivor(db, two_photos):
     loser, survivor = two_photos
     there = db.keywords.add("There", kw_type="location")
-    db.tag_photo(survivor, there)
+    keyword_tagging.tag_photo(db, survivor, there)
     _queue(db, loser, "location", "", "2026-01-02 00:00:00")
     assert db._move_location_state_for_merge(loser, survivor) is True
     assert _kw_ids(db, survivor) == []
@@ -476,18 +476,20 @@ def test_move_location_state_untagged_loser_clears_survivor(db, two_photos):
 def test_move_location_state_tags_through_the_facade(db, two_photos, monkeypatch):
     loser, survivor = two_photos
     here = db.keywords.add("Here", kw_type="location")
-    db.tag_photo(loser, here)
+    keyword_tagging.tag_photo(db, loser, here)
     _queue(db, loser, "location", "", "2026-01-02 00:00:00")
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
     calls = []
-    real = db.tag_photo
+    real = KeywordProvenanceRepository.tag
 
-    def recorder(*args, **kwargs):
+    def recorder(repo, *args, **kwargs):
         calls.append((args, kwargs))
-        return real(*args, **kwargs)
+        return real(repo, *args, **kwargs)
 
-    monkeypatch.setattr(db, "tag_photo", recorder)
+    monkeypatch.setattr(KeywordProvenanceRepository, "tag", recorder)
     db._move_location_state_for_merge(loser, survivor)
-    assert calls == [((survivor, here), {})]
+    assert calls == [((survivor, here), {"source": "manual"})]
 
 
 # -- keyword reconciliation --------------------------------------------------
@@ -498,8 +500,10 @@ def test_reconcile_keyword_edits_without_rows_returns_zero(db, two_photos,
     loser, survivor = two_photos
     _queue(db, loser, "keyword_remove_flat", "Heron", "2026-01-01 00:00:00")
     calls = []
-    monkeypatch.setattr(db, "_carry_keyword_associations_for_merge",
-                        lambda *a: calls.append(a))
+    from repositories.moves_merge import MovesMergeRepository
+
+    monkeypatch.setattr(MovesMergeRepository, "carry_keyword_associations_for_merge",
+                        lambda _repo, *a: calls.append(a))
     assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
     assert calls == []
 
@@ -510,8 +514,10 @@ def test_reconcile_keyword_edits_empty_values_still_carry_empty_grouping(
     _queue(db, loser, "keyword_add", "", "2026-01-01 00:00:00")
     _queue(db, survivor, "keyword_remove", None, "2026-01-02 00:00:00")
     calls = []
-    monkeypatch.setattr(db, "_carry_keyword_associations_for_merge",
-                        lambda *a: calls.append(a))
+    from repositories.moves_merge import MovesMergeRepository
+
+    monkeypatch.setattr(MovesMergeRepository, "carry_keyword_associations_for_merge",
+                        lambda _repo, *a: calls.append(a))
     assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
     assert calls == [(loser, survivor, {})]
     assert len(_pending(db, loser, survivor)) == 2
@@ -521,7 +527,7 @@ def test_reconcile_keyword_edits_newer_remove_drops_older_add(
         db, two_photos, caplog):
     loser, survivor = two_photos
     heron = db.keywords.add("Heron", kw_type="general")
-    db.tag_photo(survivor, heron)
+    keyword_tagging.tag_photo(db, survivor, heron)
     add = _queue(db, survivor, "keyword_add", "Heron", "2026-01-01 00:00:00")
     remove = _queue(db, loser, "keyword_remove", "heron", "2026-01-02 00:00:00")
     unrelated = _queue(db, loser, "keyword_add", "Egret", "2026-01-03 00:00:00")
@@ -568,16 +574,19 @@ def test_carry_keyword_associations_add_and_remove(db, two_photos, monkeypatch):
     loser, survivor = two_photos
     heron = db.keywords.add("Heron", kw_type="general")
     egret = db.keywords.add("Egret", kw_type="general")
-    db.tag_photo(loser, heron)
-    db.tag_photo(survivor, egret)
+    keyword_tagging.tag_photo(db, loser, heron)
+    keyword_tagging.tag_photo(db, survivor, egret)
     _queue(db, loser, "keyword_add", "heron", "2026-01-02 00:00:00")
     _queue(db, loser, "keyword_remove", "egret", "2026-01-02 00:00:00")
     tagged, untagged = [], []
-    real_tag, real_untag = db.tag_photo, db.untag_photo
-    monkeypatch.setattr(db, "tag_photo", lambda *a, **k: (
-        tagged.append((a, k)), real_tag(*a, **k))[1])
-    monkeypatch.setattr(db, "untag_photo", lambda *a, **k: (
-        untagged.append((a, k)), real_untag(*a, **k))[1])
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+    from repositories.photo_keywords import PhotoKeywordRepository
+
+    real_tag, real_untag = KeywordProvenanceRepository.tag, PhotoKeywordRepository.untag
+    monkeypatch.setattr(KeywordProvenanceRepository, "tag", lambda r, *a, **k: (
+        tagged.append((a, k)), real_tag(r, *a, **k))[1])
+    monkeypatch.setattr(PhotoKeywordRepository, "untag", lambda r, *a, **k: (
+        untagged.append((a, k)), real_untag(r, *a, **k))[1])
 
     assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
     assert tagged == [((survivor, heron), {"source": "manual"})]
@@ -588,7 +597,7 @@ def test_carry_keyword_associations_add_and_remove(db, two_photos, monkeypatch):
 def test_carry_keyword_associations_skips_when_survivor_is_newer(db, two_photos):
     loser, survivor = two_photos
     heron = db.keywords.add("Heron", kw_type="general")
-    db.tag_photo(loser, heron)
+    keyword_tagging.tag_photo(db, loser, heron)
     _queue(db, loser, "keyword_add", "Heron", "2026-01-01 00:00:00")
     _queue(db, survivor, "keyword_add", "Heron", "2026-01-02 00:00:00")
     db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor)
@@ -598,7 +607,7 @@ def test_carry_keyword_associations_skips_when_survivor_is_newer(db, two_photos)
 def test_carry_keyword_associations_ignores_rows_already_deleted(db, two_photos):
     loser, survivor = two_photos
     heron = db.keywords.add("Heron", kw_type="general")
-    db.tag_photo(loser, heron)
+    keyword_tagging.tag_photo(db, loser, heron)
     gone = _queue(db, loser, "keyword_add", "Heron", "2026-01-01 00:00:00")
     by_key = {
         "heron": {
@@ -610,7 +619,7 @@ def test_carry_keyword_associations_ignores_rows_already_deleted(db, two_photos)
         },
     }
     db.conn.execute("DELETE FROM pending_changes WHERE id = ?", (gone,))
-    db._carry_keyword_associations_for_merge(loser, survivor, by_key)
+    db.moves_merge.carry_keyword_associations_for_merge(loser, survivor, by_key)
     assert _kw_ids(db, survivor) == []
 
 
@@ -620,7 +629,7 @@ def test_photo_keyword_ids_matching_uses_the_ascii_match_key(db, two_photos):
     accented = db.keywords.add("Éclair", kw_type="general")
     other = db.keywords.add("Egret", kw_type="general")
     for kid in (upper, accented, other):
-        db.tag_photo(loser, kid)
+        keyword_tagging.tag_photo(db, loser, kid)
     assert db.moves_merge.photo_keyword_ids_matching(loser, "great heron") == [upper]
     assert db.moves_merge.photo_keyword_ids_matching(loser, "Éclair") == [accented]
     assert db.moves_merge.photo_keyword_ids_matching(loser, "éclair") == []
@@ -870,9 +879,9 @@ def test_query_move_rule_matches_species(db, rule_photos):
     db.conn.execute("UPDATE keywords SET is_species = 1 WHERE id IN (?, ?)",
                     (robin, wren))
     db.conn.commit()
-    db.tag_photo(p["hi"], robin)
-    db.tag_photo(p["hi"], wren)
-    db.tag_photo(p["lo"], plain)
+    keyword_tagging.tag_photo(db, p["hi"], robin)
+    keyword_tagging.tag_photo(db, p["hi"], wren)
+    keyword_tagging.tag_photo(db, p["lo"], plain)
     assert moves_merge.query_move_rule_matches(db, {"species": ["Robin", "Wren"]}) == [p["hi"]]
     assert moves_merge.query_move_rule_matches(db, {"species": ["Robin Nest"]}) == []
     assert len(moves_merge.query_move_rule_matches(db, {"species": []})) == 3
@@ -995,12 +1004,12 @@ def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_p
     db.photo_visibility.grant(first, [losing, survivor])
     db.photo_visibility.grant(second, [losing])
     keyword = db.keywords.add('Tropical Kingbird', is_species=True)
-    db.tag_photo(losing, keyword)
-    db.tag_photo(survivor, keyword)
+    keyword_tagging.tag_photo(db, losing, keyword)
+    keyword_tagging.tag_photo(db, survivor, keyword)
     _queue(db, survivor, 'keyword_add', 'Tropical Kingbird', '2020-01-01', ws=first)
     _queue(db, losing, 'keyword_add', 'Tropical Kingbird', '2020-01-01', ws=second)
     unrelated = db.keywords.add('American Robin', is_species=True)
-    db.tag_photo(survivor, unrelated)
+    keyword_tagging.tag_photo(db, survivor, unrelated)
     db.photo_review.set_flag(survivor, 'rejected')
     db.commit()
     with db.transaction():
@@ -1087,7 +1096,7 @@ def test_duplicate_merge_rejects_synced_candidate_confirmation_aliases(db, tmp_p
         if alias == 'alternate_common':
             candidate = 'yellow kingbird'
     identity_photo, confirmed_photo = (losing, survivor) if identity_owner == 'losing' else (survivor, losing)
-    db.tag_photo(confirmed_photo, keyword)
+    keyword_tagging.tag_photo(db, confirmed_photo, keyword)
     state = {'group_id': 'saved', 'candidates': [candidate, "Couch's Kingbird"],
              'reason': 'Need call evidence', 'missing_evidence': 'Audio', 'status': 'unresolved'}
     db.identity_alternatives.set_state(identity_photo, state)
@@ -1111,8 +1120,8 @@ def test_survivor_uncertainty_keeps_unrelated_synced_source_species_and_provenan
     with db.transaction():
         save_alternatives(db, [survivor], ['Tropical Kingbird', "Couch's Kingbird"], 'Need calls', 'Audio')
     keyword = db.keywords.add('American Robin', is_species=True)
-    db.tag_photo(losing, keyword, source='manual')
-    db.tag_photo(survivor, keyword, source='accept')
+    keyword_tagging.tag_photo(db, losing, keyword, source='manual')
+    keyword_tagging.tag_photo(db, survivor, keyword, source='accept')
     db.conn.execute('DELETE FROM pending_changes')
     db.commit()
     moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
@@ -1129,7 +1138,7 @@ def test_identity_merge_carry_respects_newer_unrelated_species_removal(db, tmp_p
     with db.transaction():
         save_alternatives(db, [survivor], ['Tropical Kingbird', "Couch's Kingbird"], 'Need calls', 'Audio')
     keyword = db.keywords.add('American Robin', is_species=True)
-    db.tag_photo(losing, keyword)
+    keyword_tagging.tag_photo(db, losing, keyword)
     _queue(db, losing, 'keyword_add', 'American Robin', '2020-01-01')
     _queue(db, survivor, 'keyword_remove', 'American Robin', '2099-01-01')
     moves_merge.merge_staged_tree_into_archive(db, t['stage_root'], t['arch'])
@@ -1148,7 +1157,7 @@ def test_identity_merge_preserves_higher_rank_taxonomy_without_confirming_candid
     keyword = db.keywords.add('Puma', kw_type='taxonomy')
     db.conn.execute('UPDATE keywords SET taxon_id=92001 WHERE id=?', (keyword,))
     photo = losing if metadata_owner == 'losing' else survivor
-    db.tag_photo(photo, keyword, source='manual')
+    keyword_tagging.tag_photo(db, photo, keyword, source='manual')
     with db.transaction():
         save_alternatives(db, [losing], ['Tropical Kingbird', "Couch's Kingbird"], 'Need species evidence', 'A clearer view')
     assert keyword in _kw_ids(db, photo)
@@ -1169,7 +1178,7 @@ def test_identity_merge_rejects_candidate_removal_that_would_erase_same_named_hi
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (92001,55555,'Puma','Puma','genus')")
     keyword = db.keywords.add('Puma', kw_type='taxonomy')
     db.conn.execute('UPDATE keywords SET taxon_id=92001 WHERE id=?', (keyword,))
-    db.tag_photo(survivor, keyword)
+    keyword_tagging.tag_photo(db, survivor, keyword)
     with db.transaction():
         save_alternatives(db, [losing], ['Puma', 'Bobcat'], 'Uncertain species', 'A clearer view')
         if edited_candidates:
@@ -1404,7 +1413,7 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
     ).fetchone()[0]
     if removed_on_survivor:
         assert _import_embedded_keywords_for_photo(db, survivor, metadata)
-        db.untag_photo(survivor, keyword["id"])
+        keyword_tagging.untag_photo(db, survivor, keyword["id"])
 
     moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
 
@@ -1429,7 +1438,7 @@ def test_embedded_merge_keeps_survivor_manual_provenance(db, tmp_path, same_hash
                         else (t["survivor"], t["staged"]))
     _import_embedded_keywords_for_photo(db, losing, {"XMP": {"Subject": ["Robin"]}})
     keyword = db.photo_keywords.get_for_photo(losing)[0]
-    db.tag_photo(survivor, keyword["id"])
+    keyword_tagging.tag_photo(db, survivor, keyword["id"])
 
     moves_merge.merge_staged_tree_into_archive(db, t["stage_root"], t["arch"])
 
@@ -1936,11 +1945,10 @@ def test_thumb_paths_for_ids_skips_photos_without_a_thumbnail(db):
 
 # -- structure ---------------------------------------------------------------
 
-# Still on ``Database``: the keyword re-tagging (which the provenance contract
-# finds through ``self.tag_photo`` / ``untag_photo``) and the sync-grant guard.
+# Still on ``Database``: the location-state carry the staged merge receives
+# per call, and the sync-grant guard.
 MOVED = [
     "_move_location_state_for_merge",
-    "_carry_keyword_associations_for_merge",
     "_photo_syncable_in_workspace",
 ]
 
@@ -2025,33 +2033,26 @@ def _service_ast(name):
     return ast.parse(inspect.getsource(getattr(moves_merge, name))).body[0]
 
 
-def test_keyword_retags_stay_on_the_facade():
-    """``test_keyword_provenance_contract`` only sees ``self.tag_photo(...)``."""
+def test_keyword_retags_go_through_the_provenance_writer():
+    """``test_keyword_provenance_contract`` reads the ``source`` of every
+    provenance-writer call: ``self.keyword_provenance.tag`` on the façade and
+    ``KeywordProvenanceRepository(...).tag`` in the repository's carry."""
     import ast
+    import inspect
+    import textwrap
 
-    import repositories.moves_merge as repo_module
+    from repositories.moves_merge import MovesMergeRepository
 
-    for name, expected in (
-        ("_move_location_state_for_merge", {"tag_photo"}),
-        ("_carry_keyword_associations_for_merge", {"tag_photo", "untag_photo"}),
-    ):
-        called = {
-            node.func.attr for node in ast.walk(_method_ast(name))
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "self"
-        }
-        assert expected <= called, name
-    tree = ast.parse(open(repo_module.__file__, encoding="utf-8").read())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            callee = func.attr if isinstance(func, ast.Attribute) else getattr(
-                func, "id", None)
-            assert callee not in {"tag_photo", "untag_photo"}, (
-                "keyword re-tagging must stay on Database so the provenance "
-                "contract sees it")
+    called = {
+        ast.unparse(node.func) for node in ast.walk(_method_ast("_move_location_state_for_merge"))
+        if isinstance(node, ast.Call)
+    }
+    assert "self.keyword_provenance.tag" in called
+    carry = ast.parse(textwrap.dedent(inspect.getsource(
+        MovesMergeRepository.carry_keyword_associations_for_merge)))
+    called = {ast.unparse(node.func) for node in ast.walk(carry) if isinstance(node, ast.Call)}
+    assert "KeywordProvenanceRepository(self.conn).tag" in called
+    assert "PhotoKeywordRepository(self.conn).untag" in called
 
 
 def test_merge_wires_every_callback_to_the_facade():
@@ -2077,8 +2078,8 @@ def test_merge_wires_every_callback_to_the_facade():
     }
 
 
-def test_factory_binds_the_cross_domain_callbacks():
-    """The keyword carry re-tags through the façade; the relink is late-bound."""
+def test_factory_binds_the_late_relink():
+    """The relink is late-bound; the keyword carry is the repository's own."""
     import ast
 
     wired = {
@@ -2087,7 +2088,7 @@ def test_factory_binds_the_cross_domain_callbacks():
         if isinstance(node, ast.Call)
         for kw in node.keywords
     }
-    assert wired["carry_keyword_associations"] == "self._carry_keyword_associations_for_merge"
+    assert "carry_keyword_associations" not in wired
     assert wired["relink_parents_by_path"] == (
         "lambda folder_ids: self.folders.relink_parents_by_path(folder_ids)")
 
@@ -2109,7 +2110,6 @@ def test_facade_signatures_are_unchanged():
 
     expected = {
         "_move_location_state_for_merge": "(self, losing_id, surviving_id)",
-        "_carry_keyword_associations_for_merge": "(self, losing_id, surviving_id, by_key)",
     }
     for name, sig in expected.items():
         assert str(inspect.signature(getattr(Database, name))) == sig, name
@@ -2250,7 +2250,7 @@ def test_collision_refuses_conflicting_identity_without_losing_evidence(db, tmp_
             save_alternatives(db, [survivor], ["Heron", "Ibis"], "Other evidence", "Wings")
         else:
             kid = db.keywords.add("Heron", is_species=True)
-            db.tag_photo(survivor, kid, source="manual")
+            keyword_tagging.tag_photo(db, survivor, kid, source="manual")
     before = db.identity_alternatives.for_photos(include_resolved=True)
     history = [tuple(r) for r in db.conn.execute("SELECT * FROM edit_history_items")]
     pending = _pending(db, loser, survivor)
@@ -2339,7 +2339,7 @@ def test_collision_preserves_incompatible_batch_history_by_rolling_back(db, tmp_
     t = _collision_tree(db, tmp_path)
     workspace_folders.add_workspace_folder(db, db._active_workspace_id, t["stage_root"])
     kid = db.keywords.add("Heron", is_species=True)
-    db.tag_photo(t["staged"], kid, source="manual")
+    keyword_tagging.tag_photo(db, t["staged"], kid, source="manual")
     with db.transaction():
         edit = save_alternatives(db, [t["staged"], t["survivor"]], ["Heron", "Egret"], "Same evidence", "Bill")
     before = db.identity_alternatives.for_photos()
@@ -2397,7 +2397,7 @@ def test_collision_keeps_higher_rank_taxonomy_outside_species_decision(db, tmp_p
     db.conn.execute('INSERT INTO taxa (id, name, rank) VALUES (91002, ?, ?)', ('Ardea', rank))
     keyword = db.keywords.add('Ardea', kw_type='taxonomy')
     db.conn.execute('UPDATE keywords SET taxon_id=? WHERE id=?', (91002, keyword))
-    db.tag_photo(tagged, keyword, source='manual')
+    keyword_tagging.tag_photo(db, tagged, keyword, source='manual')
     with db.transaction():
         edit = save_alternatives(db, [identity_photo], ['Heron', 'Egret'], 'Uncertain species', 'Bill')
     assert keyword in _kw_ids(db, tagged)
@@ -2440,8 +2440,8 @@ def test_higher_rank_homonym_collision_rollback_survives_sync_and_history(db, tm
     db.conn.execute('UPDATE keywords SET taxon_id=93001 WHERE id=?', (higher,))
     note = db.keywords.add('Unrelated note')
     for pid in paths:
-        db.tag_photo(pid, note, source='manual')
-    db.tag_photo(metadata_photo, higher, source='manual')
+        keyword_tagging.tag_photo(db, pid, note, source='manual')
+    keyword_tagging.tag_photo(db, metadata_photo, higher, source='manual')
     with db.transaction():
         edit = save_alternatives(db, [identity_photo], ['Ardea', 'Egret'], 'Uncertain silhouette', 'Bill')
         if edited_away:

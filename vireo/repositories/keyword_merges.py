@@ -8,7 +8,7 @@ repository per access. The SQL text and parameter order are unchanged from
 that module.
 
 This module writes no ``photo_keywords`` association: the merges move tags
-through ``Database._merge_keyword_into``, which
+through ``KeywordProvenanceRepository.merge_keyword_into``, which
 ``test_keyword_provenance_contract`` keys to ``repositories/keyword_provenance.py``.
 The writes here are the durable ``keyword_import_aliases`` rows, the
 survivor's chosen identity fields, and the no-op write that reserves the

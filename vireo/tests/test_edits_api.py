@@ -2,7 +2,7 @@ import json
 import os
 
 import pytest
-from services import pending_changes, photo_ingest, photo_locations, workspace_folders
+from services import keyword_tagging, pending_changes, photo_ingest, photo_locations, workspace_folders
 from services.edit_history import undo_last_edit
 
 
@@ -2881,7 +2881,7 @@ def test_renaming_a_non_location_keyword_does_not_queue_location(
     app, db, photo_id = client_with_photo
     _enable_location_keyword_writes(db)
     kw_id = db.keywords.add("SomeSpecies", is_species=True)
-    db.tag_photo(photo_id, kw_id)
+    keyword_tagging.tag_photo(db, photo_id, kw_id)
     db.commit()
     _drop_all_pending(db)
 
@@ -3095,7 +3095,7 @@ def test_removing_a_non_location_tag_does_not_queue_a_location_change(
     app, db, photo_id = client_with_photo
     _enable_location_keyword_writes(db)
     kw_id = db.keywords.add("SomeSpecies", is_species=True)
-    db.tag_photo(photo_id, kw_id)
+    keyword_tagging.tag_photo(db, photo_id, kw_id)
     db.commit()
     _drop_all_pending(db)
 

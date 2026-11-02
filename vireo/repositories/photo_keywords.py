@@ -12,7 +12,7 @@ writes that are not provenance-bearing associations:
   ``workspace_photo_count``), read by the keyword rename, delete and
   location routes;
 - the classify job's subject-keyword filter (``filter_out_subject_tagged``);
-- ``untag``, the association delete ``Database.untag_photo`` forwards to;
+- ``untag``, the association delete ``keyword_tagging.untag_photo`` forwards to;
 - the scanner's embedded-keyword offer record
   (``photo_embedded_keyword_offered``): ``embedded_offered_keys``,
   ``record_embedded_offered_keys`` and the merge-time
@@ -45,15 +45,18 @@ import sqlite3
 from collections.abc import Callable, Collection, Iterable, Iterator
 from typing import Any
 
+from repositories import chunks as default_chunks
+from repositories.keywords import KEYWORD_TYPES
+
 
 class PhotoKeywordRepository:
     def __init__(
         self,
         conn: sqlite3.Connection,
         *,
-        chunks: Callable[..., Iterator[list[Any]]],
-        keyword_types: frozenset[str],
-        filter_subject_chunk: int,
+        chunks: Callable[..., Iterator[list[Any]]] = default_chunks,
+        keyword_types: frozenset[str] = KEYWORD_TYPES,
+        filter_subject_chunk: int = 800,
     ) -> None:
         self.conn = conn
         # ``db`` module helpers and constants, kept under their module names

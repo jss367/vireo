@@ -1,7 +1,7 @@
 """Exact-value picker predicates and model choices use library semantics."""
 import config as cfg
 import pytest
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -41,9 +41,9 @@ def test_keyword_choices_match_any_and_exclude_all(db, tmp_path, field):
     c = _photo(db, folder, "c.jpg")
     hawk = db.keywords.add("Hawk", is_species=True)
     robin = db.keywords.add("Robin", is_species=True)
-    db.tag_photo(a, hawk)
-    db.tag_photo(a, robin)
-    db.tag_photo(b, robin)
+    keyword_tagging.tag_photo(db, a, hawk)
+    keyword_tagging.tag_photo(db, a, robin)
+    keyword_tagging.tag_photo(db, b, robin)
     db.commit()
     assert set(db.collections.query_photo_ids([{"field": field, "op": "in", "value": ["Hawk", "Robin"]}])) == {a, b}
     assert set(db.collections.query_photo_ids([{"field": field, "op": "not_in", "value": ["Hawk", "Robin"]}])) == {c}

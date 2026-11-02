@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from services import keyword_tagging
 from test_encounter_confirmation_preview import apply, request_preview
 from test_encounter_confirmation_preview import seed as source_seed
 
@@ -30,7 +31,7 @@ def test_confirmation_contract_counts_identity_warnings_and_undo(app_and_db, mod
     ids, path = seed(app, db, 'American Wigeon')
     before = json.loads(Path(path).read_text())
     kid = db.keywords.add('Blue Jay', is_species=True)
-    db.tag_photo(ids[0], kid)
+    keyword_tagging.tag_photo(db, ids[0], kid)
     db.commit()
     db.photo_review.set_flag(ids[0], 'flagged')
     db.commit()
@@ -234,7 +235,7 @@ def test_compact_removal_counts_and_cache_only_undo(app_and_db):
     kid = db.keywords.add('Blue Jay', is_species=True)
     db.commit()
     for pid in ids:
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
         db.commit()
     body = {'species': 'Blue Jay', 'photo_ids': ids, 'response_mode': 'compact'}
     confirmed = client.post('/api/encounters/species', json=body).json
@@ -265,18 +266,19 @@ def test_compact_does_not_normalize_or_serialize_unrelated_legacy_bursts(app_and
 
 
 def test_bulk_failure_after_first_addition_rolls_back_all_selections(app_and_db, monkeypatch):
-    from db import Database
     app, db = app_and_db
     ids, path = seed(app, db)
     before = Path(path).read_bytes()
-    original = Database.tag_photo
+    from services import keyword_tagging
+
+    original = keyword_tagging.tag_photo
     calls = []
     def fail_on_second(self, *args, **kwargs):
         calls.append(True)
         if len(calls) == 2:
             raise ValueError('invented second-assignment failure')
         return original(self, *args, **kwargs)
-    monkeypatch.setattr(Database, 'tag_photo', fail_on_second)
+    monkeypatch.setattr(keyword_tagging, 'tag_photo', fail_on_second)
     response = app.test_client().post('/api/encounters/species/bulk', json={'assignments': [
         {'species': 'Blue Jay', 'photo_ids': ids[:1]}, {'species': 'Eared Grebe', 'photo_ids': ids[1:]}]})
     assert response.status_code == 500

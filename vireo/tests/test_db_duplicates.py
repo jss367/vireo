@@ -21,7 +21,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.duplicates import DuplicatesRepository
-from services import duplicate_resolution, photo_ingest, workspace_folders
+from services import duplicate_resolution, keyword_tagging, photo_ingest, workspace_folders
 
 
 def _photo(db, folder_id, filename, file_hash=None, *, file_mtime=100.0,
@@ -469,7 +469,7 @@ def test_merge_preserves_embedded_suppression_and_survivor_removals(
         db.conn.commit()
     _import_embedded_keywords_for_photo(db, loser, metadata)
     manual = db.keywords.add("Field note")
-    db.tag_photo(loser, manual, source="manual")
+    keyword_tagging.tag_photo(db, loser, manual, source="manual")
     db.commit()
 
     _merge(db, winner, [loser])
@@ -505,7 +505,7 @@ def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
     robin = db.conn.execute(
         "SELECT id FROM keywords WHERE name = ?", ("Robin",),
     ).fetchone()["id"]
-    db.tag_photo(loser, robin, source="manual")
+    keyword_tagging.tag_photo(db, loser, robin, source="manual")
     db.commit()
 
     _merge(db, winner, [loser])
@@ -572,12 +572,12 @@ def test_merge_carries_the_strongest_loser_source_per_keyword(db, folder):
     k_accept = db.keywords.add("Accepted Tag")
     k_unknown = db.keywords.add("Unknown Tag")
     k_shared = db.keywords.add("Winner Tag")
-    db.tag_photo(l1, k_manual, source=None)
-    db.tag_photo(l2, k_manual, source="manual")
-    db.tag_photo(l1, k_accept, source="accept")
-    db.tag_photo(l2, k_unknown, source=None)
-    db.tag_photo(w, k_shared, source=None)
-    db.tag_photo(l1, k_shared, source="manual")
+    keyword_tagging.tag_photo(db, l1, k_manual, source=None)
+    keyword_tagging.tag_photo(db, l2, k_manual, source="manual")
+    keyword_tagging.tag_photo(db, l1, k_accept, source="accept")
+    keyword_tagging.tag_photo(db, l2, k_unknown, source=None)
+    keyword_tagging.tag_photo(db, w, k_shared, source=None)
+    keyword_tagging.tag_photo(db, l1, k_shared, source="manual")
     db.commit()
 
     _merge(db, w, [l1, l2])
@@ -597,14 +597,17 @@ def test_merge_tags_through_the_facade_inside_its_transaction(db, folder, monkey
     w = _photo(db, fid, "w.jpg", "H", rating=1)
     lo = _photo(db, fid, "l.jpg", "H", rating=3)
     kid = db.keywords.add("Heron")
-    db.tag_photo(lo, kid, source="accept")
+    keyword_tagging.tag_photo(db, lo, kid, source="accept")
     db.commit()
     calls = []
 
     def _record(photo_id, keyword_id, source="manual", *, species_provenance=None):
         calls.append((photo_id, keyword_id, source, species_provenance, db.conn.in_transaction))
 
-    monkeypatch.setattr(db, "tag_photo", _record)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "tag",
+                        lambda _repo, *a, **k: _record(*a, **k))
 
     _merge(db, w, [lo])
 
@@ -618,13 +621,15 @@ def test_merge_rolls_back_everything_when_tagging_fails(db, folder, monkeypatch)
     w = _photo(db, fid, "w.jpg", "H", rating=1)
     lo = _photo(db, fid, "l.jpg", "H", rating=5)
     kid = db.keywords.add("Egret")
-    db.tag_photo(lo, kid)
+    keyword_tagging.tag_photo(db, lo, kid)
     db.commit()
 
     def _boom(*args, **kwargs):
         raise RuntimeError("tag failed")
 
-    monkeypatch.setattr(db, "tag_photo", _boom)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "tag", _boom)
 
     with pytest.raises(RuntimeError, match="tag failed"):
         _merge(db, w, [lo])
@@ -688,7 +693,7 @@ def test_merge_chunks_loser_reads_and_rejections(db, folder):
         losers.append(cur.lastrowid)
     db.conn.commit()
     kid = db.keywords.add("Last Loser Tag")
-    db.tag_photo(losers[-1], kid, source="accept")
+    keyword_tagging.tag_photo(db, losers[-1], kid, source="accept")
     db.commit()
 
     with _SqlRecorder(db) as rec:
@@ -753,7 +758,7 @@ def test_bulk_resolve_keeps_the_folder_copy_and_merges(db, tmp_path):
     lo = _photo(db, fo, "a.jpg", "H1", rating=4)
     _touch(os.path.join(keep, "long_keep_name.jpg"))
     kid = db.keywords.add("Plover")
-    db.tag_photo(lo, kid, source="manual")
+    keyword_tagging.tag_photo(db, lo, kid, source="manual")
     db.commit()
     w2 = _photo(db, fk, "b.jpg", "H2")
     l2 = _photo(db, fo, "b.jpg", "H2")
@@ -1092,10 +1097,10 @@ def test_duplicate_workflow_delegates_to_repository(name):
     assert not hasattr(Database, name), f"Database.{name} came back"
 
 
-def test_winner_loser_merge_stays_on_the_facade():
+def test_winner_loser_merge_retags_through_the_provenance_writer():
     attrs = _attrs_on(Database._apply_winner_loser_merge, "self")
     assert "conn" not in attrs
-    assert {"_duplicates_repository", "tag_photo"} <= attrs
+    assert {"_duplicates_repository", "keyword_provenance"} <= attrs
 
 
 def test_workflow_signatures_are_unchanged():

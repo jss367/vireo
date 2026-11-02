@@ -269,7 +269,7 @@ def reconcile_location(db, source_id, target_id):
         # No children are eligible, so this cannot move an imported subtree.
         # The shared merger preserves provenance, pending edits and history.
         affected = db.photo_keywords.photo_workspaces_tagged_with(source_id)
-        db._merge_keyword_into(source_id, target_id)
+        db.keyword_provenance.merge_keyword_into(source_id, target_id)
         for row in affected:
             db.pending_changes.cancel(row['photo_id'], 'location',
                                       workspace_id=row['workspace_id'])
@@ -297,7 +297,7 @@ def _subtree_ids(children, root_id):
 
 
 def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
-    """Mirror ``Database._merge_keyword_into``'s child handling in memory.
+    """Mirror ``KeywordProvenanceRepository.merge_keyword_into``'s child handling in memory.
 
     The preview has to state what happens to every descendant, and
     ``merge_keywords`` needs each survivor's new path to queue the sidecar
@@ -313,7 +313,7 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
         # slips past the write path's IntegrityError guard. Every lookup and
         # dedup path uses ``keyword_match_key``, so a case-only sibling is a
         # semantic collision that has to travel the same collapse-or-rename
-        # branch the exact-name case does; ``_merge_keyword_into`` mirrors
+        # branch the exact-name case does; ``merge_keyword_into`` mirrors
         # the same fold.
         child_key = keyword_match_key(child['name'])
         existing = next(
@@ -350,7 +350,7 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
             'new_name': plan['renames'].get(child_id, child['name']),
         })
         if outcome == 'merge':
-            # ``_merge_keyword_into`` folds the absorbed row's identity into
+            # ``merge_keyword_into`` folds the absorbed row's identity into
             # the survivor. With three or more branches the NEXT same-named
             # child is compared against that folded row, so a simulation that
             # skips the fold predicts a collapse where the write path
@@ -379,7 +379,7 @@ def _plan_subtree_merge(db, nodes, children, src_id, dst_id, plan):
 
 
 def _fold_merged_identity(destination, absorbed):
-    """Apply ``_merge_keyword_into``'s metadata fold to a simulated row.
+    """Apply ``merge_keyword_into``'s metadata fold to a simulated row.
 
     Mirrors the COALESCE semantics of the same-type merge: the destination
     keeps whatever it already claims and inherits only what it is missing.
@@ -1072,7 +1072,7 @@ def _merge_sources_into_target(db, preview, target_id, ambiguous_keys, live_owne
             db.keyword_merges.set_alias(
                 path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id,
             )
-        db._merge_keyword_into(source['id'], target_id, pending_source_only=True)
+        db.keyword_provenance.merge_keyword_into(source['id'], target_id, pending_source_only=True)
     return affected
 
 
@@ -1103,7 +1103,7 @@ def _queue_merged_photo_changes(db, affected, target_id, resolved,
 def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
     """Queue ``location`` resyncs for photos whose exported place moved."""
     # A retained location child that gained place_id/coords via
-    # ``_merge_keyword_into``'s COALESCE fold has photos whose sidecars
+    # ``merge_keyword_into``'s COALESCE fold has photos whose sidecars
     # still hold the old (or empty) location. ``_queue_moved_subtree_changes``
     # only touches path-changed survivors and the collapsed child's
     # photos, so a photo tagged solely with the retained sibling would
@@ -1157,7 +1157,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
 def _apply_merge_overrides(db, target_id, resolved):
     """Write the chooser's resolved identity onto the survivor.
 
-    Runs after every ``_merge_keyword_into`` so the sources are already gone:
+    Runs after every ``merge_keyword_into`` so the sources are already gone:
     the partial ``UNIQUE(place_id) WHERE place_id IS NOT NULL`` index would
     otherwise reject moving a link that a still-present source row holds.
 
@@ -1233,7 +1233,7 @@ def _queue_survivor_rename(db, target_id, old_name, new_name, keyword_type, sett
 def _collapsing_child_tags(db, preview):
     """Photos carrying a child that is about to collapse into a sibling.
 
-    Read before the merge, because ``_merge_keyword_into`` moves these
+    Read before the merge, because ``merge_keyword_into`` moves these
     ``photo_keywords`` rows onto the surviving sibling and deletes the child.
     """
     collapsing = {child['id']: child for child in preview['children']
