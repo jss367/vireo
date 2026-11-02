@@ -53,9 +53,9 @@ def test_js_comment_edits_pass(before, after):
     assert checker.js_differs(before, after) is None
 
 
-def test_python_comment_and_docstring_edits_pass():
+def test_python_ordinary_comment_edits_pass():
     assert checker.python_differs('"""old"""\n# old\nx = 1  # noqa: F841\n',
-                                  '"""clear"""\n# clear\n# more\nx = 1  # noqa: F841\n') is None
+                                  '"""old"""\n# clear\n# more\nx = 1  # noqa: F841\n') is None
 
 
 @pytest.mark.parametrize('change', ['added', 'deleted', 'renamed', 'untracked', 'typechanged', 'modified', 'comments'])
@@ -88,3 +88,23 @@ def test_complete_git_scope(tmp_path, monkeypatch, capsys, change):
     assert checker.main() == (0 if change == 'comments' else 1)
     if change != 'comments':
         assert 'source' in capsys.readouterr().err or change == 'added'
+
+
+@pytest.mark.parametrize('before, after', [
+    ('# ruff: noqa: E402\nx = 1\n', 'x = 1\n'),
+    ('x = 1  # NOQA: F841\n', 'x = 1\n'),
+    ('# coding: utf-8\nx = "café"\n', '# coding: latin-1\nx = "café"\n'),
+    ('#!/usr/bin/env python3\nx = 1\n', '#!/usr/bin/env pypy3\nx = 1\n'),
+    ('#!/usr/bin/env python3\nx = 1\n', 'x = 1\n'),
+    ('"""old"""\nx = 1\n', '"""new"""\nx = 1\n'),
+    ('class C:\n    """old"""\n', 'class C:\n    """new"""\n'),
+    ('def f():\n    """old"""\n', 'def f():\n    """new"""\n'),
+    ('def register(f):\n    registry[f.__doc__] = f\n    return f\n@register\ndef f():\n    """old"""\n',
+     'def register(f):\n    registry[f.__doc__] = f\n    return f\n@register\ndef f():\n    """new"""\n'),
+])
+def test_runtime_python_metadata_changes_fail(before, after):
+    assert checker.python_differs(before, after)
+
+
+def test_javascript_shebang_changes_fail():
+    assert checker.js_differs('#!/usr/bin/env node\nfoo();', '#!/usr/bin/env bun\nfoo();')

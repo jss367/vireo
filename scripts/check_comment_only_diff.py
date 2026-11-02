@@ -1,17 +1,17 @@
-"""Check that a diff changes only comments and docstrings.
+"""Check that a diff changes only ordinary comments.
 
-For every Python file the diff touches, the AST with docstrings removed must
-dump identically on both sides. For every JavaScript file, acorn's parsed
-syntax tree (including regex literals and ASI) must be identical. Comments
-that tools read are compared too, because syntax trees drop them: Python
-``noqa`` / ``type:`` / ``pyright:`` / ``pragma`` / ``fmt:`` / ``broad:``
-pragmas, ESLint and ``@ts-`` directives, and JSDoc type tags.
+Python and JavaScript syntax trees must match, including Python docstrings,
+regex literals and ASI. Docstrings are runtime values: decorators and external
+callers may read them, so their changes require separate semantic review.
+Comments that tools read must retain both content and attachment: Python
+suppression and formatting pragmas, encoding cookies, executable shebangs,
+ESLint and TypeScript directives, and JSDoc type tags.
 
     python scripts/check_comment_only_diff.py [--base origin/main]
 
-Compares the merge base with ``--base`` against the working tree. Exits
-nonzero, listing the files, when any of them changed code. JavaScript needs
-``npm ci`` (acorn) in the repo root.
+Compares the merge base with --base against the working tree. Uncomparable
+source additions, deletions, renames and untracked files fail closed.
+JavaScript needs npm ci (acorn) in the repo root.
 """
 
 import argparse
@@ -27,7 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-PY_PRAGMA = re.compile(r"#\s*(noqa\b[^#]*|type:\s*\S[^#]*|pyright:[^#]*|pragma\b[^#]*|fmt:\s*\w+|broad:[^#]*)")
+PY_PRAGMA = re.compile(r"#\s*((?:ruff:\s*)?noqa\b[^#]*|type:\s*\S[^#]*|pyright:[^#]*|pragma\b[^#]*|fmt:\s*\w+|broad:[^#]*)", re.I)
 JS_DIRECTIVE = re.compile(r"^\s*(eslint[\w-]*\b.*|@ts-[\w-]+\b.*|global\s.*|globals\s.*)$", re.S)
 JSDOC_TAG = re.compile(r"@(\w+)\s*(\{[^\n]*\})?\s*(\[?[\w$.]*)")
 # Unlike a parameter description, the module source is part of an import's type.
@@ -56,7 +56,7 @@ const parse = (sourceType) => {
       prev >= 0 ? c.loc.start.line - code[prev].loc.end.line : null,
       next >= 0 ? code[next].loc.start.line - c.loc.end.line : null]};
   });
-  return {syntax, comments: attached};
+  return {syntax, shebang: src.startsWith("#!") ? src.split(/\r?\n/, 1)[0] : null, comments: attached};
 };
 let result;
 try { result = parse('script'); } catch (e) { result = parse('module'); }
@@ -64,18 +64,11 @@ process.stdout.write(JSON.stringify(result));
 """
 
 
-def _strip_docstrings(tree: ast.AST) -> ast.AST:
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            body = node.body
-            if (
-                body
-                and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
-            ):
-                node.body = body[1:]
-    return tree
+def _source_headers(src: str) -> tuple[str | None, str]:
+    """Headers affect byte decoding or direct invocation, even when ASTs match."""
+    shebang = src.splitlines()[0] if src.startswith("#!") else None
+    encoding, _ = tokenize.detect_encoding(io.BytesIO(src.encode("utf-8")).readline)
+    return shebang, encoding
 
 
 def _py_pragmas(src: str) -> Counter:
@@ -101,8 +94,10 @@ def _py_pragmas(src: str) -> Counter:
 
 
 def python_differs(old: str, new: str) -> str | None:
-    if ast.dump(_strip_docstrings(ast.parse(old))) != ast.dump(_strip_docstrings(ast.parse(new))):
-        return "code (AST without docstrings) changed"
+    if _source_headers(old) != _source_headers(new):
+        return "source encoding or executable shebang changed"
+    if ast.dump(ast.parse(old)) != ast.dump(ast.parse(new)):
+        return "code (AST including runtime docstrings) changed"
     if _py_pragmas(old) != _py_pragmas(new):
         return f"tool pragmas changed: {_py_pragmas(old) - _py_pragmas(new)} -> {_py_pragmas(new) - _py_pragmas(old)}"
     return None
@@ -132,7 +127,7 @@ def _js_load_bearing(comments: list[dict]) -> Counter:
 
 def js_differs(old: str, new: str) -> str | None:
     before, after = _js(old), _js(new)
-    if before["syntax"] != after["syntax"]:
+    if before["syntax"] != after["syntax"] or before["shebang"] != after["shebang"]:
         return "code (parsed JavaScript syntax) changed"
     if _js_load_bearing(before["comments"]) != _js_load_bearing(after["comments"]):
         return "ESLint/TypeScript directives or JSDoc type tags changed"
@@ -170,7 +165,7 @@ def main() -> int:
         failures.append(f"{rel}: source added, deleted, renamed, untracked or otherwise uncomparable")
     for rel in changed:
         print(f"ok   {rel}" if not any(f.startswith(rel + ":") for f in failures) else f"FAIL {rel}")
-    print(f"{sum(not any(f.startswith(rel + ":") for f in failures) for rel in changed)}/{len(changed)} modified .py/.js files change only comments and docstrings")
+    print(f"{sum(not any(f.startswith(rel + ":") for f in failures) for rel in changed)}/{len(changed)} modified .py/.js files change only ordinary comments")
     if added_or_removed:
         print("Not compared (added, deleted or renamed): " + ", ".join(added_or_removed))
     for failure in failures:
