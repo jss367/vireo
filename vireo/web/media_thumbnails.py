@@ -581,8 +581,8 @@ class ThumbnailRoutes:
 
         404s remain when:
           * the filename isn't ``<int>.jpg`` (malformed request);
-          * the photo no longer exists in the DB (a cached file left by a
-            delete; ``pipeline.prune_results`` removes those);
+          * the photo no longer exists in the DB (thumbnail files may
+            remain; ``pipeline.prune_results`` prunes cached result IDs);
           * the source image is unreadable (e.g. RAW decode failure).
             ``generate_thumbnail`` already logs the underlying cause.
         """
@@ -610,10 +610,10 @@ class ThumbnailRoutes:
         photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             # Stale URL — the photo was deleted, or it lives in a folder
-            # that isn't linked to this workspace. 404 is the right
-            # answer; cache pruning removes stale files upstream. We
-            # do NOT touch the cached file here — another workspace may
-            # legitimately own it.
+            # that isn't linked to this workspace. Pipeline cache pruning
+            # removes result IDs, not thumbnail files. Return 404 without
+            # touching this cached file: another workspace may legitimately
+            # own it.
             return "", 404
         return _serve_photo_thumbnail(self._get_db, self._config, db, photo_id, photo, filename)
 

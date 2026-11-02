@@ -760,16 +760,16 @@ def create_browse_blueprint(
         kids_by_key = _species_keyword_ids_by_key(db, resolver)
 
         results = []
-        # No bucket is dropped for an empty ``entry["confidences"]``. It can
-        # only be empty when *every* contributing row's raw label disagrees
-        # with the consensus the accept path applies, a mixed-consensus burst
-        # shape classification never writes: a grouped row's consensus is its
-        # own species, so every row credits its own bucket.
+        # No bucket is dropped for an empty ``entry["confidences"]``. Legacy
+        # burst votes can select a consensus different from a row's raw
+        # species label. Selecting only minority frames from such a burst
+        # can therefore produce a valid bucket with no credited confidence.
+        # ``SpeciesResolver.consensus`` supports those legacy votes today.
         #
-        # The credit gate above computes the right number rather than hiding
-        # a row, and if that invariant ever broke it degrades to "confidence
-        # unknown" instead of quoting one species' score beside another's
-        # name.
+        # The credit gate does not use raw-label scores for a different
+        # consensus species. The bucket still reports the selected photos,
+        # while ``None`` confidence renders as "confidence unknown" instead
+        # of quoting one species' score beside another's name.
         for key, entry in by_key.items():
             results.append(
                 _prediction_suggestion(db, key, entry, order, kids_by_key)
