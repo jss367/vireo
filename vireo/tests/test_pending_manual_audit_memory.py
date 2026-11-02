@@ -21,8 +21,10 @@ def _selected(module, name, namespace, cls=None):
     if module == "db.py" and not any(isinstance(n, ast.FunctionDef) and n.name == name for n in body):
         body = ast.parse((VIREO / "services/duplicate_resolution.py").read_text()).body
         namespace["cast"] = typing.cast
+        namespace.setdefault("Any", typing.Any)
     node = next(n for n in body if isinstance(n, ast.FunctionDef) and n.name == name)
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "<manual/audit memory>", "exec", flags=__future__.annotations.compiler_flag), namespace)
+    nodes = [n for n in body if isinstance(n, ast.ClassDef) and n.name == "_Refused"] + [node]
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "<manual/audit memory>", "exec", flags=__future__.annotations.compiler_flag), namespace)
     return namespace[name]
 
 

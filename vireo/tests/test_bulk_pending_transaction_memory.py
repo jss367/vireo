@@ -7,6 +7,7 @@ import builtins
 import contextlib
 import posixpath
 import sqlite3
+import typing
 import uuid
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -20,8 +21,10 @@ def _selected(module, cls, name, namespace):
     body = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls).body
     if module == "db.py" and not any(isinstance(n, ast.FunctionDef) and n.name == name for n in body):
         body = ast.parse((VIREO / "services/duplicate_resolution.py").read_text()).body
+        namespace.setdefault("Any", typing.Any)
     node = next(n for n in body if isinstance(n, ast.FunctionDef) and n.name == name)
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "<bulk memory>", "exec", flags=__future__.annotations.compiler_flag), namespace)
+    nodes = [n for n in body if isinstance(n, ast.ClassDef) and n.name == "_Refused"] + [node]
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "<bulk memory>", "exec", flags=__future__.annotations.compiler_flag), namespace)
     return namespace[name]
 
 
