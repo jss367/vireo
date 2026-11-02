@@ -98,7 +98,7 @@ class _ScanFolders:
         # cataloged descendant of ``root_path`` (unrelated archive
         # subtrees from prior scans / other workspaces) into the active
         # workspace. Only the ``_restrict_root_paths`` themselves should
-        # link. See PR #1107 review (line 1186).
+        # link.
         normalized_folder = os.path.normpath(folder_str)
         is_restrict_target = (
             self._effective_restrict_paths is not None

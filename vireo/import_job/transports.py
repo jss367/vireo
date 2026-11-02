@@ -33,8 +33,8 @@ if TYPE_CHECKING:
 # onto the per-file loop's control flow, and the mapping is load-bearing:
 # _ENQ_CANCELLED must map to ``break`` (Stop interrupted a destination
 # read inside the transport — every further step this batch would touch
-# the same, possibly dead, mount; mapping it to ``continue`` would
-# reintroduce the wedged-mount cancellation pin fixed in PR #1423) — the
+# the same, possibly dead, mount; mapping it to ``continue`` would pin
+# cancellation on the wedged mount's timeout) — the
 # same contract as ``_GATE_CANCELLED``. _ENQ_HANDLED maps to ``continue``
 # (the file reached a terminal bucket or an adopted landing inside the
 # transport); _ENQ_QUEUED also advances to the next file — the bytes move
@@ -127,9 +127,8 @@ class _LocalTransport:
         self, state: _ImportRunState, batch_st: _ImportBatchState, *, source_file: Path, rel: str,
         checker: DuplicateChecker | None, stop_requested: StopCheck,
     ) -> str:
-        # Local-rebinding shim: the body below is the local path's
-        # per-file middle (moved verbatim in PR 7; its collision walk is
-        # shared with the rsync transport since PR 7b).
+        # Local names for the per-file body below; its collision walk is
+        # shared with the rsync transport.
         dest_folder = batch_st.dest_folder
         _stop_requested = stop_requested
         # Capture card-side (size, mtime_ns) BEFORE the copy so the
@@ -248,7 +247,7 @@ def _skip_queued_identical(
     # counted as ``skipped_duplicate`` (which would otherwise let
     # a verified run report ``safe_to_format=True`` because
     # ``copied + skipped_duplicate == discovered`` without an
-    # off-card row for the second file). See PR #1113 review.
+    # off-card row for the second file).
     if (
         checker is not None
         and src_hash is not None
@@ -263,7 +262,7 @@ def _skip_queued_identical(
 
 
 class _RsyncTransport:
-    """Byte transport for a remote (SSH) archive destination (Task 2.7).
+    """Byte transport for a remote (SSH) archive destination.
 
     ``enqueue`` reserves a destination basename and queues the file on
     ``batch_st.to_transfer``; ``flush_batch`` moves the queued bytes with
@@ -295,11 +294,11 @@ class _RsyncTransport:
     would let scan() populate the row from unrelated bytes (or an
     unmounted base would leave no catalog trail at all) while blind
     stamping flipped ``safe_to_format`` green over storage this run
-    never touched. See PR #1113 review.
+    never touched.
 
     All ``move`` seams are resolved at call time as
-    ``move_mod.<name>(...)`` (the package's re-exports) so the tests'
-    monkeypatch surface on the ``move`` package keeps working unchanged.
+    ``move_mod.<name>(...)`` (the package's re-exports), so tests can
+    monkeypatch them on the ``move`` package.
     """
 
     dest_noun = "mount"
@@ -310,8 +309,6 @@ class _RsyncTransport:
         self._runner = runner
         self._params = params
         self._ctx = ctx
-        # Preamble moved verbatim from the pre-merge remote import
-        # function (PR 7 transport merge).
         # ``_make_transport`` builds this transport only for a remote target.
         rt = cast("dict[str, Any]", params.remote_target)
         remote = rt["remote"]                 # build_remote_move_spec dict
@@ -391,9 +388,7 @@ class _RsyncTransport:
         self, state: _ImportRunState, batch_st: _ImportBatchState, *, source_file: Path, rel: str,
         checker: DuplicateChecker | None, stop_requested: StopCheck,
     ) -> str:
-        # Local-rebinding shim: the body below is the remote path's
-        # per-file middle, moved verbatim; these bindings keep its lines
-        # byte-identical to the pre-move text.
+        # Local names for the per-file body below.
         dest_folder = batch_st.dest_folder
         _fold_basename = self._ctx.fold_basename
         _stop_requested = stop_requested
@@ -450,10 +445,8 @@ class _RsyncTransport:
             # may take another step: every one of them touches the same
             # mount, and advancing would pin cancelling for the mount's
             # own timeout. The file stays on the card for the next run.
-            # (Before PR 7b this was caught per-candidate inside the loop
-            # and re-checked after it; the walk propagates instead, so
-            # both transports book a dest-read cancel in exactly one
-            # place. See PR #1423.)
+            # The walk propagates the cancel, so both transports book a
+            # dest-read cancel in exactly one place.
             state.cancelled = True
             batch_st.dest_read_cancelled = True
             return _ENQ_CANCELLED
@@ -484,9 +477,8 @@ class _RsyncTransport:
         self, state: _ImportRunState, batch_st: _ImportBatchState, *, rel: str,
         checker: DuplicateChecker | None,
     ) -> None:
-        # The remote path's transfer phase, moved verbatim in PR 7
-        # (including its ``to_transfer``/``cancelled`` guard) and since
-        # split into the ``_transfer_queued`` / ``_book_transferred``
+        # The remote path's transfer phase: the ``to_transfer``/``cancelled``
+        # guard, then the ``_transfer_queued`` / ``_book_transferred``
         # steps below.
         remote = self._remote
         move_mod = self._move_mod
@@ -502,8 +494,7 @@ class _RsyncTransport:
         # was requested. Queued files that never rsync stay on the card
         # and will be picked up by the next run; adopted ``landed``
         # entries for files already visible on the mount are still
-        # cataloged by the batch-scan block below. See PR #1113
-        # review.
+        # cataloged by the batch-scan block below.
         if batch_st.to_transfer and not state.cancelled:
             extra_args = self._rsync_extra_args()
             rsync_target = move_mod.rsync_dest_spec(remote, ssh_dest)
@@ -543,7 +534,7 @@ class _RsyncTransport:
         # avoids re-transferring files it saw on the mount (hash match
         # -> skip; hash mismatch -> advance to a suffix that doesn't
         # exist), so no legitimate flow relies on rsync overwriting an
-        # existing destination file. See PR #1113 review.
+        # existing destination file.
         extra_args = [
             "-e", self._move_mod._ssh_rsh_string(remote),
             "--partial-dir=.rsync-partial",
@@ -559,8 +550,7 @@ class _RsyncTransport:
             # then formatting/unmounting the card breaks the archived
             # copy. Card-local symlinks aren't legitimately preserved
             # by an archive of the card contents, and the local path's
-            # ingest reads the referenced file bytes too. See PR #1113
-            # review.
+            # ingest reads the referenced file bytes too.
             "--copy-links",
         ]
         if remote.get("bwlimit_kbps"):

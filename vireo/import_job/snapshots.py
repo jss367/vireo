@@ -68,7 +68,7 @@ def _capture_source_snapshots(files: list[Path], sources: list[str]) -> dict[str
         # alone and produces one entry per file, so the parent's doubled
         # snapshot would refuse an unchanged card. Keying by ``rel.as_posix()``
         # collapses the twin discoveries into the single-source view retry
-        # validation reconstructs. See PR #1387 Codex review.
+        # validation reconstructs.
         entries_by_rel = {}
         for f in files:
             try:

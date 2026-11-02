@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 # case-insensitive filesystems). On Linux we probe each source's actual
 # filesystem: a FAT/exFAT/NTFS-mounted SD card is case-insensitive even
 # under a case-sensitive ext4 parent, so a platform-wide check would miss
-# a differently-cased twin path there. See PR #1107 review.
+# a differently-cased twin path there.
 _CASE_INSENSITIVE_PLATFORM = sys.platform in ("darwin", "win32")
 
 
@@ -47,7 +47,7 @@ def _fs_is_case_insensitive(path: str) -> bool:
     source pass duplicate acceptance (or a differently-cased twin folder
     under the destination skip workspace linking), and
     ``safe_to_format`` could then go green without a visible off-card
-    copy. See PR #1107 review.
+    copy.
     """
     try:
         entries = os.listdir(path)
@@ -79,7 +79,7 @@ def _build_source_root_guard(sources: Iterable[str]) -> Callable[[str | Path], b
     card; re-hashing that twin just re-reads the very card file being
     imported, so accepting it as duplicate proof would flip
     ``safe_to_format`` green while the card holds the only bytes. Only an
-    off-card twin can back a duplicate skip. See PR #1107 review.
+    off-card twin can back a duplicate skip.
     """
     def _norm(s: str) -> tuple[str, bool]:
         try:
@@ -143,7 +143,7 @@ def _is_source_backed_path(
     # directory. Without this the collision walk's adopt branch hashes
     # the source against itself, records it as ``skipped_duplicate``,
     # and safe_to_format goes green — deleting/formatting the
-    # source then erases the only copy. See PR #1107 review.
+    # source then erases the only copy.
     try:
         same_file = (
             os.path.exists(dest_path)
@@ -170,7 +170,6 @@ def _is_source_backed_path(
     # green, and formatting the card erases the "archive" copy too.
     # ``path_under_any_source`` realpaths its argument, so this is
     # also what catches a candidate that is a SYMLINK into the card.
-    # See PR #1107 review.
     return path_under_any_source(dest_path)
 
 
@@ -251,12 +250,11 @@ def _build_destination_context(db: Database, params: ImportParams) -> _DestConte
     # Which of the destination's mount-root candidates are live mounts.
     # Captured HERE — immediately after normalization, before discovery,
     # catalog-index construction or timestamp extraction — because all of
-    # those are slow against a network archive (the 2026-07-30 incident
-    # spent eight minutes just enumerating the destination). A share that
-    # detached during that window would be recorded as already-unmounted,
-    # the mounted → unmounted transition would never fire, and the guard
-    # would be silently disarmed for the rest of the run. See PR #1396
-    # review (Codex P1 r3687336684).
+    # those are slow against a network archive (enumerating the destination
+    # alone can take minutes). A share that detached during that window
+    # would be recorded as already-unmounted, the mounted → unmounted
+    # transition would never fire, and the guard would be silently
+    # disarmed for the rest of the run.
     #
     # Keying on the transition (rather than "is it mounted?") is what lets
     # an ordinary local directory at a mount-shaped path stay usable: it
@@ -271,8 +269,7 @@ def _build_destination_context(db: Database, params: ImportParams) -> _DestConte
     # path, rsync would still push to the NAS while the per-batch
     # mount-side scan reads a fresh local shadow). Cross-run history
     # closes that hole; a hand-made local dir is never observed as a
-    # live mount and stays out of the known-set. See PR #1396 review
-    # (Codex P1 r3687401636).
+    # live mount and stays out of the known-set.
     known_mount_roots = _load_known_mount_roots(db)
     mount_baseline = _archive_mount_baseline(destination, known_mount_roots)
     _record_known_mount_roots(db, mount_baseline)
@@ -286,7 +283,7 @@ def _build_destination_context(db: Database, params: ImportParams) -> _DestConte
     # the very card file being imported, so accepting it as duplicate
     # proof would flip ``safe_to_format`` green over a card whose bytes
     # never made it to the archive (remotely: whose bytes never crossed
-    # the network). Shared by both import paths. See PR #1107 review.
+    # the network). Shared by both import paths.
     _path_under_any_source = _build_source_root_guard(params.sources)
 
     _path_under_destination, _fold_basename = _destination_case_guards(
@@ -319,7 +316,7 @@ def _normalize_destination(params: ImportParams) -> str:
     # duplicate matching compares paths from prior catalog scans against
     # this destination. Sources are already ``realpath``-resolved (see
     # ``_norm_source``); doing the same to destination keeps the two sides
-    # symmetric. See PR #1107 review.
+    # symmetric.
     #
     # On the remote (SSH) path ``params.destination`` is the catalog/mount
     # base — the route sets it to mount_path/subpath — and the same
@@ -335,7 +332,7 @@ def _destination_case_guards(destination: str) -> tuple[Callable[[str], bool], C
     """``(path_under_destination, fold_basename)`` for the normalized
     ``destination``, case-folded when its filesystem is case-insensitive.
     """
-    # Destination containment for cataloged twin folders. Used to scope
+    # Destination containment for cataloged twin folders. Scopes
     # ``_linkable_twin_dirs`` to twins under the destination/mount base —
     # an off-destination twin in some other library root is none of this
     # import's business. ``destination`` is already ``realpath``-resolved
@@ -350,7 +347,7 @@ def _destination_case_guards(destination: str) -> tuple[Callable[[str], bool], C
     # so a differently-cased twin folder under the destination is still
     # linked to the workspace — otherwise ``safe_to_format`` can go
     # green while the imported photo stays invisible in the active
-    # workspace. See PR #1107 review.
+    # workspace.
     def _probe_dir_case_insensitive(path: str) -> bool:
         p = os.path.normpath(path)
         while True:
@@ -384,7 +381,7 @@ def _destination_case_guards(destination: str) -> tuple[Callable[[str], bool], C
     # ``IMG_0001.JPG`` then ``img_0001.jpg``) collide and advance through
     # numeric suffixes, instead of being sent to the same effective
     # receiver path where ``--ignore-existing`` would silently drop it and
-    # the later catalog/hash validation would fail. See PR #1113 review.
+    # the later catalog/hash validation would fail.
     def _fold_basename(name: str) -> str:
         return name.casefold() if _dest_ci else name
 

@@ -30,7 +30,7 @@ def _link_twins_and_emit(
     emit: Emit, rel: str, queued: int,
 ) -> None:
     """Link verified duplicate-twin folders into the workspace and emit
-    the end-of-batch progress line. Shared verbatim by both import
+    the end-of-batch progress line. Shared by both import
     paths; the caller keeps the ``if state.cancelled: break``.
     """
     # A verified duplicate skip's twin folder may live elsewhere under
@@ -141,7 +141,7 @@ def _linkable_twin_dirs(rows: Iterable[sqlite3.Row], under_destination: Callable
     spelled with different case on a case-insensitive mount — dropping
     the twin means the direct workspace link never runs and the imported
     duplicate stays filtered out of the active workspace while
-    safe_to_format still flips green. See PR #1107 review.
+    safe_to_format still flips green.
     """
     dirs = set()
     for r in rows:
@@ -163,10 +163,10 @@ def _link_duplicate_twin_dirs(
 
     ``_linkable_twin_dirs`` has already proved each path is a cataloged
     folder under the destination and is currently a real directory. A
-    filesystem scan adds no evidence about the duplicate bytes themselves;
-    it only used to be an indirect way to create ``workspace_folders`` rows.
-    Doing that directly keeps duplicate-only imports independent of SMB
-    directory-enumeration latency.
+    filesystem scan adds no evidence about the duplicate bytes themselves,
+    only ``workspace_folders`` rows. Creating those directly keeps
+    duplicate-only imports independent of SMB directory-enumeration
+    latency.
 
     A reattached folder whose stale status is ``missing`` is promoted after
     the existence check. ``partial`` is intentionally preserved: only an

@@ -1019,8 +1019,7 @@ class _WorkingCopyBatch:
             # ``on_publish``) so the post-loop trim can tell our bytes
             # apart from a competing publisher's later atomic replace.
             # Falls back to a post-return stat if the callback didn't
-            # fire — a minor regression window but never worse than the
-            # pre-fingerprint behavior.
+            # fire, which cannot see a replace that landed in between.
             if published_identities:
                 self.retained_new_identities[wc_abs] = published_identities[-1]
             else:
@@ -1106,11 +1105,9 @@ class _WorkingCopyBatch:
         # and must remain eligible.
         #
         # With ``protect_paths`` passed above, ``wc_abs`` is the only batch
-        # file eligible for eviction; the ``any path != wc_abs`` check
-        # therefore only fires when a batch write from before
-        # ``protect_paths`` was introduced snuck through (kept for defence
-        # in depth). The rotation signal that matters under protection is
-        # below.
+        # file eligible for eviction, so the ``any path != wc_abs`` check is
+        # defence in depth and should not fire. The rotation signal that
+        # matters under protection is below.
         removed_batch_files = (
             retained_before_enforce - set(self.retained_new_files)
         )
@@ -1119,7 +1116,7 @@ class _WorkingCopyBatch:
 
         # DESC-ordering rotation under ``protect_paths``: eviction can only
         # reclaim ``wc_abs`` from the batch, so watching for
-        # ``removed_batch_files != {wc_abs}`` (the old signal above) never
+        # ``removed_batch_files != {wc_abs}`` (the check above) never
         # catches "batch has filled the cache with its own newer files and
         # is now rotating the just-written tail." When ``wc_abs`` was
         # reclaimed AND other batch files remain retained, every future

@@ -196,7 +196,6 @@ def _import_partial_scope(params: ImportParams) -> bool:
     # import. Normalize to leading-dot lowercase to match how
     # SUPPORTED_EXTENSIONS is stored; unknown extensions in the list
     # are ignored (they can't be in SUPPORTED_EXTENSIONS regardless).
-    # See PR #1107 review.
     partial_scope = not params.recursive
     if params.file_types != "both":
         if isinstance(params.file_types, list):
@@ -262,9 +261,8 @@ def _import_result_fields(
         # Photo rows the after-import chaining hook should process.
         # Duplicate-only imports intentionally return an empty list so
         # ``_chain_after_import`` skips into its "no new photos" branch
-        # instead of enqueueing an empty process run — same convention as
-        # the local path. Without this the remote import always missed
-        # after-import processing. See PR #1113 review.
+        # instead of enqueueing an empty process run. Both transports
+        # report it, so remote imports chain after-import processing too.
         "photo_ids": sorted(state.imported_photo_ids),
         # Photos an interrupted parent landed that its carry list lacked
         # (``_recover_parent_landings``); the caller carries them too, into

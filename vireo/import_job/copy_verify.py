@@ -166,9 +166,9 @@ def _rename_promote_locked(src: str, tmp: str, dst: str, dst_dir: str) -> bool:
     # automatically — no placeholder cleanup burden, and the
     # zero-byte crash-safety invariant is preserved. On mounts
     # where flock silently no-ops (some remote FSes mounted
-    # ``nolock``) we degrade to the previous check-then-rename
-    # behavior; per-workspace/per-date destinations make
-    # overlapping runs unusual there. See PR #1107 review.
+    # ``nolock``) this degrades to a bare check-then-rename;
+    # per-workspace/per-date destinations make overlapping runs
+    # unusual there.
     lock_fd = None
     try:
         try:

@@ -64,11 +64,9 @@ class _FeatureHasher:
         permits before parking on the outer ``check_cancelled`` call.
 
         When ``cancel_only_check`` is not supplied this falls back to
-        the pause-then-parking-cancel sequence with the race window
-        Codex flagged — pause set between the two calls parks the job
-        while it still holds the lease. Not worse than the pre-fix
-        behavior, and every pipeline caller now wires the non-parking
-        probe.
+        the pause-then-parking-cancel sequence, which has a race: a pause
+        set between the two calls parks the job while it still holds the
+        lease. Every pipeline caller wires the non-parking probe.
         """
         if self._pause_pending():
             raise _ScanPauseRequested()
@@ -241,11 +239,11 @@ class _FeatureHasher:
             # ``_ScanPauseRequested`` on pending pause
             # and only calls the parking probe if it
             # cannot be avoided (no ``cancel_only_check``
-            # supplied). Closes the race Codex flagged
-            # where ``_pause_pending`` returns False,
-            # Pause fires, and the previously-called
-            # ``check_cancelled`` parked while still
-            # inside the lease and pool.
+            # supplied). That closes the race where
+            # ``_pause_pending`` returns False, Pause
+            # fires, and a parking ``check_cancelled``
+            # parks while still inside the lease and
+            # pool.
             self._check_cancelled_no_park()
             try:
                 return fut.result(timeout=0.2)

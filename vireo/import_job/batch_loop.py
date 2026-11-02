@@ -123,15 +123,11 @@ class _ImportBatchLoop:
     the intra-run fast path and be counted as a duplicate of a landing
     whose archive claim was rolled back. Refusing every remaining
     batch keeps the stale intra-run cache from ever being consulted.
-    See PR #1400 review (Codex P2 r3688614624).
 
-    Dup-folder linking runs in a SEPARATE ``scan(restrict_dirs=…)`` call
-    after the duplicate skip; its exception was previously logged and
-    swallowed, leaving safe_to_format true while the imported
-    duplicates never became visible in the active workspace. Track it
-    explicitly (``state.dup_link_failed``) so safe_to_format reflects
-    "workspace can actually see these bytes" and not just "the bytes
-    are somewhere on disk".
+    Dup-folder linking runs separately after the duplicate skip, and its
+    failure is tracked (``state.dup_link_failed``) rather than only
+    logged, so safe_to_format reflects "workspace can actually see these
+    bytes" and not just "the bytes are somewhere on disk".
     """
 
     def __init__(
@@ -298,8 +294,7 @@ class _ImportBatchLoop:
         detach that happens during the last (or only) file — there is no
         next iteration to catch it. Probe once more here, after the loop
         and before anything is cataloged, so the whole batch including
-        its final file is covered. See PR #1396 review (Codex P1
-        r3687456172).
+        its final file is covered.
 
         This is the last probe that can help: a detach after this point
         races the catalog scan itself, which is irreducible — no probe
@@ -311,8 +306,7 @@ class _ImportBatchLoop:
         # a destination-side hash was interrupted mid-read
         # (``dest_read_cancelled``): that signal means the mount itself
         # is misbehaving, so probing it here would block for the mount's
-        # own timeout and put the job right back in the long
-        # "cancelling" state this fix set out to avoid.
+        # own timeout and pin the job in a long "cancelling" state.
         #
         # Do NOT skip on a plain-Stop ``cancelled`` (observed by
         # ``runner.is_cancelled`` at the top of the source-file loop).
@@ -321,8 +315,7 @@ class _ImportBatchLoop:
         # dropped during that just-finished operation the only remaining
         # chance to notice — and to roll ``landed`` / ``dup_skips`` back
         # so the catalog block below doesn't scan a local shadow — is
-        # this probe. See PR #1423 review (Codex P2 r3716581282,
-        # r3716581283).
+        # this probe.
         if not batch_st.mount_lost and not batch_st.dest_read_cancelled:
             batch_st.mount_lost = self._unmounted_since_baseline(
                 self._ctx.mount_baseline)
@@ -363,8 +356,7 @@ class _ImportBatchLoop:
         adoption (byte-identical files match by hash and count as
         ``skipped_duplicate``). A plain user Stop on a healthy mount
         leaves ``dest_read_cancelled`` False, so partially-landed
-        batches keep cataloging like before. See PR #1423 review
-        (Codex P2 r3716433824, r3716433830).
+        batches are still cataloged.
         """
         state = self._state
         db = self._db
@@ -396,8 +388,7 @@ class _ImportBatchLoop:
         # the JPEG bytes were already at the archive path, NOT that
         # the RAW row already carried ``companion_path`` for this
         # JPEG (see the companion accept branch in
-        # ``_stamp_landed_and_validate_catalog``). See PR #1107
-        # review.
+        # ``_stamp_landed_and_validate_catalog``).
         raw_companion_invalidations = _stamp_landed_and_validate_catalog(
             state, batch_st, db, params, rel,
             attests_bytes=attests_bytes,
@@ -410,15 +401,15 @@ class _ImportBatchLoop:
         # ``vireo_dir`` through, so scanner's own
         # ``_invalidate_derived_caches`` already fires on rows it
         # detects as content-changed; this loop is defense-in-depth
-        # for legacy rows and codepath changes the scanner misses
-        # (see the ``pre_scan_hashes`` capture comment above), and
-        # is idempotent with scanner's call. Without it, imports
+        # for rows the scanner declines to invalidate (see the
+        # ``pre_scan_hashes`` capture comment above), and is
+        # idempotent with scanner's call. Without it, imports
         # that restore a replaced-then-deleted archive file could
         # leave stale ``working_copy_path``/thumb/preview files
         # pointing at the previous bytes, and the deferred
         # end-of-run ``_extract_working_copies`` skips rows whose
         # ``working_copy_path`` is already set — so the WC never
-        # rebuilds against the new archive bytes. See PR #1107 review.
+        # rebuilds against the new archive bytes.
         _invalidate_changed_and_sweep(
             state, batch_st, db, params, pre_scan_hashes,
             raw_companion_invalidations,
