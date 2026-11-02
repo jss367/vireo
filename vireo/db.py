@@ -17,6 +17,7 @@ from keyword_normalization import (
     normalize_keyword_display,
 )
 from new_images_cache import get_shared_cache
+from repositories.effective_config import subject_types, workspace_effective_config
 from repositories.keywords import KEYWORD_TYPES
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from unit_of_work import (
@@ -550,9 +551,6 @@ _LOCATION_COMPONENT_RANKS = {
     "neighborhood": 150,
 }
 
-# Default set of types that count as "identifying" a photo for queue
-# membership / classifier skip purposes. Workspaces can override.
-SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "genre"})
 
 NEEDS_IDENTIFICATION_RULES = [
     {"field": "has_subject", "op": "equals", "value": 0},
@@ -1492,49 +1490,27 @@ class Database:
         Returns:
             dict with workspace overrides deep-merged on top of global config
             so a nested override (e.g. ``{"pipeline": {"w_focus": 0.5}}``)
-            replaces only the named leaf, not the whole parent dict.
+            replaces only the named leaf, not the whole parent dict
+            (``repositories.effective_config.workspace_effective_config``).
         """
-        import config_schema
-
-        ws = self.workspaces.get(self._active_workspace_id)
-        if not ws or not ws["config_overrides"]:
-            return global_config
-        try:
-            overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            if not isinstance(overrides, dict):
-                return global_config
-            effective = config_schema.deep_merge(global_config, overrides)
-        except (json.JSONDecodeError, TypeError):
-            return global_config
-        # An override stored before the workspace routes validated values
-        # (``null``, ``"abc"``) falls back to the global value it shadows.
-        return config_schema.repair_types(effective, global_config)
+        return workspace_effective_config(self.conn, self._active_workspace_id, global_config)
 
     def effective_config(self) -> dict[str, Any]:
         """The global settings with the active workspace's overrides applied.
 
-        Exactly ``get_effective_config(cfg.load())``, for the data layer: the
-        global settings come through ``settings_source`` (which ``config``
-        installs), so neither ``Database`` nor a repository imports ``config``.
-        Repositories receive this method from their factory.
+        Exactly ``get_effective_config(cfg.load())``: the global settings
+        come through ``settings_source`` (which ``config`` installs), so the
+        data layer never imports ``config``. Repositories read the same
+        value on their own connection through
+        ``repositories.effective_config.active_effective_config``.
         """
         return self.get_effective_config(settings_source.load())
 
     def get_subject_types(self) -> set[str]:
         """Return the keyword types that count as 'identified' for the active
-        workspace.
-
-        config_overrides is arbitrary JSON (api_update_workspace persists
-        whatever the client sends), so subject_types entries may not be
-        strings — guard the membership test against unhashable values
-        (nested lists/objects) to avoid TypeError downstream in callers
-        like collection filtering and the classify skip-gate.
+        workspace (``repositories.effective_config.subject_types``).
         """
-        effective = self.effective_config()
-        raw = effective.get("subject_types", list(SUBJECT_TYPES_DEFAULT))
-        if not isinstance(raw, list):
-            return set(SUBJECT_TYPES_DEFAULT)
-        return {t for t in raw if isinstance(t, str) and t in KEYWORD_TYPES}
+        return subject_types(self.effective_config())
 
     # Conservative chunk size for filter_out_subject_tagged. Most modern
     # SQLite builds default to SQLITE_MAX_VARIABLE_NUMBER=32766, but older
@@ -1671,10 +1647,7 @@ class Database:
 
         The active workspace is resolved lazily (``Database._ws_id`` is
         passed as a resolver), so methods that return early or canonicalize
-        a species name first still raise at the point they always did. The
-        two façade methods from other domains that the moved bodies call
-        (species-name resolution and folder subtrees) are handed over bound,
-        so monkeypatches of ``Database`` keep reaching the moved code.
+        a species name first still raise at the point they always did.
         """
         from repositories.species_curation import SpeciesCurationRepository
 
@@ -1685,8 +1658,6 @@ class Database:
             life_list_ancestor_suppression_clause=(
                 _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
             ),
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
-            effective_config=self.effective_config,
         )
 
     @property
@@ -1788,19 +1759,6 @@ class Database:
         when they run.
         """
         return self._folder_repository()
-
-    def get_folder_subtree_ids(self, folder_id: int) -> list[int]:
-        """Return [folder_id, ...descendant_ids] restricted to the active workspace.
-
-        The root is always included as-is so callers' own workspace filter on
-        photos still applies. Descendants are walked through
-        ``folders.parent_id`` only when both the parent (the current node)
-        AND the child are linked to the active workspace, so branches that
-        pass through detached folders never propagate. In particular, a stale
-        or crafted ``folder_id`` for a folder that is no longer in the active
-        workspace will not expand into its active descendants.
-        """
-        return self._folder_repository().subtree_ids(folder_id)
 
     # -- Library integrity verification --
 
@@ -2248,9 +2206,8 @@ class Database:
         Photos and keywords are catalog-wide; the few workspace-scoped
         methods resolve the active workspace through ``self._ws_id`` at the
         point the original code did, so building the repository never raises.
-        The façade methods the map reads and the root merge call (folder
-        subtrees, the rules query builder, ``_merge_keyword_into``) are
-        handed over bound, so patches of them keep reaching the moved SQL.
+        The façade methods the map reads and the root merge call (the rules
+        query builder, ``_merge_keyword_into``) are handed over bound.
         """
         from repositories.locations import LocationRepository
 
@@ -2259,7 +2216,6 @@ class Database:
             self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             photo_date_asc_order=_PHOTO_DATE_ASC_ORDER,
-            folder_subtree_ids=self.get_folder_subtree_ids,
             build_query_from_rules=self._build_query_from_rules,
             merge_keyword_into=self._merge_keyword_into,
         )
@@ -2570,7 +2526,7 @@ class Database:
         """Build the (catalog-wide) culling-analysis repository on this connection."""
         from repositories.culling import CullingRepository
 
-        return CullingRepository(self.conn, self.effective_config)
+        return CullingRepository(self.conn, self._ws_id)
 
     @property
     def culling(self) -> CullingRepository:
@@ -4887,20 +4843,15 @@ class Database:
         so the active workspace is read exactly where these methods always
         read it: rule validation still fails before a missing workspace does,
         and ``create_default_collections(workspace_id=...)`` still needs no
-        active workspace. The façade methods the rules engine consults
-        (``effective_config``, ``get_subject_types``,
-        ``get_folder_subtree_ids``) are passed bound, so monkeypatches of
-        them keep reaching the moved SQL, and the module helpers and
-        constants it reads are passed in at call time for the same reason.
+        active workspace. The repository reads the effective config, the
+        subject types and folder subtrees on its own connection; the module
+        helpers and constants it reads are passed in here.
         """
         from repositories.collections import CollectionRepository
 
         return CollectionRepository(
             self.conn,
             self._ws_id,
-            effective_config=self.effective_config,
-            get_subject_types=self.get_subject_types,
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
             chunks=_chunks,
             escape_like=_escape_like,
             path_for_subtree_match=_path_for_subtree_match,

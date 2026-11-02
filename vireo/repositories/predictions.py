@@ -82,12 +82,12 @@ from collections.abc import Callable
 from typing import Any
 
 from keyword_normalization import normalize_keyword_display
+from repositories.effective_config import active_effective_config
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from settings_source import config_value
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (
-    "effective_config",
     "_build_query_from_rules",
     "_relax_negated_prediction_leaves",
     "_filter_prediction_rows_by_rules",
@@ -103,7 +103,6 @@ class DeferredIdentificationError(ValueError):
 class PredictionRepository:
     # Bound ``Database`` methods that ``__init__`` installs from
     # ``FACADE_METHODS``, declared so the type checker sees them.
-    effective_config: Callable[..., Any]
     _build_query_from_rules: Callable[..., Any]
     _relax_negated_prediction_leaves: Callable[..., Any]
     _filter_prediction_rows_by_rules: Callable[..., Any]
@@ -142,6 +141,10 @@ class PredictionRepository:
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
+
+    def effective_config(self):
+        """The global settings with the active workspace's overrides applied."""
+        return active_effective_config(self.conn, self._resolve_workspace_id)
 
     def legacy_detection_folders(self) -> list[dict[str, Any]]:
         """Visible folders with evidence of pre-raw-storage detector output.
