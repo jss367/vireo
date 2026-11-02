@@ -122,6 +122,10 @@ FULL_SUITE_PATHS = frozenset(
 )
 FULL_SUITE_PREFIXES = (".github/actions/", "vireo/data/")
 
+# Tests that read the comments of production modules. A comment-only edit
+# selects these rather than nothing.
+COMMENT_READING_TESTS = ("vireo/tests/test_comment_hygiene.py",)
+
 _TEST_FILE_RE = re.compile(r"^(tests|vireo/tests)/test_[A-Za-z0-9_]+\.py$")
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.*) b/(.*)$")
@@ -692,6 +696,20 @@ def _add_source_scanning_selections(
             sel.note(f"{source_path}: source-scanning contract in {test_file}")
 
 
+def _add_comment_reading_selections(source_path: str, base: str, cwd: Path, sel: Selection) -> None:
+    """Select the ratchets that read comments for a comment/blank-only edit.
+
+    Such an edit executes nothing, but a comment that cites a review or a PR
+    fails ``test_comment_hygiene.py``, so that test must still run.
+    """
+    picked = [test for test in COMMENT_READING_TESTS if _show(base, test, cwd) is not None]
+    sel.files.update(picked)
+    if picked:
+        sel.note(f"{source_path}: comment/blank-only edit; selecting only {', '.join(picked)}")
+    else:
+        sel.note(f"{source_path}: comment/blank-only edit; selecting nothing")
+
+
 def touched_declaration_names(hunks: list[Hunk], source: str) -> set[str]:
     """Names of the innermost function/class declarations a hunk touched.
 
@@ -870,10 +888,11 @@ def select(
             widened = None if (status == "D" or not hunks) else impacted_lines(hunks, source)
 
             # A pure comment/whitespace edit alters no code path and no
-            # structural contract; skip every fallback so the diff stays
-            # ``mode: none``.
+            # structural contract, so it selects nothing from the map and
+            # skips every fallback. Only the ratchets that read comments
+            # can fail on it.
             if hunks and widened is not None and not widened:
-                sel.note(f"{path}: comment/blank-only edit; selecting nothing")
+                _add_comment_reading_selections(path, base, cwd, sel)
                 continue
 
             # Source-scanning contracts (``glob("*.py")``/``rglob("*.py")``)
