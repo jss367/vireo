@@ -80,9 +80,10 @@ def js_comment_texts(src: str) -> list[str]:
     A small lexer that skips strings, template literals (with nested
     substitutions) and regular-expression literals, so ``//`` inside a URL
     string is not a comment. A contextual keyword rebound as an identifier
-    (``const of = 8; of / 2``) stays an identifier for the rest of the file
-    so its following ``/`` is division, not a regex. ``test_js_lexer_matches_acorn``
-    checks it against acorn on every first-party script when acorn is installed.
+    (``const of = 8; of / 2``) uses division outside keyword contexts;
+    the ``of`` separator in a for-header still permits a following regex.
+    ``test_js_lexer_matches_acorn`` checks it against acorn on every first-party
+    script when acorn is installed.
     """
     comments: list[str] = []
     i, n = 0, len(src)
@@ -90,6 +91,9 @@ def js_comment_texts(src: str) -> list[str]:
     braces: list[str] = []
     bound: set[str] = set()
     expect_binding = False
+    parens: list[bool] = []
+    pending_for = False
+    previous_word = ""
 
     def template(j: int) -> tuple[int, bool]:
         while j < n:
@@ -151,15 +155,31 @@ def js_comment_texts(src: str) -> list[str]:
             # After a block's ``}`` a ``/`` starts a regex; that is far more
             # common in these scripts than dividing an object literal.
             i, regex_ok = i + 1, True
+        elif c == "(":
+            parens.append(pending_for)
+            pending_for = False
+            i, regex_ok = i + 1, True
+        elif c == ";":
+            if parens:
+                parens[-1] = False
+            i, regex_ok = i + 1, True
         elif c in ")]":
+            if c == ")" and parens:
+                parens.pop()
             i, regex_ok = i + 1, False
         elif match := _JS_IDENT.match(src, i):
             word = match.group()
             i = match.end()
+            separator = (word == "of" and bool(parens) and parens[-1]
+                         and not regex_ok and src[:match.start()].rstrip()[-1:] != ".")
+            pending_for = word == "for" or (word == "await" and previous_word == "for")
+            previous_word = word
             if expect_binding:
                 bound.add(word)
                 regex_ok = False
-            elif word in bound:
+            elif separator:
+                regex_ok = True
+            elif word in bound or word == "of":
                 regex_ok = False
             else:
                 regex_ok = word in _JS_REGEX_AFTER_WORD
@@ -264,6 +284,15 @@ def test_js_lexer_contextual_keyword_rebound_as_identifier():
     """A contextual keyword like ``of`` rebound as an identifier is division, not regex."""
     assert js_comment_texts("const of = 8; of / 2; // Codex\n") == [" Codex"]
     assert js_comment_texts("for (const x of /foo/) { /* keep */ }\n") == [" keep "]
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("for (const of of /a\\/\\//g) { /* Codex */ }", [" Codex "]),
+    ("for (const x of /a\\/\\//g) { /* Codex */ }", [" Codex "]),
+    ("for (const x of values.of / 2) { /* Codex */ }", [" Codex "]),
+])
+def test_contextual_of_comments(source, expected):
+    assert js_comment_texts(source) == expected
 
 
 def test_js_lexer_matches_acorn():
