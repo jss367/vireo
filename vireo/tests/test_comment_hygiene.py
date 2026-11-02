@@ -266,6 +266,12 @@ def js_comment_texts(src: str) -> list[str]:
             # not a keyword. ``.N`` was handled by the number branch above.
             after_dot = True
             i, regex_ok = i + 1, False
+        elif c == "#" and (match := _JS_IDENT.match(src, i + 1)):
+            # Private name ``#foo``: a class field declaration or a private
+            # member access after ``.`` / ``?.``. Either way the token is
+            # identifier-shaped, so the following ``/`` is division and
+            # keyword status does not apply.
+            i, regex_ok = match.end(), False
         elif src.startswith(("++", "--"), i):
             i += 2
         else:
@@ -403,6 +409,23 @@ def test_js_lexer_member_access_of_is_division_not_regex():
         "obj . of / 2; // Codex\n",
         "obj./* note */of / 2; // Codex\n",
         "Observable.of.length / 2; // Codex\n",
+    ]
+    for src in cases:
+        assert any("Codex" in text for text in js_comment_texts(src)), src
+
+
+def test_js_lexer_private_member_name_is_identifier_not_regex():
+    """``#name`` is an identifier-shaped token: a class field (``#of = 8``) or
+    a private member access after ``.``/``?.`` (``this.#of``, ``obj?.#of``).
+    Either way the following ``/`` is division, so a trailing ``// Codex`` or
+    ``/* note */`` is still read."""
+    cases = [
+        "class C { #of = 8; f() { return this.#of / 2; // Codex\n } }\n",
+        "this.#of / 2; // Codex\n",
+        "obj.#of / 2; // Codex\n",
+        "obj?.#of / 2; // Codex\n",
+        "obj. #of / 2; // Codex\n",
+        "obj./* note */#of / 2; // Codex\n",
     ]
     for src in cases:
         assert any("Codex" in text for text in js_comment_texts(src)), src
