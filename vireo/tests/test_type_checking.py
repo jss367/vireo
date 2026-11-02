@@ -28,8 +28,8 @@ _FORBIDDEN_CALLABLE_FACADE_FORMS = frozenset(
 )
 
 
-def _collect_import_aliases(tree: ast.Module) -> dict[str, str]:
-    """Return a map ``{local_name: canonical_dotted_name}`` for imports.
+def _collect_import_aliases(tree: ast.Module) -> dict[str, frozenset[str]]:
+    """Return a map ``{local_name: frozenset(canonical_dotted_names)}`` for imports.
 
     Only names relevant to ``Callable[..., Any]`` detection are tracked:
     aliases of ``Callable`` and ``Any``, and aliases of the ``typing``
@@ -37,35 +37,48 @@ def _collect_import_aliases(tree: ast.Module) -> dict[str, str]:
     accessed. A local name that no tracked import binds is omitted and
     the canonicalizer treats it as its own canonical form.
 
+    The value is set-valued because competing ``TYPE_CHECKING`` branches
+    may bind one local name to different canonical names — e.g. the
+    ``if TYPE_CHECKING:`` branch doing ``from collections.abc import
+    Callable as Alias`` while the ``else:`` branch does ``from typing
+    import Any as Alias``. ``ast.walk`` visits both branches, so a
+    single-value map would let the second import overwrite the first
+    and the matcher would miss that ``Alias[..., Any]`` is the
+    forbidden form under the type checker's selected branch. By
+    recording every binding, the canonicalizer probes each alternative
+    the same way it does for module-level aliases, matching the
+    over-approximating treatment ``_collect_module_aliases`` already
+    gives ``if TYPE_CHECKING: ... else: ...`` assignments.
+
     We walk the entire tree (including ``if TYPE_CHECKING:`` bodies and
     function-local imports), accepting the slight over-approximation of
     treating a function-local alias as module-scoped: this is a ratchet,
     so recognizing more alias forms makes it harder to bypass, not
     easier.
     """
-    aliases: dict[str, str] = {}
+    raw: dict[str, set[str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
             for alias in node.names:
                 local = alias.asname or alias.name
                 if module in {"typing", "collections.abc"} and alias.name == "Callable":
-                    aliases[local] = "Callable"
+                    raw.setdefault(local, set()).add("Callable")
                 elif module == "typing" and alias.name == "Any":
-                    aliases[local] = "Any"
+                    raw.setdefault(local, set()).add("Any")
                 elif module == "collections" and alias.name == "abc":
-                    aliases[local] = "collections.abc"
+                    raw.setdefault(local, set()).add("collections.abc")
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "typing":
-                    aliases[alias.asname or "typing"] = "typing"
+                    raw.setdefault(alias.asname or "typing", set()).add("typing")
                 elif alias.name == "collections.abc" and alias.asname is not None:
                     # ``import collections.abc`` without ``as`` binds the
                     # top-level ``collections`` name; the dotted access
                     # ``collections.abc.Callable`` canonicalizes to its own
                     # text without needing an alias entry.
-                    aliases[alias.asname] = "collections.abc"
-    return aliases
+                    raw.setdefault(alias.asname, set()).add("collections.abc")
+    return {name: frozenset(canonicals) for name, canonicals in raw.items()}
 
 
 _TRY_NODE_TYPES: tuple[type, ...] = (
@@ -157,7 +170,7 @@ def _collect_module_aliases(tree: ast.Module) -> dict[str, list[ast.expr]]:
 
 def _canonical_annotation_texts(
     node: ast.expr,
-    aliases: dict[str, str],
+    aliases: dict[str, frozenset[str]],
     module_aliases: dict[str, list[ast.expr]] | None = None,
     _visited: frozenset[str] = frozenset(),
 ) -> frozenset[str]:
@@ -175,11 +188,20 @@ def _canonical_annotation_texts(
     so the matcher sees the same canonical form as the bare declaration.
     A ``Name`` whose id is in ``aliases`` is substituted for its canonical
     name, so ``C[..., A]`` with ``C`` aliasing ``Callable`` and ``A``
-    aliasing ``Any`` reads as ``Callable[..., Any]``. A ``Name`` whose id
-    is in ``module_aliases`` is resolved to each aliased expression and
+    aliasing ``Any`` reads as ``Callable[..., Any]``. ``aliases`` is now
+    set-valued: a ``Name`` whose id maps to several canonical names (as
+    competing ``TYPE_CHECKING`` branches produce) contributes every one
+    to the result set, so an alias with any branch resolving to the
+    forbidden component is reached. A ``Name`` whose id is in
+    ``module_aliases`` is resolved to each aliased expression and
     canonicalized recursively; ``_visited`` guards against a cycle such
     as ``A = B; B = A`` so a self-referential alias canonicalizes to the
-    name rather than looping.
+    name rather than looping. A name present in both maps unions the
+    results from each: the matcher never discards an alternative merely
+    because one branch happens to be an import and another a module
+    assignment, so an import binding and a module-level assignment
+    binding one local name compose into every canonical text either
+    branch could produce.
     """
     if module_aliases is None:
         module_aliases = {}
@@ -192,14 +214,17 @@ def _canonical_annotation_texts(
     if isinstance(node, ast.Constant) and node.value is Ellipsis:
         return frozenset({"..."})
     if isinstance(node, ast.Name):
+        results: set[str] = set()
         if node.id in module_aliases and node.id not in _visited:
-            results: set[str] = set()
             for alt in module_aliases[node.id]:
                 results |= _canonical_annotation_texts(
                     alt, aliases, module_aliases, _visited | {node.id}
                 )
-            return frozenset(results)
-        return frozenset({aliases.get(node.id, node.id)})
+        if node.id in aliases:
+            results |= aliases[node.id]
+        if not results:
+            return frozenset({node.id})
+        return frozenset(results)
     if isinstance(node, ast.Attribute):
         prefixes = _canonical_annotation_texts(
             node.value, aliases, module_aliases, _visited
@@ -594,4 +619,102 @@ def test_callable_facade_matcher_resolves_module_level_aliases():
         "fixture.AliasedTryStarExcept.callback",
         "fixture.AliasedTypeChecking.callback",
         "fixture.AliasedWith.callback",
+    ]
+
+
+def test_callable_facade_matcher_tracks_import_branch_alternatives():
+    """Inert fixture: the matcher must catch the forbidden form when
+    competing ``TYPE_CHECKING`` branches bind the same imported local
+    name to different canonical names.
+
+    The type checker (basedpyright treats ``TYPE_CHECKING`` as True)
+    selects the branch that binds ``Alias`` to ``Callable``, so a class
+    annotation ``callback: Alias[..., Any]`` is the forbidden form —
+    but a single-value import map would let the branch ``ast.walk``
+    visits last overwrite the first, dropping ``Callable`` from the
+    mapping and silently passing the ratchet. Set-valued import aliases
+    record every binding, matching the branch-alternative treatment
+    ``_collect_module_aliases`` already gives competing module-level
+    assignments; the matcher reports an alias whose any branch resolves
+    to the forbidden component.
+
+    The fixture pins three bounded shapes the comment thread called
+    out:
+      * ``AliasedImportBranchBodyFirst`` / ``AliasedImportBranchElseFirst``
+        — both ``TYPE_CHECKING`` branch orders, since BFS traversal
+        order would otherwise matter.
+      * ``AliasedImportBranchQuoted`` — the explicitly quoted
+        forward-reference form over the competing imports, so the
+        ``ast.Constant`` recursion still reaches the set-valued
+        canonical lookup.
+      * ``AliasedImportBranchAssignComposed`` — composes a competing
+        import alias with a module-level ``FacadeMethodComposed =
+        Imported[..., Any]`` assignment, so the module-alias branch's
+        recursion into the import map sees every alternative.
+
+    Negative controls: ``AliasedBothAny`` makes both branches bind
+    ``Alias`` to ``Any`` (so no reachable branch is the forbidden
+    form, and the matcher must not sweep it in on BFS visit order
+    alone), and ``LegitImportBranch`` keeps the live
+    ``Callable[[], int]`` signature pattern.
+    """
+    source = textwrap.dedent(
+        """
+        from __future__ import annotations
+
+        from typing import TYPE_CHECKING, Any
+
+        if TYPE_CHECKING:
+            from collections.abc import Callable as Alias
+        else:
+            from typing import Any as Alias
+
+        if not TYPE_CHECKING:
+            from typing import Any as AliasReverse
+        else:
+            from collections.abc import Callable as AliasReverse
+
+        if TYPE_CHECKING:
+            from collections.abc import Callable as Imported
+        else:
+            from typing import Any as Imported
+
+        FacadeMethodComposed = Imported[..., Any]
+
+        if TYPE_CHECKING:
+            from typing import Any as AliasBothAny
+        else:
+            from typing import Any as AliasBothAny
+
+
+        class AliasedImportBranchBodyFirst:
+            callback: Alias[..., Any]
+
+
+        class AliasedImportBranchElseFirst:
+            callback: AliasReverse[..., Any]
+
+
+        class AliasedImportBranchQuoted:
+            callback: "Alias[..., Any]"
+
+
+        class AliasedImportBranchAssignComposed:
+            callback: FacadeMethodComposed
+
+
+        class AliasedBothAny:
+            callback: AliasBothAny[..., Any]
+
+
+        class LegitImportBranch:
+            resolve_workspace_id: Alias[[], int]
+        """
+    )
+    offenders = _callable_facade_offenders(source, "fixture")
+    assert sorted(offenders) == [
+        "fixture.AliasedImportBranchAssignComposed.callback",
+        "fixture.AliasedImportBranchBodyFirst.callback",
+        "fixture.AliasedImportBranchElseFirst.callback",
+        "fixture.AliasedImportBranchQuoted.callback",
     ]
