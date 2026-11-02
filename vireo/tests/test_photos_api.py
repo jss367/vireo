@@ -14572,7 +14572,7 @@ def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_
               "value": "rejected"}]
 
     # count_photos_for_rules and query_photo_ids share the same
-    # _build_query_from_rules path — both should behave the same.
+    # build_query_from_rules path — both should behave the same.
     assert db.collections.count_photos_for_rules(rules) == 2
     assert set(db.collections.query_photo_ids(rules)) == {
         photos["bird1.jpg"], photos["bird3.jpg"],

@@ -52,7 +52,7 @@ MAX_RULE_DEPTH = 3
 GROUP_MODES = ("all", "any", "none")
 
 # What the rule engine's boolean branch accepts (``_truthy``/``_falsey`` in
-# ``Database._build_query_from_rules``). A boolean field has no closed
+# ``Database.build_query_from_rules``). A boolean field has no closed
 # vocabulary, so without this list a stored "yes" would render a button that
 # 400s the query the moment it is clicked.
 BOOLEAN_TRUE = (True, 1, "1", "true")

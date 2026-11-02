@@ -16,10 +16,11 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from config import _deep_merge, config_value
-from db import normalize_browse_stack_config
+from repositories.collections import normalize_browse_stack_config
 
 if TYPE_CHECKING:
-    from db import BrowseStackConfig, Database
+    from db import Database
+    from repositories.collections import BrowseStackConfig
     from services.service_types import JsonDict
 
 

@@ -608,7 +608,7 @@ def test_date_filter_inclusive_with_subsec(tmp_path):
 
 def test_inclusive_date_to_edge_cases():
     """_inclusive_date_to handles non-string and short fractional inputs."""
-    from db import _inclusive_date_to
+    from repositories.photo_sql import inclusive_date_to as _inclusive_date_to
 
     # Non-string input returns None (fail closed)
     assert _inclusive_date_to(20240615) is None
@@ -2126,7 +2126,7 @@ def test_has_subject_rule_rejects_invalid_op_when_subject_types_empty(tmp_path, 
     db.commit()
 
     with pytest.raises(ValueError):
-        db._build_query_from_rules(
+        db.collections.build_query_from_rules(
             [{"field": "has_subject", "op": "contains", "value": 1}]
         )
 
@@ -26745,7 +26745,7 @@ def test_collapse_browse_stack_photo_ids_matches_the_sql_projection(tmp_path):
 
 def test_browse_stack_settings_apply_workspace_overrides(tmp_path):
     """Per-workspace overrides reach the projection, and junk falls back."""
-    from db import normalize_browse_stack_config
+    from repositories.collections import normalize_browse_stack_config
 
     db, _fid = _filter_db(tmp_path)
     assert workspace_config.browse_stack_settings(db, {}) == {
@@ -27407,7 +27407,7 @@ def test_get_filter_field_values_counts_wrap_or_rules(tmp_path):
     """Facet counts under a top-level ``any`` (OR) rule group must not leak
     rows that satisfy the first OR branch but fail the facet's own predicate.
 
-    ``_build_query_from_rules`` returns ``WHERE (A) OR (B)`` for
+    ``build_query_from_rules`` returns ``WHERE (A) OR (B)`` for
     ``{mode: any}``; appending ``AND {facet}`` would bind to the last OR
     branch by SQL precedence (``(A) OR ((B) AND facet)``), letting
     branch-A rows with a NULL/non-matching facet field still inflate the

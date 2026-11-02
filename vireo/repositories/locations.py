@@ -3,13 +3,12 @@
 ``Database`` keeps the composition: keyword upserts (``_upsert_one_keyword``,
 ``_upsert_location_parent_chain``), ``tag_photo`` with its provenance fold,
 ``link_keyword_to_place`` (a pinned ``photo_keywords`` writer), the sync
-queue's ``queue_change``, the rules query builder and keyword merges all
-stay on the façade. Where a moved method needs one of them mid-query it
-receives the bound façade method: the two every map read or root merge needs
-(``_build_query_from_rules`` and ``_merge_keyword_into``) are bound once when
-the façade builds the repository, and the rest arrive per call. Folder
-subtrees come from ``repositories.folder_subtrees.folder_subtree_ids`` on this
-connection.
+queue's ``queue_change`` and keyword merges all stay on the façade. Where a
+moved method needs one of them mid-query it receives the bound façade
+method: ``_merge_keyword_into`` is bound once when the façade builds the
+repository, and the rest arrive per call. Folder subtrees
+(``repositories.folder_subtrees``) and the rules engine (a
+``CollectionRepository``) are read on this connection.
 
 Photos and keywords are catalog-wide, so most methods take no workspace.
 The ones that are scoped resolve the active workspace through
@@ -27,20 +26,18 @@ import sqlite3
 import time
 from collections.abc import Sequence
 
+from repositories.collections import CollectionRepository
 from repositories.folder_subtrees import folder_subtree_ids
 
 
 class LocationRepository:
     def __init__(self, conn, workspace_id_fn, *, chunk_size=800,
-                 photo_date_asc_order=None,
-                 build_query_from_rules, merge_keyword_into):
+                 photo_date_asc_order=None, merge_keyword_into):
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn
         self.chunk_size = chunk_size
         self.photo_date_asc_order = photo_date_asc_order
-        # Bound ``Database`` methods: ``_build_query_from_rules`` and
-        # ``_merge_keyword_into``.
-        self.build_query_from_rules = build_query_from_rules
+        # The bound ``Database._merge_keyword_into``.
         self.merge_keyword_into = merge_keyword_into
 
     def _chunks(self, values):
@@ -110,7 +107,7 @@ class LocationRepository:
             params.extend(subtree)
         if rules is not None:
             r_folder_join, r_join_clause, r_where, r_params = (
-                self.build_query_from_rules(rules)
+                CollectionRepository(self.conn, self.workspace_id_fn).build_query_from_rules(rules)
             )
             conditions.append(
                 "p.id IN (SELECT DISTINCT p.id FROM photos p "

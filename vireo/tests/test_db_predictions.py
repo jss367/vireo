@@ -8,7 +8,7 @@ review state (absence == pending, preserved manual decisions, the auto-match
 marker), the ``_commit=False`` nested-transaction seams of the review
 mutators, commit visibility and ``commit_with_retry`` routing, chunking,
 workspace scoping and lazy active-workspace resolution, and that
-composition (``get_effective_config``, ``_build_query_from_rules``,
+composition (``get_effective_config``, ``build_query_from_rules``,
 ``accept_prediction``) still routes through the façade so monkeypatches take
 effect.
 """
@@ -446,11 +446,13 @@ def test_get_predictions_rules_route_through_facade(db, cat, monkeypatch):
     db.predictions.add(_det(db, p0), "Robin", 0.5, "m1")
     db.predictions.add(_det(db, p1), "Jay", 0.9, "m1")
     db.commit()
+    from repositories.collections import CollectionRepository
+
     calls = []
-    real_build = db._build_query_from_rules
-    monkeypatch.setattr(db, "_build_query_from_rules",
-                        lambda rules, **kw: calls.append(("build", rules, kw))
-                        or real_build(rules, **kw))
+    real_build = CollectionRepository.build_query_from_rules
+    monkeypatch.setattr(CollectionRepository, "build_query_from_rules",
+                        lambda self, rules, **kw: calls.append(("build", rules, kw))
+                        or real_build(self, rules, **kw))
     real_relax = db._relax_negated_prediction_leaves
     monkeypatch.setattr(db, "_relax_negated_prediction_leaves",
                         lambda rules: calls.append(("relax", rules)) or real_relax(rules))
@@ -536,10 +538,12 @@ def test_top_prediction_confidences(db, cat, monkeypatch):
     p0, p1 = cat["p"][:2]
     db.predictions.add(_det(db, p0), "Robin", 0.6, "m1")
     db.commit()
+    from repositories.collections import CollectionRepository
+
     calls = []
-    real = db._top_prediction_confidence_params
-    monkeypatch.setattr(db, "_top_prediction_confidence_params",
-                        lambda: calls.append(1) or real())
+    real = CollectionRepository.top_prediction_confidence_params
+    monkeypatch.setattr(CollectionRepository, "top_prediction_confidence_params",
+                        lambda self: calls.append(1) or real(self))
     got = db.predictions.get_top_confidences([p0, p1])
     assert calls == [1]
     assert got == {p0: pytest.approx(0.6)}

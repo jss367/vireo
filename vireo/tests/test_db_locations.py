@@ -7,7 +7,7 @@ in ``db.py`` or in ``repositories/locations.py``. They pin commit
 boundaries, error types and messages, return shapes, the order in which the
 active workspace is resolved, chunking, and the façade calls
 (``tag_photo``, ``queue_change``,
-``_build_query_from_rules``, ``_merge_keyword_into``) that must stay
+``build_query_from_rules``, ``_merge_keyword_into``) that must stay
 patchable on ``Database``.
 """
 
@@ -137,11 +137,13 @@ def test_photo_location_statuses_dedupes_and_chunks(db, fid):
 
 
 def test_append_location_status_filter_rejects_unknown_status():
+    from repositories.photos import append_location_status_filter
+
     conditions = []
-    Database._append_location_status_filter(conditions, None)
+    append_location_status_filter(conditions, None)
     assert conditions == []
     with pytest.raises(ValueError, match="location_status must be"):
-        Database._append_location_status_filter(conditions, "gps")
+        append_location_status_filter(conditions, "gps")
 
 
 # -- map queries ------------------------------------------------------------------
@@ -203,15 +205,17 @@ def test_geolocated_photos_route_folder_and_rules_through_facade(
         subtree_calls.append(folder_id)
         return real_subtree(conn, workspace_id, folder_id)
 
-    rules_calls = []
-    real_rules = db._build_query_from_rules
+    from repositories.collections import CollectionRepository
 
-    def rules(rule_tree):
+    rules_calls = []
+    real_rules = CollectionRepository.build_query_from_rules
+
+    def rules(self, rule_tree, **kwargs):
         rules_calls.append(rule_tree)
-        return real_rules(rule_tree)
+        return real_rules(self, rule_tree, **kwargs)
 
     monkeypatch.setattr(locations_module, "folder_subtree_ids", subtree)
-    monkeypatch.setattr(db, "_build_query_from_rules", rules)
+    monkeypatch.setattr(CollectionRepository, "build_query_from_rules", rules)
     rule_tree = [{"field": "rating", "op": ">=", "value": 0}]
     rows = db.locations.get_geolocated_photos(folder_id=child, rules=rule_tree)
     assert [r["id"] for r in rows] == [in_child]
@@ -1181,7 +1185,7 @@ def test_location_backfill_queues_through_the_facade():
     [
         (
             "_location_repository",
-            {"_build_query_from_rules", "_merge_keyword_into"},
+            {"_merge_keyword_into"},
         ),
         (
             "repair_misclassified_location_ancestors",
