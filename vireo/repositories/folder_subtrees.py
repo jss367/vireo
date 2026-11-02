@@ -1,4 +1,4 @@
-"""Folder subtrees as one workspace sees them.
+"""Folder subtrees as one workspace sees them, and folder-path matching.
 
 ``folder_subtree_ids`` is the read every folder-scoped query composes: the
 Browse listings (``PhotoRepository``), the collection rules
@@ -46,3 +46,20 @@ def folder_subtree_ids(
         (folder_id, folder_id, workspace_id, folder_id, workspace_id),
     ).fetchall()
     return [r["id"] for r in rows]
+
+
+def path_for_subtree_match(value: str) -> str:
+    """Normalize a stored path for platform-neutral subtree prefix matching."""
+    return value.replace("\\", "/").rstrip("/")
+
+
+def escape_like(s: str) -> str:
+    """Escape SQL LIKE metacharacters so a path is matched literally.
+
+    LIKE treats ``%`` and ``_`` as wildcards unconditionally — an unescaped
+    folder path like ``/pics/my_dir`` also matches ``/pics/myXdir``, which
+    silently corrupts sibling folders in path-cascade UPDATEs. Pair with
+    ``LIKE ? ESCAPE '\\'`` at the call site (same convention as ingest.py
+    and scanner.py).
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

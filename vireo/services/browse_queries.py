@@ -4,7 +4,7 @@ The summary panel's aggregates (with the workspace-effective detector floor
 resolved lazily), whether a rule tree compiles at all, and the stack-projected
 counts, positions and id lists Browse pages and selects with. The SQL lives in
 ``db.photos`` and ``db.collections``; ``rules_resolvable`` compiles through
-``Database._build_query_from_rules``, the forwarder the predictions repository
+``Database.build_query_from_rules``, the forwarder the predictions repository
 binds by name, so a patch of it reaches this check too.
 """
 
@@ -63,7 +63,7 @@ def rules_resolvable(db: Database, rules: Any) -> bool:
     avoid. Only the query-building step is exercised.
     """
     try:
-        db._build_query_from_rules(rules)
+        db.collections.build_query_from_rules(rules)
     except ValueError:
         return False
     return True

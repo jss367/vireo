@@ -82,16 +82,15 @@ from collections.abc import Callable
 from typing import Any
 
 from keyword_normalization import normalize_keyword_display
+from repositories.collections import CollectionRepository
 from repositories.effective_config import active_effective_config
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from settings_source import config_value
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (
-    "_build_query_from_rules",
     "_relax_negated_prediction_leaves",
     "_filter_prediction_rows_by_rules",
-    "_top_prediction_confidence_params",
     "accept_prediction",
 )
 
@@ -103,10 +102,8 @@ class DeferredIdentificationError(ValueError):
 class PredictionRepository:
     # Bound ``Database`` methods that ``__init__`` installs from
     # ``FACADE_METHODS``, declared so the type checker sees them.
-    _build_query_from_rules: Callable[..., Any]
     _relax_negated_prediction_leaves: Callable[..., Any]
     _filter_prediction_rows_by_rules: Callable[..., Any]
-    _top_prediction_confidence_params: Callable[..., Any]
     accept_prediction: Callable[..., Any]
 
     def __init__(
@@ -141,6 +138,10 @@ class PredictionRepository:
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
+
+    def _collections(self):
+        """The rules engine, on this connection and workspace."""
+        return CollectionRepository(self.conn, self._resolve_workspace_id)
 
     def effective_config(self):
         """The global settings with the active workspace's overrides applied."""
@@ -859,7 +860,7 @@ class PredictionRepository:
 
     def _append_rules_scope(self, rules, base_conditions, base_params):
         """Limit ``get_rows`` to the photos a rules tree selects."""
-        # ``_build_query_from_rules`` compiles ``none(...)`` as photo-level
+        # ``build_query_from_rules`` compiles ``none(...)`` as photo-level
         # ``NOT EXISTS(...)``. For a row-level predicate like
         # ``none(prediction_confidence >= 0.8)`` that drops any photo with
         # a sibling row over the threshold — even when the 0.10 sibling
@@ -875,7 +876,7 @@ class PredictionRepository:
         # keep the default False to preserve the NOT EXISTS semantics
         # that include photos with no current predictions (r3619275290).
         r_folder_join, r_join_clause, r_where, r_params = (
-            self._build_query_from_rules(scope_rules, row_scoped=True)
+            self._collections().build_query_from_rules(scope_rules, row_scoped=True)
         )
         base_conditions.append(
             "p.id IN (SELECT DISTINCT p.id FROM photos p "
@@ -1354,7 +1355,7 @@ class PredictionRepository:
         """
         if not photo_ids:
             return {}
-        conf_params = self._top_prediction_confidence_params()
+        conf_params = self._collections().top_prediction_confidence_params()
         result = {}
         for i in range(0, len(photo_ids), 800):
             chunk = photo_ids[i:i + 800]

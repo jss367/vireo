@@ -9,7 +9,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import settings_source
 from keyword_normalization import (
@@ -18,8 +18,16 @@ from keyword_normalization import (
 )
 from new_images_cache import get_shared_cache
 from repositories.effective_config import subject_types, workspace_effective_config
+from repositories.folder_subtrees import escape_like as _escape_like
+from repositories.folder_subtrees import path_for_subtree_match as _path_for_subtree_match
 from repositories.keywords import KEYWORD_TYPES
-from repositories.prediction_review import prediction_review_join, prediction_review_status
+from repositories.photo_sql import (
+    PHOTO_COLS,
+    PHOTO_DATE_ASC_ORDER,
+    PHOTO_DETAIL_COLS,
+    TOP_PREDICTION_CONFIDENCE_EXPR,
+    inclusive_date_to,
+)
 from unit_of_work import (
     GuardedConnection,
     InOwnUnit,
@@ -90,14 +98,6 @@ if TYPE_CHECKING:
 # Config, recipes, place details, prediction results and history payloads are
 # heterogeneous JSON dictionaries. Their values intentionally use Any; IDs,
 # control flags, repository accessors and transaction APIs have concrete types.
-
-
-class BrowseStackConfig(TypedDict):
-    """Normalized Browse stack settings, independent of the full app config."""
-
-    time_gap: float
-    split_mode: str
-
 
 log = logging.getLogger(__name__)
 
@@ -280,22 +280,6 @@ class MissingPhotosCancelled(RuntimeError):
     """Raised when a Missing Originals filesystem scan is cancelled."""
 
 
-def _path_for_subtree_match(value: str) -> str:
-    """Normalize a stored path for platform-neutral subtree prefix matching."""
-    return value.replace("\\", "/").rstrip("/")
-
-
-def _escape_like(s: str) -> str:
-    """Escape SQL LIKE metacharacters so a path is matched literally.
-
-    LIKE treats ``%`` and ``_`` as wildcards unconditionally — an unescaped
-    folder path like ``/pics/my_dir`` also matches ``/pics/myXdir``, which
-    silently corrupts sibling folders in path-cascade UPDATEs. Pair with
-    ``LIKE ? ESCAPE '\\'`` at the call site (same convention as ingest.py
-    and scanner.py).
-    """
-    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
 
 def _is_keyword_word_char(ch):
     return ch.isalnum()
@@ -433,103 +417,6 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
         yield values[idx:idx + size]
 
 
-# Life-list ancestor suppression. Broadening the identification-keyword
-# rank guard admits linked genus/family/class rows, but Lightroom catalog
-# imports copy every ``includeParents`` ancestor onto the photo as a flat
-# keyword (see ``vireo/catalog.py``) and the classifier already treats
-# ancestor tags as "broader labels for the same taxon" rather than
-# separate identifications (see ``_can_auto_accept_detection_prediction``
-# in ``vireo/classify_job/store_predictions.py``). Without a hierarchy filter, a normal
-# species-tagged robin would also inflate ``Turdus`` / ``Turdidae`` /
-# ``Aves`` Life List buckets on those catalogs.
-#
-# Suppress a linked higher-rank taxonomy keyword on a photo whenever the
-# same photo carries another linked taxonomy keyword whose taxon is a
-# strict descendant of it. Species-rank keywords are never suppressed;
-# unlinked keywords (``taxon_id IS NULL``) can't be checked for ancestry
-# and pass through unchanged. The clause references outer aliases
-# ``pk`` (photo_keywords) and ``k`` (keywords); callers don't need to
-# join ``taxa`` themselves because the rank/ancestry checks resolve
-# ``k.taxon_id`` via inner subqueries.
-_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE = """
-    AND NOT (
-        k.taxon_id IS NOT NULL
-        AND EXISTS (
-            SELECT 1 FROM taxa t_sup_rank
-            WHERE t_sup_rank.id = k.taxon_id
-              AND t_sup_rank.rank IS NOT NULL
-              AND t_sup_rank.rank != 'species'
-        )
-        AND EXISTS (
-            SELECT 1 FROM photo_keywords pk_sup
-            JOIN keywords k_sup ON k_sup.id = pk_sup.keyword_id
-             AND (k_sup.is_species = 1 OR k_sup.type = 'taxonomy')
-             AND k_sup.taxon_id IS NOT NULL
-            WHERE pk_sup.photo_id = pk.photo_id
-              AND k_sup.id != k.id
-              AND k.taxon_id IN (
-                  WITH RECURSIVE anc(id) AS (
-                      SELECT parent_id FROM taxa
-                       WHERE id = k_sup.taxon_id
-                         AND parent_id IS NOT NULL
-                      UNION ALL
-                      SELECT t_anc.parent_id
-                      FROM taxa t_anc JOIN anc a ON t_anc.id = a.id
-                       WHERE t_anc.parent_id IS NOT NULL
-                  )
-                  SELECT id FROM anc
-              )
-        )
-    )
-"""
-
-
-# --- Browse stacks -----------------------------------------------------
-# Defaults for the Stacks toggle's burst grouping, mirroring
-# ``config.DEFAULTS``. Duplicated rather than imported so a Database built
-# without any config (tests, background jobs) still groups the same way the
-# app does instead of silently picking a different gap.
-BROWSE_STACK_TIME_GAP_DEFAULT = 3.0
-BROWSE_STACK_SPLIT_MODE_DEFAULT = "break"
-BROWSE_STACK_SPLIT_MODES = ("break", "partition")
-
-# ``julianday`` returns days as a double, so differencing two modern dates
-# leaves roughly 0.05 ms of resolution once the result is scaled back to
-# seconds. Without a tolerance, frames spaced exactly at the configured gap
-# fall on either side of the comparison depending on that noise — one pair of
-# 3.000s-apart frames stacks while the next does not. A millisecond is far
-# below any capture-time resolution EXIF records and puts the boundary where
-# the setting says it is: a gap *equal* to the setting is inside the burst.
-BURST_GAP_TOLERANCE_SECONDS = 0.001
-
-
-def normalize_browse_stack_config(config: object = None) -> BrowseStackConfig:
-    """Return ``{"time_gap", "split_mode"}`` for Browse's stack projection.
-
-    Accepts either an already-normalized stack dict or a full (effective)
-    config dict, so callers can pass ``db.get_effective_config(cfg.load())``
-    straight through. Anything unreadable falls back to the default rather
-    than raising: a malformed setting must not take Browse down, and the
-    default is the behaviour the settings UI describes.
-    """
-    gap = BROWSE_STACK_TIME_GAP_DEFAULT
-    mode = BROWSE_STACK_SPLIT_MODE_DEFAULT
-    if isinstance(config, dict):
-        raw_gap = config.get("time_gap", config.get("browse_stack_time_gap", gap))
-        try:
-            gap = float(raw_gap)
-        except (TypeError, ValueError):
-            gap = BROWSE_STACK_TIME_GAP_DEFAULT
-        if not (gap >= 0.0):  # also catches NaN
-            gap = BROWSE_STACK_TIME_GAP_DEFAULT
-        raw_mode = config.get(
-            "split_mode", config.get("browse_stack_split_mode", mode)
-        )
-        mode = raw_mode if raw_mode in BROWSE_STACK_SPLIT_MODES else (
-            BROWSE_STACK_SPLIT_MODE_DEFAULT
-        )
-    return {"time_gap": gap, "split_mode": mode}
-
 
 _LOCATION_COMPONENT_RANKS = {
     "country": 10,
@@ -552,14 +439,6 @@ _LOCATION_COMPONENT_RANKS = {
 }
 
 
-NEEDS_IDENTIFICATION_RULES = [
-    {"field": "has_subject", "op": "equals", "value": 0},
-    {"field": "wildlife_excluded", "op": "equals", "value": 0},
-]
-
-GPS_WITHOUT_LOCATION_KEYWORD_RULES = [
-    {"field": "location_keyword_missing", "op": "equals", "value": 1},
-]
 
 NO_LOCATION_INFORMATION_RULES = {
     "mode": "all",
@@ -645,122 +524,6 @@ def execute_with_retry(
             time.sleep(base_delay * (2 ** attempt))
     raise ValueError("max_retries must be nonnegative")
 
-
-def _inclusive_date_to(date_to):
-    """Pad a date_to bound so it includes sub-second timestamps.
-
-    The frontend sends either 'YYYY-MM-DD' (date picker) or
-    'YYYY-MM-DDTHH:MM:SS' (timeline click).  With sub-second precision
-    timestamps like '23:59:59.500000', a naive '<= 23:59:59' comparison
-    excludes them.  Append '.999999' so the bound covers the full second.
-    Fractional seconds shorter than 6 digits are padded with '9's so that
-    lexical comparison remains inclusive (e.g. '.5' → '.599999').
-    """
-    if date_to is None:
-        return None
-    if not isinstance(date_to, str):
-        return None
-    if len(date_to) == 10:  # bare date
-        return date_to + "T23:59:59.999999"
-    if len(date_to) == 19:  # date + time, no fractional seconds
-        return date_to + ".999999"
-    # Has fractional seconds — pad to 6 digits with '9' for inclusive upper bound
-    dot_idx = date_to.rfind(".")
-    if dot_idx >= 0:
-        frac = date_to[dot_idx + 1:]
-        if len(frac) < 6:
-            return date_to + "9" * (6 - len(frac))
-    return date_to
-
-
-def _rule_upper_bound(value):
-    """Pad only bare ``YYYY-MM-DD`` values for universal-filter upper bounds.
-
-    A precise instant like ``2024-01-01T12:00:00`` is what the caller meant;
-    padding it to ``.999999`` would spuriously include sub-second photos in
-    that same clock second (e.g. ``12:00:00.5``) on a strict ``>`` or match
-    them on a ``<=``. Only bare dates need to be advanced to end-of-day so
-    ``<= 2024-01-01`` covers the whole named day.
-    """
-    if isinstance(value, str) and len(value) == 10:
-        return _inclusive_date_to(value)
-    return value
-
-
-_PHOTO_DATE_ASC_ORDER = "p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC"
-_PHOTO_DATE_DESC_ORDER = "p.timestamp IS NULL, p.timestamp DESC, p.filename ASC, p.id ASC"
-
-# A photo's "prediction confidence" is the score of the one prediction the UI
-# presents as its strongest guess — not "some prediction row exists with this
-# score". The eligibility gates are exactly the ones every other surface that
-# speaks for the *displayed* prediction applies, so the sort key and the badge
-# cannot rank a photo on a guess Browse hides:
-#
-# * ``species IS NOT NULL`` — a detection-only row ("animal", no species) is
-#   not a species guess and has no confidence to rank by.
-# * ``detector_confidence >= <workspace floor>`` — detections under the
-#   floor are hidden everywhere (``detection_store.get_detections_for_photos``, the
-#   dashboard counters, ``_prediction_exists``), so their predictions must
-#   not position a card either.
-# * status not ``rejected`` — a guess the user threw away must not keep the
-#   photo at the top of a confidence sort.
-# * status not ``alternative`` — runner-up rows are dropped from top-level
-#   results by ``/api/predictions``, matching ``_prediction_exists``.
-# * newest ``labels_fingerprint`` per (detection, classifier) — the same pin
-#   ``get_top_prediction_for_photo`` and ``_prediction_exists`` use, so a
-#   reclassified photo ranks on its current label set rather than on a
-#   stale row left behind by the previous one.
-#
-# Correlates on the outer ``p.id``, so every caller must expose ``photos``
-# (or a projection carrying ``id``) as ``p``. Takes the two parameters
-# ``Database._top_prediction_confidence_params()`` returns, in that order.
-# It is deliberately a correlated subquery rather than a grouped CTE: at 88k
-# photos / 192k predictions the CTE form materializes every photo in the
-# catalog (~0.35s even for a 60-photo folder), while the correlated form is
-# index-driven per scoped row — 0.03s on a small workspace and no slower
-# than the CTE on the largest one.
-_TOP_PREDICTION_CONFIDENCE_EXPR = f"""(
-            SELECT MAX(conf_pr.confidence)
-            FROM detections conf_d
-            JOIN predictions conf_pr ON conf_pr.detection_id = conf_d.id
-            {prediction_review_join('conf_pr', review_alias='conf_prv')}
-            WHERE conf_d.photo_id = p.id
-              AND conf_d.detector_confidence >= ? AND conf_d.subject_verdict IS NULL
-              AND conf_pr.species IS NOT NULL
-              AND {prediction_review_status('conf_prv')}
-                  NOT IN ('rejected', 'alternative')
-              AND conf_pr.labels_fingerprint = (
-                  SELECT conf_pr2.labels_fingerprint FROM predictions conf_pr2
-                  WHERE conf_pr2.detection_id = conf_pr.detection_id
-                    AND conf_pr2.classifier_model = conf_pr.classifier_model
-                  ORDER BY conf_pr2.created_at DESC, conf_pr2.id DESC
-                  LIMIT 1
-              )
-        )"""
-
-# Sorts whose ORDER BY reads only ``photos`` columns, so they need no params.
-_PHOTO_SORT_ORDERS = {
-    "date": _PHOTO_DATE_ASC_ORDER,
-    "date_desc": _PHOTO_DATE_DESC_ORDER,
-    "name": "p.filename ASC, p.id ASC",
-    "name_desc": "p.filename DESC, p.id ASC",
-    "rating": "p.rating DESC, p.filename ASC, p.id ASC",
-    "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
-    "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
-    "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
-}
-
-# Photos the classifier has never scored are unscored, not unconfident, so
-# they sort last in *both* directions — "Prediction confidence (lowest)" is
-# read as "the guesses Vireo is least sure of", and answering it with
-# thousands of frames that carry no guess at all would bury exactly the
-# photos the sort exists to surface. ``NULLS LAST`` rather than the
-# ``expr IS NULL, expr`` idiom used for plain columns above: repeating the
-# key here would mean evaluating the correlated subquery twice per row.
-_PREDICTION_CONFIDENCE_SORTS = {
-    "prediction_confidence": "DESC",
-    "prediction_confidence_asc": "ASC",
-}
 
 
 def _contains_prediction_field(node, prediction_fields):
@@ -1651,14 +1414,7 @@ class Database:
         """
         from repositories.species_curation import SpeciesCurationRepository
 
-        return SpeciesCurationRepository(
-            self.conn,
-            self._ws_id,
-            chunks=_chunks,
-            life_list_ancestor_suppression_clause=(
-                _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
-            ),
-        )
+        return SpeciesCurationRepository(self.conn, self._ws_id)
 
     @property
     def species_curation(self) -> SpeciesCurationRepository:
@@ -1977,11 +1733,7 @@ class Database:
         ``workspace_folders`` resolve it (raising if none is active) before
         any SQL, and the catalog-wide methods never do. The column lists and
         the ``db`` module helpers are passed in, the helpers read at call
-        time so tests that patch ``db.execute_with_retry`` still apply. The façade methods the
-        listing reads consult (``repositories.photos.FACADE_METHODS``: folder
-        subtrees, the rules engine, the location-status filter, the
-        collection repository factory) are bound from this instance, so
-        patches of those ``Database`` methods still reach them.
+        time so tests that patch ``db.execute_with_retry`` still apply.
         """
         from repositories.photos import PhotoRepository
 
@@ -1990,12 +1742,11 @@ class Database:
             self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
-            photo_cols=self.PHOTO_COLS,
-            photo_detail_cols=self.PHOTO_DETAIL_COLS,
+            photo_cols=PHOTO_COLS,
+            photo_detail_cols=PHOTO_DETAIL_COLS,
             execute_with_retry=execute_with_retry,
-            inclusive_date_to=_inclusive_date_to,
+            inclusive_date_to=inclusive_date_to,
             keyword_token_clause=_keyword_token_clause,
-            facade=self,
         )
 
     def _duplicates_repository(self) -> DuplicatesRepository:
@@ -2095,22 +1846,6 @@ class Database:
             loser_ids,
         )
 
-    # Columns to return in photo list queries (excludes large fields)
-    PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
-                    timestamp, width, height, rating, flag, thumb_path, sharpness,
-                    subject_sharpness, subject_size, quality_score,
-                    latitude, longitude, companion_path, working_copy_path,
-                    wildlife_excluded, miss_no_subject, miss_clipped, miss_oof,
-                    camera_make, camera_model, iso, lens, focal_length, aperture"""
-
-    # Columns for single-photo detail queries (includes exif_data JSON +
-    # eye-focus fields consumed by the review lightbox's crosshair overlay)
-    PHOTO_DETAIL_COLS = (
-        PHOTO_COLS
-        + ", exif_data, eye_x, eye_y, eye_conf, eye_tenengrad,"
-        + " working_copy_failed_at, working_copy_failed_mtime,"
-        + " working_copy_failed_source"
-    )
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
@@ -2166,48 +1901,13 @@ class Database:
         """
         return self._stats_repository()
 
-    @staticmethod
-    def _append_location_status_filter(conditions, location_status):
-        """Add a Browse coordinate-source predicate using the photo alias ``p``.
-
-        ``exif`` means the original photo has a complete EXIF coordinate pair.
-        ``assigned`` means EXIF GPS is absent or incomplete but a linked,
-        structured location supplies a complete pair. ``none`` means neither
-        source can place the photo on the map.
-        """
-        if location_status is None:
-            return
-        assigned_exists = """EXISTS (
-            SELECT 1 FROM photo_keywords pk_location_status
-            JOIN keywords k_location_status
-              ON k_location_status.id = pk_location_status.keyword_id
-            WHERE pk_location_status.photo_id = p.id
-              AND k_location_status.type = 'location'
-              AND k_location_status.latitude IS NOT NULL
-              AND k_location_status.longitude IS NOT NULL
-        )"""
-        no_exif = "(p.latitude IS NULL OR p.longitude IS NULL)"
-        if location_status == "exif":
-            conditions.append(
-                "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
-            )
-        elif location_status == "assigned":
-            conditions.append(f"{no_exif} AND {assigned_exists}")
-        elif location_status == "none":
-            conditions.append(f"{no_exif} AND NOT {assigned_exists}")
-        else:
-            raise ValueError(
-                "location_status must be 'exif', 'assigned', or 'none'"
-            )
-
     def _location_repository(self) -> LocationRepository:
         """Build the locations repository on this connection.
 
         Photos and keywords are catalog-wide; the few workspace-scoped
         methods resolve the active workspace through ``self._ws_id`` at the
         point the original code did, so building the repository never raises.
-        The façade methods the map reads and the root merge call (the rules
-        query builder, ``_merge_keyword_into``) are handed over bound.
+        The root merge's ``_merge_keyword_into`` is handed over bound.
         """
         from repositories.locations import LocationRepository
 
@@ -2215,8 +1915,7 @@ class Database:
             self.conn,
             self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
-            photo_date_asc_order=_PHOTO_DATE_ASC_ORDER,
-            build_query_from_rules=self._build_query_from_rules,
+            photo_date_asc_order=PHOTO_DATE_ASC_ORDER,
             merge_keyword_into=self._merge_keyword_into,
         )
 
@@ -3634,7 +3333,7 @@ class Database:
             self._ws_id,
             chunks=_chunks,
             auto_match_review_marker=AUTO_MATCH_REVIEW_MARKER,
-            top_prediction_confidence_expr=_TOP_PREDICTION_CONFIDENCE_EXPR,
+            top_prediction_confidence_expr=TOP_PREDICTION_CONFIDENCE_EXPR,
             decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
             facade=self,
             species_resolver=lambda: SpeciesResolver(db=self),
@@ -3656,7 +3355,7 @@ class Database:
 
     # Row-level filterable fields: those the row's own values can prove.
     # ``species`` is intentionally excluded — the SQL ``species`` leaf
-    # (``_build_query_from_rules``) matches confirmed photo keywords via
+    # (``build_query_from_rules``) matches confirmed photo keywords via
     # ``photo_keywords → keywords → taxa``, whereas ``pr.species`` on the
     # returned row holds the model's *proposed* species. Re-checking the
     # proposed species against a keyword filter would silently hide the
@@ -3682,7 +3381,7 @@ class Database:
         ``get_predictions``'s photo-scoping subquery doesn't
         over-restrict on row-level predicates.
 
-        ``_build_query_from_rules`` compiles a ``none`` group as
+        ``build_query_from_rules`` compiles a ``none`` group as
         photo-level ``NOT EXISTS(...)``. For a bare leaf like
         ``prediction_confidence >= 0.8`` that removes any photo with a
         sibling row above the threshold, even though the 0.10 sibling
@@ -3764,7 +3463,7 @@ class Database:
         """
         if not rows:
             return rows
-        # Normalize to the same shape ``_build_query_from_rules`` accepts so
+        # Normalize to the same shape ``build_query_from_rules`` accepts so
         # both list and grouped-tree inputs go through the same walker.
         if isinstance(rules, list):
             root = {"mode": "all", "rules": rules}
@@ -4844,35 +4543,12 @@ class Database:
         read it: rule validation still fails before a missing workspace does,
         and ``create_default_collections(workspace_id=...)`` still needs no
         active workspace. The repository reads the effective config, the
-        subject types and folder subtrees on its own connection; the module
-        helpers and constants it reads are passed in here.
+        subject types and folder subtrees on its own connection and imports
+        the SQL fragments it builds with.
         """
         from repositories.collections import CollectionRepository
 
-        return CollectionRepository(
-            self.conn,
-            self._ws_id,
-            chunks=_chunks,
-            escape_like=_escape_like,
-            path_for_subtree_match=_path_for_subtree_match,
-            normalize_browse_stack_config=normalize_browse_stack_config,
-            rule_upper_bound=_rule_upper_bound,
-            life_list_ancestor_suppression_clause=_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE,
-            burst_gap_tolerance_seconds=BURST_GAP_TOLERANCE_SECONDS,
-            needs_identification_rules=NEEDS_IDENTIFICATION_RULES,
-            gps_without_location_keyword_rules=GPS_WITHOUT_LOCATION_KEYWORD_RULES,
-            photo_date_asc_order=_PHOTO_DATE_ASC_ORDER,
-            photo_sort_orders=_PHOTO_SORT_ORDERS,
-            prediction_confidence_sorts=_PREDICTION_CONFIDENCE_SORTS,
-            top_prediction_confidence_expr=_TOP_PREDICTION_CONFIDENCE_EXPR,
-            photo_cols=self.PHOTO_COLS,
-            stack_keyword_set_ctes=self._STACK_KEYWORD_SET_CTES,
-            stack_keyword_joins=self._STACK_KEYWORD_JOINS,
-            stack_run_window=self._STACK_RUN_WINDOW,
-            stack_cover_order=self._STACK_COVER_ORDER,
-            stack_sort_specs=self._STACK_SORT_SPECS,
-            suggest_value_exprs=self._SUGGEST_VALUE_EXPRS,
-        )
+        return CollectionRepository(self.conn, self._ws_id)
 
     def remap_collection_photo_ids(self, mapping: Mapping[int, int | None]) -> int:
         """Point every workspace's ``photo_ids`` rules at surviving photos; no commit."""
@@ -4888,250 +4564,6 @@ class Database:
         """Drop ``photo_ids`` entries naming deleted photos, in every workspace; no commit."""
         from repositories.collections import prune_collection_ids_of_missing_photos
         return prune_collection_ids_of_missing_photos(self.conn)
-
-    def _build_query_from_rules(self, rules, include_offline_folders=False,
-                                row_scoped=False):
-        """Build SQL clauses from a smart-collection rule tree.
-
-        Returns (folder_join, join_clause, where, params). Raises ValueError on
-        malformed input — callers that accept rules from untrusted sources
-        (e.g. the live-preview API) should catch and surface a 400.
-
-        By default the folder join filters to accessible folders
-        (``status IN ('ok', 'partial')``), matching what Browse and pipeline
-        callers need. Pass ``include_offline_folders=True`` for metadata-only
-        callers (e.g. Dashboard totals) that count photos even when their
-        storage is currently missing.
-
-        ``row_scoped=True`` selects broader candidate SQL for the negative
-        prediction-field operators (``prediction_status is not/not_in``,
-        ``classifier_model is not``): ``EXISTS(status != X)`` rather than
-        ``NOT EXISTS(status = X)``. That widening is only safe when the
-        caller re-evaluates the rule per row afterwards, which
-        ``get_predictions`` does via ``_filter_prediction_rows_by_rules``.
-        Photo-scoped callers (``/api/photos/query``, saved-collection
-        evaluation, calendar/geo totals) MUST leave this False — the
-        broad ``NOT EXISTS(status = X)`` form is what includes photos
-        with no current predictions in "is not Rejected" results (see
-        review r3619275290).
-
-        Backward compatibility: the original collection format was a flat list
-        of rule objects, implicitly combined with AND. Newer collections may use
-        a grouped tree:
-
-            {"mode": "all"|"any"|"none", "rules": [rule_or_group, ...]}
-        """
-        return self._collection_repository()._build_query_from_rules(
-            rules,
-            include_offline_folders=include_offline_folders,
-            row_scoped=row_scoped,
-        )
-
-    def _top_prediction_confidence_params(self):
-        """Bind values for ``_TOP_PREDICTION_CONFIDENCE_EXPR``, in SQL order.
-
-        The detector floor is the workspace-effective ``detector_confidence``
-        — the same read ``_build_query_from_rules`` makes for its prediction
-        predicates. Reading it here rather than baking a constant in keeps
-        the sort, the badge, and the universal filter agreeing about which
-        detections exist after the user moves the slider.
-        """
-        return self._collection_repository()._top_prediction_confidence_params()
-
-    # Species / location keyword sets, folded to one stable string per photo
-    # so two frames compare equal exactly when they carry the same keywords
-    # of that kind. A photo with no keyword of that kind has no row here at
-    # all and reads as NULL (compared as '' below), so two untagged frames
-    # match each other.
-    #
-    # One grouped pass over ``photo_keywords`` rather than a correlated
-    # subquery per photo: at catalog scale the correlated form cost ~20s on
-    # an unfiltered workspace, because it re-ran for all 63k scoped rows.
-    #
-    # ``GROUP_CONCAT`` has no guaranteed order, but it does not need one
-    # here: every photo's fold is produced by the same scan of the same
-    # subquery within a single execution, so two photos carrying the same
-    # keywords always concatenate them the same way — which is the only
-    # property the equality comparison below relies on. The inner ORDER BY
-    # additionally makes that order ascending-by-id in practice, which keeps
-    # the folds readable when debugging a stack boundary.
-    #
-    # ``taxonomy OR is_species`` mirrors the predicate used everywhere else a
-    # species keyword is identified (see ``remove_auto_keywords``): the
-    # background ``mark_species_keywords`` pass sets ``is_species`` on
-    # taxonomy keywords, and a keyword added between scans can be typed
-    # before it is flagged.
-    _STACK_KEYWORD_SET_CTES = """
-        photo_stack_species AS (
-            SELECT photo_id, GROUP_CONCAT(keyword_id) AS keyword_set
-            FROM (
-                SELECT pk.photo_id, pk.keyword_id
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                WHERE k.type = 'taxonomy' OR k.is_species = 1
-                ORDER BY pk.photo_id, pk.keyword_id
-            )
-            GROUP BY photo_id
-        ), photo_stack_location AS (
-            SELECT photo_id, GROUP_CONCAT(keyword_id) AS keyword_set
-            FROM (
-                SELECT pk.photo_id, pk.keyword_id
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                WHERE k.type = 'location'
-                ORDER BY pk.photo_id, pk.keyword_id
-            )
-            GROUP BY photo_id
-        )
-    """
-
-    # Attaches the two folds to a row set exposing ``id``.
-    _STACK_KEYWORD_JOINS = """
-        LEFT JOIN photo_stack_species
-               ON photo_stack_species.photo_id = {alias}.id
-        LEFT JOIN photo_stack_location
-               ON photo_stack_location.photo_id = {alias}.id
-    """
-
-    # Ordering that defines "consecutive frames" for burst detection. Bursts
-    # never span folders, so the sequence restarts per folder.
-    _STACK_RUN_WINDOW = "PARTITION BY folder_id ORDER BY timestamp, id"
-
-    _STACK_COVER_ORDER = """
-        CASE COALESCE(flag, 'none')
-          WHEN 'flagged' THEN 2 WHEN 'none' THEN 1 ELSE 0 END DESC,
-        quality_score IS NULL, quality_score DESC,
-        subject_sharpness IS NULL, subject_sharpness DESC,
-        sharpness IS NULL, sharpness DESC,
-        rating IS NULL, rating DESC,
-        (COALESCE(width, 0) * COALESCE(height, 0)) DESC,
-        COALESCE(file_size, 0) DESC,
-        id ASC
-    """
-
-    # Every stacked sort places a stack exactly where its *leading member* —
-    # the member that would come first in the unstacked list — sits, so
-    # toggling Stacks never reorders anything.
-    #
-    # ``member`` is the unstacked ORDER BY (see the identical ``sort_map`` in
-    # query_photos / query_photos_for_rules / query_photo_ids) applied inside
-    # the stack, so FIRST_VALUE over it yields that leading member; ``key`` is
-    # the column the primary term reads; ``order`` re-applies the same
-    # comparator to the leading member's values.
-    #
-    # Aggregating each term independently is what breaks: MAX(rating) with
-    # MIN(filename) reads two different members, so a burst of a.jpg rated 1
-    # and z.jpg rated 5 sorts as (5, "a.jpg") and jumps ahead of a single
-    # m.jpg rated 5 that outranks z.jpg with Stacks off. An order that
-    # silently depends on the Stacks toggle is exactly the hidden behaviour
-    # CORE_PHILOSOPHY's "no black boxes" rule forbids in a culling workflow
-    # (Codex P2 on PR #1561).
-    _STACK_SORT_SPECS = {
-        "date": {
-            "member": "timestamp IS NULL, timestamp ASC, filename ASC, id ASC",
-            "key": "timestamp",
-            "order": (
-                "_stack_lead_key IS NULL, _stack_lead_key ASC, "
-                "_stack_lead_filename ASC, _stack_lead_id ASC"
-            ),
-        },
-        "date_desc": {
-            "member": "timestamp IS NULL, timestamp DESC, filename ASC, id ASC",
-            "key": "timestamp",
-            "order": (
-                "_stack_lead_key IS NULL, _stack_lead_key DESC, "
-                "_stack_lead_filename ASC, _stack_lead_id ASC"
-            ),
-        },
-        "name": {
-            "member": "filename ASC, id ASC",
-            "key": "filename",
-            "order": "_stack_lead_filename ASC, _stack_lead_id ASC",
-        },
-        "name_desc": {
-            "member": "filename DESC, id ASC",
-            "key": "filename",
-            "order": "_stack_lead_filename DESC, _stack_lead_id ASC",
-        },
-        "rating": {
-            "member": "rating DESC, filename ASC, id ASC",
-            "key": "rating",
-            "order": (
-                "_stack_lead_key DESC, _stack_lead_filename ASC, "
-                "_stack_lead_id ASC"
-            ),
-        },
-        "sharpness": {
-            "member": "sharpness DESC, filename ASC, id ASC",
-            "key": "sharpness",
-            "order": (
-                "_stack_lead_key DESC, _stack_lead_filename ASC, "
-                "_stack_lead_id ASC"
-            ),
-        },
-        # Softest-first treats a stack as only as sharp as its softest
-        # member, and a stack holding any unscored member is itself unscored
-        # — both fall out of the leading-member rule for free, because
-        # SQLite's ASC sorts NULL first and the smallest score next.
-        "sharpness_asc": {
-            "member": "sharpness ASC, filename ASC, id ASC",
-            "key": "sharpness",
-            "order": (
-                "_stack_lead_key ASC, _stack_lead_filename ASC, "
-                "_stack_lead_id ASC"
-            ),
-        },
-        "quality": {
-            "member": "quality_score DESC, filename ASC, id ASC",
-            "key": "quality_score",
-            "order": (
-                "_stack_lead_key DESC, _stack_lead_filename ASC, "
-                "_stack_lead_id ASC"
-            ),
-        },
-        # ``_prediction_confidence`` is not a photos column — it is projected
-        # into ``scoped`` by ``_browse_stack_query_parts`` only for these two
-        # sorts, so the correlated subquery behind it never runs for a grid
-        # ordered by anything else. ``NULLS LAST`` mirrors the unstacked
-        # clause in ``_photo_sort_clause``: a stack whose leading member
-        # carries no prediction sinks to the end in both directions rather
-        # than heading up the "lowest" list.
-        "prediction_confidence": {
-            "member": (
-                "_prediction_confidence DESC NULLS LAST, filename ASC, id ASC"
-            ),
-            "key": "_prediction_confidence",
-            "order": (
-                "_stack_lead_key DESC NULLS LAST, _stack_lead_filename ASC, "
-                "_stack_lead_id ASC"
-            ),
-        },
-        "prediction_confidence_asc": {
-            "member": (
-                "_prediction_confidence ASC NULLS LAST, filename ASC, id ASC"
-            ),
-            "key": "_prediction_confidence",
-            "order": (
-                "_stack_lead_key ASC NULLS LAST, _stack_lead_filename ASC, "
-                "_stack_lead_id ASC"
-            ),
-        },
-    }
-
-    # (display_expr, group_expr) for suggest-capable columns.
-    # ``group_expr`` folds the value the same way the corresponding filter
-    # matches it — camera/lens rules use ``LOWER(col) = LOWER(?)`` so their
-    # facets must group case-insensitively, or ``Sony A1`` and ``sony a1``
-    # would split into two 1-count suggestions while selecting either would
-    # match both photos. ``display_expr`` is what the picker shows; using
-    # ``MIN(col)`` picks a stable representative spelling within each
-    # case-insensitive bucket instead of always lower-casing the label.
-
-    _SUGGEST_VALUE_EXPRS = {
-        "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
-        "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
-        "lens": ("MIN(p.lens)", "LOWER(p.lens)"),
-    }
 
     # ------ iNaturalist submissions ------
 

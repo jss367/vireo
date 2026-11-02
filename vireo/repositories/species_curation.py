@@ -49,9 +49,11 @@ transaction (``with db.transaction():``).
 import json
 
 from keyword_normalization import keyword_match_key
+from repositories import chunks
 from repositories.effective_config import active_effective_config
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.keyword_taxa import KeywordTaxonRepository
+from repositories.photo_sql import LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from settings_source import config_value
 from species_memberships import photo_species_memberships
@@ -284,21 +286,9 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = f"""
 
 
 class SpeciesCurationRepository:
-    def __init__(
-        self,
-        conn,
-        resolve_workspace_id,
-        *,
-        chunks,
-        life_list_ancestor_suppression_clause,
-    ):
+    def __init__(self, conn, resolve_workspace_id):
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
-        # ``db`` module helpers and constants, kept under their module names
-        # so the moved bodies read them as ``self.<name>``. ``_chunks`` is
-        # ``db._chunks`` itself (its size default is bound at import).
-        self._chunks = chunks
-        self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE = life_list_ancestor_suppression_clause
         # Species names canonicalize through the keyword-taxa repository on
         # the same connection.
         self._keyword_taxa = KeywordTaxonRepository(conn)
@@ -577,7 +567,7 @@ class SpeciesCurationRepository:
                LEFT JOIN taxa t ON t.id = k.taxon_id
                WHERE COALESCE(p.flag, 'none') != 'rejected'
                  {species_filter}
-                 {self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
+                 {LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY k.name, p.timestamp""",
             params,
         ).fetchall()
@@ -689,7 +679,7 @@ class SpeciesCurationRepository:
                 AND f.status IN ('ok', 'partial')
                WHERE COALESCE(p.flag, 'none') != 'rejected'
                  AND (k.taxon_id IS NULL OR t.rank IS NULL OR t.rank != 'species')
-                 {self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
+                 {LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                GROUP BY k.name, k.taxon_id, t.rank
                ORDER BY k.name""",
             (ws,),
@@ -754,7 +744,7 @@ class SpeciesCurationRepository:
         if not ids:
             return []
         seen = {}
-        for chunk in self._chunks(ids):
+        for chunk in chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"""WITH RECURSIVE up(id) AS (
@@ -786,7 +776,7 @@ class SpeciesCurationRepository:
         if not ids:
             return {}
         classes = {}
-        for chunk in self._chunks(ids):
+        for chunk in chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"""WITH RECURSIVE up(
@@ -917,7 +907,7 @@ class SpeciesCurationRepository:
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
                WHERE pk.photo_id = ?
-                 {self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
+                 {LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY CASE WHEN k.parent_id IS NULL THEN 1 ELSE 0 END,
                         k.id""",
             (ws, photo_id),
@@ -927,7 +917,7 @@ class SpeciesCurationRepository:
         taxon_ids = {r["taxon_id"] for r in rows if r["taxon_id"] is not None}
         canonical_roots = {}
         if taxon_ids:
-            for chunk in self._chunks(list(taxon_ids)):
+            for chunk in chunks(list(taxon_ids)):
                 placeholders = ",".join("?" for _ in chunk)
                 root_rows = self.conn.execute(
                     f"""SELECT taxon_id, name FROM keywords
@@ -1025,7 +1015,7 @@ class SpeciesCurationRepository:
                JOIN keywords lk ON lk.id = plk.keyword_id
                 AND lk.type = 'location'
                WHERE 1=1
-                 {self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
+                 {LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY k.name, lk.name""",
             tuple(params),
         ).fetchall()
@@ -1111,7 +1101,7 @@ class SpeciesCurationRepository:
                                )
                            )
                        )
-                       {self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
+                       {LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                  )"""
         species_filter = ""
         params = [ws]
@@ -1523,7 +1513,7 @@ class SpeciesCurationRepository:
         # funnels every affected photo through here would otherwise raise
         # "too many SQL variables" before any rows move.
         moved = 0
-        for chunk in self._chunks(ids):
+        for chunk in chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             cur = self.conn.execute(
                 f"""INSERT OR IGNORE INTO species_representatives
@@ -1585,7 +1575,7 @@ class SpeciesCurationRepository:
             # Chunk in memory then re-sort so the rebucket order matches
             # the single-query path.
             raw_rows = []
-            for chunk in self._chunks(photo_ids):
+            for chunk in chunks(photo_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 raw_rows.extend(self.conn.execute(
                     f"""SELECT photo_id, rank, created_at
@@ -1686,7 +1676,7 @@ class SpeciesCurationRepository:
         """
         ws = self.workspace_id
         rows = []
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT species, photo_id, rank FROM species_highlights
@@ -1718,7 +1708,7 @@ class SpeciesCurationRepository:
         """
         ws = self.workspace_id
         rows = []
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT species, photo_id, purpose FROM photo_preferences
@@ -1735,7 +1725,7 @@ class SpeciesCurationRepository:
         """Which of ``photo_ids`` have a ``species_representatives`` row for
         ``species`` (representatives are global, so any workspace)."""
         found = set()
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             for row in self.conn.execute(
                 f"""SELECT photo_id FROM species_representatives
@@ -1753,7 +1743,7 @@ class SpeciesCurationRepository:
         workspace-scoped.
         """
         rows = []
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT species, photo_id, selected_order
@@ -1802,7 +1792,7 @@ class SpeciesCurationRepository:
                          )
                      )
                  )
-                 {self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
+                 {LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                LIMIT 1""",
             (ws, photo_id, species, species),
         ).fetchone()

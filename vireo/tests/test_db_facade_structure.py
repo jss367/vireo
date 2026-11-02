@@ -305,7 +305,7 @@ def test_set_progress_handler_interrupts_and_clears(db):
 # never raise it. Methods that coordinate more than one call (``add_photo``
 # resolving duplicates after the insert, cross-domain composition) are not
 # forwarders and are not counted.
-FORWARDING_WRAPPER_LIMIT = 17
+FORWARDING_WRAPPER_LIMIT = 15
 
 
 def _is_forwarding_wrapper(fn):
@@ -384,7 +384,6 @@ def test_forwarding_wrapper_detector_matches_known_shapes():
 FACADE_BINDING_MODULES = {
     "keyword_provenance",
     "keyword_tree",
-    "photos",
     "predictions",
 }
 
@@ -392,10 +391,9 @@ FACTORY_CALLBACKS = {
     "_folder_repository": {"<Database>"},
     "_keyword_provenance_repository": {"<Database>"},
     "_keyword_tree_repository": {"<Database>"},
-    "_location_repository": {"_build_query_from_rules", "_merge_keyword_into"},
+    "_location_repository": {"_merge_keyword_into"},
     "_masks_features_repository": {"_safe_remove_mask_file"},
     "_moves_merge_repository": {"_carry_keyword_associations_for_merge"},
-    "_photos_repository": {"<Database>"},
     "_prediction_repository": {"<Database>"},
 }
 

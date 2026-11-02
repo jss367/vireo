@@ -5,7 +5,7 @@ categories, value types, supported operators, enum vocabularies, whether a
 field supports value typeahead (``suggest``), and which in-grid mutations
 can move the field's value (``changed_by``). Served verbatim by
 ``GET /api/filters/fields`` so the client picker and the server rule
-engine (``Database._build_query_from_rules``) cannot drift apart — a test
+engine (``Database.build_query_from_rules``) cannot drift apart — a test
 asserts every field/op combination listed here compiles to SQL.
 
 Design: docs/plans/2026-07-19-universal-filters-design.md.
@@ -154,7 +154,7 @@ FILTER_FIELDS = {
     # Confidence is written at classify time and never mutates under
     # accept/reject/mark-reviewed, but the *set* of prediction rows a
     # confidence filter sees can still move with a review-status edit.
-    # ``_build_query_from_rules`` routes every prediction filter through
+    # ``build_query_from_rules`` routes every prediction filter through
     # ``_prediction_exists``, which drops rows with
     # ``prv.status = 'alternative'`` so a top pick at 0.95 with a runner-up
     # at 0.10 does not satisfy ``prediction_confidence <= 0.2``. Accepting

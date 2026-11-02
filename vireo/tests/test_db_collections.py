@@ -1,7 +1,7 @@
 """Behavior pins for the collections domain of ``Database``.
 
 The behavior tests exercise collection CRUD, the smart-collection rules
-engine (``_build_query_from_rules``), the rule-driven photo queries, the
+engine (``build_query_from_rules``), the rule-driven photo queries, the
 stacked Browse projection, filter-value suggestions, and the
 default-collection migrations only through the ``Database`` façade, so they
 hold whether the SQL lives in ``db.py`` or in ``repositories/collections.py``;
@@ -17,10 +17,10 @@ import textwrap
 
 import config as cfg
 import pytest
-from db import (
+from db import Database
+from repositories.collections import (
     GPS_WITHOUT_LOCATION_KEYWORD_RULES,
     NEEDS_IDENTIFICATION_RULES,
-    Database,
 )
 from services import browse_queries, photo_ingest, workspace_folders
 
@@ -364,7 +364,7 @@ def test_photo_ids_rule_binds_non_integer_ids(db, folder):
     _photo(db, folder, "c.jpg")
     assert _ids(db, [{"field": "photo_ids", "value": [str(b)]}]) == [b]
     assert _ids(db, [{"field": "photo_ids", "value": [a, str(b)]}]) == [a, b]
-    sql = db._build_query_from_rules([{"field": "photo_ids", "value": [a, str(b)]}])
+    sql = db.collections.build_query_from_rules([{"field": "photo_ids", "value": [a, str(b)]}])
     assert sql[2] == f"WHERE ((p.id IN ({a}) OR p.id IN (?)))"
     assert sql[3] == [db._active_workspace_id, str(b)]
 
@@ -677,7 +677,7 @@ def test_needs_review_rule(db, folder):
     _prediction(db, accepted, status="accepted")
     assert _ids(db, [{"field": "needs_review", "op": "is", "value": True}]) == [pending]
     assert _ids(db, [{"field": "needs_review", "op": "is", "value": False}]) == [accepted, nothing]
-    row_scoped = db._build_query_from_rules(
+    row_scoped = db.collections.build_query_from_rules(
         [{"field": "needs_review", "op": "is", "value": False}], row_scoped=True,
     )
     assert "COALESCE(prv.status, 'pending') != 'pending'" in row_scoped[2]
@@ -700,10 +700,10 @@ def test_rules_engine_reads_workspace_lazily(db):
     db.set_active_workspace(None)
     # Validation errors surface before the workspace is resolved...
     with pytest.raises(ValueError, match="rules must be a list or group object"):
-        db._build_query_from_rules("nope")
+        db.collections.build_query_from_rules("nope")
     # ...and a valid tree needs the active workspace for the folder join.
     with pytest.raises(RuntimeError):
-        db._build_query_from_rules([{"field": "all"}])
+        db.collections.build_query_from_rules([{"field": "all"}])
 
 
 def test_rules_engine_reads_effective_detector_floor_once(db, monkeypatch):
@@ -717,7 +717,7 @@ def test_rules_engine_reads_effective_detector_floor_once(db, monkeypatch):
         return real(conn, resolve_workspace_id)
 
     monkeypatch.setattr(collections_module, "active_effective_config", recording)
-    db._build_query_from_rules([
+    db.collections.build_query_from_rules([
         {"field": "prediction_confidence", "op": ">=", "value": 0.5},
         {"field": "classifier_model", "op": "equals", "value": "m"},
     ])
@@ -728,7 +728,7 @@ def test_has_subject_honors_patched_subject_types(db, monkeypatch):
     from repositories.collections import CollectionRepository
 
     monkeypatch.setattr(CollectionRepository, "get_subject_types", lambda _self: set())
-    folder_join, join, where, params = db._build_query_from_rules(
+    folder_join, join, where, params = db.collections.build_query_from_rules(
         [{"field": "has_subject", "op": "is", "value": True}]
     )
     assert where == "WHERE (0)"
@@ -737,7 +737,7 @@ def test_has_subject_honors_patched_subject_types(db, monkeypatch):
 
 def test_rules_engine_rejects_malformed_groups_and_metadata(db):
     with pytest.raises(ValueError, match="^rule group rules must be a list$"):
-        db._build_query_from_rules({"mode": "all", "rules": [{"rules": "x"}]})
+        db.collections.build_query_from_rules({"mode": "all", "rules": [{"rules": "x"}]})
     with pytest.raises(ValueError, match="metadata search requires contains/not_contains"):
         db.collections.count_photos_for_rules([{"field": "metadata", "op": "equals", "value": "x"}])
     with pytest.raises(ValueError, match="metadata search is limited to 4,096 characters"):
@@ -776,7 +776,7 @@ def test_prediction_rules_split_by_row_scope(db, folder):
         ({"field": "prediction_status", "op": "not_in", "value": ["accepted"]},
          "COALESCE(prv.status, 'pending') NOT IN (?)"),
     ):
-        where = db._build_query_from_rules([rule], row_scoped=True)[2]
+        where = db.collections.build_query_from_rules([rule], row_scoped=True)[2]
         assert positive in where
         assert not where.startswith("WHERE (NOT ")
 
@@ -833,7 +833,7 @@ def test_private_helpers_stay_callable_on_the_facade(db, folder):
     assert ranked.startswith(ctes)
     assert ranked_params == params
     assert db.collections._burst_keys_for_ids([a]) == {}
-    folder_join, join, where, params = db._build_query_from_rules([])
+    folder_join, join, where, params = db.collections.build_query_from_rules([])
     assert db.collections._folder_filter_values(folder_join, join, where, params, q=None, limit=5) == [
         {"value": db.folders.get(folder)["path"], "count": 1},
     ]
@@ -1025,19 +1025,21 @@ _REMOVED_COLLECTION_WRAPPERS = (
     "create_default_collections",
 )
 
-# Still forwarders on ``Database``: ``PredictionRepository`` binds them from
-# the façade under these names (``repositories.predictions.FACADE_METHODS``),
-# so monkeypatches of them keep reaching the prediction SQL.
-_DELEGATING_COLLECTION_METHODS = (
+# Forwarders this domain used to keep on ``Database`` for repositories that
+# bound them by name; those repositories build a ``CollectionRepository`` on
+# their own connection now.
+_REMOVED_COLLECTION_FORWARDERS = (
     "_build_query_from_rules",
     "_top_prediction_confidence_params",
+    "build_query_from_rules",
+    "top_prediction_confidence_params",
 )
 
 # No SQL of their own: services compose collection reads, so class-level
 # patches of the repository methods (``query_photo_position_first``, ...) still
-# apply. ``rules_resolvable`` compiles through the façade forwarder.
+# apply. ``rules_resolvable`` compiles through ``db.collections``.
 _COMPOSING_COLLECTION_FUNCTIONS = {
-    ("browse_queries", "rules_resolvable"): "_build_query_from_rules",
+    ("browse_queries", "rules_resolvable"): "build_query_from_rules",
     ("browse_queries", "query_photo_position"): "query_photo_position_first",
     ("browse_queries", "query_browse_stack_position"): "query_browse_stack_position_first",
     ("browse_queries", "count_browse_stacks"): "browse_stack_totals",
@@ -1073,14 +1075,10 @@ def _accessor_calls(name):
     }
 
 
-@pytest.mark.parametrize("name", _DELEGATING_COLLECTION_METHODS)
-def test_collection_method_delegates_to_repository(name):
-    attrs = _self_attrs(name)
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to CollectionRepository"
-    )
-    assert "_collection_repository" in attrs, (
-        f"Database.{name} no longer delegates to CollectionRepository"
+@pytest.mark.parametrize("name", _REMOVED_COLLECTION_FORWARDERS)
+def test_rules_engine_has_no_forwarder_on_database(name):
+    assert not hasattr(Database, name), (
+        f"Database.{name} came back; build a CollectionRepository or call db.collections"
     )
 
 
@@ -1163,7 +1161,10 @@ def test_collection_composition_lives_in_services(where, callee):
 
 
 def test_collection_repository_wiring(db, monkeypatch):
-    import db as db_module
+    import repositories.collections as collections_module
+    from repositories import chunks
+    from repositories.folder_subtrees import escape_like
+    from repositories.photo_sql import PHOTO_COLS
 
     db.set_active_workspace(None)
     repo = db._collection_repository()  # resolves the workspace lazily
@@ -1177,14 +1178,15 @@ def test_collection_repository_wiring(db, monkeypatch):
     assert repo.effective_config() == db.effective_config()
     assert repo.get_subject_types() == db.get_subject_types()
     assert repo.get_folder_subtree_ids(1) == db.folders.subtree_ids(1)
-    assert repo._chunks is db_module._chunks
-    assert repo._escape_like is db_module._escape_like
-    assert repo.PHOTO_COLS is Database.PHOTO_COLS
-    assert repo._STACK_SORT_SPECS is Database._STACK_SORT_SPECS
-    assert repo.NEEDS_IDENTIFICATION_RULES is NEEDS_IDENTIFICATION_RULES
-    # Module constants are read when the repository is built, so a patch of
-    # the ``db`` module still reaches the moved SQL.
-    monkeypatch.setattr(db_module, "BURST_GAP_TOLERANCE_SECONDS", 99)
+    # The helpers and SQL fragments are the repository modules' own: it
+    # takes nothing else from the façade.
+    assert collections_module.chunks is chunks
+    assert collections_module.escape_like is escape_like
+    assert collections_module.PHOTO_COLS is PHOTO_COLS
+    assert list(inspect.signature(type(repo)).parameters) == ["conn", "resolve_workspace_id"]
+    # Module constants are read at call time, so a patch of the collections
+    # module reaches the query.
+    monkeypatch.setattr(collections_module, "BURST_GAP_TOLERANCE_SECONDS", 99)
     assert db.collections._burst_run_ctes({"split_mode": "break", "time_gap": 1})[1] == [100]
 
 
@@ -1208,14 +1210,12 @@ def test_collection_repository_imports_no_db_code():
 def test_collection_signatures_unchanged():
     from repositories.collections import CollectionRepository
 
-    facade = {n: str(inspect.signature(getattr(Database, n)))
-              for n in _DELEGATING_COLLECTION_METHODS}
-    assert facade["_build_query_from_rules"] == (
-        "(self, rules, include_offline_folders=False, row_scoped=False)"
-    )
-
     def sig(name):
         return str(inspect.signature(getattr(CollectionRepository, name)))
+
+    assert sig("build_query_from_rules") == (
+        "(self, rules, include_offline_folders=False, row_scoped=False)"
+    )
 
     assert sig("add") == "(self, name, rules_json, visual_json=None)"
     assert sig("get_photos") == (
