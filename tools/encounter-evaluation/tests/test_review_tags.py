@@ -301,3 +301,34 @@ def test_sync_review_tags_bootstraps_settings_provider_in_fresh_process(writable
         assert preserved <= after
     finally:
         db2.close()
+
+
+def test_review_tags_imports_before_bootstrap_without_vireo_on_path(tmp_path):
+    """The ``vireo-review-encounters`` entry point imports ``review_server``
+    (which imports ``review_tags``) BEFORE ``main`` calls ``configure_repo``.
+
+    A module-level ``from services import ...`` in ``review_tags`` would
+    therefore fail with ``ModuleNotFoundError`` at process startup, breaking
+    even ``vireo-review-encounters --help``. Reproduce that pre-bootstrap
+    environment: only the tool's ``src`` on ``sys.path``, ``vireo/`` absent.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    script = tmp_path/'drive.py'
+    script.write_text(textwrap.dedent(f"""
+        import sys
+        from pathlib import Path
+        src = Path({str(repo_root)!r})/'tools'/'encounter-evaluation'/'src'
+        sys.path.insert(0, str(src))
+        # Pre-bootstrap: vireo/ is NOT on sys.path, so a module-level
+        # ``from services import ...`` in review_tags would fail here.
+        import encounter_eval.review_tags  # noqa: F401
+        import encounter_eval.review_server  # noqa: F401
+        assert 'services' not in sys.modules
+        print('OK')
+    """))
+    completed = subprocess.run(
+        [sys.executable, '-I', str(script)],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, (completed.returncode, completed.stdout, completed.stderr)
+    assert completed.stdout.strip() == 'OK', (completed.stdout, completed.stderr)

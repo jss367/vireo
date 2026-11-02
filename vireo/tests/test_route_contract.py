@@ -2010,7 +2010,8 @@ def _repository_decision_writer_calls(tree):
     A writer is reached as ``<expr>.<accessor>.<writer>(...)`` (``db.predictions
     .update_status``), through a repository built inline
     (``PredictionRepository(...).update_status``), or through a local bound
-    to either (``preds = db.predictions; preds.update_status(...)``).
+    to either (``preds = db.predictions; preds.update_status(...)``, including the
+    annotated form ``preds: PredictionRepository = db.predictions``).
     """
     def repository_of(expr):
         if isinstance(expr, ast.Attribute) and expr.attr in _REPOSITORY_DECISION_WRITERS:
@@ -2026,6 +2027,9 @@ def _repository_decision_writer_calls(tree):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     aliases[target.id] = repository_of(node.value)
+        elif (isinstance(node, ast.AnnAssign) and node.value is not None
+                and isinstance(node.target, ast.Name) and repository_of(node.value)):
+            aliases[node.target.id] = repository_of(node.value)
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
@@ -2087,6 +2091,8 @@ def test_decision_writer_guard_detects_direct_calls():
         "    PredictionRepository(db.conn, ws).ungroup(2)\n"
         "    preds = db.predictions\n"
         "    preds.set_review_status(3, 1, 'reviewed')\n"
+        "    annotated: PredictionRepository = db.predictions\n"
+        "    annotated.update_status(6, 'rejected')\n"
         "    db.keyword_provenance.accept_prediction(4)\n"
         "    review_decisions.update_prediction_status(db, 5, 'rejected')\n"
         "    db.predictions.get_rows()\n"
@@ -2096,5 +2102,6 @@ def test_decision_writer_guard_detects_direct_calls():
         "db.predictions.update_status",
         "PredictionRepository(db.conn, ws).ungroup",
         "preds.set_review_status",
+        "annotated.update_status",
         "db.keyword_provenance.accept_prediction",
     ]
