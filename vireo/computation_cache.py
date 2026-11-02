@@ -255,7 +255,7 @@ def with_consumed_label_descriptions(identity, classifier):
     produced its species names: stamp a pre-heal run with the post-heal
     identity and every later cache check treats it as an exact match, so
     the reclassify that replaces raw binomials with common names never
-    runs (Codex #1560 P2).
+    runs.
 
     Classifiers that expose no ``label_descriptions_identity`` (bioclip,
     test doubles) leave the probed value alone.
@@ -283,10 +283,9 @@ def classifier_model_identity(active_model):
     common name stored on a prediction, so a run made before it landed
     is semantically different output from a run made after — even though
     every required file, the pinned revision and the label set are
-    identical. Keying only on required files let a pre-heal run compare
-    equal to a post-heal one, so the cache accepted it and the
-    scientific names stayed on screen until a forced reclassify
-    (Codex #1560 P2).
+    identical. Keying only on required files would let a pre-heal run
+    compare equal to a post-heal one, so the cache would accept it and the
+    scientific names would stay on screen until a forced reclassify.
     """
     if not isinstance(active_model, dict):
         return None
@@ -448,7 +447,7 @@ def classifier_runtime_fingerprint(
         # outdated binomials before that lookup. Omitting the synonym map
         # would let a run recorded before the map shipped compare equal to
         # one made after it, so the cache would skip the reclassify that
-        # replaces raw binomials with current names (Codex #1560 P2).
+        # replaces raw binomials with current names.
         "output_enrichment": {
             "species_resolution": resolution_identity(),
             "taxonomy_identity": taxonomy_identity,
@@ -1869,9 +1868,9 @@ def _backfill_classification_enrichment(
     pre-feature artifact and an enriched one for the same run share every
     identity component, and the ``_classification_enrichment_rank`` preference
     only wins the tiebreaker *within a single materialize call*. When the
-    pre-feature artifact was applied by an earlier import and the enriched
-    version arrives later, the short-circuit fires and (before this helper)
-    silently dropped the enrichment, permanently locking "not recorded" in
+    unenriched artifact was applied by an earlier import and the enriched
+    version arrives later, the short-circuit fires; without this backfill
+    it would drop the enrichment, permanently locking "not recorded" in
     behind the ``classifier_runs`` gate.
 
     Never overwrites values already recorded — a real measurement wins over a
@@ -1954,8 +1953,8 @@ def _classification_enrichment_rank(artifact):
     partial digest wins, ``materialize_artifacts`` writes the
     classifier-run marker but the un-enriched detections
     permanently land with ``match_score`` NULL and no
-    ``classifier_match_scores`` row — the very "not recorded"
-    state this feature exists to close (Codex P2 on a1be510).
+    ``classifier_match_scores`` row — the "not recorded" state the
+    enrichment exists to close.
     """
     return sum(
         1 for subject in artifact.get("subjects", ())
