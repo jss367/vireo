@@ -8,7 +8,7 @@ methods that read through ``workspace_folders`` resolve the active workspace
 catalog-wide ones never read it.
 
 ``Database`` keeps the composition. The listing reads call the façade's
-folder-subtree, rules and location-filter helpers under their ``Database``
+rules and location-filter helpers under their ``Database``
 names, bound from the instance (see ``FACADE_METHODS``) so patches of those
 methods still apply, and take the collection-rules SQL and sort clauses from
 a ``CollectionRepository`` built when they are needed; the calls happen at
@@ -26,15 +26,14 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from repositories.folder_subtrees import folder_subtree_ids
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
-# ``Database`` methods the listing reads call through the façade: the folder
-# subtree, the rules engine, the location-status filter, and the collection
+# ``Database`` methods the listing reads call through the façade: the rules engine, the location-status filter, and the collection
 # repository factory behind ``_build_collection_query`` / ``_photo_sort_clause``.
 FACADE_METHODS = (
-    "get_folder_subtree_ids",
     "_build_query_from_rules",
     "_append_location_status_filter",
     "_collection_repository",
@@ -44,7 +43,6 @@ FACADE_METHODS = (
 class PhotoRepository:
     # Bound ``Database`` methods that ``__init__`` installs from
     # ``FACADE_METHODS``, declared so the type checker sees them.
-    get_folder_subtree_ids: Callable[..., Any]
     _build_query_from_rules: Callable[..., Any]
     _append_location_status_filter: Callable[..., Any]
     _collection_repository: Callable[..., Any]
@@ -90,6 +88,10 @@ class PhotoRepository:
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
+
+    def get_folder_subtree_ids(self, folder_id):
+        """``folder_id`` plus its descendants visible in the active workspace."""
+        return folder_subtree_ids(self.conn, self.workspace_id, folder_id)
 
     def _build_collection_query(self, collection_id):
         """A collection's rules as SQL parts, or None (``CollectionRepository``)."""

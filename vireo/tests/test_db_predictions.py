@@ -345,10 +345,12 @@ def test_prediction_states(db, cat, monkeypatch):
     db.conn.execute(
         "INSERT INTO classifier_runs (detection_id, classifier_model, labels_fingerprint) "
         "VALUES (?, 'm1', 'fp1')", (d0,))
+    from repositories.predictions import PredictionRepository
+
     seen = []
-    real = db.get_effective_config
-    monkeypatch.setattr(db, "get_effective_config",
-                        lambda c: seen.append(1) or dict(real(c), classifier_confidence=0.3))
+    real = PredictionRepository.effective_config
+    monkeypatch.setattr(PredictionRepository, "effective_config",
+                        lambda self: seen.append(1) or dict(real(self), classifier_confidence=0.3))
     states = db.predictions.get_states([p0, p1, p2, p0])
     assert seen == [1]
     assert list(states) == [p0, p1, p2]
