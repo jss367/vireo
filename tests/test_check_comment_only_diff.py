@@ -19,6 +19,20 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import check_comment_only_diff as checker  # noqa: E402
 
+_GIT_REPO_ENV = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
+)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_git_env(monkeypatch):
+    """Inherited Git repo-location vars would otherwise redirect ``git init``
+    (and ``_git``) away from ``tmp_path``, so a stray ``GIT_DIR`` in the
+    test runner could silently point the fixture at the real repository."""
+    for name in _GIT_REPO_ENV:
+        monkeypatch.delenv(name, raising=False)
+
 # ---------------------------------------------------------------------------
 # python_differs: pragmas, shebang, encoding
 # ---------------------------------------------------------------------------
@@ -62,6 +76,20 @@ def test_python_differs_lowercase_noqa_removal_fails():
 def test_python_differs_ruff_noqa_removal_fails():
     before = "x = 1  # ruff: noqa: F841\n"
     after = "x = 1\n"
+    assert checker.python_differs(before, after) is not None
+
+
+def test_python_differs_pylint_directive_removal_fails():
+    """``# pylint: disable=...`` is a load-bearing directive, not prose."""
+    before = "x = 1  # pylint: disable=unused-variable\n"
+    after = "x = 1\n"
+    assert checker.python_differs(before, after) is not None
+
+
+def test_python_differs_pylint_dropped_while_broad_reason_kept_fails():
+    """Removing ``pylint:`` must still fail even when a ``broad:`` reason persists."""
+    before = "x = 1  # pylint: disable=W0703  # broad: boundary\n"
+    after = "x = 1  # broad: boundary\n"
     assert checker.python_differs(before, after) is not None
 
 
@@ -132,6 +160,15 @@ def test_js_differs_comment_only_edit_passes():
 @needs_node
 def test_js_differs_statement_change_fails():
     assert checker.js_differs("x = 1;\n", "x = 2;\n") is not None
+
+
+@needs_node
+def test_js_differs_exported_directive_removal_fails():
+    """``/* exported foo */`` is read by ESLint; removing it can introduce
+    ``no-unused-vars`` errors, so the checker must detect its loss."""
+    before = "/* exported foo */\nconst foo = 1;\n"
+    after = "const foo = 1;\n"
+    assert checker.js_differs(before, after) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -250,3 +287,25 @@ def test_source_changes_cross_language_rename_is_mixed(tmp_path):
         checker.ROOT = orig_root
     assert entries
     assert entries[0][3] == "mixed", entries
+
+
+def test_source_changes_detects_non_ascii_path(tmp_path):
+    """``git diff --name-status`` without ``-z`` quotes non-ASCII paths with
+    ``core.quotePath=true``, which would make ``_suffix_of`` drop them and
+    certify an executable module edit as comment-only."""
+    _run_in_fixture(tmp_path, ("naïve.py", "X = 1\n"))
+    (tmp_path / "naïve.py").write_text("X = 2\n", encoding="utf-8")
+    base = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    orig_root = checker.ROOT
+    checker.ROOT = tmp_path
+    try:
+        entries = checker._source_changes(base)
+    finally:
+        checker.ROOT = orig_root
+    assert entries, "non-ASCII source file must not be dropped by name parsing"
+    label, old_path, new_path, suffix = entries[0]
+    assert old_path == "naïve.py"
+    assert new_path == "naïve.py"
+    assert suffix == ".py"

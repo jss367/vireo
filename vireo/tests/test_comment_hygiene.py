@@ -200,6 +200,7 @@ def js_comment_texts(src: str) -> list[str]:
             word = match.group()
             i = match.end()
             is_binding = expect_binding or destr_depth > 0 or param_depth > 0
+            bare_binding = is_binding and destr_depth == 0 and param_depth == 0
             if is_binding:
                 bound.add(word)
                 regex_ok = False
@@ -233,6 +234,8 @@ def js_comment_texts(src: str) -> list[str]:
             if src.startswith("=>", j):
                 bound.add(word)
                 regex_ok = False
+            elif bare_binding and word not in _JS_BINDING_KW:
+                expect_binding = src.startswith(",", j)
         elif (c.isdigit() or (c == "." and src[i + 1 : i + 2].isdigit())) and (match := _JS_NUMBER.match(src, i)):
             i, regex_ok = match.end(), False
         elif src.startswith(("++", "--"), i):
@@ -349,6 +352,17 @@ def test_js_lexer_binding_forms_other_than_declarations():
     for src in cases:
         matches = js_comment_texts(src)
         assert any("Codex" in text for text in matches), src
+
+
+def test_js_lexer_for_of_does_not_bind_loop_body():
+    """``for (const x of xs)`` must bind only ``x``: ``of``, ``xs`` and the body
+    keep their roles, so a ``return /re/`` in the body still lexes as a regex
+    and a following line comment is detected."""
+    src = (
+        "for (const x of xs) { return /'/.test(x); }\n"
+        "function g(s) { return /\"/.test(s); // Codex\n}\n"
+    )
+    assert any("Codex" in text for text in js_comment_texts(src))
 
 
 def test_js_lexer_matches_acorn():

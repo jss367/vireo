@@ -44,11 +44,13 @@ JS_EXTS = (".js", ".mjs", ".cjs")
 SOURCE_EXTS = PY_EXTS + JS_EXTS
 
 PY_PRAGMA = re.compile(
-    r"#\s*(ruff:\s*noqa\b[^#]*|noqa\b[^#]*|type:\s*\S[^#]*|pyright:[^#]*|pragma\b[^#]*|fmt:\s*\w+|broad:[^#]*)",
+    r"#\s*(ruff:\s*noqa\b[^#]*|noqa\b[^#]*|type:\s*\S[^#]*|pyright:[^#]*|pylint:[^#]*|pragma\b[^#]*|fmt:\s*\w+|broad:[^#]*)",
     re.I,
 )
 PY_CODING = re.compile(r"coding[=:]\s*([-\w.]+)")
-JS_DIRECTIVE = re.compile(r"^\s*(eslint[\w-]*\b.*|@ts-[\w-]+\b.*|global\s.*|globals\s.*)$", re.S)
+JS_DIRECTIVE = re.compile(
+    r"^\s*(eslint[\w-]*\b.*|@ts-[\w-]+\b.*|global\s.*|globals\s.*|exported\s.*)$", re.S
+)
 JSDOC_TAG = re.compile(r"@(\w+)\s*(\{[^\n]*\})?\s*(\[?[\w$.]*)")
 JSDOC_IMPORT_SRC = re.compile(r"""@import\b[^\n]*?(['"][^'"\n]+['"])""")
 
@@ -182,26 +184,32 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
     non-source suffix (``module.txt``) is still reported as a source deletion
     instead of silently dropped. An entry whose status is not A/M/D/R, or
     whose rename crosses languages (``.py`` <-> ``.js``), is returned with a
-    sentinel suffix so ``main()`` fails on it rather than certifying it.
+    sentinel suffix so ``main()`` fails on it rather than certifying it. The
+    ``-z`` flag emits NUL-separated records so a non-ASCII, quote, tab,
+    backslash or newline in a path cannot be dropped by ``core.quotePath``.
     """
     out: list[tuple[str, str, str, str]] = []
-    for line in _git("diff", "--name-status", base, "--").splitlines():
-        parts = line.split("\t")
-        status = parts[0][0]
-        if status == "R":
-            old_path, new_path = parts[1], parts[2]
+    tokens = _git("diff", "--name-status", "-z", base, "--").split("\0")
+    idx = 0
+    while idx < len(tokens) and tokens[idx]:
+        status = tokens[idx][0]
+        n = 2 if status in ("R", "C") else 1
+        paths = tokens[idx + 1 : idx + 1 + n]
+        idx += 1 + n
+        if status in ("R", "C") and len(paths) == 2:
+            old_path, new_path = paths[0], paths[1]
             label = f"{old_path} -> {new_path}"
-        elif status == "D":
-            old_path, new_path = parts[1], ""
+        elif status == "D" and len(paths) == 1:
+            old_path, new_path = paths[0], ""
             label = f"{old_path} (deleted)"
-        elif status == "A":
-            old_path, new_path = "", parts[1]
+        elif status == "A" and len(paths) == 1:
+            old_path, new_path = "", paths[0]
             label = f"{new_path} (added)"
-        elif status == "M":
-            old_path = new_path = parts[1]
-            label = parts[1]
+        elif status == "M" and len(paths) == 1:
+            old_path = new_path = paths[0]
+            label = paths[0]
         else:
-            out.append((parts[-1], "", "", status))
+            out.append((paths[-1] if paths else "", "", "", status))
             continue
         old_suffix = _suffix_of(old_path)
         new_suffix = _suffix_of(new_path)
