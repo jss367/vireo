@@ -82,10 +82,11 @@ def js_comment_texts(src: str) -> list[str]:
     substitutions) and regular-expression literals, so ``//`` inside a URL
     string is not a comment. Identifiers introduced by a binding form are
     tracked so a contextual keyword rebound as a name (``const of = 8``,
-    ``function f(of)``, ``const g = (of) => ...``, ``const {of} = x``,
-    ``catch (of)``) stays an identifier for the rest of the file and its
-    following ``/`` is division, not a regex. ``test_js_lexer_matches_acorn``
-    checks it against acorn on every first-party script when acorn is installed.
+    ``function f(of)``, ``const g = (of) => ...``, ``const h = of => ...``,
+    ``const {of} = x``, ``catch (of)``) stays an identifier for the rest of
+    the file and its following ``/`` is division, not a regex.
+    ``test_js_lexer_matches_acorn`` checks it against acorn on every
+    first-party script when acorn is installed.
     """
     comments: list[str] = []
     i, n = 0, len(src)
@@ -217,6 +218,21 @@ def js_comment_texts(src: str) -> list[str]:
                 and word not in _JS_PARAM_KW
             ):
                 paren_candidates[-1].append(word)
+            j = i
+            while j < n:
+                if src[j] in " \t\r\n":
+                    j += 1
+                elif src.startswith("//", j):
+                    end = src.find("\n", j)
+                    j = n if end < 0 else end
+                elif src.startswith("/*", j):
+                    end = src.find("*/", j + 2)
+                    j = n if end < 0 else end + 2
+                else:
+                    break
+            if src.startswith("=>", j):
+                bound.add(word)
+                regex_ok = False
         elif (c.isdigit() or (c == "." and src[i + 1 : i + 2].isdigit())) and (match := _JS_NUMBER.match(src, i)):
             i, regex_ok = match.end(), False
         elif src.startswith(("++", "--"), i):
@@ -324,6 +340,8 @@ def test_js_lexer_binding_forms_other_than_declarations():
     cases = [
         "function f(of) { return of / 2; // Codex\n}\n",
         "const g = (of) => of / 2; // Codex\n",
+        "const h = of => of / 2; // Codex\n",
+        "const i = of /* note */ => of / 2; // Codex\n",
         "const {of} = x; of / 2; // Codex\n",
         "const [a, of] = arr; of / 2; // Codex\n",
         "try {} catch (of) { of / 2; /* Codex */ }\n",
