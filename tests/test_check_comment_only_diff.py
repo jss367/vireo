@@ -171,6 +171,24 @@ def test_js_differs_exported_directive_removal_fails():
     assert checker.js_differs(before, after) is not None
 
 
+@needs_node
+def test_js_differs_directive_prologue_string_escape_fails():
+    """``"use strict"`` -> ``"use\\x20strict"`` has the same cooked token
+    value but only the literal spelling activates strict mode."""
+    before = '"use strict";\nconst x = 1;\n'
+    after = '"use\\x20strict";\nconst x = 1;\n'
+    assert checker.js_differs(before, after) is not None
+
+
+@needs_node
+def test_js_differs_tagged_template_raw_escape_fails():
+    """``tag`\\x41` `` vs ``tag`A` `` have the same cooked template value, but
+    a tag that reads ``strings.raw`` sees the escape."""
+    before = "tag`\\x41`;\n"
+    after = "tag`A`;\n"
+    assert checker.js_differs(before, after) is not None
+
+
 # ---------------------------------------------------------------------------
 # _source_changes: file discovery across extensions and renames
 # ---------------------------------------------------------------------------

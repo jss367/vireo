@@ -84,7 +84,10 @@ def js_comment_texts(src: str) -> list[str]:
     tracked so a contextual keyword rebound as a name (``const of = 8``,
     ``function f(of)``, ``const g = (of) => ...``, ``const h = of => ...``,
     ``const {of} = x``, ``catch (of)``) stays an identifier for the rest of
-    the file and its following ``/`` is division, not a regex.
+    the file and its following ``/`` is division, not a regex. A member-access
+    ``.`` (``obj.of``, ``Observable.of / 2``) is tracked separately so a
+    property name reusing a contextual keyword does not open a regex either,
+    even when no binding form made it an identifier earlier.
     ``test_js_lexer_matches_acorn`` checks it against acorn on every
     first-party script when acorn is installed.
     """
@@ -98,6 +101,7 @@ def js_comment_texts(src: str) -> list[str]:
     pending_params = False
     param_depth = 0
     paren_candidates: list[list[str]] = []
+    after_dot = False
 
     def template(j: int) -> tuple[int, bool]:
         while j < n:
@@ -114,19 +118,30 @@ def js_comment_texts(src: str) -> list[str]:
 
     while i < n:
         c = src[i]
+        # Whitespace and comments are transparent: a `.` separated from its
+        # property name by spaces or a block comment (``obj. of``,
+        # ``obj./* note */of``) still binds ``of`` to the member-access
+        # context.
         if c.isspace() or c == "﻿":
             i += 1
-        elif src.startswith("//", i):
+            continue
+        if src.startswith("//", i):
             end = src.find("\n", i)
             end = n if end < 0 else end
             comments.append(src[i + 2 : end].rstrip("\r"))
             i = end
-        elif src.startswith("/*", i):
+            continue
+        if src.startswith("/*", i):
             end = src.find("*/", i + 2)
             end = n if end < 0 else end
             comments.append(src[i + 2 : end])
             i = end + 2
-        elif c in "'\"":
+            continue
+        # Any other branch consumes a significant token, so after_dot is
+        # cleared below; the `.` branch sets it back to True.
+        was_after_dot = after_dot
+        after_dot = False
+        if c in "'\"":
             j = i + 1
             while j < n and src[j] != c:
                 j += 2 if src[j] == "\\" else 1
@@ -199,45 +214,58 @@ def js_comment_texts(src: str) -> list[str]:
         elif match := _JS_IDENT.match(src, i):
             word = match.group()
             i = match.end()
-            is_binding = expect_binding or destr_depth > 0 or param_depth > 0
-            bare_binding = is_binding and destr_depth == 0 and param_depth == 0
-            if is_binding:
-                bound.add(word)
-                regex_ok = False
-            elif word in bound:
+            if was_after_dot:
+                # The identifier is a property name, so its following ``/`` is
+                # division and keyword status (``of``, ``return``, ...) does
+                # not apply.
                 regex_ok = False
             else:
-                regex_ok = word in _JS_REGEX_AFTER_WORD
-            if word in _JS_BINDING_KW:
-                expect_binding = True
-            elif word in _JS_PARAM_KW:
-                pending_params = True
-            if (
-                paren_candidates
-                and not is_binding
-                and word not in _JS_BINDING_KW
-                and word not in _JS_PARAM_KW
-            ):
-                paren_candidates[-1].append(word)
-            j = i
-            while j < n:
-                if src[j] in " \t\r\n":
-                    j += 1
-                elif src.startswith("//", j):
-                    end = src.find("\n", j)
-                    j = n if end < 0 else end
-                elif src.startswith("/*", j):
-                    end = src.find("*/", j + 2)
-                    j = n if end < 0 else end + 2
+                is_binding = expect_binding or destr_depth > 0 or param_depth > 0
+                bare_binding = is_binding and destr_depth == 0 and param_depth == 0
+                if is_binding:
+                    bound.add(word)
+                    regex_ok = False
+                elif word in bound:
+                    regex_ok = False
                 else:
-                    break
-            if src.startswith("=>", j):
-                bound.add(word)
-                regex_ok = False
-            elif bare_binding and word not in _JS_BINDING_KW:
-                expect_binding = src.startswith(",", j)
+                    regex_ok = word in _JS_REGEX_AFTER_WORD
+                if word in _JS_BINDING_KW:
+                    expect_binding = True
+                elif word in _JS_PARAM_KW:
+                    pending_params = True
+                if (
+                    paren_candidates
+                    and not is_binding
+                    and word not in _JS_BINDING_KW
+                    and word not in _JS_PARAM_KW
+                ):
+                    paren_candidates[-1].append(word)
+                j = i
+                while j < n:
+                    if src[j] in " \t\r\n":
+                        j += 1
+                    elif src.startswith("//", j):
+                        end = src.find("\n", j)
+                        j = n if end < 0 else end
+                    elif src.startswith("/*", j):
+                        end = src.find("*/", j + 2)
+                        j = n if end < 0 else end + 2
+                    else:
+                        break
+                if src.startswith("=>", j):
+                    bound.add(word)
+                    regex_ok = False
+                elif bare_binding and word not in _JS_BINDING_KW:
+                    expect_binding = src.startswith(",", j)
         elif (c.isdigit() or (c == "." and src[i + 1 : i + 2].isdigit())) and (match := _JS_NUMBER.match(src, i)):
             i, regex_ok = match.end(), False
+        elif src.startswith("...", i):
+            i, regex_ok = i + 3, True
+        elif c == "." and not src.startswith("..", i + 1):
+            # Member access ``.`` — the next identifier is a property name,
+            # not a keyword. ``.N`` was handled by the number branch above.
+            after_dot = True
+            i, regex_ok = i + 1, False
         elif src.startswith(("++", "--"), i):
             i += 2
         else:
@@ -363,6 +391,21 @@ def test_js_lexer_for_of_does_not_bind_loop_body():
         "function g(s) { return /\"/.test(s); // Codex\n}\n"
     )
     assert any("Codex" in text for text in js_comment_texts(src))
+
+
+def test_js_lexer_member_access_of_is_division_not_regex():
+    """A property name reusing a contextual keyword (``obj.of``,
+    ``Observable.of``) must not open a regex on the following ``/``, so a
+    trailing ``// Codex`` or ``/* note */`` after a division is still read."""
+    cases = [
+        "obj.of / 2; // Codex\n",
+        "obj?.of / 2; // Codex\n",
+        "obj . of / 2; // Codex\n",
+        "obj./* note */of / 2; // Codex\n",
+        "Observable.of.length / 2; // Codex\n",
+    ]
+    for src in cases:
+        assert any("Codex" in text for text in js_comment_texts(src)), src
 
 
 def test_js_lexer_matches_acorn():

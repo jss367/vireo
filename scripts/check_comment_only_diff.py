@@ -4,20 +4,23 @@ For every Python file (``.py``) the diff touches, the AST with docstrings
 removed must dump identically on both sides and the shebang and ``# coding:``
 declaration must match (both pick the interpreter or decoder that runs the
 file, and the AST drops them). For every JavaScript file (``.js``, ``.mjs``,
-``.cjs``), acorn's token stream (comments excluded) must be identical, with
-regular-expression tokens compared by their pattern and flags rather than
-collapsed to ``[object Object]``, and the hashbang line is compared separately
-because acorn drops it. Comments that tools read are compared too, because
-the AST and the token stream both drop them: Python ``noqa`` (``ruff: noqa``
-too, and ``NOQA`` case-insensitively) / ``type:`` / ``pyright:`` / ``pragma``
-/ ``fmt:`` / ``broad:`` pragmas, ESLint and ``@ts-`` directives
-(``@ts-expect-error`` included), and JSDoc type tags with ``@import`` module
-sources captured separately so changing the source is detected. Added,
-deleted and renamed source files are compared the same way, against an empty
-counterpart (or across both paths for a rename), so a diff is comment-only
-only when every A/M/D/R source file is. A rename to or from a non-source
-suffix (``module.py`` -> ``module.txt``) is treated as a deletion or addition
-of the source file so the rename cannot hide a removed executable module.
+``.cjs``), acorn's token stream (comments excluded) must be identical: each
+token's type label and the exact source text between its ``start`` and ``end``
+positions are compared, so a cooked value shared by two different spellings
+(``"use strict"`` vs ``"use\\x20strict"`` as a directive prologue, or
+``tag`\\x41`` vs ``tag`A`` as a tagged-template raw) is detected. The
+hashbang line is compared separately because acorn drops it. Comments that
+tools read are compared too, because the AST and the token stream both drop
+them: Python ``noqa`` (``ruff: noqa`` too, and ``NOQA`` case-insensitively) /
+``type:`` / ``pyright:`` / ``pragma`` / ``fmt:`` / ``broad:`` pragmas, ESLint
+and ``@ts-`` directives (``@ts-expect-error`` included), and JSDoc type tags
+with ``@import`` module sources captured separately so changing the source is
+detected. Added, deleted and renamed source files are compared the same way,
+against an empty counterpart (or across both paths for a rename), so a diff
+is comment-only only when every A/M/D/R source file is. A rename to or from a
+non-source suffix (``module.py`` -> ``module.txt``) is treated as a deletion
+or addition of the source file so the rename cannot hide a removed executable
+module.
 
     python scripts/check_comment_only_diff.py [--base origin/main]
 
@@ -59,19 +62,10 @@ const acorn = require(process.argv[1] + '/node_modules/acorn');
 const fs = require('fs');
 const src = fs.readFileSync(0, 'utf8');
 const comments = [];
-const asString = (v) => {
-  if (v === undefined) return null;
-  if (v !== null && typeof v === 'object') {
-    const flags = typeof v.flags === 'string' ? v.flags : '';
-    const pattern = typeof v.pattern === 'string' ? v.pattern : JSON.stringify(v);
-    return 'regexp /' + pattern + '/' + flags;
-  }
-  return String(v);
-};
 const parse = (sourceType) => {
   comments.length = 0;
   const opts = {ecmaVersion: 'latest', sourceType, onComment: (block, text) => comments.push(text)};
-  return [...acorn.tokenizer(src, opts)].map((t) => [t.type.label, asString(t.value)]);
+  return [...acorn.tokenizer(src, opts)].map((t) => [t.type.label, src.slice(t.start, t.end)]);
 };
 let tokens;
 try { tokens = parse('script'); } catch (e) { tokens = parse('module'); }
