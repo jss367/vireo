@@ -327,3 +327,35 @@ def test_source_changes_detects_non_ascii_path(tmp_path):
     assert old_path == "naïve.py"
     assert new_path == "naïve.py"
     assert suffix == ".py"
+
+
+def test_js_protocol_is_utf8_under_non_utf8_default(monkeypatch):
+    """``_js`` sends source to Node, which reads stdin as UTF-8. An ANSI
+    default would otherwise encode ``é`` and ``ö`` into bytes that both decode
+    to U+FFFD on Node's side, letting a changed executable string compare
+    equal. Exercises real pipes with a UTF-8 peer without needing Node."""
+    real_run = subprocess.run
+    peer = (
+        "import json, sys; "
+        "source = sys.stdin.buffer.read().decode('utf-8'); "
+        "sys.stdout.buffer.write(json.dumps({'source': source}, ensure_ascii=False).encode('utf-8'))"
+    )
+
+    def utf8_peer(_args, **kwargs):
+        return real_run([sys.executable, "-c", peer], **kwargs)
+
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    monkeypatch.setattr(subprocess, "run", utf8_peer)
+    source = "const bird = '鳥'; // naïve"
+    assert checker._js(source) == {"source": source}
+
+
+@needs_node
+def test_js_differs_distinguishes_non_ascii_strings_under_non_utf8_default(monkeypatch):
+    """A real Node pipe must not fold ``é``/``ö`` to the same U+FFFD when the
+    Python default is CP1252: both bytes would decode to the replacement
+    character on Node's UTF-8 reader and a changed string would look equal."""
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    assert checker.js_differs("const x = 'é';", "const x = 'ö';") is not None
+    comments = checker._js("const bird = '鳥'; // naïve")["comments"]
+    assert [c["text"] if isinstance(c, dict) else c for c in comments] == [" naïve"]

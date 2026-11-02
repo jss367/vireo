@@ -129,8 +129,13 @@ def python_differs(old: str, new: str) -> str | None:
 def _js(src: str) -> dict:
     if not src:
         return {"tokens": [], "comments": []}
+    # Node reads stdin and writes stdout as UTF-8; ``text=True`` alone would
+    # encode the Python payload with the active locale, so an ANSI default
+    # (CP1252) would turn ``é`` and ``ö`` into bytes that both decode to U+FFFD
+    # in Node, and a changed executable string would compare equal.
     res = subprocess.run(
-        ["node", "-e", JS_TOKENS, str(ROOT)], input=src, capture_output=True, text=True, check=True
+        ["node", "-e", JS_TOKENS, str(ROOT)],
+        input=src, capture_output=True, text=True, encoding="utf-8", check=True,
     )
     return json.loads(res.stdout)
 
