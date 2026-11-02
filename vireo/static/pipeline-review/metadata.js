@@ -114,7 +114,7 @@ function filterAggSpeciesRows(rows, threshold) {
 // Client-side mirror of _build_species_predictions (vireo/pipeline.py): aggregate
 // a list of photo objects' species_top5 into consensus rows
 // ({species, count, avg_confidence, models:[{model, confidence, photo_count}]},
-// sorted by total count desc, models sorted by name). Used to rebuild a burst's
+// sorted by total count desc, models sorted by name). Rebuilds a burst's
 // predictions after a local detach so the cached/displayed "Burst consensus"
 // reflects only the photos still in that burst — not the ones split off.
 /** @param {ReviewPhoto[]} photos */
@@ -158,7 +158,7 @@ function buildBurstConsensus(photos) {
 
 // Client mirror of encounter_species_label() (vireo/encounters.py): pick the
 // species with the highest confidence-weighted sum across all photos' top-5
-// predictions, breaking ties by first-appearance order. Used to persist an
+// predictions, breaking ties by first-appearance order. Persists an
 // unconfirmed species override for a detached single-photo burst so the
 // local save-cache path agrees with the server detach endpoint, which
 // derives the same label via _rebuild_encounter_species_label. Sorting by

@@ -203,7 +203,7 @@ function collectRemoteTargets() {
     }, { toast: false });
     // A missing local archive root is not a connection failure, but a bare
     // green "Connection OK" would hide the one misconfiguration the Import
-    // page can't name later (issue #1377): render it as a warning and offer
+    // page can't name later: render it as a warning and offer
     // the one-line fix inline, since the folder is the user's own staging
     // area and creating it is always safe.
     var archiveRootInvalid = !!(res.ok && res.archive_root_invalid);

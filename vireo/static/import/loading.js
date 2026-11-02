@@ -13,7 +13,7 @@ async function initImportPage() {
   wireImportSelectAll();
   // Remote targets are independent of import readiness.  In a large catalog
   // the metadata-repair count below can take a long time, and starting the
-  // target request afterward used to leave the destination picker with only
+  // target request afterward would leave the destination picker with only
   // its static local-path option for the entire scan.
   loadImportRemoteTargets();
   // Metadata readiness is advisory startup work: the import endpoint still

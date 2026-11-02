@@ -380,7 +380,7 @@ function _nwLooksSynology() {
   /** @param {string} p */ var setChosen = async function(p) {
     // Filesystem-aware containment: the same check _coerce_remote_target
     // performs at save time. A purely-lexical prefix compare on the client
-    // (which we used to do here) misses symlink aliases — e.g. ~/Archive
+    // misses symlink aliases — e.g. ~/Archive
     // that points at /Volumes/Photography — and the save-time validator
     // would then silently blank local_archive_root, leaving the wizard's
     // target unable to offer the chained move. Fail here instead so the

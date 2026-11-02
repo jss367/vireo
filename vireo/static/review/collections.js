@@ -10,8 +10,7 @@ async function loadCollectionFilter() {
       opt.value = String(c.id);
       opt.textContent = c.name;
       // count_error means /api/collections couldn't resolve this collection's
-      // rules — selecting it would 400 the downstream /photos endpoint and
-      // (previously) silently widen the review scope back to every prediction.
+      // rules — selecting it would 400 the downstream /photos endpoint.
       // Show it disabled with a hint so the state is visible.
       if (c.count_error) {
         opt.disabled = true;

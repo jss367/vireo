@@ -1,6 +1,5 @@
-// Page startup: the module the template loads. Binds the toolbar controls that
-// used to carry inline handlers, loads the recent log lines, and connects the
-// live log stream.
+// Page startup: the module the template loads. Binds the toolbar controls,
+// loads the recent log lines, and connects the live log stream.
 // ES module. Module scripts run in document order after the navbar's entry,
 // so safeFetch and showToast are defined by the time this runs.
 

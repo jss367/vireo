@@ -1,6 +1,6 @@
 // Page startup: the module the template loads. Registers the page hook
-// vireo-work-locally.js calls, binds the controls that used to carry inline
-// handlers and the delegated list listeners, then loads every section.
+// vireo-work-locally.js calls, binds the page controls and the delegated list
+// listeners, then loads every section.
 // ES module. The template loads vireo-work-locally.js (deferred) before this
 // module, so its first status load is in flight but cannot have finished yet
 // when the hook is registered.
