@@ -31,7 +31,7 @@ from highlights_payload import (
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
-from services import prediction_decisions
+from services import prediction_decisions, review_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 from species_memberships import photo_species_memberships
 from web.request_args import request_bool_arg
@@ -357,7 +357,7 @@ class _HighlightsRelabel:
         db = self.db
         pred = self.top_predictions.get(pid)
         if pred is not None:
-            db.update_prediction_status(pred["id"], "rejected")
+            review_decisions.update_prediction_status(db, pred["id"], "rejected")
             self.rejected_prediction_ids.append(pred["id"])
 
         # A scoped relabel keeps the photo's other species. It still lists
@@ -637,7 +637,7 @@ def _accept_confirm_targets(
         limits = {"photo_ids": key_pids}
         if exact_rows:
             limits["prediction_ids"] = [targets[p]["id"] for p in key_pids]
-        result = db.accept_prediction(pred["id"], **limits)
+        result = review_decisions.accept_prediction(db, pred["id"], **limits)
         if result is None:
             skipped.append({"photo_id": pid, "reason": "prediction_not_found"})
             continue

@@ -14,6 +14,7 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
+from services import review_decisions
 from services.edit_history import HistoryItem, prediction_status_item
 from services.service_types import JsonDict
 from species_identity import SpeciesResolver
@@ -131,7 +132,7 @@ def accept_review_card(db: Database, rows: list[JsonDict]) -> JsonDict:
     for row in rows:
         if row['id'] in accepted:
             continue
-        result = db.accept_prediction(row['id'], prediction_ids=ids)
+        result = review_decisions.accept_prediction(db, row['id'], prediction_ids=ids)
         if result is None:
             raise ReviewCardConflict('A reviewed prediction disappeared. Reload Review.')
         accepted.update(result['accepted_prediction_ids'])
@@ -163,7 +164,7 @@ def reject_review_card(db: Database, rows: list[JsonDict]) -> JsonDict:
     for photo_id, targets in by_photo.items():
         def apply(target_ids: set[int] = targets) -> None:
             for prediction_id in target_ids:
-                db.update_prediction_status(prediction_id, 'rejected')
+                review_decisions.update_prediction_status(db, prediction_id, 'rejected')
 
         item = prediction_status_item(db, photo_id, sorted(targets), apply)
         if item is not None:

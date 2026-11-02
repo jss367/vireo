@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import browse_queries, photo_ingest, workspace_folders
+from services import browse_queries, photo_ingest, review_decisions, workspace_folders
 
 
 def parse_queries(queries, options=None):
@@ -251,9 +251,9 @@ def test_metadata_search_uses_current_visible_predictions(catalog):
     assert search("Strix nebulosa") == [ids["empty"]]
     assert search("Strigidae") == [ids["empty"]]
     current_id = db.conn.execute("SELECT MAX(id) FROM predictions").fetchone()[0]
-    db.update_prediction_status(current_id, "alternative")
+    review_decisions.update_prediction_status(db, current_id, "alternative")
     assert search("New species") == []
-    db.update_prediction_status(current_id, "reviewed")
+    review_decisions.update_prediction_status(db, current_id, "reviewed")
     assert search("reviewed") == [ids["empty"]]
     db.conn.execute("UPDATE detections SET detector_confidence=0.01 WHERE id=?", (det,))
     assert search("New species") == []

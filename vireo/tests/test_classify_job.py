@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from classify_job import ClassifyParams, run_classify_job
 from PIL import Image
-from services import detection_store, photo_ingest, workspace_folders
+from services import detection_store, photo_ingest, review_decisions, workspace_folders
 
 
 def test_classify_params_is_dataclass():
@@ -3328,7 +3328,7 @@ def test_match_flip_preserves_manual_review_on_reuse(
 
     run("disagreement")
     pred_id = db.predictions.get_rows(photo_ids=[photo_id])[0]["id"]
-    db.update_prediction_status(pred_id, manual_status)
+    review_decisions.update_prediction_status(db, pred_id, manual_status)
 
     run("match")
     matched = db.predictions.get_rows(photo_ids=[photo_id])[0]
@@ -3610,7 +3610,7 @@ def test_mixed_burst_never_groups_so_displayed_species_is_accepted_species(
 
     sparrow = by_det[det_ids[2]]
     assert sparrow["species"] == "Sparrow"
-    result = db.accept_prediction(sparrow["id"])
+    result = review_decisions.accept_prediction(db, sparrow["id"])
     assert result["species"] == "Sparrow", (
         "accepting the row Browse labels 'Sparrow' tagged a different "
         "species"
@@ -3695,7 +3695,7 @@ def test_grouped_burst_consensus_equals_each_row_species(tmp_path, monkeypatch):
             "a grouped burst's vote JSON must name exactly one species; a "
             "second key is what would let the consensus diverge from the row"
         )
-    result = db.accept_prediction(rows[0]["id"])
+    result = review_decisions.accept_prediction(db, rows[0]["id"])
     assert result["species"] == rows[0]["species"] == "Robin"
 
 

@@ -1,6 +1,6 @@
 import pytest
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, review_decisions
 
 from e2e.module_pages import install_page_module_exposure
 
@@ -578,7 +578,7 @@ def test_compare_full_load_lands_on_the_collection_when_nothing_needs_review(
         for row in db.conn.execute("SELECT id FROM predictions").fetchall()
     ]
     for pred_id in pred_ids:
-        db.update_prediction_status(pred_id, "accepted")
+        review_decisions.update_prediction_status(db, pred_id, "accepted")
         db.commit()
     db.conn.commit()
     # Seed one settled row so the photo does not collapse to

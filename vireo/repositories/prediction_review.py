@@ -19,6 +19,10 @@ without materializing a catalog-wide intermediate result.
 
 import re
 
+# ``prediction_review.individual`` marker of a review row the classify job
+# wrote for an automatic match, not a person's decision.
+AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
+
 
 def _identifier(value: str) -> str:
     if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", value) is None:

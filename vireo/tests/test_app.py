@@ -14,6 +14,7 @@ from services import (
     missing_originals,
     pending_changes,
     photo_ingest,
+    review_decisions,
     subject_masks,
     workspace_config,
     workspace_folders,
@@ -13533,7 +13534,7 @@ def test_highlights_curation_filter_ignores_rejected_selected_prediction(app_and
 
     # Rejecting the selected photo's prediction removes that photo from the
     # species bucket, but the second prediction keeps the species visible.
-    db.update_prediction_status(prediction_ids[0], "rejected")
+    review_decisions.update_prediction_status(db, prediction_ids[0], "rejected")
     db.commit()
     response = client.get(
         "/api/highlights",
@@ -20998,7 +20999,6 @@ def test_batch_accept_checks_and_writes_are_one_transaction(
     import sqlite3
     import threading
 
-    import db as db_module
 
     app, db = app_and_db
     client = app.test_client()
@@ -21033,7 +21033,9 @@ def test_batch_accept_checks_and_writes_are_one_transaction(
         finally:
             conn.close()
 
-    original_accept = db_module.Database.accept_prediction
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    original_accept = KeywordProvenanceRepository.accept_prediction
     fired = []
 
     def _accept_with_interleave(self, *args, **kwargs):
@@ -21046,7 +21048,7 @@ def test_batch_accept_checks_and_writes_are_one_transaction(
         return original_accept(self, *args, **kwargs)
 
     monkeypatch.setattr(
-        db_module.Database, "accept_prediction", _accept_with_interleave,
+        KeywordProvenanceRepository, "accept_prediction", _accept_with_interleave,
     )
 
     resp = client.post(
@@ -21705,7 +21707,7 @@ def test_batch_accept_dedup_still_rejects_skipped_detection_alternatives(
         "species": None,
     }
 
-    db.accept_prediction(pred_ids[0], prediction_ids=set(pred_ids))
+    review_decisions.accept_prediction(db, pred_ids[0], prediction_ids=set(pred_ids))
     db.commit()
 
     # Every submitted detection's alternative row must end up rejected —
@@ -25143,7 +25145,6 @@ def test_single_reject_serializes_with_concurrent_batch_accept(
     import sqlite3
     import threading
 
-    import db as db_module
 
     app, db = app_and_db
     client = app.test_client()
@@ -25177,7 +25178,9 @@ def test_single_reject_serializes_with_concurrent_batch_accept(
         finally:
             conn.close()
 
-    original_update = db_module.Database.update_prediction_status
+    from repositories.predictions import PredictionRepository
+
+    original_update = PredictionRepository.update_status
     fired = []
 
     def _update_with_interleave(self, this_pred_id, status, *args, **kwargs):
@@ -25191,8 +25194,8 @@ def test_single_reject_serializes_with_concurrent_batch_accept(
         return original_update(self, this_pred_id, status, *args, **kwargs)
 
     monkeypatch.setattr(
-        db_module.Database,
-        "update_prediction_status",
+        PredictionRepository,
+        "update_status",
         _update_with_interleave,
     )
 

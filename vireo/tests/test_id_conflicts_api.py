@@ -11,6 +11,7 @@ import os
 import sys
 
 import pytest
+from services import review_decisions
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -146,7 +147,7 @@ def test_a_decision_updates_the_counts_through_refresh_photo_id(compare_collecti
     assert first["summary"]["needs_review"] == len(photo_ids)
 
     for row in db.predictions.get_rows(photo_ids=[photo_ids[0]]):
-        db.update_prediction_status(row["id"], "reviewed")
+        review_decisions.update_prediction_status(db, row["id"], "reviewed")
     db.conn.commit()
 
     refreshed = client.get(

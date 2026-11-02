@@ -14,6 +14,7 @@ from repositories.collections import BrowseStackConfig, CollectionRepository, no
 from repositories.photos import PhotoRepository
 from repositories.species_provenance import SpeciesProvenanceRepository
 from repositories.storage import StorageRepository
+from services import review_decisions
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.workspace_config import browse_stack_settings
 
@@ -34,7 +35,7 @@ def check_database_api(db: Database) -> None:
     assert_type(db._collection_repository(), CollectionRepository)
     assert_type(db.add_keyword("Robin", is_species=True), int)
     assert_type(db.get_photo_edit_recipe(1), dict[str, Any] | None)
-    assert_type(db.accept_prediction(1), dict[str, Any] | None)
+    assert_type(review_decisions.accept_prediction(db, 1), dict[str, Any] | None)
     assert_type(undo_last_edit(db), dict[str, Any] | None)
     assert_type(redo_last_undo(db), dict[str, Any] | None)
     assert_type(db.queue_change(1, "rating", "5"), str | None)

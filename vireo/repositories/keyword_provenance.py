@@ -81,6 +81,7 @@ from repositories.keyword_identity_sql import (
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.keyword_tree import KeywordTreeRepository
 from repositories.prediction_review import prediction_review_join, prediction_review_status
+from repositories.predictions import PredictionRepository
 from repositories.species_curation import SpeciesCurationRepository
 from settings_source import config_value
 
@@ -99,7 +100,6 @@ FACADE_METHODS = (
     # accept_prediction
     "add_keyword",
     "get_photos_with_equivalent_species",
-    "update_prediction_status",
     "queue_change",
     "remove_pending_changes",
 )
@@ -1034,7 +1034,6 @@ class KeywordProvenanceRepository:
     _edit_prediction_ids: Callable[..., Any]
     add_keyword: Callable[..., Any]
     get_photos_with_equivalent_species: Callable[..., Any]
-    update_prediction_status: Callable[..., Any]
     queue_change: Callable[..., Any]
     remove_pending_changes: Callable[..., Any]
 
@@ -1795,7 +1794,9 @@ class KeywordProvenanceRepository:
         # including the entry row. Doing it here rather than up front
         # is what keeps an out-of-scope entry row untouched.
         _reject_detection_alternatives(self.conn, ws, this_pred_id)
-        self.update_prediction_status(this_pred_id, "accepted")
+        PredictionRepository(self.conn, self._resolve_workspace_id).update_status(
+            this_pred_id, "accepted",
+        )
         old_species = []
         already_has_species = photo_id in self.get_photos_with_equivalent_species(
             [photo_id], kid
