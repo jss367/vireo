@@ -62,7 +62,7 @@ def catalog(photo_source=None):
     repo.conn, repo.workspace_id = c, 1
     repo.get_folder_subtree_ids = lambda fid: [fid]
     repo._build_collection_query = lambda cid: ("", "", "WHERE p.id=?", [2]) if cid == 1 else None
-    repo._build_query_from_rules = lambda rules: ("", "", "WHERE p.id=?", [rules["id"]])
+    repo.build_query_from_rules = lambda rules: ("", "", "WHERE p.id=?", [rules["id"]])
     return c, repo
 
 
