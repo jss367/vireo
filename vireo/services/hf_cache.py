@@ -1,11 +1,11 @@
 """The Hugging Face hub cache entries Vireo downloaded, and their cleanup.
 
-Vireo used to fetch every model into the hub cache (``blobs/<oid>`` plus
-``snapshots/<rev>/<path>`` symlinks, or plain copies where symlinks are
-unavailable) and then byte-copy it into ``~/.vireo/models``, so each model
-took its size twice. Downloads now write straight into ``~/.vireo/models``
-(``hub_download.fetch_hub_file``) and add nothing here, but the entries older
-downloads left stay until removed. The runtime only ever reads
+Downloads write straight into ``~/.vireo/models``
+(``hub_download.fetch_hub_file``) and add nothing to the hub cache
+(``blobs/<oid>`` plus ``snapshots/<rev>/<path>`` symlinks, or plain copies
+where symlinks are unavailable), but entries that older downloads put there,
+before byte-copying them into ``~/.vireo/models``, stay until removed and
+take each model's size a second time. The runtime only ever reads
 ``~/.vireo/models``. An entry for a complete install duplicates its files;
 one for an incomplete install can spare the network during repair. Entries
 for removed or superseded models are dead weight that Settings never shows

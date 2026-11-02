@@ -44,7 +44,7 @@ def get_classifier_run_cache_hits(
     expected to be cached. Only observed misses on preflight-expected
     photos deflate the projected cache hits; misses on photos the
     preflight never counted are unrelated to the estimate and must
-    not scale it down (Codex #1468 P2).
+    not scale it down.
 
     Photo-scoped to match runtime accounting: the classify loop keeps
     its ``cached`` bucket photo-scoped (see pipeline_job.py — a photo
@@ -69,7 +69,7 @@ def get_classifier_run_cache_hits(
     its weak-threshold animal detections carries a matching run key.
     Without this, a rerun over a cached weak tail is scored as pure
     uncached work and the ETA can substantially overstate the time
-    remaining (Codex #1468 P2).
+    remaining.
 
     When the detector stage ran, ``fresh_detections_by_photo`` and
     ``fresh_processed_photo_ids`` scope processed photos to the exact
@@ -91,9 +91,9 @@ def get_classifier_run_cache_hits(
     observation-based correction cannot deflate the estimate until those
     rejected rows are actually visited — leading
     ``_classification_eta_progress`` to report "finishing…" while
-    substantial inference work still remains (Codex #1468 P2). Passing
-    ``None`` retains the pre-Codex behaviour (no runtime filter); this
-    is the correct choice on reclassify runs, where the runtime gate is
+    substantial inference work still remains. Passing ``None`` applies
+    no runtime filter; this is the correct choice on reclassify runs,
+    where the runtime gate is
     bypassed anyway. Values may be ``None`` when the caller cannot
     compute an expected fingerprint (e.g. portable identity not wired
     up): matching detections then skip the runtime filter, mirroring
@@ -176,7 +176,7 @@ def get_unclassifiable_photos(
     current detector pass replaces the runtime candidates while older
     rows from another detector model remain in the DB. Without this
     override, stale rows can make the preflight choose a different crop
-    or skip outcome than runtime (Codex #1468 P2).
+    or skip outcome than runtime.
     Each detection dict must expose ``confidence`` (or
     ``detector_confidence``) and ``category`` (defaulting to
     ``"animal"`` when absent, matching ``_detect_batch``'s output).
@@ -195,7 +195,7 @@ def get_unclassifiable_photos(
     prematurely. When both this set and ``fresh_detections_by_photo``
     are provided, photos NOT in the processed set defer to the DB
     predicate for that photo, matching what the runtime actually
-    sees (Codex #1468 P2).
+    sees.
     """
     if not photo_ids:
         return set()

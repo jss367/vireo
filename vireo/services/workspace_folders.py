@@ -367,7 +367,7 @@ def add_folder(
     roots: those parents only need to exist for ``folders.parent_id``
     integrity, and letting ``add_workspace_folder`` fire would
     subtree-cascade every pre-existing descendant of the destination
-    into the active workspace. See PR #1107 review.
+    into the active workspace.
 
     Returns the folder id.
     """

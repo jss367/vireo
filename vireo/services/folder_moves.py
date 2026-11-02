@@ -615,7 +615,7 @@ def _record_move_outcome(result: JsonDict) -> None:
     """Set the move result's ``ok`` verdict and ``summary`` in place."""
     # Tell the JobRunner whether the move actually succeeded. Without
     # this the runner marks any normal return "completed" — so a move
-    # that copied nothing because rsync timed out used to read as
+    # that copied nothing because rsync timed out would read as
     # "completed, 0 errors" in the history. A partial move (some
     # photos moved, some errors) failed too; its summary keeps both
     # counts. A `needs_merge` return is

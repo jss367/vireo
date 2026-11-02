@@ -4,7 +4,8 @@ Browse re-issues its grid, calendar and summary reads on every search
 change, and on a large catalog one metadata search can keep SQLite busy for
 seconds. The page already ignores a response once it has sent a newer
 request for the same loader, but ignoring it does not stop the work, so
-quick typing used to stack several full searches on the server.
+without cancellation quick typing stacks several full searches on the
+server.
 
 A request that opts in names a *lane* (one page instance plus one loader)
 and its *sequence* (that loader's own stale-response counter). When a newer
@@ -33,7 +34,7 @@ SUPERSEDED_CODE = "search_superseded"
 
 _LANE_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,96}")
 # Lanes are per page load; old ones are forgotten oldest-first. Forgetting a
-# lane only means a late straggler on it runs to completion, as before.
+# lane only means a late straggler on it runs to completion.
 MAX_LANES = 1024
 # SQLite VM instructions between supersession checks: well under a
 # millisecond of work, against a lock-guarded dict lookup per check.

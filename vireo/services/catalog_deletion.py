@@ -12,8 +12,8 @@ a caller's unit the caller prunes once that unit commits, with the ids of
 every chunk it deleted.
 
 The new-images cache is ``Database``'s process cache, so the invalidations go
-through the façade's public invalidators, in the same order relative to the
-commit as before: ``delete_photos`` invalidates the affected folders'
+through the façade's public invalidators, ordered against the commit:
+``delete_photos`` invalidates the affected folders'
 workspaces in a ``finally`` after the repository delete (so a rollback still
 clears it), and ``delete_folder`` invalidates the active workspace after the
 whole subtree delete has committed.
@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 def prune_pipeline_cache_for_ids(db: Database, ids: Iterable[int] | None) -> None:
     """Remove globally deleted ``ids`` from every workspace's results.
 
-    Split out from ``delete_photos`` so chunked callers can defer it to
+    Separate from ``delete_photos`` so chunked callers can defer it to
     after their outer transaction commits — pruning the on-disk cache
     is not transactional, so running it per-chunk would leave the cache
     permanently stripped of rows that a later rollback restores.

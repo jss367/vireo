@@ -1119,10 +1119,10 @@ class _InPlaceImportRun:
     def _discover_sources(self) -> None:
         """Discover every source before processing any of them.
 
-        Previously each scan discovered its source just-in-time, so the UI
-        called a partial denominator "Overall" and then moved backward when
-        the next source added more files. Freezing these manifests makes the
-        total stable and also excludes files that arrive mid-import.
+        Discovering each source just-in-time would make the UI call a
+        partial denominator "Overall" and then move backward when the next
+        source adds more files. Freezing these manifests keeps the total
+        stable and also excludes files that arrive mid-import.
         """
         sources = self.sources
         for source_index, source in enumerate(sources, 1):

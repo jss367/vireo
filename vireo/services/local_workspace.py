@@ -666,8 +666,8 @@ def _walk_entries(root: str, *, cancel_check: CancelCheck | None = None) -> Iter
         # below. Recheck cancellation between the potentially blocking lstat
         # above and the open/scandir so an obsolete preflight does not have
         # to wait for another whole filesystem call before it can back out.
-        # Codex flagged this for the root specifically, whose lstat is not
-        # followed by a yield, but it applies to popped children too.
+        # This matters most for the root, whose lstat is not followed by a
+        # yield, but it applies to popped children too.
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("Folder scan cancelled")
         # A queued child that is no longer a directory (replaced by a symlink
