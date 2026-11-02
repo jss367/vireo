@@ -28,7 +28,7 @@ function browseSelectedStackCoverId() {
     // tray that "Select all" filled pins the focus to the visible cover
     // (``batchHasHiddenMembers`` in toggleBrowseStack) because a collapsed
     // tray cannot hold a focus on a hidden frame. Accept a focus that *is*
-    // this cover, reject any other (Codex P2 on PR #1695).
+    // this cover, reject any other.
     if (selection.focusedPhotoId != null && photo.id !== selection.focusedPhotoId) return false;
     var ids = browseStackMemberIdsFor(photo);
     return !!ids && ids.length === selection.batchIds.size
@@ -60,7 +60,7 @@ export function captureSelectedPhotoAnchor() {
   var cardRect = card.getBoundingClientRect();
   // Position in ``photos`` at capture time. Bounds the paged rescan below
   // when a ``preserveScroll`` reload runs after an edit that may have
-  // removed this photo from the filter (Codex review r4013123608): a
+  // removed this photo from the filter: a
   // 60k-photo library would otherwise walk to ``allLoaded`` — ~1,200
   // page requests — before giving up.
   //
@@ -69,8 +69,7 @@ export function captureSelectedPhotoAnchor() {
   // single page even though the cover may sit tens of thousands of rows
   // in. Anchor the position via the cover so the budget matches where the
   // member actually lives; ``loadUntilPhotoRendered`` with
-  // ``resolveStackMember: true`` will re-expand the tray on the far side
-  // (Codex review r4013378153).
+  // ``resolveStackMember: true`` will re-expand the tray on the far side.
   var index = state.photos.findIndex(function(p) { return p.id === anchorId; });
   if (index < 0) {
     const memberCover = loadedBrowseStackCoverForPhoto(anchorId);
@@ -124,7 +123,7 @@ export function captureBrowseViewportAnchor() {
   // screen is a member. Skipping those would let the loop drop through to
   // the first top-level card *below* the tray — off-screen — and after the
   // reset collapses the tray, restoring that off-screen card at its old
-  // large offset snaps the grid upward (Codex review r4012897730).
+  // large offset snaps the grid upward.
   var cards = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll(
     '#grid .grid-card, #grid .browse-stack-member'
   ));

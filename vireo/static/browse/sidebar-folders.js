@@ -50,10 +50,9 @@ export async function loadFolders(/** @type {{shouldRender?: () => boolean}} */ 
     // to, so ``browseWorkspaceId`` moves in lockstep with
     // ``browseFolderRows`` no matter what another tab does in between.
     // A parallel ``/api/workspaces/active`` call would leave a window
-    // where /api/folders and /api/workspaces/active can disagree (Codex
-    // review r3799038685); it would also drag the expensive per-root
-    // workspace_photo_count query into every sidebar refresh (Codex
-    // review r3799038688).
+    // where /api/folders and /api/workspaces/active can disagree; it would
+    // also drag the expensive per-root workspace_photo_count query into
+    // every sidebar refresh.
     var payload = await safeFetch(
       '/api/folders?with_workspace=1', {}, { toast: false }
     );
@@ -77,8 +76,7 @@ export async function loadFolders(/** @type {{shouldRender?: () => boolean}} */ 
     // A DOM/cache-based check after a swallowed failure sees the stale
     // tree and preserves a folder that just went missing, then reloads
     // its now-unavailable scope into an empty grid — the advanced navbar
-    // snapshot means later polls see no transition to repair it
-    // (Codex review r3687062925).
+    // snapshot means later polls see no transition to repair it.
     return null;
   }
 }
@@ -216,8 +214,8 @@ function folderLocalStatuses(/** @type {BrowseFolder[]} */ folders, /** @type {R
         // return (unmounted, never staged) has nothing local to badge.
         // Synthesizing a phantom here would restore every such root as
         // a clickable zero-count folder with no local-status badge,
-        // effectively resurrecting missing remote folders in Browse
-        // (Codex review r3792082330). Skip it entirely.
+        // effectively resurrecting missing remote folders in Browse.
+        // Skip it entirely.
         return;
       } else {
         // A top-level workspace root that has gone missing has no
@@ -225,18 +223,16 @@ function folderLocalStatuses(/** @type {BrowseFolder[]} */ folders, /** @type {R
         // entry the recovery state disappears entirely — the user loses
         // the only signal that their local copy needs attention. Emit a
         // phantom top-level row so renderFolderTree can inject a
-        // ``.tree-item`` that carries the LOCAL ISSUE / SYNCING badge
-        // (Codex review r3792031813).
+        // ``.tree-item`` that carries the LOCAL ISSUE / SYNCING badge.
         if (!syntheticIds[requestedId]) {
           syntheticIds[requestedId] = true;
           var syntheticName = String(item.folder_name || '').trim() ||
             'Missing local folder';
           // Seed the synthesized row with the root's real workspace photo
-          // count from workspace_status(). Hard-coding 0 made the only
+          // count from workspace_status(). Hard-coding 0 would make the only
           // visible entry for a top-level missing local root read as an
           // empty folder even when the recovery session covers hundreds of
-          // photos, which mis-cues users toward discarding it (Codex review
-          // r3792132683).
+          // photos, which mis-cues users toward discarding it.
           var syntheticCount = Number(item.workspace_photo_count || 0);
           var syntheticRow = {path: '',
             id: requestedId,
@@ -316,7 +312,7 @@ function folderLocalStatuses(/** @type {BrowseFolder[]} */ folders, /** @type {R
     // Fallback anchors represent a hidden subtree that could not be
     // shown. Propagating the anchor's status through unrelated visible
     // siblings would mislabel healthy remote folders as LOCAL ISSUE /
-    // SYNCING / REMOVING (Codex review r3792031821).
+    // SYNCING / REMOVING.
     if (status && status.fallback) return;
     (byParent[folderId] || []).forEach(function(child) {
       markDescendants(Number(child.id), status);
@@ -417,7 +413,7 @@ function refreshFolderLocalStatusIndicators() {
   // needed phantom would look identical to a stale one left behind after
   // a recovery discard. Rebuild the input so ``synthetic`` reliably
   // enumerates exactly the phantoms the current local-folder state
-  // requires (Codex review r3792082333).
+  // requires.
   var realFolders = state.browseFolderRows.filter(function(f) {
     return !f.__synthetic_missing_local;
   });
@@ -449,7 +445,7 @@ function refreshFolderLocalStatusIndicators() {
   // session and the real folder returns to ``/api/folders``. Re-fetch
   // so the restored row and photo count replace the zero-count
   // ``status: 'missing'`` shell instead of leaving Browse with an
-  // orphaned clickable phantom (Codex review r3792082333).
+  // orphaned clickable phantom.
   if (stalePhantomPresent && typeof loadFolders === 'function') {
     loadFolders();
     return;
@@ -509,8 +505,8 @@ export function filterByFolder(/** @type {number} */ folderId) {
   // refreshActiveCollectionAfterMembershipChange, which sees
   // openedCollectionId still set and calls filterByCollection() —
   // filterByCollection clears activeFolderId, unexpectedly replacing
-  // the user's folder-scoped view with the original collection
-  // (Codex review r3622204141). filterByKeyword goes through
+  // the user's folder-scoped view with the original collection.
+  // filterByKeyword goes through
   // VireoFilter.addRule → onChange → the openedCollectionId clear at
   // browse init, but filterByFolder's reloadBrowseResults() path
   // bypasses VireoFilter, so clear it explicitly here.
