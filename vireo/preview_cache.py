@@ -734,7 +734,7 @@ def purge_cached_files_for_recycled_id(
     used to own that row.
 
     Delete paths are supposed to unlink these files, but the surface
-    area is wide — ``FolderRepository.merge_into_existing``,
+    area is wide — ``folder_merges.merge_into_existing``,
     ``scanner._pair_raw_jpeg_companions``, ``audit.remove_orphans`` and
     other raw-SQL drops each need to remember every id-keyed derivative
     family, and any unlink that fails leaves an orphan behind. Rather

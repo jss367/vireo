@@ -1386,7 +1386,7 @@ def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
     if os.path.exists(new_subdir):
         # Target already exists — this is the merge case (e.g.
         # `/api/folders/<id>/relocate` routing through
-        # `db.folders.merge_into_existing`). Move individual files into the
+        # `folder_merges.merge_into_existing`). Move individual files into the
         # target so reassigned photos still resolve to their developed
         # render instead of being stranded under the old key. On
         # filename collision the target wins, matching the DB merge's
