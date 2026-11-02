@@ -469,8 +469,7 @@ def test_offline_original_delete_without_commit_stays_in_the_callers_transaction
     p1 = _photo(db, "a.jpg")
     db.caches.offline_original_upsert(**_offline_args(p1))
     db.commit()
-    with db.transaction():
-        db.begin_immediate()
+    with db.transaction(immediate=True):
         assert db.caches.offline_original_delete(p1) is None
         # Still inside the writer-locked transaction, and nothing committed.
         assert db.conn.in_transaction
@@ -779,7 +778,6 @@ def test_caches_is_a_fresh_repository_on_the_connection_per_access(db):
     assert first is not second
     assert first.conn is db.conn
     assert first.execute_with_retry is db_module.execute_with_retry
-    assert first.commit_with_retry is db_module.commit_with_retry
 
 
 def test_caches_accessor_picks_up_a_retry_helper_patched_after_an_earlier_access(db, monkeypatch):

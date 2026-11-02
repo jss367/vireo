@@ -31,7 +31,7 @@ callback.
 """
 
 import sqlite3
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any
 
 # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
@@ -138,15 +138,11 @@ class ModelRunsRepository:
         conn: sqlite3.Connection,
         *,
         auto_match_review_marker: str,
-        commit_with_retry: Callable[[sqlite3.Connection], None],
     ) -> None:
         self.conn = conn
         # ``prediction_review.individual`` value of reproducible auto-created
         # taxonomy-match reviews, which never pin a run.
         self.auto_match_review_marker = auto_match_review_marker
-        # ``db.commit_with_retry``, passed in so repositories import no
-        # ``db`` code and a monkeypatch of the module function still applies.
-        self.commit_with_retry = commit_with_retry
 
     def record_detector_run(
         self,

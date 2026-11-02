@@ -912,26 +912,32 @@ def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
 
     def racing_add_photo(self, *args, **kwargs):
         if not raced_photo_ids and kwargs.get("filename") == "heron.jpg":
-            # Simulate a concurrent writer: insert the row AND populate a
-            # collection with its id before our INSERT OR IGNORE fires.
-            cur = self.conn.execute(
-                "INSERT INTO photos (folder_id, filename, extension,"
-                " file_size, file_mtime)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (kwargs["folder_id"], kwargs["filename"],
-                 kwargs.get("extension", ".jpg"),
-                 kwargs.get("file_size", 0),
-                 kwargs.get("file_mtime", 0.0)),
-            )
-            self.conn.commit()
-            raced_photo_ids.append(cur.lastrowid)
-            self.collections.add(
-                "Concurrent",
-                json.dumps(
-                    [{"field": "photo_ids", "value": [cur.lastrowid]}],
-                ),
-            )
-            self.commit()
+            # Simulate a concurrent writer on its own connection: insert the
+            # row AND populate a collection with its id, committed before our
+            # INSERT OR IGNORE fires.
+            other = Database(self._db_path)
+            try:
+                other.set_active_workspace(self.active_workspace_id)
+                with other.transaction():
+                    cur = other.conn.execute(
+                        "INSERT INTO photos (folder_id, filename, extension,"
+                        " file_size, file_mtime)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (kwargs["folder_id"], kwargs["filename"],
+                         kwargs.get("extension", ".jpg"),
+                         kwargs.get("file_size", 0),
+                         kwargs.get("file_mtime", 0.0)),
+                    )
+                raced_photo_ids.append(cur.lastrowid)
+                with other.transaction():
+                    other.collections.add(
+                        "Concurrent",
+                        json.dumps(
+                            [{"field": "photo_ids", "value": [cur.lastrowid]}],
+                        ),
+                    )
+            finally:
+                other.close()
         return real_add_photo(self, *args, **kwargs)
 
     monkeypatch.setattr(photo_ingest, "add_photo", racing_add_photo)

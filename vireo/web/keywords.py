@@ -236,7 +236,6 @@ def _queue_location_path_changes(
                     "effective",
                     workspace_id=row["workspace_id"],
                 )
-            db.commit()
 
 
 def create_keywords_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:

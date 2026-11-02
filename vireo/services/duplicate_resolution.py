@@ -79,14 +79,14 @@ def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int] | None) ->
     if db.in_transaction:
         return deferred
     preflight = repo.resolution_preflight(ids)
-    db.begin_immediate()
-    with db.transaction():
+    # The plan is read under the writer lock and applied in the same unit; a
+    # plan that refuses has written nothing, so leaving the unit commits
+    # nothing.
+    with db.transaction(immediate=True):
         plan = repo.resolution_plan(ids, preflight=preflight)
         if plan is None:
-            db.rollback()
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
         if plan is DEFERRED_PLAN:
-            db.rollback()
             return deferred
         winner_id, loser_ids = cast("tuple[int, list[int]]", plan)
         db._apply_winner_loser_merge(winner_id, loser_ids)
@@ -120,21 +120,15 @@ def keep_duplicate_copy(db: Database, photo_id: int) -> JsonDict:
     reason = repo.keep_copy_refusal(photo_id)
     if reason is not None:
         return {"error": reason}
-    db.begin_immediate()
-    try:
+    with db.transaction(immediate=True):
         found, reason = repo.keep_copy_plan(photo_id)
         if reason is not None:
-            db.rollback()
+            # Refused before any write.
             return {"error": reason}
         plan = cast("JsonDict", found)
-        # Commits the transaction opened above.
         db._apply_winner_loser_merge(
             photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"], manual_review=True,
         )
-    except BaseException:
-        if db.in_transaction:
-            db.rollback()
-        raise
     return {
         "file_hash": plan["file_hash"],
         "winner_id": photo_id,
@@ -183,18 +177,18 @@ def bulk_resolve_by_folder(
     skipped: list[JsonDict] = []
     for file_hash in file_hashes:
         preflight = repo.keep_folder_preflight(file_hash, keep_folder_norm)
-        # Disk work precedes BEGIN; catalog revalidation and the merge share
-        # the writer lock. A failed nested BEGIN leaves caller work intact.
-        db.begin_immediate()
-        with db.transaction():
+        # Disk work precedes the unit; catalog revalidation and the merge
+        # share the writer lock. A hash whose plan refuses has written
+        # nothing, so its unit commits nothing.
+        with db.transaction(immediate=True):
             winner_id, loser_ids, reason = repo.keep_folder_plan(
                 file_hash, keep_folder_norm, preflight=preflight,
             )
-            if reason is not None:
-                db.rollback()
-                skipped.append({"file_hash": file_hash, "reason": reason})
-                continue
-            db._apply_winner_loser_merge(winner_id, loser_ids, manual_review=True)
+            if reason is None:
+                db._apply_winner_loser_merge(winner_id, loser_ids, manual_review=True)
+        if reason is not None:
+            skipped.append({"file_hash": file_hash, "reason": reason})
+            continue
         resolved.append({
             "file_hash": file_hash,
             "winner_id": winner_id,

@@ -25,11 +25,9 @@ class CachesRepository:
         conn: sqlite3.Connection,
         *,
         execute_with_retry: Callable[..., sqlite3.Cursor],
-        commit_with_retry: Callable[[sqlite3.Connection], None],
     ) -> None:
         self.conn = conn
         self.execute_with_retry = execute_with_retry
-        self.commit_with_retry = commit_with_retry
 
     # -- preview_cache LRU ---------------------------------------------------
 

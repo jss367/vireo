@@ -13,16 +13,12 @@ machinery so ``db.py`` keeps only the façade method:
   savepoint: released when its block exits, rolled back to when it raises
   (and the exception propagates), so a caller that catches an inner failure
   and carries on keeps none of the failed inner unit.
-- ``HoldingConnection`` is the connection class every ``Database`` opens. It
-  exists only for the migration: while a unit is open, a data method that
-  still commits on its own (``self.conn.commit()``) is held to a no-op and
-  sqlite3's committing ``with conn:`` block becomes a savepoint, so wrapping a
-  caller in a unit never splits it even before its callees stop committing.
-  A data method that still rolls back on its own ends the unit's transaction
-  part-way; the connection records that, and the unit raises
-  ``TransactionOwnershipError`` at its exit instead of committing whatever
-  was written after the rollback. The class is deleted when no data method
-  commits or rolls back (``test_transaction_ownership.py`` reaches zero).
+- ``GuardedConnection`` is the connection class every ``Database`` opens.
+  While a unit is open on it, ``commit()``, ``rollback()`` and sqlite3's
+  committing ``with conn:`` block raise ``TransactionOwnershipError``: only
+  the unit that owns the transaction ends it, so a callee that tried to
+  commit or roll back its caller's work fails loudly instead of splitting the
+  unit (``test_transaction_ownership.py`` keeps data methods from trying).
 """
 
 from __future__ import annotations
@@ -32,11 +28,10 @@ import dataclasses
 import logging
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from types import TracebackType
 
 log = logging.getLogger(__name__)
 
@@ -98,10 +93,6 @@ def _release(conn: sqlite3.Connection, name: str) -> None:
     try:
         conn.execute(f"RELEASE {name}")
     except sqlite3.OperationalError:
-        if getattr(conn, "doomed_at", None) is not None:
-            # A legacy rollback already discarded the savepoint with the
-            # whole transaction; the outermost unit reports it.
-            return
         raise TransactionOwnershipError(
             f"Savepoint {name} was ended before its block finished: "
             "something committed the unit of work's transaction early."
@@ -109,72 +100,42 @@ def _release(conn: sqlite3.Connection, name: str) -> None:
 
 
 def _roll_back_to(conn: sqlite3.Connection, name: str) -> None:
-    # Gone if a legacy rollback ended the transaction; the exception that is
-    # propagating already reports the failure.
+    # Gone if the transaction already ended (SQLite rolls a transaction back
+    # by itself after some errors); the propagating exception reports it.
     with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(f"ROLLBACK TO {name}")
         conn.execute(f"RELEASE {name}")
 
 
-class HoldingConnection(sqlite3.Connection):
-    """``sqlite3.Connection`` that defers to an open unit of work.
+class GuardedConnection(sqlite3.Connection):
+    """``sqlite3.Connection`` that refuses to end an open unit's transaction.
 
-    ``commit_holds`` counts the units open on this connection. While it is
-    nonzero ``commit()`` is a no-op, ``with conn:`` is a savepoint, and
-    ``rollback()`` records ``doomed_at``, the connection's ``total_changes``
-    at that moment, so the outermost unit refuses to commit anything written
-    after it.
+    ``units`` is the ``UnitOfWork`` of the ``Database`` that opened the
+    connection. While it has a unit open, ``commit()``, ``rollback()`` and
+    ``with conn:`` raise ``TransactionOwnershipError``; the unit commits or
+    rolls back itself after closing, when none is open.
     """
 
-    commit_holds = 0
-    doomed_at: int | None = None
-    # The outermost open unit, set while it holds this connection, so a
-    # legacy ``with conn:`` savepoint owns ``after_commit`` callbacks the
-    # way a nested unit does.
-    unit: UnitOfWork | None = None
+    units: UnitOfWork | None = None
+
+    def _refuse_inside_a_unit(self, action: str) -> None:
+        if self.units is not None and self.units.depth:
+            raise TransactionOwnershipError(
+                f"{action} inside a unit of work: the unit that owns the "
+                "transaction commits or rolls it back when its block exits."
+            )
 
     def commit(self) -> None:
-        if self.commit_holds:
-            return
+        self._refuse_inside_a_unit("commit()")
         super().commit()
 
     def rollback(self) -> None:
-        if self.commit_holds and self.doomed_at is None:
-            self.doomed_at = self.total_changes
+        self._refuse_inside_a_unit("rollback()")
         super().rollback()
 
-    def __enter__(self) -> HoldingConnection:
-        savepoints: list[str | None] = self.__dict__.setdefault("_with_savepoints", [])
-        if self.commit_holds:
-            if not self.in_transaction:
-                # A SAVEPOINT outside a transaction would begin one that its
-                # RELEASE commits; the unit's owner commits instead.
-                _begin_immediate(self, retry_busy=False)
-            name = f"uow_with_{len(savepoints)}"
-            self.execute(f"SAVEPOINT {name}")
-            savepoints.append(name)
-            if self.unit is not None:
-                self.unit.push_frame()
-        else:
-            savepoints.append(None)
+    def __enter__(self) -> GuardedConnection:
+        self._refuse_inside_a_unit("with conn:")
         return super().__enter__()
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> Literal[False]:
-        name = self.__dict__["_with_savepoints"].pop()
-        if name is None:
-            return super().__exit__(exc_type, exc, tb)
-        if self.unit is not None:
-            self.unit.pop_frame(keep=exc_type is None)
-        if exc_type is None:
-            _release(self, name)
-        else:
-            _roll_back_to(self, name)
-        return False
 
 
 def _roll_back_after_failure(conn: sqlite3.Connection) -> None:
@@ -216,11 +177,6 @@ class InOwnUnit:
             self.callback()
 
 
-def _hold(conn: sqlite3.Connection, delta: int) -> None:
-    if isinstance(conn, HoldingConnection):
-        conn.commit_holds += delta
-
-
 class UnitOfWork:
     """The units of work open on one connection."""
 
@@ -244,15 +200,37 @@ class UnitOfWork:
             return self._joined(conn)
         return self._outermost(conn, immediate=immediate, retry_busy=retry_busy)
 
-    def push_frame(self) -> None:
-        """Open a callback frame for a savepoint inside the open unit."""
-        self._callbacks.append([])
+    def hold_writer_lock(self, conn: sqlite3.Connection) -> None:
+        """Take SQLite's writer lock now for the open unit, if it has not yet.
 
-    def pop_frame(self, *, keep: bool) -> None:
-        """Close a savepoint's frame: hand its callbacks up, or drop them."""
-        inner = self._callbacks.pop()
-        if keep:
-            self._callbacks[-1].extend(inner)
+        A unit that has written already holds it, and so does a transaction
+        its caller began outside any unit (``begin_immediate()``), which this
+        leaves alone. Raises ``TransactionOwnershipError`` when neither is
+        open: the lock would begin a transaction nobody owns.
+        """
+        if self._owner_needs_begin(conn, "hold_writer_lock()"):
+            _begin_immediate(conn, retry_busy=self._retry_busy)
+
+    def hold_read_snapshot(self, conn: sqlite3.Connection) -> None:
+        """Begin the open unit's transaction now (deferred), if it has not yet.
+
+        The reads that follow share one snapshot, and no lock is taken until
+        the first of them. A transaction already open is left alone; raises
+        ``TransactionOwnershipError`` when neither a unit nor a transaction
+        is open.
+        """
+        if self._owner_needs_begin(conn, "hold_read_snapshot()"):
+            conn.execute("BEGIN")
+
+    def _owner_needs_begin(self, conn: sqlite3.Connection, action: str) -> bool:
+        if conn.in_transaction:
+            return False
+        if not self.depth:
+            raise TransactionOwnershipError(
+                f"{action} outside a unit of work: the transaction it begins "
+                "would have no owner; open a unit with transaction() first."
+            )
+        return True
 
     @property
     def joined(self) -> bool:
@@ -291,40 +269,21 @@ class UnitOfWork:
         if immediate:
             # Raises, as ``BEGIN`` does, if a transaction is already open.
             _begin_immediate(conn, retry_busy=retry_busy)
-        # Otherwise an open transaction here is one an unconverted caller
-        # began (a legacy ``begin_immediate()`` or a ``_commit=False`` write):
-        # the unit adopts it, as ``with conn:`` always did. A migration rule.
-        if isinstance(conn, HoldingConnection):
-            conn.doomed_at = None
-            conn.unit = self
+        # Otherwise an open transaction here is one a caller began outside
+        # any unit (``begin_immediate()``, or a write with no unit around
+        # it): the unit adopts it, as ``with conn:`` does.
         self.depth = 1
         self._retry_busy = retry_busy
         self._callbacks = [[]]
-        _hold(conn, 1)
         finished = False
         try:
             yield
             finished = True
         finally:
             callbacks = self._callbacks[0]
-            doomed_at = getattr(conn, "doomed_at", None)
-            self._leave(conn)
+            self._leave()
             if not finished:
                 _roll_back_after_failure(conn)
-        if doomed_at is not None:
-            # An unconverted data method rolled the unit back part-way. If
-            # nothing was written since, the unit simply ends rolled back, as
-            # it always did; committing writes made after it would keep half
-            # a unit, so those are refused.
-            wrote_after = conn.total_changes > doomed_at
-            if conn.in_transaction:
-                conn.rollback()
-            if wrote_after:
-                raise TransactionOwnershipError(
-                    "A data method rolled back this unit of work's transaction "
-                    "part-way; nothing the unit wrote was kept."
-                )
-            return
         committed = False
         try:
             _commit(conn)
@@ -345,32 +304,25 @@ class UnitOfWork:
         check ``owns_transaction`` and run it after the join block, when they
         also own the commit. A migration rule only, like adoption.
         """
-        if isinstance(conn, HoldingConnection):
-            conn.doomed_at = None
-            conn.unit = self
         self.depth = 1
         self._retry_busy = False
         self._in_joined = True
         self._callbacks = [[]]
-        _hold(conn, 1)
         conn.execute("SAVEPOINT uow_join")
         finished = False
         try:
             yield
             finished = True
         finally:
-            self._leave(conn)
+            self._leave()
             if not finished:
                 _roll_back_to(conn, "uow_join")
         _release(conn, "uow_join")
 
-    def _leave(self, conn: sqlite3.Connection) -> None:
+    def _leave(self) -> None:
         self.depth = 0
         self._in_joined = False
         self._callbacks = []
-        if isinstance(conn, HoldingConnection):
-            conn.unit = None
-        _hold(conn, -1)
 
     @contextlib.contextmanager
     def _nested(self, conn: sqlite3.Connection, *, retry_busy: bool) -> Iterator[None]:
@@ -382,14 +334,17 @@ class UnitOfWork:
         self.depth += 1
         name = f"uow_{self.depth}"
         conn.execute(f"SAVEPOINT {name}")
-        self.push_frame()
+        self._callbacks.append([])
         finished = False
         try:
             yield
             finished = True
         finally:
             self.depth -= 1
-            self.pop_frame(keep=finished)
+            # Hand the savepoint's callbacks to its owner, or drop them.
+            inner = self._callbacks.pop()
+            if finished:
+                self._callbacks[-1].extend(inner)
             if not finished:
                 _roll_back_to(conn, name)
         _release(conn, name)

@@ -2,8 +2,8 @@
 
 See ``docs/plans/2026-10-25-unit-of-work-design.md``. Each rule below is one
 the migration relies on: an owner's block is one transaction, nested blocks
-are savepoints, data methods that still commit or roll back on their own
-cannot split or half-commit a unit, and follow-up work waits for the commit.
+are savepoints, nothing but the unit can commit or roll back its
+transaction, and follow-up work waits for the commit.
 """
 
 import contextlib
@@ -128,75 +128,68 @@ def test_an_inner_exception_that_propagates_rolls_back_the_whole_unit(db):
     assert _committed(db) == []
 
 
-def test_a_legacy_commit_inside_a_unit_is_held(db):
+@pytest.mark.parametrize("end", [
+    lambda db: db.conn.commit(),
+    lambda db: db.commit(),
+    lambda db: db.commit_with_retry(),
+    lambda db: db.conn.rollback(),
+    lambda db: db.rollback(),
+    lambda db: db.begin_immediate(),
+    lambda db: db.begin(),
+], ids=["conn.commit", "commit", "commit_with_retry", "conn.rollback", "rollback",
+        "begin_immediate", "begin"])
+def test_ending_or_beginning_a_transaction_inside_a_unit_raises(db, end):
+    # Only the unit that owns the transaction ends it. A callee that tries is
+    # refused before it acts, so the unit keeps what it wrote and fails whole.
+    with pytest.raises(TransactionOwnershipError), db.transaction():
+        _write(db, "a")
+        with db.transaction():
+            end(db)
+    assert not db.in_transaction
+    assert _committed(db) == []
+
+
+def test_a_caught_refusal_leaves_the_unit_intact(db):
     with db.transaction():
         _write(db, "a")
-        db.conn.commit()
-        db.commit()
-        db.commit_with_retry()
-        assert db.in_transaction
+        with pytest.raises(TransactionOwnershipError):
+            db.commit()
+        _write(db, "b")
         assert _committed(db) == []
-    assert _committed(db) == ["a"]
+    assert _committed(db) == ["a", "b"]
 
 
-def test_a_legacy_with_conn_block_inside_a_unit_is_a_savepoint(db):
-    with db.transaction():
+def test_with_conn_inside_a_unit_raises(db):
+    with pytest.raises(TransactionOwnershipError), db.transaction():
         _write(db, "outer")
-        with pytest.raises(RuntimeError), db.conn:
-            _write(db, "inner")
-            raise RuntimeError("boom")
         with db.conn:
-            _write(db, "kept")
-        assert _committed(db) == []
-    assert _committed(db) == ["kept", "outer"]
+            _write(db, "inner")
+    assert _committed(db) == []
 
 
-def test_with_conn_outside_a_unit_still_commits(db):
+def test_commit_and_with_conn_outside_a_unit_still_work(db):
     with db.conn:
         _write(db, "a")
-    assert _committed(db) == ["a"]
+    _write(db, "b")
+    db.commit()
+    assert _committed(db) == ["a", "b"]
 
 
-def test_a_legacy_rollback_dooms_the_unit(db):
-    # Today's ``except: self.conn.rollback(); raise`` in a data method, with a
-    # caller that swallows the error: the unit's earlier writes are gone, so
-    # it must not commit the writes made after them.
-    with pytest.raises(TransactionOwnershipError), db.transaction():
-        _write(db, "before")
-        with contextlib.suppress(ValueError):
-            try:
-                _write(db, "failing")
-                raise ValueError("data method failure")
-            except ValueError:
-                db.conn.rollback()
-                raise
-        _write(db, "after")
+def test_hold_writer_lock_takes_the_lock_for_the_open_unit(db):
+    other = sqlite3.connect(db._db_path, timeout=0)
+    try:
         with db.transaction():
-            _write(db, "nested-after")
+            db.hold_writer_lock()
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("BEGIN IMMEDIATE")
+            _write(db, "a")
+            db.hold_writer_lock()
+    finally:
+        other.close()
+    assert _committed(db) == ["a"]
+    with pytest.raises(TransactionOwnershipError):
+        db.hold_writer_lock()
     assert not db.in_transaction
-    assert _committed(db) == []
-    # The next unit starts clean.
-    with db.transaction():
-        _write(db, "next")
-    assert _committed(db) == ["next"]
-
-
-def test_a_legacy_rollback_with_nothing_written_after_ends_the_unit(db):
-    # ``db.rollback(); return`` inside a unit (a refused plan): the unit ends
-    # rolled back, as it always did, without an ownership error.
-    with db.transaction():
-        _write(db, "refused")
-        db.rollback()
-    assert not db.in_transaction
-    assert _committed(db) == []
-
-
-def test_a_doomed_unit_reports_the_propagating_error_instead(db):
-    with pytest.raises(ValueError, match="original"), db.transaction():
-        _write(db, "a")
-        db.rollback()
-        raise ValueError("original")
-    assert _committed(db) == []
 
 
 def test_after_commit_runs_once_the_unit_is_durable(db):
@@ -289,27 +282,6 @@ def test_closing_over_an_open_transaction_is_reported(tmp_path, monkeypatch):
     database.close()
     assert len(reported) == 1
 
-
-
-def test_after_commit_follows_a_legacy_with_conn_savepoint(db):
-    # A legacy ``with conn:`` inside a unit is a savepoint, so callbacks
-    # registered in it share its fate, including from a unit nested in it.
-    seen = []
-    with db.transaction():
-        db.after_commit(lambda: seen.append("outer"))
-        with pytest.raises(RuntimeError), db.conn:
-            _write(db, "failed")
-            db.after_commit(lambda: seen.append("failed legacy block"))
-            with db.transaction():
-                db.after_commit(lambda: seen.append("nested in failed block"))
-            raise RuntimeError("boom")
-        with db.conn:
-            _write(db, "kept")
-            with db.transaction():
-                db.after_commit(lambda: seen.append("nested in kept block"))
-            db.after_commit(lambda: seen.append("kept legacy block"))
-    assert _committed(db) == ["kept"]
-    assert seen == ["outer", "nested in kept block", "kept legacy block"]
 
 
 def test_a_refused_immediate_unit_leaves_the_callers_snapshot(db):

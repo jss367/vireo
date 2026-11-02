@@ -386,7 +386,9 @@ def test_companion_boundary_does_not_commit_a_failed_read_as_imported():
     assert failures == [(str(_MemorySidecar()), "photo.jpg", "invented unreadable reason")]
     inaccessible[0] = False
     companion(owner, image_path, {"owner_id": 731})
-    assert first_commits == [] and commits == ["commit"]
+    # The import never commits: the caller's unit (``finish_known_companion``
+    # or the attach) owns that, so a failed read cannot be committed either.
+    assert first_commits == [] and commits == []
     assert len(failures) == 1
     assert imported == [({"Paris"}, [])]
 

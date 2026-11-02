@@ -2,7 +2,6 @@
  "upward_edges": [
   "db -> services",
   "db -> services.identity_alternatives",
-  "db -> services.pending_changes",
   "repositories.duplicates -> volume_reachability",
   "repositories.sync -> sidecar_identity",
   "schema -> file_replace",

@@ -41,7 +41,8 @@ CONNECTION_LIFECYCLE = {
     # names:
     # Reports whether the connection has a transaction open.
     "in_transaction",
-    # Commits through HoldingConnection.commit, a no-op inside a unit of work.
+    # Commits the open transaction; refused inside a unit of work
+    # (``unit_of_work.GuardedConnection``).
     "commit",
     # Rolls the connection's open transaction back.
     "rollback",
@@ -170,10 +171,13 @@ def test_commit_rollback_and_in_transaction(db):
     assert _committed_markers(db) == 1
 
 
-def test_commit_is_a_no_op_inside_a_unit_of_work(db):
+def test_commit_is_refused_inside_a_unit_of_work(db):
+    from unit_of_work import TransactionOwnershipError
+
     with db.transaction():
         _write(db, "a")
-        db.commit()
+        with pytest.raises(TransactionOwnershipError):
+            db.commit()
         assert db.in_transaction
         assert _committed_markers(db) == 0
     assert not db.in_transaction
@@ -236,8 +240,7 @@ def test_commit_with_retry_commits_through_the_module_helper(db, monkeypatch):
 
 
 def test_transaction_commits_on_exit(db):
-    with db.transaction():
-        db.begin_immediate()
+    with db.transaction(immediate=True):
         _write(db, "a")
     assert not db.in_transaction
     assert _committed_markers(db) == 1
@@ -264,8 +267,7 @@ def test_commit_with_retry_retries_a_transient_lock(db, monkeypatch):
 
 
 def test_transaction_rolls_back_when_the_block_raises(db):
-    with pytest.raises(RuntimeError, match="boom"), db.transaction():
-        db.begin_immediate()
+    with pytest.raises(RuntimeError, match="boom"), db.transaction(immediate=True):
         _write(db, "a")
         raise RuntimeError("boom")
     assert not db.in_transaction

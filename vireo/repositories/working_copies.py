@@ -30,7 +30,7 @@ paths and the pipeline's thumbnail stage commit it themselves.
 """
 
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 # A candidate row as the extraction pass hands it back: the ``sqlite3.Row``
@@ -62,14 +62,8 @@ def row_identity_params(row: CandidateRow) -> tuple:
 
 
 class WorkingCopyRepository:
-    def __init__(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        commit_with_retry: Callable[[sqlite3.Connection], None],
-    ) -> None:
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
-        self.commit_with_retry = commit_with_retry
 
     # -- candidates ----------------------------------------------------------
 

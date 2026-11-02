@@ -1043,7 +1043,7 @@ def test_detector_runtime_fingerprints_are_distinct_per_chunk(db):
 
 def test_classifier_cache_run_filter_shapes():
     repo = ModelRunsRepository(
-        None, auto_match_review_marker="AUTO", commit_with_retry=lambda conn: None,
+        None, auto_match_review_marker="AUTO",
     )
     filter_sql, filter_args, runtime_clause, runtime_args = (
         repo.classifier_cache_run_filter(None, None, set(), True)
@@ -1208,15 +1208,13 @@ def _self_attrs(fn_obj):
 def test_model_runs_is_a_fresh_repository_on_the_connection_per_access(db):
     """``db.model_runs`` builds a new repository each time, never a cached one.
 
-    Every model-run table is catalog-wide, so it needs no workspace, and it
-    carries the module's ``commit_with_retry`` as it is at access time.
+    Every model-run table is catalog-wide, so it needs no workspace.
     """
     first, second = db.model_runs, db.model_runs
     assert isinstance(first, ModelRunsRepository)
     assert first is not second
     assert first.conn is db.conn
     assert first.auto_match_review_marker == AUTO_MATCH_REVIEW_MARKER
-    assert first.commit_with_retry is db_module.commit_with_retry
     db.set_active_workspace(None)
     assert db.model_runs.get_global_detection_stats() == {"photo_count": 0, "model_count": 0}
 

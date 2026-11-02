@@ -212,13 +212,20 @@ def test_cleanup_preserves_masks_owned_by_recycled_companion_id(catalog, monkeyp
     original = companions._run_post_commit_fs_actions
 
     def recycle_before_cleanup(actions):
-        photo_id = photo_ingest.add_photo(
-            catalog.db, folder_id=catalog.folder_id, filename="new.jpg",
-            extension=".jpg", file_size=100, file_mtime=1.0,
-        )
-        assert photo_id == catalog.jpeg
-        catalog.db.set_photo_edit_recipe(photo_id, catalog.recipes[-1])
-        catalog.db.commit()
+        # A concurrent writer, on its own connection, reuses the deleted
+        # companion's id after the pairing committed and before cleanup.
+        other = Database(catalog.db._db_path)
+        try:
+            other.set_active_workspace(catalog.db.active_workspace_id)
+            photo_id = photo_ingest.add_photo(
+                other, folder_id=catalog.folder_id, filename="new.jpg",
+                extension=".jpg", file_size=100, file_mtime=1.0,
+            )
+            assert photo_id == catalog.jpeg
+            with other.transaction():
+                other.set_photo_edit_recipe(photo_id, catalog.recipes[-1])
+        finally:
+            other.close()
         original(actions)
 
     monkeypatch.setattr(companions, "_run_post_commit_fs_actions", recycle_before_cleanup)

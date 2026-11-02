@@ -112,14 +112,19 @@ that information for interactive use.
   (`_active_workspace_id`, `_ws_id()`) outside `db.py` and the repositories,
   and caps each module's remaining `<expr>.conn` uses at today's count, so
   that SQL can only move into repositories, never grow.
-  Transaction control goes through `Database` as well: `db.commit()`,
-  `db.rollback()`, `db.in_transaction`, `db.begin()` (a deferred `BEGIN`,
-  the read snapshot multi-query reads hold), `db.begin_immediate()` and
-  `with db.transaction():` (sqlite3's `with conn:`) are the connection calls
-  they name (`commit()` still honors `_commits_held`), and
-  `db.commit_with_retry()` commits with the locked/busy backoff of the
-  module's `commit_with_retry`, so a caller that owns a transaction never
-  needs `db.conn` for it. `db.set_progress_handler()` is the connection's
+  Transaction control goes through `Database` as well. `with
+  db.transaction():` is the unit of work, the one commit point for routes,
+  jobs and services (a savepoint when nested; see
+  `docs/plans/2026-10-25-unit-of-work-design.md`). Inside a unit,
+  `db.hold_writer_lock()` and `db.hold_read_snapshot()` begin its
+  transaction early, and `db.after_commit()` defers work until it is
+  durable. Outside any unit, `db.commit()`, `db.rollback()`, `db.begin()`
+  (a deferred `BEGIN`, the read snapshot multi-query reads hold),
+  `db.begin_immediate()` and `db.commit_with_retry()` (the module's
+  locked/busy backoff) are the connection calls they name; inside a unit
+  each of them, and a raw `conn.commit()`, raises
+  `TransactionOwnershipError`. A caller that owns a transaction never needs
+  `db.conn` for it. `db.set_progress_handler()` is the connection's
   progress-handler call, which installs the search-lane interrupt.
 - Workspace-local copy persistence lives in `repositories/local_workspaces.py`;
   folder-local copies and their shared catalog path updates live in

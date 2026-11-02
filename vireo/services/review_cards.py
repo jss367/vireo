@@ -4,8 +4,8 @@ The listing keeps its prediction rows for Browse and per-model filtering. A
 card_id links overlapping burst groups without changing stored group identity.
 The browser submits the visible members; decisions revalidate them under the
 existing writer lock, never expanding beyond the submitted selection.
-The caller holds legacy setters' commits until the complete decision and
-its history have succeeded, then commits the writer transaction once.
+The caller's decision unit commits the complete decision and its history
+once, or rolls all of it back.
 """
 
 from __future__ import annotations

@@ -1074,20 +1074,13 @@ def test_detection_function_delegates_to_repository(module, name):
 def test_detections_is_a_fresh_repository_on_the_connection_per_access(db, monkeypatch):
     """``db.detections`` builds a new repository each time, never a cached one.
 
-    It carries the module's ``commit_with_retry`` as read at the access, so a
-    patch of that helper reaches writes made through the accessor.
+    It never commits, so it carries no commit helper.
     """
     first, second = db.detections, db.detections
     assert isinstance(first, DetectionsRepository)
     assert first is not second
     assert first.conn is db.conn
-    assert first.commit_with_retry is db_module.commit_with_retry
-
-    def recording(conn, *args, **kwargs):
-        return None
-
-    monkeypatch.setattr(db_module, "commit_with_retry", recording)
-    assert db.detections.commit_with_retry is recording
+    assert not hasattr(first, "commit_with_retry")
 
 
 def test_detections_has_no_forwarding_wrappers_on_database():
@@ -1218,6 +1211,6 @@ def test_snapshot_excludes_only_requested_model_in_nullable_legacy_storage():
         conn.execute('CREATE TABLE detections(id INTEGER, photo_id INTEGER, detector_model TEXT)')
         conn.executemany('INSERT INTO detections VALUES (?, 1, ?)', [
             (1, None), (2, 'megadetector-v6'), (3, 'reviewer-selected')])
-        repo = DetectionsRepository(conn, commit_with_retry=lambda connection: connection.commit())
+        repo = DetectionsRepository(conn)
         assert repo.get_ids_for_photos([1]) == {1: {1, 2, 3}}
         assert repo.get_ids_for_photos([1], exclude_model='reviewer-selected') == {1: {1, 2}}

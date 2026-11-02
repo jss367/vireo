@@ -906,34 +906,26 @@ def record_known_mount_roots(db, baseline: dict[str, bool]) -> None:
     fresh = {root for root, live in baseline.items() if live}
     if not fresh:
         return
-    transaction_started = False
     try:
         # This helper has always committed at the end, so preserving pending
-        # caller DML is part of its existing contract. End an implicit legacy
-        # sqlite3 transaction before opening the explicit writer transaction.
-        if db.in_transaction:
+        # caller DML is part of its existing contract. Outside a unit of work,
+        # end an implicit legacy sqlite3 transaction before opening the
+        # writer transaction; inside one, the write is a savepoint of it and
+        # the unit's owner commits it.
+        if db.in_transaction and not db.in_unit_of_work:
             db.commit()
         # Acquire SQLite's writer reservation before reading the JSON value.
         # Concurrent Database connections then serialize the complete
         # read/merge/write sequence instead of both reading the same old set
         # and letting the later UPSERT discard the other's newly seen root.
-        db.begin_immediate()
-        transaction_started = True
-        existing = load_known_mount_roots(db)
-        merged = existing | fresh
-        if merged == existing:
-            db.commit()
-            return
-        db.meta.set(
-            KNOWN_MOUNT_ROOTS_KEY, json.dumps(sorted(merged)),
-        )
-        db.commit()
+        with db.transaction(immediate=True):
+            existing = load_known_mount_roots(db)
+            merged = existing | fresh
+            if merged != existing:
+                db.meta.set(
+                    KNOWN_MOUNT_ROOTS_KEY, json.dumps(sorted(merged)),
+                )
     except Exception:  # broad: persisting evidence is best-effort; the next run lacks it
-        if transaction_started:
-            try:
-                db.rollback()
-            except Exception:  # broad: must not replace the failure logged just below
-                log.debug("Rollback after a known-mount-roots write failed", exc_info=True)
         log.debug(
             "Could not persist known mount roots (%r); cold-start detached "
             "stub detection will lack that evidence next run.",

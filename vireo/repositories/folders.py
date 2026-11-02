@@ -40,7 +40,7 @@ class FolderMergeHooks:
 
 
 class FolderRepository:
-    def __init__(self, conn, resolve_workspace_id, *, commit_with_retry,
+    def __init__(self, conn, resolve_workspace_id, *,
                  path_for_subtree_match, stored_parent_path, subtree_prefix,
                  subtree_relative, join_subtree_path, chunk_size=800,
                  merge_hooks: FolderMergeHooks, keyword_source_conflict_sql):
@@ -48,9 +48,6 @@ class FolderRepository:
         # ``Database._ws_id``, uncalled: only the workspace-scoped reads
         # resolve it, so the catalog-wide methods work with no workspace set.
         self._resolve_workspace_id = resolve_workspace_id
-        # ``db.commit_with_retry``, passed in so repositories import no
-        # ``db`` code and a monkeypatch of the module function still applies.
-        self.commit_with_retry = commit_with_retry
         # ``db``'s pure path helpers: platform-neutral subtree matching
         # (``\`` folded to ``/``), the stored parent path, and rebasing a
         # descendant path from one subtree root onto another.

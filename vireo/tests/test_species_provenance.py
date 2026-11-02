@@ -581,13 +581,13 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
         for pid in (1, 2):
             db.tag_photo(pid, kid, provenance=old_evidence)
             db.commit()
-    save_alternatives(db, [1, 2], [candidate, other], 'Need calls', 'Audio')
-    db.commit()
+    with db.transaction():
+        save_alternatives(db, [1, 2], [candidate, other], 'Need calls', 'Audio')
     if direction == 'redo':
         undo_last_edit(db)
     else:
-        resolve_alternatives(db, [1, 2], candidate)
-        db.commit()
+        with db.transaction():
+            resolve_alternatives(db, [1, 2], candidate)
         db.tag_photo(1, kid, provenance=old_evidence)
         db.commit()
     if failure == 'stale':

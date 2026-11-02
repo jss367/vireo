@@ -60,7 +60,7 @@ PROVENANCE_NEUTRAL_WRITERS = {
 PROVENANCE_CARRYING_WRITERS = {
     ("db.py", "_carry_keyword_associations_for_merge"): "forwards the winning source association's existing stamp",
     ("services/identity_alternatives.py", "replay_identity_edit"): "identity history restores original candidate association stamps",
-    ("db.py", "_edit_set_photo_location"): "history restores the original location stamps",
+    ("db.py", "restore_photo_location_state"): "history restores the original location stamps",
     ("db.py", "_apply_winner_loser_merge"): "duplicate merge carries the losers' stamps",
 }
 

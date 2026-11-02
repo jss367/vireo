@@ -170,11 +170,12 @@ def test_recorded_action_literals_have_replay_or_explicit_exclusion():
     from pathlib import Path
 
     from db import Database
+    from services.edit_history import SERVICE_REPLAYED_ACTIONS
 
     assert set(Database._UNDO_HANDLERS) == set(Database._REDO_HANDLERS)
     supported = (
         set(Database._EDIT_FIELD_SETTERS) | set(Database._UNDO_HANDLERS)
-        | {'pipeline_grouping', 'species_confirm_cache', 'identity_alternatives'}
+        | SERVICE_REPLAYED_ACTIONS
         | set(Database._NON_UNDOABLE)
     )
     root = Path(__file__).parents[1]
