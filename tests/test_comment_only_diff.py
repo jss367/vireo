@@ -112,7 +112,7 @@ def test_javascript_shebang_changes_fail():
     assert checker.js_differs('#!/usr/bin/env node\nfoo();', '#!/usr/bin/env bun\nfoo();')
 
 
-@pytest.mark.parametrize('suffix', ['.py', '.js'])
+@pytest.mark.parametrize('suffix', ['.py', '.js', '.mjs', '.cjs'])
 @pytest.mark.parametrize('change', ['comment_added', 'comment_deleted', 'same_language_rename'])
 def test_comparable_file_changes_preserve_writer_behavior(tmp_path, monkeypatch, suffix, change):
     """Keep the resumed writer's explicit comparisons of both source sides."""
@@ -136,10 +136,10 @@ def test_comparable_file_changes_preserve_writer_behavior(tmp_path, monkeypatch,
     monkeypatch.setattr(checker, 'ROOT', tmp_path)
     # Node dependencies belong to the test checkout, not its inert Git fixture.
     original_js = checker._js
-    def fixture_js(src):
+    def fixture_js(src, source_type=None):
         with monkeypatch.context() as context:
             context.setattr(checker, 'ROOT', SCRIPT.parents[1])
-            return original_js(src)
+            return original_js(src, source_type)
     monkeypatch.setattr(checker, '_js', fixture_js)
     monkeypatch.setattr(sys, 'argv', [str(SCRIPT), '--base', 'HEAD'])
     assert checker.main() == 0
@@ -148,6 +148,10 @@ def test_comparable_file_changes_preserve_writer_behavior(tmp_path, monkeypatch,
 @pytest.mark.parametrize('old_name, new_name', [
     ('source.py', 'source.txt'), ('source.js', 'source.txt'),
     ('source.txt', 'source.py'), ('source.txt', 'source.js'),
+    ('source.mjs', 'source.txt'), ('source.txt', 'source.mjs'),
+    ('source.cjs', 'source.txt'), ('source.txt', 'source.cjs'),
+    ('source.mjs', 'source.cjs'), ('source.cjs', 'source.mjs'),
+    ('source.js', 'source.mjs'), ('source.mjs', 'source.js'),
 ])
 def test_rename_across_source_types_fails(tmp_path, monkeypatch, old_name, new_name):
     def git(*args):
@@ -214,3 +218,64 @@ def test_exported_lint_directive_survives_ordinary_prose_edits():
         '/* exported helper */\nfunction helper() {} // old',
         '/* exported helper */\nfunction helper() {} // clear',
     ) is None
+
+
+@pytest.mark.parametrize('suffix', ['.mjs', '.cjs'])
+@pytest.mark.parametrize('change', ['modified', 'added', 'deleted', 'untracked', 'renamed', 'comments'])
+def test_module_source_files_are_in_complete_git_scope(tmp_path, monkeypatch, suffix, change):
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git('init')
+    git('config', 'user.email', 'test@example.invalid')
+    git('config', 'user.name', 'Test')
+    code = 'export const value = 1;\n' if suffix == '.mjs' else 'module.exports = 1;\n'
+    source = tmp_path / ('source' + suffix)
+    source.write_text(code)
+    git('add', '.')
+    git('commit', '-m', 'fixture')
+    if change == 'modified':
+        source.write_text(code.replace('1', '2'))
+    elif change in {'added', 'untracked'}:
+        (tmp_path / ('new' + suffix)).write_text(code)
+        if change == 'added':
+            git('add', '.')
+    elif change == 'deleted':
+        source.unlink()
+    elif change == 'renamed':
+        git('mv', source.name, 'renamed' + suffix)
+        (tmp_path / ('renamed' + suffix)).write_text(code.replace('1', '2'))
+    else:
+        source.write_text('// ordinary prose\n' + code)
+    monkeypatch.setattr(checker, 'ROOT', tmp_path)
+    original_js = checker._js
+    def fixture_js(src, source_type=None):
+        with monkeypatch.context() as context:
+            context.setattr(checker, 'ROOT', SCRIPT.parents[1])
+            return original_js(src, source_type)
+    monkeypatch.setattr(checker, '_js', fixture_js)
+    monkeypatch.setattr(sys, 'argv', [str(SCRIPT), '--base', 'HEAD'])
+    assert checker.main() == (0 if change == 'comments' else 1)
+
+
+def test_module_mode_accepts_top_level_await():
+    assert checker.js_differs('await load();', '// note\nawait load();', 'module') is None
+
+
+def test_commonjs_mode_handles_wrapper_return():
+    assert checker.js_differs('return require("x");', '// note\nreturn require("x");', 'commonjs') is None
+    assert checker.js_differs('return 1;', 'return 2;', 'commonjs')
+
+
+@pytest.mark.parametrize('mode, source', [('module', 'return 1;'), ('commonjs', 'export const x = 1;')])
+def test_invalid_module_syntax_fails_closed(mode, source):
+    with pytest.raises(subprocess.CalledProcessError):
+        checker.js_differs(source, source, mode)
+
+
+def test_checker_parses_tracked_module_and_commonjs_corpus():
+    files = [rel for rel in checker._git('ls-files', '-z', '--', '*.mjs', '*.cjs').split('\0')
+             if rel and 'vendor' not in Path(rel).parts]
+    assert files
+    for rel in files:
+        mode = 'module' if rel.endswith('.mjs') else 'commonjs'
+        checker._js((SCRIPT.parents[1] / rel).read_text(encoding='utf-8'), mode)

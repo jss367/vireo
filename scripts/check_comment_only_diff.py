@@ -14,7 +14,10 @@ runtime equivalence or check filesystem metadata and module import effects.
 Compare the merge base with --base against the working tree. A/M/D/R source
 changes are compared against empty counterparts or across same-language
 rename paths. Untracked files, cross-language renames and unsupported source
-change kinds fail closed. JavaScript needs npm ci (acorn) in the repo root.
+change kinds fail closed. Supported suffixes are .py, .js, .mjs and .cjs:
+.mjs uses ES-module parsing, .cjs uses CommonJS parsing, and .js tries script
+then module. Invalid or unsupported syntax fails closed. Other file types
+are outside this comparison. JavaScript needs npm ci (acorn) in the repo root.
 """
 
 import argparse
@@ -29,6 +32,8 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+JS_SUFFIXES = {".js", ".mjs", ".cjs"}
+SOURCE_SUFFIXES = {".py", *JS_SUFFIXES}
 
 PY_PRAGMA = re.compile(
     r"#\s*(ruff:\s*noqa\b[^#]*|noqa\b[^#]*|type:\s*\S[^#]*|pyright:[^#]*|pragma\b[^#]*|fmt:\s*\w+|broad:[^#]*)",
@@ -76,7 +81,10 @@ const parse = (sourceType) => {
     comments: attached};
 };
 let result;
-try { result = parse('script'); } catch (e) { result = parse('module'); }
+const requested = process.argv[2];
+if (requested === 'auto') {
+  try { result = parse('script'); } catch (e) { result = parse('module'); }
+} else { result = parse(requested); }
 process.stdout.write(JSON.stringify(result));
 """
 
@@ -131,9 +139,9 @@ def python_differs(old: str, new: str) -> str | None:
     return None
 
 
-def _js(src: str) -> dict:
+def _js(src: str, source_type: str | None = None) -> dict:
     res = subprocess.run(
-        ["node", "-e", JS_TOKENS, str(ROOT)], input=src, capture_output=True, text=True, check=True
+        ["node", "-e", JS_TOKENS, str(ROOT), source_type or "auto"], input=src, capture_output=True, text=True, check=True
     )
     return json.loads(res.stdout)
 
@@ -157,10 +165,10 @@ def _js_shebang(src: str) -> str:
     return src.splitlines()[0] if src.startswith("#!") else ""
 
 
-def js_differs(old: str, new: str) -> str | None:
+def js_differs(old: str, new: str, source_type: str | None = None) -> str | None:
     if _js_shebang(old) != _js_shebang(new):
         return f"shebang changed: {_js_shebang(old)!r} -> {_js_shebang(new)!r}"
-    before, after = _js(old), _js(new)
+    before, after = _js(old, source_type), _js(new, source_type)
     if (before["tokens"] != after["tokens"] or before["syntax"] != after["syntax"]):
         return "code (parsed JavaScript syntax) changed"
     if _js_load_bearing(before["comments"]) != _js_load_bearing(after["comments"]):
@@ -173,7 +181,7 @@ def _git(*args: str) -> str:
 
 
 def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
-    """``(label, old_path, new_path, suffix)`` for every A/M/D/R .py/.js file.
+    """``(label, old_path, new_path, suffix)`` for every A/M/D/R supported source file.
 
     Unsupported or untracked entries carry a non-source suffix so
     ``main()`` can fail on them; the labels for added, deleted and renamed
@@ -199,7 +207,7 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
         else:
             label = old_path
         old_suffix, new_suffix = Path(old_path).suffix, Path(new_path).suffix
-        if not ({old_suffix, new_suffix} & {".py", ".js"}):
+        if not ({old_suffix, new_suffix} & SOURCE_SUFFIXES):
             continue
         if status not in {"A", "M", "D", "R"}:
             out.append((label, "", "", status))
@@ -208,7 +216,7 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
         else:
             out.append((label, old_path, new_path, new_suffix or old_suffix))
     for path in _git("ls-files", "--others", "--exclude-standard", "-z").split("\0"):
-        if path.endswith((".py", ".js")):
+        if Path(path).suffix in SOURCE_SUFFIXES:
             out.append((path + " (untracked)", "", "", "untracked"))
     return out
 
@@ -223,19 +231,23 @@ def main() -> int:
     failed_labels: set[str] = set()
     for label, old_path, new_path, suffix in entries:
         labels.append(label)
-        if suffix not in {".py", ".js"}:
+        if suffix not in SOURCE_SUFFIXES:
             failures.append(f"{label}: unsupported change kind {suffix!r}")
             failed_labels.add(label)
             continue
         old = _git("show", f"{base}:{old_path}") if old_path else ""
         new = (ROOT / new_path).read_text(encoding="utf-8") if new_path else ""
-        reason = js_differs(old, new) if suffix == ".js" else python_differs(old, new)
+        if suffix in JS_SUFFIXES:
+            source_type = {".mjs": "module", ".cjs": "commonjs"}.get(suffix)
+            reason = js_differs(old, new, source_type)
+        else:
+            reason = python_differs(old, new)
         if reason:
             failures.append(f"{label}: {reason}")
             failed_labels.add(label)
     for label in labels:
         print(f"FAIL {label}" if label in failed_labels else f"ok   {label}")
-    print(f"{len(labels) - len(failures)}/{len(labels)} source changes are comment-only")
+    print(f"{len(labels) - len(failures)}/{len(labels)} supported Python/JavaScript source changes pass the scoped comparison")
     for failure in failures:
         print("  " + failure, file=sys.stderr)
     return 1 if failures else 0
