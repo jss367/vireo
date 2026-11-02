@@ -126,21 +126,13 @@ def create_audit_blueprint(
         return jsonify(orphans)
 
     def _audit_workspace_roots(db: Database) -> list[str]:
-        """Root folder paths of the active workspace.
+        """Root folder paths of the active workspace, derived server-side.
 
-        Audit scans derive their roots server-side: an audit run is
-        recorded as a clean workspace-wide check, so letting the client
-        scope the scan with ``root`` params would let a subset (or
-        empty) request certify the whole workspace. Stray ``root``
-        query params are tolerated and ignored.
-
-        Uses ``workspace_folders.get_audit_root_paths``, which returns only real
-        ``workspace_folders`` roots. Folders a workspace sees solely through
-        a ``workspace_photos`` grant are excluded, because the whole-folder
-        audit workflows (``/api/audit/untracked``,
-        ``/api/audit/import-untracked``, stray-sidecar scans) would
-        otherwise enumerate and permit importing hidden sibling files that
-        the workspace has no claim to.
+        An audit run is recorded as a clean workspace-wide check, so ``root``
+        query params are ignored: a subset request must not certify the
+        whole workspace. Folders seen only through a ``workspace_photos``
+        grant are excluded, so whole-folder audits cannot enumerate or
+        import sibling files the workspace has no claim to.
         """
         return workspace_folders.get_audit_root_paths(db)
 

@@ -84,7 +84,7 @@ DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS = 0.1
 # files spends the entire prep phase reading metadata before the WSGI layer
 # ever gets a chance to observe the disconnect. Aligned with
 # metadata._BATCH_SIZE so an outer chunk maps to at most one ExifTool
-# subprocess for its leftovers, keeping subprocess overhead unchanged.
+# subprocess for its leftovers, so chunking adds no subprocesses.
 # Module-level so tests can override it.
 DUPLICATE_CHECK_PREP_BATCH_SIZE = 100
 
@@ -893,7 +893,7 @@ class _ImportFullRun:
         self.vireo_dir = media_root(self.config["THUMB_CACHE_DIR"])
         try:
             # copy=false: scan_target is the source and restrict_dirs is
-            #   None, so scanner walks the full source tree (unchanged).
+            #   None, so scanner walks the full source tree.
             # copy=true: scan_target is the destination (folder hierarchy
             #   root, for parent-folder chain creation), but restrict_dirs
             #   narrows enumeration to only the subfolders ingest wrote

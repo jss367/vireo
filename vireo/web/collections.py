@@ -87,20 +87,19 @@ def _collection_list_entry(db: Database, c: Row) -> JsonDict:
     # filter bar's visual clause; ``count_collection_photos`` only
     # evaluates ``rules``, so a saved visual collection with e.g.
     # ``rules: []`` would return the workspace-wide metadata count
-    # here while Browse shows a much smaller set on reopen
-    # (Codex review r3620935217). Resolving the visual clause on
+    # here while Browse shows a much smaller set on reopen.
+    # Resolving the visual clause on
     # every listing would run the embedding for every visual
     # collection on every page load — too expensive. Omit the count
     # instead: the sidebar (browse.html) renders an empty count
     # span for null photo_count, and the ✦ visual marker already
     # tells users this collection is visually resolved.
     #
-    # Still validate the metadata rules though — skipping the count
-    # was also the only validation path that caught malformed JSON
-    # or unresolvable rule fields. Without this check, a visual
-    # collection with degraded rules would look healthy in the
+    # Still validate the metadata rules: counting is the listing's only
+    # check for malformed JSON or unresolvable rule fields. Without it, a
+    # visual collection with degraded rules would look healthy in the
     # sidebar and only 400 later when Browse routes those bad rules
-    # through ``/api/photos/query`` (Codex review r3621304875).
+    # through ``/api/photos/query``.
     if c["visual_json"] is not None:
         d["photo_count"] = None
         d["available_photo_count"] = None
@@ -144,7 +143,7 @@ def _collection_list_entry(db: Database, c: Row) -> JsonDict:
         # and leave ``visual_json`` alone — the manually added
         # photos would only surface in the reopened collection
         # if they also matched the hidden visual prompt, so
-        # the add is silently ineffective (Codex r3620791304).
+        # the add is silently ineffective.
         d["can_add_photos"] = False
     else:
         try:
@@ -264,8 +263,7 @@ def create_collections_blueprint(
             # counting/persisting so the sidebar count on reopen matches
             # what the save-time preview counter showed — otherwise a
             # library with embeddings from multiple models silently
-            # widens the collection to "any embedding exists" (Codex
-            # review r3621749904).
+            # widens the collection to "any embedding exists".
             rules = inject_active_visual_model(rules)
             db.collections.count_photos_for_rules(rules)
             # The visual clause is saved alongside rules — a collection
@@ -346,8 +344,7 @@ def create_collections_blueprint(
             rules = body.get("rules")
             try:
                 # Same active-model pinning as POST so the persisted
-                # rules match what the save-time preview counted
-                # (Codex review r3621749904).
+                # rules match what the save-time preview counted.
                 rules = inject_active_visual_model(rules)
                 db.collections.count_photos_for_rules(rules)
             except ValueError as e:
@@ -401,8 +398,8 @@ def create_collections_blueprint(
         # ``_collection_accepts_manual_photos``, but appending to
         # ``photo_ids`` here would not touch ``visual_json``, so the
         # manually added photos would only surface on reopen if they
-        # also matched the hidden visual prompt — a silent no-op
-        # (Codex r3620791304). Reject the request explicitly so the UI
+        # also matched the hidden visual prompt — a silent no-op.
+        # Reject the request explicitly so the UI
         # picker (which already hides these) can't be bypassed by a
         # bookmarked or hand-crafted POST.
         if row["visual_json"] is not None:
@@ -570,8 +567,7 @@ def create_collections_blueprint(
         name/rating/sharpness/quality. ``stacks=true`` further emits
         each stack's cover before its hidden members so the first id is
         always the visible top-level card even when the quality-ranked
-        cover isn't the stack's earliest member under the sort (Codex
-        P2 on PR #1561).
+        cover isn't the stack's earliest member under the sort.
         """
         db = get_db()
         if collection_row(db, collection_id) is None:

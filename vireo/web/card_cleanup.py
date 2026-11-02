@@ -231,7 +231,7 @@ def create_card_cleanup_blueprint(
 
         card_cleanup_dir = config["CARD_CLEANUP_DIR"]
 
-        # Codex P1: load the manifest INSIDE the lock, after the conflict
+        # Load the manifest INSIDE the lock, after the conflict
         # check passes. Loading it before we hold the lock captures a
         # snapshot that a concurrent verify can outdate before our worker
         # starts: if request A loads revision N, releases, then request B
@@ -307,7 +307,7 @@ def create_card_cleanup_blueprint(
             db, ctx.runner, scan_job_id)
         if err is not None:
             return err
-        # Codex P1: the client must send the manifest revision it
+        # The client must send the manifest revision it
         # confirmed. If a verify has run since that confirmation, the
         # on-disk manifest carries a newer revision and its deletable
         # set may include files the user never saw — reject rather than
@@ -363,7 +363,7 @@ def create_card_cleanup_blueprint(
             finally:
                 thread_db.close()
 
-        # Atomic conflict-check + start (Codex P1): pair with the same
+        # Atomic conflict-check + start: pair with the same
         # lock the verify endpoint uses so a verify POST can't slip in
         # between our check and our registration and start writing a
         # new manifest under this delete.

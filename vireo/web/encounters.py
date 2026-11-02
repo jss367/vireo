@@ -491,7 +491,7 @@ class _SpeciesConfirmation:
         # same alias under different taxa across submitted photos (a
         # legitimate homonym; duplicate repair deliberately preserves such
         # rows), so each photo gets its own resolved row. A single
-        # ``best_taxon`` used to select one row for the whole batch would
+        # ``best_taxon`` selecting one row for the whole batch would
         # leave every photo on a different taxon with its old leaf still
         # attached — the removal loop matches by ``taxon_id``.
         self.per_photo_old_row: dict[int, Row] = {}
@@ -1409,8 +1409,8 @@ class _SpeciesConfirmation:
             ),
             "species_list": self.new_species_list,
             "low_confidence_photo_ids": low_confidence_photo_ids,
-            # Kept for older clients/tests that checked this field; explicit
-            # confirmations no longer skip submitted photos.
+            # Always empty: explicit confirmations never skip a submitted
+            # photo. The field stays for API clients that read it.
             "skipped_photo_ids": [],
         }
         if self.group_photo_states is not None:

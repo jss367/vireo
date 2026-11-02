@@ -55,8 +55,8 @@ def create_dashboard_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprin
                 # Dashboard Browse drilldown link) resolves collection_id
                 # through ``_build_collection_query``, which evaluates
                 # ``rules`` only. A visual collection selected here would
-                # silently widen to every metadata match (Codex review
-                # r3620636595), so stats.html disables these picker options.
+                # silently widen to every metadata match, so stats.html
+                # disables these picker options.
                 "has_visual": row["visual_json"] is not None,
             })
         return jsonify({"folders": folders, "collections": collections})

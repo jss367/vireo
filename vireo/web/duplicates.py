@@ -451,9 +451,9 @@ def create_duplicates_blueprint(
     def api_duplicates_last_scan() -> ResponseReturnValue:
         """Return the most recent completed duplicate-scan's result.
 
-        The /duplicates page only holds proposals in JS memory, so
-        navigating away and back used to require a full rescan. This
-        lets the page restore prior results from ``job_history`` instead.
+        The /duplicates page holds proposals only in JS memory; this lets
+        it restore prior results from ``job_history`` after navigating
+        away instead of rescanning.
 
         Library-wide on purpose: duplicate detection itself ignores
         workspace scope (photos are global), so the result of any
