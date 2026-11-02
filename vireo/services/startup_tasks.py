@@ -83,7 +83,7 @@ class StartupTasks:
     ``app`` is read at call time (``app.config["THUMB_CACHE_DIR"]``,
     ``app._job_runner``, ``app._log_broadcaster``), so the instance can be
     built before those attributes are set. ``init_db`` is the startup
-    connection ``create_app`` opened; ``db_path`` is used to open the
+    connection ``create_app`` opened; ``db_path`` opens the
     short-lived connections background passes need.
     """
 
@@ -582,10 +582,10 @@ def metadata_repair_count(db: Database, workspace_id: int, root_paths: Sequence[
     # with no repairable rows, an unscoped count combined with a
     # non-empty ``reachable_roots`` list would enable the Repair
     # button and start a job that finishes without ever touching the
-    # offline photos — Codex's "repeating repair job" pathology. The
-    # scoped count reflects only what the repair pass would actually
-    # process. ``None`` preserves the unscoped legacy shape for any
-    # future caller that wants a workspace-wide figure.
+    # offline photos, so the button keeps offering a repair that never
+    # happens. The scoped count reflects only what the repair pass would
+    # actually process. ``None`` gives the unscoped, workspace-wide
+    # figure.
     rows = db.photo_visibility.metadata_repair_rows(workspace_id, root_paths)
 
     # A database row is only repairable when its original still exists.

@@ -157,8 +157,8 @@ def _competing_retry_failure(runner: JobRunner, job_config: JsonDict) -> ImportF
     rejected request costs no worker thread. Best-effort against
     exact-simultaneous starts — ``list_jobs`` releases the runner lock
     before ``start`` takes it — which is acceptable for the double-click
-    / two-tab case this fix targets; the follow-up work is to fold both
-    under one runner-side call. See PR #1387 Codex review.
+    / two-tab case it guards; closing that window needs both under one
+    runner-side call.
     """
     retry_root = job_config.get("root_import_job_id")
     if not retry_root:
@@ -386,8 +386,7 @@ class _ImportPhotosRequest:
         # the supposed archive copy, so allowing this is a data-loss trap.
         # Case-fold handling (darwin/win32 unconditional, Linux per-mount
         # probe) lives in path_guard — see its module docstring and the
-        # fs_is_case_insensitive() docstring for the full rationale
-        # (PR #1107 review).
+        # fs_is_case_insensitive() docstring for the full rationale.
         destination = self.destination
         try:
             dest_real = os.path.realpath(destination)
@@ -451,12 +450,12 @@ class _ImportPhotosRequest:
     def resolve_after_import(self) -> ImportFailure | None:
         """Resolve the after-import strategy.
 
-        After-import strategy: validated at enqueue (failing the chain
-        hours later is the old pipeline's mistake). Key present -> null
+        After-import strategy: validated at enqueue, not hours later when
+        the chain would fail. Key present -> null
         means import-only, a string must name a real strategy. Key
         omitted -> default from the workspace's pipeline.default_process_id
         (nullable, same vocabulary). Stored in the job config for the
-        PR 3 chaining hook; the import job itself never reads it.
+        after-import chaining hook; the import job itself never reads it.
         Resolve and validate BEFORE creating any new workspace so a bad
         value doesn't leave an orphan Archive Import behind. When the
         request omits the key and asks to create a new workspace, we can't
@@ -635,10 +634,9 @@ class _ImportPhotosRequest:
         # fingerprint recorded when the parent landed it; refuse a
         # mismatch rather than letting the after-import chain (and
         # any ``after_process_move``) sweep up the unrelated row.
-        # Parents from before this fix carry no fingerprints at all
-        # (empty dict), and are exempted — hard-rejecting every
-        # legacy failed job's retry would be a bigger regression than
-        # the narrow race window this protects.
+        # Parents that recorded no fingerprints (empty dict) are
+        # exempted — refusing every such failed job's retry would cost
+        # more than the narrow race window this protects.
         parent_allowed_fingerprints = self.parent_allowed_fingerprints
         if parent_allowed_fingerprints:
             current_fingerprints = self.service._capture_photo_fingerprints_for_ids(
@@ -699,8 +697,8 @@ class _ImportPhotosRequest:
         legitimate reinsert-and-retry recovery. Here we recompute
         the current signature for every retry source that shares a
         path with a parent source and refuse the retry when any
-        signature has drifted. Legacy parents from before this fix
-        have no snapshots and fall through unchanged.
+        signature has drifted. A parent without snapshots is not
+        checked.
         """
         parent_source_snapshots = self.parent_source_snapshots
         if not parent_source_snapshots:
@@ -715,7 +713,7 @@ class _ImportPhotosRequest:
         # gates them via ``skip_duplicates``) and stream those IDs
         # into the after-import chain / NAS-move scope, even though
         # the "Retry failed files" button only ever promised the
-        # parent's failed files. See PR #1387 Codex review.
+        # parent's failed files.
         parent_sources = {
             src for src, snapshot in parent_source_snapshots.items()
             if isinstance(snapshot, dict) and snapshot

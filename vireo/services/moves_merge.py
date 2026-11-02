@@ -170,8 +170,8 @@ def merge_staged_tree_into_archive(db: Database, staged_root_id: int, archive_pa
     ``moves_merge.link_survivor_for_sibling_edits``.
     """
     def case_insensitive_root(path: str) -> str | None:
-        # Late-bound so a patched ``move._case_insensitive_root`` applies,
-        # and imported at the point of use as before.
+        # Late-bound and imported at the point of use, so a patched
+        # ``move._case_insensitive_root`` applies.
         from move import _case_insensitive_root
         return _case_insensitive_root(path)
 

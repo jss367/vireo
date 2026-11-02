@@ -1,8 +1,8 @@
 """Standalone preview warmup with tracked failures and worker connection cleanup.
 
 The HTTP layer validates the selection and injects a runner plus a database
-factory bound to the launching workspace. Rendering and cache adoption keep
-using the same materializer and eviction path as before.
+factory bound to the launching workspace. Rendering and cache adoption use
+the same materializer and eviction path as on-demand previews.
 """
 
 from __future__ import annotations

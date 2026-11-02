@@ -74,7 +74,7 @@ def validate_visual_arg(visual: object) -> VisualClause | None:
     # An unhashable strength (e.g. ``["broad"]``) makes ``strength in
     # VISUAL_STRENGTH_THRESHOLDS`` raise ``TypeError``, which would
     # escape the 400 handler in the collection create/update paths as
-    # a 500 (CodeRabbit review r3620473547 outside-diff note).
+    # a 500.
     if not isinstance(strength, str):
         raise ValueError("visual.strength must be a string")
     if strength not in VISUAL_STRENGTH_THRESHOLDS:
@@ -97,7 +97,7 @@ def inject_active_visual_model(rules: RuleTree) -> RuleTree:
     index" means; smart-collection storage paths (POST/PUT
     ``/api/collections``) also normalize before persisting so a
     collection's saved rules match what the preview counter showed at
-    save time (Codex review r3621749904) — otherwise the sidebar
+    save time — otherwise the sidebar
     count and the reopened result set silently diverge from the
     preview when embeddings from multiple models exist.
 
