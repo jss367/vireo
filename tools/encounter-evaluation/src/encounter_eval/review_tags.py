@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from services import keyword_tagging
-
 from .common import configure_repo, digest
 from .review import metadata, same_photo
 
@@ -18,6 +16,13 @@ def ensure_tag_sync(conn):
 
 def _apply_tags(db, photo, answer, marker):
     """One library transaction, including a receipt for crash-safe retries."""
+    # Deferred alongside pending_changes: the ``vireo-review-encounters``
+    # entry point imports this module before ``main`` calls
+    # ``configure_repo``, which is what adds ``vireo/`` to ``sys.path``, so
+    # importing ``services.keyword_tagging`` at module load would fail with
+    # ``ModuleNotFoundError`` before bootstrap. By the time ``_apply_tags``
+    # runs, ``sync_review_tags`` has called ``configure_repo``.
+    from services import keyword_tagging
     from services.pending_changes import queue_keyword_add, queue_keyword_remove
 
     pid = photo['id']
