@@ -125,17 +125,17 @@ def _first_paint_focus(
     # Photo deep links need the target's position in the exact sort
     # order used by this first paint. Returning the zero-based index
     # and its bounded page from this read snapshot avoids probing
-    # serial 50-photo pages until the target happens to appear. Keep
-    # the extra ordered-id query opt-in so ordinary Browse loads retain
-    # their existing cost.
+    # serial 50-photo pages until the target happens to appear. The
+    # extra ordered-id query is opt-in so ordinary Browse loads do not
+    # pay for it.
     #
     # When the target is already in the first-page ``photos`` fetched
     # above (the common case — Highlights and most native actions open
     # a photo whose sorted position is on page 1), compute the index
     # from that page directly.  Materializing every folder ID would
     # add O(folder size) latency and memory to the critical first
-    # paint on the documented 100K- and 1M-photo libraries, even when
-    # a lookup was never necessary (Codex review r3792637103).
+    # paint on 100K- and 1M-photo libraries, even when no lookup is
+    # needed.
     focus_index = None
     focus_page = page
     if focus_photo_id is not None:
@@ -212,7 +212,7 @@ def _first_paint_collection_dicts(db: Database, collections: list[Row]) -> list[
             # without touching ``visual_json`` — the manually added
             # photos would only show up in the reopened collection
             # if they also matched the hidden visual clause, making
-            # the add silently ineffective (Codex r3620791304).
+            # the add silently ineffective.
             d["can_add_photos"] = (
                 c["visual_json"] is None
                 and _collection_accepts_manual_photos(parsed_rules)
@@ -265,7 +265,7 @@ def _pending_predictions_by_species(
         # the same detection classified by several models. Keep every
         # matching prediction id so the batch accept flips them all —
         # keywording the photo once and leaving nothing pending in Review.
-        # Submitting only the top-confidence id used to accept that row,
+        # Submitting only the top-confidence id would accept that row,
         # keyword the photo, and then hide the sibling rows behind the
         # "already keyworded" filter with no way to resolve them.
         photo_entry = entry["rows_by_photo"].setdefault(row["photo_id"], {
@@ -392,9 +392,9 @@ def _is_visual_collection(db: Database, collection_id: int | None) -> bool:
     # but the wrong grid still flashes between the two — and any failure
     # before ``filterByCollection()`` runs leaves the user staring at the
     # widened scope. Drop the ``collection_id`` from the photo query and
-    # return an empty grid so the wrong data can never appear (Codex
-    # review on PR #1343). Folders/keywords/collections are still returned
-    # so the sidebar bootstraps.
+    # return an empty grid so the wrong data can never appear.
+    # Folders/keywords/collections are still returned so the sidebar
+    # bootstraps.
     if collection_id is not None:
         coll_row = db.collections.get(collection_id)
         if coll_row is not None and coll_row["visual_json"] is not None:
@@ -456,16 +456,14 @@ def create_browse_blueprint(
         # Without a baseline, the first /api/folders/missing observation
         # returns false when a background ``MissingOriginals.folder_health_loop`` flip runs
         # between init and the poll — later polls then see the same IDs and
-        # never dispatch, leaving Browse stuck showing the pre-flip state
-        # (Codex review r3686191141).
+        # never dispatch, leaving Browse stuck showing the pre-flip state.
         #
         # This is the first read in the explicit transaction above, so every
         # photo / folder / keyword / collection read below shares the same
         # health snapshot. Ordering alone is insufficient: if the background
         # health loop commits after this query but before folders.tree(),
         # and the navbar's initial poll already finished, no immediate poll
-        # remains to repair the mixed response (Codex reviews r3686317681 and
-        # r3687501744).
+        # remains to repair the mixed response.
         missing_folder_ids = [f["id"] for f in db.folders.missing()]
         folder_health_version = missing_originals.get_folder_health_version(db)
 
@@ -533,7 +531,7 @@ def create_browse_blueprint(
         # ``get_browse_summary`` narrows through ``_build_collection_query``,
         # which reads only ``collections.rules``. Without ``visual``, a saved
         # visual collection would silently widen the summary to every
-        # metadata match (Codex review r3622521597). Browse itself clears
+        # metadata match. Browse itself clears
         # ``activeCollectionId`` when opening a collection into the filter
         # bar, so its ``/api/browse/summary`` calls never carry a visual
         # collection id; this guards direct API callers.
@@ -615,8 +613,7 @@ def create_browse_blueprint(
         # ``get_filter_field_values`` narrows counts through
         # ``_build_collection_query``, which reads only ``collections.rules``.
         # Without ``visual``, a saved visual collection would silently widen
-        # the typeahead counts to every metadata match (Codex review
-        # r3622521597).
+        # the typeahead counts to every metadata match.
         err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
@@ -629,7 +626,7 @@ def create_browse_blueprint(
         # allowance instead of the 500 default: the folder picker renders
         # a hierarchy of every workspace folder, not a 50-value preview,
         # and clamping to 500 silently truncates scoped folder lists past
-        # that point (Codex review r4209417965).
+        # that point.
         limit_raw = request.args.get("limit", 20, type=int)
         if limit_raw is None:
             limit_raw = 20
@@ -763,25 +760,16 @@ def create_browse_blueprint(
         kids_by_key = _species_keyword_ids_by_key(db, resolver)
 
         results = []
-        # A bucket-level suppression used to sit here: when the threshold was
-        # active and ``entry["confidences"]`` came out empty, the bucket was
-        # dropped and counted into a ``suppressed_borrowed_count`` the panel
-        # rendered as its own empty state. Both are gone, because the state
-        # they described is gone. ``confidences`` can only be empty when
-        # *every* contributing row's raw label disagrees with the consensus
-        # the accept path applies, and that is precisely the legacy
-        # mixed-consensus burst shape, which a since-retired one-shot repair
-        # cleared from the catalog and current classification never writes:
-        # a grouped row's consensus is its own species, so every row credits
-        # its own bucket. Keeping a
-        # filter plus a second piece of empty-state vocabulary for an
-        # unreachable case is its own transparency cost — the user would be
-        # asked to learn a distinction the data can no longer produce.
+        # No bucket is dropped for an empty ``entry["confidences"]``. It can
+        # only be empty when *every* contributing row's raw label disagrees
+        # with the consensus the accept path applies, a mixed-consensus burst
+        # shape classification never writes: a grouped row's consensus is its
+        # own species, so every row credits its own bucket.
         #
-        # The credit gate above stays. It is four lines, it computes the
-        # right number rather than hiding a row, and if the invariant it
-        # rests on ever regressed it degrades to "confidence unknown"
-        # instead of quoting one species' score beside another's name.
+        # The credit gate above computes the right number rather than hiding
+        # a row, and if that invariant ever broke it degrades to "confidence
+        # unknown" instead of quoting one species' score beside another's
+        # name.
         for key, entry in by_key.items():
             results.append(
                 _prediction_suggestion(db, key, entry, order, kids_by_key)
@@ -898,9 +886,9 @@ def create_browse_blueprint(
 
         A count is a hint, not an import, so each folder gets
         ``PHOTO_COUNT_PATH_BUDGET_SECS`` and the request
-        ``PHOTO_COUNT_REQUEST_BUDGET_SECS``: browsing ``/Volumes`` used to
-        count every photo on the boot disk and the NAS share, holding a
-        server thread for over a minute after the user had moved on. A
+        ``PHOTO_COUNT_REQUEST_BUDGET_SECS``: without them, browsing
+        ``/Volumes`` counts every photo on the boot disk and the NAS share,
+        holding a server thread for over a minute after the user moved on. A
         folder whose count ran out of time is listed in ``incomplete`` with
         the photos found so far (a lower bound); a folder never reached
         before the request budget ran out is left out of ``counts``.

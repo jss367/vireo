@@ -241,8 +241,8 @@ def _validate_config_snapshot(body: JsonDict) -> str | None:
     """Validate and coerce, in place, every schema setting in a ``/api/config`` body.
 
     The curated forms post whole snapshots, and a value stored unvalidated
-    (``null`` from an empty number field, ``"abc"``) used to be written
-    verbatim and then break every reader of that setting, Browse included.
+    (``null`` from an empty number field, ``"abc"``) breaks every reader
+    of that setting, Browse included.
     Each schema leaf present in ``body`` goes through the same
     ``validate_value`` as the settings PATCH, and a scalar where a schema
     section (``pipeline``, ``ingest``) belongs is refused. Keys outside the
@@ -763,12 +763,11 @@ def create_settings_blueprint(
         }), 409
 
     def _settings_post_save_side_effects(current: JsonDict, previous: JsonDict | None = None) -> str | None:
-        """Side effects mirrored from the legacy /api/config POST handler.
+        """Side effects every global settings write shares with a curated-form save.
 
-        Keeps every global settings write behaviorally identical to the old
-        curated-form save: HF_TOKEN stays in sync, cache budgets take effect
-        immediately, and raising the working-copy ceiling makes deliberately
-        evicted rows eligible for a future backfill again.
+        HF_TOKEN stays in sync, cache budgets take effect immediately, and
+        raising the working-copy ceiling makes deliberately evicted rows
+        eligible for a future backfill again.
 
         Returns a warning for the save response when a side effect the user
         relies on could not run (``None`` otherwise); the save itself stands.
@@ -857,13 +856,13 @@ def create_settings_blueprint(
             current = dict(previous)
 
             # Validate the working-copy quota against the schema up front.
-            # Without this, a non-integer or explicit ``null`` value used to
-            # slip past the confirmation gate (int() raised, ``new_quota_mb``
-            # stayed None) but was still persisted verbatim; the post-save
-            # side effect then fell back to the 20 GB default when parsing
-            # the stored value — a silent reduction that could evict working
-            # copies without a confirmation prompt whenever the previously
-            # stored quota exceeded 20 GB.
+            # Otherwise a non-integer or explicit ``null`` value would slip
+            # past the confirmation gate (int() raises, ``new_quota_mb``
+            # stays None) yet still be persisted; the post-save side effect
+            # then falls back to the 20 GB default when parsing the stored
+            # value — a silent reduction that could evict working copies
+            # without a confirmation prompt whenever the stored quota
+            # exceeded 20 GB.
             #
             # After validation the confirmation gate delegates to the same
             # helper every other global-config write path uses, so a stale

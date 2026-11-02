@@ -145,30 +145,17 @@ class _HighlightsRelabel:
 
     def _snapshot_current_species(self) -> None:
         """Snapshot each photo's current species-rank taxonomy keywords
-        before the relabel touches them. Used to skip stale curation rows
-        for species the photo no longer carries across all three curation
-        tables (species_highlights, photo_preferences,
-        species_representatives): untag_photo does not clear any of them,
-        so a photo can retain a curation row for species A after that
-        keyword was removed. Without this filter, relabeling the photo's
-        current species B→C would sweep the stale A rows into A→C
-        renames — losing the preserved A state and making C look
-        manually selected.
+        before the relabel touches them.
 
-        Species-rank filter matches the old_rows removal query in
-        ``_retag_photo`` — higher-rank taxonomy keywords (genus/family) are
-        not untagged by the relabel, so treating them as "current" would
-        migrate their curation onto the new species while leaving the
-        higher-rank keyword attached with its curation stripped.
-
-        Route through get_species_keywords_for_photos so taxon-linked
-        hierarchy leaves canonicalize to the same-taxon root spelling
-        (e.g. an attached ``Desert Verdin`` reads as ``Verdin``).
-        Existing curation is keyed under that root, so a raw-name
-        snapshot would reject the root-key highlight/representative row
-        as stale after duplicate repair left only the hierarchy leaf,
-        stranding it under a species the photo no longer carries by
-        name.
+        The curation tables (species_highlights, photo_preferences,
+        species_representatives) keep rows for species the photo no longer
+        carries, since untag_photo clears none of them; relabeling B→C must
+        not sweep a stale A row into an A→C rename. Species rank only,
+        matching ``_retag_photo``'s removal query: genus/family keywords stay
+        attached, so their curation must stay too. Read through
+        get_species_keywords_for_photos so a hierarchy leaf (``Desert
+        Verdin``) reads as the same-taxon root (``Verdin``) its curation is
+        keyed under.
         """
         current_species_by_pid = self.current_species_by_pid
         for pid, names in self.db.photo_species.get_species_for_photos(
@@ -523,7 +510,7 @@ def _species_confirm_targets(db: Database, photo_ids: list[int], species: str) -
     photo in ``species``'s bucket, so a photo with another species already
     tagged still gets this one, and a photo already tagged with it is
     skipped. Membership follows ``photo_species_memberships``, the rule the
-    page used to build the bucket."""
+    page builds the bucket with."""
     canonicalize = species_canonicalizer(db)
     target_key = _species_key(canonicalize, species)
     subjects_by_pid = db.predictions.top_unrejected_by_detection(photo_ids)
