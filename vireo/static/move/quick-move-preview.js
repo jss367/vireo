@@ -273,7 +273,7 @@ export function _destWarn(text) {
 // Windows drive like "C:\foo", or UNC "\\server\share"). Matches what
 // Python's os.path.isabs would say on the corresponding platform — the
 // JS side has no way to know which platform the backend is running, so
-// accept any form. Used to warn before the backend refuses a relative
+// accept any form. Warns before the backend refuses a relative
 // mount path on the remote target.
 /** @param {string | null | undefined} p */
 export function _isAbsolutePath(p) {

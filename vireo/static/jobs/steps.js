@@ -4,9 +4,9 @@ import { jobsElement, LEAF_MAX, state } from './state.js';
 import { formatElapsed, statusIcon, toggleIcon } from './format.js';
 import { escapeHtml } from './shared.js';
 
-// A failed step's Retry button used to carry onclick="event.stopPropagation();"
-// so its click never reached the detail pane's step toggle. Stop it at the
-// pane in the capture phase instead, before the pane's own click listener.
+// A failed step's Retry click must not reach the detail pane's step toggle.
+// Stop it at the pane in the capture phase, before the pane's own click
+// listener.
 export function bindStepRetryButtons() {
   jobsElement('jobDetailPane', HTMLElement).addEventListener('click', function(e) {
     if (e.target instanceof Element && e.target.closest('[data-step-retry]')) e.stopPropagation();

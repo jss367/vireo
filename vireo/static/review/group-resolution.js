@@ -26,7 +26,7 @@ var _grmSuppressLoupeClick = false;
 var _grmLoupeLastX = 50;
 var _grmLoupeLastY = 50;
 // Whether the loupe has received a real hover (vs. just the centre default).
-// Used to decide between cover-fit (no-hover) and zoom (hover) per card.
+// Decides between cover-fit (no-hover) and zoom (hover) per card.
 var _grmLoupeHovering = false;
 // True when grmSnapOneToOne is awaiting the selected card's natural dims
 // (the original image is still loading and may be EXIF-rotated relative to

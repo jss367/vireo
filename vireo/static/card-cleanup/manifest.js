@@ -7,7 +7,7 @@ import { cardCleanupErrorText, cardCleanupFileCount, cardCleanupSetError, state 
 import { cardCleanupRenderHashFailedCallout, cardCleanupRenderVerificationCallout } from './verification.js';
 
 export async function cardCleanupLoadManifest() {
-  // Codex P2 (commit 16a3f8e4): capture the scan we are loading FOR so a
+  // Capture the scan we are loading FOR so a
   // response that arrives after a second scan has taken ownership of
   // scanJobId cannot render scan #1's manifest over scan #2's state.
   // Without this guard, cardCleanupFinishJob unlocks the buttons before

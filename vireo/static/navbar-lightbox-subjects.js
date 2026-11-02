@@ -108,7 +108,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     // sync_primary which can clear mask/embedding/eye state, "Analyze
     // subjects" enqueues a job that writes detection_subjects and can
     // change the primary, and Use crop / Use exposure PUT the edit
-    // recipe — so they all must honor _lbReadOnly (Codex r4056621185).
+    // recipe — so they all must honor _lbReadOnly.
     const readOnly = typeof lbState.readOnly !== 'undefined' && lbState.readOnly;
     const readOnlyTitle = readOnly && typeof lbState.readOnlyMessage === 'string' ? lbState.readOnlyMessage : null;
     /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectSummary')).textContent = 'Subjects (' + data.subjects.length + ')'
@@ -207,7 +207,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     if (!data || busy || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Choosing a primary — including "Choose automatically" — reaches
     // sync_primary, which clears mask, embedding and eye state; block
-    // it in a scoped Pipeline Review lightbox (Codex r4056621185).
+    // it in a scoped Pipeline Review lightbox.
     if (typeof _lbGuardReadOnly === 'function' && _lbGuardReadOnly()) return;
     const photoId = data.photo_id;
     const seq = generation;
@@ -285,7 +285,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     const subject = primary();
     if (!subject?.analysis || busy || _lbEditWritePending || !data || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Guard against a rogue click before render() runs after the read-only
-    // state flips (Codex r4056563011). _lbGuardReadOnly surfaces the same
+    // state flips. _lbGuardReadOnly surfaces the same
     // read-only toast every other edit-recipe writer uses.
     if (typeof _lbGuardReadOnly === 'function' && _lbGuardReadOnly()) return;
     const photoId = data.photo_id;
@@ -332,8 +332,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     if (!data || busy || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Analyze subjects enqueues a job that writes detection_subjects and
     // can flip the primary via sync_primary (clearing mask, embedding
-    // and eye state), so it must be blocked in read-only lightboxes
-    // (Codex r4056621185).
+    // and eye state), so it must be blocked in read-only lightboxes.
     if (typeof _lbGuardReadOnly === 'function' && _lbGuardReadOnly()) return;
     const photoId = data.photo_id;
     const seq = generation;

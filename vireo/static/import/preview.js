@@ -378,8 +378,8 @@ async function previewImport(opts) {
     // until the stream drains: submitting mid-stream would send a selection
     // that doesn't match the boxes the user is looking at.
     importDupStreamPending = true;
-    // updateImportSelectionUI(), not a bare updateStartGate(): since #1387
-    // this path renders nothing until the stream drains, so between here and
+    // updateImportSelectionUI(), not a bare updateStartGate(): this path
+    // renders nothing until the stream drains, so between here and
     // then the grid is empty while "N of M selected" would still be showing
     // the PREVIOUS card's tally. Over SMB with verify_by_hash that window is
     // minutes long. Resync it against the grid that is actually on screen.
@@ -448,7 +448,7 @@ async function previewImport(opts) {
               Number.isFinite(Number(d.preparing)) &&
               Number.isFinite(Number(d.total))) {
             // Heartbeat from the prep phase (batched EXIF/capture-time
-            // reads before per-file checks begin). Long cards used to
+            // reads before per-file checks begin). Without it long cards
             // sit on "Discovering files…" through all of prep — this
             // shows the user work is happening AND surfaces a place the
             // server pauses long enough to observe a client disconnect.

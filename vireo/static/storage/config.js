@@ -100,10 +100,10 @@ export function saveStorageConfig() {
 }
 
 // If a debounced autosave for other storage controls is queued but has not
-// yet fired, POST its payload synchronously before returning. The
-// working-copy Apply flow used to `clearTimeout(state.storageSaveTimer)` on
-// entry, which silently dropped any preview-cache or thumbnail edit from
-// the last 250 ms; flushing keeps those edits reaching the server.
+// yet fired, POST its payload synchronously before returning. Clearing
+// `state.storageSaveTimer` instead would silently drop any preview-cache or
+// thumbnail edit from the last 250 ms; flushing keeps those edits reaching
+// the server.
 export async function flushPendingStorageAutosave() {
   if (state.storageSaveTimer == null) return;
   clearTimeout(state.storageSaveTimer);

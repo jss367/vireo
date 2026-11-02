@@ -237,7 +237,7 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
 /** @param {KeyboardEvent} event @param {number} encIdx @param {number | null} [burstIdx] */
 function speciesInputKey(event, encIdx, burstIdx) {
   if (event.key !== 'Enter') return;
-  // Skip while an IME composition is active — Enter is used to finalize
+  // Skip while an IME composition is active — Enter finalizes
   // character conversion in East Asian input methods.
   if (event.isComposing || event.keyCode === 229) return;
   event.preventDefault();

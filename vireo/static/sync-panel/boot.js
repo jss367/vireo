@@ -1,7 +1,7 @@
 // Startup for the sync panel (_sync_panel.html, on Browse, Review, Location
 // Review and Pipeline Review): registers the native menu's Sync Metadata
-// hook, binds the controls that used to carry inline handlers, the review
-// dialog's thumbnail clicks, and the lightbox listeners.
+// hook, binds the panel's controls, the review dialog's thumbnail clicks, and
+// the lightbox listeners.
 // Classic script; loads after every other sync panel script, and before the
 // including page's own scripts, which call checkPendingSync and runSync.
 

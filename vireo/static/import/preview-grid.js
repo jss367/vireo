@@ -316,10 +316,9 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
     }
     const headerLabel = document.createElement('span');
     // Stamped as data, not recovered from the rendered text: with "Hide
-    // duplicates" on, the label carries a "· N duplicates hidden" suffix and
-    // the trailing-count regex refreshImportFolderHeaders() used to strip
-    // would leave the checkbox tooltip naming the folder
-    // "card-a (0) · 2 duplicates hidden".
+    // duplicates" on, the label carries a "· N duplicates hidden" suffix, and
+    // stripping a trailing count off the text would leave the checkbox
+    // tooltip naming the folder "card-a (0) · 2 duplicates hidden".
     headerLabel.dataset.folder = subfolder;
     headerLabel.textContent = subfolder + ' (' + shown.length + ')' +
       (hiddenHere ? ' · ' + hiddenHere.toLocaleString() + ' duplicate' +
@@ -437,19 +436,13 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
 
 // Redraw the boxes after a selection change.
 //
-// This used to branch on `typeof rerenderImportPreviewGrid === 'function'`
-// against a targeted DOM fallback, because the hide-duplicates filter (#1382)
-// had not merged yet and there was no full re-render to call. It has merged;
-// the fallback is dead code and is gone.
-//
-// A targeted refresh is still what happens, and deliberately so. The live
-// path works — driven through rerenderImportPreviewGrid(), per-file toggles,
-// folder headers, select-all and shift-ranges all behave and the headers do
-// get refreshed — but it rebuilds every card on every checkbox click, which
-// drops each <img> and re-runs setupImportThumbnailScheduler() over the whole
-// grid. Measured on a six-card preview: 6 thumbnail requests per click
-// through the full re-render, 0 through this refresh. That is linear in card
-// size, and #1382 exists for 985-file cards. Selection state is derived, so
+// A targeted refresh, deliberately. rerenderImportPreviewGrid() also works —
+// per-file toggles, folder headers, select-all and shift-ranges all behave —
+// but it rebuilds every card on every checkbox click, which drops each <img>
+// and re-runs setupImportThumbnailScheduler() over the whole grid. Measured
+// on a six-card preview: 6 thumbnail requests per click through the full
+// re-render, 0 through this refresh, and the cost is linear in card count
+// on cards that can hold a thousand files. Selection state is derived, so
 // only the boxes and the headers can change; the tiles cannot.
 //
 // The one thing a targeted refresh cannot do is honor a change in WHICH cards
