@@ -103,7 +103,7 @@ def _plural(n, s="s"):
 
 
 def _classify_would_run_after_auto_skip(params):
-    """Mirror ``_apply_no_model_auto_skip`` (app.py) at plan time.
+    """Mirror ``services.pipeline_launch.apply_no_model_auto_skip`` at plan time.
 
     ``/api/jobs/pipeline`` flips ``skip_classify`` (and by the same rule
     ``skip_regroup``) to True when the caller didn't already disable
@@ -282,8 +282,8 @@ def _import_without_new_files(params, photo_ids, new_count):
     local processing on, the post-ingest scan targets the local staging
     root instead, which stays empty when every file deduplicates (ingest
     creates the staging dir but copies nothing into it), so "nothing
-    to …" is genuinely true. Copy mode keeps the pre-existing
-    forward-looking summaries and lets Group see upstream will-run.
+    to …" is genuinely true. Copy mode keeps the forward-looking
+    summaries and lets Group see upstream will-run.
     """
     return (
         params.local_processing
@@ -431,8 +431,8 @@ class _ClassifyPlan:
         # ``detector_confidence`` mirrors the pipeline's runtime fallback gate
         # so photos whose only MegaDetector rows are below the classification
         # floor are counted as fallback candidates. Without it the plan would
-        # ignore noise-only photos even though classify_stage now sends them
-        # through the full-image fallback (PR #1484).
+        # ignore noise-only photos even though classify_stage sends them
+        # through the full-image fallback.
         self.fallback_photo_ids = (
             set(self.scope_ids) - self.contextual_weak_ids
         ) & self.current_detector_photo_ids
@@ -1271,7 +1271,7 @@ def _regroup_skip_flag_plan(params, import_no_new):
     # available. Without the same gate here, the plan promises
     # "Will prepare species review" on installs with no model where
     # the job will only surface the no-model warning and skip
-    # regroup — the exact transparency failure the review flagged.
+    # regroup.
     if (
         params.review_mode == "species"
         and not params.skip_classify

@@ -1,7 +1,7 @@
 """Animal keypoint detection via ONNX Runtime.
 
 Top-down keypoint models take a cropped image (MegaDetector bbox) and return
-per-keypoint (x, y, conf) in image-pixel coordinates. Used to localize the
+per-keypoint (x, y, conf) in image-pixel coordinates. They localize the
 animal's eye for eye-focus scoring.
 
 Models:

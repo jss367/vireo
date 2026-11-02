@@ -136,7 +136,7 @@ def sim_embedding(emb_a, emb_b):
 def _has_similarity_signal(photo):
     """True if a photo carries any signal the score cut can act on.
 
-    Used to decide whether a pair of timestamp-less photos can be judged by
+    Decides whether a pair of timestamp-less photos can be judged by
     similarity (screenshots/exports with embeddings) or is genuinely
     signal-less (unreadable files — no detection ran, so no embeddings or
     species) and must instead be grouped by file order.
