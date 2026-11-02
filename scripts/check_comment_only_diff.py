@@ -1,11 +1,18 @@
 """Check that a diff changes only comments and docstrings.
 
 For every Python file the diff touches, the AST with docstrings removed must
-dump identically on both sides. For every JavaScript file, acorn's token
-stream (comments excluded) must be identical. Comments that tools read are
-compared too, because the AST and the token stream both drop them: Python
-``noqa`` / ``type:`` / ``pyright:`` / ``pragma`` / ``fmt:`` / ``broad:``
-pragmas, ESLint and ``@ts-`` directives, and JSDoc type tags.
+dump identically on both sides and the shebang and ``# coding:`` declaration
+must match (both pick the interpreter or decoder that runs the file, and the
+AST drops them). For every JavaScript file, acorn's token stream (comments
+excluded) must be identical, with regular-expression tokens compared by their
+pattern and flags rather than collapsed to ``[object Object]``. Comments that
+tools read are compared too, because the AST and the token stream both drop
+them: Python ``noqa`` (``ruff: noqa`` too, and ``NOQA`` case-insensitively)
+/ ``type:`` / ``pyright:`` / ``pragma`` / ``fmt:`` / ``broad:`` pragmas,
+ESLint and ``@ts-`` directives, and JSDoc type tags. Added, deleted and
+renamed source files are compared the same way, against an empty counterpart
+(or across both paths for a rename), so a diff is comment-only only when
+every A/M/D/R source file is.
 
     python scripts/check_comment_only_diff.py [--base origin/main]
 
@@ -27,7 +34,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-PY_PRAGMA = re.compile(r"#\s*(noqa\b[^#]*|type:\s*\S[^#]*|pyright:[^#]*|pragma\b[^#]*|fmt:\s*\w+|broad:)")
+PY_PRAGMA = re.compile(
+    r"#\s*(ruff:\s*noqa\b[^#]*|noqa\b[^#]*|type:\s*\S[^#]*|pyright:[^#]*|pragma\b[^#]*|fmt:\s*\w+|broad:)",
+    re.I,
+)
+PY_CODING = re.compile(r"coding[=:]\s*([-\w.]+)")
 JS_DIRECTIVE = re.compile(r"^\s*(eslint[\w-]*\b.*|@ts-\w+|global\s.*|globals\s.*)$", re.S)
 JSDOC_TAG = re.compile(r"@(\w+)\s*(\{[^\n]*\})?\s*(\[?[\w$.]*)")
 
@@ -36,10 +47,19 @@ const acorn = require(process.argv[1] + '/node_modules/acorn');
 const fs = require('fs');
 const src = fs.readFileSync(0, 'utf8');
 const comments = [];
+const asString = (v) => {
+  if (v === undefined) return null;
+  if (v !== null && typeof v === 'object') {
+    const flags = typeof v.flags === 'string' ? v.flags : '';
+    const pattern = typeof v.pattern === 'string' ? v.pattern : JSON.stringify(v);
+    return 'regexp /' + pattern + '/' + flags;
+  }
+  return String(v);
+};
 const parse = (sourceType) => {
   comments.length = 0;
   const opts = {ecmaVersion: 'latest', sourceType, onComment: (block, text) => comments.push(text)};
-  return [...acorn.tokenizer(src, opts)].map((t) => [t.type.label, t.value === undefined ? null : String(t.value)]);
+  return [...acorn.tokenizer(src, opts)].map((t) => [t.type.label, asString(t.value)]);
 };
 let tokens;
 try { tokens = parse('script'); } catch (e) { tokens = parse('module'); }
@@ -63,6 +83,8 @@ def _strip_docstrings(tree: ast.AST) -> ast.AST:
 
 def _py_pragmas(src: str) -> Counter:
     found: Counter = Counter()
+    if not src:
+        return found
     for tok in tokenize.generate_tokens(io.StringIO(src).readline):
         if tok.type == tokenize.COMMENT:
             for match in PY_PRAGMA.finditer(tok.string):
@@ -70,8 +92,28 @@ def _py_pragmas(src: str) -> Counter:
     return found
 
 
+def _py_shebang(src: str) -> str:
+    return src.splitlines()[0] if src.startswith("#!") else ""
+
+
+def _py_coding(src: str) -> str:
+    for line in src.splitlines()[:2]:
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            match = PY_CODING.search(stripped)
+            if match:
+                return match.group(1).lower()
+    return ""
+
+
 def python_differs(old: str, new: str) -> str | None:
-    if ast.dump(_strip_docstrings(ast.parse(old))) != ast.dump(_strip_docstrings(ast.parse(new))):
+    if _py_shebang(old) != _py_shebang(new):
+        return f"shebang changed: {_py_shebang(old)!r} -> {_py_shebang(new)!r}"
+    if _py_coding(old) != _py_coding(new):
+        return f"source encoding changed: {_py_coding(old)!r} -> {_py_coding(new)!r}"
+    old_tree = ast.parse(old) if old else ast.Module(body=[], type_ignores=[])
+    new_tree = ast.parse(new) if new else ast.Module(body=[], type_ignores=[])
+    if ast.dump(_strip_docstrings(old_tree)) != ast.dump(_strip_docstrings(new_tree)):
         return "code (AST without docstrings) changed"
     if _py_pragmas(old) != _py_pragmas(new):
         return f"tool pragmas changed: {_py_pragmas(old) - _py_pragmas(new)} -> {_py_pragmas(new) - _py_pragmas(old)}"
@@ -79,6 +121,8 @@ def python_differs(old: str, new: str) -> str | None:
 
 
 def _js(src: str) -> dict:
+    if not src:
+        return {"tokens": [], "comments": []}
     res = subprocess.run(
         ["node", "-e", JS_TOKENS, str(ROOT)], input=src, capture_output=True, text=True, check=True
     )
@@ -109,32 +153,59 @@ def _git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
 
 
+def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
+    """``(label, old_path, new_path, suffix)`` for every A/M/D/R .py/.js file.
+
+    An entry whose status is not A/M/D/R is returned with suffix ``""`` so
+    ``main()`` can fail on it; the labels for added, deleted and renamed
+    files make the change kind readable in the output.
+    """
+    out: list[tuple[str, str, str, str]] = []
+    for line in _git("diff", "--name-status", base, "--").splitlines():
+        parts = line.split("\t")
+        status = parts[0][0]
+        if status == "R":
+            old_path, new_path = parts[1], parts[2]
+            label = f"{old_path} -> {new_path}"
+        elif status == "D":
+            old_path, new_path = parts[1], ""
+            label = f"{old_path} (deleted)"
+        elif status == "A":
+            old_path, new_path = "", parts[1]
+            label = f"{new_path} (added)"
+        elif status == "M":
+            old_path = new_path = parts[1]
+            label = parts[1]
+        else:
+            out.append((parts[-1], "", "", status))
+            continue
+        suffix = next((s for s in (".py", ".js") if (new_path or old_path).endswith(s)), "")
+        if suffix:
+            out.append((label, old_path, new_path, suffix))
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--base", default="origin/main")
     base = _git("merge-base", parser.parse_args().base, "HEAD").strip()
-    changed = [
-        line
-        for line in _git("diff", "--name-only", "--diff-filter=M", base, "--").splitlines()
-        if line.endswith((".py", ".js"))
-    ]
-    failures = []
-    for rel in changed:
-        old = _git("show", f"{base}:{rel}")
-        new = (ROOT / rel).read_text(encoding="utf-8")
-        reason = js_differs(old, new) if rel.endswith(".js") else python_differs(old, new)
+    entries = _source_changes(base)
+    failures: list[str] = []
+    labels: list[str] = []
+    for label, old_path, new_path, suffix in entries:
+        labels.append(label)
+        if suffix not in {".py", ".js"}:
+            failures.append(f"{label}: unsupported change kind {suffix!r}")
+            continue
+        old = _git("show", f"{base}:{old_path}") if old_path else ""
+        new = (ROOT / new_path).read_text(encoding="utf-8") if new_path else ""
+        reason = js_differs(old, new) if suffix == ".js" else python_differs(old, new)
         if reason:
-            failures.append(f"{rel}: {reason}")
-    added_or_removed = [
-        line
-        for line in _git("diff", "--name-only", "--diff-filter=ADR", base, "--").splitlines()
-        if line.endswith((".py", ".js"))
-    ]
-    for rel in changed:
-        print(f"ok   {rel}" if not any(f.startswith(rel + ":") for f in failures) else f"FAIL {rel}")
-    print(f"{len(changed) - len(failures)}/{len(changed)} modified .py/.js files change only comments and docstrings")
-    if added_or_removed:
-        print("Not compared (added, deleted or renamed): " + ", ".join(added_or_removed))
+            failures.append(f"{label}: {reason}")
+    failed_labels = {failure.split(":", 1)[0] for failure in failures}
+    for label in labels:
+        print(f"FAIL {label}" if label in failed_labels else f"ok   {label}")
+    print(f"{len(labels) - len(failures)}/{len(labels)} source changes are comment-only")
     for failure in failures:
         print("  " + failure, file=sys.stderr)
     return 1 if failures else 0
