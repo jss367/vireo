@@ -24,8 +24,8 @@
   "vireo/static/import/jobs.js:retryBodyFromFinishedJob": 103,
   "vireo/static/import/jobs.js:startImport": 135,
   "vireo/static/import/loading.js:initImportPage": 151,
-  "vireo/static/import/preview-grid.js:renderImportPreviewGrid": 240,
-  "vireo/static/import/preview-grid.js:renderImportPreviewGrid.@call:[[\"member\",[\"expression\",\"{\\\"type\\\":\\\"CallExpression\\\",\\\"callee\\\":{\\\"type\\\":\\\"MemberExpression\\\",\\\"object\\\":{\\\"type\\\":\\\"CallExpression\\\",\\\"callee\\\":{\\\"type\\\":\\\"MemberExpression\\\",\\\"object\\\":{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"Object\\\"},\\\"property\\\":{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"keys\\\"},\\\"computed\\\":false,\\\"optional\\\":false},\\\"arguments\\\":[{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"groups\\\"}],\\\"optional\\\":false},\\\"property\\\":{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"sort\\\"},\\\"computed\\\":false,\\\"optional\\\":false},\\\"arguments\\\":[],\\\"optional\\\":false}\"],[\"property\",\"Identifier\",\"forEach\"],false],null]": 140,
+  "vireo/static/import/preview-grid.js:renderImportPreviewGrid": 239,
+  "vireo/static/import/preview-grid.js:renderImportPreviewGrid.@call:[[\"member\",[\"expression\",\"{\\\"type\\\":\\\"CallExpression\\\",\\\"callee\\\":{\\\"type\\\":\\\"MemberExpression\\\",\\\"object\\\":{\\\"type\\\":\\\"CallExpression\\\",\\\"callee\\\":{\\\"type\\\":\\\"MemberExpression\\\",\\\"object\\\":{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"Object\\\"},\\\"property\\\":{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"keys\\\"},\\\"computed\\\":false,\\\"optional\\\":false},\\\"arguments\\\":[{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"groups\\\"}],\\\"optional\\\":false},\\\"property\\\":{\\\"type\\\":\\\"Identifier\\\",\\\"name\\\":\\\"sort\\\"},\\\"computed\\\":false,\\\"optional\\\":false},\\\"arguments\\\":[],\\\"optional\\\":false}\"],[\"property\",\"Identifier\",\"forEach\"],false],null]": 139,
   "vireo/static/import/preview.js:previewImport": 407,
   "vireo/static/import/results.js:renderResult": 152,
   "vireo/static/jobs/actions.js:bindDetailPaneActions": 258,
@@ -47,7 +47,7 @@
   "vireo/static/move/quick-move-preview.js:updateQuickMovePreview": 114,
   "vireo/static/move/quick-move-start.js:startQuickMove": 146,
   "vireo/static/navbar-folder-banners.js:checkNewImages": 151,
-  "vireo/static/navbar-folder-banners.js:loadMissingFolders": 177,
+  "vireo/static/navbar-folder-banners.js:loadMissingFolders": 173,
   "vireo/static/navbar-pipeline-inspector.js:renderPipeline": 169,
   "vireo/static/navbar-shared-helpers.js:init": 103,
   "vireo/static/photo-editor/context-menu.js:buildPhotoEditorContextMenu": 155,
@@ -80,7 +80,6 @@
   "vireo/static/vireo-batch-edits.js:open": 127,
   "vireo/static/vireo-browse-compare.js:create": 340,
   "vireo/static/vireo-dialog.js:create": 104,
-  "vireo/static/vireo-filter.js:init": 101,
   "vireo/static/vireo-filter.js:installEvents": 398,
   "vireo/static/vireo-workspace-switcher.js:create": 225
 }

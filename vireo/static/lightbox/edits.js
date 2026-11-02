@@ -517,11 +517,11 @@ var _VIREO_EDIT_MATH_VERSION = 10;
 }
 
 // Fingerprint the *whole* recipe, not the subset the lightbox can edit.
-// This used to hash ``_lbCloneEditRecipe(recipe)``, which models only
-// rotation/straighten/flip/crop/adjustments — so a recipe whose only edit
-// lived in the ``local`` section fingerprinted identically to no edit at all,
-// and the grid kept serving the pre-edit thumbnail out of the browser cache
-// for the full 24h max-age. Prefer ``render_key`` from the server (see
+// ``_lbCloneEditRecipe(recipe)`` models only
+// rotation/straighten/flip/crop/adjustments, so hashing it would fingerprint
+// a recipe whose only edit lives in the ``local`` section identically to no
+// edit at all, and the grid would keep serving the pre-edit thumbnail out of
+// the browser cache for the full 24h max-age. Prefer ``render_key`` from the server (see
 // ``_vireoPhotoRenderKey``); this is the fallback for payloads that predate
 // it and for recipes this page wrote itself.
 export function _vireoEditRecipeCacheKey(/** @type {LightboxRecipe | null | undefined} */ recipe) {

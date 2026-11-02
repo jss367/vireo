@@ -72,8 +72,8 @@ export function selectedQuickFolderTemplate() {
 //
 // Passing null resets the labels to bare patterns — the deliberate state
 // before this folder's real dates are known. An example that is stale or
-// invented is worse than no example: this control shipped a frozen sample
-// date for months that contradicted the panel right below it.
+// invented is worse than no example: a frozen sample date would contradict
+// the panel right below it.
 //
 // The examples depend on the selected source folder and nothing else, so the
 // only thing that invalidates them is changing that folder.
