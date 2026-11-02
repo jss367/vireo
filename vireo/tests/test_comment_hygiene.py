@@ -175,6 +175,12 @@ def js_comment_texts(src: str) -> list[str]:
             i, regex_ok = j, False
         elif c in "{}":
             if c == "{":
+                # An optional ``catch`` binding (``catch { ... }``) opens its
+                # body without a parameter list, so a ``pending_params`` left
+                # over from ``catch`` must not survive into the body — the
+                # next ordinary call's ``(`` would otherwise be lexed as a
+                # parameter list and its identifiers would land in ``bound``.
+                pending_params = False
                 braces.append("{")
                 if expect_binding or destr_depth > 0:
                     destr_depth += 1
@@ -407,6 +413,21 @@ def test_js_lexer_binding_forms_other_than_declarations():
     for src in cases:
         matches = js_comment_texts(src)
         assert any("Codex" in text for text in matches), src
+
+
+def test_js_lexer_optional_catch_binding_does_not_bind_call_args():
+    """An optional ``catch`` binding (``catch { ... }``) has no parameter list,
+    so an identifier inside its body — ``return`` in ``run(() => { return
+    /'/.toString(); })`` — must not be bound as a parameter. If it were, the
+    following ``/`` would lex as division, the lone ``'`` would open a string
+    literal that runs to end of file, and the trailing ``// Codex`` would be
+    swallowed."""
+    cases = [
+        "try {} catch { run(() => { return /'/.toString(); // Codex\n }) }\n",
+        "try { x } catch { run(async () => { await y; return /'/.test(s); // Codex\n}) }\n",
+    ]
+    for src in cases:
+        assert any("Codex" in text for text in js_comment_texts(src)), src
 
 
 def test_js_lexer_for_of_does_not_bind_loop_body():
