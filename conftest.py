@@ -9,6 +9,7 @@ tests; other fixtures live in the per-suite ``conftest.py`` files.
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -28,7 +29,8 @@ def isolated_trash(tmp_path, monkeypatch):
     only with a synthetic volume inside tmp_path. Finder tests must mock
     subprocess.run explicitly.
     """
-    import app as app_module
+    from services import trash as trash_module
+    from services import volumes
 
     root = tmp_path.resolve()
     trash = root / "test-trash"
@@ -55,13 +57,13 @@ def isolated_trash(tmp_path, monkeypatch):
             destination = Path(tempfile.mkdtemp(dir=trash)) / source.name
             shutil.move(source, destination)
 
-    real_volume_trash = app_module._move_to_volume_trash
+    real_volume_trash = trash_module.move_to_volume_trash
 
     def isolate_volume_trash(filepath):
         """Allow native moves only into a synthetic, test-owned volume."""
-        if app_module.sys.platform != "darwin":
+        if sys.platform != "darwin":
             return False
-        volume_root = app_module._volume_root_for_path(filepath)
+        volume_root = volumes.volume_root_for_path(filepath)
         if volume_root is None:
             return False
         source = test_source(filepath)
@@ -87,6 +89,6 @@ def isolated_trash(tmp_path, monkeypatch):
         return real_run(args, *positional, **kwargs)
 
     monkeypatch.setattr(send2trash, "send2trash", move_to_test_trash)
-    monkeypatch.setattr(app_module, "_move_to_volume_trash", isolate_volume_trash)
+    monkeypatch.setattr(trash_module, "move_to_volume_trash", isolate_volume_trash)
     monkeypatch.setattr(subprocess, "run", prevent_real_finder_delete)
     return trash

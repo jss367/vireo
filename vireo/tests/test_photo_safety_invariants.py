@@ -419,15 +419,16 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         return hashes
 
     def _deleter(self):
-        import app as app_module
+        from services import volumes
         from services.photo_deletion import PhotoDeletion
+        from sql_chunks import chunked
 
         return PhotoDeletion(
             {"THUMB_CACHE_DIR": self.thumbs},
-            chunked=app_module._chunked,
+            chunked=chunked,
             trash_paths=self._trash_paths,
-            snapshot_parent_device=app_module._snapshot_parent_device,
-            path_confirmed_gone=app_module._path_confirmed_gone,
+            snapshot_parent_device=volumes.snapshot_parent_device,
+            path_confirmed_gone=volumes.path_confirmed_gone,
         )
 
     def _trash_paths(self, filepaths, progress_callback=None, already_missing_out=None,

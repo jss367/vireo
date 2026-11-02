@@ -47,7 +47,7 @@ _NFS_SRC_RE = re.compile(
 _NETWORK_FS = ("smbfs", "nfs", "afpfs", "webdav")
 # autofs is deliberately excluded: an autofs entry is an automount trigger,
 # not local storage, and the target it resolves to can be an unavailable
-# network share. Treating it as local would let ``_path_on_network_volume``
+# network share. Treating it as local would let ``volumes.path_on_network_volume``
 # route callers through in-process ``stat``/``isfile`` calls that trip the
 # automount and block indefinitely — the exact failure mode the fail-closed
 # probe path is designed to avoid.

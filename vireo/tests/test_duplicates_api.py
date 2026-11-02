@@ -289,7 +289,7 @@ def test_delete_loser_files_reports_send2trash_error_off_mac(
     """Off macOS, a send2trash failure surfaces its real error to the client
     rather than the macOS-only Finder fallback guard message.
 
-    Regression: guarding _trash_via_finder to raise on non-mac meant the
+    Regression: guarding trash_via_finder to raise on non-mac meant the
     caller's except reported "Finder trash fallback is only available on
     macOS" in failed[].error, hiding the actionable send2trash cause.
     """
@@ -1193,112 +1193,6 @@ def test_last_scan_ignores_failed_jobs(app_and_db):
 
     body = app.test_client().get("/api/duplicates/last-scan").get_json()
     assert body == {"found": False}
-
-
-# -----------------------------------------------------------------------------
-# _ensure_volume_trashes_dir — pre-trash hook that creates the per-user
-# .Trashes directory on external/network volumes so send2trash legacy mode
-# stops falling back to AppleScript Finder (which times out for hours).
-# -----------------------------------------------------------------------------
-
-def test_ensure_volume_trashes_dir_creates_dir_under_volume(monkeypatch):
-    """Path under /Volumes/X triggers makedirs for /Volumes/X/.Trashes/$UID."""
-    import os
-    import sys
-
-    import pytest
-
-    if sys.platform != "darwin":
-        pytest.skip("macOS /Volumes trash hook")
-
-    from app import _ensure_volume_trashes_dir
-
-    calls = []
-    def fake_makedirs(path, mode=None, exist_ok=False):
-        calls.append((path, mode, exist_ok))
-    monkeypatch.setattr("os.makedirs", fake_makedirs)
-
-    seen = set()
-    _ensure_volume_trashes_dir("/Volumes/Photography/sub/file.NEF", seen)
-
-    assert len(calls) == 1
-    path, mode, exist_ok = calls[0]
-    assert path == f"/Volumes/Photography/.Trashes/{os.getuid()}"
-    assert mode == 0o700
-    assert exist_ok is True
-    assert "/Volumes/Photography" in seen
-
-
-def test_ensure_volume_trashes_dir_idempotent_per_volume(monkeypatch):
-    """Repeated calls for files on the same volume only run makedirs once."""
-    import sys
-
-    import pytest
-
-    if sys.platform != "darwin":
-        pytest.skip("macOS /Volumes trash hook")
-
-    from app import _ensure_volume_trashes_dir
-
-    calls = []
-    monkeypatch.setattr("os.makedirs", lambda *a, **k: calls.append((a, k)))
-
-    seen = set()
-    _ensure_volume_trashes_dir("/Volumes/Photography/a.NEF", seen)
-    _ensure_volume_trashes_dir("/Volumes/Photography/b.NEF", seen)
-    _ensure_volume_trashes_dir("/Volumes/Photography/sub/c.NEF", seen)
-
-    assert len(calls) == 1
-
-
-def test_ensure_volume_trashes_dir_creates_per_distinct_volume(monkeypatch):
-    """Files on different volumes each get their own .Trashes dir created."""
-    import sys
-
-    import pytest
-
-    if sys.platform != "darwin":
-        pytest.skip("macOS /Volumes trash hook")
-
-    from app import _ensure_volume_trashes_dir
-
-    calls = []
-    monkeypatch.setattr("os.makedirs", lambda p, **k: calls.append(p))
-
-    seen = set()
-    _ensure_volume_trashes_dir("/Volumes/Photography/a.NEF", seen)
-    _ensure_volume_trashes_dir("/Volumes/Backup/a.NEF", seen)
-
-    assert len(calls) == 2
-    assert "/Volumes/Photography/.Trashes/" in calls[0]
-    assert "/Volumes/Backup/.Trashes/" in calls[1]
-
-
-def test_ensure_volume_trashes_dir_skips_non_volume_paths(monkeypatch):
-    """System-Trash-managed paths (~, /tmp, /private) don't need this hook."""
-    from app import _ensure_volume_trashes_dir
-
-    calls = []
-    monkeypatch.setattr("os.makedirs", lambda *a, **k: calls.append(a))
-
-    _ensure_volume_trashes_dir("/Users/julius/photo.NEF", set())
-    _ensure_volume_trashes_dir("/private/tmp/photo.NEF", set())
-    _ensure_volume_trashes_dir("relative/path.NEF", set())
-    _ensure_volume_trashes_dir("/Volumes", set())  # bare /Volumes, no mount
-
-    assert calls == []
-
-
-def test_ensure_volume_trashes_dir_swallows_oserror(monkeypatch):
-    """Read-only mount or ACL block must not break the bulk trash — let the
-    actual send2trash call surface the more specific error."""
-    from app import _ensure_volume_trashes_dir
-
-    def boom(*a, **k):
-        raise OSError("read-only file system")
-    monkeypatch.setattr("os.makedirs", boom)
-
-    _ensure_volume_trashes_dir("/Volumes/X/photo.NEF", set())  # must not raise
 
 
 def test_keep_endpoint_switches_the_kept_copy(app_and_db, tmp_path):

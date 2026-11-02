@@ -8,9 +8,10 @@ that information for interactive use.
 ## Application layout
 
 - `vireo/app.py` holds the app factory and its wiring, plus the process
-  entry point (`main()`), the startup cache migrations, and the mount-aware
-  Trash helpers (`_trash_paths` and friends, which tests patch on the `app`
-  module). `create_app` builds the per-app objects (the request DB getter,
+  entry point (`main()`) and the startup cache migrations. The mount-aware
+  Trash pipeline lives in `services/trash.py` and `services/volumes.py`;
+  `app.py` imports its entry points under private names (`_trash_paths` and
+  friends) that route tests patch on the `app` module. `create_app` builds the per-app objects (the request DB getter,
   the job runner, and the services that carry state), runs the startup
   catalog repairs (`StartupTasks.run_catalog_repairs`), registers the request hooks (`web.app_hooks`), registers
   every blueprint, and adds the `/api/v1` aliases. It defines no routes:
