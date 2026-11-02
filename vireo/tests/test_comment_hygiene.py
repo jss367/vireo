@@ -284,7 +284,26 @@ def js_comment_texts(src: str) -> list[str]:
                     # a for-paren would make the nested ``of`` open a regex
                     # whose closing `/` is the start of the trailing line
                     # comment, swallowing the comment the ratchet must read.
-                    for_paren_pending = j < n and src[j] == "("
+                    # ``for await`` is the async-iteration header: the
+                    # ``await`` keyword sits between ``for`` and the paren
+                    # list, so step past it before deciding so the inner
+                    # ``of`` can still open its regex iterable.
+                    k = j
+                    m_await = _JS_IDENT.match(src, k)
+                    if m_await and m_await.group() == "await":
+                        k = m_await.end()
+                        while k < n:
+                            if src[k] in " \t\r\n":
+                                k += 1
+                            elif src.startswith("//", k):
+                                end = src.find("\n", k)
+                                k = n if end < 0 else end
+                            elif src.startswith("/*", k):
+                                end = src.find("*/", k + 2)
+                                k = n if end < 0 else end + 2
+                            else:
+                                break
+                    for_paren_pending = k < n and src[k] == "("
                 if src.startswith("=>", j):
                     bound.add(word)
                     regex_ok = False
@@ -514,6 +533,22 @@ def test_js_lexer_for_as_property_name_does_not_open_for_paren():
     ]
     for src in cases:
         assert any("Codex" in text for text in js_comment_texts(src)), src
+
+
+def test_js_lexer_for_await_opens_loop_header():
+    """``for await (binding of /pat/)`` is the async-iteration header: the
+    optional ``await`` sits between ``for`` and the paren list, so its ``(``
+    still opens a for-paren. Otherwise the inner ``of`` would be a plain
+    identifier, the following ``/`` would open a regex that swallows the
+    body, and code identifiers after it would leak into the comment stream."""
+    cases = [
+        "async function f(){ for await (const x of /\\//) { const Codex = 1; } }\n",
+        "async function g(){ for  await  (const x of /re/) { /* keep */ } }\n",
+        "async function h(){ for /* c */ await (const x of /re/) { /* keep */ } }\n",
+    ]
+    assert js_comment_texts(cases[0]) == []
+    assert js_comment_texts(cases[1]) == [" keep "]
+    assert js_comment_texts(cases[2]) == [" c ", " keep "]
 
 
 def test_js_lexer_matches_acorn():
