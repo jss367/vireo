@@ -151,12 +151,19 @@ def _writer_calls(rel, tree):
     fourth positional argument. The repository writer ``tag`` takes it
     keyword-only, through any receiver that is a provenance repository.
     """
-    aliases = {
-        target.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign) and _builds_provenance_repository(node.value)
-        for target in node.targets if isinstance(target, ast.Name)
-    }
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _builds_provenance_repository(node.value):
+            aliases.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.value is not None
+            and _builds_provenance_repository(node.value)
+            and isinstance(node.target, ast.Name)
+        ):
+            aliases.add(node.target.id)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -721,6 +728,9 @@ def test_writer_call_scan_finds_every_way_to_reach_the_writer():
         "    KeywordProvenanceRepository(conn).tag(1, 2, source='accept')\n"
         "    repo = db.keyword_provenance\n"
         "    repo.tag(1, 2)\n"
+        "    annotated: KeywordProvenanceRepository = db.keyword_provenance\n"
+        "    annotated.tag(1, 2, source=None)\n"
+        "    bare: KeywordProvenanceRepository\n"
         "    db.tags.tag(1)\n"
     )
     found = [
@@ -729,7 +739,7 @@ def test_writer_call_scan_finds_every_way_to_reach_the_writer():
     ]
     assert found == [
         (2, "<omitted>"), (3, None), (4, "manual"), (5, None), (6, "accept"),
-        (8, "<unrecognized>"),
+        (8, "<unrecognized>"), (10, None),
     ]
     self_tree = ast.parse("def f(self):\n    self.tag(1, 2, source=None)\n")
     assert [_declared_source(src) for _, src in _writer_calls(_PROVENANCE_MODULE, self_tree)] == [None]
