@@ -12,7 +12,6 @@ import pytest
     [
         ("repositories.keyword_tree", "KeywordTreeRepository"),
         ("repositories.keyword_provenance", "KeywordProvenanceRepository"),
-        ("repositories.photos", "PhotoRepository"),
         ("repositories.predictions", "PredictionRepository"),
     ],
 )

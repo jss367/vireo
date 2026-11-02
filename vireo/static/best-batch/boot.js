@@ -1,5 +1,5 @@
-// Page startup: the module the template loads. Binds the controls that used
-// to carry inline handlers and the delegated card clicks, then loads the batch.
+// Page startup: the module the template loads. Binds the page controls and
+// the delegated card clicks, then loads the batch.
 // ES module.
 
 import { bindFocusControls } from './focus.js';

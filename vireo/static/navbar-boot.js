@@ -2,9 +2,9 @@
 //
 //   <script type="module" src="/static/navbar-boot.js"></script>
 //
-// It imports the navbar and lightbox modules in the order _navbar.html used
-// to load them as classic scripts (a module's own imports still evaluate
-// before it) and the classic bridge (navbar-globals.js, which imports every
+// It imports the navbar and lightbox modules in dependency order (a module's
+// own imports still evaluate before it) and the classic bridge
+// (navbar-globals.js, which imports every
 // module it publishes from), then binds the markup's data-navbar-on handlers.
 // Module scripts are deferred: this runs after the document is parsed, before
 // the page's deferred scripts and before DOMContentLoaded.

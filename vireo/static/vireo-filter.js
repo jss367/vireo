@@ -163,7 +163,7 @@
   // from its own controls. Misses excludes ``flag=rejected`` because
   // ``/api/misses`` filters those rows out server-side; without this a
   // "Flag = Rejected" expression composed on Browse and handed to Misses
-  // would render an always-empty grid (Codex review r3627389228).
+  // would render an always-empty grid.
   //
   // The rewrite is minimal: values the server excludes are dropped from
   // ``is``/``in`` clauses (leaves become no-ops rather than always-false
@@ -401,8 +401,8 @@
   // ``others.rules`` would discard the root mode: a tree whose root is
   // ``any`` or ``none`` (NOT(…) / OR(…)) would silently become ``all``,
   // scoping values to the wrong photo set and letting the 50-result cap
-  // fill with values from outside the active grid (Codex review
-  // r4208938067). Wrap non-``all`` subtrees so their mode survives, and
+  // fill with values from outside the active grid. Wrap non-``all``
+  // subtrees so their mode survives, and
   // drop empty subtrees so an empty ``any`` doesn't short-circuit the
   // scope to false (``prunedTree`` already prunes nested empties).
   function composeScopeRules(/** @type {FilterRule[]} */ context, /** @type {FilterGroup} */ others) {
@@ -544,8 +544,8 @@
   // ``state.root.rules`` directly into an outer ``{mode: 'all', rules: …}``
   // wrapper would flatten a saved ``{mode: 'any'}`` or ``{mode: 'none'}``
   // root — the Edit Rules modal in Browse can save either — from OR/NOT
-  // into AND, silently changing what the reopened collection matches
-  // (Codex review r3620791294). Non-'all' roots are wrapped as a nested
+  // into AND, silently changing what the reopened collection matches.
+  // Non-'all' roots are wrapped as a nested
   // child so the outer AND with the context is honored without collapsing
   // the inner OR/NOT.
   function composeWithContext(/** @type {FilterRule[]} */ context, /** @type {FilterGroup} */ root) {
@@ -600,7 +600,7 @@
     // saved collection would then snapshot its whole photo_ids list into
     // every workspace-state fetch, and a later reload would restore that
     // stale expansion instead of re-resolving the live collection —
-    // membership edits/deletes wouldn't show through (Codex r3623087117).
+    // membership edits/deletes wouldn't show through.
     // Callers opening a saved expression pass ``noPersist: true`` so the
     // load itself isn't persisted; subsequent user edits go through
     // mutate() again without the flag and persist normally.
@@ -640,7 +640,7 @@
     const context = state.getContextRules ? state.getContextRules() : [];
     // Mirror effectiveRules' mode-preserving compose: a paused-view
     // "would match" counter must reflect what unpausing would apply, not
-    // an AND-flattened version of an any/none root (Codex r3620791294).
+    // an AND-flattened version of an any/none root.
     const rules = composeWithContext(context, state.root);
     /** @type {Promise<{total: number}>} */ (fetchJson('/api/photos/query', {
       method: 'POST',
@@ -1521,9 +1521,9 @@
   }
 
   // Stringified representation of everything the picker's value request
-  // depends on, used by ``loadValuePickers`` to detect that an already-
-  // fetched list is stale after a sibling rule change (Codex review
-  // r4209098966). The query is only part of the key for non-folder
+  // depends on, which ``loadValuePickers`` compares to detect that an
+  // already-fetched list is stale after a sibling rule change. The query is
+  // only part of the key for non-folder
   // pickers: the folder picker fetches a single tree and filters it
   // client-side, so typing in its search box must not invalidate the
   // cache.
@@ -1561,7 +1561,7 @@
     // and page scope (folder/collection) — subtree-aggregated server-side.
     // Null means scope is inactive and every folder is reachable. Hiding
     // out-of-scope folders stops a folder-scoped Browse view from offering
-    // picks that would silently empty the grid (Codex review r4209098975).
+    // picks that would silently empty the grid.
     const scopedPaths = picker.scopedPaths;
     // A folder the user has already picked must stay visible in the tree
     // even when the current scope would otherwise hide it, so they can
@@ -1698,8 +1698,8 @@
       // skipped it (``picker.pending`` was true). No later render fires
       // ``loadValuePickers`` on its own, so the pending request's
       // completion is where that re-check has to happen or the picker
-      // stays scoped to the previous result set indefinitely (Codex
-      // review r4209417944). Re-run only while the picker is still open
+      // stays scoped to the previous result set indefinitely. Re-run only
+      // while the picker is still open
       // — a reopen will fire ``loadValuePickers`` on its own and refetch
       // against the fresh scope.
       if (picker.open && pickerScopeKey(node, picker) !== picker.scopeKey) {
@@ -1714,15 +1714,14 @@
     };
     if (node.field === 'folder') {
       // Folders need two reads: ``/api/folders`` for the id/parent_id
-      // hierarchy used to render the tree, and the scoped folder facet
+      // hierarchy the tree renders from, and the scoped folder facet
       // from ``/api/filters/values`` so the picker only lists folders
       // whose subtree has photos matching the current sibling rules,
-      // visual clause and page scope (Codex review r4209098975). The
+      // visual clause and page scope. The
       // facet aggregates counts over each folder's subtree, so a scoped
       // path's ancestors are already in the response — no manual
       // ancestor hoisting needed. If the facet fails but the tree
-      // succeeds, fall back to the unscoped tree (same behavior as
-      // before the scope was wired in).
+      // succeeds, fall back to the unscoped tree.
       const foldersPromise = /** @type {Promise<FilterFolder[]>} */ (fetchJson('/api/folders'));
       // The folder facet uses a bump limit server-side so the tree is
       // not silently truncated past the typeahead's 50-cap when the
@@ -1745,7 +1744,7 @@
     // Mirror the typeahead's scope (other rules, visual, page scope) so a
     // folder- or collection-scoped Browse view lists values present in
     // the current grid. Without these the global 50-value cap can omit
-    // values that are actually in scope (Codex review r4208710522).
+    // values that are actually in scope.
     /** @type {Promise<{values: FilterFacet[]}>} */ (fetchJson(`/api/filters/values?${scopeParams()}`)).then((data) => {
       finish(data.values, null);
     }).catch(fail);
@@ -1758,7 +1757,7 @@
       if (!picker.open || picker.pending || picker.error) return;
       // Refetch when either the picker has never loaded or when a
       // sibling rule, visual clause or page-scope change has made the
-      // cached values stale (Codex review r4209098966). Without this
+      // cached values stale. Without this
       // the picker continues to show the previous scope's choices —
       // and with more than 50 values can omit newly valid ones — until
       // the user retypes the query or reopens the whole popover.
@@ -2049,7 +2048,7 @@
       clearUnappliedQuickSearchText();
       if (!hasUserFilters() && !state.muted) return;
       // Kill any pending live-search debounce so it can't silently reinstate
-      // the just-typed text after "Filters cleared" (Codex review r3791783342).
+      // the just-typed text after "Filters cleared".
       cancelQuickSearchTimer();
       mutate(() => {
         state.root = { mode: 'all', rules: [] };
@@ -2400,10 +2399,10 @@
     // the reopened collection matches globally, so including
     // getContextRules() in the preview would show a folder-scoped count
     // that disagrees with what the collection actually contains on
-    // reopen (CodeRabbit review r3620473554).
+    // reopen.
     // Preserve the root's group mode (any/none) so the count reflects
     // what the saved collection actually matches, not an all-mode
-    // flattening of it (Codex review r3620791294). ``userRules()`` is
+    // flattening of it. ``userRules()`` is
     // the shared helper for that shape.
     const rules = userRules();
     const preview = /** @type {HTMLElement} */ ($('.vf-save-preview'));
@@ -2554,8 +2553,7 @@
         // still carries the caller's intent to constrain the page. Falling
         // through to legacy params or persisted state would silently widen
         // the destination — on Misses, that re-exposes bulk reject and
-        // recompute to photos outside the intended handoff scope
-        // (Codex review r3627816534).
+        // recompute to photos outside the intended handoff scope.
         if (urlParams.has('filters')) {
           const handoffRaw = urlParams.get('filters');
           let payload;
@@ -2644,7 +2642,7 @@
       // collection is open) pass ``{ reason: 'expressionRefreshed' }`` so
       // the anchor is NOT preserved: the selected photo may have just left
       // the collection, and loadUntilPhotoRendered would then page through
-      // the whole refreshed set looking for it (Codex review r3622521603).
+      // the whole refreshed set looking for it.
       let root = /** @type {FilterGroup} */ ({ mode: 'all', rules: [] });
       if (Array.isArray(rules)) root = { mode: 'all', rules: clone(rules) };
       else if (isGroup(rules)) root = clone(rules);
@@ -2653,7 +2651,7 @@
       root.rules = root.rules.filter((r) => !(r && r.field === 'all'));
       const reason = (opts && opts.reason) || 'expressionLoaded';
       // A pending debounce from just-typed text would fire after the load
-      // and overwrite the collection's expression (Codex r3791783342).
+      // and overwrite the collection's expression.
       cancelQuickSearchTimer();
       clearUnappliedQuickSearchText();
       mutate(() => {
@@ -2666,7 +2664,7 @@
                 ? visual.strength : 'balanced' }
           : null;
         state.visualInfo = null;
-        // See mutate()'s noPersist note (Codex r3623087117): opening a
+        // See mutate()'s noPersist note: opening a
         // saved collection should not snapshot its expanded rule list
         // (e.g. a huge photo_ids array from a manual collection) into
         // workspaces.ui_state.
@@ -2702,11 +2700,10 @@
         // from the whole tree. A nested identity leaf (saved advanced
         // group, say) would otherwise intersect its disjoint old
         // membership with the new rule and empty the grid instead of
-        // switching to the selected group (Codex review r4208710529).
+        // switching to the selected group.
         // ``rulesWithoutFields`` also prunes groups left empty by the
         // strip, so a nested empty ``any`` cannot compile to false and
-        // AND-collapse the grid when the new rule is appended (Codex
-        // review r4208938061).
+        // AND-collapse the grid when the new rule is appended.
         const stripped = rulesWithoutFields(state.root, ['photo_ids', 'burst_id', 'duplicate_group']);
         if (stripped.mode === 'all') {
           stripped.rules.push(rule);

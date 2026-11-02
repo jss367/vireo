@@ -1,5 +1,5 @@
-// Page startup: the module the template loads. Binds the controls that used
-// to carry inline handlers and shows the desktop-only Browse button.
+// Page startup: the module the template loads. Binds the page controls and
+// shows the desktop-only Browse button.
 // ES module.
 
 import { byId } from './state.js';

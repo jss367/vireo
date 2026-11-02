@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any
 
 import config as cfg
 from config import config_value
-from db import _inclusive_date_to
+from repositories.photo_sql import inclusive_date_to as _inclusive_date_to
+from repositories.photos import append_location_status_filter
 
 if TYPE_CHECKING:
     from db import Database
@@ -166,7 +167,7 @@ def get_dashboard_stats(
         db, folder_id, collection_id, date_from, date_to,
     )
     location_conditions: list[str] = []
-    db._append_location_status_filter(location_conditions, "none")
+    append_location_status_filter(location_conditions, "none")
     return repo.get_dashboard(
         min_conf, preview_size, scope_sql, scope_params, location_conditions,
     )
