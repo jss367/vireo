@@ -66,7 +66,7 @@ def python_comment_texts(src: str) -> list[str]:
 
 
 _JS_REGEX_AFTER_WORD = {
-    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
+    "return", "typeof", "instanceof", "in", "new", "delete", "void", "throw",
     "case", "do", "else", "yield", "await",
 }
 _JS_IDENT = re.compile(r"[A-Za-z_$\u0080-￿][\w$\u0080-￿]*")
@@ -85,6 +85,9 @@ def js_comment_texts(src: str) -> list[str]:
     i, n = 0, len(src)
     regex_ok = True
     braces: list[str] = []
+    parens: list[bool] = []
+    pending_for = False
+    previous_word = ""
 
     def template(j: int) -> tuple[int, bool]:
         while j < n:
@@ -146,10 +149,27 @@ def js_comment_texts(src: str) -> list[str]:
             # After a block's ``}`` a ``/`` starts a regex; that is far more
             # common in these scripts than dividing an object literal.
             i, regex_ok = i + 1, True
+        elif c == "(":
+            parens.append(pending_for)
+            pending_for = False
+            i, regex_ok = i + 1, True
+        elif c == ";":
+            if parens:
+                parens[-1] = False
+            i, regex_ok = i + 1, True
         elif c in ")]":
+            if c == ")" and parens:
+                parens.pop()
             i, regex_ok = i + 1, False
         elif match := _JS_IDENT.match(src, i):
-            i, regex_ok = match.end(), match.group() in _JS_REGEX_AFTER_WORD
+            word = match.group()
+            # `of` is contextual: a for-header separator follows a completed
+            # left operand, whereas identifiers and property names do not.
+            separator = (word == "of" and bool(parens) and parens[-1]
+                         and not regex_ok and src[:i].rstrip()[-1:] != ".")
+            pending_for = word == "for" or (word == "await" and previous_word == "for")
+            previous_word = word
+            i, regex_ok = match.end(), word in _JS_REGEX_AFTER_WORD or separator
         elif (c.isdigit() or (c == "." and src[i + 1 : i + 2].isdigit())) and (match := _JS_NUMBER.match(src, i)):
             i, regex_ok = match.end(), False
         elif src.startswith(("++", "--"), i):
@@ -244,6 +264,16 @@ def test_only_comments_and_docstrings_are_read():
     assert count_matches(python_comment_texts(py)) == {"codex": 1, "used_to": 1, "review_id": 1}
     js = "const u = 'http://x/#1234'; // Codex\nconst t = `a ${'b' /* PR #12 */} //c`;\nconst r = /\\/\\//g; /* used to */\n"
     assert js_comment_texts(js) == [" Codex", " PR #12 ", " used to "]
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("const of = 8; of / 2; // Codex", [" Codex"]),
+    ("for (const of of /a\\/\\//g) { /* Codex */ }", [" Codex "]),
+    ("for (const x of /a\\/\\//g) { /* Codex */ }", [" Codex "]),
+    ("for (const x of values.of / 2) { /* Codex */ }", [" Codex "]),
+])
+def test_contextual_of_comments(source, expected):
+    assert js_comment_texts(source) == expected
 
 
 def test_js_lexer_matches_acorn():
