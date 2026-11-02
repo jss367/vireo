@@ -95,11 +95,11 @@ def _register_document_uri(root, xmp_path):
 
     Uses ``Path.absolute()'' rather than ``Path.resolve()'' so a
     sidecar accessed through a symlinked directory keeps the
-    retrieval path in the URI (Codex finding: otherwise a relative
+    retrieval path in the URI. Otherwise a relative
     ``rdf:about="photo.jpg"'' folds against the physical target
     while a sibling ``rdf:about="file:///alias/photo.jpg"'' keeps
     the alias, and ``_photo_subject'' treats the packet as
-    ambiguous).
+    ambiguous.
     """
     try:
         uri = Path(xmp_path).absolute().as_uri()
@@ -132,9 +132,9 @@ def _effective_xml_base(elem, parent_map):
     recommendation. When at least one ``xml:base'' is declared and
     the composed value is still a relative reference, resolves it
     against the sidecar's document URI so ``xml:base="sub/"''
-    becomes an absolute path (Codex finding: otherwise a relative
-    base leaves ``photo.jpg'' relative and it can't fold with a
-    sibling absolute-URI Description).
+    becomes an absolute path; otherwise a relative base leaves
+    ``photo.jpg'' relative and it can't fold with a sibling
+    absolute-URI Description.
 
     Returns ``""'' when no ``xml:base'' is declared anywhere in the
     ancestor chain, even if the sidecar's document URI is

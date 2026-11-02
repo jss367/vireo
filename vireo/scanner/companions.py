@@ -43,7 +43,7 @@ def _companions_compatible(raw: Mapping[str, Any], jpeg: Mapping[str, Any]) -> b
     """True unless the two rows' capture metadata says they are different shots.
 
     Missing metadata on either side is not evidence against the pair (an
-    unreadable RAW still pairs with its JPEG by name, as before); only a
+    unreadable RAW still pairs with its JPEG by name); only a
     capture-time gap beyond the tolerance or a different camera refuses it.
     """
     raw_ts, jpeg_ts = raw.get("timestamp"), jpeg.get("timestamp")

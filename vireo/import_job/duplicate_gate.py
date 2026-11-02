@@ -27,8 +27,8 @@ log = logging.getLogger(__name__)
 # per-file loop's control flow, and the mapping is load-bearing:
 # _GATE_CANCELLED must map to ``break`` (Stop interrupted a destination
 # read — every further step this batch would touch the same, possibly
-# dead, mount; mapping it to ``continue`` would reintroduce the
-# wedged-mount cancellation pin fixed in PR #1423). _GATE_SKIPPED maps
+# dead, mount; mapping it to ``continue`` would pin cancellation on the
+# wedged mount's timeout). _GATE_SKIPPED maps
 # to ``continue`` (the file was counted as a duplicate skip or failed
 # its duplicate check); _GATE_PROCEED falls through to the
 # collision/adopt/transfer path.
@@ -48,9 +48,8 @@ def _duplicate_gate(
 ) -> str:
     """Decide whether ``source_file`` is a duplicate of cataloged or
     intra-run bytes, doing the byte-verification reads that decision
-    requires. Shared verbatim by both import paths (the 2026-08-08
-    phase map verified the two nested copies identical); returns one of
-    the ``_GATE_*`` verdicts — see the constants above for the caller's
+    requires. Shared by both import paths; returns one of the
+    ``_GATE_*`` verdicts — see the constants above for the caller's
     mapping contract.
     """
     if checker is None:
@@ -225,7 +224,7 @@ def _byte_verified_twins(
     # hash row. Linking any twin folder we did not
     # re-hash would pull unrelated/missing archive folders
     # into the active workspace on a duplicate-only
-    # import. See PR #1107 review.
+    # import.
     verified_twin_rows = []
     for twin in twin_rows:
         twin_path = os.path.join(
@@ -241,7 +240,7 @@ def _byte_verified_twins(
         # proof would flip safe_to_format green
         # while the card holds the only bytes. Only
         # an off-card twin can back a duplicate
-        # skip. See PR #1107 review.
+        # skip.
         if ctx.path_under_any_source(twin_path):
             continue
         try:
@@ -267,7 +266,6 @@ def _byte_verified_twins(
             # active workspace) or pulls an
             # unrelated folder in (if the catalog's
             # stored hash row no longer describes
-            # the on-disk bytes). See PR #1107
-            # review.
+            # the on-disk bytes).
             verified_twin_rows.append(twin)
     return accept, verified_twin_rows

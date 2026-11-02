@@ -217,7 +217,7 @@ def _escape_text(text):
 
 def _escape_attribute(text):
     # ElementTree's escapes in ElementTree's order, so an unchanged value is
-    # written exactly as before.
+    # written byte-for-byte as ElementTree wrote it.
     return (
         _escape_text(text).replace('"', "&quot;").replace("\r", "&#13;")
         .replace("\n", "&#10;").replace("\t", "&#09;")

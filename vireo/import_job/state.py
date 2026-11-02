@@ -59,7 +59,7 @@ class ImportParams:
     # After-import process strategy name. Stored in the job config for the
     # PR 3 chaining hook; unused by the import job itself.
     after_import: str | None = None
-    # Remote (SSH) archive destination (Task 2.7). When set, the card is
+    # Remote (SSH) archive destination. When set, the card is
     # rsynced to ``remote_path/subpath`` over SSH instead of copied locally,
     # and photos are cataloged at ``mount_path/subpath`` (which ``destination``
     # is set to). The dict shape (built by ``/api/jobs/import-photos`` from
@@ -69,7 +69,7 @@ class ImportParams:
     #               bwlimit_kbps/rsync_bin/ssh_dest_base/mount_dest_base>,
     #    "ssh_base": remote_path/subpath (NAS-side),
     #    "mount_base": mount_path/subpath (== destination)}
-    # ``None`` keeps the local copy path unchanged.
+    # ``None`` selects the local copy path.
     remote_target: dict[str, Any] | None = None
     # Vireo data dir for working-copy extraction (Task 2.5). None skips
     # extraction (tests, or callers that defer to the scanner backfill).
@@ -80,8 +80,7 @@ class ImportParams:
     # replaces bytes at an existing archive path would clear working copies
     # and previews but leave a stale thumbnail served by the UI. Callers with
     # the configured value (Flask ``/api/jobs/import-photos``) should pass
-    # it; ``None`` falls back to the default location downstream. See PR
-    # #1107 review.
+    # it; ``None`` falls back to the default location downstream.
     thumb_cache_dir: str | None = None
     # Photo IDs a recovery retry carries from its parent import (already
     # validated against the parent's scope). The run finishes their
@@ -194,8 +193,7 @@ class _ImportBatchState:
     landed: list[_LandedFile] = field(default_factory=list)
     # Twin folders (under destination) whose bytes we RE-HASHED this run
     # and confirmed against source hashes — safe to scan/link into the
-    # active workspace after this batch's fresh-scan runs. See PR #1113
-    # review.
+    # active workspace after this batch's fresh-scan runs.
     dup_dirs: set[str] = field(default_factory=set)
     # Accepted duplicate skips for this batch —
     # (source_file, counted_unverified). A skip asserts the archive
@@ -205,8 +203,7 @@ class _ImportBatchState:
     # never enter ``landed``, so they need their own rollback — without
     # it a duplicate-only batch satisfies copied + skipped_duplicate ==
     # discovered and reports safe_to_format True over an archive
-    # holding none of the bytes. See PR #1396 review (Codex P1
-    # r3687506040; remote fold r3688498501 / r3688501706).
+    # holding none of the bytes.
     dup_skips: list[tuple[Path, bool]] = field(default_factory=list)
     # dest_paths the post-scan cross-checks reclassified from
     # copied/skipped_duplicate to failed. The entries stay in ``landed``
@@ -218,7 +215,7 @@ class _ImportBatchState:
     # photo whose catalog row is missing (JPEG-pair miss aside) or
     # whose archive bytes no longer match what we copied, and cache a
     # working copy that doesn't correspond to what the rest of the app
-    # sees at the archive path. See PR #1107 review.
+    # sees at the archive path.
     reclassified_landed_paths: set[str] = field(default_factory=set)
     # Sticky once tripped: a batch can hold hundreds of files (the
     # 2026-07-26 folder held 200), and when it is the only batch there
@@ -236,12 +233,10 @@ class _ImportBatchState:
     # block MUST skip its ``scan()`` / ``_hash_dest_file`` /
     # ``_rehash_dest_or_none`` calls on the same paths — they would hit
     # the same wedged mount and pin the job in "cancelling" for the
-    # mount's own timeout, exactly the failure mode this PR set out to
-    # eliminate. A plain user Stop on a healthy mount leaves this False
-    # (the catalog runs normally so partially-landed batches stay
-    # cataloged the way ``test_cancel_leaves_valid_partial_catalog``
-    # expects). See PR #1423 review (Codex P2 r3716433824 /
-    # r3716433830).
+    # mount's own timeout. A plain user Stop on a healthy mount leaves
+    # this False (the catalog runs normally so partially-landed batches
+    # stay cataloged the way ``test_cancel_leaves_valid_partial_catalog``
+    # expects).
     dest_read_cancelled: bool = False
     # --- Remote-only trio (unused on the local path until PR 7) ------
     # Files queued for the batch rsync:
@@ -260,7 +255,7 @@ class _ImportBatchState:
     # would otherwise sail past the empty ``_seen_hashes`` and get
     # queued/rsynced/cataloged again. Track queued src hashes here
     # to catch that case at enqueue time — the file that was already
-    # queued backs this skip. See PR #1113 review.
+    # queued backs this skip.
     queued_src_hashes: dict[str, str] = field(default_factory=dict)
     # Same-stem card files (IMG_0001.CR3 + IMG_0001.JPG) must keep one
     # shared stem at the destination, or a collision rename splits the
@@ -340,14 +335,14 @@ def _record_checker(
     Without this the checker only sees the pre-run catalog, so a later
     byte-identical card file with a different basename in the same run
     is copied/cataloged again instead of being recognized as an
-    intra-run duplicate (spec decision 5): every caller passes the
+    intra-run duplicate: every caller passes the
     landed/adopted ``dest_folder`` and verified ``file_hash``, recorded
     unconditionally per token. ``DuplicateChecker.record``
     re-``os.stat``s the source path — on removable media yanked after
     this file's bytes were verified, that raises ``OSError`` and would
     kill the whole background job. Swallow it: the run keeps its
     already-verified landings and only loses the intra-run dedupe
-    optimization. See PR #1113 review.
+    optimization.
     """
     if checker is None:
         return
