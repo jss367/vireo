@@ -914,8 +914,8 @@ class _ScanPass:
         # One shared checker across the whole source loop: files
         # copied by earlier iterations are recorded in it, so
         # later sources treat them as duplicates even before the
-        # DB scan (this replaces the old accumulated-hashes
-        # re-read of every copied file between sources).
+        # DB scan, without re-reading every copied file between
+        # sources.
         ingest_checker = self._fresh_checker()
         totals = _IngestTotals()
         for src_folder in sources:
@@ -1154,8 +1154,8 @@ class _ScanPass:
         """Refuse an archive destination above a tracked folder.
 
         A tracked archive destination (the import lands at
-        or inside a folder Vireo already manages) is no
-        longer a hard failure: the archive move opts into
+        or inside a folder Vireo already manages) is not a
+        failure: the archive move opts into
         merging (allow_tracked_merge=True) and folds the
         staged tree into the existing archive. The precise
         per-file content-conflict guard below

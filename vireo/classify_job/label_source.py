@@ -83,7 +83,7 @@ def _sources_from_metas(label_metas: Iterable[Mapping[str, Any]] | None) -> list
 
 
 def _resolve_label_sources(params: LabelSourceParams, db: Database | None) -> list[str]:
-    """Return list of source file paths used to build the active label set."""
+    """Return the source file paths that build the active label set."""
     return _sources_from_metas(_resolve_label_set_metas(params, db))
 
 

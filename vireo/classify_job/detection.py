@@ -167,7 +167,7 @@ class _DetectBatchRun:
         photos that already have cached detection rows — analyzing
         cached boxes doesn't require detect_animals/get_primary_detection,
         so cached-only installations must still receive subject
-        quality/crop/exposure data (Codex r4056698679).
+        quality/crop/exposure data.
         """
         for photo in self.photos:
             if photo["id"] in self.cached_detections:
@@ -563,9 +563,9 @@ def _detect_batch(
         raise
     except (ImportError, RuntimeError) as e:
         # Detection unavailable (missing weights/backend) — non-fatal, the
-        # caller degrades to full-image classification. Previously silenced
-        # entirely, which let the detect stage report success while the
-        # batch's remaining photos were silently skipped.
+        # caller degrades to full-image classification. It is still
+        # reported: silencing it would let the detect stage report success
+        # while the batch's remaining photos were silently skipped.
         log.warning("Detection unavailable for batch (non-fatal): %s", e)
     except Exception:  # broad: detection is optional for classify; any failure degrades to full-image classification
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
@@ -624,8 +624,7 @@ def _analyze_subjects(
         # full-image classifier fallback. Fall through to ``analyze_photo``
         # for reclassified-but-undetected photos: its ``if not detections``
         # branch runs before ``os.stat``, so an offline source doesn't
-        # crash, and its ``sync_primary`` clears the stale derived state
-        # (Codex r4056646676).
+        # crash, and its ``sync_primary`` clears the stale derived state.
         if photo["id"] not in processed_ids and not reclassify:
             continue
         checkpoint()
@@ -852,10 +851,10 @@ class _DetectSubjectsRun:
         )
 
         # No reclassify pre-clear. ``detections.clear`` is global: its
-        # cascade took every classifier model's predictions and every
-        # workspace's review state with it, before this run had written
-        # anything to replace them, so a Stop anywhere after this point
-        # stranded the photo. ``write_detection_batch`` with
+        # cascade takes every classifier model's predictions and every
+        # workspace's review state with it, before this run has written
+        # anything to replace them, so a Stop anywhere after it would
+        # strand the photo. ``write_detection_batch`` with
         # ``force_runtime_replace`` replaces this photo's MegaDetector
         # rows atomically when the new result lands, and a detector
         # failure (``detect_animals`` returning None) leaves the old
@@ -1021,7 +1020,7 @@ def _detect_subjects(
             # get_primary_detection. ``_detect_batch`` handles this
             # detector-less branch internally by iterating only cached
             # rows, so route through it before signalling the missing
-            # detector to the outer handler (Codex r4056724369).
+            # detector to the outer handler.
             run.backfill_cached_subject_analysis()
             raise ImportError(
                 "MegaDetector ONNX model not available — cannot run detection"
