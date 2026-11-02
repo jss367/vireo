@@ -2,7 +2,7 @@
 
 ``POST /api/folders/<id>/relocate`` points a folder row at a new path. When
 another row already tracks that path, a *missing* folder is merged into it
-(``FolderRepository.merge_into_existing``); a folder that is not missing is
+(``services.folder_merges.merge_into_existing``); a folder that is not missing is
 refused. A refusal is reported to the user as a 409, and what the refusal
 keeps differs by cause:
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from repositories.folders import OriginalPathReturned
+from services import folder_merges
 
 if TYPE_CHECKING:
     from db import Database
@@ -39,7 +40,7 @@ def relocate_folder(
             # A savepoint: a refusal raised part-way through a merge leaves
             # none of the merge behind.
             with db.transaction():
-                return db.folders.relocate(folder_id, new_path), None
+                return folder_merges.relocate(db, folder_id, new_path), None
         except OriginalPathReturned as exc:
             db.folders.mark_ok(folder_id)
             return [], exc

@@ -7,9 +7,9 @@ read or write that runs the SQL. Functions that read config or a scope check
 for an active workspace first, so with none they raise ``RuntimeError``
 before reading config or staging a scope.
 
-``Database._safe_remove_mask_file`` (the masks-directory containment check
-for file deletes) stays on ``Database``: the masks repository receives it as
-a callback when it is built.
+The masks-directory containment check for file deletes is
+``repositories.masks_features.safe_remove_mask_file``; the repository gets
+the masks directory from ``Database._masks_dir_real`` when it is built.
 """
 
 from __future__ import annotations

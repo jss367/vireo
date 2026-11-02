@@ -387,10 +387,8 @@ FACADE_BINDING_MODULES = {
 }
 
 FACTORY_CALLBACKS = {
-    "_folder_repository": {"<Database>"},
     "_keyword_provenance_repository": {"<Database>"},
     "_location_repository": {"_merge_keyword_into"},
-    "_masks_features_repository": {"_safe_remove_mask_file"},
     "_moves_merge_repository": {"_carry_keyword_associations_for_merge"},
     "_prediction_repository": {"<Database>"},
 }
@@ -459,8 +457,8 @@ def _callbacks_in(expr, methods):
 
     A bare ``self`` anywhere in it (passed directly, or closed over by a
     lambda) is ``<Database>``; ``self.<method>`` is that method unless it is
-    the workspace resolver. ``self.conn``, domain accessors (properties) and
-    class constants are not callbacks.
+    the workspace resolver. ``self.conn``, domain accessors (properties),
+    class constants and the value a method call returns are not callbacks.
     """
     parents = {child: node for node in ast.walk(expr) for child in ast.iter_child_nodes(node)}
     found = set()
@@ -469,7 +467,8 @@ def _callbacks_in(expr, methods):
             continue
         parent = parents.get(sub)
         if isinstance(parent, ast.Attribute) and parent.value is sub:
-            if parent.attr in methods and parent.attr not in WORKSPACE_RESOLVERS:
+            called = isinstance(parents.get(parent), ast.Call) and parents[parent].func is parent
+            if parent.attr in methods and parent.attr not in WORKSPACE_RESOLVERS and not called:
                 found.add(parent.attr)
         else:
             found.add("<Database>")
@@ -506,3 +505,4 @@ def test_backbinding_detectors_match_known_shapes():
     assert callbacks("self.conn") == set()
     assert callbacks("self.moves_merge.transfer_gps_review") == set()
     assert callbacks("self.PHOTO_COLS") == set()
+    assert callbacks("self.effective_config()") == set()

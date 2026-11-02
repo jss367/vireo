@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, TypedDict
 
 from file_replace import replace_file
-from services import workspace_folders
+from services import folder_merges, workspace_folders
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -1470,8 +1470,8 @@ def _restore_catalog(db: Database, workspace_id: int) -> None:
                 # BEGIN IMMEDIATE opened above; a failure below still rolls back
                 # every merge/rebase together instead of leaving a
                 # partially-restored catalog with local-workspace state.
-                db.folders.merge_into_existing(
-                    conflict["id"], mapping["folder_id"], mapping["source_path"]
+                folder_merges.merge_into_existing(
+                    db, conflict["id"], mapping["folder_id"], mapping["source_path"]
                 )
 
         for mapping in mappings:
@@ -1496,7 +1496,7 @@ def _restore_catalog(db: Database, workspace_id: int) -> None:
             )
             existing = db.local_folders.path_conflict(target, row["id"])
             if existing:
-                db.folders.merge_into_existing(row["id"], existing["id"], target)
+                folder_merges.merge_into_existing(db, row["id"], existing["id"], target)
             else:
                 db.local_folders.set_catalog_path(target, row["id"])
                 relinked.append(row["id"])

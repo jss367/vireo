@@ -1480,11 +1480,11 @@ class Database:
         ``with_quality_data``) resolve it before any SQL, raising
         ``RuntimeError`` when none is set, and the catalog-wide methods never
         resolve it. The path helpers are looked up here, so monkeypatches of
-        the ``db`` module functions still reach the moved SQL. The merge's carries into other domains (the GPS-review
-        transfer and the embedded-keyword offers) are bound here too.
+        the ``db`` module functions still reach the moved SQL. A folder merge
+        runs in ``services.folder_merges``, which composes the cross-domain
+        carries.
         """
-        from repositories.folders import FolderMergeHooks, FolderRepository
-        from services.identity_alternatives import prepare_photo_merge
+        from repositories.folders import FolderRepository
 
         return FolderRepository(
             self.conn,
@@ -1495,11 +1495,6 @@ class Database:
             subtree_relative=_subtree_relative,
             join_subtree_path=_join_subtree_path,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
-            merge_hooks=FolderMergeHooks(
-                transfer_gps_review=self.moves_merge.transfer_gps_review,
-                transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
-                prepare_identity_merge=lambda losing, survivor: prepare_photo_merge(self, losing, survivor),
-            ),
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
@@ -2160,15 +2155,15 @@ class Database:
         receives ``self._ws_id`` uncalled: the workspace-scoped pipeline
         selectors resolve it (raising ``RuntimeError`` when no workspace is
         active) before running any SQL, and every other method never
-        resolves it. The storage cleanup deletes receive ``_safe_remove_mask_file`` (the
-        masks-directory containment check) as ``remove_file``.
+        resolves it. The storage cleanup deletes remove files only inside
+        the masks directory (``_masks_dir_real``), which is passed as a value.
         """
         from repositories.masks_features import MasksFeaturesRepository
 
         return MasksFeaturesRepository(
             self.conn,
             self._ws_id,
-            remove_file=self._safe_remove_mask_file,
+            masks_dir=self._masks_dir_real(),
         )
 
     @property
@@ -2250,41 +2245,6 @@ class Database:
         if not parent:
             return None
         return os.path.realpath(os.path.join(parent, "masks"))
-
-    def _safe_remove_mask_file(self, path):
-        """``os.remove`` ``path`` only if it resolves inside the masks
-        directory. The user-triggerable storage cleanup endpoints feed
-        ``photo_masks.path`` straight into this; without the realpath
-        containment check, a corrupted or migrated row pointing at
-        ``/etc/...`` could cause arbitrary file deletion. Mirrors the
-        defense already in place on ``/api/masks/<pid>/<variant>.png``.
-        """
-        if not path:
-            return
-        masks_dir = self._masks_dir_real()
-        if masks_dir is None:
-            log.warning(
-                "Refusing to remove mask file %s (no masks dir resolved)",
-                path,
-            )
-            return
-        try:
-            abs_path = os.path.realpath(path)
-        except OSError:
-            log.warning("Failed to resolve mask path %s", path)
-            return
-        if not (abs_path == masks_dir
-                or abs_path.startswith(masks_dir + os.sep)):
-            log.warning(
-                "Refusing to remove mask file %s outside masks dir %s",
-                path, masks_dir,
-            )
-            return
-        try:
-            if os.path.isfile(abs_path):
-                os.remove(abs_path)
-        except OSError:
-            log.warning("Failed to remove mask file %s", abs_path)
 
     # -- Keywords --
 

@@ -23,7 +23,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
-from services import workspace_folders
+from services import folder_merges, workspace_folders
 from services.local_workspace import (
     MANIFEST_VERSION,
     LocalWorkspaceCancelled,
@@ -381,7 +381,7 @@ def local_roots_under_folder(db: Database, folder_id: int) -> list[int]:
 
     Staging rebases the child folder row's ``folders.path`` under
     ``local-folders/``, so a subtree scan on ``folders.path`` (as
-    ``delete_folder``/``folders.relocate`` do) no longer sees it — while
+    ``delete_folder``/``folder_merges.relocate`` do) no longer sees it — while
     ``local_folder_mappings.source_path`` still records the original
     location beneath the ancestor. Callers that must consider every
     affected descendant session (workspace status aggregation, ancestor
@@ -1351,8 +1351,8 @@ def _restore_catalog(db: Database, root_folder_id: int) -> None:
         for mapping in mappings:
             conflict = db.local_folders.path_conflict(mapping["source_path"], mapping["folder_id"])
             if conflict and conflict["id"] not in mapped_ids:
-                db.folders.merge_into_existing(
-                    conflict["id"], mapping["folder_id"], mapping["source_path"]
+                folder_merges.merge_into_existing(
+                    db, conflict["id"], mapping["folder_id"], mapping["source_path"]
                 )
         for mapping in mappings:
             db.local_folders.set_catalog_path(f"__vireo_local_folder_restore__/{root_folder_id}/{mapping['folder_id']}", mapping["folder_id"])
@@ -1368,7 +1368,7 @@ def _restore_catalog(db: Database, root_folder_id: int) -> None:
             )
             existing = db.local_folders.path_conflict(target, row["id"])
             if existing:
-                db.folders.merge_into_existing(row["id"], existing["id"], target)
+                folder_merges.merge_into_existing(db, row["id"], existing["id"], target)
             else:
                 db.local_folders.set_catalog_path(target, row["id"])
                 relinked.append(row["id"])
