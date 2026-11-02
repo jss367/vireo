@@ -258,8 +258,6 @@ def js_comment_texts(src: str) -> list[str]:
                     expect_binding = True
                 elif word in _JS_PARAM_KW:
                     pending_params = True
-                if word == "for":
-                    for_paren_pending = True
                 if (
                     paren_candidates
                     and not is_binding
@@ -279,6 +277,14 @@ def js_comment_texts(src: str) -> list[str]:
                         j = n if end < 0 else end + 2
                     else:
                         break
+                if word == "for":
+                    # Only a loop header's `(` opens a for-paren: a property
+                    # name reusing the reserved word (``{for: (of / 2) //
+                    # note}``) is followed by `:`, and letting its ``(`` claim
+                    # a for-paren would make the nested ``of`` open a regex
+                    # whose closing `/` is the start of the trailing line
+                    # comment, swallowing the comment the ratchet must read.
+                    for_paren_pending = j < n and src[j] == "("
                 if src.startswith("=>", j):
                     bound.add(word)
                     regex_ok = False
@@ -492,6 +498,19 @@ def test_js_lexer_private_member_name_is_identifier_not_regex():
         "obj?.#of / 2; // Codex\n",
         "obj. #of / 2; // Codex\n",
         "obj./* note */#of / 2; // Codex\n",
+    ]
+    for src in cases:
+        assert any("Codex" in text for text in js_comment_texts(src)), src
+
+
+def test_js_lexer_for_as_property_name_does_not_open_for_paren():
+    """``for`` is a reserved word that may appear only as a property name
+    (``{for: value}``). Its following ``(`` is a grouped expression, not a
+    loop header, so ``of`` inside must not open a regex that would eat the
+    trailing line comment."""
+    cases = [
+        "const o = {for: (of / 2) // Codex\n};\n",
+        "const p = {for: 1, bar: (of / 2) /* Codex */};\n",
     ]
     for src in cases:
         assert any("Codex" in text for text in js_comment_texts(src)), src

@@ -182,8 +182,8 @@ def _suffix_of(path: str) -> str:
     return next((s for s in SOURCE_EXTS if path.endswith(s)), "")
 
 
-def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
-    """``(label, old_path, new_path, suffix)`` for every A/M/D/R source file.
+def _source_changes(base: str) -> list[tuple[str, str, str, str, bool]]:
+    """``(label, old_path, new_path, suffix, mode_changed)`` for every A/M/D/R source file.
 
     Both sides of a rename are inspected so a ``module.py`` renamed to a
     non-source suffix (``module.txt``) is still reported as a source deletion
@@ -192,12 +192,18 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
     sentinel suffix so ``main()`` fails on it rather than certifying it. The
     ``-z`` flag emits NUL-separated records so a non-ASCII, quote, tab,
     backslash or newline in a path cannot be dropped by ``core.quotePath``.
+    ``--raw`` carries the old and new Git modes so a mode-only edit
+    (``100644`` <-> ``100755``, which flips a script's executability) is
+    reported as a change: ``--name-status`` would mark it ``M`` and the
+    blob-text comparison would then pass unchanged.
     """
-    out: list[tuple[str, str, str, str]] = []
-    tokens = _git("diff", "--name-status", "-z", base, "--").split("\0")
+    out: list[tuple[str, str, str, str, bool]] = []
+    tokens = _git("diff", "--raw", "-z", base, "--").split("\0")
     idx = 0
     while idx < len(tokens) and tokens[idx]:
-        status = tokens[idx][0]
+        meta_parts = tokens[idx].lstrip(":").split()
+        old_mode, new_mode, status_field = meta_parts[0], meta_parts[1], meta_parts[4]
+        status = status_field[0]
         n = 2 if status in ("R", "C") else 1
         paths = tokens[idx + 1 : idx + 1 + n]
         idx += 1 + n
@@ -214,7 +220,7 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
             old_path = new_path = paths[0]
             label = paths[0]
         else:
-            out.append((paths[-1] if paths else "", "", "", status))
+            out.append((paths[-1] if paths else "", "", "", status, False))
             continue
         old_suffix = _suffix_of(old_path)
         new_suffix = _suffix_of(new_path)
@@ -223,10 +229,11 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
         old_is_js = old_suffix in JS_EXTS
         new_is_js = new_suffix in JS_EXTS
         if old_suffix and new_suffix and old_is_js != new_is_js:
-            out.append((label, old_path, new_path, "mixed"))
+            out.append((label, old_path, new_path, "mixed", False))
             continue
         suffix = new_suffix or old_suffix
-        out.append((label, old_path, new_path, suffix))
+        mode_changed = status in ("M", "R", "C") and old_mode != new_mode
+        out.append((label, old_path, new_path, suffix, mode_changed))
     return out
 
 
@@ -237,7 +244,7 @@ def main() -> int:
     entries = _source_changes(base)
     failures: list[str] = []
     labels: list[str] = []
-    for label, old_path, new_path, suffix in entries:
+    for label, old_path, new_path, suffix, mode_changed in entries:
         labels.append(label)
         if suffix == "mixed":
             failures.append(f"{label}: cross-language rename")
@@ -245,6 +252,8 @@ def main() -> int:
         if suffix not in SOURCE_EXTS:
             failures.append(f"{label}: unsupported change kind {suffix!r}")
             continue
+        if mode_changed:
+            failures.append(f"{label}: file mode changed")
         old = _git("show", f"{base}:{old_path}") if old_path and _suffix_of(old_path) else ""
         new = (
             (ROOT / new_path).read_text(encoding="utf-8")

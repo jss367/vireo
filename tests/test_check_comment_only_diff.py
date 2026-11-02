@@ -236,7 +236,7 @@ def test_source_changes_detects_mjs_file(tmp_path):
     finally:
         checker.ROOT = orig_root
     assert any(label.endswith("x.mjs") for label, *_ in entries), entries
-    assert all(suffix in (".mjs", ".js", ".cjs") for _, _, _, suffix in entries if suffix != "mixed")
+    assert all(suffix in (".mjs", ".js", ".cjs") for _, _, _, suffix, _ in entries if suffix != "mixed")
 
 
 def test_source_changes_detects_cjs_file(tmp_path):
@@ -251,7 +251,7 @@ def test_source_changes_detects_cjs_file(tmp_path):
         entries = checker._source_changes(base)
     finally:
         checker.ROOT = orig_root
-    assert any(label.endswith("helper.cjs") and suffix == ".cjs" for label, _, _, suffix in entries), entries
+    assert any(label.endswith("helper.cjs") and suffix == ".cjs" for label, _, _, suffix, _ in entries), entries
 
 
 def test_source_changes_rename_to_non_source_is_not_dropped(tmp_path):
@@ -268,7 +268,7 @@ def test_source_changes_rename_to_non_source_is_not_dropped(tmp_path):
     finally:
         checker.ROOT = orig_root
     assert entries, "rename to non-source must still produce an entry"
-    label, old_path, new_path, suffix = entries[0]
+    label, old_path, new_path, suffix, _ = entries[0]
     assert old_path == "module.py"
     assert new_path == "module.txt"
     assert suffix == ".py"
@@ -287,7 +287,7 @@ def test_source_changes_rename_from_non_source_is_an_addition(tmp_path):
     finally:
         checker.ROOT = orig_root
     assert entries
-    _, _, new_path, suffix = entries[0]
+    _, _, new_path, suffix, _ = entries[0]
     assert new_path == "module.py" and suffix == ".py"
 
 
@@ -307,6 +307,44 @@ def test_source_changes_cross_language_rename_is_mixed(tmp_path):
     assert entries[0][3] == "mixed", entries
 
 
+def test_source_changes_flags_mode_only_change_as_failure(tmp_path):
+    """A ``100644`` -> ``100755`` edit flips a script's executability, so an
+    identical-blob flip must not pass as comment-only. ``--name-status``
+    reports it ``M`` with no mode info, so the checker reads modes from
+    ``--raw`` and marks the entry ``mode_changed``. The fixture flips the
+    executable bit on disk and forces ``core.filemode=true`` so the diff
+    against ``base`` picks it up on filesystems that would otherwise ignore
+    it."""
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True, env=env)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "core.filemode", "true"], check=True, env=env)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", "root"], check=True, env=env)
+    script = tmp_path / "run.py"
+    script.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    script.chmod(0o644)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "run.py"], check=True, env=env)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "base"], check=True, env=env)
+    base = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True, env=env,
+    ).stdout.strip()
+    script.chmod(0o755)
+    orig_root = checker.ROOT
+    checker.ROOT = tmp_path
+    try:
+        entries = checker._source_changes(base)
+    finally:
+        checker.ROOT = orig_root
+    assert entries, "mode-only change must produce an entry"
+    label, old_path, new_path, suffix, mode_changed = entries[0]
+    assert old_path == "run.py"
+    assert new_path == "run.py"
+    assert suffix == ".py"
+    assert mode_changed, "100644 -> 100755 is a mode change the checker must flag"
+
+
 def test_source_changes_detects_non_ascii_path(tmp_path):
     """``git diff --name-status`` without ``-z`` quotes non-ASCII paths with
     ``core.quotePath=true``, which would make ``_suffix_of`` drop them and
@@ -323,7 +361,7 @@ def test_source_changes_detects_non_ascii_path(tmp_path):
     finally:
         checker.ROOT = orig_root
     assert entries, "non-ASCII source file must not be dropped by name parsing"
-    label, old_path, new_path, suffix = entries[0]
+    label, old_path, new_path, suffix, _ = entries[0]
     assert old_path == "naïve.py"
     assert new_path == "naïve.py"
     assert suffix == ".py"
