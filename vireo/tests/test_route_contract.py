@@ -6,9 +6,13 @@ from services.prediction_decisions import PREDICTION_DECISION_ROUTES
 VIREO_DIR = Path(__file__).resolve().parents[1]
 APP_SOURCE = VIREO_DIR / "app.py"
 
-# Every ``Database`` method that writes a row's review decision. A route that
-# can reach one of these is a prediction-decision route and must hold the
-# writer lock across its precondition read and its writes.
+# Every function that writes a row's review decision: the writers of
+# ``services.review_decisions``, the one entry point for recording a
+# decision (``test_only_the_decision_service_calls_the_decision_writers``
+# keeps everything else off the repository writers behind them), plus
+# undo/redo. A route that can reach one of these is a prediction-decision
+# route and must hold the writer lock across its precondition read and its
+# writes.
 _PREDICTION_MUTATORS = frozenset({
     "accept_prediction",
     "accept_subject_species",
@@ -23,6 +27,20 @@ _PREDICTION_MUTATORS = frozenset({
 
 # The function that takes the lock (``vireo/services/prediction_decisions.py``).
 _DECISION_LOCK = "begin_prediction_decision"
+
+# The decision service, and the repository writers only it may call. Each
+# key is the ``Database`` accessor that reaches the repository.
+_DECISION_SERVICE = "services/review_decisions.py"
+_REPOSITORY_DECISION_WRITERS = {
+    "predictions": frozenset({
+        "update_status", "update_status_by_photo", "ungroup", "set_review_status",
+    }),
+    "keyword_provenance": frozenset({"accept_prediction"}),
+}
+_REPOSITORY_CLASSES = {
+    "PredictionRepository": "predictions",
+    "KeywordProvenanceRepository": "keyword_provenance",
+}
 
 
 def _decision_sources():
@@ -1984,3 +2002,99 @@ def test_route_contract_matches_snapshot(app_and_db):
     actual = contract.splitlines()
 
     assert actual == expected
+
+
+def _repository_decision_writer_calls(tree):
+    """``(lineno, call)`` for every call of a repository decision writer in ``tree``.
+
+    A writer is reached as ``<expr>.<accessor>.<writer>(...)`` (``db.predictions
+    .update_status``), through a repository built inline
+    (``PredictionRepository(...).update_status``), or through a local bound
+    to either (``preds = db.predictions; preds.update_status(...)``).
+    """
+    def repository_of(expr):
+        if isinstance(expr, ast.Attribute) and expr.attr in _REPOSITORY_DECISION_WRITERS:
+            return expr.attr
+        if (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)
+                and expr.func.id in _REPOSITORY_CLASSES):
+            return _REPOSITORY_CLASSES[expr.func.id]
+        return None
+
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and repository_of(node.value):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    aliases[target.id] = repository_of(node.value)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        receiver = node.func.value
+        repository = repository_of(receiver) or (
+            aliases.get(receiver.id) if isinstance(receiver, ast.Name) else None
+        )
+        if repository and node.func.attr in _REPOSITORY_DECISION_WRITERS[repository]:
+            yield node.lineno, ast.unparse(node.func)
+
+
+def test_only_the_decision_service_calls_the_decision_writers():
+    """Routes record decisions through ``services.review_decisions`` alone.
+
+    The decision-route analysis above keys on the service's writer names. A
+    route (or a helper it calls) that reached the repository writer directly
+    would write ``prediction_review`` without the analysis seeing it, so no
+    production module outside the data layer may call those writers except
+    the service itself.
+    """
+    offenders = []
+    for path in sorted(VIREO_DIR.rglob("*.py")):
+        rel = path.relative_to(VIREO_DIR).as_posix()
+        if rel.split("/")[0] in {"tests", "testing", "repositories"}:
+            continue
+        if rel in {"db.py", _DECISION_SERVICE}:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders += [f"{rel}:{line} {call}" for line, call in _repository_decision_writer_calls(tree)]
+    assert not offenders, (
+        "These call a prediction-decision writer behind services.review_decisions "
+        "directly, which the decision-route analysis cannot see. Call the "
+        "review_decisions function instead:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_decision_service_defines_every_decision_writer():
+    """The mutator names are the service's functions, not leftovers."""
+    import inspect
+
+    from services import review_decisions
+
+    defined = {
+        name for name, fn in inspect.getmembers(review_decisions, inspect.isfunction)
+        if fn.__module__ == review_decisions.__name__
+    }
+    assert _PREDICTION_MUTATORS - {"undo_last_edit", "redo_last_undo"} == defined
+    from db import Database
+
+    for name in _PREDICTION_MUTATORS - {"undo_last_edit", "redo_last_undo"}:
+        assert not hasattr(Database, name), f"Database.{name} came back; call review_decisions"
+
+
+def test_decision_writer_guard_detects_direct_calls():
+    """Pin the guard: every way of reaching a repository writer is caught."""
+    tree = ast.parse(
+        "def route(db):\n"
+        "    db.predictions.update_status(1, 'rejected')\n"
+        "    PredictionRepository(db.conn, ws).ungroup(2)\n"
+        "    preds = db.predictions\n"
+        "    preds.set_review_status(3, 1, 'reviewed')\n"
+        "    db.keyword_provenance.accept_prediction(4)\n"
+        "    review_decisions.update_prediction_status(db, 5, 'rejected')\n"
+        "    db.predictions.get_rows()\n"
+    )
+    calls = [call for _, call in _repository_decision_writer_calls(tree)]
+    assert calls == [
+        "db.predictions.update_status",
+        "PredictionRepository(db.conn, ws).ungroup",
+        "preds.set_review_status",
+        "db.keyword_provenance.accept_prediction",
+    ]

@@ -18,6 +18,7 @@ from services import (
     detection_store,
     gps_locations,
     photo_ingest,
+    review_decisions,
     stage_counts,
     subject_masks,
     workspace_folders,
@@ -1768,7 +1769,7 @@ def test_api_photos_geo_species_filter(app_and_db):
     db.commit()
     preds = db.predictions.get_rows(photo_ids=[1, 3])
     for pr in preds:
-        db.accept_prediction(pr['id'])
+        review_decisions.accept_prediction(db, pr['id'])
         db.commit()
 
     import json as _json
@@ -1788,7 +1789,7 @@ def test_api_species_list(app_and_db):
     db.predictions.add(det_ids[0], 'Cardinal', 0.9, 'bioclip')
     db.commit()
     preds = db.predictions.get_rows(photo_ids=[1])
-    db.accept_prediction(preds[0]['id'])
+    review_decisions.accept_prediction(db, preds[0]['id'])
     db.commit()
 
     client = app.test_client()
@@ -14565,7 +14566,7 @@ def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_
     pred2 = db.conn.execute(
         "SELECT id FROM predictions WHERE species='Sparrow'"
     ).fetchone()["id"]
-    db.update_prediction_status(pred2, "rejected")
+    review_decisions.update_prediction_status(db, pred2, "rejected")
     db.commit()
 
     rules = [{"field": "prediction_status", "op": "is not",

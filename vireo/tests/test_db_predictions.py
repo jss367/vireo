@@ -21,7 +21,7 @@ import textwrap
 
 import pytest
 from db import AUTO_MATCH_REVIEW_MARKER, Database
-from services import photo_ingest, workspace_folders
+from services import photo_ingest, review_decisions, workspace_folders
 from signature_contract import calling_signature
 
 
@@ -453,13 +453,15 @@ def test_get_predictions_rules_route_through_facade(db, cat, monkeypatch):
     monkeypatch.setattr(CollectionRepository, "build_query_from_rules",
                         lambda self, rules, **kw: calls.append(("build", rules, kw))
                         or real_build(self, rules, **kw))
-    real_relax = db._relax_negated_prediction_leaves
-    monkeypatch.setattr(db, "_relax_negated_prediction_leaves",
+    import repositories.predictions as predictions_module
+
+    real_relax = predictions_module.relax_negated_prediction_leaves
+    monkeypatch.setattr(predictions_module, "relax_negated_prediction_leaves",
                         lambda rules: calls.append(("relax", rules)) or real_relax(rules))
-    real_filter = db._filter_prediction_rows_by_rules
-    monkeypatch.setattr(db, "_filter_prediction_rows_by_rules",
-                        lambda rows, rules: calls.append(("filter", len(rows)))
-                        or real_filter(rows, rules))
+    real_filter = predictions_module.filter_prediction_rows_by_rules
+    monkeypatch.setattr(predictions_module, "filter_prediction_rows_by_rules",
+                        lambda rows, rules, collections: calls.append(("filter", len(rows)))
+                        or real_filter(rows, rules, collections))
     rules = [{"field": "prediction_confidence", "op": ">=", "value": 0.8}]
     rows = db.predictions.get_rows(rules=rules)
     assert [r["species"] for r in rows] == ["Jay"]
@@ -475,13 +477,13 @@ def test_prediction_reads_require_workspace(db):
         lambda: db.predictions.get_existing_photo_ids("m1"),
         lambda: db.predictions.get_top_for_photo(1),
         lambda: db.predictions.get_for_photo(1, "m1"),
-        lambda: db.update_prediction_status(1, "accepted"),
-        lambda: db.update_predictions_status_by_photo(1, "accepted"),
-        lambda: db.ungroup_prediction(1),
+        lambda: review_decisions.update_prediction_status(db, 1, "accepted"),
+        lambda: review_decisions.update_predictions_status_by_photo(db, 1, "accepted"),
+        lambda: review_decisions.ungroup_prediction(db, 1),
         lambda: db.predictions.clear(),
         lambda: db.predictions.clear_group_info(1, "m1"),
         lambda: db.predictions.update_group_info(1, "m1", "g", 1, 1, None),
-        lambda: db.accept_subject_species(1),
+        lambda: review_decisions.accept_subject_species(db, 1),
         lambda: db.predictions.reconcile_match_review_state(1, "m1", "fp", "x", "new"),
     ):
         with pytest.raises(RuntimeError):
@@ -562,12 +564,12 @@ def test_top_unrejected_predictions_by_photo(db, cat):
     db.commit()
     jay = _pred_id(db, det, "Jay", fp="new")
     wren = _pred_id(db, det, "Wren", fp="new")
-    db.update_prediction_status(wren, "rejected")
-    db.set_review_status(jay, cat["ws"], "reviewed", group_id="g")
+    review_decisions.update_prediction_status(db, wren, "rejected")
+    review_decisions.set_review_status(db, jay, cat["ws"], "reviewed", group_id="g")
     # Another workspace's rejection does not hide a row here.
     other = db.create_workspace("Other")
     db.commit()
-    db.set_review_status(jay, other, "rejected")
+    review_decisions.set_review_status(db, jay, other, "rejected")
 
     tie = _det(db, p1)
     db.predictions.add(tie, "Hawk", 0.5, "m1")
@@ -578,7 +580,7 @@ def test_top_unrejected_predictions_by_photo(db, cat):
     only_rejected = _det(db, p2)
     db.predictions.add(only_rejected, "Owl", 0.9, "m1")
     db.commit()
-    db.update_prediction_status(_pred_id(db, only_rejected, "Owl", fp="legacy"), "rejected")
+    review_decisions.update_prediction_status(db, _pred_id(db, only_rejected, "Owl", fp="legacy"), "rejected")
 
     # Not filtered by workspace visibility.
     db.predictions.add(_det(db, cat["outside"]), "Crow", 0.4, "m1")
@@ -618,8 +620,8 @@ def test_top_unrejected_predictions_by_detection_keeps_every_subject(db, cat):
     db.predictions.add(wigeon_det, "American Wigeon", 0.8, "m1")
     db.predictions.add(wigeon_det, "Gadwall", 0.85, "m1")
     db.commit()
-    db.update_prediction_status(
-        _pred_id(db, wigeon_det, "Gadwall", fp="legacy"), "rejected",
+    review_decisions.update_prediction_status(
+        db, _pred_id(db, wigeon_det, "Gadwall", fp="legacy"), "rejected",
     )
     db.predictions.add(_det(db, p1), "Robin", 0.5, "m1")
     db.commit()
@@ -666,11 +668,11 @@ def test_inspector_predictions_for_photo(db, cat):
     db.predictions.add(full, "Heron", 0.8, "m1", labels_fingerprint="fp-new")
     db.commit()
     robin = _pred_id(db, high, "Robin", fp="fp-new")
-    db.set_review_status(robin, ws, "accepted", individual="Bob", group_id="g1")
+    review_decisions.set_review_status(db, robin, ws, "accepted", individual="Bob", group_id="g1")
     other_ws = db.create_workspace("Other")
     db.commit()
     wren = _pred_id(db, high, "Wren", model="m2", fp="fp-x")
-    db.set_review_status(wren, other_ws, "rejected")
+    review_decisions.set_review_status(db, wren, other_ws, "rejected")
 
     rows = db.predictions.inspector_rows_for_photo(p0, db.active_workspace_id, 0.5)
     # Latest label set per (detection, model), real detections at or above
@@ -700,12 +702,12 @@ def test_update_prediction_status_leaves_commit_to_caller(db, cat):
     db.predictions.add(det, "Robin", 0.5, "m1")
     db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
-    db.update_prediction_status(pid, "rejected")
+    review_decisions.update_prediction_status(db, pid, "rejected")
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM prediction_review") == [(0,)]
     db.conn.commit()
     with db.transaction():
-        db.update_prediction_status(pid, "accepted")
+        review_decisions.update_prediction_status(db, pid, "accepted")
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT status FROM prediction_review") == [("accepted",)]
 
@@ -718,12 +720,12 @@ def test_update_predictions_status_by_photo_leaves_commit_to_caller(db, cat):
     db.predictions.add(d1, "Jay", 0.5, "m1", status="accepted")
     db.commit()
     db.conn.commit()
-    db.update_predictions_status_by_photo(p0, "rejected")
+    review_decisions.update_predictions_status_by_photo(db, p0, "rejected")
     assert db.conn.in_transaction
     assert _visible(db, "SELECT status FROM prediction_review") == [("accepted",)]
     db.conn.commit()
     with db.transaction():
-        db.update_predictions_status_by_photo(p0, "reviewed")
+        review_decisions.update_predictions_status_by_photo(db, p0, "reviewed")
     assert not db.conn.in_transaction
     assert sorted(_visible(db, "SELECT status FROM prediction_review")) == [
         ("reviewed",), ("reviewed",)]
@@ -735,12 +737,12 @@ def test_ungroup_prediction_leaves_commit_to_caller(db, cat):
     db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.conn.commit()
-    db.ungroup_prediction(pid)
+    review_decisions.ungroup_prediction(db, pid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT group_id FROM prediction_review") == [("g1",)]
     db.conn.rollback()
     with db.transaction():
-        db.ungroup_prediction(pid)
+        review_decisions.ungroup_prediction(db, pid)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT group_id FROM prediction_review") == [(None,)]
 
@@ -753,9 +755,9 @@ def test_review_status_get_and_set(db, cat):
     other = db.create_workspace("Other")
     db.commit()
     assert db.predictions.get_review_status(pid, cat["ws"]) == "pending"
-    db.set_review_status(pid, other, "accepted", individual="i", group_id="g")
+    review_decisions.set_review_status(db, pid, other, "accepted", individual="i", group_id="g")
     assert db.conn.in_transaction  # the caller commits
-    db.set_review_status(pid, other, "rejected")
+    review_decisions.set_review_status(db, pid, other, "rejected")
     assert db.predictions.get_review_status(pid, other) == "rejected"
     assert _review(db, pid, other) == ("rejected", "i", "g", None, None)
     assert db.predictions.get_review_status(pid, cat["ws"]) == "pending"
@@ -814,7 +816,7 @@ def test_accept_prediction_leaves_commit_to_caller_and_rolls_back_with_its_unit(
     db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
     db.conn.commit()
-    result = db.accept_prediction(pid)
+    result = review_decisions.accept_prediction(db, pid)
     assert result["accepted_prediction_ids"] == [pid]
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
@@ -825,7 +827,7 @@ def test_accept_prediction_leaves_commit_to_caller_and_rolls_back_with_its_unit(
 
     monkeypatch.setattr(db, "tag_photo", boom)
     with pytest.raises(RuntimeError, match="tag failed"), db.transaction():
-        db.accept_prediction(pid)
+        review_decisions.accept_prediction(db, pid)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM prediction_review") == [(0,)]
 
@@ -841,10 +843,10 @@ def test_accept_subject_species(db, cat, monkeypatch):
     db.commit()
     top = _pred_id(db, det, "Robin")
     calls = []
-    real = db.accept_prediction
-    monkeypatch.setattr(db, "accept_prediction",
-                        lambda pid, **kw: calls.append((pid, kw)) or real(pid, **kw))
-    result = db.accept_subject_species(top)
+    real = review_decisions.accept_prediction
+    monkeypatch.setattr(review_decisions, "accept_prediction",
+                        lambda d, pid, **kw: calls.append((pid, kw)) or real(d, pid, **kw))
+    result = review_decisions.accept_subject_species(db, top)
     assert db.conn.in_transaction
     assert [kw for _, kw in calls] == [
         {"photo_ids": [p0], "prediction_ids": [pid]} for pid, _ in calls
@@ -853,12 +855,12 @@ def test_accept_subject_species(db, cat, monkeypatch):
     assert result["prediction_ids"][0] == top
     assert len(result["prediction_ids"]) == 2
     db.conn.commit()
-    assert db.accept_subject_species(999_999) is None
+    assert review_decisions.accept_subject_species(db, 999_999) is None
     # A prediction on a photo outside the workspace is not a target.
     out_det = _det(db, cat["outside"])
     db.predictions.add(out_det, "Robin", 0.9, "m1")
     db.commit()
-    assert db.accept_subject_species(_pred_id(db, out_det, "Robin", fp="legacy")) is None
+    assert review_decisions.accept_subject_species(db, _pred_id(db, out_det, "Robin", fp="legacy")) is None
 
 
 def test_accept_subject_species_rolls_back(db, cat, monkeypatch):
@@ -872,13 +874,13 @@ def test_accept_subject_species_rolls_back(db, cat, monkeypatch):
         db.conn.execute("INSERT INTO db_meta (key, value) VALUES ('probe', '1')")
         raise RuntimeError("accept failed")
 
-    monkeypatch.setattr(db, "accept_prediction", boom)
+    monkeypatch.setattr(review_decisions, "accept_prediction", boom)
     with pytest.raises(RuntimeError, match="accept failed"), db.transaction():
-        db.accept_subject_species(pid)
+        review_decisions.accept_subject_species(db, pid)
     assert not db.conn.in_transaction
     assert db.meta.get("probe") is None
     with pytest.raises(RuntimeError, match="accept failed"):
-        db.accept_subject_species(pid)
+        review_decisions.accept_subject_species(db, pid)
     assert db.conn.in_transaction
     db.conn.rollback()
 
@@ -888,9 +890,9 @@ def test_accept_subject_species_no_accept(db, cat, monkeypatch):
     db.predictions.add(det, "Robin", 0.9, "m1")
     db.commit()
     pid = _pred_id(db, det, "Robin", fp="legacy")
-    monkeypatch.setattr(db, "accept_prediction",
-                        lambda pid, **kw: {"accepted_prediction_ids": [], "affected": []})
-    assert db.accept_subject_species(pid) is None
+    monkeypatch.setattr(review_decisions, "accept_prediction",
+                        lambda _db, pid, **kw: {"accepted_prediction_ids": [], "affected": []})
+    assert review_decisions.accept_subject_species(db, pid) is None
     assert not db.conn.in_transaction
 
 
@@ -916,7 +918,7 @@ def test_decision_row_and_status(db, cat):
     det, (pid,) = _scope_preds(db, cat["p"][0], ["Robin"])
     other = db.create_workspace("Other")
     db.commit()
-    db.set_review_status(pid, other, "accepted", group_id="other-g")
+    review_decisions.set_review_status(db, pid, other, "accepted", group_id="other-g")
 
     row = db.predictions.get_decision_row(pid)
     assert dict(row) == {
@@ -926,7 +928,7 @@ def test_decision_row_and_status(db, cat):
     }
     assert db.predictions.current_status(pid) == "pending"
 
-    db.set_review_status(pid, cat["ws"], "rejected", group_id="g")
+    review_decisions.set_review_status(db, pid, cat["ws"], "rejected", group_id="g")
     row = db.predictions.get_decision_row(pid)
     assert (row["status"], row["group_id"]) == ("rejected", "g")
     assert db.predictions.current_status(pid) == "rejected"
@@ -966,12 +968,12 @@ def test_decided_and_superseded_prediction_ids(db, cat):
     # m2 has only the one label set, so its row is current.
     assert db.predictions.superseded_ids([old, new, jay]) == {old}
 
-    db.update_prediction_status(old, "accepted")
-    db.update_prediction_status(new, "alternative")
-    db.update_prediction_status(jay, "reviewed")
+    review_decisions.update_prediction_status(db, old, "accepted")
+    review_decisions.update_prediction_status(db, new, "alternative")
+    review_decisions.update_prediction_status(db, jay, "reviewed")
     other = db.create_workspace("Other")
     db.commit()
-    db.set_review_status(new, other, "rejected")
+    review_decisions.set_review_status(db, new, other, "rejected")
     assert db.predictions.decided_ids([old, new, jay]) == {old, jay}
     assert db.predictions.decided_ids([]) == set()
     assert db.predictions.superseded_ids([]) == set()
@@ -1014,8 +1016,8 @@ def test_non_alternative_predictions_for_photos(db, cat):
     p0, p1 = cat["p"][0], cat["p"][1]
     _, (lead, runner_up) = _scope_preds(db, p0, ["Robin", "Jay"])
     _, (plain,) = _scope_preds(db, p1, ["Wren"])
-    db.update_prediction_status(runner_up, "alternative")
-    db.set_review_status(lead, cat["ws"], "pending", group_id="g")
+    review_decisions.update_prediction_status(db, runner_up, "alternative")
+    review_decisions.set_review_status(db, lead, cat["ws"], "pending", group_id="g")
     rows = db.predictions.non_alternative_rows_for_photos([p1, p0])
     assert [(r["id"], r["photo_id"], bool(r["in_group"])) for r in rows] == [
         (lead, p0, True), (plain, p1, False),
@@ -1029,9 +1031,9 @@ def test_scope_review_statuses(db, cat):
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="fp2")
     db.commit()
     other_set = _pred_id(db, det, "Robin", fp="fp2")
-    db.update_prediction_status(pick, "rejected")
-    db.update_prediction_status(sib, "accepted")
-    db.update_prediction_status(other_set, "accepted")
+    review_decisions.update_prediction_status(db, pick, "rejected")
+    review_decisions.update_prediction_status(db, sib, "accepted")
+    review_decisions.update_prediction_status(db, other_set, "accepted")
     rows = db.predictions.scope_review_statuses([pick])
     assert sorted((r["pick_id"], r["prediction_id"], r["status"]) for r in rows) == [
         (pick, pick, "rejected"), (pick, sib, "accepted"),
@@ -1046,9 +1048,9 @@ def test_prediction_scope_and_sibling_reads(db, cat):
     db.predictions.add(det, "Robin", 0.5, "m1", labels_fingerprint="fp2")
     db.commit()
     other_set = _pred_id(db, det, "Robin", fp="fp2")
-    db.update_prediction_status(alt, "alternative")
-    db.update_prediction_status(decided, "rejected")
-    db.update_prediction_status(other_set, "alternative")
+    review_decisions.update_prediction_status(db, alt, "alternative")
+    review_decisions.update_prediction_status(db, decided, "rejected")
+    review_decisions.update_prediction_status(db, other_set, "alternative")
 
     scope = db.predictions.get_scope(lead)
     assert tuple(scope) == (det, "m1", "fp1")
@@ -1069,7 +1071,7 @@ def test_prediction_statuses_with_supersession(db, cat):
     db.commit()
     old = _pred_id(db, det, "Robin", fp="old")
     new = _pred_id(db, det, "Robin", fp="new")
-    db.update_prediction_status(new, "accepted")
+    review_decisions.update_prediction_status(db, new, "accepted")
     rows = {
         r["prediction_id"]: (r["photo_id"], r["status"], bool(r["is_superseded"]))
         for r in db.predictions.statuses_with_supersession([old, new])
@@ -1087,11 +1089,11 @@ def test_burst_group_members(db, cat):
     _, (decided,) = _scope_preds(db, cat["p"][2], ["Robin"])
     _, (other_model,) = _scope_preds(db, cat["p"][3], ["Robin"], model="m2")
     _, (hidden,) = _scope_preds(db, cat["outside"], ["Robin"])
-    db.set_review_status(lead, ws, "pending", group_id="g")
-    db.set_review_status(member, ws, "pending", group_id="g")
-    db.set_review_status(decided, ws, "rejected", group_id="g")
-    db.set_review_status(other_model, ws, "pending", group_id="g")
-    db.set_review_status(hidden, ws, "pending", group_id="g")
+    review_decisions.set_review_status(db, lead, ws, "pending", group_id="g")
+    review_decisions.set_review_status(db, member, ws, "pending", group_id="g")
+    review_decisions.set_review_status(db, decided, ws, "rejected", group_id="g")
+    review_decisions.set_review_status(db, other_model, ws, "pending", group_id="g")
+    review_decisions.set_review_status(db, hidden, ws, "pending", group_id="g")
     rows = db.predictions.burst_group_members("g", "m1", lead)
     assert [(r["id"], r["photo_id"], r["status"]) for r in rows] == [
         (member, cat["p"][1], "pending"), (decided, cat["p"][2], "rejected"),
@@ -1187,17 +1189,6 @@ def test_classify_job_reaches_predictions_through_the_accessor():
 # -- structure ----------------------------------------------------------------------------
 
 
-# Still forwarders on ``Database``: the prediction-decision writers that
-# ``test_route_contract`` finds by these names (``accept_prediction``, the
-# sixth, lives with the keyword-provenance writers).
-_DELEGATING_PREDICTION_METHODS = (
-    "update_prediction_status",
-    "update_predictions_status_by_photo",
-    "ungroup_prediction",
-    "accept_subject_species",
-    "set_review_status",
-)
-
 # The forwarding wrappers this domain used to have on ``Database``; callers
 # reach the same methods through ``db.predictions`` now.
 _REMOVED_PREDICTION_WRAPPERS = (
@@ -1233,9 +1224,12 @@ _REMOVED_PREDICTION_WRAPPERS = (
     "get_inspector_predictions_for_photo",
     "count_workspace_predictions",
     "get_live_prediction_rows_by_photo",
+    "_relax_negated_prediction_leaves",
+    "_filter_prediction_rows_by_rules",
 )
 
-# ``test_route_contract`` looks these up by name on ``Database``.
+# The decision writers ``test_route_contract`` keys the decision lock to:
+# ``services.review_decisions`` functions, no longer ``Database`` methods.
 _PREDICTION_MUTATORS = (
     "accept_prediction",
     "accept_subject_species",
@@ -1258,20 +1252,10 @@ def _self_attrs(fn):
     }
 
 
-@pytest.mark.parametrize("name", _DELEGATING_PREDICTION_METHODS)
-def test_prediction_method_delegates_to_repository(name):
-    attrs = _self_attrs(getattr(Database, name))
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to PredictionRepository"
-    )
-    assert "_prediction_repository" in attrs, (
-        f"Database.{name} no longer delegates to PredictionRepository"
-    )
-
-
 @pytest.mark.parametrize("name", _PREDICTION_MUTATORS)
-def test_prediction_mutators_keep_their_database_names(name):
-    assert callable(getattr(Database, name, None))
+def test_prediction_mutators_live_in_the_decision_service(name):
+    assert callable(getattr(review_decisions, name, None))
+    assert not hasattr(Database, name), f"Database.{name} came back; call review_decisions"
 
 
 def test_predictions_has_no_forwarding_wrappers_on_database():
@@ -1288,10 +1272,9 @@ def test_predictions_has_no_forwarding_wrappers_on_database():
 def test_accept_prediction_delegates_to_keyword_provenance_repository():
     """It tags through ``tag_photo`` mid-transaction, so it lives with the
     provenance writers rather than in ``PredictionRepository``."""
-    attrs = _self_attrs(Database.accept_prediction)
-    assert "conn" not in attrs
-    assert "_keyword_provenance_repository" in attrs
-    assert "_prediction_repository" not in attrs
+    source = inspect.getsource(review_decisions.accept_prediction)
+    assert "db.keyword_provenance.accept_prediction(" in source
+    assert "db.predictions" not in source
 
 
 def test_prediction_repository_never_references_keyword_writers():
@@ -1310,34 +1293,21 @@ def test_prediction_repository_never_references_keyword_writers():
                         "link_keyword_to_place"}
 
 
-def test_prediction_repository_routes_facade_calls_through_database(db):
-    repo = db._prediction_repository()
-    from repositories.predictions import FACADE_METHODS
-
-    for name in FACADE_METHODS:
-        assert getattr(repo, name) == getattr(db, name), name
-
-
-def test_prediction_repository_never_hands_itself_out_as_the_database():
+def test_prediction_repository_takes_no_facade(db):
     import repositories.predictions as module
 
-    tree = ast.parse(inspect.getsource(module))
-    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    bare = [
-        node.lineno for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and node.id == "self"
-        and not (isinstance(parents.get(node), ast.Attribute)
-                 and parents[node].value is node)
-        and not isinstance(parents.get(node), ast.arguments)
-    ]
-    assert len(bare) == 1  # ``setattr(self, ...)`` in ``__init__``
+    assert not hasattr(module, "FACADE_METHODS")
+    params = inspect.signature(module.PredictionRepository).parameters
+    assert list(params) == ["conn", "resolve_workspace_id"]
+    repo = db._prediction_repository()
+    assert repo._collections().conn is db.conn
 
 
 def test_prediction_facade_signatures_unchanged():
     from repositories.predictions import PredictionRepository
 
-    sig = {n: calling_signature(getattr(Database, n))
-           for n in _DELEGATING_PREDICTION_METHODS}
+    sig = {n: calling_signature(getattr(review_decisions, n))
+           for n in _PREDICTION_MUTATORS if n != "accept_prediction"}
     sig.update({
         f"repo.{n}": str(inspect.signature(getattr(PredictionRepository, n)))
         for n in ("add", "clear", "get_rows")
@@ -1353,12 +1323,12 @@ def test_prediction_facade_signatures_unchanged():
         "(self, model=None, collection_photo_ids=None, labels_fingerprint=None, "
         "clear_run_keys=True, exclude_detector_model=None)"
     )
-    assert sig["update_prediction_status"] == "(self, prediction_id, status)"
-    assert sig["update_predictions_status_by_photo"] == "(self, photo_id, status)"
-    assert sig["ungroup_prediction"] == "(self, prediction_id)"
-    assert sig["accept_subject_species"] == "(self, prediction_id)"
+    assert sig["update_prediction_status"] == "(db, prediction_id, status)"
+    assert sig["update_predictions_status_by_photo"] == "(db, photo_id, status)"
+    assert sig["ungroup_prediction"] == "(db, prediction_id)"
+    assert sig["accept_subject_species"] == "(db, prediction_id)"
     assert sig["set_review_status"] == (
-        "(self, prediction_id, workspace_id, status, individual=None, group_id=None)"
+        "(db, prediction_id, workspace_id, status, individual=None, group_id=None)"
     )
     assert sig["repo.get_rows"] == (
         "(self, photo_ids=None, model=None, status=None, rules=None)"
