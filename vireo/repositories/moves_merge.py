@@ -148,7 +148,7 @@ class MovesMergeRepository:
     def move_folder_path(self, folder_id, new_path, new_name=None):
         """Update a folder's path and cascade to all children; commit.
 
-        Unlike ``FolderRepository.relocate`` (which only updates missing
+        Unlike ``folder_merges.relocate`` (which only updates missing
         children), this updates ALL child folders regardless of status.
         ``new_name`` is used when the root folder is renamed as part of the
         move; descendants keep their existing names.

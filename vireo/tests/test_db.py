@@ -4,6 +4,7 @@ import sys
 
 import pytest
 from repositories.masks_features import MaskQuality, PipelineFeatures
+from services import folder_merges
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services import (
@@ -10197,7 +10198,7 @@ def test_get_missing_photos_treats_broken_symlink_as_missing(tmp_path):
 
 
 def test_relocate_folder(tmp_path):
-    """folders.relocate updates path and sets status to 'ok'."""
+    """folder_merges.relocate updates path and sets status to 'ok'."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10210,7 +10211,7 @@ def test_relocate_folder(tmp_path):
 
     new_path = str(tmp_path / "new_location")
     os.makedirs(new_path)
-    db.folders.relocate(fid, new_path)
+    folder_merges.relocate(db, fid, new_path)
     db.commit()
 
     row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
@@ -10219,7 +10220,7 @@ def test_relocate_folder(tmp_path):
 
 
 def test_relocate_folder_cascade(tmp_path):
-    """folders.relocate returns child folders that also exist at new location."""
+    """folder_merges.relocate returns child folders that also exist at new location."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10234,7 +10235,7 @@ def test_relocate_folder_cascade(tmp_path):
     new_root = str(tmp_path / "new_root")
     os.makedirs(os.path.join(new_root, "sub"))
 
-    cascaded = db.folders.relocate(parent, new_root)
+    cascaded = folder_merges.relocate(db, parent, new_root)
     db.commit()
     assert len(cascaded) == 1
     assert cascaded[0]["id"] == child
@@ -10284,7 +10285,7 @@ def test_relocate_folder_relinks_parent_by_path(tmp_path):
     db.conn.commit()
 
     # User moved it onto the USA volume and re-points Vireo at the new path.
-    db.folders.relocate(date, "/vol/USA/2026-05-30")
+    folder_merges.relocate(db, date, "/vol/USA/2026-05-30")
     db.commit()
 
     row = db.conn.execute(
@@ -10295,7 +10296,7 @@ def test_relocate_folder_relinks_parent_by_path(tmp_path):
 
 
 def test_relocate_folder_merge_into_existing(tmp_path):
-    """folders.relocate merges photos into existing folder when paths conflict."""
+    """folder_merges.relocate merges photos into existing folder when paths conflict."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10323,7 +10324,7 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     pid_b_existing = photo_ingest.add_photo(db, fid_existing, "photo_b.jpg", ".jpg", 2000, 2.0)
     pid_c = photo_ingest.add_photo(db, fid_existing, "photo_c.jpg", ".jpg", 1000, 1.0)
 
-    cascaded = db.folders.relocate(fid_missing, existing_path)
+    cascaded = folder_merges.relocate(db, fid_missing, existing_path)
     db.commit()
 
     # Missing folder should be deleted
@@ -10372,7 +10373,7 @@ def test_relocate_folder_merge_revalidates_source_path(tmp_path):
 
     # The repository refuses without writing anything.
     with pytest.raises(OriginalPathReturned, match="already tracked"):
-        db.folders.relocate(fid_source, target_path)
+        folder_merges.relocate(db, fid_source, target_path)
     assert not db.conn.in_transaction
 
     cascaded, refusal = relocate_folder(db, fid_source, target_path)
@@ -10387,7 +10388,7 @@ def test_relocate_folder_merge_revalidates_source_path(tmp_path):
 
 
 def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
-    """folders.relocate raises ValueError when source folder is not missing."""
+    """folder_merges.relocate raises ValueError when source folder is not missing."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10405,7 +10406,7 @@ def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
 
     import pytest
     with pytest.raises(ValueError, match="already tracked"):
-        db.folders.relocate(fid_a, dir_b)
+        folder_merges.relocate(db, fid_a, dir_b)
         db.commit()
 
     # Both folders should remain unchanged
@@ -10414,7 +10415,7 @@ def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
 
 
 def test_relocate_folder_merge_updates_photo_count(tmp_path):
-    """folders.merge_into_existing recomputes photo_count on the target folder."""
+    """folder_merges.merge_into_existing recomputes photo_count on the target folder."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10435,7 +10436,7 @@ def test_relocate_folder_merge_updates_photo_count(tmp_path):
     photo_ingest.add_photo(db, fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
     photo_ingest.add_photo(db, fid_existing, "photo_b.jpg", ".jpg", 1000, 1.0)
 
-    db.folders.relocate(fid_missing, existing_path)
+    folder_merges.relocate(db, fid_missing, existing_path)
     db.commit()
 
     row = db.conn.execute("SELECT photo_count FROM folders WHERE id = ?", (fid_existing,)).fetchone()
@@ -10443,7 +10444,7 @@ def test_relocate_folder_merge_updates_photo_count(tmp_path):
 
 
 def test_relocate_folder_merge_marks_target_ok(tmp_path):
-    """folders.merge_into_existing sets target folder status to ok."""
+    """folder_merges.merge_into_existing sets target folder status to ok."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10459,7 +10460,7 @@ def test_relocate_folder_merge_marks_target_ok(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing'")
     db.conn.commit()
 
-    db.folders.relocate(fid_missing, existing_path)
+    folder_merges.relocate(db, fid_missing, existing_path)
     db.commit()
 
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_existing,)).fetchone()
@@ -10467,7 +10468,7 @@ def test_relocate_folder_merge_marks_target_ok(tmp_path):
 
 
 def test_relocate_folder_merge_reparents_children(tmp_path):
-    """folders.merge_into_existing reparents child folders to the target folder."""
+    """folder_merges.merge_into_existing reparents child folders to the target folder."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10484,7 +10485,7 @@ def test_relocate_folder_merge_reparents_children(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
     db.conn.commit()
 
-    db.folders.relocate(fid_missing, existing_path)
+    folder_merges.relocate(db, fid_missing, existing_path)
     db.commit()
 
     # Source folder should be gone
@@ -10496,7 +10497,7 @@ def test_relocate_folder_merge_reparents_children(tmp_path):
 
 
 def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
-    """folders.merge_into_existing transfers workspace visibility to the target folder."""
+    """folder_merges.merge_into_existing transfers workspace visibility to the target folder."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
@@ -10526,7 +10527,7 @@ def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
     db.conn.commit()
 
-    db.folders.relocate(fid_missing, existing_path)
+    folder_merges.relocate(db, fid_missing, existing_path)
     db.commit()
 
     # Target folder should now be visible in BOTH workspaces
@@ -10540,7 +10541,7 @@ def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
 
 
 def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
-    """folders.merge_into_existing must not promote materialized descendants to roots."""
+    """folder_merges.merge_into_existing must not promote materialized descendants to roots."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
@@ -10565,7 +10566,7 @@ def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
     db.conn.commit()
 
-    db.folders.relocate(fid_missing, existing_path)
+    folder_merges.relocate(db, fid_missing, existing_path)
     db.commit()
 
     row = db.conn.execute(
@@ -10578,7 +10579,7 @@ def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
 
 
 def test_relocate_folder_cascade_skips_duplicate(tmp_path):
-    """folders.relocate skips cascading a child if its target path is already tracked."""
+    """folder_merges.relocate skips cascading a child if its target path is already tracked."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10597,7 +10598,7 @@ def test_relocate_folder_cascade_skips_duplicate(tmp_path):
     # Add a folder that already occupies the child's target path
     workspace_folders.add_folder(db, child_target, name="conflict")
 
-    cascaded = db.folders.relocate(parent, new_root)
+    cascaded = folder_merges.relocate(db, parent, new_root)
     db.commit()
     # Child should NOT be in cascaded list since its target is already taken
     assert len(cascaded) == 0
@@ -10609,7 +10610,7 @@ def test_relocate_folder_cascade_skips_duplicate(tmp_path):
 
 
 def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
-    """folders.relocate skips descendants when their ancestor's path conflicts."""
+    """folder_merges.relocate skips descendants when their ancestor's path conflicts."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10630,7 +10631,7 @@ def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
     # Add a folder that conflicts with the child's target path
     workspace_folders.add_folder(db, child_target, name="conflict")
 
-    cascaded = db.folders.relocate(parent, new_root)
+    cascaded = folder_merges.relocate(db, parent, new_root)
     db.commit()
     # Neither child nor grandchild should be cascaded
     assert len(cascaded) == 0
@@ -10662,7 +10663,7 @@ def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(t
     os.makedirs(grand_target)
     workspace_folders.add_folder(db, child_target, name="conflict")
 
-    cascaded = db.folders.relocate(parent, new_root)
+    cascaded = folder_merges.relocate(db, parent, new_root)
     db.commit()
     assert cascaded == []
 
