@@ -33,7 +33,7 @@ def cleanup_case(app_and_db, tmp_path):
 URL = "/api/jobs/old-move/source-cleanup"
 
 
-def test_review_and_optional_trash_from_old_history(cleanup_case, monkeypatch):
+def test_review_and_optional_trash_from_old_history(cleanup_case, monkeypatch, fake_trash):
     app, db, source, _ = cleanup_case
     child = source / "subfolder"
     child.mkdir()
@@ -46,7 +46,7 @@ def test_review_and_optional_trash_from_old_history(cleanup_case, monkeypatch):
             os.unlink(path)
         return len(paths), set(paths), []
 
-    monkeypatch.setattr("app._trash_paths", trash)
+    fake_trash.handle_trash(trash)
     client = app.test_client()
     response = client.get(URL)
     assert response.status_code == 200, response.json
@@ -59,6 +59,9 @@ def test_review_and_optional_trash_from_old_history(cleanup_case, monkeypatch):
     assert result.status_code == 200, result.json
     assert result.json["trashed"] == 2
     assert result.json["state"] == "removed"
+    # One Trash call per reviewed file, each rechecked just before it goes.
+    assert sorted(calls) == sorted([str(source / "orphan.xmp"), str(child / "notes.txt")])
+    assert len(fake_trash.trash_calls) == 2
     assert not source.exists()
     assert source.parent.exists()
     assert client.get(URL).json["state"] == "removed"
@@ -68,7 +71,7 @@ def test_review_and_optional_trash_from_old_history(cleanup_case, monkeypatch):
 
 
 @pytest.mark.parametrize("change", ["added", "edited", "replaced", "symlink"])
-def test_cleanup_refuses_changed_review(cleanup_case, monkeypatch, tmp_path, change):
+def test_cleanup_refuses_changed_review(cleanup_case, monkeypatch, tmp_path, change, fake_trash):
     app, db, source, _ = cleanup_case
     client = app.test_client()
     review = client.get(URL).json
@@ -84,7 +87,7 @@ def test_cleanup_refuses_changed_review(cleanup_case, monkeypatch, tmp_path, cha
         (source / "orphan.xmp").unlink()
         (source / "orphan.xmp").symlink_to(tmp_path / "outside")
     calls = []
-    monkeypatch.setattr("app._trash_paths", lambda paths: calls.append(paths))
+    fake_trash.handle_trash(lambda paths: calls.append(paths))
     response = client.post(URL, json={"confirm_trash": True, "review_token": review["review_token"]})
     assert response.status_code == 409
     assert calls == []
@@ -287,7 +290,7 @@ def test_device_change_between_inventory_and_removal_keeps_catalog(cleanup_case,
     assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
 
 
-def test_cleanup_refuses_job_running_in_another_workspace(cleanup_case, monkeypatch):
+def test_cleanup_refuses_job_running_in_another_workspace(cleanup_case, monkeypatch, fake_trash):
     import threading
 
     app, db, source, _ = cleanup_case
@@ -297,7 +300,7 @@ def test_cleanup_refuses_job_running_in_another_workspace(cleanup_case, monkeypa
     db.commit()
     release = threading.Event()
     app._job_runner.start("scan", lambda job: release.wait(synchronization_timeout(5)), workspace_id=other)
-    monkeypatch.setattr("app._trash_paths", lambda paths: pytest.fail("Trash called during another workspace's scan"))
+    fake_trash.handle_trash(lambda paths: pytest.fail("Trash called during another workspace's scan"))
     try:
         response = client.post(URL, json={"confirm_trash": True, "review_token": review["review_token"]})
         assert response.status_code == 409
@@ -306,7 +309,7 @@ def test_cleanup_refuses_job_running_in_another_workspace(cleanup_case, monkeypa
         release.set()
 
 
-def test_cleanup_blocks_new_cross_workspace_import_until_trash_finishes(cleanup_case, monkeypatch):
+def test_cleanup_blocks_new_cross_workspace_import_until_trash_finishes(cleanup_case, monkeypatch, fake_trash):
     from jobs import WorkspaceBusyError
 
     app, db, source, _ = cleanup_case
@@ -322,7 +325,7 @@ def test_cleanup_blocks_new_cross_workspace_import_until_trash_finishes(cleanup_
             os.unlink(path)
         return len(paths), set(paths), []
 
-    monkeypatch.setattr("app._trash_paths", trash)
+    fake_trash.handle_trash(trash)
     response = client.post(URL, json={"confirm_trash": True, "review_token": review["review_token"]})
     assert response.status_code == 200, response.json
     assert response.json["state"] == "removed"
@@ -384,7 +387,7 @@ def test_auto_cleanup_keeps_replacement_directory(cleanup_case, monkeypatch):
 
 @pytest.mark.parametrize("kind", ["workspace", "folder"])
 @pytest.mark.parametrize("location", ["same", "ancestor", "descendant"])
-def test_staged_source_mappings_block_cleanup_after_catalog_rebase(cleanup_case, monkeypatch, kind, location):
+def test_staged_source_mappings_block_cleanup_after_catalog_rebase(cleanup_case, monkeypatch, kind, location, fake_trash):
     app, db, source, folder_id = cleanup_case
     client = app.test_client()
     token = client.get(URL).json["review_token"]
@@ -402,7 +405,7 @@ def test_staged_source_mappings_block_cleanup_after_catalog_rebase(cleanup_case,
         db.conn.execute("INSERT INTO local_folder_mappings (root_folder_id, folder_id, source_path, local_path) "
                         "VALUES (?, ?, ?, ?)", (folder_id, folder_id, mapped_source, managed))
     db.conn.commit()
-    monkeypatch.setattr("app._trash_paths", lambda paths: pytest.fail("Trash called for staged source"))
+    fake_trash.handle_trash(lambda paths: pytest.fail("Trash called for staged source"))
     for response in [client.get(URL), client.post(URL, json={"confirm_trash": True, "review_token": token})]:
         assert response.status_code == 409
         assert "Work Locally" in response.json["error"]

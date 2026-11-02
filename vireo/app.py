@@ -37,19 +37,10 @@ from services.photo_deletion import PhotoDeletion
 from services.pipeline_launch import PipelineChain
 from services.preview_workers import PreviewWorkers
 from services.render_cache import RenderCache
-
-# ``_trash_paths``, the ``services.volumes`` helpers and ``_chunked`` keep
-# private names here because the delete wiring in create_app looks them up
-# on this module at call time; route tests patch them here.
-from services.trash import trash_paths as _trash_paths
+from services.trash import TrashService
 from services.visual_scope import (
     VisualScope,
 )
-from services.volumes import network_volume_roots as _network_volume_roots
-from services.volumes import path_confirmed_gone as _path_confirmed_gone
-from services.volumes import path_on_network_volume as _path_on_network_volume
-from services.volumes import snapshot_parent_device as _snapshot_parent_device
-from sql_chunks import chunked as _chunked
 from web import app_hooks
 from web.audit import create_audit_blueprint
 from web.batch import create_batch_blueprint
@@ -626,9 +617,10 @@ class _AppWiring:
     build_scan_work: object
     folder_moves: FolderMoves
     pipeline_chain: PipelineChain
+    trash: TrashService
 
 
-def create_app(db_path, thumb_cache_dir=None, api_token=None):
+def create_app(db_path, thumb_cache_dir=None, api_token=None, *, trash=None):
     """Create the Flask app for the Vireo photo browser.
 
     Args:
@@ -638,6 +630,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ``X-Vireo-Token`` header. When ``None`` (default), all /api/v1/*
             traffic is rejected with 401 — the token is expected to be
             supplied by ``main()`` after calling ``runtime.generate_token``.
+        trash: the ``services.trash.TrashService`` every delete of
+            originals goes through (``PhotoDeletion`` and the audit,
+            duplicates and move-cleanup routes). ``None`` (default) builds
+            the real one; tests pass a fake.
     """
     app = _new_configured_app(db_path, thumb_cache_dir, api_token)
 
@@ -678,7 +674,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         render_edit_preview_job, threads=app.config.get('EDIT_PREVIEW_THREADS', 2),
     )
 
-    photo_deletion = _build_photo_deletion(app)
+    trash = trash or TrashService()
+    # Batch delete and the post-delete cache sweep (services.photo_deletion).
+    photo_deletion = PhotoDeletion(app.config, trash=trash)
 
     # Startup catalog, its repairs, the job runner and the background passes.
     # Missing Originals is built here, before the shared services below:
@@ -695,6 +693,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         render_cache=render_cache,
         photo_deletion=photo_deletion,
         missing_originals=missing_originals,
+        trash=trash,
     )
 
     # -- Blueprints --
@@ -749,26 +748,6 @@ def _new_configured_app(db_path, thumb_cache_dir, api_token):
     # multi-second cost this store exists to avoid.
     app.config["ID_CONFLICTS_SNAPSHOTS"] = id_conflicts.SnapshotStore()
     return app
-
-
-def _build_photo_deletion(app):
-    """Batch delete and the post-delete cache sweep (services.photo_deletion).
-
-    The filesystem helpers are wrapped in lambdas so they are looked up on
-    this module at call time — tests monkeypatch ``app._trash_paths`` /
-    ``app._chunked`` and must keep reaching the delete path.
-    """
-    return PhotoDeletion(
-        app.config,
-        chunked=lambda *args, **kwargs: _chunked(*args, **kwargs),
-        trash_paths=lambda *args, **kwargs: _trash_paths(*args, **kwargs),
-        snapshot_parent_device=(
-            lambda *args, **kwargs: _snapshot_parent_device(*args, **kwargs)
-        ),
-        path_confirmed_gone=(
-            lambda *args, **kwargs: _path_confirmed_gone(*args, **kwargs)
-        ),
-    )
 
 
 def _start_app_runtime(app, db_path):
@@ -907,7 +886,7 @@ def _schedule_startup_backfills(app, startup):
 
 def _build_shared_services(
     app, *, db_path, get_db, init_db, location_errors, render_cache,
-    photo_deletion, missing_originals,
+    photo_deletion, missing_originals, trash,
 ):
     """Per-app services shared by several blueprints, gathered with the rest."""
     # Resolves visual-search clauses; owns the per-app query-text
@@ -965,6 +944,7 @@ def _build_shared_services(
         build_scan_work=build_scan_work,
         folder_moves=folder_moves,
         pipeline_chain=pipeline_chain,
+        trash=trash,
     )
 
 
@@ -1046,9 +1026,7 @@ def _register_library_blueprints(app, w):
             ),
             invalidate_missing_originals=missing_originals.invalidate,
             get_runner=lambda: app._job_runner,
-            # Late-bound so a patched ``app._trash_paths`` reaches the
-            # stray-sidecar delete, as it does the duplicates routes.
-            trash_paths=lambda *args, **kwargs: _trash_paths(*args, **kwargs),
+            trash=w.trash,
         )
     )
     app.register_blueprint(
@@ -1154,19 +1132,14 @@ def _register_file_blueprints(app, w):
     )
     app.register_blueprint(create_move_cleanup_blueprint(
         _get_db, lambda: app._job_runner, json_error,
-        lambda paths: _trash_paths(paths), folder_moves.guard_error,
+        w.trash, folder_moves.guard_error,
     ))
     app.register_blueprint(create_moves_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_duplicates_blueprint(
             _get_db,
             json_error,
-            # Late-bound through the module globals, like the move-cleanup
-            # blueprint's trash hook above, so a patched ``app._trash_paths``
-            # or ``app._network_volume_roots`` still reaches these routes.
-            trash_paths=lambda *args, **kwargs: _trash_paths(*args, **kwargs),
-            network_volume_roots=lambda: _network_volume_roots(),
-            path_on_network_volume=_path_on_network_volume,
+            trash=w.trash,
             cleanup_cached_files_for_deleted_photos=(
                 w.photo_deletion.cleanup_cached_files_for_deleted_photos
             ),

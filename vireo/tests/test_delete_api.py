@@ -273,7 +273,7 @@ def test_delete_modal_marks_files_stage_partial_on_trash_failure(app_and_db):
 
 
 def test_batch_delete_progress_reports_failed_count_on_trash_failure(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """The disk-phase completion emit must carry ``failed`` so the UI can
     keep the Files stage in a failure state instead of showing it green.
@@ -282,7 +282,6 @@ def test_batch_delete_progress_reports_failed_count_on_trash_failure(
     tell that files were retained and reports 'Move files to Trash ✓
     Complete' during subsequent cleanup phases.
     """
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -304,7 +303,7 @@ def test_batch_delete_progress_reports_failed_count_on_trash_failure(
             {"path": path, "error": "SMB Trash unavailable"} for path in paths
         ]
 
-    monkeypatch.setattr(appmod, "_trash_paths", fail_trash)
+    fake_trash.handle_trash(fail_trash)
 
     resp = client.post("/api/jobs/batch-delete", json={
         "photo_ids": [photo["id"]],
@@ -357,13 +356,12 @@ def test_batch_delete_progress_reports_failed_count_on_trash_failure(
 
 
 def test_batch_delete_progress_marks_catalog_stage_partial_on_revalidation_skip(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """A concurrent move mid-delete leaves the catalog row and the UI must
     surface it -- Finishing.failed alone isn't enough; the frontend also
     needs a per-stage attribution so the catalog bar shows partial rather
     than green ✓ complete."""
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -387,7 +385,7 @@ def test_batch_delete_progress_marks_catalog_stage_partial_on_revalidation_skip(
         db.conn.commit()
         return 0, set(paths), []
 
-    monkeypatch.setattr(appmod, "_trash_paths", concurrent_move_then_trash)
+    fake_trash.handle_trash(concurrent_move_then_trash)
     resp = client.post("/api/jobs/batch-delete", json={
         "photo_ids": [pid],
         "mode": "disk",
@@ -603,10 +601,9 @@ def test_api_batch_delete_disk_mode(app_and_db, tmp_path, isolated_trash):
 
 
 def test_api_batch_delete_disk_failure_retains_catalog_row(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """A Trash failure leaves both the original and its Vireo row retryable."""
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -627,7 +624,7 @@ def test_api_batch_delete_disk_failure_retains_catalog_row(
             {"path": path, "error": "SMB Trash unavailable"} for path in paths
         ]
 
-    monkeypatch.setattr(appmod, "_trash_paths", fail_trash)
+    fake_trash.handle_trash(fail_trash)
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [photo["id"]],
         "mode": "disk",
@@ -644,10 +641,9 @@ def test_api_batch_delete_disk_failure_retains_catalog_row(
 
 
 def test_api_batch_delete_disk_partial_failure_deletes_only_successes(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """A mixed filesystem result deletes only successfully trashed rows."""
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -678,7 +674,7 @@ def test_api_batch_delete_disk_partial_failure_deletes_only_successes(
         ]
         return len(successes), successes, failures
 
-    monkeypatch.setattr(appmod, "_trash_paths", partial_trash)
+    fake_trash.handle_trash(partial_trash)
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [success_id, failed_id],
         "mode": "disk",
@@ -696,7 +692,7 @@ def test_api_batch_delete_disk_partial_failure_deletes_only_successes(
 
 
 def test_api_batch_delete_skips_row_whose_identity_changed_mid_delete(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """A concurrent move-photos must not turn a disk delete into an orphan.
 
@@ -708,7 +704,6 @@ def test_api_batch_delete_skips_row_whose_identity_changed_mid_delete(
     entry. Simulate that race by relocating the row inside the trash stub
     and confirm the catalog row is preserved and reported retained.
     """
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -737,7 +732,7 @@ def test_api_batch_delete_skips_row_whose_identity_changed_mid_delete(
         db.conn.commit()
         return 0, set(paths), []
 
-    monkeypatch.setattr(appmod, "_trash_paths", concurrent_move_then_trash)
+    fake_trash.handle_trash(concurrent_move_then_trash)
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [pid],
         "mode": "disk",
@@ -757,7 +752,7 @@ def test_api_batch_delete_skips_row_whose_identity_changed_mid_delete(
 
 
 def test_api_batch_delete_treats_concurrently_deleted_row_as_completed(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """A row already removed by a racing delete must not resurface as failed.
 
@@ -768,7 +763,6 @@ def test_api_batch_delete_treats_concurrently_deleted_row_as_completed(
     client showing a photo that is absent from both catalog and disk until
     reload.
     """
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -786,7 +780,7 @@ def test_api_batch_delete_treats_concurrently_deleted_row_as_completed(
         db.conn.commit()
         return 0, set(paths), []
 
-    monkeypatch.setattr(appmod, "_trash_paths", concurrent_delete_then_trash)
+    fake_trash.handle_trash(concurrent_delete_then_trash)
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [pid],
         "mode": "disk",
@@ -799,10 +793,11 @@ def test_api_batch_delete_treats_concurrently_deleted_row_as_completed(
     )
     assert data["trash_failed"] == []
     assert db.photos.get(pid) is None
+    assert fake_trash.trashed_paths == [[os.path.join(folder_path, "bird.jpg")]]
 
 
 def test_api_batch_delete_disk_targets_absolute_companion_path(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """An absolute ``companion_path`` must not be joined with folder_path.
 
@@ -811,7 +806,6 @@ def test_api_batch_delete_disk_targets_absolute_companion_path(
     target the wrong file, either failing the operation or trashing an
     unrelated photo without ever pruning the correct catalog row.
     """
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -847,7 +841,7 @@ def test_api_batch_delete_disk_targets_absolute_companion_path(
                 removed.add(p)
         return len(removed), removed, []
 
-    monkeypatch.setattr(appmod, "_trash_paths", record_trash)
+    fake_trash.handle_trash(record_trash)
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [photo["id"]],
         "mode": "disk",
@@ -874,7 +868,7 @@ def test_api_batch_delete_disk_targets_absolute_companion_path(
 
 
 def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """A concurrent /api/jobs/move-folder must not turn a disk delete into an orphan.
 
@@ -884,7 +878,6 @@ def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
     copied file now lives at the new folder path. The revalidation must also
     include the resolved folder path.
     """
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -910,9 +903,7 @@ def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
         db.conn.commit()
         return 0, set(paths), []
 
-    monkeypatch.setattr(
-        appmod, "_trash_paths", concurrent_folder_rename_then_trash,
-    )
+    fake_trash.handle_trash(concurrent_folder_rename_then_trash)
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [pid],
         "mode": "disk",
@@ -928,10 +919,11 @@ def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
     row = db.photos.get(pid)
     assert row is not None, "renamed-folder row must survive a racing disk delete"
     assert os.path.exists(moved_file), "moved file must not be orphaned"
+    assert fake_trash.trashed_paths == [[os.path.join(original_folder, "bird.jpg")]]
 
 
 def test_api_batch_delete_disk_revalidates_companion_pairing_before_delete(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """A concurrent scan that pairs RAW+JPEG must not orphan the JPEG on disk.
 
@@ -944,7 +936,6 @@ def test_api_batch_delete_disk_revalidates_companion_pairing_before_delete(
     also include ``companion_path`` so the newly-paired row is skipped and
     reported retained.
     """
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -973,7 +964,7 @@ def test_api_batch_delete_disk_revalidates_companion_pairing_before_delete(
         db.conn.commit()
         return 0, set(paths), []
 
-    monkeypatch.setattr(appmod, "_trash_paths", concurrent_pair_then_trash)
+    fake_trash.handle_trash(concurrent_pair_then_trash)
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [raw_id],
         "mode": "disk",
@@ -998,10 +989,9 @@ def test_api_batch_delete_disk_revalidates_companion_pairing_before_delete(
 
 
 def test_api_batch_delete_companion_failure_does_not_move_primary(
-    app_and_db, tmp_path, monkeypatch,
+    app_and_db, tmp_path, monkeypatch, fake_trash,
 ):
     """An untracked companion must succeed before its primary is touched."""
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -1032,7 +1022,7 @@ def test_api_batch_delete_companion_failure_does_not_move_primary(
             {"path": path, "error": "sidecar locked"} for path in paths
         ]
 
-    monkeypatch.setattr(appmod, "_trash_paths", fail_companion)
+    fake_trash.handle_trash(fail_companion)
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [photo["id"]],
         "mode": "disk",
@@ -1113,7 +1103,6 @@ def test_api_batch_delete_invalid_mode(app_and_db):
 def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
     """Route must chunk photo_ids before calling delete_photos so SQLite's
     bound-parameter cap (~999 on legacy builds) can't trip on bulk deletes."""
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -1133,7 +1122,7 @@ def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
     def small_chunked(seq, size=2):
         for i in range(0, len(seq), size):
             yield seq[i:i + size]
-    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+    monkeypatch.setattr("services.photo_deletion.chunked", small_chunked)
 
     chunks_seen = []
     real_delete = catalog_deletion.delete_photos
@@ -1162,7 +1151,6 @@ def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypa
     and cached files don't drift apart. Without a shared transaction the
     earlier chunks' commits would survive, leaving the route 500ing after
     deleting only part of the selection."""
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -1182,7 +1170,7 @@ def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypa
     def small_chunked(seq, size=2):
         for i in range(0, len(seq), size):
             yield seq[i:i + size]
-    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+    monkeypatch.setattr("services.photo_deletion.chunked", small_chunked)
 
     real_delete = catalog_deletion.delete_photos
     calls = {"n": 0}
@@ -1217,7 +1205,6 @@ def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
     earlier chunks' photos — those rows still exist, so pruning them
     would orphan their pipeline entries with no way to restore them
     (the cache file is non-transactional)."""
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -1268,7 +1255,7 @@ def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
     def small_chunked(seq, size=2):
         for i in range(0, len(seq), size):
             yield seq[i:i + size]
-    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+    monkeypatch.setattr("services.photo_deletion.chunked", small_chunked)
 
     real_delete = catalog_deletion.delete_photos
     calls = {"n": 0}
@@ -1305,7 +1292,6 @@ def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
     """On the happy path (all chunks commit), the pipeline cache must
     still be pruned of the deleted photos exactly once after the outer
     commit — i.e., deferring the prune doesn't drop it on the floor."""
-    import app as appmod
 
     app, db = app_and_db
     client = app.test_client()
@@ -1363,7 +1349,7 @@ def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
     def small_chunked(seq, size=2):
         for i in range(0, len(seq), size):
             yield seq[i:i + size]
-    monkeypatch.setattr(appmod, "_chunked", small_chunked)
+    monkeypatch.setattr("services.photo_deletion.chunked", small_chunked)
 
     resp = client.post("/api/batch/delete", json={
         "photo_ids": bulk_ids,

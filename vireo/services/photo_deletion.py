@@ -10,26 +10,27 @@ on its own, also used by the audit, duplicates and folders routes after they
 drop rows.
 
 Nothing here touches ``request`` or builds an HTTP response. ``create_app``
-builds one ``PhotoDeletion``; the filesystem primitives it depends on
-(``sql_chunks.chunked``, ``services.trash.trash_paths`` and
-``services.volumes``' ``snapshot_parent_device`` / ``path_confirmed_gone``)
-are injected through ``app.py`` as late-binding callables, so tests that
-monkeypatch them on the ``app`` module keep reaching this code.
+builds one ``PhotoDeletion`` around the app's ``services.trash.TrashService``,
+which moves files to the Trash and supplies the mount-identity checks
+(``snapshot_parent_device`` / ``path_confirmed_gone``) permanent delete
+brackets each removal with.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from services import catalog_deletion
+from sql_chunks import chunked
 
 if TYPE_CHECKING:
     from db import Database
     from services.service_types import JsonDict
+    from services.trash import PathOutcome, TrashService
 
 log = logging.getLogger(__name__)
 
@@ -38,20 +39,8 @@ log = logging.getLogger(__name__)
 # matches.
 PhotoIdentity = tuple[int, str, str, str | None]
 
-# ``(moved, successful paths, failures)`` from moving files to the Trash or
-# deleting them; each failure is a ``{"path", "error"}`` dict.
-PathOutcome = tuple[int, set[str], list["JsonDict"]]
-
 # A ``run_batch_delete`` progress event (``phase``, counts, ``detail``, ...).
 DeleteProgress = Callable[["JsonDict"], None]
-
-
-class TrashPaths(Protocol):
-    """``app._trash_paths``, as the delete calls it."""
-
-    def __call__(
-        self, filepaths: Sequence[str], progress_callback: Callable[[int, int, str], None] | None = None,
-    ) -> PathOutcome: ...
 
 
 class BatchDeleteResult(TypedDict):
@@ -80,23 +69,16 @@ def reraise_fatal_cleanup_error(exc: BaseException) -> None:
 
 
 class PhotoDeletion:
-    """Photo deletion bound to one app's config and filesystem helpers.
+    """Photo deletion bound to one app's config and ``TrashService``.
 
     ``config`` is the app's config mapping; ``THUMB_CACHE_DIR`` is read on
     every call, as it was when this lived in ``create_app``.
     """
 
     # Any: the Flask app config holds heterogeneous settings values.
-    def __init__(
-        self, config: Mapping[str, Any], *, chunked: Callable[[Sequence[int]], Iterable[list[int]]],
-        trash_paths: TrashPaths, snapshot_parent_device: Callable[[str], int | None],
-        path_confirmed_gone: Callable[[str, int | None], bool],
-    ) -> None:
+    def __init__(self, config: Mapping[str, Any], *, trash: TrashService) -> None:
         self._config = config
-        self._chunked = chunked
-        self._trash_paths = trash_paths
-        self._snapshot_parent_device = snapshot_parent_device
-        self._path_confirmed_gone = path_confirmed_gone
+        self._trash = trash
 
     def cleanup_cached_files_for_deleted_photos(
         self, files: Sequence[JsonDict], progress_callback: Callable[[int, int, str], None] | None = None,
@@ -282,7 +264,7 @@ class _BatchDeleteRun:
             else:
                 ids_to_delete = list(ids)
 
-            for chunk in self._deletion._chunked(ids_to_delete):
+            for chunk in chunked(ids_to_delete):
                 chunk_result = catalog_deletion.delete_photos(
                     db, chunk,
                     include_companions=expand_companions,
@@ -315,7 +297,7 @@ class _BatchDeleteRun:
         identity changed are appended to ``skipped_ids``.
         """
         verified_ids: list[int] = []
-        for chunk in self._deletion._chunked(ids):
+        for chunk in chunked(ids):
             current = {
                 row["id"]: (
                     row["folder_id"],
@@ -552,7 +534,7 @@ class _BatchDeleteRun:
                 self.disk_total, filename,
             )
 
-        result = self._deletion._trash_paths(
+        result = self._deletion._trash.trash_paths(
             paths_to_change, progress_callback=trash_progress,
         )
         self.disk_paths_finished += len(paths_to_change)
@@ -565,19 +547,19 @@ class _BatchDeleteRun:
         # Snapshot each parent's st_dev before deletion so a mount that
         # vanishes mid-batch can be detected even when the mount point
         # remains visible on the underlying local FS (see
-        # ``_snapshot_parent_device``).
+        # ``volumes.snapshot_parent_device``).
         parent_devs = {
-            path: self._deletion._snapshot_parent_device(path)
+            path: self._deletion._trash.snapshot_parent_device(path)
             for path in paths_to_change
         }
         for filepath in paths_to_change:
             if not os.path.isfile(filepath):
-                # Same live-parent gate as ``_trash_paths`` — a
+                # Same live-parent gate as ``trash_paths`` — a
                 # disconnected mount also makes ``os.path.isfile``
                 # return False, and treating that as "already gone"
                 # would prune the catalog row for a photo that
                 # reappears when the volume comes back.
-                if self._deletion._path_confirmed_gone(
+                if self._deletion._trash.path_confirmed_gone(
                     filepath, parent_devs.get(filepath),
                 ):
                     log.warning("File already missing: %s", filepath)
