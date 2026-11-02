@@ -168,12 +168,15 @@ def setup():
     prov.db = db
     prov._chunks = lambda xs: [list(xs)[i : i + 100] for i in range(0, len(xs), 100)]
     prov._edit_prediction_ids = lambda *_a: []
-    prov.rename_species_highlights_species = forbidden
-    prov.rename_photo_preferences_species = forbidden
+    prov._species_curation = lambda: types.SimpleNamespace(
+        rename_highlights=forbidden, rename_photo_preferences=forbidden,
+    )
+    prov._resolve_workspace_id = forbidden
     prov.keyword_source_max_sql = ns["keyword_source_max_sql"]
     prov.keyword_source_max = ns["keyword_source_max"]
     prov._merge_keyword_into = prov.merge_keyword_into
-    prov._reparent_disambiguated = forbidden
+    ns["KeywordTreeRepository"].__init__ = lambda self, conn, resolve_workspace_id: None
+    ns["KeywordTreeRepository"].reparent_disambiguated = forbidden
     db._merge_keyword_into = prov.merge_keyword_into
 
     def kw(name="Invented bird", parent=None, taxon=1, source=None, kind="taxonomy"):

@@ -507,7 +507,7 @@ def test_keyword_maintenance_retargets_resolved_history_before_undo(app_and_db, 
         db.commit()
     else:
         # Internal canonicalization and collision renames share this hook.
-        db._rename_keyword_dependents(source, CANDIDATES[0], target_name)
+        db.keyword_tree.rename_dependents(source, CANDIDATES[0], target_name)
         db.keyword_tree.apply_update(source, {'name': target_name})
     db.commit()
     assert client.post('/api/undo').status_code == 200
@@ -534,7 +534,7 @@ def test_non_species_keyword_maintenance_leaves_same_named_alternatives_unchange
         db.update_keyword(source, name='An individual bird')
         db.commit()
     else:
-        db._rename_keyword_dependents(source, CANDIDATES[0], 'An individual bird')
+        db.keyword_tree.rename_dependents(source, CANDIDATES[0], 'An individual bird')
     db.commit()
     assert current_group(client) == before
     assert client.post('/api/undo').status_code == 200

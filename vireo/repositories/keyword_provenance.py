@@ -79,7 +79,9 @@ from repositories.keyword_identity_sql import (
     keywords_claim_different_taxa,
 )
 from repositories.keyword_taxa import KeywordTaxonRepository
+from repositories.keyword_tree import KeywordTreeRepository
 from repositories.prediction_review import prediction_review_join, prediction_review_status
+from repositories.species_curation import SpeciesCurationRepository
 from settings_source import config_value
 
 log = logging.getLogger(__name__)
@@ -94,9 +96,6 @@ FACADE_METHODS = (
     "_upsert_location_parent_chain",
     # merge_keyword_into
     "_edit_prediction_ids",
-    "_reparent_disambiguated",
-    "rename_photo_preferences_species",
-    "rename_species_highlights_species",
     # accept_prediction
     "add_keyword",
     "get_photos_with_equivalent_species",
@@ -1033,9 +1032,6 @@ class KeywordProvenanceRepository:
     _restore_misclassified_location_ancestor: Callable[..., Any]
     _upsert_location_parent_chain: Callable[..., Any]
     _edit_prediction_ids: Callable[..., Any]
-    _reparent_disambiguated: Callable[..., Any]
-    rename_photo_preferences_species: Callable[..., Any]
-    rename_species_highlights_species: Callable[..., Any]
     add_keyword: Callable[..., Any]
     get_photos_with_equivalent_species: Callable[..., Any]
     update_prediction_status: Callable[..., Any]
@@ -1079,6 +1075,10 @@ class KeywordProvenanceRepository:
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
+
+    def _species_curation(self):
+        """The species-curation renames, on this connection and workspace."""
+        return SpeciesCurationRepository(self.conn, self._resolve_workspace_id)
 
     def effective_config(self):
         """The global settings with the active workspace's overrides applied."""
@@ -1183,8 +1183,8 @@ class KeywordProvenanceRepository:
             self.conn, src, dst, src_id, dst_id,
             pending_source_only=pending_source_only,
             chunks=self._chunks,
-            rename_species_highlights_species=self.rename_species_highlights_species,
-            rename_photo_preferences_species=self.rename_photo_preferences_species,
+            rename_species_highlights_species=self._species_curation().rename_highlights,
+            rename_photo_preferences_species=self._species_curation().rename_photo_preferences,
         )
         _retarget_edit_history(
             self.conn, src_id, dst_id,
@@ -1230,7 +1230,9 @@ class KeywordProvenanceRepository:
             pending_source_only=pending_source_only,
             db=self.db,
             merge_keyword_into=self._merge_keyword_into,
-            reparent_disambiguated=self._reparent_disambiguated,
+            reparent_disambiguated=KeywordTreeRepository(
+                self.conn, self._resolve_workspace_id,
+            ).reparent_disambiguated,
         )
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (src_id,))
         return merged
@@ -1806,8 +1808,8 @@ class KeywordProvenanceRepository:
                 remove_pending_changes=self.remove_pending_changes,
                 queue_change=self.queue_change,
                 species_root_name_for_taxon=KeywordTaxonRepository(self.conn).species_root_name_for_taxon,
-                rename_species_highlights_species=self.rename_species_highlights_species,
-                rename_photo_preferences_species=self.rename_photo_preferences_species,
+                rename_species_highlights_species=self._species_curation().rename_highlights,
+                rename_photo_preferences_species=self._species_curation().rename_photo_preferences,
             )
         changed_tag = not already_has_species
         if changed_tag:

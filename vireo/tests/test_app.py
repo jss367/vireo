@@ -9012,7 +9012,7 @@ def test_rename_species_highlights_species_chunks_scoped_photo_ids(
         photo_ids.append(pid)
 
     pairs = [(pid, ws) for pid in photo_ids]
-    moved = db.rename_species_highlights_species("OldBird", "NewBird", pairs)
+    moved = db.species_curation.rename_highlights("OldBird", "NewBird", pairs)
     db.commit()
 
     assert moved == len(photo_ids)

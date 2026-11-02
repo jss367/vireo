@@ -433,13 +433,13 @@ class _HighlightsRelabel:
         ws_id = self.ws_id
         assert ws_id is not None  # Set by preflight before any relabel writes.
         for old_species_name, pids in self.highlight_renames.items():
-            db.rename_species_highlights_species(
+            db.species_curation.rename_highlights(
                 old_species_name,
                 species,
                 [(pid, ws_id) for pid in pids],
             )
         for old_species_name, pids in self.preference_renames.items():
-            db.rename_photo_preferences_species(
+            db.species_curation.rename_photo_preferences(
                 old_species_name,
                 species,
                 [(pid, ws_id) for pid in pids],
