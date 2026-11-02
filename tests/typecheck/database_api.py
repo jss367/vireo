@@ -9,8 +9,8 @@ the fixture fail if an API becomes too permissive to catch those mistakes.
 from pathlib import Path
 from typing import Any, assert_type
 
-from db import BrowseStackConfig, Database, normalize_browse_stack_config
-from repositories.collections import CollectionRepository
+from db import Database
+from repositories.collections import BrowseStackConfig, CollectionRepository, normalize_browse_stack_config
 from repositories.photos import PhotoRepository
 from repositories.species_provenance import SpeciesProvenanceRepository
 from repositories.storage import StorageRepository

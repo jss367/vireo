@@ -19,6 +19,7 @@ import textwrap
 import config as cfg
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, Database
+from repositories.photo_sql import PHOTO_COLS, PHOTO_DETAIL_COLS
 from services import browse_queries, catalog_deletion, duplicate_resolution, photo_ingest, workspace_folders
 
 
@@ -171,7 +172,7 @@ def test_add_photo_inserts_with_retry_and_leaves_commit_to_its_unit(db, monkeypa
 def test_get_photo_returns_detail_columns(db, lib):
     row = db.photos.get(lib["a"])
     assert set(row.keys()) == {
-        c.strip() for c in Database.PHOTO_DETAIL_COLS.split(",")
+        c.strip() for c in PHOTO_DETAIL_COLS.split(",")
     }
     assert row["filename"] == "a.jpg"
     assert db.photos.get(999999) is None
@@ -182,7 +183,7 @@ def test_get_photo_sql_is_byte_identical(db, lib):
     db.photos.get(lib["a"])
     db.photos.get(lib["a"], verify_workspace=True)
     db.conn.set_trace_callback(None)
-    detail = Database.PHOTO_DETAIL_COLS
+    detail = PHOTO_DETAIL_COLS
     assert statements == [
         f"SELECT {detail} FROM photos WHERE id = {lib['a']}",
         f"""SELECT {detail} FROM photos
@@ -240,7 +241,7 @@ def test_get_photos_by_ids(db, lib):
     assert db.photos.get_by_ids([]) == {}
     got = db.photos.get_by_ids([lib["a"], lib["b"], 999999])
     assert sorted(got) == sorted([lib["a"], lib["b"]])
-    cols = {c.strip() for c in Database.PHOTO_COLS.split(",")}
+    cols = {c.strip() for c in PHOTO_COLS.split(",")}
     assert set(got[lib["a"]].keys()) == cols
     with_exif = db.photos.get_by_ids([lib["a"]], include_exif=True)
     assert set(with_exif[lib["a"]].keys()) == cols | {"exif_data"}
@@ -522,7 +523,7 @@ def test_get_photos_pages_and_scopes(db, lib):
     rows = db.photos.list_page()
     assert [r["filename"] for r in rows] == ["c.jpg", "a.jpg", "b.jpg"]
     assert set(rows[0].keys()) == {
-        c.strip() for c in Database.PHOTO_COLS.split(",")
+        c.strip() for c in PHOTO_COLS.split(",")
     }
     assert [r["filename"] for r in db.photos.list_page(page=2, per_page=2)] == ["b.jpg"]
     # page < 1 is clamped to the first page.
@@ -1520,12 +1521,14 @@ def test_add_photo_inserts_through_the_repository_then_runs_the_hook():
     assert not hasattr(Database, "add_photo")
 
 
-def test_photo_repository_routes_facade_calls_through_database(db):
-    from repositories.photos import FACADE_METHODS
+def test_photo_repository_takes_no_facade(db):
+    import repositories.photos as module
 
+    assert not hasattr(module, "FACADE_METHODS")
+    assert "facade" not in inspect.signature(module.PhotoRepository).parameters
     repo = db._photos_repository()
-    for name in FACADE_METHODS:
-        assert getattr(repo, name) == getattr(db, name), name
+    # The rules engine is a CollectionRepository on the same connection.
+    assert repo._collections().conn is db.conn
 
 
 def test_photo_repository_imports_no_db_code():
