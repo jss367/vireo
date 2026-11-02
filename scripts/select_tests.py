@@ -122,9 +122,9 @@ FULL_SUITE_PATHS = frozenset(
 )
 FULL_SUITE_PREFIXES = (".github/actions/", "vireo/data/")
 
-# Tests that read the comments of production modules. Every change to a
-# source module selects them, a comment-only one included.
-COMMENT_READING_TESTS = ("vireo/tests/test_comment_hygiene.py",)
+# Run whenever the unit job does, whatever the map says: these read source
+# text (comments) that executes nothing, so coverage can never select them.
+ALWAYS_RUN_TESTS = ("vireo/tests/test_comment_hygiene.py",)
 
 _TEST_FILE_RE = re.compile(r"^(tests|vireo/tests)/test_[A-Za-z0-9_]+\.py$")
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -696,20 +696,6 @@ def _add_source_scanning_selections(
             sel.note(f"{source_path}: source-scanning contract in {test_file}")
 
 
-def _add_comment_reading_selections(source_path: str, head: str, cwd: Path, sel: Selection) -> None:
-    """Select the ratchets that read comments for any change to a source module.
-
-    Any edit can add or remove a comment, and a comment-only edit executes
-    nothing, so neither the map nor the other fallbacks reach a test that
-    only reads comments (``test_comment_hygiene.py``). Whether it exists is
-    read at ``head``: the map commit can predate the test.
-    """
-    for test in COMMENT_READING_TESTS:
-        if test not in sel.files and _show(head, test, cwd) is not None:
-            sel.files.add(test)
-            sel.note(f"{source_path}: comments read by {test}")
-
-
 def touched_declaration_names(hunks: list[Hunk], source: str) -> set[str]:
     """Names of the innermost function/class declarations a hunk touched.
 
@@ -874,7 +860,6 @@ def select(
             continue
 
         if kind == "source":
-            _add_comment_reading_selections(path, head, cwd, sel)
             # Added modules have no diff hunks in the map's world, so
             # fall through directly to the structural-contract fallbacks
             # after noting the addition.
@@ -889,11 +874,10 @@ def select(
             widened = None if (status == "D" or not hunks) else impacted_lines(hunks, source)
 
             # A pure comment/whitespace edit alters no code path and no
-            # structural contract, so it selects nothing from the map and
-            # skips every fallback; only the comment-reading ratchets
-            # selected above can fail on it.
+            # structural contract; skip every fallback so the diff stays
+            # ``mode: none``.
             if hunks and widened is not None and not widened:
-                sel.note(f"{path}: comment/blank-only edit; nothing from the map")
+                sel.note(f"{path}: comment/blank-only edit; selecting nothing")
                 continue
 
             # Source-scanning contracts (``glob("*.py")``/``rglob("*.py")``)
@@ -962,6 +946,10 @@ def select(
 
     if sel.mode == "full":
         return sel
+    for test in ALWAYS_RUN_TESTS:
+        if _show(head, test, cwd) is not None:
+            sel.files.add(test)
+            sel.note(f"{test}: always run")
     if not sel.files and not sel.ids:
         sel.mode = "none"
         sel.note("no unit test exercises the changed files")

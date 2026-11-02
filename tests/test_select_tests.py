@@ -423,32 +423,18 @@ def test_comment_only_change_selects_nothing_from_map(repo):
     assert meta["sha"]  # map still intact
 
 
-def test_comment_only_change_selects_the_comment_reading_ratchets(repo):
-    # The ratchet lands after the map commit, so main's own run set it aside.
+def test_always_run_tests_are_selected_whatever_the_map_says(repo):
+    # Added after the map commit, so a run with own_base sets its addition aside.
     _write(repo, "vireo/tests/test_comment_hygiene.py", "def test_counts(): pass\n")
     ratchet_added = _commit(repo, "add the ratchet")
-    # Replace the blank line after ``import os`` with a comment: comment-only.
-    _write(repo, "vireo/app.py", APP_SRC.replace("import os\n\n", "import os\n# Codex asked for this\n", 1))
-    _commit(repo, "comment")
-    impact, _, _ = select_tests.load_map(repo / select_tests.MAP_DIR)
+    _write(repo, "docs/notes.md", "more notes\n")
+    _commit(repo, "a change no test exercises")
 
-    for sel in (
-        select_tests.select(ratchet_added, "HEAD", impact, cwd=repo),
-        # The map commit predates the ratchet; it exists at head, so it runs.
-        _select(repo, own_base=ratchet_added),
-    ):
-        assert sel.mode == "subset", sel.notes
-        assert sel.files == {"vireo/tests/test_comment_hygiene.py"}
-        assert not sel.ids
-
-    # A comment inserted beside code is attributed to its function, so the map
-    # selects that function's tests; the ratchet runs as well.
-    _write(repo, "vireo/app.py", APP_SRC.replace("    return x + 1", "    # Codex asked for this\n    return x + 1"))
-    _commit(repo, "comment beside code")
     sel = _select(repo, own_base=ratchet_added)
+
     assert sel.mode == "subset", sel.notes
-    assert "vireo/tests/test_comment_hygiene.py" in sel.files
-    assert "vireo/tests/test_app.py::test_alpha" in sel.ids
+    assert sel.files == {"vireo/tests/test_comment_hygiene.py"}
+    assert not sel.ids
 
 
 def test_replacing_comment_with_code_selects_enclosing_function(tmp_path):
