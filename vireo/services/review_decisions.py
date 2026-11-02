@@ -48,7 +48,7 @@ def update_predictions_status_by_photo(db: Database, photo_id: int, status: str)
     Does not commit: the caller holds the prediction decision lock
     (``services.prediction_decisions``) and owns the transaction.
 
-    Deliberately unconditional. The stale-overwrite this used to enable — a
+    Deliberately unconditional. A stale overwrite — a
     group apply flipping an ``accepted`` row to ``rejected`` while the
     keyword the accept added stays on the photo — is guarded one level up,
     in ``api_prediction_group_apply``, against the statuses the burst modal
@@ -143,7 +143,7 @@ def accept_prediction(
     re-accepting them into duplicate history items.
 
     ``species_key`` is the resolved consensus identity, independent of
-    the particular keyword alias used to tag the photos. Batch callers
+    the particular keyword alias that tags the photos. Batch callers
     compare this key and record each result's actual ``keyword_id`` for
     undo/redo rather than requiring equivalent aliases to share an ID.
 

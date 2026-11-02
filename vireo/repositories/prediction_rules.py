@@ -250,7 +250,7 @@ def relax_negated_prediction_leaves(rules):
     ``none(all(rating >= 5))`` = ``NOT EXISTS(rating >= 5)``,
     which excludes every rating-5 photo — including one whose only
     high-conf row is 0.10 and should PASS the outer expression at
-    the row level (see r3618935666). Whenever a negated subgroup
+    the row level. Whenever a negated subgroup
     (transitively) contains a prediction row field we therefore
     drop the whole subgroup so SQL becomes a no-op there; the
     row-level pass then evaluates the original expression per row
@@ -269,7 +269,7 @@ def relax_negated_prediction_leaves(rules):
     (no photo-level restriction). Without this, ``any(none(
     prediction_confidence >= 0.8), rating >= 5)`` compiled as just
     ``rating >= 5``, hiding rating-3 photos whose low-confidence
-    rows satisfy the outer OR at the row level (see r3619014565).
+    rows satisfy the outer OR at the row level.
     """
     broad = RELAX_BROAD
 
