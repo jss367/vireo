@@ -3,6 +3,7 @@ import json
 import pytest
 from services import (
     dashboard_stats,
+    keyword_duplicates,
     moves_merge,
     photo_ingest,
     workspace_config,
@@ -1050,7 +1051,7 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
 
     # Merge in workspace A — should only merge Cardinal pair
     db.set_active_workspace(ws_a)
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
     assert merged == 1  # only Cardinal/cardinal
 
@@ -1245,7 +1246,7 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     db.queue_change(pid_b, "keyword_add", "\u2018apapane")
     db.commit()
 
-    db.keyword_tree.merge_duplicates()
+    keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     add_values = sorted(
@@ -1301,7 +1302,7 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     db.tag_photo(pid_a, quoted)
     db.tag_photo(pid_b, clean)
 
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     assert merged == 1
@@ -1380,7 +1381,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     )
     db.conn.commit()
 
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     assert merged == 1
@@ -1485,7 +1486,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     )
     db.conn.commit()
 
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     assert merged == 1
@@ -1627,7 +1628,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     )
     db.conn.commit()
 
-    db.keyword_tree.merge_duplicates()
+    keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     # Workspace A's curation and pending change should be canonicalized.
@@ -1693,7 +1694,7 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     db.tag_photo(pid_a, masse_id)
     db.tag_photo(pid_b, masze_id)
 
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     assert merged == 0
@@ -1741,7 +1742,7 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
     db.tag_photo(pid_a, upper_id)
     db.tag_photo(pid_b, lower_id)
 
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     assert merged == 0
@@ -1794,7 +1795,7 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
         db.tag_photo(pid, row[0])
         db.commit()
 
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
     assert merged == 0
 
@@ -1837,7 +1838,7 @@ def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
     db.tag_photo(pid_plain, plain_id)
     db.commit()
 
-    assert db.keyword_tree.merge_duplicates() == 0
+    assert keyword_duplicates.merge_duplicate_keywords(db) == 0
     rows = db.conn.execute(
         "SELECT id, is_species FROM keywords WHERE id IN (?, ?) ORDER BY id",
         (species_id, plain_id),
@@ -1883,7 +1884,7 @@ def test_merge_duplicate_keywords_reparents_children(db):
         db.tag_photo(pid, row[0])
         db.commit()
 
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
     assert merged == 2  # Birds/birds, then Heron/heron once same-parent
 
@@ -1933,7 +1934,7 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
     db.tag_photo(pid1, h1)
     db.tag_photo(pid2, h2)
 
-    merged = db.keyword_tree.merge_duplicates()
+    merged = keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
     assert merged == 2  # birds into Birds, then its Heron into Birds' Heron
 
@@ -1998,7 +1999,7 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     db.conn.commit()
 
     # Must not raise; converges to one Birds with one Heron child.
-    db.keyword_tree.merge_duplicates()
+    keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     birds = db.conn.execute(
@@ -2062,7 +2063,7 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     db.tag_photo(pid_general, m_general)
     db.tag_photo(pid_genre, m_genre)
 
-    db.keyword_tree.merge_duplicates()
+    keyword_duplicates.merge_duplicate_keywords(db)
     db.commit()
 
     # Birds/birds collapsed to one parent.
