@@ -974,8 +974,7 @@ class MovesMergeRepository:
             root_ancestor_exists, root_descendant_exists,
             prune_nonroot_links_outside_roots,
             materialize_workspace_descendants, add_workspace_folder,
-            add_workspace_folder_no_commit, case_insensitive_root,
-            move_location_state, KEYWORD_SOURCE_CONFLICT_SQL):
+            case_insensitive_root, move_location_state, KEYWORD_SOURCE_CONFLICT_SQL):
         """Prepare a staged-tree fold: ``(merge, staged_folders)``, or None.
 
         None when the staged root is gone. Otherwise the archive base is
@@ -995,9 +994,9 @@ class MovesMergeRepository:
           ``db.workspace_folders.root_{ancestor,descendant}_exists``
         * ``prune_nonroot_links_outside_roots`` ->
           ``services.moves_merge.prune_ws_nonroot_links_outside_roots``
-        * ``materialize_workspace_descendants``, ``add_workspace_folder``,
-          ``add_workspace_folder_no_commit`` -> the ``services.workspace_folders``
-          functions of the same name, bound to the database
+        * ``materialize_workspace_descendants``, ``add_workspace_folder`` ->
+          the ``services.workspace_folders`` functions of the same name, bound
+          to the database (inside the fold's unit the link is a savepoint)
         * ``case_insensitive_root`` -> ``move._case_insensitive_root``
         * ``move_location_state`` -> ``Database._move_location_state_for_merge``
           (the per-collision keyword-edit, review-state and sibling-link
@@ -1021,7 +1020,6 @@ class MovesMergeRepository:
             materialize_workspace_descendants=(
                 materialize_workspace_descendants),
             add_workspace_folder=add_workspace_folder,
-            add_workspace_folder_no_commit=add_workspace_folder_no_commit,
             case_insensitive_root=case_insensitive_root,
             move_location_state=move_location_state,
             reconcile_keyword_edits=self.reconcile_conflicting_keyword_edits,
@@ -1115,8 +1113,7 @@ class _StagedTreeMerge:
             root_ancestor_exists, root_descendant_exists,
             prune_nonroot_links_outside_roots,
             materialize_workspace_descendants, add_workspace_folder,
-            add_workspace_folder_no_commit, case_insensitive_root,
-            move_location_state, reconcile_keyword_edits,
+            case_insensitive_root, move_location_state, reconcile_keyword_edits,
             transfer_review_state, link_survivor_for_sibling_edits, KEYWORD_SOURCE_CONFLICT_SQL):
         self.conn = repo.conn
         self.KEYWORD_SOURCE_CONFLICT_SQL = KEYWORD_SOURCE_CONFLICT_SQL
@@ -1133,7 +1130,6 @@ class _StagedTreeMerge:
         self.materialize_workspace_descendants = (
             materialize_workspace_descendants)
         self.add_workspace_folder = add_workspace_folder
-        self.add_workspace_folder_no_commit = add_workspace_folder_no_commit
         self.case_insensitive_root = case_insensitive_root
         self.move_location_state = move_location_state
         self.reconcile_keyword_edits = reconcile_keyword_edits
@@ -1484,15 +1480,13 @@ class _StagedTreeMerge:
             "WHERE id = ?",
             (target_path, parent_id, sf["id"]),
         )
-        # Use the non-committing variant so the folder path/parent_
-        # id UPDATE just above stays in the outer transaction — the
-        # public ``add_workspace_folder`` commits, and a mid-loop
-        # commit would persist a partial reparent that the outer
-        # rollback (below) could no longer undo if a later staged
-        # folder raised.
+        # Inside the fold's unit the link is a savepoint, so the folder
+        # path/parent_id UPDATE just above and the link land together and
+        # a later staged folder that raises rolls both back. Removed
+        # descendants stay removed, as an internal merge requires.
         if target_in_workspace:
-            self.add_workspace_folder_no_commit(
-                ws, sf["id"], is_root=False)
+            self.add_workspace_folder(
+                ws, sf["id"], is_root=False, restore_removed=False)
             # The staging scan registers each photo-bearing leaf as
             # its own workspace ROOT (scanner restrict_dirs =>
             # is_root=1). Once that leaf is folded under the existing

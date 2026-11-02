@@ -7,7 +7,7 @@
   "preview_materializer.py:materialize_preview": 13,
   "repositories/collections.py:CollectionRepository.__init__": 25,
   "repositories/keyword_provenance.py:_strip_replaced_species": 13,
-  "repositories/moves_merge.py:_StagedTreeMerge.__init__": 16,
+  "repositories/moves_merge.py:_StagedTreeMerge.__init__": 15,
   "repositories/photos.py:PhotoRepository.list_page": 14,
   "repositories/predictions.py:PredictionRepository.add": 17,
   "web/job_launchers.py:create_job_launchers_blueprint": 14

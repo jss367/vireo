@@ -1,12 +1,11 @@
-"""Transaction ownership only moves toward the unit of work.
+"""Transaction ownership stays with the unit of work.
 
-The target (``docs/plans/2026-10-25-unit-of-work-design.md``): repository and
-``Database`` data methods never begin, commit or roll back a transaction, and
-each route, job or service owns its transaction with ``with
-db.transaction():``. Two counts measure the distance from that target, and
-each is capped per module at its current value, both ways: a count may not
-grow, and when it shrinks the cap must be lowered in the same change so the
-progress sticks (delete an entry at zero).
+The target (``docs/plans/2026-10-25-unit-of-work-design.md``), now reached:
+repository and ``Database`` data methods never begin, commit or roll back a
+transaction, and each route, job or service owns its transaction with ``with
+db.transaction():``. Two counts measure the distance from that target. Both
+are zero, and each is capped per module both ways, so neither can come back:
+a module that gains a count fails until the code is fixed.
 
 ``COMMIT_FLAG_LIMITS`` counts commit flags in every first-party module under
 ``vireo/`` (outside ``tests/`` and ``testing/``):
@@ -39,7 +38,9 @@ transaction control belongs, so they are not counted: ``commit``,
 ``transaction``, ``close`` and ``__init__`` (which seeds a fresh catalog's
 defaults in its own unit of work), and the module-level
 ``commit_with_retry`` helper. (The unit of work's machinery, ``vireo/unit_of_work.py``, is not part
-of the data layer.)
+of the data layer.) Inside a unit, the connection itself refuses to commit or
+roll back (``unit_of_work.GuardedConnection``), which catches at run time what
+this static count cannot see.
 
 Run ``python vireo/tests/test_transaction_ownership.py`` to print the current
 counts in the form the limits below use.
@@ -80,21 +81,14 @@ EXEMPT_DATA_LAYER_QUALNAMES = {
     },
 }
 
-# Commit flags per module (path relative to the repository root). A module not
-# listed may have none. Lower an entry (delete it at zero) when a domain's
-# data methods stop committing and lose their flag; never raise one.
-COMMIT_FLAG_LIMITS: dict[str, int] = {
-    "vireo/repositories/folders.py": 1,
-    "vireo/services/catalog_deletion.py": 1,
-    "vireo/services/maintenance_history.py": 1,
-    "vireo/services/photo_deletion.py": 1,
-    "vireo/services/workspace_folders.py": 1,
-}
+# Commit flags per module (path relative to the repository root). Both counts
+# reached zero when the migration finished: no module may add a commit flag,
+# and no data method may control a transaction. The dictionaries stay so the
+# printout and the ratchet keep one shape; an entry here is a regression.
+COMMIT_FLAG_LIMITS: dict[str, int] = {}
 
 # Transaction control inside the data layer, per module. Same rules.
-DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {
-    "vireo/db.py": 1,
-}
+DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {}
 
 
 def _first_party_modules():

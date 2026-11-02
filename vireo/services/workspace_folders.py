@@ -16,8 +16,8 @@ to the outermost durable commit with ``db.after_commit`` so a concurrent
 new-images poll nested inside a larger transaction (``add_folder``,
 workspace creation) cannot snapshot the incremented generation, read the
 pre-commit folder links, and publish that stale result for the full TTL.
-The no-commit link (``add_workspace_folder_no_commit``) leaves both the
-commit and the invalidation to its caller.
+Inside a caller's unit the link is a savepoint of it, and the invalidation
+waits for the caller's commit.
 
 The SQL is ``WorkspaceFolderRepository``'s (``db.workspace_folders``);
 ``Database.get_folder_subtree_ids`` stays on the façade because
@@ -36,20 +36,13 @@ if TYPE_CHECKING:
     from services.service_types import JsonDict
 
 
-def add_workspace_folder_no_commit(
-        db: Database, workspace_id: int, folder_id: int, *, is_root: bool = True,
-        restore_removed: bool = False) -> None:
-    """Link a folder + descendants to a workspace WITHOUT committing.
+def _link_folder_subtree(
+        db: Database, workspace_id: int, folder_id: int, *, is_root: bool,
+        restore_removed: bool) -> None:
+    """Link a folder + descendants to a workspace (no commit).
 
-    Same body as ``add_workspace_folder`` minus the ``commit()`` and cache
-    invalidation. Intended for callers that already run inside a larger
-    try/except+rollback transaction (e.g. ``merge_staged_tree_into_
-    archive``) where a mid-body commit would break rollback safety by
-    persisting a preceding UPDATE that an outer failure was meant to
-    undo. The caller is responsible for committing (and for invalidating
-    the workspace's new-images cache) after its own transaction closes.
-    Internal merges preserve removed descendants unless the caller
-    explicitly asks to restore them.
+    Without ``restore_removed``, descendants the workspace explicitly
+    removed stay removed; the folder itself is always linked.
     """
     repo = db.workspace_folders
     folder_ids = db.folders.subtree_ids_by_path(folder_id)
@@ -69,11 +62,14 @@ def add_workspace_folder(
         restore_removed: bool = True) -> None:
     """Link a folder and descendants, restoring explicit removals by default.
 
-    Scanner registration passes ``restore_removed=False``: only the
-    directly visited folder restores membership, not removed descendants.
+    One unit of work; inside a caller's unit it is a savepoint, so a later
+    failure there rolls the link back with the rest (the staged-tree merge,
+    the move's destination link). Scanner registration and internal merges
+    pass ``restore_removed=False``: only the directly visited folder
+    restores membership, not removed descendants.
     """
     with db.transaction():
-        add_workspace_folder_no_commit(
+        _link_folder_subtree(
             db, workspace_id, folder_id, is_root=is_root, restore_removed=restore_removed)
         # The folder's untracked files now count toward this workspace's
         # new-images backlog. Drop any stale cached payload so the next read

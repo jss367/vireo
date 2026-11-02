@@ -1034,19 +1034,20 @@ def test_delete_photos_expires_drained_move_provenance(db, lib, tmp_path):
     assert got == {moved_a: None, moved_b: lib_path}
 
 
-def test_delete_photos_commit_false_joins_outer_transaction(db, lib, cache, monkeypatch):
+def test_delete_photos_inside_a_unit_leaves_commit_and_prune_to_its_owner(db, lib, cache, monkeypatch):
     pruned = []
     monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda _db, ids: pruned.append(ids))
-    result = catalog_deletion.delete_photos(db, [lib["a"]], commit=False)
-    assert result["ids"] == [lib["a"]]
-    assert db.conn.in_transaction
-    with _reader(db) as r:
-        assert r.execute(
-            "SELECT COUNT(*) FROM photos WHERE id = ?", (lib["a"],),
-        ).fetchone()[0] == 1
+    with pytest.raises(RuntimeError, match="owner rolls back"), db.transaction():
+        result = catalog_deletion.delete_photos(db, [lib["a"]])
+        assert result["ids"] == [lib["a"]]
+        assert db.conn.in_transaction
+        with _reader(db) as r:
+            assert r.execute(
+                "SELECT COUNT(*) FROM photos WHERE id = ?", (lib["a"],),
+            ).fetchone()[0] == 1
+        raise RuntimeError("owner rolls back")
     assert pruned == []
     assert len(cache.invalidated) == 1
-    db.conn.rollback()
     assert db.photos.get(lib["a"]) is not None
 
 
@@ -1071,7 +1072,7 @@ def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache,
     assert pruned == []
 
 
-def test_delete_photos_commit_false_error_leaves_rollback_to_caller(db, lib, cache):
+def test_delete_photos_error_inside_a_unit_rolls_back_only_its_savepoint(db, lib, cache):
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
     db.commit()
@@ -1079,13 +1080,17 @@ def test_delete_photos_commit_false_error_leaves_rollback_to_caller(db, lib, cac
         "CREATE TEMP TRIGGER block_photo_delete BEFORE DELETE ON photos "
         "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
     )
-    with pytest.raises(sqlite3.IntegrityError, match="blocked"):
-        catalog_deletion.delete_photos(db, [lib["a"]], commit=False)
-    assert db.conn.in_transaction
-    assert db.conn.execute(
-        "SELECT COUNT(*) FROM photo_keywords WHERE photo_id = ?", (lib["a"],),
-    ).fetchone()[0] == 0
-    db.conn.rollback()
+    with db.transaction():
+        db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (lib["b"],))
+        with pytest.raises(sqlite3.IntegrityError, match="blocked"):
+            catalog_deletion.delete_photos(db, [lib["a"]])
+        # The failed delete rolled back to its savepoint: the caller's own
+        # write and the photo's keywords are both still there.
+        assert db.conn.in_transaction
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM photo_keywords WHERE photo_id = ?", (lib["a"],),
+        ).fetchone()[0] == 1
+    assert db.photos.get(lib["b"])["rating"] == 4
     assert len(cache.invalidated) == 1
 
 

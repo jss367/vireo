@@ -99,7 +99,7 @@
   "services/mask_extraction.py": 1,
   "services/missing_originals.py": 4,
   "services/original_photo.py": 4,
-  "services/photo_deletion.py": 3,
+  "services/photo_deletion.py": 2,
   "services/pipeline_launch.py": 3,
   "services/prediction_ambiguity.py": 1,
   "services/preview_workers.py": 2,

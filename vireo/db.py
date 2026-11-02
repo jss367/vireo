@@ -2091,12 +2091,14 @@ class Database:
 
     def _apply_winner_loser_merge(self, winner_id, loser_ids, winner_flag=None, *, manual_review=False):
         """Merge rating/keywords from losers onto winner, then flag losers
-        as rejected. Single transaction. Shared between the resolver-based
+        as rejected, in the caller's unit of work (never commits). Shared
+        between the resolver-based
         ``duplicate_resolution.apply_duplicate_resolution`` and the
-        user-driven ``bulk_resolve_by_folder`` and ``keep_duplicate_copy``.
+        user-driven ``bulk_resolve_by_folder`` and ``keep_duplicate_copy``,
+        each of which reads its plan and applies it in one immediate unit.
 
         ``winner_flag``, when given, is written to the winner in the same
-        transaction (``keep_duplicate_copy`` un-rejects the copy it keeps).
+        unit (``keep_duplicate_copy`` un-rejects the copy it keeps).
         Only explicit user choices publish manual flag attribution; automatic
         resolution never publishes new manual confirmation.
         """
@@ -2108,48 +2110,47 @@ class Database:
         loser_metas = [repo.photo_metadata(lid) for lid in loser_ids]
         merge = merge_metadata(winner_meta, loser_metas)
 
-        with self.transaction():
-            if winner_flag is not None:
-                repo.set_flag(winner_id, winner_flag)
-            if merge.new_rating != winner_meta.rating:
-                repo.set_rating(winner_id, merge.new_rating)
-            # Carry every loser's durable provenance -- and its species
-            # evidence -- onto the winner, including keyword IDs the winner
-            # already has. merge_metadata() omits overlaps from
-            # keyword_ids_to_add, but a manual loser must still upgrade a
-            # weaker winner association -- so this loop is driven by what the
-            # losers carry, not by what needs adding. tag_photo's upsert folds
-            # against the winner's own stamp, so a weak loser can never pull a
-            # stronger winner down; the same upsert keeps the winner's own
-            # species_provenance when the winner already recorded one.
-            loser_keyword_sources: dict[int, str | None] = {}
-            loser_keyword_evidence: dict[int, str | None] = {}
-            for row in repo.loser_keyword_rows(loser_ids, survivor_id=winner_id):
-                kw_id = row["keyword_id"]
-                loser_keyword_sources[kw_id] = keyword_source_max(
-                    row["source"], loser_keyword_sources.get(kw_id),
-                )
-                if row["species_provenance"] is not None and loser_keyword_evidence.get(kw_id) is None:
-                    loser_keyword_evidence[kw_id] = evidence_for_photo_copy(row["species_provenance"], row["photo_id"])
-            for kw_id, merged_source in loser_keyword_sources.items():
-                self.tag_photo(
-                    winner_id, kw_id, source=merged_source,
-                    species_provenance=loser_keyword_evidence.get(kw_id),
-                )
-            # Rejected losers remain in the catalog and can be reopened.
-            # Copy their suppression state after choosing carried tags, so
-            # both identities retain removals and one loser's detached key
-            # cannot suppress another loser's attached tag during this merge.
-            repo.copy_loser_embedded_offered_keys(winner_id, loser_ids)
-            # TODO: pending-edit copy for duplicate merge — see plan Task 7.
-            # Skipped because pending_changes is workspace-scoped and its
-            # value/change_token columns are non-trivial to copy safely in
-            # this transaction. Rare edge case; revisit if product needs it.
-            # Collections are rule-based (no junction table) so
-            # merge.collection_ids_to_add has nothing to write either.
-            repo.reject(loser_ids)
-            if manual_review:
-                self.photo_review.confirm_duplicate_choices(winner_id, loser_ids)
+        if winner_flag is not None:
+            repo.set_flag(winner_id, winner_flag)
+        if merge.new_rating != winner_meta.rating:
+            repo.set_rating(winner_id, merge.new_rating)
+        # Carry every loser's durable provenance -- and its species
+        # evidence -- onto the winner, including keyword IDs the winner
+        # already has. merge_metadata() omits overlaps from
+        # keyword_ids_to_add, but a manual loser must still upgrade a
+        # weaker winner association -- so this loop is driven by what the
+        # losers carry, not by what needs adding. tag_photo's upsert folds
+        # against the winner's own stamp, so a weak loser can never pull a
+        # stronger winner down; the same upsert keeps the winner's own
+        # species_provenance when the winner already recorded one.
+        loser_keyword_sources: dict[int, str | None] = {}
+        loser_keyword_evidence: dict[int, str | None] = {}
+        for row in repo.loser_keyword_rows(loser_ids, survivor_id=winner_id):
+            kw_id = row["keyword_id"]
+            loser_keyword_sources[kw_id] = keyword_source_max(
+                row["source"], loser_keyword_sources.get(kw_id),
+            )
+            if row["species_provenance"] is not None and loser_keyword_evidence.get(kw_id) is None:
+                loser_keyword_evidence[kw_id] = evidence_for_photo_copy(row["species_provenance"], row["photo_id"])
+        for kw_id, merged_source in loser_keyword_sources.items():
+            self.tag_photo(
+                winner_id, kw_id, source=merged_source,
+                species_provenance=loser_keyword_evidence.get(kw_id),
+            )
+        # Rejected losers remain in the catalog and can be reopened.
+        # Copy their suppression state after choosing carried tags, so
+        # both identities retain removals and one loser's detached key
+        # cannot suppress another loser's attached tag during this merge.
+        repo.copy_loser_embedded_offered_keys(winner_id, loser_ids)
+        # TODO: pending-edit copy for duplicate merge — see plan Task 7.
+        # Skipped because pending_changes is workspace-scoped and its
+        # value/change_token columns are non-trivial to copy safely in
+        # this transaction. Rare edge case; revisit if product needs it.
+        # Collections are rule-based (no junction table) so
+        # merge.collection_ids_to_add has nothing to write either.
+        repo.reject(loser_ids)
+        if manual_review:
+            self.photo_review.confirm_duplicate_choices(winner_id, loser_ids)
 
         logging.getLogger(__name__).info(
             "Duplicate resolved: kept id=%s, rejected id(s)=%s",

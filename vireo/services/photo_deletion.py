@@ -268,15 +268,13 @@ class _BatchDeleteRun:
             detail="Preparing database changes; nothing is committed yet.",
         )
         revalidating = bool(revalidate_identity)
-        # BEGIN IMMEDIATE takes the write lock up front so no other writer
-        # (notably move-photos or move-folder) can commit an identity
-        # change between the revalidation SELECT and the DELETE that
-        # follows. Without it, a move committed after the SELECT but
-        # before the DELETE would let us delete a row that no longer
-        # matches the identity we verified.
-        if revalidating:
-            db.begin_immediate()
-        try:
+        # One unit for every chunk. When revalidating it takes the write
+        # lock up front (``immediate``) so no other writer (notably
+        # move-photos or move-folder) can commit an identity change between
+        # the revalidation SELECT and the DELETE that follows. Without it, a
+        # move committed after the SELECT but before the DELETE would let us
+        # delete a row that no longer matches the identity we verified.
+        with db.transaction(immediate=revalidating):
             if revalidating:
                 ids_to_delete = self._revalidated_ids(
                     ids, revalidate_identity, skipped_ids,
@@ -288,7 +286,6 @@ class _BatchDeleteRun:
                 chunk_result = catalog_deletion.delete_photos(
                     db, chunk,
                     include_companions=expand_companions,
-                    commit=False,
                 )
                 result["deleted"] += chunk_result["deleted"]
                 result["ids"].extend(chunk_result["ids"])
@@ -300,10 +297,6 @@ class _BatchDeleteRun:
                         "Preparing database changes; nothing is committed yet."
                     ),
                 )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
         result["skipped_ids"] = skipped_ids
 
         self.emit(

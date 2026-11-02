@@ -1143,7 +1143,7 @@ def test_delete_folder_removes_subtree_photos_and_provenance(db, cache, monkeypa
     result = catalog_deletion.delete_folder(db, root)
     assert result["deleted_photos"] == 2
     assert sorted(f["photo_id"] for f in result["files"]) == sorted([p1, p2])
-    assert delete_calls == [(sorted([p1, p2]), (), {"commit": False})]
+    assert delete_calls == [(sorted([p1, p2]), (), {})]
     assert pruned == [sorted([p1, p2])]
     assert (db._db_path, {ws}) in cache.invalidated
     with _reader(db) as r:

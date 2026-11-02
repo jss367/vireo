@@ -2071,7 +2071,6 @@ def test_merge_wires_every_callback_to_the_facade():
         "prune_nonroot_links_outside_roots": "partial(prune_ws_nonroot_links_outside_roots, db)",
         "materialize_workspace_descendants": "partial(workspace_folders.materialize_workspace_descendants, db)",
         "add_workspace_folder": "partial(workspace_folders.add_workspace_folder, db)",
-        "add_workspace_folder_no_commit": "partial(workspace_folders.add_workspace_folder_no_commit, db)",
         "case_insensitive_root": "case_insensitive_root",
         "move_location_state": "db._move_location_state_for_merge",
         "KEYWORD_SOURCE_CONFLICT_SQL": "KEYWORD_SOURCE_CONFLICT_SQL",

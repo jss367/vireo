@@ -509,14 +509,15 @@ class _PhotoCatalogRewrite:
         moves = db.moves_merge
         with db.transaction():
             if link_destination:
-                workspace_folders.add_workspace_folder_no_commit(
+                # A savepoint of this unit; it drops the new-images cache
+                # once the unit commits.
+                workspace_folders.add_workspace_folder(
                     db, db.active_workspace_id, self.dest_folder_id, restore_removed=True,
                 )
             db.photo_visibility.preserve_for_move(item.pid, self.keep_visible)
             moves.repoint_moved_photo(item.pid, self.dest_folder_id, item.src_dir)
         if link_destination:
             self.workspace_linked = True
-            db._new_images_cache.invalidate_workspaces(db._db_path, [db.active_workspace_id])
         self.stems.pin_destination_stem(item)
 
 

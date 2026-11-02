@@ -93,7 +93,7 @@ class _ScanFolders:
         # intermediate ancestor between it and ``restrict_dirs`` exist
         # only to satisfy the ``folders.parent_id`` chain — they are not
         # part of what the user asked to import. Linking them to the
-        # workspace would fire ``add_workspace_folder_no_commit`` and
+        # workspace would fire ``add_workspace_folder`` and
         # its path-prefix subtree cascade, pulling every pre-existing
         # cataloged descendant of ``root_path`` (unrelated archive
         # subtrees from prior scans / other workspaces) into the active
