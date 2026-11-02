@@ -533,11 +533,10 @@ def create_pipeline_blueprint(
                 computation_cache_dir=config["COMPUTATION_CACHE_DIR"],
             )
 
-        # Enqueue rather than start directly: when pipeline slots are available,
-        # ``enqueue_pipeline`` promotes inline
-        # before returning, so this behaves like a direct start.
-        # When a pipeline is already running, the new run waits in
-        # ``status='queued'`` until the slot opens. Callers receive the
+        # Enqueue rather than start directly: ``enqueue_pipeline`` attempts
+        # inline promotion before returning. Queue order or promotion
+        # failures can leave the new run in ``status='queued'`` until
+        # a later promotion succeeds. Callers receive the
         # same {"job_id": ...} response either way; clients learn about
         # the queued state via /api/jobs/<id> polling or the SSE stream.
         job_config = launch.job_config(params)

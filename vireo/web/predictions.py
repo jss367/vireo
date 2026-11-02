@@ -1339,9 +1339,10 @@ def create_predictions_blueprint(
         Group apply cannot use the "already decided" precondition: the burst
         modal opens on any grouped card, including one this user already
         decided, and re-opening a burst to change its split is legitimate.
-        Instead it is compare-and-swap against what the modal displayed: skip
-        a photo only when that picture has moved. Two shapes of "moved"
-        invalidate a photo, checked in one pass:
+        It compares the observed rows returned by the repository lookup.
+        Missing or deleted observed rows are omitted and do not invalidate
+        the photo; current grouped rows can still be applied in that case.
+        Two kinds of movement on returned rows invalidate a photo:
 
         1. **Status drift on an observed row.** An observed row's stored
            status is no longer the one the client displayed — a decision that
