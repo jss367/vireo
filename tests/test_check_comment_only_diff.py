@@ -397,3 +397,53 @@ def test_js_differs_distinguishes_non_ascii_strings_under_non_utf8_default(monke
     assert checker.js_differs("const x = 'é';", "const x = 'ö';") is not None
     comments = checker._js("const bird = '鳥'; // naïve")["comments"]
     assert [c["text"] if isinstance(c, dict) else c for c in comments] == [" naïve"]
+
+
+@pytest.mark.parametrize(("name", "body"), [
+    ("new.py", "# wording\n"),
+    ("naïve.py", "X = 1\n"),
+    ("鳥.js", "// wording\n"),
+    ("nested/new.mjs", "// wording\n"),
+    ("new.cjs", "// wording\n"),
+])
+def test_untracked_supported_source_is_rejected(tmp_path, monkeypatch, capsys, name, body):
+    _run_in_fixture(tmp_path, ("tracked.py", "X = 1\n"))
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    assert checker._source_changes("HEAD") == [(name + " (untracked)", "", name, "untracked", False)]
+    assert checker.main() == 1
+    assert "untracked source file" in capsys.readouterr().err
+    if name.endswith(".py") and body.startswith("#"):
+        subprocess.run(["git", "-C", str(tmp_path), "add", name], check=True)
+        assert checker.main() == 0, "staged comment-only additions remain supported"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows filenames cannot contain CR or LF")
+@pytest.mark.parametrize("name", ["line\nname.py", "carriage\rname.py"])
+def test_untracked_source_path_records_preserve_newlines(tmp_path, monkeypatch, name):
+    _run_in_fixture(tmp_path, ("tracked.py", "X = 1\n"))
+    (tmp_path / name).write_text("# wording\n", encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    assert checker._source_changes("HEAD") == [(name + " (untracked)", "", name, "untracked", False)]
+
+
+def test_untracked_non_source_and_ignored_files_are_outside_diff(tmp_path, monkeypatch):
+    _run_in_fixture(tmp_path, (".gitignore", "ignored.py\n"))
+    (tmp_path / "notes.txt").write_text("notes\n", encoding="utf-8")
+    (tmp_path / "ignored.py").write_text("X = 1\n", encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    assert checker._source_changes("HEAD") == []
+
+
+def test_git_blob_text_preserves_universal_newline_contract(tmp_path, monkeypatch):
+    _run_in_fixture(tmp_path, ("source.py", "# line\nx = 1\n"))
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "core.autocrlf", "false"], check=True)
+    path = tmp_path / "source.py"
+    path.write_bytes(b"# line\r\nx = 1\r")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "source.py"], check=True)
+    assert checker._git("show", ":source.py") == path.read_text(encoding="utf-8") == "# line\nx = 1\n"

@@ -33,6 +33,7 @@ import argparse
 import ast
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -169,13 +170,17 @@ def js_differs(old: str, new: str) -> str | None:
 
 
 def _git(*args: str) -> str:
-    # Git for Windows emits path output (``--name-status -z``) and blob bytes
-    # (``git show``) as UTF-8, but ``text=True`` alone decodes with the active
-    # code page; a non-UTF-8 locale would mangle a non-ASCII path or source
-    # file before it reaches ``python_differs`` / ``js_differs``.
-    return subprocess.run(
-        ["git", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True
-    ).stdout
+    # Keep NUL-delimited path output binary until decoding so text mode cannot
+    # normalize CR/CRLF within a filename. Blob text retains the same UTF-8 /
+    # universal-newline contract as Path.read_text in main().
+    path_records = "-z" in args
+    result = subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True,
+        encoding=None if path_records else "utf-8", check=True,
+    )
+    if not path_records:
+        return result.stdout
+    return result.stdout.decode("utf-8") if os.name == "nt" else os.fsdecode(result.stdout)
 
 
 def _suffix_of(path: str) -> str:
@@ -195,7 +200,8 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str, bool]]:
     ``--raw`` carries the old and new Git modes so a mode-only edit
     (``100644`` <-> ``100755``, which flips a script's executability) is
     reported as a change: ``--name-status`` would mark it ``M`` and the
-    blob-text comparison would then pass unchanged.
+    blob-text comparison would then pass unchanged. Nonignored untracked
+    supported source is reported with an untracked sentinel and rejected.
     """
     out: list[tuple[str, str, str, str, bool]] = []
     tokens = _git("diff", "--raw", "-z", base, "--").split("\0")
@@ -234,6 +240,11 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str, bool]]:
         suffix = new_suffix or old_suffix
         mode_changed = status in ("M", "R", "C") and old_mode != new_mode
         out.append((label, old_path, new_path, suffix, mode_changed))
+    # Untracked source has no reviewed base blob. Require the author to stage
+    # it for normal comparison, even when its current text is only comments.
+    for path in _git("ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+        if _suffix_of(path):
+            out.append((path + " (untracked)", "", path, "untracked", False))
     return out
 
 
@@ -246,6 +257,9 @@ def main() -> int:
     labels: list[str] = []
     for label, old_path, new_path, suffix, mode_changed in entries:
         labels.append(label)
+        if suffix == "untracked":
+            failures.append(f"{label}: untracked source file; stage it for comparison")
+            continue
         if suffix == "mixed":
             failures.append(f"{label}: cross-language rename")
             continue

@@ -325,6 +325,18 @@ jobs:
         run: npm ci
       - name: Lint JavaScript and check frontend types
         run: npm run check:frontend
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install isolated corpus test runner
+        run: python -m pip install pytest
+      - name: Require bounded hygiene lexer to match Acorn
+        env:
+          VIREO_REQUIRE_ACORN: "1"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          node -e "require('./node_modules/acorn')"
+          python -m pytest --noconftest -o addopts='' vireo/tests/test_comment_hygiene.py -k 'acorn or corpus' -q
 
   lint:
     runs-on: ubuntu-latest

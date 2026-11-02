@@ -25,6 +25,7 @@ to" and is not counted.
 import ast
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -551,28 +552,72 @@ def test_js_lexer_for_await_opens_loop_header():
     assert js_comment_texts(cases[2]) == [" c ", " keep "]
 
 
-def test_js_lexer_matches_acorn():
-    """The Python lexer finds exactly the comments acorn finds."""
-    repo = VIREO.parent
+def _assert_js_corpus_matches_acorn(files: list[Path], repo: Path = VIREO.parent):
+    """Fail on any corpus file outside the bounded lexer's supported syntax."""
     node = shutil.which("node")
     if not node or not (repo / "node_modules" / "acorn").is_dir():
-        pytest.skip("node and acorn (npm ci) are needed for the cross-check")
+        message = "node and acorn (npm ci) are needed for the cross-check"
+        if os.environ.get("VIREO_REQUIRE_ACORN") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
     script = (
         "const acorn = require(process.argv[1] + '/node_modules/acorn');"
         "const fs = require('fs'); const out = {};"
         "for (const f of process.argv.slice(2)) {"
         "  const src = fs.readFileSync(f, 'utf8'); const c = [];"
         "  const o = {ecmaVersion: 'latest', onComment: (b, t) => c.push(t)};"
-        "  try { [...acorn.tokenizer(src, {...o, sourceType: 'script'})]; }"
-        "  catch (e) { c.length = 0; [...acorn.tokenizer(src, {...o, sourceType: 'module'})]; }"
+        "  try { acorn.parse(src, {...o, sourceType: 'script'}); }"
+        "  catch (e) { c.length = 0; acorn.parse(src, {...o, sourceType: 'module'}); }"
         "  out[f] = c; }"
         "process.stdout.write(JSON.stringify(out));"
     )
-    files = [str(path) for path in production_files() if path.suffix == ".js"]
-    result = subprocess.run([node, "-e", script, str(repo), *files], capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        [node, "-e", script, str(repo), *map(str, files)],
+        capture_output=True, encoding="utf-8", check=True,
+    )
     expected = json.loads(result.stdout)
-    mismatched = [f for f in files if js_comment_texts(Path(f).read_text(encoding="utf-8")) != expected[f]]
+    mismatched = [str(f) for f in files if js_comment_texts(f.read_text(encoding="utf-8")) != expected[str(f)]]
     assert not mismatched, mismatched
+
+
+def test_js_lexer_matches_acorn():
+    """Frontend CI requires this comparison on every first-party script."""
+    files = [path for path in production_files() if path.suffix == ".js"]
+    assert files, "first-party JavaScript corpus must not be empty"
+    _assert_js_corpus_matches_acorn(files)
+
+
+@pytest.mark.parametrize("source", [
+    "for (; of / 2; ) { // actual comment\n }",
+    "const o = {for(x = of / 2 /* actual comment */) {}};",
+    "const of = 1; for (const x of /[//]inert/) { /* actual comment */ }",
+])
+def test_js_corpus_rejects_unsupported_contexts(tmp_path, source):
+    """Unsupported syntax must fail the oracle, rather than certify its counts."""
+    path = tmp_path / "counterexample.js"
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(AssertionError, match="counterexample.js"):
+        _assert_js_corpus_matches_acorn([path])
+
+
+def test_js_corpus_accepts_comment_cleanup(tmp_path):
+    path = tmp_path / "cleanup.js"
+    for wording in ("old wording", "clear wording"):
+        path.write_text(f"const n = 1; // {wording}\n", encoding="utf-8")
+        _assert_js_corpus_matches_acorn([path])
+
+
+@pytest.mark.parametrize("missing", ["node", "acorn"])
+def test_js_corpus_required_prerequisites_cannot_skip(tmp_path, monkeypatch, missing):
+    monkeypatch.setenv("VIREO_REQUIRE_ACORN", "1")
+    if missing == "node":
+        monkeypatch.setattr(shutil, "which", lambda _: None)
+        repo = VIREO.parent
+    else:
+        monkeypatch.setattr(shutil, "which", lambda _: "/unused/node")
+        repo = tmp_path
+    with pytest.raises(pytest.fail.Exception, match="node and acorn"):
+        _assert_js_corpus_matches_acorn([], repo=repo)
 
 
 def test_writer_refuses_to_raise_or_add(tmp_path):
