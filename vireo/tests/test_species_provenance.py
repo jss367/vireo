@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 from db import Database
-from services import catalog_deletion, moves_merge, workspace_folders
+from services import catalog_deletion, folder_merges, moves_merge, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 
 
@@ -318,7 +318,7 @@ def test_photo_association_moves_preserve_evidence(db, tmp_path, operation, exis
     if operation == 'pairing':
         db.keyword_provenance.carry_companion_keywords(losing, survivor)
     elif operation == 'folder_collision':
-        db.folders.merge_into_existing(source_folder, target_folder, str(target_dir))
+        folder_merges.merge_into_existing(db, source_folder, target_folder, str(target_dir))
         db.commit()
         assert db.photos.get(losing) is None
     elif operation == 'duplicate_resolution':

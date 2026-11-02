@@ -7,6 +7,8 @@ import tempfile
 import threading
 import time
 
+from services import folder_merges
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
@@ -2023,7 +2025,7 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     sibling_file.unlink()
     reusable_path.rmdir()
 
-    db.folders.relocate(original_fid, str(target_path))
+    folder_merges.relocate(db, original_fid, str(target_path))
     db.commit()
 
     # The original source folder row must be gone (merged into target).
@@ -2121,7 +2123,7 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
     old_child.rmdir()
     old_root.rmdir()
 
-    cascaded = db.folders.relocate(old_root_id, str(new_root))
+    cascaded = folder_merges.relocate(db, old_root_id, str(new_root))
     db.commit()
 
     assert cascaded == [{
@@ -2508,7 +2510,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
         (original_fid,),
     )
     db.conn.commit()
-    db.folders.relocate(original_fid, str(relocated_path))
+    folder_merges.relocate(db, original_fid, str(relocated_path))
     db.commit()
 
     # The provenance must have been rebased onto the new path, not left

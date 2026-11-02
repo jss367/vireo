@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from services import catalog_deletion, photo_ingest
+from services import catalog_deletion, folder_merges, photo_ingest
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -1325,7 +1325,7 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
                     writer = Database(db._db_path)
                     try:
                         folder_id = writer.photos.get(photo_id)["folder_id"]
-                        writer.folders.relocate(folder_id, str(relocated))
+                        folder_merges.relocate(writer, folder_id, str(relocated))
                         writer.commit()
                         assert writer.photos.get(photo_id)["folder_id"] == folder_id
                     finally:

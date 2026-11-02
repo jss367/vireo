@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 from repositories.photo_row_deletion import photo_row_deletion
-from services import catalog_deletion, moves_merge, photo_ingest, workspace_folders
+from services import catalog_deletion, folder_merges, moves_merge, photo_ingest, workspace_folders
 from services.startup_tasks import StartupTasks
 
 VIREO_ROOT = Path(__file__).resolve().parents[1]
@@ -244,7 +244,7 @@ def test_relocating_a_missing_folder_onto_an_existing_one_prunes_collections(db,
     phantom = _photo(db, source, "phantom.jpg")
     coll = _static_collection(db, other_ws, "c", [dup, phantom])
 
-    db.folders.merge_into_existing(source, target, str(target_dir))
+    folder_merges.merge_into_existing(db, source, target, str(target_dir))
     db.commit()
 
     assert _ids(db, coll) == [survivor]

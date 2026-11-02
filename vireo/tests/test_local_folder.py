@@ -1848,7 +1848,7 @@ def _stage_child_under_parent(tmp_path):
 
 def test_relocate_ancestor_of_local_folder_refuses_with_409(tmp_path, monkeypatch):
     """POST /api/folders/<ancestor>/relocate must refuse when a descendant
-    has a shared local copy. Without the guard, ``db.folders.relocate`` walks
+    has a shared local copy. Without the guard, ``folder_merges.relocate`` walks
     the parent's ``folders.path`` subtree — which no longer includes the
     rebased child — and rewrites the parent while
     ``local_folder_mappings.source_path`` and the manifest keep pointing at
