@@ -122,8 +122,8 @@ FULL_SUITE_PATHS = frozenset(
 )
 FULL_SUITE_PREFIXES = (".github/actions/", "vireo/data/")
 
-# Tests that read the comments of production modules. A comment-only edit
-# selects these rather than nothing.
+# Tests that read the comments of production modules. Every change to a
+# source module selects them, a comment-only one included.
 COMMENT_READING_TESTS = ("vireo/tests/test_comment_hygiene.py",)
 
 _TEST_FILE_RE = re.compile(r"^(tests|vireo/tests)/test_[A-Za-z0-9_]+\.py$")
@@ -697,18 +697,17 @@ def _add_source_scanning_selections(
 
 
 def _add_comment_reading_selections(source_path: str, head: str, cwd: Path, sel: Selection) -> None:
-    """Select the ratchets that read comments for a comment/blank-only edit.
+    """Select the ratchets that read comments for any change to a source module.
 
-    Such an edit executes nothing, but a comment that cites a review or a PR
-    fails ``test_comment_hygiene.py``, so that test must still run. Whether
-    it exists is read at ``head``: the map commit can predate the test.
+    Any edit can add or remove a comment, and a comment-only edit executes
+    nothing, so neither the map nor the other fallbacks reach a test that
+    only reads comments (``test_comment_hygiene.py``). Whether it exists is
+    read at ``head``: the map commit can predate the test.
     """
-    picked = [test for test in COMMENT_READING_TESTS if _show(head, test, cwd) is not None]
-    sel.files.update(picked)
-    if picked:
-        sel.note(f"{source_path}: comment/blank-only edit; selecting only {', '.join(picked)}")
-    else:
-        sel.note(f"{source_path}: comment/blank-only edit; selecting nothing")
+    for test in COMMENT_READING_TESTS:
+        if test not in sel.files and _show(head, test, cwd) is not None:
+            sel.files.add(test)
+            sel.note(f"{source_path}: comments read by {test}")
 
 
 def touched_declaration_names(hunks: list[Hunk], source: str) -> set[str]:
@@ -875,6 +874,7 @@ def select(
             continue
 
         if kind == "source":
+            _add_comment_reading_selections(path, head, cwd, sel)
             # Added modules have no diff hunks in the map's world, so
             # fall through directly to the structural-contract fallbacks
             # after noting the addition.
@@ -890,10 +890,10 @@ def select(
 
             # A pure comment/whitespace edit alters no code path and no
             # structural contract, so it selects nothing from the map and
-            # skips every fallback. Only the ratchets that read comments
-            # can fail on it.
+            # skips every fallback; only the comment-reading ratchets
+            # selected above can fail on it.
             if hunks and widened is not None and not widened:
-                _add_comment_reading_selections(path, head, cwd, sel)
+                sel.note(f"{path}: comment/blank-only edit; nothing from the map")
                 continue
 
             # Source-scanning contracts (``glob("*.py")``/``rglob("*.py")``)
