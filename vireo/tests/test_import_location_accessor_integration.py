@@ -37,7 +37,7 @@ def test_import_locations_use_repository_without_removed_facade_methods(operatio
             INSERT INTO keywords VALUES(1,'Parent',NULL,NULL,NULL,NULL,'location');
             INSERT INTO keywords VALUES(2,'Invented',NULL,NULL,99,1,'location');
         ''')
-        repository = ns['LocationRepository'](conn, forbidden, folder_subtree_ids=forbidden,
+        repository = ns['LocationRepository'](conn, forbidden,
                                               build_query_from_rules=forbidden, merge_keyword_into=forbidden)
         # Deliberately expose no old get_keyword_place_row or fill_missing_location_coordinates.
         db = SimpleNamespace(locations=repository, get_or_create_text_location=lambda _: 2)

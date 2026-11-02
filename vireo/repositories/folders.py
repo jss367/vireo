@@ -18,6 +18,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from repositories.folder_subtrees import folder_subtree_ids
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import remap_photo_visibility
 
@@ -162,34 +163,12 @@ class FolderRepository:
             (ws, ws),
         ).fetchall()
 
-    def subtree_ids(self, folder_id):
-        """Return the seed plus visible descendants, skipping hidden ancestors.
+    def subtree_ids(self, folder_id: int) -> list[int]:
+        """Return the seed plus the active workspace's visible descendants.
 
-        The folder tree reparents a visible descendant to its nearest visible
-        ancestor. Walk physical nodes first so selecting that displayed parent
-        reaches the same descendants, without returning hidden folders.
-        A seed outside this workspace never expands.
+        See ``folder_subtree_ids``; the workspace is the active one.
         """
-        ws = self.workspace_id
-        rows = self.conn.execute(
-            """WITH RECURSIVE tree(id) AS (
-                   SELECT ?
-                   UNION ALL
-                   SELECT f.id FROM folders f
-                   JOIN tree t ON f.parent_id = t.id
-                   WHERE EXISTS (
-                       SELECT 1 FROM workspace_visible_folders seed
-                       WHERE seed.folder_id = ? AND seed.workspace_id = ?
-                   )
-               )
-               SELECT t.id FROM tree t
-               WHERE t.id = ? OR EXISTS (
-                   SELECT 1 FROM workspace_visible_folders wf
-                   WHERE wf.folder_id = t.id AND wf.workspace_id = ?
-               )""",
-            (folder_id, folder_id, ws, folder_id, ws),
-        ).fetchall()
-        return [r["id"] for r in rows]
+        return folder_subtree_ids(self.conn, self.workspace_id, folder_id)
 
     def subtree_ids_by_path(self, folder_id):
         """Return folder_id plus descendants by path prefix and local-copy source path."""
@@ -314,7 +293,7 @@ class FolderRepository:
         """Return workspace folders with scored photos in their subtree."""
         ws = self.workspace_id
         # Traverse physical ancestors and emit only visible ones, matching
-        # the effective-parent folder tree and get_folder_subtree_ids even
+        # the effective-parent folder tree and folder_subtree_ids even
         # when a granted descendant lies below an invisible intermediate.
         return self.conn.execute(
             """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (

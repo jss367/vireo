@@ -1128,7 +1128,7 @@ def create_job_launchers_blueprint(
                 return json_error("folder does not belong to the active workspace", 403)
             photo_ids = db.caches.offline_original_ids(
                 workspace_id=ctx.workspace_id,
-                folder_ids=db.get_folder_subtree_ids(folder_id),
+                folder_ids=db.folders.subtree_ids(folder_id),
             )
         else:
             if ctx.workspace_id is None:

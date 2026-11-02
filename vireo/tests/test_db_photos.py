@@ -641,18 +641,21 @@ def test_listing_requires_active_workspace(db, lib, method, args):
 
 
 def test_listing_routes_through_facade_helpers(db, lib, monkeypatch):
-    """Folder subtrees, collection queries and sort clauses come from the
-    façade, so patches of those Database methods reach the listing reads."""
+    """Folder subtrees come from the repository's own subtree read, and the
+    collection queries and sort clauses from ``CollectionRepository``, so
+    patches of those methods reach the listing reads."""
     calls = []
-    real_subtree = db.get_folder_subtree_ids
     from repositories.collections import CollectionRepository
+    from repositories.photos import PhotoRepository
+
+    real_subtree = PhotoRepository.get_folder_subtree_ids
 
     real_coll = CollectionRepository._build_collection_query
     real_sort = CollectionRepository._photo_sort_clause
 
-    def subtree(fid):
+    def subtree(self, fid):
         calls.append(("subtree", fid))
-        return real_subtree(fid)
+        return real_subtree(self, fid)
 
     def coll(self, cid):
         calls.append(("coll", cid))
@@ -662,7 +665,7 @@ def test_listing_routes_through_facade_helpers(db, lib, monkeypatch):
         calls.append(("sort", key))
         return real_sort(self, key)
 
-    monkeypatch.setattr(db, "get_folder_subtree_ids", subtree)
+    monkeypatch.setattr(PhotoRepository, "get_folder_subtree_ids", subtree)
     monkeypatch.setattr(CollectionRepository, "_build_collection_query", coll)
     monkeypatch.setattr(CollectionRepository, "_photo_sort_clause", sort)
     cid = db.collections.add("All", json.dumps([{"field": "all"}]))

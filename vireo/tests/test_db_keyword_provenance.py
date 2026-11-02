@@ -719,7 +719,12 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     queued = _spy(monkeypatch, db, "queue_change")
     highlights = _spy(monkeypatch, db, "rename_species_highlights_species")
     prefs = _spy(monkeypatch, db, "rename_photo_preferences_species")
-    configs = _spy(monkeypatch, db, "get_effective_config")
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    configs = []
+    real_config = KeywordProvenanceRepository.effective_config
+    monkeypatch.setattr(KeywordProvenanceRepository, "effective_config",
+                        lambda self: configs.append(1) or real_config(self))
 
     with db.transaction():
         r0 = db.accept_prediction(pred0, replace_species=True, species_taxonomy=None)

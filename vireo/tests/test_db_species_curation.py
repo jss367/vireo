@@ -11,8 +11,8 @@ ordering, that the writers leave the commit to the caller (the caller's
 transaction stays open and nothing is committed), commit visibility from a
 second connection, lazy active-workspace resolution, chunking, and that
 composition still routes where patches reach it: species names through
-``KeywordTaxonRepository.resolve_species_display``, ``get_folder_subtree_ids``
-through the façade, and this domain's own entry points (``rename_representatives``,
+``KeywordTaxonRepository.resolve_species_display``, ``repositories.folder_subtrees.folder_subtree_ids``,
+and this domain's own entry points (``rename_representatives``,
 ``set_global_representative``, ...) through the repository class.
 """
 
@@ -227,14 +227,16 @@ def test_highlights_candidates_quality_floor_drops_unscored(db, cur):
 
 def test_highlights_candidates_folder_subtree_and_single_photo(db, cur, monkeypatch):
     p = cur["p"]
+    import repositories.species_curation as species_curation_module
+
     calls = []
-    real = db.get_folder_subtree_ids
+    real = species_curation_module.folder_subtree_ids
 
-    def recording(folder_id):
+    def recording(conn, workspace_id, folder_id):
         calls.append(folder_id)
-        return real(folder_id)
+        return real(conn, workspace_id, folder_id)
 
-    monkeypatch.setattr(db, "get_folder_subtree_ids", recording)
+    monkeypatch.setattr(species_curation_module, "folder_subtree_ids", recording)
     rows = db.species_curation.get_highlights_candidates(cur["sub"])
     assert calls == [cur["sub"]]
     assert {r["id"] for r in rows} == {p["robin2"], p["puma"]}
@@ -267,9 +269,11 @@ def test_highlights_candidates_skip_rejected_and_stale_predictions(db, cur):
 
 
 def test_highlights_candidates_resolves_workspace_before_subtree(db, cur, monkeypatch):
+    import repositories.species_curation as species_curation_module
+
     calls = []
-    monkeypatch.setattr(db, "get_folder_subtree_ids",
-                        lambda fid: calls.append(fid) or [fid])
+    monkeypatch.setattr(species_curation_module, "folder_subtree_ids",
+                        lambda _c, _ws, fid: calls.append(fid) or [fid])
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
         db.species_curation.get_highlights_candidates(cur["fid"])

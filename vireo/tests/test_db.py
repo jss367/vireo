@@ -294,7 +294,7 @@ def test_folder_subtree_does_not_expand_when_root_is_inactive(tmp_path):
                  file_size=100, file_mtime=1.0)
 
     # Only A itself comes back (no expansion into B).
-    assert db.get_folder_subtree_ids(a) == [a]
+    assert db.folders.subtree_ids(a) == [a]
     # And since A itself isn't in the active workspace, the photo query returns nothing.
     assert db.photos.list_page(folder_id=a) == []
 
@@ -324,7 +324,7 @@ def test_folder_subtree_matches_effective_tree_without_exposing_hidden_nodes(tmp
     photo_ingest.add_photo(db, folder_id=b, filename='hidden.jpg', extension='.jpg',
                  file_size=100, file_mtime=3.0)
     # add_photo does not grant visibility back to the detached intermediate.
-    assert db.get_folder_subtree_ids(a) == [a, c]
+    assert db.folders.subtree_ids(a) == [a, c]
     tree = {row['id']: row for row in db.folders.tree()}
     assert b not in tree
     assert tree[c]['parent_id'] == a
@@ -11453,10 +11453,10 @@ def test_move_folder_path_relinks_parent(db, destination):
     assert tree[date]["parent_id"] == expected_parent
     assert tree[child]["path"] == new_path + "/edits"
     assert tree[child]["parent_id"] == date
-    assert date not in db.get_folder_subtree_ids(month)
-    assert child not in db.get_folder_subtree_ids(month)
+    assert date not in db.folders.subtree_ids(month)
+    assert child not in db.folders.subtree_ids(month)
     if expected_parent is not None:
-        assert {date, child} <= set(db.get_folder_subtree_ids(expected_parent))
+        assert {date, child} <= set(db.folders.subtree_ids(expected_parent))
 
 
 @pytest.mark.parametrize("startup", ["database", "app"])
@@ -11492,7 +11492,7 @@ def test_startup_repairs_stale_folder_parent(tmp_path, startup):
         tree = {r["id"]: r for r in reopened.folders.tree()}
         assert tree[date]["parent_id"] == year
         assert tree[child]["parent_id"] == date
-        assert date not in reopened.get_folder_subtree_ids(month)
+        assert date not in reopened.folders.subtree_ids(month)
         folders_before[date]["parent_id"] = year
         assert {r["id"]: dict(r) for r in reopened.conn.execute("SELECT * FROM folders")} == folders_before
         assert dict(reopened.photos.get(pid)) == photo_before

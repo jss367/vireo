@@ -10,8 +10,9 @@ from; the backfill then stores the hash it computed. Embeddings come from
 ``db.masks_features.get_embedding`` and the folder paths from
 ``FolderRepository.all_rows``.
 
-Photo rows and predictions are catalog-wide; the prediction ranking resolves
-the active workspace's effective detector floor through its config callback.
+Photo rows and predictions are catalog-wide; the prediction ranking reads
+the active workspace's effective detector floor
+(``repositories.effective_config``) through the workspace resolver.
 ``set_phash`` does not commit: the backfill commits once per
 photo through ``Database.commit`` so the writer lock is released between
 photos.
@@ -24,17 +25,23 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
+from repositories.effective_config import active_effective_config
 from settings_source import config_value
 
 
 class CullingRepository:
     def __init__(
-        self, conn: sqlite3.Connection,
-        # Config values span arbitrary settings and workspace overrides.
-        effective_config: Callable[[], dict[str, Any]],
+        self, conn: sqlite3.Connection, resolve_workspace_id: Callable[[], int],
     ) -> None:
         self.conn = conn
-        self.effective_config = effective_config
+        # ``Database._ws_id``, uncalled: only the effective-config read
+        # resolves it, and with no workspace active it reads the global
+        # settings alone.
+        self._resolve_workspace_id = resolve_workspace_id
+
+    def effective_config(self) -> dict[str, Any]:
+        """The global settings with the active workspace's overrides applied."""
+        return active_effective_config(self.conn, self._resolve_workspace_id)
 
     def top_prediction(
         self, photo_id: int, min_detector_confidence: float | None = None,

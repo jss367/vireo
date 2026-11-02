@@ -20,11 +20,11 @@ import config as cfg
 import pytest
 from db import (
     DEFAULT_TABS,
-    SUBJECT_TYPES_DEFAULT,
     Database,
     normalize_browse_stack_config,
 )
 from new_images import get_new_images_for_workspace
+from repositories.effective_config import SUBJECT_TYPES_DEFAULT
 from repositories.workspaces import WorkspaceRepository
 from services import workspace_config, workspace_folders, workspace_lifecycle
 
