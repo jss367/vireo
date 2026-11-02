@@ -50,7 +50,7 @@ def dashboard_scope_clause(
     if folder_id is not None:
         if not _scoped_stats(db).folder_linked(folder_id):
             raise ValueError("folder not found in active workspace")
-        subtree = db.get_folder_subtree_ids(folder_id)
+        subtree = db.folders.subtree_ids(folder_id)
         placeholders = ",".join("?" for _ in subtree)
         conditions.append(f"{table_alias}.folder_id IN ({placeholders})")
         params.extend(subtree)
@@ -137,7 +137,7 @@ def get_folder_coverage_stats(
     if folder_id is not None:
         if not repo.folder_linked(folder_id):
             raise ValueError("folder not found in active workspace")
-        subtree = db.get_folder_subtree_ids(folder_id)
+        subtree = db.folders.subtree_ids(folder_id)
     return repo.get_folder_coverage(
         min_conf, scope_sql, scope_params, photo_scope_sql,
         photo_scope_params, subtree, repo.coverage_select_fragment(),

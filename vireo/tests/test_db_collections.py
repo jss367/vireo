@@ -707,23 +707,27 @@ def test_rules_engine_reads_workspace_lazily(db):
 
 
 def test_rules_engine_reads_effective_detector_floor_once(db, monkeypatch):
+    import repositories.collections as collections_module
+
     calls = []
-    real = db.get_effective_config
+    real = collections_module.active_effective_config
 
-    def recording(config):
-        calls.append(config)
-        return real(config)
+    def recording(conn, resolve_workspace_id):
+        calls.append(conn)
+        return real(conn, resolve_workspace_id)
 
-    monkeypatch.setattr(db, "get_effective_config", recording)
+    monkeypatch.setattr(collections_module, "active_effective_config", recording)
     db._build_query_from_rules([
         {"field": "prediction_confidence", "op": ">=", "value": 0.5},
         {"field": "classifier_model", "op": "equals", "value": "m"},
     ])
-    assert len(calls) == 1
+    assert calls == [db.conn]
 
 
 def test_has_subject_honors_patched_subject_types(db, monkeypatch):
-    monkeypatch.setattr(db, "get_subject_types", lambda: set())
+    from repositories.collections import CollectionRepository
+
+    monkeypatch.setattr(CollectionRepository, "get_subject_types", lambda _self: set())
     folder_join, join, where, params = db._build_query_from_rules(
         [{"field": "has_subject", "op": "is", "value": True}]
     )
@@ -1168,9 +1172,11 @@ def test_collection_repository_wiring(db, monkeypatch):
     db.set_active_workspace(1)
     assert repo.workspace_id == 1
     assert repo.conn is db.conn
-    assert repo.effective_config == db.effective_config
-    assert repo.get_subject_types == db.get_subject_types
-    assert repo.get_folder_subtree_ids == db.get_folder_subtree_ids
+    # Settings and folder subtrees are read on the repository's own
+    # connection, never through the Database.
+    assert repo.effective_config() == db.effective_config()
+    assert repo.get_subject_types() == db.get_subject_types()
+    assert repo.get_folder_subtree_ids(1) == db.folders.subtree_ids(1)
     assert repo._chunks is db_module._chunks
     assert repo._escape_like is db_module._escape_like
     assert repo.PHOTO_COLS is Database.PHOTO_COLS

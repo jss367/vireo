@@ -356,16 +356,18 @@ def test_folder_coverage_stats_scopes(db, lib):
         dashboard_stats.get_folder_coverage_stats(db, folder_id=lib["f_other"])
 
 
-def test_folder_scope_composes_subtree_through_the_facade(db, lib, monkeypatch):
+def test_folder_scope_composes_subtree_through_the_folder_repository(db, lib, monkeypatch):
+    from repositories.folders import FolderRepository
+
     calls = []
     monkeypatch.setattr(
-        db, "get_folder_subtree_ids", lambda fid: calls.append(fid) or [fid],
+        FolderRepository, "subtree_ids", lambda _self, fid: calls.append(fid) or [fid],
     )
     with pytest.raises(ValueError):
         dashboard_stats.get_folder_coverage_stats(db, folder_id=lib["f_other"])
     assert calls == []
     rows = dashboard_stats.get_folder_coverage_stats(db, folder_id=lib["f_root"])
-    # Façade-patched subtree: only the root itself is enumerated, and both
+    # Patched subtree: only the root itself is enumerated, and both
     # the full scope clause and the folder filter asked for it.
     assert calls == [lib["f_root"], lib["f_root"]]
     assert [r["path"] for r in rows] == ["/lib"]

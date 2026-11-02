@@ -6,7 +6,7 @@ few private helpers other domains call), so they hold whether the SQL lives
 in ``db.py`` or in ``repositories/locations.py``. They pin commit
 boundaries, error types and messages, return shapes, the order in which the
 active workspace is resolved, chunking, and the façade calls
-(``tag_photo``, ``queue_change``, ``get_folder_subtree_ids``,
+(``tag_photo``, ``queue_change``,
 ``_build_query_from_rules``, ``_merge_keyword_into``) that must stay
 patchable on ``Database``.
 """
@@ -175,9 +175,11 @@ def test_geolocated_photos_shape_fallback_and_order(db, fid):
 def test_geolocated_photos_resolves_workspace_before_folder_subtree(
     db, fid, monkeypatch,
 ):
+    import repositories.locations as locations_module
+
     calls = []
     monkeypatch.setattr(
-        db, "get_folder_subtree_ids", lambda f: calls.append(f) or [f],
+        locations_module, "folder_subtree_ids", lambda _c, _ws, f: calls.append(f) or [f],
     )
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
@@ -192,12 +194,14 @@ def test_geolocated_photos_route_folder_and_rules_through_facade(
     in_child = _photo(db, child, "child.jpg", 1.0, 2.0)
     _photo(db, fid, "top.jpg", 1.0, 2.0)
 
-    subtree_calls = []
-    real_subtree = db.get_folder_subtree_ids
+    import repositories.locations as locations_module
 
-    def subtree(folder_id):
+    subtree_calls = []
+    real_subtree = locations_module.folder_subtree_ids
+
+    def subtree(conn, workspace_id, folder_id):
         subtree_calls.append(folder_id)
-        return real_subtree(folder_id)
+        return real_subtree(conn, workspace_id, folder_id)
 
     rules_calls = []
     real_rules = db._build_query_from_rules
@@ -206,7 +210,7 @@ def test_geolocated_photos_route_folder_and_rules_through_facade(
         rules_calls.append(rule_tree)
         return real_rules(rule_tree)
 
-    monkeypatch.setattr(db, "get_folder_subtree_ids", subtree)
+    monkeypatch.setattr(locations_module, "folder_subtree_ids", subtree)
     monkeypatch.setattr(db, "_build_query_from_rules", rules)
     rule_tree = [{"field": "rating", "op": ">=", "value": 0}]
     rows = db.locations.get_geolocated_photos(folder_id=child, rules=rule_tree)
@@ -230,8 +234,12 @@ def test_plottable_photo_ids_folder_subtree_and_keyword_coords(db, fid):
 
 
 def test_plottable_photo_ids_resolves_workspace_before_subtree(db, fid, monkeypatch):
+    import repositories.locations as locations_module
+
     calls = []
-    monkeypatch.setattr(db, "get_folder_subtree_ids", lambda f: calls.append(f) or [f])
+    monkeypatch.setattr(
+        locations_module, "folder_subtree_ids", lambda _c, _ws, f: calls.append(f) or [f],
+    )
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
         db.locations.get_plottable_photo_ids(folder_id=fid)
@@ -1173,7 +1181,7 @@ def test_location_backfill_queues_through_the_facade():
     [
         (
             "_location_repository",
-            {"get_folder_subtree_ids", "_build_query_from_rules", "_merge_keyword_into"},
+            {"_build_query_from_rules", "_merge_keyword_into"},
         ),
         (
             "repair_misclassified_location_ancestors",

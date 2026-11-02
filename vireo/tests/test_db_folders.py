@@ -218,7 +218,7 @@ def test_add_folder_new_row_commits_once(db, monkeypatch):
     assert len(commits) == 1
 
 
-# -- folders.get / folders.tree / get_folder_subtree_ids --------------------
+# -- folders.get / folders.tree / folders.subtree_ids --------------------
 
 
 def test_get_folder_returns_row_or_none(db):
@@ -279,7 +279,7 @@ def test_get_folder_tree_filters_status_and_rewrites_parents(db):
         db.folders.tree()
 
 
-def test_get_folder_subtree_ids_walks_hidden_nodes_but_returns_only_visible_descendants(db):
+def test_folder_subtree_ids_walks_hidden_nodes_but_returns_only_visible_descendants(db):
     ws = db._ws_id()
     root = workspace_folders.add_folder(db, "/s")
     a = workspace_folders.add_folder(db, "/s/a", parent_id=root, workspace_root=False)
@@ -287,13 +287,13 @@ def test_get_folder_subtree_ids_walks_hidden_nodes_but_returns_only_visible_desc
     gap = _raw_folder(db, "/s/gap", root)
     below_gap = _raw_folder(db, "/s/gap/b", gap)
     _link(db, ws, below_gap, 0)
-    assert sorted(db.get_folder_subtree_ids(root)) == sorted([root, a, a1, below_gap])
-    assert db.get_folder_subtree_ids(root)[0] == root
+    assert sorted(db.folders.subtree_ids(root)) == sorted([root, a, a1, below_gap])
+    assert db.folders.subtree_ids(root)[0] == root
     # A stale unlinked seed still cannot expand into visible descendants.
-    assert db.get_folder_subtree_ids(gap) == [gap]
+    assert db.folders.subtree_ids(gap) == [gap]
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_folder_subtree_ids(root)
+        db.folders.subtree_ids(root)
 
 
 # -- path-based subtree helpers -----------------------------------------------
@@ -1473,15 +1473,13 @@ def test_get_folder_source_path_prefers_the_root_mapping(db):
 
 # -- structure ----------------------------------------------------------------
 
-# The folder methods that stay on ``Database``: the startup parent repair
-# ``__init__`` runs, and ``get_folder_subtree_ids``, which ``PhotoRepository``
-# binds from the façade by name (``FACADE_METHODS``) and the species-curation
-# and location factories hand over bound. ``add_folder`` lives in
+# The folder method that stays on ``Database``: the startup parent repair
+# ``__init__`` runs. Other repositories read folder subtrees through
+# ``repositories.folder_subtrees.folder_subtree_ids``. ``add_folder`` lives in
 # ``services/workspace_folders.py`` and ``delete_folder`` in
 # ``services/catalog_deletion.py``.
 _DELEGATING_FOLDER_METHODS = (
     "repair_stale_folder_parents",
-    "get_folder_subtree_ids",
 )
 
 # The forwarding wrappers this domain used to have on ``Database``; callers
@@ -1509,6 +1507,7 @@ _REMOVED_FOLDER_WRAPPERS = (
     "get_photo_ids_under_path",
     "get_folders_with_quality_data",
     "update_folder_counts",
+    "get_folder_subtree_ids",
 )
 
 
