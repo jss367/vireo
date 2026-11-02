@@ -177,10 +177,10 @@ class _MaskExtractionRun:
         # A source file that never opened is not the same as "SAM found
         # no subject here", even though both leave the photo unmasked.
         # Only the second is an answer about the photo; the first means
-        # we never looked. Folding them together let a dropped share
+        # we never looked. Folding them together would let a dropped share
         # finish this job green while every unmasked photo went on to be
-        # hard-rejected in Process Review as `no_subject_mask`
-        # (Codex #1392 P1). Mirrors extract_masks_stage in pipeline_job.
+        # hard-rejected in Process Review as `no_subject_mask`. Mirrors
+        # extract_masks_stage in pipeline_job.
         self.unreadable = 0
         job["_start_time"] = time.time()
 
@@ -354,7 +354,7 @@ class _MaskExtractionRun:
         # when the primary detection actually changed, so the
         # subsequent eye stage recomputes for the newly
         # published subject instead of retaining the previous
-        # subject's eye focus (Codex r4056563009).
+        # subject's eye focus.
         self.deps.sync_primary(
             thread_db, photo_id, min_conf=self.min_detector_conf,
         )
@@ -385,8 +385,7 @@ class _MaskExtractionRun:
         mask and skip DINO, leaving dino_subject_embedding
         null even though the job reported the photo
         processed. Mirror the Process pipeline's
-        active_mask_variant/dino_embedding_variant guard
-        (Codex r4056402007).
+        active_mask_variant/dino_embedding_variant guard.
         """
         thread_db = self.thread_db
         photo = item.photo
@@ -551,8 +550,7 @@ class _MaskExtractionRun:
         # unmasked. Styling the card honestly isn't enough: the Jobs
         # page, job history, API clients and the completion event all
         # read the job status, and "completed" there tells the user their
-        # library was processed when some of it was never opened
-        # (Codex #1392).
+        # library was processed when some of it was never opened.
         unreadable, failed, total = self.unreadable, self.failed, self.total
         job_errors = []
         if unreadable:

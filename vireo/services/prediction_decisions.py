@@ -204,20 +204,11 @@ def under_prediction_decision_lock[R](
 def out_of_workspace_prediction_ids(db: Database, pred_ids: Sequence[int]) -> set[int]:
     """Which of ``pred_ids`` sit on a photo no longer in this workspace.
 
-    The fourth precondition alongside decided / superseded / ambiguous, and
-    the same shape: ``_parse_prediction_ids`` verified workspace ownership
-    before the lock, but a folder detach is itself a write. In WAL mode
-    another connection can acquire the writer lock, delete the row from
-    ``workspace_folders``, and commit — all in the window between
-    ``_parse_prediction_ids`` finishing and ``BEGIN IMMEDIATE`` on this
-    request succeeding. Skipping the row here catches that race so a batch
-    cannot tag a now-foreign photo or write workspace-scoped
-    ``prediction_review`` state for it. Reported as
-    ``skipped_out_of_workspace`` so a caller can tell "detached mid-flight"
-    from any of the other skip reasons — the user's next step is a panel
-    refresh, and folding it into a different count would misname the
-    problem the way ``CORE_PHILOSOPHY.md`` rules out.
-
+    A folder detach can commit between ``_parse_prediction_ids``'s ownership
+    check and ``BEGIN IMMEDIATE``; skipping these rows keeps a batch from
+    tagging a now-foreign photo or writing its workspace-scoped
+    ``prediction_review`` state. Callers report them as
+    ``skipped_out_of_workspace`` (the fix is a panel refresh, not Review).
     Call it after ``begin_prediction_decision``: only an in-lock read closes
     the window.
     """
