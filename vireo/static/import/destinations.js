@@ -350,10 +350,10 @@ function remoteTargetsLoadFailed() {
 }
 
 async function loadImportRemoteTargets() {
-  // A failure here used to silently wipe the SSH options and leave a
-  // local-only dropdown with no explanation — and a HUNG endpoint never
-  // settled this promise at all, so the dropdown just never grew its SSH
-  // entries. Bound the wait, say what happened, offer a retry, and keep
+  // A failure here must not silently wipe the SSH options and leave a
+  // local-only dropdown with no explanation — and a HUNG endpoint would
+  // never settle this promise at all, so the dropdown would never grow its
+  // SSH entries. Bound the wait, say what happened, offer a retry, and keep
   // the last known target list rather than discarding a working option
   // over a transient failure.
   let failed = false;

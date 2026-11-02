@@ -88,7 +88,7 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
   selectedSubjectByPhoto: {}, // photo id -> detection id (multi-subject photos only)
   selectionAnchor: null,
   touched: new Set(), // photo ids changed by the user before DB seeding lands
-  sessionId: 0,       // bumped on each openGroupReview; used to drop stale fetches
+  sessionId: 0,       // bumped on each openGroupReview; drops stale fetches
   applying: false
 };
 
@@ -289,7 +289,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     touched: new Set(),
     // Filled in by the /group/state fetch below. Keys: photo_id → {flag,
     // has_species_keyword}. This is the live DB snapshot the modal opened
-    // with, used to (a) render "from DB" markers and (b) compute the
+    // with, which (a) renders "from DB" markers and (b) computes the
     // change-only Apply button label.
     dbState: {},
     keywordStateSpecies: initialSpecies,

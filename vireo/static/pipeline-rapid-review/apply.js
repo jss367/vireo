@@ -184,10 +184,10 @@ async function applyCurrent(openNext) {
         }
       });
     }
-    // /group/apply is flags-only now; persist the species through the same
+    // /group/apply is flags-only; persist the species through the same
     // unified endpoint the grid uses so confirmation actually lands server-side
     // (tags all burst frames, handles species replacement + auto-detach).
-    // The server now OWNS confirmation: it sets species_confirmed on the
+    // The server OWNS confirmation: it sets species_confirmed on the
     // correct encounter and returns the authoritative structure via
     // spResp.encounters. We do not write enc.confirmed_species/species_confirmed
     // locally — after an auto-detach the encounter indices shift, so the cached

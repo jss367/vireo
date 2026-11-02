@@ -37,8 +37,8 @@ export function cardCleanupRenderVerificationCallout(manifest) {
     (pending === 1 ? ' is' : ' are') +
     ' kept only because the matching archive copy has never been ' +
     'checksum-verified.';
-  // Codex P2 (r3761960414): the cost message used to promise "reads N
-  // matching copies" where N = number of unique pending hashes. But
+  // The cost message must not promise "reads N matching copies" where
+  // N = number of unique pending hashes:
   // verify_manifest_archives iterates every unchecked archive row for a
   // hash until one hashes cleanly, so a hash with several corrupt or
   // stale candidates can drive multiple full-file reads even though the
@@ -87,7 +87,7 @@ export function cardCleanupRenderHashFailedCallout(manifest) {
     'check (modified, corrupt, or unreadable). Re-running verification ' +
     'would only reproduce that verdict — open the Audit page to accept ' +
     'the current bytes, restore from backup, or investigate.';
-  // Scope honesty (Codex P2 review): the card scan matches photos across
+  // Scope honesty: the card scan matches photos across
   // ALL workspaces, but the Audit page only lists flagged rows for the
   // CURRENT workspace. If the failed archive copy belongs to a folder in
   // a different workspace, the suggested Audit remedy is unreachable
@@ -152,7 +152,7 @@ export async function cardCleanupStartVerification() {
 /** @param {CardCleanupJob | null} job @param {string} status @param {string | null | undefined} jobError */
 export async function cardCleanupFinishVerification(job, status, jobError) {
   const resultEl = /** @type {HTMLElement} */ (document.getElementById('card-cleanup-verify-result'));
-  // Codex P1 (this commit): a completed or cancelled verification may
+  // A completed or cancelled verification may
   // have promoted files, so the pre-verification Delete state is stale
   // until the refreshed manifest lands. Track both whether we tried to
   // reload and whether it succeeded; the "Preview updated" copy and
@@ -164,14 +164,14 @@ export async function cardCleanupFinishVerification(job, status, jobError) {
   if (attemptedReload) {
     refreshed = await cardCleanupLoadManifest();
   }
-  // Codex P1: any completed/cancelled verification renders the
+  // Any completed/cancelled verification renders the
   // pre-verification Delete state stale. Do NOT let cardCleanupSetBusy
   // restore that state — a successful reload has already re-rendered
   // Delete via cardCleanupRenderManifest, and a failed reload needs it
   // locked. Restoring the busyRestore snapshot in between would flicker
-  // Delete back to "enabled with old counts" for the microsecond
-  // between this call and the manual disable below, and Codex flagged
-  // the whole window as a P1 risk on this PR.
+  // Delete back to "enabled with old counts" for the moment between
+  // this call and the manual disable below, and even that window could
+  // authorize a stale deletion.
   cardCleanupSetBusy(false, {keepDeleteState: attemptedReload || refreshed});
   if (attemptedReload && !refreshed) {
     // Verification finished but the manifest reload failed or returned

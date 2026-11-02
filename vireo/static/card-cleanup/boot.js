@@ -1,6 +1,6 @@
-// Page startup: the module the template loads. Binds the controls that used
-// to carry inline handlers, fills the source from the import page's link,
-// and loads the volume suggestions.
+// Page startup: the module the template loads. Binds the page controls,
+// fills the source from the import page's link, and loads the volume
+// suggestions.
 // ES module.
 
 import { cardCleanupCancelJob, cardCleanupCloseConfirm, cardCleanupConfirmDelete, cardCleanupOpenConfirm } from './delete.js';
