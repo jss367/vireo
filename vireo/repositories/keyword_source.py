@@ -24,9 +24,8 @@ point to reference one of them. ``db`` re-exports every name here.
 # provenance-neutral writer has to say so explicitly. See
 # ``test_keyword_provenance_contract.py``, which pins that inventory.
 KEYWORD_SOURCE_MANUAL = "manual"
-# Written by the prediction-accept path (PR #1479 Phase 4). Nothing in this
-# module writes it yet; it is declared here so the lattice below has its
-# middle element and both PRs share one ordering instead of two.
+# Written by prediction acceptance; stronger than unknown provenance and
+# weaker than an explicit manual association.
 KEYWORD_SOURCE_ACCEPT = "accept"
 KEYWORD_SOURCE_UNKNOWN = None
 
