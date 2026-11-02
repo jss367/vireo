@@ -60,8 +60,8 @@ var _STAGE_ENABLE_BY_SUFFIX = (function() {
   return m;
 })();
 
-// Did the user disable this stage via its enable checkbox? Used to
-// distinguish backend `skipped` due to a user toggle ("Will skip") from
+// Did the user disable this stage via its enable checkbox? Distinguishes
+// backend `skipped` due to a user toggle ("Will skip") from
 // `skipped` due to prior outputs already existing ("Already done").
 /** @param {string} cardSuffix */
 function _isUserDisabledStage(cardSuffix) {

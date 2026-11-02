@@ -1,7 +1,6 @@
 // Page startup: the module the template loads. Importing it loads the rest of
 // the page's modules; this file then registers the page hooks, binds every
-// listener (including the controls that used to carry inline onclick
-// attributes), and starts the filter bar, the config load and the first load.
+// listener, and starts the filter bar, the config load and the first load.
 // ES module.
 
 import { state } from './state.js';
@@ -41,7 +40,7 @@ function onButtonClick(id, action) {
   if (button) button.addEventListener('click', function() { action(); });
 }
 
-// The page controls that used to carry inline onclick attributes.
+// The page's toolbar and panel controls.
 function bindMissPageButtons() {
   onButtonClick('missesSelectionBrowseBtn', openSelectionInBrowse);
   onButtonClick('missesSelectionUnflagBtn', bulkUnflagSelection);

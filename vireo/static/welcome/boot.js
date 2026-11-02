@@ -1,5 +1,5 @@
-// Page startup: the module the template loads. Binds the controls that used
-// to carry inline handlers, runs the ExifTool check, and enables Get Started
+// Page startup: the module the template loads. Binds the page controls, runs
+// the ExifTool check, and enables Get Started
 // once the model status is known (or resumes at the region step).
 // ES module.
 

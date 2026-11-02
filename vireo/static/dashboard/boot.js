@@ -1,5 +1,5 @@
-// Page startup: the module the template loads. Binds the controls that used
-// to carry inline handlers, the delegated listeners on rendered markup (bar
+// Page startup: the module the template loads. Binds the page controls, the
+// delegated listeners on rendered markup (bar
 // drill-downs, inventory model rows, folder coverage rows, attention cards),
 // and loads the Dashboard on DOMContentLoaded.
 // ES module.

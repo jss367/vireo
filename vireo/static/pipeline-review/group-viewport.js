@@ -8,7 +8,7 @@
  * Mouse wheel is a fine-tune multiplier on top.
  */
 
-// Card thumbnails default to 180px wide × 120px tall (3:2). Used to compute
+// Card thumbnails default to 180px wide × 120px tall (3:2). These give
 // the cover-fit ratio when deriving a 1:1 scale.
 var GRM_CARD_W = 180;
 var GRM_CARD_H = 120;

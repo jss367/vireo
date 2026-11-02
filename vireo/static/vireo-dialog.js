@@ -76,7 +76,7 @@
       event.preventDefault();
       const target = elements[next] || overlay;
       target.focus({preventScroll: true});
-      // Codex P2: a dialog's own scrollable list (e.g. the batch
+      // A dialog's own scrollable list (e.g. the batch
       // Add-to-Collection chooser's max-height:200px overflow-y:auto area)
       // would otherwise hide the newly focused button when Tab lands below
       // the fold, since preventScroll suppresses the browser's default

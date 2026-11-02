@@ -320,21 +320,19 @@ function updateStartGate() {
     // safe-to-format verdict on it.
     reason = 'No files selected';
   } else if (importLocationsPending()) reason = 'Reading GPS for locations…';
-  // Form validity, from #1387's importFormProblem(). That PR landed its own
-  // single owner of this button (updateStartAvailability()) on main while
-  // this branch was landing updateStartGate() here; both assigned
-  // btn.disabled, so keeping both would have made the button read whichever
-  // ran last. They answer different questions and both have to be able to
-  // hold it shut — "is the FORM complete" (no destination, no file types,
-  // unrepaired ExifTool, an unusable NAS target) and "does the PREVIEW still
-  // describe what would be copied". So this function owns both, and
-  // updateStartAvailability() is gone.
+  // Form validity, from importFormProblem(). This function is the button's
+  // single owner of btn.disabled (there is no separate
+  // updateStartAvailability()) — two writers would leave it reading
+  // whichever ran last. It answers two different questions, and either can
+  // hold the button shut: "is the FORM complete" (no destination, no file
+  // types, unrepaired ExifTool, an unusable NAS target) and "does the
+  // PREVIEW still describe what would be copied".
   //
   // The two report through different channels on purpose: a lifecycle
   // `reason` replaces the LABEL, because it describes something the page is
   // doing and the user only has to wait; a form `problem` names a field the
   // user must go fix, and belongs in the tooltip next to the inline error
-  // #1387 already renders beside that field. A form problem must not
+  // already rendered beside that field. A form problem must not
   // overwrite "Importing…".
   const problem = importFormProblem();
   btn.disabled = reason !== null || newImagesStartBlocked || !!problem;

@@ -30,8 +30,8 @@ async function loadCollections() {
       sel.innerHTML += '<option value="' + c.id + '"' + disabled + title + '>' + label + '</option>';
     });
   } catch(e) {
-    // Don't fail silently: an empty picker used to look like "no collections"
-    // even when the endpoint was 500ing. Surface it so the cause is visible.
+    // Don't fail silently: an empty picker looks like "no collections"
+    // even when the endpoint is 500ing. Surface it so the cause is visible.
     console.error('Failed to load collections:', e);
     if (typeof showToast === 'function') {
       showToast('Could not load collections — see console for details', 'error');

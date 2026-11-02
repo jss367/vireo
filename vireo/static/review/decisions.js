@@ -99,7 +99,7 @@ async function acceptAllPending() {
   // Capture the epoch on entry — a filter edit / collection switch mid-loop
   // bumps ``_loadPredictionsEpoch``; without this the loop would keep
   // accepting rows from the pre-reload ``predictions`` array while the
-  // visible chips already show a narrower filter. See r3618935660.
+  // visible chips already show a narrower filter.
   var epoch = _loadPredictionsEpoch;
   var pending = visiblePendingCards();
   var scope = reviewCardScopeKey();

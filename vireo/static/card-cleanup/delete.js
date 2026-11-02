@@ -138,17 +138,16 @@ async function cardCleanupDeleteRefused(resp, data) {
     cardCleanupSetError(data.error ||
       'The preview changed since you confirmed it — review the ' +
       'updated totals before deleting.');
-    // Codex P1 review: await the reload before releasing the busy
-    // state. The previous flow called cardCleanupSetBusy(false)
-    // first and then kicked cardCleanupLoadManifest() off as
-    // fire-and-forget, so Scan/Verify/Delete were re-enabled in
-    // the gap before the response landed. A user who reopened
-    // the confirm dialog during that gap saw the pre-mismatch
-    // totals; once the reload swapped state.manifest
-    // for the fresh one, confirming would send the new revision
-    // and the server would accept deletion of the newly promoted
-    // set that never appeared in the dialog. Awaiting the reload
-    // with the page still locked closes the window. On success,
+    // Await the reload before releasing the busy state. Releasing
+    // first and reloading fire-and-forget would re-enable
+    // Scan/Verify/Delete in the gap before the response lands: a
+    // user who reopened the confirm dialog then would see the
+    // pre-mismatch totals, and once the reload swapped
+    // state.manifest for the fresh one, confirming would send the
+    // new revision and the server would accept deletion of the
+    // newly promoted set that never appeared in the dialog.
+    // Awaiting the reload with the page still locked closes the
+    // window. On success,
     // cardCleanupRenderManifest has already set Delete's disabled
     // state and hint from the fresh totals, so keepDeleteState
     // preserves them across the unlock. On failure the render
@@ -182,7 +181,7 @@ export async function cardCleanupConfirmDelete() {
   }
   const confirmBtn = /** @type {HTMLButtonElement} */ (document.getElementById('card-cleanup-confirm-btn'));
   confirmBtn.disabled = true;
-  // Lock the page before the POST goes out (Codex P2 review). The confirm
+  // Lock the page before the POST goes out. The confirm
   // dialog can be dismissed (backdrop click, Escape) while this request is
   // pending; if Scan and Verify stayed live in that gap, a second job could
   // start and its watch would overwrite this delete's jobId — including the
@@ -192,13 +191,13 @@ export async function cardCleanupConfirmDelete() {
   cardCleanupSetBusy(true, {
     deleteHint: 'Deletion is starting…',
   });
-  // Codex P1: send the manifest revision we confirmed against. If a
+  // Send the manifest revision we confirmed against. If a
   // verify has landed since (and rewritten the manifest with a fresh
   // revision), the server rejects this POST rather than deleting the
   // newly-promoted files the user never saw.
   //
-  // Codex P2: pre-revision manifests (saved before this branch landed)
-  // have no `revision` key. Sending undefined would make JSON.stringify
+  // A manifest saved before revisions existed has no `revision` key.
+  // Sending undefined would make JSON.stringify
   // drop `manifest_revision` from the body, and the endpoint rejects a
   // missing key with 400 rather than treating it as the initial
   // revision — leaving every carried-over preview undeletable. Match
@@ -228,7 +227,7 @@ export async function cardCleanupConfirmDelete() {
     cardCleanupCloseConfirm();
     // The POST failed at the network layer, so the server may have
     // accepted the delete and queued the destructive job before the
-    // connection dropped — we simply don't know (Codex P2 review).
+    // connection dropped — we simply don't know.
     // Unlocking here would let a second job start and hijack the page's
     // jobId while the deletion continues unseen, so keep Scan / Verify /
     // Delete disabled and send the user to the Jobs page for the actual

@@ -3,9 +3,8 @@
 
 // Per-photo outcomes for the Extract card, in the order the user cares
 // about. `masked`/`skipped`/`unreadable`/`failed`/`total` are what both the
-// pipeline stage and /api/jobs/extract-masks actually emit — this card used
-// to read `masks_created`/`scored_count`, names no backend has ever sent, so
-// its summary rendered empty on every run.
+// pipeline stage and /api/jobs/extract-masks actually emit; read nothing
+// else, or the summary renders empty.
 /** @param {PipelineStageResult | null | undefined} ext */
 function _extractMasksSummary(ext) {
   if (!ext) return '';
@@ -39,16 +38,16 @@ function _extractMasksClean(ext) {
 }
 
 // What the standalone Extract card should show for a finished job. The job
-// now reports `failed` when photos went unmasked, and the counts plus the
+// reports `failed` when photos went unmasked, and the counts plus the
 // backend's reconnect instruction matter most in exactly that case — so the
-// rendering must not live inside a `completed`-only branch (Codex #1392 P2).
+// rendering must not live inside a `completed`-only branch.
 //
 // `topErrors` is the completion event's own `errors` array. It's the only
 // source of a message when the worker raised (JobRunner leaves `result` null
 // and stashes the exception at the top level) or when the user cancelled
 // before the worker returned a structured result — otherwise those two paths
 // fall through to the generic "Some photos have no mask", hiding the real
-// cause (Codex #1392 P2).
+// cause.
 /** @param {string} jobStatus @param {PipelineStageResult | null | undefined} result @param {string[] | undefined} topErrors */
 function _extractStepOutcome(jobStatus, result, topErrors) {
   var clean = jobStatus === 'completed' && _extractMasksClean(result);

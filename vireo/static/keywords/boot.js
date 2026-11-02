@@ -25,7 +25,7 @@ import { openExternalLink, openLinkPlaceFromUrl, VireoTextSearch } from './share
 bindKeywordRecordToggles();
 bindLocationReview();
 bindKeywordSearch();
-// The search options used to carry inline onclick handlers.
+// The search option buttons.
 /** @type {HTMLButtonElement} */ (document.getElementById('kwSearchMatchCaseBtn')).addEventListener('click', function() {
   VireoTextSearch.toggle('kwSearch', 'match_case', render);
 });

@@ -2,8 +2,8 @@
  *
  * Starting an export only queues a background job, so the modal's "Export
  * started" toast says nothing about whether any file was written. A job that
- * fails at once (an offline original folder, say) used to be visible only in
- * the jobs panel, and the click looked like it had done nothing. watch()
+ * fails at once (an offline original folder, say) would otherwise be visible
+ * only in the jobs panel, and the click would look like it had done nothing. watch()
  * follows the job's stream and toasts what actually happened; outcome() is
  * the pure mapping from the job's terminal event to that toast.
  *

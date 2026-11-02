@@ -90,10 +90,10 @@ function afterMoveEligibleTargets() {
 }
 
 // Why no target can host the chained move, in terms of the field the user
-// has to fix (issue #1377). The generic "destination is not inside any
-// archive root" blamed the destination even when the real problem was a
-// typo'd or missing archive root in Settings, which the user could never
-// fix by retyping the destination. Three cases, each naming the actual
+// has to fix. A generic "destination is not inside any archive root" would
+// blame the destination even when the real problem is a typo'd or missing
+// archive root in Settings, which the user can never fix by retyping the
+// destination. Three cases, each naming the actual
 // configured root so a mismatch is visible at a glance:
 //   1. no target has an archive root configured at all;
 //   2. the destination is inside a configured root that does not exist on
@@ -482,8 +482,8 @@ const _afterMoveOnReturn = () => {
 // initial value (__none__), which selectedAfterImport() would surface as
 // an explicit null. Posting `after_import: null` tells the import
 // endpoint to run import-only and skip the workspace's
-// pipeline.default_process_id — the exact race the reviewer flagged.
-// Guarding the body key with this flag makes an unresolved default
+// pipeline.default_process_id. Guarding the body key with this flag makes
+// an unresolved default
 // fall back to the endpoint's "key omitted → apply workspace default"
 // branch, which is what the user actually expects.
 let _afterImportConfigLoaded = false;
@@ -513,7 +513,7 @@ let _afterImportUserTouched = false;
 // The unscoped global pipeline.default_process_id from /api/config, captured
 // during initImportPage. A brand-new workspace has no config_overrides yet,
 // so this is the strategy the server will apply when the new-workspace
-// import path omits `after_import`. Used to populate the honest "New
+// import path omits `after_import`. It fills the honest "New
 // workspace default: X" placeholder so the visible dropdown selection
 // isn't misled by whatever was prefilled from the currently-active
 // workspace's (possibly-overridden) default.

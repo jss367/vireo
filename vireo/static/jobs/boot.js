@@ -15,7 +15,7 @@ bindSourceCleanupConfirm();
 bindStepRetryButtons();
 bindDetailPaneActions();
 jobsElement('retryJobsPolling', HTMLButtonElement).addEventListener('click', retryJobsPolling);
-// The type and status filters used to carry onchange="applyFilters()".
+// The type and status filters apply on change.
 jobsElement('filterType', HTMLSelectElement).addEventListener('change', applyFilters);
 jobsElement('filterStatus', HTMLSelectElement).addEventListener('change', applyFilters);
 jobsElement('filterOrigin', HTMLSelectElement).addEventListener('change', applyOriginFilter);
