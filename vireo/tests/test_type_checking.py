@@ -68,6 +68,39 @@ def _collect_import_aliases(tree: ast.Module) -> dict[str, str]:
     return aliases
 
 
+def _iter_module_scope_statements(tree: ast.Module) -> list[ast.stmt]:
+    """Return every statement that binds at module scope.
+
+    Descends through module-scope control-flow (``if TYPE_CHECKING:``,
+    ``try``/``except``/``finally``, ``with``, ``match``) because an
+    assignment nested inside one still binds at module scope — the type
+    checker sees ``if TYPE_CHECKING: FacadeMethod = Callable[..., Any]``
+    exactly like the direct-body form, so the ratchet must too. Class
+    and function bodies are deliberately skipped: those are scoped
+    bindings, not aliases a module-scope class annotation would reach.
+    """
+    out: list[ast.stmt] = []
+    stack: list[ast.stmt] = list(reversed(tree.body))
+    while stack:
+        stmt = stack.pop()
+        out.append(stmt)
+        if isinstance(stmt, ast.If):
+            stack.extend(reversed(stmt.body))
+            stack.extend(reversed(stmt.orelse))
+        elif isinstance(stmt, ast.Try):
+            stack.extend(reversed(stmt.body))
+            for handler in stmt.handlers:
+                stack.extend(reversed(handler.body))
+            stack.extend(reversed(stmt.orelse))
+            stack.extend(reversed(stmt.finalbody))
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            stack.extend(reversed(stmt.body))
+        elif isinstance(stmt, ast.Match):
+            for case in stmt.cases:
+                stack.extend(reversed(case.body))
+    return out
+
+
 def _collect_module_aliases(tree: ast.Module) -> dict[str, ast.expr]:
     """Return a map ``{local_name: value_ast_expr}`` for module-level aliases.
 
@@ -80,7 +113,8 @@ def _collect_module_aliases(tree: ast.Module) -> dict[str, ast.expr]:
     right-hand side AST and recursing, so an aliased forbidden form
     reads as the forbidden form.
 
-    Collected forms, all at module top level:
+    Collected forms, at module scope (direct top-level or nested under
+    module-scope control-flow such as ``if TYPE_CHECKING:``):
       * ``FacadeMethod = Callable[..., Any]`` — ``ast.Assign``, single Name target.
       * ``FacadeMethod: TypeAlias = Callable[..., Any]`` — ``ast.AnnAssign`` with a value.
       * ``type FacadeMethod = Callable[..., Any]`` — ``ast.TypeAlias`` (PEP 695).
@@ -90,7 +124,7 @@ def _collect_module_aliases(tree: ast.Module) -> dict[str, ast.expr]:
     scope would reach.
     """
     module_aliases: dict[str, ast.expr] = {}
-    for stmt in tree.body:
+    for stmt in _iter_module_scope_statements(tree):
         if isinstance(stmt, ast.Assign):
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
@@ -372,8 +406,12 @@ def test_callable_facade_matcher_resolves_module_level_aliases():
     = Callable[..., Any]``). ``AliasedThroughAlias`` chains an alias
     through another alias so the resolver recurses, ``AliasQuoted``
     puts the aliased name inside a quoted annotation to prove the
-    quote-handling branch recurses too, and ``AliasImportAlias``
-    composes an import alias with a module-level alias.
+    quote-handling branch recurses too, ``AliasImportAlias`` composes
+    an import alias with a module-level alias, and ``AliasedTypeChecking``
+    / ``AliasedTryExcept`` / ``AliasedWith`` hide the alias under
+    module-scope control-flow (``if TYPE_CHECKING:``, ``try``/``except``,
+    ``with``) so the matcher must descend into those bodies rather than
+    stopping at the ``ast.If`` / ``ast.Try`` / ``ast.With`` wrapper.
 
     Negative controls: ``PlainTuple`` is a module-level alias that
     resolves to an unrelated type (``tuple[int, str]``) so the matcher
@@ -386,8 +424,9 @@ def test_callable_facade_matcher_resolves_module_level_aliases():
         """
         from __future__ import annotations
 
+        import contextlib
         from collections.abc import Callable
-        from typing import Any, TypeAlias
+        from typing import TYPE_CHECKING, Any, TypeAlias
         from typing import Callable as TC
 
 
@@ -401,6 +440,17 @@ def test_callable_facade_matcher_resolves_module_level_aliases():
         A = A
         B = C
         C = B
+
+        if TYPE_CHECKING:
+            TypeCheckingAlias = Callable[..., Any]
+
+        try:
+            TryBodyAlias = Callable[..., Any]
+        except ImportError:
+            TryExceptAlias = Callable[..., Any]
+
+        with contextlib.ExitStack():
+            WithBodyAlias = Callable[..., Any]
 
 
         class AliasedPlain:
@@ -427,6 +477,22 @@ def test_callable_facade_matcher_resolves_module_level_aliases():
             callback: "FacadeMethod"
 
 
+        class AliasedTypeChecking:
+            callback: TypeCheckingAlias
+
+
+        class AliasedTryBody:
+            callback: TryBodyAlias
+
+
+        class AliasedTryExcept:
+            callback: TryExceptAlias
+
+
+        class AliasedWith:
+            callback: WithBodyAlias
+
+
         class UnrelatedAlias:
             callback: Unrelated
 
@@ -447,4 +513,8 @@ def test_callable_facade_matcher_resolves_module_level_aliases():
         "fixture.AliasedPep695.callback",
         "fixture.AliasedPlain.callback",
         "fixture.AliasedThroughAlias.callback",
+        "fixture.AliasedTryBody.callback",
+        "fixture.AliasedTryExcept.callback",
+        "fixture.AliasedTypeChecking.callback",
+        "fixture.AliasedWith.callback",
     ]
