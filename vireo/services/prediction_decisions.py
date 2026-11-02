@@ -207,8 +207,8 @@ def out_of_workspace_prediction_ids(db: Database, pred_ids: Sequence[int]) -> se
     A folder detach can commit between ``_parse_prediction_ids``'s ownership
     check and ``BEGIN IMMEDIATE``; skipping these rows keeps a batch from
     tagging a now-foreign photo or writing its workspace-scoped
-    ``prediction_review`` state. Callers report them as
-    ``skipped_out_of_workspace`` (the fix is a panel refresh, not Review).
+    ``prediction_review`` state. Batches report ``skipped_out_of_workspace``;
+    single accept/reject return 404. Refresh the panel to recover.
     Call it after ``begin_prediction_decision``: only an in-lock read closes
     the window.
     """
