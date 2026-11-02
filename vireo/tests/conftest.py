@@ -263,8 +263,24 @@ def db(tmp_path):
 
 
 @pytest.fixture
-def app_and_db(tmp_path, monkeypatch):
-    """Create a test app with sample data."""
+def fake_trash():
+    """A ``FakeTrash`` (``vireo/tests/fake_trash.py``).
+
+    A test that asks for it next to ``app_and_db`` gets an app built around
+    it, so the delete routes and ``PhotoDeletion`` call this object.
+    """
+    from fake_trash import FakeTrash
+
+    return FakeTrash()
+
+
+@pytest.fixture
+def app_and_db(tmp_path, monkeypatch, request):
+    """Create a test app with sample data.
+
+    The app holds the test's ``fake_trash`` when the test asks for one, and
+    the real ``TrashService`` otherwise.
+    """
     from db import Database
     monkeypatch.setenv("HOME", str(tmp_path))
     import classifier
@@ -325,7 +341,8 @@ def app_and_db(tmp_path, monkeypatch):
     for pid in [p1, p2, p3]:
         Image.new('RGB', (100, 100)).save(os.path.join(thumb_dir, f"{pid}.jpg"))
 
-    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test-token-123")
+    trash = request.getfixturevalue("fake_trash") if "fake_trash" in request.fixturenames else None
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test-token-123", trash=trash)
     # Source/fallback tests monkeypatch the renderer in this interpreter.
     app.config["EDIT_PREVIEW_IN_PROCESS"] = True
     yield app, db

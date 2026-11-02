@@ -1345,67 +1345,6 @@ def test_trash_paths_routes_custom_path_when_mount_discovery_fails(
     assert failures == []
 
 
-def test_delete_loser_files_preserves_endpoint_network_classification(
-    monkeypatch, tmp_path,
-):
-    """Regression: the duplicate-cleanup endpoint stats the mount table
-    once and classifies a custom-mount share (e.g. ``/Users/me/mnt/photos``)
-    as network-backed. If that classification is not threaded into
-    ``trash_paths``, the helper's own re-query can time out and its
-    fallback silently reclassifies non-``/Volumes`` paths as local —
-    which then invokes the unbounded in-process I/O this whole routing
-    exists to prevent. The endpoint must pass its own ``network_roots``
-    to preserve the already-good classification.
-    """
-
-    mount_root = tmp_path / "photos"
-    mount_root.mkdir()
-    photo_path = str(mount_root / "bird.NEF")
-
-    captured_calls = {}
-
-    def fake_trash_paths(
-        filepaths, progress_callback=None, already_missing_out=None,
-        network_roots=None,
-    ):
-        captured_calls["filepaths"] = list(filepaths)
-        captured_calls["network_roots"] = network_roots
-        # Simulate a fully successful Finder-routed batch so the endpoint
-        # accepts it as trashed and we can assert on how it was invoked.
-        successful = set(filepaths)
-        return 0, successful, []
-
-    monkeypatch.setattr(trash, "trash_paths", fake_trash_paths)
-    # The endpoint's own classifier successfully sees the custom mount.
-    monkeypatch.setattr(
-        volumes, "network_volume_roots", lambda: {str(mount_root)},
-    )
-    monkeypatch.setattr(
-        volumes, "path_on_network_volume",
-        lambda _fp, roots: bool(roots) and str(mount_root) in roots,
-    )
-
-    # Directly call the helper the endpoint delegates through — the
-    # signature we care about is what reaches trash_paths, so a targeted
-    # unit assertion is enough to lock the wiring in place.
-    #
-    # We reproduce only the classification+delegation the endpoint does,
-    # in isolation from the DB / route wiring, so the regression this
-    # guards against (dropped network_roots at the call site) is what
-    # actually fails when someone re-introduces it.
-    network_roots = volumes.network_volume_roots()
-    trash_candidates = [(1, photo_path)]
-    filepaths = [fp for _pid, fp in trash_candidates]
-    fake_trash_paths(
-        filepaths,
-        already_missing_out=set(),
-        network_roots=network_roots,
-    )
-
-    assert captured_calls["network_roots"] == {str(mount_root)}
-    assert captured_calls["filepaths"] == [photo_path]
-
-
 def test_trash_paths_honors_caller_supplied_network_roots(
     monkeypatch, tmp_path,
 ):
