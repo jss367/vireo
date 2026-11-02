@@ -95,8 +95,7 @@ export async function filterByKeyword(/** @type {string} */ name) {
   // Bump the scope generation BEFORE the readiness guard so an in-flight
   // queued filterByCollection (awaiting browseFilterInitPromise) sees the
   // newer intent and bails out on resume. Without this, the collection
-  // could resume after fields load and clobber the user's later click
-  // (Codex review r3624549744).
+  // could resume after fields load and clobber the user's later click.
   var myScopeGen = ++state.browseScopeGen;
   // The sidebar tree is rendered from the /photos init payload, so a
   // slow /api/filters/fields (or workspace) round-trip leaves clickable
@@ -104,9 +103,9 @@ export async function filterByKeyword(/** @type {string} */ name) {
   // guard, addRule -> makeRule dereferences state.fields (still null)
   // and throws. Dropping the click outright would leave the bootstrap
   // grid (e.g. a ``?collection_id=A`` deep link's collection scope) in
-  // place while the user's later keyword selection is silently lost
-  // (Codex review r3624927534) — queue behind init and apply once ready,
-  // matching filterByCollection's pattern.
+  // place while the user's later keyword selection is silently lost —
+  // queue behind init and apply once ready, matching filterByCollection's
+  // pattern.
   if (VireoFilter && !VireoFilter.isReady()) {
     if (!state.browseFilterInitPromise) return;
     try {
