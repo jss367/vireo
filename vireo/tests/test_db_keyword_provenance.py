@@ -112,7 +112,7 @@ def lib(db, tmp_path, monkeypatch):
 def test_tag_photo_commits_with_the_callers_unit(db, lib):
     p0 = lib["p"][0]
     with db.transaction():
-        kid = db.add_keyword("Driftwood")
+        kid = db.keywords.add("Driftwood")
         db.tag_photo(p0, kid)
     assert not db.conn.in_transaction
     assert _visible(
@@ -122,7 +122,7 @@ def test_tag_photo_commits_with_the_callers_unit(db, lib):
 
 def test_tag_photo_leaves_commit_to_caller(db, lib):
     p0 = lib["p"][0]
-    kid = db.add_keyword("Driftwood")
+    kid = db.keywords.add("Driftwood")
     db.tag_photo(p0, kid, source=KEYWORD_SOURCE_UNKNOWN)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
@@ -151,7 +151,7 @@ def test_tag_photo_leaves_commit_to_caller(db, lib):
 def test_tag_photo_retag_stores_the_lattice_max(db, lib, first, second, expected):
     p0 = lib["p"][0]
     with db.transaction():
-        kid = db.add_keyword("Wildlife", kw_type="genre")
+        kid = db.keywords.add("Wildlife", kw_type="genre")
         db.tag_photo(p0, kid, source=first)
         db.tag_photo(p0, kid, source=second)
     assert _visible(
@@ -166,8 +166,8 @@ def test_tag_photo_retag_stores_the_lattice_max(db, lib, first, second, expected
 def test_merge_keyword_into_leaves_commit_to_caller(db, lib):
     p0 = lib["p"][0]
     with db.transaction():
-        src = db.add_keyword("Egret")
-        dst = db.add_keyword("Heron")
+        src = db.keywords.add("Egret")
+        dst = db.keywords.add("Heron")
         db.tag_photo(p0, src)
     assert db._merge_keyword_into(src, dst) == 1
     assert db.conn.in_transaction
@@ -237,10 +237,10 @@ def test_merge_keyword_into_moves_import_aliases_and_metadata(db, lib):
 
 def test_merge_keyword_into_recurses_through_the_facade(db, lib, monkeypatch):
     p0, p1 = lib["p"][:2]
-    src_parent = db.add_keyword("Waders")
-    dst_parent = db.add_keyword("Shorebirds")
-    src_child = db.add_keyword("Heron", parent_id=src_parent)
-    dst_child = db.add_keyword("heron", parent_id=dst_parent)
+    src_parent = db.keywords.add("Waders")
+    dst_parent = db.keywords.add("Shorebirds")
+    src_child = db.keywords.add("Heron", parent_id=src_parent)
+    dst_child = db.keywords.add("heron", parent_id=dst_parent)
     db.tag_photo(p0, src_child)
     db.tag_photo(p1, dst_child, source=KEYWORD_SOURCE_UNKNOWN)
     db.tag_photo(p1, src_child)
@@ -264,10 +264,10 @@ def test_merge_keyword_into_recurses_through_the_facade(db, lib, monkeypatch):
 def test_merge_keyword_into_disambiguates_cross_type_children_through_the_facade(
     db, lib, monkeypatch,
 ):
-    src_parent = db.add_keyword("Waders")
-    dst_parent = db.add_keyword("Shorebirds")
-    child = db.add_keyword("Macro", parent_id=src_parent)
-    peer = db.add_keyword("Macro", parent_id=dst_parent, kw_type="individual")
+    src_parent = db.keywords.add("Waders")
+    dst_parent = db.keywords.add("Shorebirds")
+    child = db.keywords.add("Macro", parent_id=src_parent)
+    peer = db.keywords.add("Macro", parent_id=dst_parent, kw_type="individual")
     from repositories.keyword_tree import KeywordTreeRepository
 
     calls = _class_spy(monkeypatch, KeywordTreeRepository, "reparent_disambiguated")
@@ -286,7 +286,7 @@ def test_merge_keyword_into_disambiguates_cross_type_children_through_the_facade
     ]
 
 
-def test_merge_keyword_into_keeps_distinct_taxa_apart_and_hands_over_the_database(
+def test_merge_keyword_into_keeps_distinct_taxa_apart_through_the_alias_repository(
     db, lib, monkeypatch,
 ):
     from repositories import keyword_identity_sql as keyword_identity
@@ -296,20 +296,26 @@ def test_merge_keyword_into_keeps_distinct_taxa_apart_and_hands_over_the_databas
         "(1, 101, 'Turdus migratorius', 'species'), "
         "(2, 202, 'Erithacus rubecula', 'species')"
     )
-    src_parent = db.add_keyword("Waders")
-    dst_parent = db.add_keyword("Shorebirds")
+    src_parent = db.keywords.add("Waders")
+    dst_parent = db.keywords.add("Shorebirds")
     child = _raw_kw(db, "Robin", src_parent, "taxonomy", 1, taxon_id=1)
     peer = _raw_kw(db, "Robin", dst_parent, "taxonomy", 1, taxon_id=2)
     seen = []
     real = keyword_identity.taxon_identity
 
-    def spy(database, row):
-        seen.append(database)
-        return real(database, row)
+    def spy(merges, row):
+        seen.append(merges)
+        return real(merges, row)
 
     monkeypatch.setattr(keyword_identity, "taxon_identity", spy)
     assert db._merge_keyword_into(src_parent, dst_parent) == 1
-    assert seen and all(d is db for d in seen)
+    # The taxon identities are read through the alias repository on the same
+    # connection, never through the Database.
+    from repositories.keyword_merges import KeywordMergeRepository
+
+    assert seen and all(
+        isinstance(m, KeywordMergeRepository) and m.conn is db.conn for m in seen
+    )
     names = dict(db.conn.execute(
         "SELECT id, name FROM keywords WHERE id IN (?, ?)", (child, peer),
     ).fetchall())
@@ -321,13 +327,13 @@ def test_merge_keyword_into_retargets_pending_and_curation_through_the_facade(
 ):
     p0, p1 = lib["p"][:2]
     ws = lib["ws"]
-    src = db.add_keyword("Egret", is_species=True)
-    dst = db.add_keyword("Heron", is_species=True)
+    src = db.keywords.add("Egret", is_species=True)
+    dst = db.keywords.add("Heron", is_species=True)
     db.tag_photo(p0, src)
     db.tag_photo(p1, dst)
-    db.queue_change(p0, "keyword_add", "Egret", workspace_id=ws)
+    db.pending_changes.queue(p0, "keyword_add", "Egret", workspace_id=ws)
     db.commit()
-    db.queue_change(p1, "keyword_remove", "Egret", workspace_id=ws)
+    db.pending_changes.queue(p1, "keyword_remove", "Egret", workspace_id=ws)
     db.commit()
     from repositories.species_curation import SpeciesCurationRepository
 
@@ -352,8 +358,8 @@ def test_merge_keyword_into_retargets_pending_and_curation_through_the_facade(
 
 def test_merge_keyword_into_retargets_edit_history(db, lib):
     p0 = lib["p"][0]
-    src = db.add_keyword("Egret")
-    dst = db.add_keyword("Heron")
+    src = db.keywords.add("Egret")
+    dst = db.keywords.add("Heron")
     db.tag_photo(p0, src)
     db.record_edit(
         "keyword_add", "add Egret", str(src),
@@ -373,9 +379,9 @@ def test_merge_keyword_into_ignores_non_list_history_keyword_ids(db, lib):
     """A malformed ``keyword_ids`` (bare int or string) must not abort the
     merge, and a string must not be matched character by character."""
     p0, p1 = lib["p"][:2]
-    src = db.add_keyword("Egret")
-    dst = db.add_keyword("Heron")
-    other = db.add_keyword("Gull")
+    src = db.keywords.add("Egret")
+    dst = db.keywords.add("Heron")
+    other = db.keywords.add("Gull")
     # The string case only mis-matched when one of its characters equals src.
     assert src < 10
     db.tag_photo(p0, src)
@@ -487,11 +493,13 @@ def test_upsert_one_keyword_rejects_cross_type_collision(db, lib):
 _COMPONENTS = [{"name": "California", "types": ["administrative_area_level_1"]}]
 
 
-def test_link_keyword_to_place_builds_chain_through_the_facade(
+def test_link_keyword_to_place_builds_the_parent_chain(
     db, lib, monkeypatch,
 ):
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
     kid = db.get_or_create_text_location("Home")
-    chain_calls = _spy(monkeypatch, db, "_upsert_location_parent_chain")
+    chain_calls = _class_spy(monkeypatch, KeywordProvenanceRepository, "upsert_location_parent_chain")
     with db.transaction():
         result = db.keyword_provenance.link_keyword_to_place(kid, {
             "place_id": "place-home", "name": "Home Park", "lat": 1.0, "lng": 2.0,
@@ -551,7 +559,9 @@ def test_link_keyword_to_place_rolls_back_on_failure(db, lib, monkeypatch):
         )
         raise RuntimeError("chain failed")
 
-    monkeypatch.setattr(db, "_upsert_location_parent_chain", boom)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "upsert_location_parent_chain", boom)
     # The caller's unit rolls the partial chain back with the failure.
     with pytest.raises(RuntimeError, match="chain failed"), db.transaction():
         db.keyword_provenance.link_keyword_to_place(kid, {"place_id": "place-home", "name": "Home"})
@@ -569,7 +579,7 @@ def test_link_keyword_to_place_validates_target(db, lib):
         db.keyword_provenance.link_keyword_to_place(1, {})
     with pytest.raises(ValueError, match="does not exist"):
         db.keyword_provenance.link_keyword_to_place(999_999, {"place_id": "x"})
-    general = db.add_keyword("Driftwood")
+    general = db.keywords.add("Driftwood")
     with pytest.raises(ValueError, match="not 'location'"):
         db.keyword_provenance.link_keyword_to_place(general, {"place_id": "x"})
 
@@ -616,11 +626,15 @@ def test_accept_prediction_tags_manual_and_queues_add_through_the_facade(
     pid = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
     tags = _spy(monkeypatch, db, "tag_photo")
-    queued = _spy(monkeypatch, db, "queue_change")
+    from repositories.sync import SyncRepository
+
+    queued = _class_spy(monkeypatch, SyncRepository, "queue")
     from repositories.predictions import PredictionRepository
 
     statuses = _class_spy(monkeypatch, PredictionRepository, "update_status")
-    added = _spy(monkeypatch, db, "add_keyword")
+    from repositories.keywords import KeywordRepository
+
+    added = _class_spy(monkeypatch, KeywordRepository, "add")
 
     with db.transaction():
         result = review_decisions.accept_prediction(db, pid)
@@ -659,7 +673,7 @@ def test_accept_prediction_leaves_commit_to_caller(db, lib):
 
 def test_replace_species_requires_explicit_taxonomy_before_writes(db, lib):
     p0 = lib["p"][0]
-    old_keyword = db.add_keyword("Jay", is_species=True)
+    old_keyword = db.keywords.add("Jay", is_species=True)
     db.tag_photo(p0, old_keyword)
     prediction = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
@@ -682,7 +696,9 @@ def test_accept_prediction_rolls_back_when_queueing_fails(db, lib, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("queue failed")
 
-    monkeypatch.setattr(db, "queue_change", boom)
+    from repositories.sync import SyncRepository
+
+    monkeypatch.setattr(SyncRepository, "queue", boom)
     with pytest.raises(RuntimeError, match="queue failed"), db.transaction():
         review_decisions.accept_prediction(db, pid)
     assert not db.conn.in_transaction
@@ -699,12 +715,14 @@ def test_accept_prediction_rolls_back_when_queueing_fails(db, lib, monkeypatch):
 
 def test_accept_prediction_already_tagged_is_status_only(db, lib, monkeypatch):
     p0 = lib["p"][0]
-    kid = db.add_keyword("Robin", is_species=True)
+    kid = db.keywords.add("Robin", is_species=True)
     db.tag_photo(p0, kid, source=KEYWORD_SOURCE_UNKNOWN)
     pid = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
+    from repositories.sync import SyncRepository
+
     tags = _spy(monkeypatch, db, "tag_photo")
-    queued = _spy(monkeypatch, db, "queue_change")
+    queued = _class_spy(monkeypatch, SyncRepository, "queue")
     result = review_decisions.accept_prediction(db, pid)
     assert tags == [] and queued == []
     assert result["affected"] == [{
@@ -721,11 +739,11 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     monkeypatch.setattr(taxonomy, "load_local_taxonomy", lambda *a, **k: None)
     p0, p1 = lib["p"][:2]
     ws = lib["ws"]
-    jay = db.add_keyword("Jay", is_species=True)
-    wren = db.add_keyword("Wren", is_species=True)
+    jay = db.keywords.add("Jay", is_species=True)
+    wren = db.keywords.add("Wren", is_species=True)
     db.tag_photo(p0, jay)
     db.tag_photo(p1, wren)
-    db.queue_change(p1, "keyword_add", "Wren", workspace_id=ws)
+    db.pending_changes.queue(p1, "keyword_add", "Wren", workspace_id=ws)
     db.commit()
     db.conn.execute(
         "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
@@ -734,8 +752,10 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     pred0 = _pred(db, _det(db, p0), "Robin")
     pred1 = _pred(db, _det(db, p1), "Robin")
     db.conn.commit()
-    cancels = _spy(monkeypatch, db, "remove_pending_changes")
-    queued = _spy(monkeypatch, db, "queue_change")
+    from repositories.sync import SyncRepository
+
+    cancels = _class_spy(monkeypatch, SyncRepository, "cancel")
+    queued = _class_spy(monkeypatch, SyncRepository, "queue")
     from repositories.species_curation import SpeciesCurationRepository
 
     highlights = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_highlights")
@@ -779,7 +799,7 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     ])
 
 
-def test_accept_prediction_hands_the_database_to_species_resolver(db, lib, monkeypatch):
+def test_accept_prediction_hands_species_resolver_a_taxon_catalog(db, lib, monkeypatch):
     import species_identity
 
     seen = []
@@ -794,7 +814,11 @@ def test_accept_prediction_hands_the_database_to_species_resolver(db, lib, monke
     pid = _pred(db, _det(db, lib["p"][0]), "Robin")
     db.conn.commit()
     review_decisions.accept_prediction(db, pid)
-    assert seen == [db]
+    from repositories.keywords import TaxonCatalog
+
+    [catalog] = seen
+    assert isinstance(catalog, TaxonCatalog)
+    assert catalog.meta.conn is db.conn and catalog.taxa.conn is db.conn
 
 
 def test_accept_prediction_requires_an_active_workspace(db, lib):
@@ -916,7 +940,7 @@ def test_keyword_provenance_repository_routes_facade_calls_through_database(db):
     repo = db._keyword_provenance_repository()
     for name in FACADE_METHODS:
         assert getattr(repo, name) == getattr(db, name), name
-    assert repo.db is db
+    assert not hasattr(repo, "db")
 
 
 def test_keyword_provenance_facade_names_never_shadow_repository_methods():
@@ -1013,7 +1037,15 @@ def test_moved_writers_reach_each_other_only_through_the_facade():
         if isinstance(n, ast.ClassDef) and n.name == "KeywordProvenanceRepository"
     )
     database_class = _database_class_tree()
-    exposed = _facade_exposed_repository_methods(database_class)
+    # The repository methods behind the forwarders still bound by name
+    # (``FACADE_METHODS``). Other ``Database`` methods that compose the
+    # repository (``upsert_place_chain``) call it like any other caller.
+    forwarders = ast.ClassDef(
+        name="Database", bases=[], keywords=[], decorator_list=[],
+        body=[n for n in database_class.body
+              if isinstance(n, ast.FunctionDef) and n.name in _DELEGATING_PROVENANCE_METHODS],
+    )
+    exposed = _facade_exposed_repository_methods(forwarders)
 
     # The derivation finds every wrapper's target, and nothing that isn't a
     # repository method.

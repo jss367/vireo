@@ -167,7 +167,7 @@ def test_apply_skips_keyword_when_already_applied(app_and_db):
     app, db = app_and_db
     pids = _photo_ids(db)
     pid = pids[0]
-    kid = db.add_keyword('Coyote', is_species=True)
+    kid = db.keywords.add('Coyote', is_species=True)
     db.tag_photo(pid, kid)
     db.commit()
     client = app.test_client()
@@ -204,7 +204,7 @@ def test_apply_does_not_touch_keyword_pending_changes(app_and_db):
     pids = _photo_ids(db)
     pid = pids[0]
     # Pre-existing pending remove for "Coyote".
-    db.queue_change(pid, 'keyword_remove', 'Coyote')
+    db.pending_changes.queue(pid, 'keyword_remove', 'Coyote')
     db.commit()
     client = app.test_client()
 
@@ -344,7 +344,7 @@ def test_state_endpoint_returns_current_flags_and_keyword_status(app_and_db):
     db.commit()
     db.photo_review.set_flag(rejected_id, 'rejected')
     db.commit()
-    kid = db.add_keyword('Coyote', is_species=True)
+    kid = db.keywords.add('Coyote', is_species=True)
     db.tag_photo(flagged_id, kid)
     db.commit()
     client = app.test_client()
@@ -415,7 +415,7 @@ def test_state_endpoint_ignores_homonym_non_species_keyword(app_and_db):
     pid = pids[0]
 
     # Pre-existing 'individual' tag named like the species we're about to type.
-    individual_kid = db.add_keyword('Robin', kw_type='individual')
+    individual_kid = db.keywords.add('Robin', kw_type='individual')
     db.tag_photo(pid, individual_kid)
     db.commit()
 
@@ -443,9 +443,9 @@ def test_state_endpoint_gates_representative_on_current_eligibility(app_and_db):
     live_id, rejected_id, untagged_id = pids[0], pids[1], pids[2]
 
     # One species per photo so each failure mode is independently observable.
-    kid_live = db.add_keyword('Coyote Live', is_species=True)
-    kid_rejected = db.add_keyword('Coyote Rejected', is_species=True)
-    kid_untagged = db.add_keyword('Coyote Untagged', is_species=True)
+    kid_live = db.keywords.add('Coyote Live', is_species=True)
+    kid_rejected = db.keywords.add('Coyote Rejected', is_species=True)
+    kid_untagged = db.keywords.add('Coyote Untagged', is_species=True)
     db.tag_photo(live_id, kid_live)
     db.tag_photo(rejected_id, kid_rejected)
     db.tag_photo(untagged_id, kid_untagged)
@@ -495,8 +495,8 @@ def test_state_endpoint_reports_each_listed_species(app_and_db):
     app, db = app_and_db
     pids = _photo_ids(db)
     both_id, teal_only_id, none_id = pids[0], pids[1], pids[2]
-    teal = db.add_keyword('Green-winged Teal', is_species=True)
-    wigeon = db.add_keyword('American Wigeon', is_species=True)
+    teal = db.keywords.add('Green-winged Teal', is_species=True)
+    wigeon = db.keywords.add('American Wigeon', is_species=True)
     db.tag_photo(both_id, teal)
     db.tag_photo(both_id, wigeon)
     db.tag_photo(teal_only_id, teal)

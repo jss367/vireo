@@ -133,14 +133,14 @@ def cur(db):
     _taxon(db, 7, "Mammalia", "class")
     _taxon(db, 8, "Puma concolor", "species", 7, "Cougar")
     k = {
-        "robin": db.add_keyword("American Robin", kw_type="taxonomy"),
-        "cardinal": db.add_keyword("Northern Cardinal", is_species=True),
-        "turdus": db.add_keyword("Turdus", kw_type="taxonomy"),
-        "puma": db.add_keyword("Cougar", kw_type="taxonomy"),
-        "mystery": db.add_keyword("Mystery Bird", is_species=True),
-        "loc": db.add_keyword("Backyard", kw_type="location"),
-        "park": db.add_keyword("Park", kw_type="location"),
-        "sunset": db.add_keyword("Sunset"),
+        "robin": db.keywords.add("American Robin", kw_type="taxonomy"),
+        "cardinal": db.keywords.add("Northern Cardinal", is_species=True),
+        "turdus": db.keywords.add("Turdus", kw_type="taxonomy"),
+        "puma": db.keywords.add("Cougar", kw_type="taxonomy"),
+        "mystery": db.keywords.add("Mystery Bird", is_species=True),
+        "loc": db.keywords.add("Backyard", kw_type="location"),
+        "park": db.keywords.add("Park", kw_type="location"),
+        "sunset": db.keywords.add("Sunset"),
     }
     _link(db, k["robin"], 4)
     _link(db, k["cardinal"], 6)
@@ -362,7 +362,7 @@ def test_uncounted_identifications_route_class_lookup_through_facade(db, cur, mo
 
 
 def test_uncounted_filter_token_keeps_non_ascii(db, cur):
-    kid = db.add_keyword("Mésange", is_species=True)
+    kid = db.keywords.add("Mésange", is_species=True)
     db.tag_photo(cur["p"]["card2"], kid)
     db.commit()
     names = {g["name"]: g for g in db.species_curation.get_life_list_uncounted_identifications()}

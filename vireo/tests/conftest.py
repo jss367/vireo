@@ -316,8 +316,8 @@ def app_and_db(tmp_path, monkeypatch):
     db.photo_review.set_rating(p3, 5)
     db.commit()
 
-    k1 = db.add_keyword('Cardinal')
-    k2 = db.add_keyword('Sparrow')
+    k1 = db.keywords.add('Cardinal')
+    k2 = db.keywords.add('Sparrow')
     db.tag_photo(p1, k1)
     db.tag_photo(p2, k2)
     db.commit()

@@ -33,9 +33,9 @@ def writable_queue(tmp_path):
     ])
     db.conn.commit()
     with db.transaction():
-        old = db.add_keyword('Spotted Redshank', is_species=True, source_taxon_id=101)
-        genre = db.add_keyword('Favorite', kw_type='genre')
-        genus = db.add_keyword('Plegadis', kw_type='taxonomy')
+        old = db.keywords.add('Spotted Redshank', is_species=True, source_taxon_id=101)
+        genre = db.keywords.add('Favorite', kw_type='genre')
+        genus = db.keywords.add('Plegadis', kw_type='taxonomy')
         db.conn.execute('UPDATE keywords SET taxon_id=3 WHERE id=?', (genus,))
         for kid in [old, genre, genus]:
             db.tag_photo(pid, kid)

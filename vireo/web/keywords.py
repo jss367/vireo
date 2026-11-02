@@ -230,7 +230,7 @@ def _queue_location_path_changes(
             name_changed or type_changed
         ):
             for row in location_affected:
-                db.queue_change(
+                db.pending_changes.queue(
                     row["photo_id"],
                     "location",
                     "effective",
@@ -448,7 +448,7 @@ def create_keywords_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint
             if kw_row["type"] == "location":
                 location_descendants = db.photo_keywords.subtree_photo_workspaces(keyword_id)
                 for row in location_descendants:
-                    db.queue_change(
+                    db.pending_changes.queue(
                         row["photo_id"],
                         "location",
                         "effective",

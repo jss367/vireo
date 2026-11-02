@@ -707,7 +707,7 @@ def resolve_drift(db, photo_id, direction):
         # Queue all current DB keywords as pending writes
         keywords = db.photo_keywords.get_for_photo(photo_id)
         for kw in keywords:
-            db.queue_change(photo_id, "keyword_add", kw["name"])
+            db.pending_changes.queue(photo_id, "keyword_add", kw["name"])
     elif direction == "use_xmp":
         from sync import sync_from_xmp
 

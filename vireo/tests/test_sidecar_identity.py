@@ -70,9 +70,9 @@ def sidecars(tmp_path, db, monkeypatch):
 @pytest.mark.parametrize('different_parent', [False, True])
 def test_missing_sidecars_use_containing_directory_case_semantics(db, sidecars, folds, different_parent):
     photos, paths = sidecars(folds, different_parent)
-    db.queue_change(photos[0], 'keyword_add', 'Robin')
+    db.pending_changes.queue(photos[0], 'keyword_add', 'Robin')
     db.commit()
-    db.queue_change(photos[1], 'keyword_add', 'Robin')
+    db.pending_changes.queue(photos[1], 'keyword_add', 'Robin')
     db.commit()
     assert db.pending_changes.keyword_sidecar_alias(photos[0], db._active_workspace_id, 'Robin') is folds
     identities = _sidecar_target_identities(dict(zip(paths, paths, strict=True)))
@@ -137,7 +137,7 @@ def test_zero_parent_inode_is_inconclusive(tmp_path, monkeypatch):
 @pytest.mark.parametrize('shared', [False, True])
 def test_existing_sidecar_inodes_override_windows_normcase(db, sidecars, different_parent, shared):
     photos, paths = sidecars(False, different_parent, sidecar_inodes=[1, 1 if shared else 2])
-    db.queue_change(photos[1], 'keyword_add', 'Robin')
+    db.pending_changes.queue(photos[1], 'keyword_add', 'Robin')
     db.commit()
     assert db.pending_changes.keyword_sidecar_alias(photos[0], db._active_workspace_id, 'Robin') is shared
     identities = _sidecar_target_identities(dict(zip(paths, paths, strict=True)))
@@ -183,9 +183,9 @@ def test_missing_unicode_names_use_actual_directory_lookups(db, sidecars, differ
     # the multi-character ß/SS expansion does not. Casefold alone merges both.
     photos, paths = sidecars(True, different_parent, filenames=names, name_key=str.lower)
     assert directory_folds_case(os.path.dirname(paths[0])) is True
-    db.queue_change(photos[0], 'keyword_add', 'Robin')
+    db.pending_changes.queue(photos[0], 'keyword_add', 'Robin')
     db.commit()
-    db.queue_change(photos[1], 'keyword_add', 'Robin')
+    db.pending_changes.queue(photos[1], 'keyword_add', 'Robin')
     db.commit()
     assert db.pending_changes.keyword_sidecar_alias(photos[0], db._active_workspace_id, 'Robin') is shared
     identities = _sidecar_target_identities(dict(zip(paths, paths, strict=True)))

@@ -55,11 +55,11 @@ def _apply_tags(db, photo, answer, marker):
                 desired.update(r['id'] for r in matching)
                 continue
             if taxon['inat_id']:
-                kid = db.add_keyword(taxon['common_name'] or taxon['name'], is_species=True,
+                kid = db.keywords.add(taxon['common_name'] or taxon['name'], is_species=True,
                                      source_taxon_id=taxon['inat_id'])
             else:
                 # Scientific names avoid common-name homonyms for local-only taxa.
-                kid = db.add_keyword(taxon['name'], is_species=True)
+                kid = db.keywords.add(taxon['name'], is_species=True)
                 linked = db.conn.execute('SELECT taxon_id FROM keywords WHERE id=?', (kid,)).fetchone()
                 if linked['taxon_id'] != taxon['id']:
                     raise ValueError(f'Could not safely resolve local species {key}; no tags were changed')

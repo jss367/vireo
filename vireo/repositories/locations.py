@@ -555,7 +555,7 @@ class LocationRepository:
     def restore_misclassified_ancestor(self, keyword_id, allow_leaf=False):
         """Retype one legacy taxonomy row that is structurally a location.
 
-        See ``Database._restore_misclassified_location_ancestor``. Does not
+        See ``restore_misclassified_ancestor``. Does not
         commit.
         """
         row = self.conn.execute(
@@ -593,12 +593,10 @@ class LocationRepository:
         )
         return True
 
-    def repair_misclassified_ancestors(self, *, restore_ancestor):
+    def repair_misclassified_ancestors(self):
         """Run the restore passes and the root merge (no commit).
 
-        ``restore_ancestor`` is the façade's
-        ``_restore_misclassified_location_ancestor``. Returns
-        ``(repaired, merged_roots)``.
+        Returns ``(repaired, merged_roots)``.
         """
         repaired = 0
         while True:
@@ -610,7 +608,7 @@ class LocationRepository:
             ).fetchall()
             repaired_this_pass = 0
             for row in rows:
-                if restore_ancestor(row["id"]):
+                if self.restore_misclassified_ancestor(row["id"]):
                     repaired += 1
                     repaired_this_pass += 1
             if not repaired_this_pass:

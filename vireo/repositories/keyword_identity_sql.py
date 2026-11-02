@@ -143,7 +143,7 @@ def resolve_import_path(merges, parts, *, kw_type=None, linked_locations_only=Fa
     return target_id
 
 
-def taxon_identity(db, row):
+def taxon_identity(merges, row):
     """Resolve a keyword row's species identity the way ``identity_sql`` does.
 
     ``source_taxon_id`` is the label source's own iNat id and outranks the
@@ -156,7 +156,7 @@ def taxon_identity(db, row):
         return None
     inat = row['source_taxon_id']
     if inat is None and row['taxon_id'] is not None:
-        found = db.keyword_merges.inat_id_of_taxon(row['taxon_id'])
+        found = merges.inat_id_of_taxon(row['taxon_id'])
         inat = found['inat_id'] if found else None
     if inat is not None:
         return f'inat:{inat}'
@@ -165,7 +165,7 @@ def taxon_identity(db, row):
     return None
 
 
-def keywords_claim_different_taxa(db, first, second):
+def keywords_claim_different_taxa(merges, first, second):
     """Whether two same-named rows stand for two genuinely different species.
 
     A row that claims no species, or that agrees with the other, is safe to
@@ -174,8 +174,8 @@ def keywords_claim_different_taxa(db, first, second):
     source's, so the migrating row's photos would come out tagged as the
     other species.
     """
-    first_id = taxon_identity(db, first)
-    second_id = taxon_identity(db, second)
+    first_id = taxon_identity(merges, first)
+    second_id = taxon_identity(merges, second)
     return first_id is not None and second_id is not None and first_id != second_id
 
 

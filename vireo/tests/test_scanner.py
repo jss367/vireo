@@ -1047,7 +1047,7 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
             "UPDATE photos SET exif_data = ? WHERE id = ?",
             (json.dumps(meta), photo_id),
         )
-    db.tag_photo(already, db.add_keyword("Egret"))
+    db.tag_photo(already, db.keywords.add("Egret"))
     db.commit()
     db.conn.commit()
 
@@ -3208,14 +3208,16 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
 
             monkeypatch.setattr(scanner.companion_keep._KnownCompanionKeeper, "import_companion_sidecar", sidecar)
         else:
-            original = cat.db.add_keyword
+            from repositories.keywords import KeywordRepository
 
-            def add_keyword(name, *args, **kwargs):
-                keyword = original(name, *args, **kwargs)
+            original = KeywordRepository.add
+
+            def add_keyword(repo, name, *args, **kwargs):
+                keyword = original(repo, name, *args, **kwargs)
                 replace_owner()
                 return keyword
 
-            monkeypatch.setattr(cat.db, "add_keyword", add_keyword)
+            monkeypatch.setattr(KeywordRepository, "add", add_keyword)
 
         counts = cat.scan(incremental=boundary == "stat-settle")
         assert evidence["attempted"]
@@ -3316,7 +3318,7 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
         (jpeg_id,),
     )
     # Add a keyword to the JPEG
-    kw_id = db.add_keyword("Robin")
+    kw_id = db.keywords.add("Robin")
     db.tag_photo(jpeg_id, kw_id)
     db.commit()
     db.conn.commit()
@@ -3466,7 +3468,7 @@ def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_r
     metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
                         else {"Subject": ["Robin"]})}
     _import_embedded_keywords_for_photo(db, jpeg, metadata)
-    db.tag_photo(jpeg, db.add_keyword("Field note"))
+    db.tag_photo(jpeg, db.keywords.add("Field note"))
     db.commit()
     if removed_on_raw:
         _import_embedded_keywords_for_photo(db, raw, metadata)
@@ -8957,7 +8959,7 @@ def test_xmp_import_skips_a_location_keyword_the_user_already_changed(tmp_path):
     ).lastrowid
     db.conn.commit()
     db.set_photo_location(photo_id, new_leaf)
-    db.queue_change(photo_id, "location", "effective")
+    db.pending_changes.queue(photo_id, "location", "effective")
     db.commit()
 
     _import_keywords_for_photo(db, photo_id, xmp_path)

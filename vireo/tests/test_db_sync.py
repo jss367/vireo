@@ -129,7 +129,7 @@ def test_count_and_list_all_require_active_workspace(lib):
 
 def test_queue_change_returns_token_and_commits(lib):
     db, ws = lib["db"], lib["ws"]
-    token = db.queue_change(lib["a"], "flag", "flagged")
+    token = db.pending_changes.queue(lib["a"], "flag", "flagged")
     db.commit()
     assert str(uuid.UUID(token)) == token
     db.commit()
@@ -142,7 +142,7 @@ def test_queue_change_returns_token_and_commits(lib):
 
 def test_queue_change_no_commit_leaves_transaction_open(lib):
     db, ws = lib["db"], lib["ws"]
-    token = db.queue_change(lib["a"], "flag", "flagged")
+    token = db.pending_changes.queue(lib["a"], "flag", "flagged")
     assert token is not None
     assert db.conn.in_transaction
     assert _visible_rows(db) == []
@@ -152,26 +152,26 @@ def test_queue_change_no_commit_leaves_transaction_open(lib):
 
 def test_queue_change_explicit_workspace(lib):
     db, other = lib["db"], lib["other"]
-    db.queue_change(lib["a"], "flag", "flagged", workspace_id=other)
+    db.pending_changes.queue(lib["a"], "flag", "flagged", workspace_id=other)
     db.commit()
     assert _rows(db) == [(lib["a"], "flag", "flagged", other, 0)]
     # The active workspace is not consulted when one is supplied.
     db.set_active_workspace(None)
-    assert db.queue_change(lib["b"], "flag", "rejected", workspace_id=other)
+    assert db.pending_changes.queue(lib["b"], "flag", "rejected", workspace_id=other)
 
 
 def test_queue_change_requires_active_workspace_when_none_given(lib):
     db = lib["db"]
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.queue_change(lib["a"], "flag", "flagged")
+        db.pending_changes.queue(lib["a"], "flag", "flagged")
         db.commit()
 
 
 def test_queue_change_normalizes_keyword_values(lib):
     db = lib["db"]
     for kind in ("keyword_add", "keyword_remove", "keyword_remove_flat"):
-        db.queue_change(lib["a"], kind, '"Robin"')
+        db.pending_changes.queue(lib["a"], kind, '"Robin"')
         db.commit()
     assert [r[1:3] for r in _rows(db)] == [
         ("keyword_add", "Robin"),
@@ -179,7 +179,7 @@ def test_queue_change_normalizes_keyword_values(lib):
         ("keyword_remove_flat", "Robin"),
     ]
     # Non-keyword values are stored verbatim.
-    db.queue_change(lib["a"], "title", '"Robin"')
+    db.pending_changes.queue(lib["a"], "title", '"Robin"')
     db.commit()
     assert _rows(db)[-1][2] == '"Robin"'
 
@@ -187,8 +187,8 @@ def test_queue_change_normalizes_keyword_values(lib):
 def test_queue_change_blank_keyword_returns_none_before_workspace(lib):
     db = lib["db"]
     db.set_active_workspace(None)
-    assert db.queue_change(lib["a"], "keyword_add", '""') is None
-    assert db.queue_change(lib["a"], "keyword_remove", "   ") is None
+    assert db.pending_changes.queue(lib["a"], "keyword_add", '""') is None
+    assert db.pending_changes.queue(lib["a"], "keyword_remove", "   ") is None
     assert _rows(db) == []
     db.commit()
     assert not db.conn.in_transaction
@@ -196,55 +196,55 @@ def test_queue_change_blank_keyword_returns_none_before_workspace(lib):
 
 def test_queue_change_generic_dedupe(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
-    assert db.queue_change(lib["a"], "flag", "flagged")
+    assert db.pending_changes.queue(lib["a"], "flag", "flagged")
     statements = _trace(db)
-    assert db.queue_change(lib["a"], "flag", "flagged") is None
+    assert db.pending_changes.queue(lib["a"], "flag", "flagged") is None
     db.conn.set_trace_callback(None)
     assert not any(s.startswith("INSERT") for s in statements)
     db.commit()
     assert not db.conn.in_transaction
     # A different value, photo or workspace is a new intent.
-    assert db.queue_change(lib["a"], "flag", "rejected")
-    assert db.queue_change(lib["b"], "flag", "flagged")
-    assert db.queue_change(lib["a"], "flag", "flagged", workspace_id=other)
+    assert db.pending_changes.queue(lib["a"], "flag", "rejected")
+    assert db.pending_changes.queue(lib["b"], "flag", "flagged")
+    assert db.pending_changes.queue(lib["a"], "flag", "flagged", workspace_id=other)
     assert len(_rows(db)) == 4
     assert {r[3] for r in _rows(db)} == {ws, other}
 
 
 def test_queue_change_rating_dedupes_only_against_latest(lib):
     db = lib["db"]
-    assert db.queue_change(lib["a"], "rating", "1")
-    assert db.queue_change(lib["a"], "rating", "1") is None
-    assert db.queue_change(lib["a"], "rating", "2")
+    assert db.pending_changes.queue(lib["a"], "rating", "1")
+    assert db.pending_changes.queue(lib["a"], "rating", "1") is None
+    assert db.pending_changes.queue(lib["a"], "rating", "2")
     # 1 -> 2 -> 1 keeps the last 1.
-    assert db.queue_change(lib["a"], "rating", "1")
+    assert db.pending_changes.queue(lib["a"], "rating", "1")
     assert [r[2] for r in _rows(db)] == ["1", "2", "1"]
 
 
 def test_queue_change_rating_requeues_after_other_photo_rating(lib):
     db = lib["db"]
-    assert db.queue_change(lib["a"], "rating", "3")
-    assert db.queue_change(lib["b"], "rating", "4")
+    assert db.pending_changes.queue(lib["a"], "rating", "3")
+    assert db.pending_changes.queue(lib["b"], "rating", "4")
     # Same latest value for photo a, but a later rating on another photo
     # (possibly sharing the sidecar) intervened.
-    assert db.queue_change(lib["a"], "rating", "3")
+    assert db.pending_changes.queue(lib["a"], "rating", "3")
     assert len(_rows(db)) == 3
     # Another workspace's rating does not count as intervening.
-    db.queue_change(lib["c"], "rating", "5", workspace_id=lib["other"])
+    db.pending_changes.queue(lib["c"], "rating", "5", workspace_id=lib["other"])
     db.commit()
-    assert db.queue_change(lib["a"], "rating", "3") is None
+    assert db.pending_changes.queue(lib["a"], "rating", "3") is None
 
 
 def test_queue_change_keyword_dedupe(lib):
     db = lib["db"]
-    assert db.queue_change(lib["a"], "keyword_add", "Robin")
-    assert db.queue_change(lib["a"], "keyword_add", "Robin") is None
+    assert db.pending_changes.queue(lib["a"], "keyword_add", "Robin")
+    assert db.pending_changes.queue(lib["a"], "keyword_add", "Robin") is None
     # Case-variant spelling is a different latest value -> queued.
-    assert db.queue_change(lib["a"], "keyword_add", "robin")
+    assert db.pending_changes.queue(lib["a"], "keyword_add", "robin")
     # An opposite intent is always queued.
-    assert db.queue_change(lib["a"], "keyword_remove", "robin")
-    assert db.queue_change(lib["a"], "keyword_remove", "ROBIN")
-    assert db.queue_change(lib["a"], "keyword_remove", "ROBIN") is None
+    assert db.pending_changes.queue(lib["a"], "keyword_remove", "robin")
+    assert db.pending_changes.queue(lib["a"], "keyword_remove", "ROBIN")
+    assert db.pending_changes.queue(lib["a"], "keyword_remove", "ROBIN") is None
     assert [r[1:3] for r in _rows(db)] == [
         ("keyword_add", "Robin"),
         ("keyword_add", "robin"),
@@ -255,15 +255,15 @@ def test_queue_change_keyword_dedupe(lib):
 
 def test_queue_change_keyword_requeues_after_other_photo_edit(lib):
     db = lib["db"]
-    assert db.queue_change(lib["a"], "keyword_add", "Robin")
+    assert db.pending_changes.queue(lib["a"], "keyword_add", "Robin")
     # Unrelated keyword on another photo does not intervene.
-    db.queue_change(lib["b"], "keyword_add", "Wren")
+    db.pending_changes.queue(lib["b"], "keyword_add", "Wren")
     db.commit()
-    assert db.queue_change(lib["a"], "keyword_add", "Robin") is None
+    assert db.pending_changes.queue(lib["a"], "keyword_add", "Robin") is None
     # Same keyword (any case, any keyword type) on another photo does.
-    db.queue_change(lib["b"], "keyword_remove_flat", "ROBIN")
+    db.pending_changes.queue(lib["b"], "keyword_remove_flat", "ROBIN")
     db.commit()
-    assert db.queue_change(lib["a"], "keyword_add", "Robin")
+    assert db.pending_changes.queue(lib["a"], "keyword_add", "Robin")
     assert len(_rows(db)) == 4
 
 
@@ -281,8 +281,8 @@ def test_queue_change_keyword_latest_by_created_at(lib):
     )
     db.conn.commit()
     # Latest by created_at is the remove, so a remove is redundant.
-    assert db.queue_change(lib["a"], "keyword_remove", "Robin") is None
-    assert db.queue_change(lib["a"], "keyword_add", "Robin")
+    assert db.pending_changes.queue(lib["a"], "keyword_remove", "Robin") is None
+    assert db.pending_changes.queue(lib["a"], "keyword_add", "Robin")
 
 
 # -- claim_pending_changes_for_sync ------------------------------------------------
@@ -296,9 +296,9 @@ def test_claim_empty_returns_list_without_workspace(lib):
 
 def test_claim_marks_rows_and_returns_in_caller_order(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
-    db.queue_change(lib["a"], "keyword_add", "Robin")
+    db.pending_changes.queue(lib["a"], "keyword_add", "Robin")
     db.commit()
-    db.queue_change(lib["b"], "flag", "flagged")
+    db.pending_changes.queue(lib["b"], "flag", "flagged")
     db.commit()
     legacy = _insert(db, lib["c"], "rating", "2", ws, token=None)
     foreign = _insert(db, lib["a"], "rating", "5", other, token="t-foreign")
@@ -319,7 +319,7 @@ def test_claim_marks_rows_and_returns_in_caller_order(lib):
 
 def test_claim_skips_replaced_or_cancelled_rows(lib):
     db = lib["db"]
-    db.queue_change(lib["a"], "flag", "flagged")
+    db.pending_changes.queue(lib["a"], "flag", "flagged")
     db.commit()
     row = db.pending_changes.list_all()[0]
     stale = {"id": row["id"], "change_token": "not-the-token"}
@@ -343,7 +343,7 @@ def test_claim_chunks_by_400(lib):
 
 def test_claim_requires_active_workspace(lib):
     db = lib["db"]
-    db.queue_change(lib["a"], "flag", "flagged")
+    db.pending_changes.queue(lib["a"], "flag", "flagged")
     db.commit()
     rows = db.pending_changes.list_all()
     db.set_active_workspace(None)
@@ -442,14 +442,14 @@ def test_remove_pending_changes_filters_and_commits(lib):
     _insert(db, lib["a"], "rating", "4", ws)
     _insert(db, lib["a"], "rating", "3", other)
     _insert(db, lib["b"], "rating", "3", ws)
-    assert db.remove_pending_changes(lib["a"], "rating", "3") == 1
+    assert db.pending_changes.cancel(lib["a"], "rating", "3") == 1
     db.commit()
     assert not db.conn.in_transaction
     assert (lib["a"], "rating", "3", ws, 0) not in _visible_rows(db)
-    assert db.remove_pending_changes(lib["a"], "rating") == 1
-    assert db.remove_pending_changes(lib["a"], workspace_id=other) == 1
-    assert db.remove_pending_changes(lib["a"]) == 1
-    assert db.remove_pending_changes(lib["a"]) == 0
+    assert db.pending_changes.cancel(lib["a"], "rating") == 1
+    assert db.pending_changes.cancel(lib["a"], workspace_id=other) == 1
+    assert db.pending_changes.cancel(lib["a"]) == 1
+    assert db.pending_changes.cancel(lib["a"]) == 0
     db.commit()
     assert _visible_rows(db) == [(lib["b"], "rating", "3", ws, 0)]
 
@@ -457,7 +457,7 @@ def test_remove_pending_changes_filters_and_commits(lib):
 def test_remove_pending_changes_no_commit(lib):
     db, ws = lib["db"], lib["ws"]
     _insert(db, lib["a"], "flag", "flagged", ws)
-    assert db.remove_pending_changes(lib["a"]) == 1
+    assert db.pending_changes.cancel(lib["a"]) == 1
     assert db.conn.in_transaction
     assert len(_visible_rows(db)) == 1
     db.conn.rollback()
@@ -467,7 +467,7 @@ def test_remove_pending_changes_requires_workspace(lib):
     db = lib["db"]
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.remove_pending_changes(lib["a"])
+        db.pending_changes.cancel(lib["a"])
         db.commit()
 
 
@@ -476,7 +476,7 @@ def test_remove_uncaptured_keyword_has_no_inverse(lib):
     _insert(db, lib["a"], "keyword_add", "Robin", ws)
     _insert(db, lib["a"], "keyword_remove_flat", "Jay", ws, sync_started=1)
     _insert(db, lib["a"], "flag", "flagged", ws, sync_started=1)
-    assert db.remove_pending_changes(lib["a"]) == 3
+    assert db.pending_changes.cancel(lib["a"]) == 3
     db.commit()
     assert _visible_rows(db) == []
 
@@ -485,7 +485,7 @@ def test_remove_captured_keyword_queues_inverse(lib):
     db, ws = lib["db"], lib["ws"]
     _insert(db, lib["a"], "keyword_add", "Robin", ws, sync_started=1)
     _insert(db, lib["a"], "keyword_remove", "Wren", ws, sync_started=1)
-    assert db.remove_pending_changes(lib["a"]) == 2
+    assert db.pending_changes.cancel(lib["a"]) == 2
     assert db.conn.in_transaction
     db.conn.commit()
     assert _visible_rows(db) == [
@@ -498,7 +498,7 @@ def test_remove_aliased_keyword_queues_inverse(lib):
     db, ws = lib["db"], lib["ws"]
     _insert(db, lib["a"], "keyword_add", "Robin", ws)
     _insert(db, lib["a_raw"], "keyword_add", "Robin", ws)
-    assert db.remove_pending_changes(lib["a"], "keyword_add") == 1
+    assert db.pending_changes.cancel(lib["a"], "keyword_add") == 1
     db.commit()
     assert _visible_rows(db) == [
         (lib["a_raw"], "keyword_add", "Robin", ws, 0),
@@ -506,27 +506,26 @@ def test_remove_aliased_keyword_queues_inverse(lib):
     ]
 
 
-def test_remove_routes_composition_through_facade(lib, monkeypatch):
-    """The inverse is queued through ``Database.queue_change`` (a patch target
-    the keyword-provenance flows share); the alias check runs on the
-    repository, where a class-level patch reaches it."""
+def test_cancel_queues_the_inverse_through_the_repository(lib, monkeypatch):
+    """The inverse is queued through ``SyncRepository.queue`` and the alias
+    check runs on the repository, where class-level patches reach both."""
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     _insert(db, lib["a"], "keyword_add", "Robin", other)
     queued, alias_calls = [], []
-    real_queue = db.queue_change
+    real_queue = SyncRepository.queue
 
     def alias(repo, photo_id, workspace_id, value):
         assert repo.conn is db.conn
         alias_calls.append((photo_id, workspace_id, value))
         return True
 
-    def recorder(*args, **kwargs):
+    def recorder(repo, *args, **kwargs):
         queued.append((args, kwargs))
-        return real_queue(*args, **kwargs)
+        return real_queue(repo, *args, **kwargs)
 
     monkeypatch.setattr(SyncRepository, "keyword_sidecar_alias", alias)
-    monkeypatch.setattr(db, "queue_change", recorder)
-    assert db.remove_pending_changes(lib["a"], workspace_id=other) == 1
+    monkeypatch.setattr(SyncRepository, "queue", recorder)
+    assert db.pending_changes.cancel(lib["a"], workspace_id=other) == 1
     assert alias_calls == [(lib["a"], other, "Robin")]
     assert queued == [
         ((lib["a"], "keyword_remove", "Robin"),
@@ -942,18 +941,18 @@ def test_queue_flag_change_routes_through_facade(lib, flag_config, monkeypatch):
         db, "get_effective_config", lambda conf: {"sync_flags_to_xmp": True},
     )
     removed, queued = [], []
-    real_remove, real_queue = db.remove_pending_changes, db.queue_change
+    real_remove, real_queue = SyncRepository.cancel, SyncRepository.queue
 
-    def rec_remove(*a, **k):
+    def rec_remove(repo, *a, **k):
         removed.append((a, k))
-        return real_remove(*a, **k)
+        return real_remove(repo, *a, **k)
 
-    def rec_queue(*a, **k):
+    def rec_queue(repo, *a, **k):
         queued.append((a, k))
-        return real_queue(*a, **k)
+        return real_queue(repo, *a, **k)
 
-    monkeypatch.setattr(db, "remove_pending_changes", rec_remove)
-    monkeypatch.setattr(db, "queue_change", rec_queue)
+    monkeypatch.setattr(SyncRepository, "cancel", rec_remove)
+    monkeypatch.setattr(SyncRepository, "queue", rec_queue)
     assert db.queue_flag_change_if_enabled(lib["a"], "flagged")
     assert removed == [((lib["a"], "flag"), {"workspace_id": ws})]
     assert queued == [
@@ -1093,8 +1092,8 @@ def test_status_counts(lib):
 
 def test_count_queued_location_photos(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
-    place = db.add_keyword("Pond", kw_type="location")
-    plain = db.add_keyword("Heron")
+    place = db.keywords.add("Pond", kw_type="location")
+    plain = db.keywords.add("Heron")
     db.tag_photo(lib["a"], place)
     db.tag_photo(lib["b"], plain)
     db.tag_photo(lib["c"], place)
@@ -1147,8 +1146,6 @@ def test_delete_workspace_returns_rows_uncommitted(lib):
 # location repositories (and patched on ``db`` by their tests), and the undo
 # replay's flag setter calls ``queue_flag_change_if_enabled``.
 _DELEGATING_SYNC_METHODS = (
-    "queue_change",
-    "remove_pending_changes",
     "queue_flag_change_if_enabled",
 )
 
@@ -1182,7 +1179,6 @@ _REMOVED_SYNC_WRAPPERS = (
 # Production code calls those instead, so their guards, their composition and
 # the patch target on ``queue_change`` are not bypassed.
 _FACADE_ONLY_REPOSITORY_METHODS = (
-    "queue",
     "claim_for_sync",
     "remove_token",
     "delete_matching",
@@ -1209,9 +1205,9 @@ def test_sync_method_delegates_to_repository(name):
     assert "conn" not in attrs, (
         f"Database.{name} touches self.conn; move the SQL to SyncRepository"
     )
-    # ``queue_flag_change_if_enabled`` composes the two queue methods and,
-    # since it stopped committing, needs no repository of its own.
-    assert "_sync_repository" in attrs or {"queue_change", "remove_pending_changes"} <= attrs, (
+    # ``queue_flag_change_if_enabled`` composes the queue's ``cancel`` and
+    # ``queue`` through the ``pending_changes`` accessor.
+    assert "_sync_repository" in attrs or "pending_changes" in attrs, (
         f"Database.{name} no longer delegates to SyncRepository"
     )
 
@@ -1253,12 +1249,14 @@ def test_sync_queue_function_parameters_unchanged():
 def test_sync_facade_signatures_unchanged():
     sig = {n: calling_signature(getattr(Database, n))
            for n in _DELEGATING_SYNC_METHODS}
-    assert sig["queue_change"] == (
+    assert calling_signature(SyncRepository.queue) == (
         "(self, photo_id, change_type, value, workspace_id=None)"
     )
-    assert sig["remove_pending_changes"] == (
+    assert calling_signature(SyncRepository.cancel) == (
         "(self, photo_id, change_type=None, value=None, workspace_id=None)"
     )
+    for name in ("queue_change", "remove_pending_changes"):
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.pending_changes"
     assert sig["queue_flag_change_if_enabled"] == (
         "(self, photo_id, flag, workspace_id=None)"
     )
@@ -1360,7 +1358,7 @@ def test_production_code_uses_facade_for_coordinated_queue_writes():
         text = path.read_text(encoding="utf-8")
         offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
     assert offenders == [], (
-        "Call the Database method or the service instead (db.queue_change, "
-        "pending_changes.claim_pending_changes_for_sync, db.remove_pending_changes, "
+        "Call the queue's entry points or the service instead (db.pending_changes.queue, "
+        "db.pending_changes.cancel, pending_changes.claim_pending_changes_for_sync, "
         f"pending_changes.clear_pending, ...): {offenders}"
     )

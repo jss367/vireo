@@ -1540,7 +1540,7 @@ def test_add_keyword_input_suggests_existing_keyword(live_server, page):
     db = live_server["db"]
     source_id = live_server["data"]["photos"][0]
     target_id = live_server["data"]["photos"][1]
-    keyword_id = db.add_keyword("Alan's Hummingbird")
+    keyword_id = db.keywords.add("Alan's Hummingbird")
     db.tag_photo(source_id, keyword_id)
     db.commit()
 
@@ -1577,7 +1577,7 @@ def test_multiselect_keyword_picker_shows_and_applies_suggestion(live_server, pa
         "Batch suggestion Dogwood",
     ]
     for name in keyword_names:
-        keyword_id = db.add_keyword(name)
+        keyword_id = db.keywords.add(name)
         db.tag_photo(live_server["data"]["photos"][-1], keyword_id)
         db.commit()
 
@@ -1651,8 +1651,8 @@ def test_species_badge_tracks_detail_keyword_edits_without_reload(live_server, p
     target_id = live_server["data"]["photos"][1]
     old_name = "Hawaii Creeper"
     new_name = "Hawaii Amakihi"
-    old_id = db.add_keyword(old_name, kw_type="taxonomy")
-    new_id = db.add_keyword(new_name, kw_type="taxonomy")
+    old_id = db.keywords.add(old_name, kw_type="taxonomy")
+    new_id = db.keywords.add(new_name, kw_type="taxonomy")
     db.tag_photo(target_id, old_id)
     db.tag_photo(source_id, new_id)
     db.commit()
@@ -1752,7 +1752,7 @@ def test_add_keyword_autocomplete_retries_after_fetch_failure(live_server, page)
     db = live_server["db"]
     source_id = live_server["data"]["photos"][0]
     target_id = live_server["data"]["photos"][1]
-    keyword_id = db.add_keyword("Alan's Hummingbird")
+    keyword_id = db.keywords.add("Alan's Hummingbird")
     db.tag_photo(source_id, keyword_id)
     db.commit()
     calls = {"count": 0}
@@ -2287,7 +2287,7 @@ def test_multiselect_shows_and_removes_keyword_shared_by_all_photos(live_server,
     db = live_server["db"]
     selected_ids = live_server["data"]["photos"]
     keyword_name = "Shared selection keyword"
-    keyword_id = db.add_keyword(keyword_name)
+    keyword_id = db.keywords.add(keyword_name)
     db.commit()
     for photo_id in selected_ids:
         db.tag_photo(photo_id, keyword_id)
@@ -2330,8 +2330,8 @@ def test_multiselect_groups_metadata_and_bulk_updates_wildlife_workflow(
 ):
     db = live_server["db"]
     selected_ids = live_server["data"]["photos"]
-    species_id = db.add_keyword("House Sparrow", is_species=True)
-    location_id = db.add_keyword("Grangettes nature reserve", kw_type="location")
+    species_id = db.keywords.add("House Sparrow", is_species=True)
+    location_id = db.keywords.add("Grangettes nature reserve", kw_type="location")
     db.commit()
     for photo_id in selected_ids:
         db.tag_photo(photo_id, species_id)

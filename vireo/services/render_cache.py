@@ -35,10 +35,10 @@ log = logging.getLogger(__name__)
 
 def queue_edit_recipe_sync(db: Database, photo_id: int, recipe_json: str | None) -> None:
     """Queue the current non-destructive edit recipe for XMP sync (no commit)."""
-    db.remove_pending_changes(
+    db.pending_changes.cancel(
         photo_id, "edit_recipe", workspace_id=db.require_workspace_id(),
     )
-    db.queue_change(
+    db.pending_changes.queue(
         photo_id, "edit_recipe", recipe_json or "",
         workspace_id=db.require_workspace_id(),
     )

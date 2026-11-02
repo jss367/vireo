@@ -134,7 +134,7 @@ def test_prediction_decisions_do_not_imply_inspection_or_species_resolution(db, 
     _prediction(db, photos[0], "rejected")
     _prediction(db, photos[1], "accepted", AUTO_MATCH_REVIEW_MARKER)
     _prediction(db, photos[2], "pending")
-    species = db.add_keyword("Confirmed bird", is_species=True)
+    species = db.keywords.add("Confirmed bird", is_species=True)
     db.tag_photo(photos[1], species)
     db.commit()
     review = collection_coverage(db, cid, {})["review"]
@@ -157,7 +157,7 @@ def test_explicitly_unresolved_is_independent_of_existing_species_and_scope(db, 
 
     _, photos = _photos(db, tmp_path)
     cid = _collection(db, photos[:2])
-    species = db.add_keyword("Confirmed bird", is_species=True)
+    species = db.keywords.add("Confirmed bird", is_species=True)
     db.tag_photo(photos[0], species)
     db.commit()
     monkeypatch.setattr(Database, "identity_alternatives", property(lambda _db: None), raising=False)

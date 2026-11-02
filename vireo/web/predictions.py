@@ -1112,12 +1112,12 @@ def create_predictions_blueprint(
             # same for a legacy/name-only bucket.
             explicit = resolver.explicit_source(expected_species) is not None
             # add_keyword returns the new or existing keyword's id.
-            keyword_id = cast(int, db.add_keyword(
+            keyword_id = cast(int, db.keywords.add(
                 identity.display_name, is_species=True,
                 source_taxon_id=identity.taxon_id if explicit else None,
             ))
             species = db.keywords.name_of(keyword_id)
-        already_tagged = db.get_photos_with_equivalent_species(all_photo_ids, keyword_id)
+        already_tagged = db.photo_species.get_photos_with_equivalent_species(all_photo_ids, keyword_id)
         for photo_id in all_photo_ids:
             if photo_id in already_tagged:
                 continue
@@ -1144,7 +1144,7 @@ def create_predictions_blueprint(
             flat_removals = db.pending_changes.flat_keyword_removals(photo_id, item_species)
             # accept_prediction queues an add directly. Reconcile it
             # with any pending removal before applying the shared helper.
-            db.remove_pending_changes(photo_id, "keyword_add", item_species)
+            db.pending_changes.cancel(photo_id, "keyword_add", item_species)
             queue_keyword_add(db, photo_id, item_species)
             # Keep the suppression records cleared by the add, including
             # those in other workspaces sharing this photo's sidecar.
@@ -1923,14 +1923,14 @@ def create_predictions_blueprint(
         # intermediate commit would release the writer lock mid-decision.
         try:
             if local_species:
-                kid = db.add_keyword(
+                kid = db.keywords.add(
                     local_species, is_species=True,
                 )
                 # Queue/record the stored spelling (see api_add_keyword).
                 stored_name = db.keywords.name_of(kid)
                 if stored_name:
                     local_species = stored_name
-                already_has_species = db.get_photos_with_equivalent_species(
+                already_has_species = db.photo_species.get_photos_with_equivalent_species(
                     actionable_picks, kid
                 )
                 added_picks = []
@@ -1939,7 +1939,7 @@ def create_predictions_blueprint(
                     if pid in already_has_species:
                         continue
                     db.tag_photo(pid, kid, source="manual")
-                    db.queue_change(
+                    db.pending_changes.queue(
                         pid, "keyword_add", local_species,
                     )
                     added_picks.append(pid)
