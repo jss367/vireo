@@ -131,7 +131,7 @@ export async function toggleDetailWildlifeExcluded() {
 // the worst of both: its stamp makes any fetch that started before it skip
 // these ids, while that fetch still adds them to colorLabelsFetched — so a
 // labelled photo the user edited before initial hydration finished reads as a
-// definite "no color" until reload (Codex P2 on PR #1668).
+// definite "no color" until reload.
 //
 // The refetch alone is the whole repair; the stamp must NOT be cleared. Stamps
 // only ever advance through _noteColorLabelEdits, so a stamp is never greater
@@ -139,8 +139,8 @@ export async function toggleDetailWildlifeExcluded() {
 // response. Clearing it would instead un-guard a *concurrent* write: with
 // overlapping writes on one photo, an earlier request failing after a later one
 // succeeded would drop the successful write's completion stamp, letting a GET
-// issued before either of them overwrite the label the user actually chose
-// (Codex P2, second pass). Dropping the fetched marker is kept — until the
+// issued before either of them overwrite the label the user actually chose.
+// Dropping the fetched marker is kept — until the
 // refetch lands we genuinely do not know this photo's color, and the batch
 // inspector should say so rather than assert "no color".
 export function _recoverColorLabelsAfterFailedWrite(/** @type {number[]} */ ids) {
@@ -164,7 +164,7 @@ export async function fetchColorLabels(/** @type {number[]} */ photoIds) {
   // Chunk the GET URL so oversized stacks (or any large id set) don't
   // exceed the browser/proxy/server request-target limit and drop the
   // whole page's color labels when a stack expansion hydrates a large
-  // member list (Codex P2 on PR #1561). Matches the 500-id cap the
+  // member list. Matches the 500-id cap the
   // /api/photos/by-ids stack-expansion path already uses.
   /** @type {Record<string, string>} */ var combined = {};
   var chunkFailed = false;

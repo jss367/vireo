@@ -165,15 +165,9 @@ function predictionEmptyMessage(/** @type {BrowsePredictionPhotoState | null} */
   if (!photoState) return 'No predictions for this photo.';
   if (!photoState.detector_ran) return 'Not yet classified — no detector has run on this photo.';
   if (photoState.classifier_ran) {
-    // A third branch used to sit here, taking a count of buckets the
-    // borrowed-confidence suppression had dropped and naming that as the
-    // reason the panel was empty. Both the suppression and this branch are
-    // retired: the only rows that could reach them were legacy
-    // mixed-consensus bursts, which a since-retired one-shot repair cleared
-    // and current classification never writes.
-    // The two remaining branches are exhaustive again — with nothing
-    // suppressed, an empty panel under a classifier that ran means either
-    // the floor hid everything or there was nothing to hide.
+    // The two branches are exhaustive: no bucket is suppressed, so an empty
+    // panel under a classifier that ran means either the floor hid
+    // everything or there was nothing to hide.
     if (hiddenCount) return 'No species above threshold — every prediction is below your confidence floor.';
     return 'Classification ran and produced no species for this photo.';
   }
@@ -409,15 +403,11 @@ export function renderDetailPredictions(/** @type {DetailPredictionsResponse} */
     return bConf - aConf;
   });
 
-  // A bucket-level suppression used to run here, mirroring the server's:
-  // under an active threshold, a pending bucket left with `confidence ==
-  // null` was dropped, counted, and explained in its own empty-state
-  // sentence. Retired along with the server's copy. A pending bucket can
-  // only keep a null confidence when every row in it is labelled with a
-  // species other than the one the accept path applies, and a since-retired
-  // one-shot repair cleared that shape out of the catalog (current
-  // classification never writes it) — a grouped row's consensus is now its own
-  // species, so a surviving row always credits its own bucket. (With
+  // No bucket is dropped for a null confidence, matching the server. A
+  // pending bucket can only keep a null confidence when every row in it is
+  // labelled with a species other than the one the accept path applies, a
+  // shape classification never writes — a grouped row's consensus is its
+  // own species, so a surviving row always credits its own bucket. (With
   // `threshold > 0` the row filter above has already dropped any row whose
   // confidence is null or zero, so there is no second route to a null
   // bucket here.) The credit gate stays: it is what keeps the number honest
@@ -604,8 +594,8 @@ export async function afterHistoryChange() {
     members.forEach(function(photo) { cachedMemberIds.add(photo.id); });
   });
   // ``focusAnchor``: an undone rating or keyword can move the anchored card
-  // anywhere in the current sort, and paging to find it walks the catalog
-  // (Codex P1 on PR #1695). The ids this function restores below all belong
+  // anywhere in the current sort, and paging to find it walks the catalog.
+  // The ids this function restores below all belong
   // to the anchored card — ``captureSelectedPhotoAnchor`` only anchors a
   // single photo or a single stack — so the focused window holds them.
   var loaded = await resetAndLoad({
@@ -621,7 +611,7 @@ export async function afterHistoryChange() {
   // reflect what the user wants. Snapshot the epoch here so the restore
   // below can bail out instead of folding the pre-undo ids back into the
   // fresh selection, which would replace a new single-card pick or merge
-  // into a new batch. Codex P2 on PR #1672.
+  // into a new batch.
   var restoreEpoch = state.anchorRestoreEpoch;
   var windowIsCurrent = observeBrowseWindow();
   for (var cover of state.photos.slice()) {
@@ -631,7 +621,6 @@ export async function afterHistoryChange() {
     // frames are in `previousSelection` and in no member cache; without
     // hydrating them, the restore below finds only the cover and the whole
     // stack quietly shrinks to one frame across an undo.
-    // Codex P2 on PR #1672.
     if (memberIds && memberIds.some(function(id) {
       return cachedMemberIds.has(id) || previousSelection.has(id);
     })) {
@@ -815,7 +804,7 @@ async function rejectDetailPredictions(/** @type {number[]} */ predictionIds, /*
    deliberately does not go through _refreshBrowseKeywordState — but it does
    change the photo's top prediction, and with the Prediction confidence card
    field on, the badge would otherwise keep showing the score the user just
-   threw away (Codex P2 on PR #1670). Accepts get the same value for free
+   threw away. Accepts get the same value for free
    from the /by-ids fetch _refreshBrowseKeywordState already makes.
 
    Skipped when the card field is off (nothing displays the number) and when

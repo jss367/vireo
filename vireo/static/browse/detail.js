@@ -66,8 +66,7 @@ export async function loadDetail(/** @type {number} */ id) {
   // Accept line for the whole batch — clicking it applies A's GPS place to
   // every selected photo. Also null detailPhotoId so any in-flight
   // reverse-geocode for A can't repaint through maybeShowExifSuggestion's
-  // post-await guard once the batch inspector is on screen. Codex P2 on
-  // PR #1097 (17:23Z).
+  // post-await guard once the batch inspector is on screen.
   if (state.detailPhotoId !== id) {
     clearExifSuggestion();
     state.detailPhotoId = null;
@@ -407,9 +406,8 @@ export function hideDetailPanel() {
 // detailPhotoId as its owner check — so a later selection that still
 // contains the abandoned photo would resurrect its Accept line for the whole
 // batch, and one click would apply that one photo's place to every selected
-// photo. closeDetail() and clearSelection() have retired both since Codex P2
-// on PR #1097; the paths that enter a stack selection need it for the same
-// reason. Codex P1 on PR #1672.
+// photo. closeDetail() and clearSelection() retire both; the paths that
+// enter a stack selection need it for the same reason.
 export function abandonDetailFocusForBatch() {
   hideDetailPanel();
   clearExifSuggestion();
@@ -426,15 +424,14 @@ export function closeDetail() {
   // later Ctrl+A (or any batch that still contains that photo) would satisfy
   // renderLocationEmpty's owner-in-selection check and resurrect the anchor's
   // Accept line for the whole batch — clicking it would apply the anchor's
-  // GPS-derived place to every selected photo. Codex P2 on PR #1097.
+  // GPS-derived place to every selected photo.
   clearExifSuggestion();
   // Null the ambient detail-photo pointer for the same reason. maybeShowExif
   // Suggestion's post-await guard uses detailPhotoId as its owner
   // check: if a reverse-geocode was in flight when we closed the panel, the
   // fetch keeps running and later resolves. With the pointer still set, a
   // Ctrl+A that includes the departed photo would satisfy both async guards
-  // and repaint A's Accept line into the batch inspector. Codex P2 on
-  // PR #1097 (17:04Z follow-up).
+  // and repaint A's Accept line into the batch inspector.
   state.detailPhotoId = null;
   // Re-highlight any cmd/shift-click selections that survive detail close.
   // A blanket .remove('selected') would leave selectedPhotos armed for batch

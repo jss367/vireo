@@ -463,7 +463,6 @@ document.addEventListener('contextmenu', function(e) {
     // restore still waiting on stack hydration (undo/redo) considers itself
     // current and merges the pre-undo ids into the stack just chosen.
     // selectPhoto() and selectBrowseStackAll() bump it for the same reason.
-    // Codex P2 on PR #1672.
     state.anchorRestoreEpoch++;
     selection.selectBatch(stackIds, state.photos.findIndex(function(p) { return p.id === pid; }));
     abandonDetailFocusForBatch();
@@ -477,7 +476,6 @@ document.addEventListener('contextmenu', function(e) {
     // pre-undo ids into the card just right-clicked. Only when it actually
     // changed: right-clicking inside the selection keeps it, and retiring a
     // pending restore for that would lose a selection nobody replaced.
-    // Codex P2 on PR #1672.
     if (selectionIdsKey(ids) !== beforeCoercion) { state.anchorRestoreEpoch++; selection.replaceBatch(ids); }
   }
   // If coercion replaced the set, align selectedPhotoId (so the detail panel
@@ -681,7 +679,7 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
   // whatever ``/api/workspaces/active`` returns at click time. Workspace
   // activation is persisted globally, so another tab switching workspaces
   // after render would otherwise redirect the destructive call at the
-  // wrong workspace (Codex review r3798912101).
+  // wrong workspace.
   var wsId = state.browseWorkspaceId;
   if (wsId == null) {
     showToast(
@@ -703,7 +701,7 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
   // descendant scope (opened via ``?folder_id=<descendant>``) is stripped
   // as well; without it, a subsequent reload restores the detached
   // descendant and loads an empty Browse view because the refreshed tree
-  // no longer contains it (Codex review r3799361364).
+  // no longer contains it.
   var removedSubtreeIds = (function collectSubtreeIds() {
     var childrenByParent = /** @type {Record<string, number[]>} */ ({});
     state.browseFolderRows.forEach(function(row) {
@@ -758,8 +756,7 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
     // ``browseFolderRows`` excludes missing rows, so a health refresh
     // that removed the descendant before the click would leave it out of
     // ``removedSubtreeIds`` and the URL would still restore an empty
-    // scope on any subsequent reload (Codex reviews r3799300182,
-    // r3799361364, and r3799431533). Treating "not currently visible in
+    // scope on any subsequent reload. Treating "not currently visible in
     // ``browseFolderRows``" as also-strip covers the missing-descendant
     // case without pulling in catalog ancestry.
     try {
@@ -787,12 +784,12 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
     // the tree. Without this, ``localFolderData()`` still
     // carries the removed root when ``renderFolderTree`` runs, so
     // ``folderLocalStatuses`` synthesizes a phantom top-level row for it
-    // and leaves the removed folder visible until the next blocker poll
-    // (Codex review r3798912105). ``load()`` swallows fetch failures and
+    // and leaves the removed folder visible until the next blocker poll.
+    // ``load()`` swallows fetch failures and
     // returns ``null``; rendering against the pre-DELETE
     // ``localFolderData()`` in that case would resurrect the
     // removed root as a phantom, so reload instead of rebuilding from
-    // stale local state (Codex review r3799142116).
+    // stale local state.
     var local = localFolders();
     if (local && typeof local.load === 'function') {
       var localRefreshed = await local.load();
@@ -916,8 +913,7 @@ async function deleteCollectionById(/** @type {number} */ cid, /** @type {string
   // expression is loaded into the filter bar instead of being applied as a
   // scope), so we need to clear that path too — otherwise the sidebar row
   // disappears but the filter bar and grid keep applying the deleted
-  // collection's expression until the user manually clears it (Codex
-  // review r3621903982).
+  // collection's expression until the user manually clears it.
   if (state.activeCollectionId === cid) {
     state.activeCollectionId = null;
     resetAndLoad();

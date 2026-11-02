@@ -449,11 +449,11 @@ export async function removeSelectionKeyword(/** @type {number} */ keywordId) {
   // ``resetAndLoad({preserveScroll: true})`` when any active rule reads a
   // keyword-derived field (``dependsOnMutation([MUTATION_KEYWORD])``), and
   // the sidebar's ``activeKeyword`` path installs the same ``keyword``
-  // rule into VireoFilter — so the earlier follow-up call to
-  // ``refreshActiveKeywordAfterRemoval`` fired a *second* reset that
-  // arrived after the first had already cleared ``photos`` and grid
+  // rule into VireoFilter — so a follow-up call to
+  // ``refreshActiveKeywordAfterRemoval`` would fire a *second* reset that
+  // arrives after the first has already cleared ``photos`` and grid
   // cards, leaving ``captureBrowseViewportAnchor`` nothing to anchor on
-  // and dropping the scroll position (Codex review r4013311737).
+  // and dropping the scroll position.
   refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
   refreshPendingSyncBanner();
   showUndoToast();
