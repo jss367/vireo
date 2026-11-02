@@ -328,8 +328,7 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
         # unscored run on a different detection of the same model are two
         # separate pieces of evidence. The scored one may say "no label
         # matches", but the unscored one was never judged — the blanket
-        # verdict must stay blocked over the panel that still displays it
-        # (Codex P1 on f074d0c).
+        # verdict must stay blocked over the panel that still displays it.
         unscored_assessments.append(assessment)
     summary = summarize(
         [assessment for _score, assessment in best.values()]
@@ -383,8 +382,8 @@ def _assess_current_rows(match_rows, config):
             # runs`` cannot see these — its NOT EXISTS is satisfied by the
             # row's mere presence — so without this branch the run would
             # vanish from the rollup entirely and a failing sibling could
-            # carry the photo to ``unlisted`` over predictions nobody judged
-            # (Codex P1 on ecb275c). Absence of a verdict is not a verdict,
+            # carry the photo to ``unlisted`` over predictions nobody judged.
+            # Absence of a verdict is not a verdict,
             # whichever shape the absence takes.
             assessment = _unmeasured_assessment(
                 model,

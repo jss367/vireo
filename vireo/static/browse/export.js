@@ -240,7 +240,7 @@ export function markExportCustom() {
 // than substituted. /api/photos/<id> returns the same species-rank keyword
 // list the export worker names files with, so the preview matches the file
 // on disk. Cleared each time the modal opens so a renamed photo cannot show
-// a stale name (Codex P2 on PR #1561).
+// a stale name.
 var _exportPreviewPhotos = /** @type {Record<string, BrowsePhoto | null>} */ ({});
 var _exportPreviewFetches = /** @type {Record<string, Promise<void>>} */ ({});
 
@@ -302,7 +302,7 @@ export function updateExportPreview() {
   // Resolve that photo from the server rather than previewing a stand-in:
   // rendering the stack's loaded cover here would assert a filename the
   // export will never write, which is exactly the kind of plausible-looking
-  // proxy CORE_PHILOSOPHY forbids (Codex P2 on PR #1561).
+  // proxy CORE_PHILOSOPHY forbids.
   if (!photo && Object.prototype.hasOwnProperty.call(_exportPreviewPhotos, String(firstId))) {
     photo = _exportPreviewPhotos[String(firstId)] || null;
     if (!photo) {

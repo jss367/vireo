@@ -88,8 +88,8 @@ def attach_species_representatives(db, photo_dicts):
     # whose photo dicts lack the `flag` column (notably /api/predictions,
     # whose SELECT only pulls filename/timestamp from photos). The
     # in-loop `p.get("flag") == "rejected"` shortcut still short-circuits
-    # rejected photos for views that DO include flag, so this only shifts
-    # behavior for the payloads that were previously reading raw prefs.
+    # rejected photos for views that DO include flag, so this gate is what
+    # protects the payloads without it.
     representatives = db.get_species_representatives(eligible_only=True)
     for p in photo_dicts:
         pid = p.get("photo_id", p.get("id"))
@@ -196,7 +196,7 @@ def prepare_browse_photo_dicts(db, photos, stack_items=None):
     # score that positioned each item — read off the stack's *leading*
     # member, which is usually not the quality-ranked cover. Keep it so
     # the badge names the number that decided the card's place instead of
-    # the cover's own (Codex P2 on PR #1670). Absent for every other sort
+    # the cover's own. Absent for every other sort
     # and for unstacked reads, where the card's own score is the one that
     # positioned it.
     stack_lead_confidence = {}
@@ -254,8 +254,7 @@ def prepare_browse_photo_dicts(db, photos, stack_items=None):
         # keeps results similarity-ranked no matter what the dropdown
         # says, and that path builds its stacks in Python with only the
         # cover's own score, so a select-derived label would explain the
-        # relevance order with a number that did not produce it (Codex
-        # P2 on PR #1670).
+        # relevance order with a number that did not produce it.
         if (photo.get("browse_stack") or {}).get("count", 0) >= 2:
             photo["prediction_confidence_is_stack_lead"] = True
     attach_edit_recipes(db, photo_dicts)

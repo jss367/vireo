@@ -24,8 +24,8 @@ export const state = {
   // capture the second call needs is already gone — it would clear
   // ``selectedPhotoId`` and reload from page 1, losing the selection the
   // feature exists to preserve. Hold the in-flight target here so a newer
-  // focused reload can pick up the older one's anchor (Codex review
-  // r4021334323). Cleared once every in-flight focused reload has settled.
+  // focused reload can pick up the older one's anchor. Cleared once every
+  // in-flight focused reload has settled.
   /** @type {BrowseAnchor | null} */
   pendingFocusAnchor: null,
   // Which photo the last focused load was actually placed by (see loadPhotos).
@@ -69,8 +69,7 @@ export const state = {
   // cancel an in-flight expansion, and a subsequent re-expand starts a new
   // attempt. Tracking every pending request means a mid-flight edit reaches
   // all of them, so an untracked earlier response cannot cache pre-edit
-  // members while only the newest request was marked stale. Codex P2 on
-  // PR #1561.
+  // members while only the newest request was marked stale.
   /** @type {Record<string, BrowseStackRequest[]>} */
   browseStackExpansionRequests: {},
   detailPredictionsExpanded: false,
@@ -78,16 +77,13 @@ export const state = {
   _detailPredictionData: null,
   // The single-photo panel's rendered rows, in render order, so its buttons can
   // carry a bare index instead of the row's data. The selection panel uses
-  // selectionPanel for its row snapshots; the detail panel matches it,
-  // for a reason worth stating: it used to interpolate the species straight
-  // into an inline handler attribute —
-  // `onclick='acceptDetailPredictions([12],44,"Say\'s Phoebe")'` — and the
-  // apostrophe closed the attribute. Accept was broken outright for Say's
-  // Phoebe, Cooper's Hawk, Steller's Jay, Bewick's Wren, Swainson's Hawk,
-  // Wilson's Warbler: possessive common names are ordinary in North American
-  // birds, which is most of what this app is pointed at. Escaping that one
-  // interpolation would have fixed that one line; keeping row data out of the
-  // markup is what stops the next button added here from reintroducing it.
+  // selectionPanel for its row snapshots; the detail panel matches it.
+  // Interpolating the species into an inline handler attribute —
+  // `onclick='acceptDetailPredictions([12],44,"Say\'s Phoebe")'` — lets the
+  // apostrophe close the attribute and breaks Accept for every possessive
+  // common name (Say's Phoebe, Cooper's Hawk, Steller's Jay), which are
+  // ordinary among North American birds. Keeping row data out of the markup
+  // means no button added here can reintroduce that.
   /** @type {BrowsePredictionGroup[]} */
   detailPredictionGroups: [],
   /** @type {number | null} */
@@ -113,7 +109,7 @@ export const state = {
   // stale value for the edited id survive.
   /** @type {Record<string, number>} */
   colorLabelEditGen: Object.create(null),
-  // rating/flag/color/date/keyword filter state now lives in VireoFilter
+  // rating/flag/color/date/keyword filter state lives in VireoFilter
   // (the universal filter bar); Browse keeps only page-scope state.
   /** @type {number | null} */
   activeFolderId: null,
@@ -125,14 +121,12 @@ export const state = {
   // Normal collection clicks keep the historical collection-only behavior.
   dashboardCollectionScope: false,
   // Which saved collection (if any) is currently loaded into the filter bar
-  // as editable chips. Phase 5's ``filterByCollection`` clears
-  // ``activeCollectionId`` when it hands off to the filter bar (because the
-  // expression IS the filter and the historical "collection endpoint" mode
-  // is gone), so we need a separate handle to reload the expression after
-  // membership edits — refreshActiveCollectionAfterMembershipChange used to
-  // only reload the sidebar counts, leaving a stale photo_ids list in the
-  // bar until the user reopened the collection (CodeRabbit review
-  // r3620473562). Cleared by the filter bar's onChange when the user edits
+  // as editable chips. ``filterByCollection`` clears ``activeCollectionId``
+  // when it hands off to the filter bar (the expression IS the filter), so
+  // refreshActiveCollectionAfterMembershipChange needs this separate handle
+  // to reload the expression after membership edits — reloading only the
+  // sidebar counts would leave a stale photo_ids list in the bar until the
+  // user reopened the collection. Cleared by the filter bar's onChange when the user edits
   // the expression (so a user-edited chip set isn't silently reverted to
   // the saved collection on the next membership refresh).
   /** @type {number | null} */
@@ -153,7 +147,7 @@ export const state = {
   // (filterByFolder/filterByKeyword/filterByCollection). A queued collection
   // open captures the gen at entry and aborts on resume if a later scope
   // change has advanced it — otherwise the queued click would clobber the
-  // user's newer selection (Codex review r3624395785).
+  // user's newer selection.
   browseScopeGen: 0,
   timelineMode: false,
   calendarYear: new Date().getFullYear(),
@@ -175,8 +169,7 @@ export const state = {
   // Same superseded-response guard as loadCollectionCounts, extended to the
   // summary and calendar loaders so a slow /api/browse/summary or
   // /api/photos/calendar response cannot overwrite the panel or heatmap
-  // after a newer scope selection triggered a fresh load
-  // (CodeRabbit review r3684913398).
+  // after a newer scope selection triggered a fresh load.
   summaryLoadGen: 0,
   /** @type {Record<string, BrowseLoadState<BrowseSummary>>} */
   summaryLoadStates: {},
@@ -198,8 +191,8 @@ export const state = {
   // without any freshness guard, so a slow pre-transition response can arrive
   // after a guarded ``refreshBrowseAfterFolderHealthChange`` render and
   // repaint the sidebar with data that no longer reflects the current health
-  // state — reintroducing the offline-folder-in-tree symptom the health
-  // refresh was meant to fix (Codex review r3686842772). Every loader checks
+  // state — showing an offline folder in the tree after the health refresh
+  // removed it. Every loader checks
   // its captured generation after ``await`` and skips ``render*`` when a
   // newer call has since started, so last-started always wins regardless of
   // which call site issued it.
@@ -223,26 +216,25 @@ export const state = {
   // response, so ``removeWorkspaceRootFromBrowse`` can bind its DELETE to
   // the workspace the user actually saw. Trusting ``/api/workspaces/active``
   // at click time would let a cross-tab workspace switch redirect the
-  // destructive call to the wrong workspace (Codex review r3798912101).
+  // destructive call to the wrong workspace.
   /** @type {number | null} */
   browseWorkspaceId: null,
   /** @type {Record<string, BrowseCollection>} */
   collectionsById: {},
   // Bumped by every folder-health refresh. Bootstrap snapshots it before its
   // first await and compares after, so it must hold a number from the start:
-  // an ``undefined`` snapshot once made every normal load look like a health
-  // change happened during init, and Browse rendered empty (Codex review
-  // r3686317674).
+  // an ``undefined`` snapshot would make every normal load look like a health
+  // change happened during init, and Browse would render empty.
   folderHealthRefreshSeq: 0,
   // Track the currently-running refresh so awaiters (the photo deep-link
   // loader in particular) can wait for it to settle before re-snapshotting
   // their generation counter and retrying. Without this, a health event
   // that fires while ``?photo_id=…`` is awaiting ``_cfgPromise`` /
-  // ``/api/photos/<id>`` / ``/api/browse/init`` used to cancel the deep
+  // ``/api/photos/<id>`` / ``/api/browse/init`` would cancel the deep
   // link permanently — the refresh has no idea what folder the target
-  // photo lives in, so Browse fell back to the unscoped workspace grid
-  // without scrolling to the requested photo (and VireoFilter was left
-  // uninitialized) (Codex review r3686778061).
+  // photo lives in, so Browse would fall back to the unscoped workspace
+  // grid without scrolling to the requested photo (and leave VireoFilter
+  // uninitialized).
   _activeFolderHealthRefresh: Promise.resolve(),
 };
 
@@ -282,7 +274,7 @@ export var PREDICTION_COLLAPSE_AT = 5;
 // the pre-write stamp wrote, so `>` alone would let its response (read from the
 // server before the write committed) overwrite the fresh local value once it
 // resolves. Re-stamping on completion puts every such fetch strictly behind
-// the write (Codex P2 on PR #1668).
+// the write.
 export function _noteColorLabelEdits(/** @type {number[]} */ ids) {
   state.colorLabelGen++;
   ids.forEach(function(id) { state.colorLabelEditGen[id] = state.colorLabelGen; });
