@@ -174,9 +174,8 @@ class _KnownCompanionKeeper:
     def finish_known_companion(self, image_path: Path, known: sqlite3.Row) -> bool:
         """Import sidecar and report the path while its owner stays locked.
 
-        Keyword creation/tagging and the sidecar helper ordinarily commit
-        internally. Hold those commits so they cannot release ownership
-        between validation, tagging and the callback. The full/hash path
+        One unit of work from the owner check through the tagging and the
+        credit, so nothing releases ownership in between. The full/hash path
         uses the same guard as stat settling.
         """
         ownership = (
@@ -198,7 +197,8 @@ class _KnownCompanionKeeper:
         Import shared-stem XMP too: the RAW can vanish after the JPEG is
         handled, even if it existed at discovery or at this call. Repeating
         the keyword import on the same owner is idempotent and preserves
-        pending removals, just as the old insert-and-merge path did.
+        pending removals, just as the old insert-and-merge path did. Runs in
+        the caller's unit of work, which commits the imported keywords.
         """
         xmp_path = image_path.with_suffix(".xmp")
         if not xmp_path.exists():
@@ -216,9 +216,7 @@ class _KnownCompanionKeeper:
                 str(xmp_path), image_path.name, str(exc) or type(exc).__name__,
             )
             return
-        if imported:
-            self.db.commit_with_retry()
-        else:
+        if not imported:
             # Unreadable: nothing was imported. The companion is re-read,
             # and this retried, on the next scan.
             self.tally.report_sidecar_failure(
@@ -314,7 +312,6 @@ class _KnownCompanionKeeper:
                 self.db.companion_pairing.set_identity_mtime(
                     known["owner_id"], image_path.name, file_mtime,
                 )
-            self.db.commit_with_retry()
         else:
             return False
         return self.finish_known_companion(image_path, known)

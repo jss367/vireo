@@ -80,8 +80,8 @@ def test_batch_identity_reuse_keeps_each_photo_association_check_live(tmp_path, 
         def change_next_photo(repository, photo_id, state):
             original(repository, photo_id, state)
             if photo_id == photos[0]:
+                # Inside the save's unit of work, which rolls it back below.
                 db.tag_photo(photos[1], keyword, source='manual')
-                db.commit()
 
         monkeypatch.setattr(IdentityAlternativesRepository, 'set_state', change_next_photo)
         with pytest.raises(IdentityHistoryStale), db.transaction():

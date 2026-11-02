@@ -120,13 +120,16 @@ def test_a_none_result_commits(db):
     assert _committed(db) == ["none"]
 
 
-def test_a_legacy_commit_inside_the_decision_is_held(db):
+def test_a_commit_inside_the_decision_is_refused_and_rolls_it_back(db):
+    from unit_of_work import TransactionOwnershipError
+
     def work():
         _write(db, "first")
         db.commit()
-        assert _committed(db) == []
         _write(db, "second")
         return {"ok": True}
 
-    prediction_decisions.under_prediction_decision_lock(db, work, json_error=_json_error)
-    assert _committed(db) == ["first", "second"]
+    with pytest.raises(TransactionOwnershipError):
+        prediction_decisions.under_prediction_decision_lock(db, work, json_error=_json_error)
+    assert _committed(db) == []
+    assert not db.in_transaction

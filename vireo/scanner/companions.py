@@ -493,9 +493,9 @@ def _defer_recipe_snapshot_cleanup(
 
         # A concurrent insert can reuse the deleted companion's id after
         # commit. Keep its new owner's snapshots and hold the writer lock
-        # from this ownership check through cleanup.
-        if not db.in_transaction:
-            db.begin_immediate()
+        # from this ownership check through cleanup (the pass runs these
+        # actions in a unit of their own once the pairs commit).
+        db.hold_writer_lock()
         if db.photos.get(cid) is None:
             cleanup_snapshot_transfer(vd, cid, pid, refs)
         _invalidate_derived_caches(

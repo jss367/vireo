@@ -79,7 +79,7 @@ def make_repo():
                 "INSERT INTO predictions(id,detection_id,classifier_model,labels_fingerprint,species,confidence)VALUES(8,8,'invented-model','invented-fp','invented',0)"
             )
     c.commit()
-    r = ns["ModelRunsRepository"](c, auto_match_review_marker="AUTO", commit_with_retry=forbidden)
+    r = ns["ModelRunsRepository"](c, auto_match_review_marker="AUTO")
     return (c, r, ns)
 
 

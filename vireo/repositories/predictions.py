@@ -116,7 +116,6 @@ class PredictionRepository:
         resolve_workspace_id,
         *,
         chunks,
-        commit_with_retry,
         auto_match_review_marker,
         top_prediction_confidence_expr,
         decided_prediction_statuses,
@@ -128,11 +127,8 @@ class PredictionRepository:
         self._resolve_workspace_id = resolve_workspace_id
         # ``db`` module helpers and constants, kept under their module names
         # so the moved bodies read them as ``self.<name>``. ``_chunks`` is
-        # ``db._chunks`` itself (its size default is bound at import)
-        # and ``commit_with_retry`` is looked up on ``db`` when the façade
-        # builds this repository (tests patch it there).
+        # ``db._chunks`` itself (its size default is bound at import).
         self._chunks = chunks
-        self.commit_with_retry = commit_with_retry
         self.AUTO_MATCH_REVIEW_MARKER = auto_match_review_marker
         self._TOP_PREDICTION_CONFIDENCE_EXPR = top_prediction_confidence_expr
         # ``Database.DECIDED_PREDICTION_STATUSES``: the statuses ``decided_ids``

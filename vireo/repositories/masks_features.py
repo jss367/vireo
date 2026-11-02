@@ -124,14 +124,10 @@ class MasksFeaturesRepository:
         conn: sqlite3.Connection,
         workspace_id_fn: Callable[[], int],
         *,
-        commit_with_retry: Callable[[sqlite3.Connection], None],
         remove_file: Callable[[str], None],
     ) -> None:
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn
-        # ``db.commit_with_retry``, passed in so repositories import no
-        # ``db`` code and a monkeypatch of the module function still applies.
-        self.commit_with_retry = commit_with_retry
         # ``Database._safe_remove_mask_file``: deletes a mask file only inside
         # the masks directory.
         self.remove_file = remove_file

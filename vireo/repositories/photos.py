@@ -59,7 +59,6 @@ class PhotoRepository:
         photo_cols,
         photo_detail_cols,
         execute_with_retry,
-        commit_with_retry,
         inclusive_date_to,
         keyword_token_clause,
         facade,
@@ -80,7 +79,6 @@ class PhotoRepository:
         # ``db`` module helpers, passed in so repositories import no ``db``
         # code and monkeypatches of the module functions still apply.
         self.execute_with_retry = execute_with_retry
-        self.commit_with_retry = commit_with_retry
         self.inclusive_date_to = inclusive_date_to
         self.keyword_token_clause = keyword_token_clause
         # Bound ``Database`` methods, kept under their façade names, so

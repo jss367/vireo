@@ -1010,8 +1010,7 @@ def _apply_choice(
     from services.edit_history import change_photo_location
 
     with db.transaction():
-        if not db.in_transaction:
-            db.begin_immediate()
+        db.hold_writer_lock()
         leaf_id, name = _choice_leaf(db, choice, details)
         # Re-read under the write lock: another tab may have placed a photo
         # since the plan was made, and imports keep existing locations.

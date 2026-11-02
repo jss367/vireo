@@ -1139,17 +1139,15 @@ def test_id_for_key_matches_the_full_cache_key(db, cat):
     assert db.predictions.id_for_key(det, "m1", "fp1", "Wren") is None
 
 
-def test_predictions_is_a_fresh_repository_on_the_connection_per_access(db, monkeypatch):
-    import db as db_module
+def test_predictions_is_a_fresh_repository_on_the_connection_per_access(db):
     from repositories.predictions import PredictionRepository
 
     first, second = db.predictions, db.predictions
     assert isinstance(first, PredictionRepository)
     assert first is not second
     assert first.conn is db.conn
-    assert first.commit_with_retry is db_module.commit_with_retry
-    monkeypatch.setattr(db_module, "commit_with_retry", lambda conn: None)
-    assert db.predictions.commit_with_retry is not first.commit_with_retry
+    # It never commits, so it carries no commit helper.
+    assert not hasattr(first, "commit_with_retry")
     # The workspace is still resolved lazily, at each read.
     db.set_active_workspace(None)
     repo = db.predictions

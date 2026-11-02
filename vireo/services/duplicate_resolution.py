@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -45,6 +45,14 @@ def check_and_resolve_duplicates_for_hash(db: Database, file_hash: str | None) -
             "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
         )
     return None
+
+
+class _Refused(Exception):
+    """Ends a resolution's unit without committing; carries what to return."""
+
+    def __init__(self, result: Any) -> None:
+        super().__init__()
+        self.result: Any = result
 
 
 def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int] | None) -> JsonDict:
@@ -79,17 +87,20 @@ def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int] | None) ->
     if db.in_transaction:
         return deferred
     preflight = repo.resolution_preflight(ids)
+    # The plan is read under the writer lock and applied in the same unit,
+    # which adopts the BEGIN IMMEDIATE; a refused plan rolls the unit back.
     db.begin_immediate()
-    with db.transaction():
-        plan = repo.resolution_plan(ids, preflight=preflight)
-        if plan is None:
-            db.rollback()
-            return {"winner_id": None, "loser_ids": [], "rejected": 0}
-        if plan is DEFERRED_PLAN:
-            db.rollback()
-            return deferred
-        winner_id, loser_ids = cast("tuple[int, list[int]]", plan)
-        db._apply_winner_loser_merge(winner_id, loser_ids)
+    try:
+        with db.transaction():
+            plan = repo.resolution_plan(ids, preflight=preflight)
+            if plan is None:
+                raise _Refused({"winner_id": None, "loser_ids": [], "rejected": 0})
+            if plan is DEFERRED_PLAN:
+                raise _Refused(deferred)
+            winner_id, loser_ids = cast("tuple[int, list[int]]", plan)
+            db._apply_winner_loser_merge(winner_id, loser_ids)
+    except _Refused as refused:
+        return refused.result
     return {
         "winner_id": winner_id,
         "loser_ids": list(loser_ids),
@@ -120,21 +131,20 @@ def keep_duplicate_copy(db: Database, photo_id: int) -> JsonDict:
     reason = repo.keep_copy_refusal(photo_id)
     if reason is not None:
         return {"error": reason}
+    # One unit, adopting the BEGIN IMMEDIATE: the plan and the merge commit
+    # together, and a refusal or a failure rolls everything back.
     db.begin_immediate()
     try:
-        found, reason = repo.keep_copy_plan(photo_id)
-        if reason is not None:
-            db.rollback()
-            return {"error": reason}
-        plan = cast("JsonDict", found)
-        # Commits the transaction opened above.
-        db._apply_winner_loser_merge(
-            photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"], manual_review=True,
-        )
-    except BaseException:
-        if db.in_transaction:
-            db.rollback()
-        raise
+        with db.transaction():
+            found, reason = repo.keep_copy_plan(photo_id)
+            if reason is not None:
+                raise _Refused({"error": reason})
+            plan = cast("JsonDict", found)
+            db._apply_winner_loser_merge(
+                photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"], manual_review=True,
+            )
+    except _Refused as refused:
+        return refused.result
     return {
         "file_hash": plan["file_hash"],
         "winner_id": photo_id,
@@ -184,17 +194,20 @@ def bulk_resolve_by_folder(
     for file_hash in file_hashes:
         preflight = repo.keep_folder_preflight(file_hash, keep_folder_norm)
         # Disk work precedes BEGIN; catalog revalidation and the merge share
-        # the writer lock. A failed nested BEGIN leaves caller work intact.
+        # the writer lock. A failed nested BEGIN leaves caller work intact,
+        # and a hash whose plan refuses rolls its unit back.
         db.begin_immediate()
-        with db.transaction():
-            winner_id, loser_ids, reason = repo.keep_folder_plan(
-                file_hash, keep_folder_norm, preflight=preflight,
-            )
-            if reason is not None:
-                db.rollback()
-                skipped.append({"file_hash": file_hash, "reason": reason})
-                continue
-            db._apply_winner_loser_merge(winner_id, loser_ids, manual_review=True)
+        try:
+            with db.transaction():
+                winner_id, loser_ids, reason = repo.keep_folder_plan(
+                    file_hash, keep_folder_norm, preflight=preflight,
+                )
+                if reason is not None:
+                    raise _Refused(reason)
+                db._apply_winner_loser_merge(winner_id, loser_ids, manual_review=True)
+        except _Refused:
+            skipped.append({"file_hash": file_hash, "reason": reason})
+            continue
         resolved.append({
             "file_hash": file_hash,
             "winner_id": winner_id,

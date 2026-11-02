@@ -133,7 +133,6 @@ class _CollectionMembership:
         self._collection_named_ids_version = (
             version[0], self.db.scanning.collection_revision(),
         )
-        self.db.commit_with_retry()
         log.warning(
             "New photo %d reused the id of a deleted photo that %d "
             "collection(s) still listed; removed the stale entry so the "

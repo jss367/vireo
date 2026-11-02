@@ -49,13 +49,9 @@ class DetectionsRepository:
         conn: sqlite3.Connection,
         *,
         chunk_size: int = 800,
-        commit_with_retry: Callable[[sqlite3.Connection], None],
     ) -> None:
         self.conn = conn
         self.chunk_size = chunk_size
-        # ``db.commit_with_retry``, passed in so repositories import no
-        # ``db`` code and a monkeypatch of the module function still applies.
-        self.commit_with_retry = commit_with_retry
 
     # -- writes -------------------------------------------------------------
 

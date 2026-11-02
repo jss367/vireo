@@ -158,9 +158,8 @@ def set_subject_verdict(
     # its workspace visibility and the prior verdict are read under the
     # writer lock (``_locked_region``), so the history row's old value is
     # the verdict this write actually replaces, and the verdict, the primary
-    # re-projection and the history row commit together (record_edit's own
-    # commit and prune run inside the unit, where a legacy commit is a
-    # no-op). The writer lock comes first and the photo lock inside
+    # re-projection and the history row commit together (the history prune
+    # follows the commit). The writer lock comes first and the photo lock inside
     # ``_apply`` second, the one order every verdict writer uses; every
     # ``SubjectVerdictError`` raised inside rolls the unit back.
     with db.transaction(immediate=True):

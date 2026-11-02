@@ -1274,8 +1274,8 @@ def test_masks_features_is_a_fresh_repository_on_the_connection_per_access(db):
 
     The workspace is passed as ``Database._ws_id`` itself, uncalled, so
     building the repository resolves nothing; the cleanup deletes get the
-    façade's contained file delete, and ``commit_with_retry`` is the module
-    function as it is at access time.
+    façade's contained file delete. It never commits, so it carries no
+    commit helper.
     """
     first, second = db.masks_features, db.masks_features
     assert isinstance(first, MasksFeaturesRepository)
@@ -1283,7 +1283,7 @@ def test_masks_features_is_a_fresh_repository_on_the_connection_per_access(db):
     assert first.conn is db.conn
     assert first.workspace_id_fn == db._ws_id
     assert first.remove_file == db._safe_remove_mask_file
-    assert first.commit_with_retry is db_module.commit_with_retry
+    assert not hasattr(first, "commit_with_retry")
 
 
 def test_accessor_writes_never_commit(db, monkeypatch):

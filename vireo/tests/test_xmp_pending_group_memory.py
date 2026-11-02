@@ -10,7 +10,7 @@ import runpy
 import sqlite3
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 SUPPORT = runpy.run_path(str(Path(__file__).with_name("test_xmp_keyword_snapshot.py")))
@@ -30,8 +30,11 @@ def _selected(module, name, namespace, cls=None):
         namespace["duplicate_resolution"] = SimpleNamespace(apply_duplicate_resolution=lambda db, ids: db._fake_apply_duplicate_resolution(ids))
         namespace["log"] = SimpleNamespace(warning=lambda *a: None)
         namespace["cast"] = cast
+        namespace.setdefault("Any", Any)
     node = next(n for n in body if isinstance(n, ast.FunctionDef) and n.name == name)
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "<pending memory>", "exec",
+    # The duplicate-resolution functions raise the module's private refusal.
+    nodes = [n for n in body if isinstance(n, ast.ClassDef) and n.name == "_Refused"] + [node]
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "<pending memory>", "exec",
                  flags=__future__.annotations.compiler_flag), namespace)
     return namespace[name]
 

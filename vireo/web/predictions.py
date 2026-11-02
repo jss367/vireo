@@ -1656,9 +1656,8 @@ def create_predictions_blueprint(
             rows = validate_review_card(db, pred_id, list(dict.fromkeys(ids)), workspace)
         except ReviewCardConflict as exc:
             return json_error(str(exc), 409)
-        # The decision's unit of work holds the legacy setters' own commits
-        # until every member and its history have succeeded; a partial
-        # failure rolls everything back.
+        # One decision's unit of work for every member and its history; a
+        # partial failure rolls everything back.
         result = accept_review_card(db, rows) if decision == 'accept' else reject_review_card(db, rows)
         return jsonify(result)
 

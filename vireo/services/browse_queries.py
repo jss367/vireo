@@ -43,8 +43,7 @@ def get_browse_summary(
     # interrupt, which makes SQLite roll the transaction back itself, takes
     # the table with it.
     with db.transaction(join=True):
-        if not db.in_transaction:
-            db.begin()
+        db.hold_read_snapshot()
         return db.photos.get_browse_summary(
             folder_id=folder_id,
             collection_id=collection_id,

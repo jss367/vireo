@@ -75,9 +75,12 @@ def run_atomic_edit[R](db: Database, work: Callable[[], R], *, immediate: bool =
 def change_photo_location(
     db: Database, photo_id: int, keyword_id: int | None = None,
 ) -> HistoryItem | None:
-    """Apply an assignment/clear and return its full before/after history item."""
-    if not db.in_transaction:
-        db.begin_immediate()
+    """Apply an assignment/clear and return its full before/after history item.
+
+    Runs in the caller's unit of work, holding the writer lock from the
+    before-state read through the write.
+    """
+    db.hold_writer_lock()
     old_value = db.edit_history.photo_location_state(photo_id)
     if keyword_id is None:
         db.locations.clear_photo(photo_id)
@@ -129,6 +132,11 @@ _IDENTITY_STALE = (
     'review the next action before trying again.'
 )
 _CACHE_LINKED = frozenset({'pipeline_grouping', 'species_confirm_cache'})
+# Actions this module replays itself rather than through ``Database``'s
+# setter and handler tables.
+SERVICE_REPLAYED_ACTIONS = frozenset({
+    *_CACHE_LINKED, 'identity_alternatives', 'photo_location', subject_verdicts.ACTION_TYPE,
+})
 
 
 def undo_last_edit(db: Database, *, cache_restore: CacheRestore | None = None) -> dict[str, Any] | None:
@@ -244,12 +252,24 @@ def _replay_entry(
         elif action == subject_verdicts.ACTION_TYPE:
             subject_verdicts.replay_history(db, items, undo=undo)
             _flip_cursor(history, entry, undo=undo)
+        elif action == 'photo_location':
+            _replay_photo_locations(db, items, undo=undo)
+            _flip_cursor(history, entry, undo=undo)
         else:
             if undo:
                 db._apply_undo(entry, items)
             else:
                 db._apply_redo(entry, items)
             _flip_cursor(history, entry, undo=undo)
+
+
+def _replay_photo_locations(db: Database, items: Sequence[Any], *, undo: bool) -> None:
+    """Restore each photo's recorded places, then queue its sidecar sync."""
+    value_key = 'old_value' if undo else 'new_value'
+    for item in items:
+        db.restore_photo_location_state(item['photo_id'], item[value_key])
+        queue_location_sync_if_enabled(db, item['photo_id'])
+    db.species_provenance.replay_history(items, undo=undo)
 
 
 def _flip_cursor(history: EditHistoryRepository, entry: dict[str, Any], *, undo: bool) -> None:

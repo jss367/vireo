@@ -20,7 +20,13 @@ from new_images_cache import get_shared_cache
 from repositories.keyword_identity_sql import resolve_import_alias
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.species_taxon_lookup import taxon_lookup_variants
-from unit_of_work import HoldingConnection, InOwnUnit, UnitOfWork, report_discarded_transaction
+from unit_of_work import (
+    GuardedConnection,
+    InOwnUnit,
+    TransactionOwnershipError,
+    UnitOfWork,
+    report_discarded_transaction,
+)
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -1051,10 +1057,11 @@ class Database:
         # ``conn`` exists only while the connection is open: ``close`` deletes
         # it, so its type is the connection, never ``None``. ``close`` and
         # ``__del__`` tolerate its absence if ``sqlite3.connect`` raises.
-        self.conn: HoldingConnection = sqlite3.connect(
-            db_path, check_same_thread=False, factory=HoldingConnection,
+        self.conn: GuardedConnection = sqlite3.connect(
+            db_path, check_same_thread=False, factory=GuardedConnection,
         )
         self._unit = UnitOfWork()
+        self.conn.units = self._unit
         self.conn.row_factory = sqlite3.Row
         self.conn.create_function(
             "vireo_keyword_text_match",
@@ -1185,9 +1192,10 @@ class Database:
     # without touching ``conn``. ``transaction()`` is the unit of work, the
     # commit point the data layer is moving to (see
     # ``docs/plans/2026-10-25-unit-of-work-design.md``); the rest are the
-    # ``sqlite3.Connection`` operations they name, kept for callers not yet
-    # converted. While a unit is open, ``commit()`` is a no-op and
-    # ``rollback()`` dooms the unit (``unit_of_work.HoldingConnection``).
+    # ``sqlite3.Connection`` operations they name, for work outside any unit
+    # (read snapshots, jobs that still commit by hand). Inside a unit each of
+    # them raises ``TransactionOwnershipError``: the unit alone ends its
+    # transaction (``unit_of_work.GuardedConnection``).
 
     @property
     def in_transaction(self) -> bool:
@@ -1200,15 +1208,13 @@ class Database:
         return bool(self._unit.depth)
 
     def commit(self) -> None:
-        """Commit the open transaction (a no-op inside a unit of work)."""
+        """Commit the open transaction; raises inside a unit of work."""
         self.conn.commit()
 
     def rollback(self) -> None:
-        """Roll back the open transaction.
+        """Roll back the open transaction; raises inside a unit of work.
 
-        Inside a unit of work this ends the unit's transaction part-way, so
-        the unit raises ``TransactionOwnershipError`` at its exit instead of
-        committing; abandon a unit by raising out of its block instead.
+        Abandon a unit by raising out of its block instead.
         """
         self.conn.rollback()
         self._species_provenance_before = {}
@@ -1228,8 +1234,10 @@ class Database:
         ``BEGIN IMMEDIATE`` waits up to the connection's ``busy_timeout`` for
         the lock and raises ``sqlite3.OperationalError`` if it is not freed in
         time, or if a transaction is already open (BEGIN does not nest), so
-        commit or roll back first.
+        commit or roll back first. Inside a unit of work it raises
+        ``TransactionOwnershipError``: use ``transaction(immediate=True)``.
         """
+        self._refuse_inside_a_unit("begin_immediate()")
         self.conn.execute("BEGIN IMMEDIATE")
 
     def begin(self) -> None:
@@ -1239,9 +1247,17 @@ class Database:
         read after that sees the same snapshot until ``commit()`` or
         ``rollback()`` (read-only callers release it with ``rollback()``).
         Raises ``sqlite3.OperationalError`` if a transaction is already open
-        (BEGIN does not nest).
+        (BEGIN does not nest), and ``TransactionOwnershipError`` inside a unit
+        of work.
         """
+        self._refuse_inside_a_unit("begin()")
         self.conn.execute("BEGIN")
+
+    def _refuse_inside_a_unit(self, action: str) -> None:
+        if self._unit.depth:
+            raise TransactionOwnershipError(
+                f"{action} inside a unit of work: the unit owns its transaction."
+            )
 
     @contextlib.contextmanager
     def transaction(
@@ -1294,6 +1310,26 @@ class Database:
             if entered and not finished:
                 survives = self._unit.depth or self.in_transaction
                 self._species_provenance_before = provenance if survives else {}
+
+    def hold_writer_lock(self) -> None:
+        """Inside a unit of work, take SQLite's writer lock now.
+
+        For a callee that reads what decides its writes but cannot open the
+        unit itself (``transaction(immediate=True)`` is the owner's choice):
+        the reads that follow cannot go stale. A no-op once the unit has
+        written; raises ``TransactionOwnershipError`` outside a unit.
+        """
+        self._unit.hold_writer_lock(self.conn)
+
+    def hold_read_snapshot(self) -> None:
+        """Inside a unit of work, begin its transaction now with a deferred ``BEGIN``.
+
+        Every read that follows shares one snapshot (no lock is taken until
+        the first read), for read-only units that compose several queries. A
+        no-op once the unit's transaction has begun; raises
+        ``TransactionOwnershipError`` outside a unit.
+        """
+        self._unit.hold_read_snapshot(self.conn)
 
     def after_commit(
         self, callback: Callable[[], object], *,
@@ -1738,9 +1774,8 @@ class Database:
         (``tree``, ``subtree_ids``, ``missing``, ``count``,
         ``with_quality_data``) resolve it before any SQL, raising
         ``RuntimeError`` when none is set, and the catalog-wide methods never
-        resolve it. ``commit_with_retry`` and the path helpers are looked up
-        here, so monkeypatches of the ``db`` module functions still reach the
-        moved SQL. The merge's carries into other domains (the GPS-review
+        resolve it. The path helpers are looked up here, so monkeypatches of
+        the ``db`` module functions still reach the moved SQL. The merge's carries into other domains (the GPS-review
         transfer and the embedded-keyword offers) are bound here too.
         """
         from repositories.folders import FolderMergeHooks, FolderRepository
@@ -1749,7 +1784,6 @@ class Database:
         return FolderRepository(
             self.conn,
             self._ws_id,
-            commit_with_retry=commit_with_retry,
             path_for_subtree_match=_path_for_subtree_match,
             stored_parent_path=_stored_parent_path,
             subtree_prefix=_subtree_prefix,
@@ -2006,8 +2040,7 @@ class Database:
         ``workspace_folders`` resolve it (raising if none is active) before
         any SQL, and the catalog-wide methods never do. The column lists and
         the ``db`` module helpers are passed in, the helpers read at call
-        time so tests that patch ``db.commit_with_retry`` /
-        ``db.execute_with_retry`` still apply. The façade methods the
+        time so tests that patch ``db.execute_with_retry`` still apply. The façade methods the
         listing reads consult (``repositories.photos.FACADE_METHODS``: folder
         subtrees, the rules engine, the location-status filter, the
         collection repository factory) are bound from this instance, so
@@ -2023,7 +2056,6 @@ class Database:
             photo_cols=self.PHOTO_COLS,
             photo_detail_cols=self.PHOTO_DETAIL_COLS,
             execute_with_retry=execute_with_retry,
-            commit_with_retry=commit_with_retry,
             inclusive_date_to=_inclusive_date_to,
             keyword_token_clause=_keyword_token_clause,
             facade=self,
@@ -2404,15 +2436,14 @@ class Database:
         """Build the preview/offline-original cache repository on this connection.
 
         Both caches are catalog-wide, so the repository takes no workspace id.
-        The retry helpers are read from this module at call time so tests that
-        patch ``db.commit_with_retry`` / ``db.execute_with_retry`` still apply.
+        ``execute_with_retry`` is read from this module at call time so tests
+        that patch ``db.execute_with_retry`` still apply.
         """
         from repositories.caches import CachesRepository
 
         return CachesRepository(
             self.conn,
             execute_with_retry=execute_with_retry,
-            commit_with_retry=commit_with_retry,
         )
 
     @property
@@ -2422,8 +2453,8 @@ class Database:
         A domain accessor, not a cached attribute: every access builds a fresh
         repository through ``_caches_repository``, exactly as a forwarding
         wrapper called at that moment would, so the connection and the
-        module's ``execute_with_retry`` / ``commit_with_retry`` (which tests
-        patch) are resolved per use. Do not hold the returned repository
+        module's ``execute_with_retry`` (which tests patch) are resolved per
+        use. Do not hold the returned repository
         across a patch of those helpers or a connection swap.
         """
         return self._caches_repository()
@@ -2472,12 +2503,11 @@ class Database:
         """Build the working-copy extraction repository on this connection.
 
         The ``working_copy_*`` columns are catalog-wide, so it takes no
-        workspace id. ``commit_with_retry`` is read from this module at call
-        time so a test that patches ``db.commit_with_retry`` still applies.
+        workspace id.
         """
         from repositories.working_copies import WorkingCopyRepository
 
-        return WorkingCopyRepository(self.conn, commit_with_retry=commit_with_retry)
+        return WorkingCopyRepository(self.conn)
 
     @property
     def working_copies(self) -> WorkingCopyRepository:
@@ -2496,9 +2526,7 @@ class Database:
         receives ``self._ws_id`` uncalled: the workspace-scoped pipeline
         selectors resolve it (raising ``RuntimeError`` when no workspace is
         active) before running any SQL, and every other method never
-        resolves it. ``commit_with_retry`` is read from this module at call
-        time so tests that patch ``db.commit_with_retry`` still apply, and
-        the storage cleanup deletes receive ``_safe_remove_mask_file`` (the
+        resolves it. The storage cleanup deletes receive ``_safe_remove_mask_file`` (the
         masks-directory containment check) as ``remove_file``.
         """
         from repositories.masks_features import MasksFeaturesRepository
@@ -2506,7 +2534,6 @@ class Database:
         return MasksFeaturesRepository(
             self.conn,
             self._ws_id,
-            commit_with_retry=commit_with_retry,
             remove_file=self._safe_remove_mask_file,
         )
 
@@ -3868,9 +3895,9 @@ class Database:
         they keep raising at exactly the point they always did. The façade
         methods the moved bodies call are handed over bound, so
         monkeypatches of ``Database`` keep reaching the moved code, and the
-        ``db`` module names the bodies read (``_chunks``,
-        ``commit_with_retry``, ``log``, the auto-match marker, the top
-        confidence expression) are read here, at call time.
+        ``db`` module names the bodies read (``_chunks``, ``log``, the
+        auto-match marker, the top confidence expression) are read here, at
+        call time.
         """
         from repositories.predictions import PredictionRepository
         from species_identity import SpeciesResolver
@@ -3879,7 +3906,6 @@ class Database:
             self.conn,
             self._ws_id,
             chunks=_chunks,
-            commit_with_retry=commit_with_retry,
             auto_match_review_marker=AUTO_MATCH_REVIEW_MARKER,
             top_prediction_confidence_expr=_TOP_PREDICTION_CONFIDENCE_EXPR,
             decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
@@ -3892,9 +3918,8 @@ class Database:
         """Classifier predictions: ``db.predictions.id_for_key(...)`` and friends.
 
         A domain accessor, not a cached attribute: every access builds a fresh
-        repository through ``_prediction_repository``, so the connection, the
-        lazily resolved workspace and the module's ``commit_with_retry`` are
-        read per use. Only the prediction-decision writers keep ``Database``
+        repository through ``_prediction_repository``, so the connection and
+        the lazily resolved workspace are read per use. Only the prediction-decision writers keep ``Database``
         wrappers (``update_prediction_status``,
         ``update_predictions_status_by_photo``, ``ungroup_prediction``,
         ``set_review_status``, ``accept_subject_species``): ``test_route_contract``
@@ -4247,7 +4272,6 @@ class Database:
         return ModelRunsRepository(
             self.conn,
             auto_match_review_marker=AUTO_MATCH_REVIEW_MARKER,
-            commit_with_retry=commit_with_retry,
         )
 
     @property
@@ -4256,9 +4280,8 @@ class Database:
 
         A domain accessor, not a cached attribute: every access builds a fresh
         repository through ``_model_runs_repository``, exactly as a forwarding
-        wrapper called at that moment would, so the connection and the
-        module's ``commit_with_retry`` (which tests patch) are resolved per
-        use. Every model-run table is catalog-wide, so no method needs an
+        wrapper called at that moment would, so the connection is resolved
+        per use. Every model-run table is catalog-wide, so no method needs an
         active workspace.
 
         The detection writes receive ``detector_run_is_pinned`` from here as
@@ -4313,7 +4336,6 @@ class Database:
         return DetectionsRepository(
             self.conn,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
-            commit_with_retry=commit_with_retry,
         )
 
     @property
@@ -4321,8 +4343,8 @@ class Database:
         """Detector output: ``db.detections.get_ids_for_photos(ids)``, ``db.detections.clear(pid)`` and friends.
 
         A domain accessor, not a cached attribute: every access builds a fresh
-        repository through ``_detections_repository``, so the connection and
-        the module's ``commit_with_retry`` are read per use. The table is
+        repository through ``_detections_repository``, so the connection is
+        read per use. The table is
         catalog-wide, so the accessor needs no active workspace.
 
         Work that adds a config lookup or a second step lives in the
@@ -4641,8 +4663,12 @@ class Database:
             self.photo_versions.put(pid, state["value"])
         self.photo_versions.queue_sync(pid, self.require_workspace_id())
 
-    def _edit_set_photo_location(self, pid, value):
-        from services.pending_changes import queue_location_sync_if_enabled
+    def restore_photo_location_state(self, pid: int, value: str) -> None:
+        """Put back the place links and GPS review ``photo_location_state`` captured.
+
+        The ``photo_location`` replay; ``services.edit_history`` queues the
+        sidecar sync after it (the data layer does not import services).
+        """
         state = json.loads(value)
         self.locations.clear_photo(pid)
         for link in state['links']:
@@ -4656,7 +4682,6 @@ class Database:
         self.locations.delete_gps_review(pid)
         if state.get('gps_review') is not None:
             self.locations.save_gps_reviews([(pid, state['gps_review'])])
-        queue_location_sync_if_enabled(self, pid)
 
     def _edit_set_prediction_status(self, pid, value):
         recorded = json.loads(value)
@@ -4957,7 +4982,6 @@ class Database:
         'color_label': _edit_set_color_label,
         'edit_recipe': _edit_set_edit_recipe,
         'photo_version': _edit_set_photo_version,
-        'photo_location': _edit_set_photo_location,
         'prediction_status': _edit_set_prediction_status,
     }
     _UNDO_HANDLERS = {

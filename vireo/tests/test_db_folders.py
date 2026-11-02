@@ -1646,7 +1646,7 @@ def test_folder_repository_chunks_by_its_chunk_size(db):
     from repositories.folders import FolderMergeHooks, FolderRepository
 
     repo = FolderRepository(
-        db.conn, None, commit_with_retry=None, path_for_subtree_match=None,
+        db.conn, None, path_for_subtree_match=None,
         stored_parent_path=None, subtree_prefix=None, subtree_relative=None,
         join_subtree_path=None, chunk_size=2, merge_hooks=FolderMergeHooks(None, None),
         keyword_source_conflict_sql="",

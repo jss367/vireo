@@ -408,10 +408,10 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
             db.conn.execute(
                 "DELETE FROM pending_changes WHERE id = ?", (original_id,),
             )
+            # Inside the sync's unit of work, which commits it.
             replacement_token = db.queue_change(
                 pid, "keyword_add", "Kestrel",
             )
-            db.commit()
             (replacement_row,) = db.pending_changes.list_all()
             assert replacement_row["id"] == original_id
             assert replacement_row["change_token"] == replacement_token
@@ -2758,10 +2758,9 @@ def test_sync_legacy_checkpoint_keeps_tokened_replacement(tmp_path, db, monkeypa
     real_clear = pending_changes.clear_pending
 
     def replace_before_clear(*args, **kwargs):
+        # Inside the sync's unit of work, which commits it.
         db.remove_pending_changes(pid)
-        db.commit()
         db.queue_change(pid, "rating", "5")
-        db.commit()
         assert db.pending_changes.list_all()[0]["id"] == rowid
         return real_clear(*args, **kwargs)
 
@@ -3040,10 +3039,9 @@ def test_sync_claim_does_not_take_a_replacement_with_reused_id(tmp_path, db, mon
     real_claim = pending_changes.claim_pending_changes_for_sync
 
     def replace_then_claim(sync_db, changes):
+        # Inside the sync's unit of work, which commits it.
         db.remove_pending_changes(pid)
-        db.commit()
         db.queue_change(pid, "keyword_add", "Kestrel")
-        db.commit()
         assert db.pending_changes.list_all()[0]["id"] == changes[0]["id"]
         return real_claim(sync_db, changes)
 
