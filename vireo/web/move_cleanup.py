@@ -12,11 +12,9 @@ from jobs import WorkspaceBusyError
 from move_cleanup import cleanup_source, review_source
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-
     from flask.typing import ResponseReturnValue
-    from services.photo_deletion import PathOutcome
     from services.service_types import JsonError
+    from services.trash import TrashService
     from web.web_types import GetDb, GetRunner, GuardMoveFolder
 
 CLEANUP_LABEL = "the cleanup of a moved folder's source"
@@ -24,7 +22,7 @@ CLEANUP_LABEL = "the cleanup of a moved folder's source"
 
 def create_move_cleanup_blueprint(
     get_db: GetDb, get_runner: GetRunner, json_error: JsonError,
-    trash_paths: Callable[[Sequence[str]], PathOutcome], guard_move_folder: GuardMoveFolder,
+    trash: TrashService, guard_move_folder: GuardMoveFolder,
 ) -> Blueprint:
     blueprint = Blueprint("move_cleanup", __name__)
     cleanup_lock = threading.Lock()
@@ -91,7 +89,7 @@ def create_move_cleanup_blueprint(
                     return json_error("Confirm moving the reviewed files to Trash", 400)
                 if row is None:
                     return json_error("The move result is still being saved; review again in a moment", 409)
-                cleanup = cleanup_source(db, source, body.get("review_token"), trash_paths)
+                cleanup = cleanup_source(db, source, body.get("review_token"), trash.trash_paths)
                 result["source_cleanup"] = cleanup
                 with db.transaction():
                     db.job_history.set_result(job_id, json.dumps(result))

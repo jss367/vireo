@@ -17,9 +17,15 @@ path's own mount and a second Finder look all agree; local paths must keep
 their parent's device. Anything else stays a failure, so callers keep the
 catalog row of a photo that would reappear when the share comes back.
 
-Collaborators are reached through their modules (``volumes.<name>``,
-``volume_reachability.network_root_reachable``) and this module's own
-globals, so a test that patches one of them reaches the whole run.
+``TrashService`` is the object the delete paths hold: ``create_app`` builds
+one and passes it to ``PhotoDeletion`` and to the audit, duplicates and
+move-cleanup blueprints, and route tests inject a fake through
+``create_app(trash=...)`` (``vireo/tests/fake_trash.py``).
+
+Inside the run, collaborators are reached through their modules
+(``volumes.<name>``, ``volume_reachability.network_root_reachable``) and this
+module's own globals, so a unit test that patches one OS boundary there
+reaches the whole run.
 """
 
 from __future__ import annotations
@@ -71,6 +77,45 @@ class _Unset(enum.Enum):
 # already-known custom mount point as local and reintroducing the
 # unbounded-I/O hang this routing exists to prevent).
 NETWORK_ROOTS_UNSET: Final = _Unset.TOKEN
+
+
+class TrashService:
+    """The Trash and the mount checks every delete of originals goes through.
+
+    ``trash_paths`` moves files to the Trash (see the module docstring). The
+    other methods are the ``services.volumes`` checks the callers make around
+    it: the duplicates routes classify losers against one mount-table
+    snapshot (``network_volume_roots``, ``path_on_network_volume``) before
+    any stat, and permanent delete brackets each ``os.remove`` with
+    ``snapshot_parent_device`` / ``path_confirmed_gone``.
+    """
+
+    def trash_paths(
+        self, filepaths: Iterable[str], progress_callback: TrashProgress | None = None,
+        already_missing_out: set[str] | None = None,
+        network_roots: NetworkRoots | Literal[_Unset.TOKEN] = NETWORK_ROOTS_UNSET,
+    ) -> PathOutcome:
+        """:func:`trash_paths`: ``(moved, successful paths, failures)``."""
+        return trash_paths(
+            filepaths, progress_callback=progress_callback,
+            already_missing_out=already_missing_out, network_roots=network_roots,
+        )
+
+    def network_volume_roots(self) -> NetworkRoots:
+        """One mount-table snapshot, or ``None`` when it could not be read."""
+        return volumes.network_volume_roots()
+
+    def path_on_network_volume(self, filepath: str, network_roots: NetworkRoots) -> bool:
+        """Whether ``filepath`` must avoid in-process filesystem calls."""
+        return volumes.path_on_network_volume(filepath, network_roots)
+
+    def snapshot_parent_device(self, filepath: str) -> int | None:
+        """The parent directory's ``st_dev``, taken before a delete."""
+        return volumes.snapshot_parent_device(filepath)
+
+    def path_confirmed_gone(self, filepath: str, expected_parent_dev: int | None = None) -> bool:
+        """Whether ``filepath`` is verifiably absent from a live volume."""
+        return volumes.path_confirmed_gone(filepath, expected_parent_dev)
 
 
 def missing_paths_via_finder(

@@ -525,9 +525,8 @@ def test_delete_stray_sidecars_preserves_hidden_owner(tmp_path):
     assert os.path.exists(hidden_owner)
 
 
-def test_audit_delete_sidecars_route_uses_trash(app_and_db, tmp_path, monkeypatch):
+def test_audit_delete_sidecars_route_uses_trash(app_and_db, tmp_path, monkeypatch, fake_trash):
     """The route moves strays to the Trash instead of unlinking them."""
-    import app as app_module
     from xmp import write_sidecar
 
     app, db = app_and_db
@@ -539,11 +538,11 @@ def test_audit_delete_sidecars_route_uses_trash(app_and_db, tmp_path, monkeypatc
 
     calls = []
 
-    def fake_trash(targets, **_kwargs):
+    def record_trash(targets, **_kwargs):
         calls.append(list(targets))
         return len(targets), set(targets), []
 
-    monkeypatch.setattr(app_module, "_trash_paths", fake_trash)
+    fake_trash.handle_trash(record_trash)
     client = app.test_client()
     resp = client.post("/api/audit/delete-sidecars", json={"paths": [stray]})
     assert resp.status_code == 200

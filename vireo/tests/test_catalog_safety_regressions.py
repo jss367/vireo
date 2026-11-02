@@ -49,8 +49,7 @@ def test_remove_orphans_retains_existing_photo(app_and_db, tmp_path):
 
 
 @pytest.mark.parametrize("network", [False, True])
-def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkeypatch, network):
-    import app as app_module
+def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkeypatch, network, fake_trash):
     from move import move_photos
     from scanner import scan
     app, db = app_and_db
@@ -78,10 +77,13 @@ def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkey
     def record_trash(paths, **kwargs):
         requested.extend(paths)
         return len(paths), set(paths), []
-    monkeypatch.setattr(app_module, "_trash_paths", record_trash)
-    monkeypatch.setattr(app_module, "_network_volume_roots", lambda: [str(dst)] if network else [])
+    fake_trash.handle_trash(record_trash)
+    fake_trash.report_network_roots([str(dst)] if network else [])
     response = app.test_client().post("/api/duplicates/delete-loser-files", json={"photo_ids": [loser]})
     assert response.status_code == 200, response.json
+    # The endpoint classified the alias against the reported mount table
+    # (network or local, as parametrized) and still refused to trash it.
+    assert fake_trash.network_roots_queries == 1
     assert requested == []
     assert response.json["skipped"]
     assert db.photos.get(alias_pid) is not None
