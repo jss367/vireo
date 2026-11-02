@@ -29,7 +29,7 @@ var rapid = {
   zoomAnchor: null,
   zoomDrag: null,
   suppressZoomClick: false,
-  // Bumped on each openSession; used to drop stale /group/state responses
+  // Bumped on each openSession; drops stale /group/state responses
   // when the user switches bursts before the previous fetch resolves.
   openToken: 0,
   queue: {

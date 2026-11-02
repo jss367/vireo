@@ -15,11 +15,10 @@ function applyReviewQueryParams() {
   if (!isNaN(qsPhoto)) currentPhotoIdFilter = qsPhoto;
 }
 
-// Filter pills go in #reviewFilterPills, the row under the action bar. They
-// used to be placed after a `.toolbar` this page doesn't have, which dropped
-// them at the end of <body>, behind the bottom-panel toggle, where "show all ×"
-// couldn't be clicked and the user was stuck in the narrowed view. The body
-// fallback must stay an *append into* the body, never a sibling of it (a
+// Filter pills go in #reviewFilterPills, the row under the action bar. Pills
+// that land at the end of <body> sit behind the bottom-panel toggle, where
+// "show all ×" can't be clicked and the user is stuck in the narrowed view.
+// The body fallback must stay an *append into* the body, never a sibling of it (a
 // sibling of <body> never renders): a silent no-op is exactly the failure mode
 // these pills exist to prevent.
 /** @param {HTMLElement} pill */ function insertFilterPill(pill) {
