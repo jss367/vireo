@@ -1,0 +1,7 @@
+{
+  "codex": {"source": "\\bcodex\\b", "flags": "i"},
+  "review_id": {"source": "\\br\\d{9,}\\b", "flags": ""},
+  "pr_ref": {"source": "\\bPR\\s*#\\d+|(?<![\\w&#/])#\\d{3,}\\b(?![\\w-])", "flags": ""},
+  "moved_verbatim": {"source": "\\bmoved\\s+verbatim\\b", "flags": "i"},
+  "used_to": {"source": "(?<!\\bis )(?<!\\bare )(?<!\\bbe )(?<!\\bbeen )(?<!\\bbeing )\\bused\\s+to\\b", "flags": "i"}
+}
