@@ -16,8 +16,10 @@ def _selected_function(file, name):
 
 def _path_namespace():
     namespace = {}
-    for name in ("_path_for_subtree_match", "_subtree_prefix",
-                 "_subtree_relative", "_join_subtree_path"):
+    exec(compile(_selected_function("repositories/folder_subtrees.py", "path_for_subtree_match"),
+                 "folder path helper", "exec"), namespace)
+    namespace["_path_for_subtree_match"] = namespace["path_for_subtree_match"]
+    for name in ("_subtree_prefix", "_subtree_relative", "_join_subtree_path"):
         exec(compile(_selected_function("db.py", name), "db path helper", "exec"), namespace)
     exec(compile(_selected_function("repositories/moves_merge.py", "folder_paths_below"),
                  "folder_paths_below", "exec"), namespace)

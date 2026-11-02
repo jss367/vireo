@@ -7,12 +7,10 @@ methods that read through ``workspace_folders`` resolve the active workspace
 (``workspace_id``) before any SQL and raise when none is active, while the
 catalog-wide ones never read it.
 
-``Database`` keeps the composition. The listing reads call the façade's
-rules and location-filter helpers under their ``Database``
-names, bound from the instance (see ``FACADE_METHODS``) so patches of those
-methods still apply, and take the collection-rules SQL and sort clauses from
-a ``CollectionRepository`` built when they are needed; the calls happen at
-the same point as before.
+The listing reads compose the rules engine and sort clauses of a
+``CollectionRepository`` built on the same connection when they are needed,
+folder subtrees from ``repositories.folder_subtrees`` and the coordinate
+filter ``append_location_status_filter`` defined here.
 ``services.catalog_deletion.delete_photos``
 keeps the companion resolution, the new-images cache invalidation and the
 pipeline cache prune; ``services.photo_ingest.add_photo`` runs the
@@ -23,30 +21,49 @@ plus the catalog-wide eviction reset a raised working-copy quota triggers.
 """
 
 import os
-from collections.abc import Callable
-from typing import Any
 
+from repositories.collections import CollectionRepository
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
-# ``Database`` methods the listing reads call through the façade: the rules engine, the location-status filter, and the collection
-# repository factory behind ``_build_collection_query`` / ``_photo_sort_clause``.
-FACADE_METHODS = (
-    "_build_query_from_rules",
-    "_append_location_status_filter",
-    "_collection_repository",
-)
+
+def append_location_status_filter(conditions: list[str], location_status: str | None) -> None:
+    """Add a Browse coordinate-source predicate using the photo alias ``p``.
+
+    ``exif`` means the original photo has a complete EXIF coordinate pair.
+    ``assigned`` means EXIF GPS is absent or incomplete but a linked,
+    structured location supplies a complete pair. ``none`` means neither
+    source can place the photo on the map.
+    """
+    if location_status is None:
+        return
+    assigned_exists = """EXISTS (
+        SELECT 1 FROM photo_keywords pk_location_status
+        JOIN keywords k_location_status
+          ON k_location_status.id = pk_location_status.keyword_id
+        WHERE pk_location_status.photo_id = p.id
+          AND k_location_status.type = 'location'
+          AND k_location_status.latitude IS NOT NULL
+          AND k_location_status.longitude IS NOT NULL
+    )"""
+    no_exif = "(p.latitude IS NULL OR p.longitude IS NULL)"
+    if location_status == "exif":
+        conditions.append(
+            "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
+        )
+    elif location_status == "assigned":
+        conditions.append(f"{no_exif} AND {assigned_exists}")
+    elif location_status == "none":
+        conditions.append(f"{no_exif} AND NOT {assigned_exists}")
+    else:
+        raise ValueError(
+            "location_status must be 'exif', 'assigned', or 'none'"
+        )
 
 
 class PhotoRepository:
-    # Bound ``Database`` methods that ``__init__`` installs from
-    # ``FACADE_METHODS``, declared so the type checker sees them.
-    _build_query_from_rules: Callable[..., Any]
-    _append_location_status_filter: Callable[..., Any]
-    _collection_repository: Callable[..., Any]
-
     def __init__(
         self,
         conn,
@@ -59,7 +76,6 @@ class PhotoRepository:
         execute_with_retry,
         inclusive_date_to,
         keyword_token_clause,
-        facade,
     ):
         self.conn = conn
         # ``Database._ws_id``, uncalled: the workspace-scoped reads resolve
@@ -79,10 +95,6 @@ class PhotoRepository:
         self.execute_with_retry = execute_with_retry
         self.inclusive_date_to = inclusive_date_to
         self.keyword_token_clause = keyword_token_clause
-        # Bound ``Database`` methods, kept under their façade names, so
-        # patches of those methods still reach the listing reads.
-        for name in FACADE_METHODS:
-            setattr(self, name, getattr(facade, name))
 
     @property
     def workspace_id(self):
@@ -93,13 +105,21 @@ class PhotoRepository:
         """``folder_id`` plus its descendants visible in the active workspace."""
         return folder_subtree_ids(self.conn, self.workspace_id, folder_id)
 
+    def _collections(self):
+        """The rules engine and sort clauses, on this connection and workspace."""
+        return CollectionRepository(self.conn, self._resolve_workspace_id)
+
+    def build_query_from_rules(self, rules):
+        """A rule tree as SQL parts (``CollectionRepository.build_query_from_rules``)."""
+        return self._collections().build_query_from_rules(rules)
+
     def _build_collection_query(self, collection_id):
         """A collection's rules as SQL parts, or None (``CollectionRepository``)."""
-        return self._collection_repository()._build_collection_query(collection_id)
+        return self._collections()._build_collection_query(collection_id)
 
     def _photo_sort_clause(self, sort):
         """The photo-list ORDER BY for ``sort`` (``CollectionRepository``)."""
-        return self._collection_repository()._photo_sort_clause(sort)
+        return self._collections()._photo_sort_clause(sort)
 
     def _chunks(self, values, size=None):
         """Yield ``values`` in lists of at most ``size`` (default chunk_size)."""
@@ -575,7 +595,7 @@ class PhotoRepository:
         where_params = [ws, str(year)]
         if rules is not None:
             r_folder_join, r_join_clause, r_where, r_params = (
-                self._build_query_from_rules(rules)
+                self.build_query_from_rules(rules)
             )
             conditions.append(
                 "p.id IN (SELECT DISTINCT p.id FROM photos p "
@@ -692,7 +712,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        self._append_location_status_filter(conditions, location_status)
+        append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -784,7 +804,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        self._append_location_status_filter(conditions, location_status)
+        append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -916,7 +936,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        self._append_location_status_filter(conditions, location_status)
+        append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -1019,7 +1039,7 @@ class PhotoRepository:
 
         conditions, join_params, where_params = self._browse_summary_scope(
             ws, folder_id, collection_id, rules, self.get_folder_subtree_ids,
-            self._build_collection_query, self._build_query_from_rules,
+            self._build_collection_query, self.build_query_from_rules,
         )
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
