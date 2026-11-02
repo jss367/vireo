@@ -164,7 +164,13 @@ def js_differs(old: str, new: str) -> str | None:
 
 
 def _git(*args: str) -> str:
-    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    # Git for Windows emits path output (``--name-status -z``) and blob bytes
+    # (``git show``) as UTF-8, but ``text=True`` alone decodes with the active
+    # code page; a non-UTF-8 locale would mangle a non-ASCII path or source
+    # file before it reaches ``python_differs`` / ``js_differs``.
+    return subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True
+    ).stdout
 
 
 def _suffix_of(path: str) -> str:

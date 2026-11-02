@@ -87,7 +87,12 @@ def js_comment_texts(src: str) -> list[str]:
     the file and its following ``/`` is division, not a regex. A member-access
     ``.`` (``obj.of``, ``Observable.of / 2``) is tracked separately so a
     property name reusing a contextual keyword does not open a regex either,
-    even when no binding form made it an identifier earlier.
+    even when no binding form made it an identifier earlier. ``of`` only
+    opens a regex when it appears directly inside a ``for (...)`` paren list
+    (where ``for (binding of /pat/)`` is valid syntax); at any other position
+    — statement start (``of / 2``), an imported name (``import {of}``), a
+    hoisted function declaration (``function of() {}``) — ``of`` is treated
+    as a plain identifier and its following ``/`` is division.
     ``test_js_lexer_matches_acorn`` checks it against acorn on every
     first-party script when acorn is installed.
     """
@@ -102,6 +107,8 @@ def js_comment_texts(src: str) -> list[str]:
     param_depth = 0
     paren_candidates: list[list[str]] = []
     after_dot = False
+    for_paren_pending = False
+    paren_is_for: list[bool] = []
 
     def template(j: int) -> tuple[int, bool]:
         while j < n:
@@ -189,12 +196,16 @@ def js_comment_texts(src: str) -> list[str]:
             i, regex_ok = i + 1, False
         elif c == "(":
             paren_candidates.append([])
+            paren_is_for.append(for_paren_pending)
+            for_paren_pending = False
             if pending_params or param_depth > 0:
                 param_depth += 1
                 pending_params = False
             i, regex_ok = i + 1, True
         elif c == ")":
             cands = paren_candidates.pop() if paren_candidates else []
+            if paren_is_for:
+                paren_is_for.pop()
             if param_depth > 0:
                 param_depth -= 1
             j = i + 1
@@ -210,6 +221,7 @@ def js_comment_texts(src: str) -> list[str]:
             expect_binding = False
             destr_depth = 0
             pending_params = False
+            for_paren_pending = False
             i, regex_ok = i + 1, True
         elif match := _JS_IDENT.match(src, i):
             word = match.group()
@@ -227,12 +239,21 @@ def js_comment_texts(src: str) -> list[str]:
                     regex_ok = False
                 elif word in bound:
                     regex_ok = False
+                elif word == "of":
+                    # ``of`` opens a regex only inside a ``for (...)`` paren
+                    # list (``for (binding of /pat/)``). At statement start,
+                    # inside an import spec, or after a bare function name,
+                    # ``of`` is a plain identifier and the following ``/`` is
+                    # division.
+                    regex_ok = bool(paren_is_for) and paren_is_for[-1]
                 else:
                     regex_ok = word in _JS_REGEX_AFTER_WORD
                 if word in _JS_BINDING_KW:
                     expect_binding = True
                 elif word in _JS_PARAM_KW:
                     pending_params = True
+                if word == "for":
+                    for_paren_pending = True
                 if (
                     paren_candidates
                     and not is_binding
@@ -412,6 +433,30 @@ def test_js_lexer_member_access_of_is_division_not_regex():
     ]
     for src in cases:
         assert any("Codex" in text for text in js_comment_texts(src)), src
+
+
+def test_js_lexer_unbound_of_outside_for_is_identifier():
+    """``of`` opens a regex only inside a ``for (...)`` paren list. At
+    statement start, after an unmodeled binding form (``import {of}``,
+    ``function of() {}``) or as a bare global, ``of / 2`` is division and
+    the trailing ``// Codex`` is detected."""
+    cases = [
+        "of / 2; // Codex\n",
+        "import {of} from 'x'; of / 2; // Codex\n",
+        "function of() {} of / 2; // Codex\n",
+        "{ of / 2; // Codex\n}\n",
+        "for (const x of /foo/) { of / 2; // Codex\n }\n",
+    ]
+    for src in cases:
+        assert any("Codex" in text for text in js_comment_texts(src)), src
+
+
+def test_js_lexer_for_of_still_opens_regex_on_rhs():
+    """A regex literal is the valid iterable of a ``for ... of`` loop, so
+    inside a ``for (...)`` paren list ``of`` still opens the regex and the
+    body's comments are not swallowed."""
+    src = "for (const x of /foo/) { /* keep */ }\n"
+    assert js_comment_texts(src) == [" keep "]
 
 
 def test_js_lexer_private_member_name_is_identifier_not_regex():
