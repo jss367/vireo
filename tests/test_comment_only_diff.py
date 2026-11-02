@@ -77,8 +77,10 @@ def test_complete_git_scope(tmp_path, monkeypatch, capsys, change):
     elif change == 'renamed':
         git('mv', source.name, 'renamed.js')
     elif change == 'untracked':
-        (tmp_path / 'new\nsource.py').write_text('x = 2\n')
+        (tmp_path / 'new source.py').write_text('x = 2\n')
     elif change == 'typechanged':
+        if sys.platform == 'win32':
+            pytest.skip('POSIX symlink type change')
         source.unlink()
         source.symlink_to('target.py')
     else:
@@ -162,6 +164,7 @@ def test_rename_across_source_types_fails(tmp_path, monkeypatch, old_name, new_n
     assert checker.main() == 1
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX filename characters')
 @pytest.mark.parametrize('filename', ['source\nname.py', 'source\tname.py', 'source:name.py'])
 def test_tracked_unusual_filenames_are_compared(tmp_path, monkeypatch, capsys, filename):
     def git(*args):
