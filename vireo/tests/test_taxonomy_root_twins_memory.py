@@ -9,6 +9,7 @@ import json
 import logging
 import sqlite3
 import types
+import typing
 import unittest
 import uuid
 from pathlib import Path
@@ -64,6 +65,7 @@ def setup():
         "_lookup_species_taxon_id": lookup_taxon_id,
         "_species_taxon_match": species_preferring_taxon_match,
         "uuid": uuid,
+        "cast": typing.cast,
         "sqlite3": sqlite3,
         "log": logging.getLogger("invented"),
         "contextmanager": contextlib.contextmanager,
