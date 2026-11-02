@@ -142,7 +142,7 @@ def publish_site(db, vireo_dir, destination, life_list, highlights=None, options
 
     Args:
         db: active-workspace Database instance.
-        vireo_dir: Vireo data directory, used to resolve working copies.
+        vireo_dir: Vireo data directory, for resolving working copies.
         destination: absolute output directory.
         life_list: payload matching ``/api/life-list``.
         highlights: payload matching ``/api/highlights``.

@@ -243,8 +243,8 @@ def is_excluded_scan_path(path):
     user-chosen path. A leaf-only check is insufficient: a user can
     select a child of the bundle directly (e.g.
     ``~/Pictures/Photos Library.photoslibrary/originals``), and stale
-    folder rows from before this guard existed can carry the same
-    shape. Either way, opening it still trips the macOS TCC
+    folder rows can carry the same shape. Either way, opening it still
+    trips the macOS TCC
     "access data from other apps" prompt — so we reject the whole
     subtree, not just the bundle root.
 

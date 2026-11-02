@@ -45,11 +45,10 @@ MUTATIONS = (MUTATION_KEYWORD, MUTATION_PREDICTION, MUTATION_WILDLIFE)
 # Fields whose value only a keyword edit can move. Accepting a prediction
 # writes a species keyword too, but the accept path already fans out
 # ``MUTATION_KEYWORD`` alongside ``MUTATION_PREDICTION``
-# (``_afterPredictionMutation`` in ``vireo/templates/browse.html``), so
-# listing ``MUTATION_PREDICTION`` here would only add false positives on
+# (``_afterPredictionMutation`` in ``vireo/static/browse/prediction-panels.js``),
+# so listing ``MUTATION_PREDICTION`` here would only add false positives on
 # the status-only prediction paths (reject, mark reviewed) that touch no
-# keywords, forcing an unnecessary reset of every keyword-filtered grid
-# (Codex review r4013123596).
+# keywords, forcing an unnecessary reset of every keyword-filtered grid.
 _KEYWORD_DERIVED = [MUTATION_KEYWORD]
 
 
@@ -165,8 +164,7 @@ FILTER_FIELDS = {
     # rule's row set — so a photo can newly satisfy the confidence rule
     # even though its numeric confidence never changed. Listing
     # ``MUTATION_PREDICTION`` here keeps the confidence-filtered grid in
-    # sync with that visibility flip (Codex review r4013497441, revising
-    # r4013378150). ``classifier_model`` stays empty because sibling
+    # sync with that visibility flip. ``classifier_model`` stays empty because sibling
     # alternatives share the same classifier as their top pick — the
     # ``EXISTS`` predicate is already satisfied by the visible top row and
     # cannot change from ``true`` to ``false`` (or the reverse) when a

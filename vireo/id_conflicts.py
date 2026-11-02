@@ -1055,8 +1055,8 @@ def _search_text(photo, assessment):
     """Everything the page shows about a row, joined for substring search.
 
     Fields are joined with newlines, which are not word characters, so
-    whole-word matching behaves exactly as it does against the separate
-    fields the browser used to search.
+    whole-word matching behaves exactly as it would against each field
+    separately.
     """
     status = assessment["status"]
     signal = assessment["signal"]
@@ -1297,12 +1297,11 @@ def select(
 # ---------------------------------------------------------------------------
 # Snapshots
 #
-# The page has always worked from a snapshot: the browser used to fetch every
-# row once and then filter, sort and count that copy until the user reloaded.
-# Keeping the snapshot here instead changes nothing about how current the
-# numbers are — it just means the browser is no longer the thing holding a
-# catalog in memory. Decisions made on the page patch the snapshot, so the
-# counts follow the work being done.
+# The page works from a snapshot: rows are derived once, then filtered,
+# sorted and counted from that copy until the user reloads. The snapshot
+# lives here so the browser does not hold a catalog in memory. Decisions
+# made on the page patch the snapshot, so the counts follow the work being
+# done.
 # ---------------------------------------------------------------------------
 
 # Each snapshot of a catalog-sized collection costs tens of megabytes, so

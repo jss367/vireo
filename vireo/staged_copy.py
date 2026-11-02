@@ -17,11 +17,11 @@ _COPY_CHUNK = 1 << 20  # 1 MiB per read; small enough for slow NAS transfers
 
 # fd-based metadata ops aren't universal: ``os.fchmod`` is Unix-only, and
 # ``os.utime`` accepts an fd only on platforms that list it in
-# ``os.supports_fd``. On Windows the fallback promote path used to raise
-# ``AttributeError``/``TypeError`` after copying the bytes, which the
-# rollback in ``_promote_by_placeholder`` treated as a failure and, in
-# ``move_photos``, bypassed the ``except OSError`` handler and aborted
-# the batch. Path-based fallbacks guarded by an inode re-check keep the
+# ``os.supports_fd``. Called unguarded on Windows, the fallback promote path
+# would raise ``AttributeError``/``TypeError`` after copying the bytes,
+# which the rollback in ``_promote_by_placeholder`` treats as a failure
+# and which, in ``move_photos``, bypasses the ``except OSError`` handler
+# and aborts the batch. Path-based fallbacks guarded by an inode re-check keep the
 # same "don't leak metadata onto a racer's file" guarantee.
 _UTIME_SUPPORTS_FD = os.utime in getattr(os, "supports_fd", set())
 _HAS_FCHMOD = hasattr(os, "fchmod")
