@@ -423,6 +423,22 @@ def test_comment_only_change_selects_nothing_from_map(repo):
     assert meta["sha"]  # map still intact
 
 
+def test_always_run_tests_are_selected_whatever_the_map_says(repo):
+    # Added after the map commit, so a run with own_base sets its addition aside.
+    _write(repo, "vireo/tests/test_comment_hygiene.py", "def test_counts(): pass\n")
+    ratchet_added = _commit(repo, "add the ratchet")
+    _write(repo, "docs/notes.md", "more notes\n")
+    _commit(repo, "a change no test exercises")
+
+    # The second case has no changes of its own left after setting main's aside.
+    for own_base in (ratchet_added, "HEAD"):
+        sel = _select(repo, own_base=own_base)
+
+        assert sel.mode == "subset", sel.notes
+        assert sel.files == {"vireo/tests/test_comment_hygiene.py"}
+        assert not sel.ids
+
+
 def test_replacing_comment_with_code_selects_enclosing_function(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

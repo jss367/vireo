@@ -122,6 +122,10 @@ FULL_SUITE_PATHS = frozenset(
 )
 FULL_SUITE_PREFIXES = (".github/actions/", "vireo/data/")
 
+# Run whenever the unit job does, whatever the map says: these read source
+# text (comments) that executes nothing, so coverage can never select them.
+ALWAYS_RUN_TESTS = ("vireo/tests/test_comment_hygiene.py",)
+
 _TEST_FILE_RE = re.compile(r"^(tests|vireo/tests)/test_[A-Za-z0-9_]+\.py$")
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.*) b/(.*)$")
@@ -792,6 +796,26 @@ def select(
     cwd: Path = ROOT,
     explain: bool = False,
     own_base: str | None = None,
+) -> Selection:
+    """Select for the diff ``base``..``head``, plus ``ALWAYS_RUN_TESTS``."""
+    sel = _select_for_diff(base, head, impact, cwd, explain, own_base)
+    if sel.mode == "full":
+        return sel
+    for test in ALWAYS_RUN_TESTS:
+        if _show(head, test, cwd) is not None:
+            sel.files.add(test)
+            sel.mode = "subset"
+            sel.note(f"{test}: always run")
+    return sel
+
+
+def _select_for_diff(
+    base: str,
+    head: str,
+    impact: ImpactMap | None,
+    cwd: Path,
+    explain: bool,
+    own_base: str | None,
 ) -> Selection:
     """Select for the diff ``base``..``head``, ``base`` being the map commit.
 

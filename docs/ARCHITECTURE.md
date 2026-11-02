@@ -206,6 +206,10 @@ the JavaScript twin of the Python function-length ratchet: every function in a
 first-party script under `vireo/static` is capped at 100 lines, the ones
 already over it are listed with their exact length in
 `tests/frontend/function_length_baseline.json`, and that list only shrinks.
+It also runs `tests/frontend/comment-hygiene.test.mjs`, the JavaScript half of
+the comment-hygiene ratchet (`vireo/tests/test_comment_hygiene.py`), which reads
+comments with acorn and owns the `.js` entries of
+`vireo/tests/comment_hygiene_baseline.json`.
 
 ESLint checks first-party JavaScript under `vireo/static`, excluding vendor and
 minified files. Classic scripts still share page globals and expose inline-handler
