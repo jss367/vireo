@@ -17,6 +17,7 @@ monkeypatched.
 
 import pytest
 from playwright.sync_api import expect
+from services import keyword_tagging
 
 from e2e.module_pages import install_page_module_exposure
 
@@ -66,7 +67,7 @@ def _seed_location_keyword(live_server, name, place_id=None):
     else:
         kw_id = db.get_or_create_text_location(name)
         db.commit()
-    db.tag_photo(photo_id, kw_id)
+    keyword_tagging.tag_photo(db, photo_id, kw_id)
     db.commit()
     return kw_id
 

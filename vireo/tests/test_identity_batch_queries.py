@@ -1,7 +1,7 @@
 """Bound full-catalog identity resolution work for a multi-photo decision."""
 import pytest
 from db import Database
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
@@ -47,7 +47,7 @@ def test_resolution_refreshes_identity_after_keyword_creation_in_same_transactio
         photo = photo_ingest.add_photo(db, folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=1, file_mtime=1)
         common = db.keywords.add('Choice')  # promoted by resolution, not a species yet
         alias = db.keywords.add('Scientific alias', is_species=True, source_taxon_id=99001)
-        db.tag_photo(photo, alias, source='accept')
+        keyword_tagging.tag_photo(db, photo, alias, source='accept')
         db.commit()
         with db.transaction():
             # Warm name resolution before either the taxonomy or promoted keyword exists.
@@ -81,7 +81,7 @@ def test_batch_identity_reuse_keeps_each_photo_association_check_live(tmp_path, 
             original(repository, photo_id, state)
             if photo_id == photos[0]:
                 # Inside the save's unit of work, which rolls it back below.
-                db.tag_photo(photos[1], keyword, source='manual')
+                keyword_tagging.tag_photo(db, photos[1], keyword, source='manual')
 
         monkeypatch.setattr(IdentityAlternativesRepository, 'set_state', change_next_photo)
         with pytest.raises(IdentityHistoryStale), db.transaction():
@@ -113,9 +113,9 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
         db.conn.execute('UPDATE keywords SET taxon_id=99001,source_taxon_id=101,is_species=0 WHERE id=?', (higher,))
         scientific = db.keywords.add('Puma concolor', is_species=True)
         note = db.keywords.add('Unrelated note')
-        db.tag_photo(photo, higher, source='manual')
-        db.tag_photo(photo, scientific, source='accept')
-        db.tag_photo(photo, note, source='manual')
+        keyword_tagging.tag_photo(db, photo, higher, source='manual')
+        keyword_tagging.tag_photo(db, photo, scientific, source='accept')
+        keyword_tagging.tag_photo(db, photo, note, source='manual')
         db.commit()
         db.photo_review.set_flag(photo, 'rejected')
         db.commit()

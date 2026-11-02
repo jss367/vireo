@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import schema
 from db import AUTO_MATCH_REVIEW_MARKER, Database
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from services.collection_coverage import collection_coverage
 from services.imports import ImportService
 
@@ -135,7 +135,7 @@ def test_prediction_decisions_do_not_imply_inspection_or_species_resolution(db, 
     _prediction(db, photos[1], "accepted", AUTO_MATCH_REVIEW_MARKER)
     _prediction(db, photos[2], "pending")
     species = db.keywords.add("Confirmed bird", is_species=True)
-    db.tag_photo(photos[1], species)
+    keyword_tagging.tag_photo(db, photos[1], species)
     db.commit()
     review = collection_coverage(db, cid, {})["review"]
     assert review["denominator"] == 3
@@ -158,7 +158,7 @@ def test_explicitly_unresolved_is_independent_of_existing_species_and_scope(db, 
     _, photos = _photos(db, tmp_path)
     cid = _collection(db, photos[:2])
     species = db.keywords.add("Confirmed bird", is_species=True)
-    db.tag_photo(photos[0], species)
+    keyword_tagging.tag_photo(db, photos[0], species)
     db.commit()
     monkeypatch.setattr(Database, "identity_alternatives", property(lambda _db: None), raising=False)
     assert collection_coverage(db, cid, {})["review"]["unresolved_identity_count"] is None

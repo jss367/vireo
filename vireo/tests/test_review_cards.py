@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from services import review_decisions
+from services import keyword_tagging, review_decisions
 
 BLUE = {"taxon_id": 138690, "scientific_name": "Cyanistes caeruleus"}
 
@@ -178,7 +178,7 @@ def test_compare_legacy_aliases_undo_redo_tags_and_sidecar_intent(
         aliases.reverse()
     keywords = {name: db.keywords.add(name, is_species=True) for name in aliases}
     if existing_alias:
-        db.tag_photo(photo_id, keywords[existing_alias])
+        keyword_tagging.tag_photo(db, photo_id, keywords[existing_alias])
         db.commit()
     before = {k['id'] for k in db.photo_keywords.get_for_photo(photo_id)}
     detection_id = db.detections.save(photo_id, [{
@@ -279,7 +279,7 @@ def test_card_undo_preserves_existing_keyword_and_prior_alternative_decision(app
     app, db = app_and_db
     photos, detections, ids = _seed(db)
     kid = db.keywords.add('Blue Tit', is_species=True)
-    db.tag_photo(photos[1], kid)
+    keyword_tagging.tag_photo(db, photos[1], kid)
     db.commit()
     db.predictions.add(detections[1], 'Other bird', .1, 'BioCLIP',
                        labels_fingerprint='current', status='reviewed')

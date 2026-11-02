@@ -16,7 +16,7 @@ if _VIREO_DIR not in sys.path:
 # Importing config installs the settings provider every Database here reads
 # through settings_source; the data layer never imports config itself.
 import config  # noqa: E402,F401
-from services import photo_ingest, workspace_folders  # noqa: E402
+from services import keyword_tagging, photo_ingest, workspace_folders  # noqa: E402
 
 
 def _make_thumb(thumb_dir, photo_id):
@@ -132,11 +132,11 @@ def browse_seed(db_path, thumb_dir, photos_root):
     k_robin = db.keywords.add("Robin", is_species=True)
     k_sparrow = db.keywords.add("Sparrow", is_species=True)
 
-    db.tag_photo(photos[0], k_eagle)
-    db.tag_photo(photos[1], k_eagle)
-    db.tag_photo(photos[2], k_robin)
-    db.tag_photo(photos[3], k_robin)
-    db.tag_photo(photos[4], k_sparrow)
+    keyword_tagging.tag_photo(db, photos[0], k_eagle)
+    keyword_tagging.tag_photo(db, photos[1], k_eagle)
+    keyword_tagging.tag_photo(db, photos[2], k_robin)
+    keyword_tagging.tag_photo(db, photos[3], k_robin)
+    keyword_tagging.tag_photo(db, photos[4], k_sparrow)
     db.commit()
 
     # Create thumbnails

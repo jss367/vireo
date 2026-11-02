@@ -1,8 +1,8 @@
 """Persistence for exact-duplicate groups (photos sharing a ``file_hash``).
 
 ``Database`` keeps the composition: it decides when to resolve, calls the
-winner/loser merge, and re-tags the winner through ``Database.tag_photo`` so
-the keyword-provenance fold and any patched ``tag_photo`` still apply. This
+winner/loser merge, and re-tags the winner through the provenance writer
+(``keyword_provenance.tag``) so the keyword-provenance fold applies. This
 repository owns the SQL those steps read and write, plus the reads the
 ``/api/duplicates/*`` routes make (live twins of a hash, loser-file
 candidates, the disk-cleanup summary). Every method is catalog-wide

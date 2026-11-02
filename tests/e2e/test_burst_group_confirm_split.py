@@ -27,6 +27,7 @@ import time
 
 import pytest
 from playwright.sync_api import expect
+from services import keyword_tagging
 
 # Regression guard for a fixed product bug: grmOnToggleChange() used to pin
 # BOTH overrides (confirmSpeciesOverride AND applyFlagsOverride) to their
@@ -192,7 +193,7 @@ def _tag_all(live_server, photo_ids, species):
     kid = db.keywords.add(species, is_species=True)
     db.commit()
     for pid in photo_ids:
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
         db.commit()
     return kid
 
@@ -410,8 +411,8 @@ def test_smart_default_species_checked_when_frame_missing_keyword(live_server, p
     # three frames in the DB — the third is missing the keyword.
     _write_single_burst_cache(live_server, photo_ids, confirmed_species=species)
     kid = db.keywords.add(species, is_species=True)
-    db.tag_photo(photo_ids[0], kid)
-    db.tag_photo(photo_ids[1], kid)
+    keyword_tagging.tag_photo(db, photo_ids[0], kid)
+    keyword_tagging.tag_photo(db, photo_ids[1], kid)
     db.commit()
     # photo_ids[2] intentionally left untagged.
 
@@ -674,8 +675,8 @@ def test_keyword_summary_counts_discarded_removals(live_server, page):
     _write_single_burst_cache(live_server, photo_ids, confirmed_species=species)
     db = live_server["db"]
     kid = db.keywords.add(species, is_species=True)
-    db.tag_photo(photo_ids[0], kid)
-    db.tag_photo(photo_ids[1], kid)
+    keyword_tagging.tag_photo(db, photo_ids[0], kid)
+    keyword_tagging.tag_photo(db, photo_ids[1], kid)
     db.commit()
     # photo_ids[2] intentionally untagged.
 

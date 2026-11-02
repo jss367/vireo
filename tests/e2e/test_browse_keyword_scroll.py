@@ -11,7 +11,7 @@ all, and a filter it can move is reloaded in place.
 
 import pytest
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import keyword_tagging, photo_ingest
 
 from e2e.stack_seed import seed_browse_stack
 
@@ -29,7 +29,7 @@ def _seed_filtered_library(db, folder_id, count=160):
             file_mtime=1.0,
             timestamp=f"2024-05-01T{i // 60:02d}:{i % 60:02d}:00",
         )
-        db.tag_photo(pid, kw)
+        keyword_tagging.tag_photo(db, pid, kw)
         db.commit()
     return kw
 
@@ -161,7 +161,7 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
         "SELECT id FROM photos WHERE filename LIKE 'marsh%'"
     )]
     for photo_id in photo_ids:
-        db.tag_photo(photo_id, old_keyword)
+        keyword_tagging.tag_photo(db, photo_id, old_keyword)
         db.commit()
         detection = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},

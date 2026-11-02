@@ -1,19 +1,17 @@
 """Persistence for place/location keywords, photo locations and geo queries.
 
-``Database`` keeps the composition: keyword upserts (``_upsert_one_keyword``,
-``_upsert_location_parent_chain``), ``tag_photo`` with its provenance fold,
-``link_keyword_to_place`` (a pinned ``photo_keywords`` writer), the sync
-queue's ``queue_change`` and keyword merges all stay on the façade. Where a
-moved method needs one of them mid-query it receives the bound façade
-method: ``_merge_keyword_into`` is bound once when the façade builds the
-repository, and the rest arrive per call. Folder subtrees
-(``repositories.folder_subtrees``) and the rules engine (a
+Keyword upserts, place links and keyword merges are the keyword-provenance
+repository's (``upsert_one_keyword``, ``upsert_location_parent_chain``,
+``link_keyword_to_place``, ``merge_duplicate_location_roots``), and photo
+tagging goes through ``services.keyword_tagging``. Where a method here needs
+the sync queue mid-query it receives the queue method per call. Folder
+subtrees (``repositories.folder_subtrees``) and the rules engine (a
 ``CollectionRepository``) are read on this connection.
 
 Photos and keywords are catalog-wide, so most methods take no workspace.
 The ones that are scoped resolve the active workspace through
-``workspace_id_fn`` at the same point the original ``Database`` code called
-``self._ws_id()``; building the repository never resolves it.
+``workspace_id_fn`` where they need it; building the repository never
+resolves it.
 
 The GPS discrepancy decisions (``location_gps_reviews``) the Location Review
 page records are written here too, and ``gps_discrepancy_rows`` is the read
@@ -32,13 +30,11 @@ from repositories.folder_subtrees import folder_subtree_ids
 
 class LocationRepository:
     def __init__(self, conn, workspace_id_fn, *, chunk_size=800,
-                 photo_date_asc_order=None, merge_keyword_into):
+                 photo_date_asc_order=None):
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn
         self.chunk_size = chunk_size
         self.photo_date_asc_order = photo_date_asc_order
-        # The bound ``Database._merge_keyword_into``.
-        self.merge_keyword_into = merge_keyword_into
 
     def _chunks(self, values):
         values = list(values)
@@ -594,9 +590,10 @@ class LocationRepository:
         return True
 
     def repair_misclassified_ancestors(self):
-        """Run the restore passes and the root merge (no commit).
+        """Run the restore passes until none restores a row (no commit).
 
-        Returns ``(repaired, merged_roots)``.
+        Returns the number of rows restored. The duplicate-root merge that
+        follows is ``KeywordProvenanceRepository.merge_duplicate_location_roots``.
         """
         repaired = 0
         while True:
@@ -613,74 +610,7 @@ class LocationRepository:
                     repaired_this_pass += 1
             if not repaired_this_pass:
                 break
-        merged_roots = self.merge_duplicate_roots()
-        return repaired, merged_roots
-
-    def merge_duplicate_roots(self):
-        """Collapse same-name ``type='location'`` roots into a single row.
-
-        Retyping a place-bearing taxonomy root at startup can leave two
-        location rows with the same ``name`` and ``parent_id IS NULL``
-        because SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
-        NULL parents. Multiple coordless duplicates without any competing
-        place-bearing root describe the same neutral hierarchy anchor and
-        must collapse so children stay under one shared parent.
-
-        Whenever any place-bearing root exists at this name, coordless
-        roots are neutral hierarchy anchors that
-        ``_upsert_one_keyword`` installs (or preserves) for
-        component-only references — Google's per-component
-        ``address_components`` carry no ``place_id``, so we cannot prove
-        which specific Google place the caller meant. Merging a
-        coordless anchor into the place-bearing root would silently
-        reparent its descendants under that Google place — the wrong
-        answer once a second same-name Google place appears. Leave
-        place-bearing roots and their coordless anchors alone; only
-        consolidate coordless duplicates so ambiguous children still
-        share one shared parent.
-
-        ``merge_keyword_into`` is the façade's ``_merge_keyword_into``.
-        """
-        duplicates = self.conn.execute(
-            "SELECT name FROM keywords "
-            "WHERE type = 'location' AND parent_id IS NULL "
-            "GROUP BY name HAVING COUNT(*) > 1"
-        ).fetchall()
-        merged = 0
-        for dup in duplicates:
-            candidates = self.conn.execute(
-                "SELECT id, place_id, latitude, longitude FROM keywords "
-                "WHERE name = ? AND parent_id IS NULL AND type = 'location' "
-                "ORDER BY id",
-                (dup["name"],),
-            ).fetchall()
-            if len(candidates) < 2:
-                continue
-            place_bearing = [c for c in candidates if c["place_id"] is not None]
-            coordless = [c for c in candidates if c["place_id"] is None]
-            if place_bearing:
-                # Any place-bearing root at this name means coordless
-                # anchors cannot be safely merged into it: address
-                # components have no place_id, so coordless-anchor
-                # descendants may refer to a different Google place with
-                # the same name. Preserve place-bearing roots alongside
-                # coordless anchors; only collapse coordless duplicates
-                # into a single shared anchor.
-                if len(coordless) < 2:
-                    continue
-                survivor_id = coordless[0]["id"]
-                for cand in coordless[1:]:
-                    merged += self.merge_keyword_into(
-                        cand["id"], survivor_id,
-                    )
-                continue
-            # No place-bearing roots — every candidate is coordless.
-            # Legacy duplicate anchors describe the same neutral parent
-            # and can safely merge into the oldest survivor.
-            survivor_id = candidates[0]["id"]
-            for cand in candidates[1:]:
-                merged += self.merge_keyword_into(cand["id"], survivor_id)
-        return merged
+        return repaired
 
     # -- place chains and photo links ----------------------------------------
 

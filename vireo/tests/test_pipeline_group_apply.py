@@ -6,6 +6,8 @@ clear flags on photos moved to candidates, and must add the consensus
 species keyword on picks while skipping photos that already have it.
 """
 
+from services import keyword_tagging
+
 
 def _photo_ids(db):
     return [p['id'] for p in db.photos.list_page()]
@@ -168,7 +170,7 @@ def test_apply_skips_keyword_when_already_applied(app_and_db):
     pids = _photo_ids(db)
     pid = pids[0]
     kid = db.keywords.add('Coyote', is_species=True)
-    db.tag_photo(pid, kid)
+    keyword_tagging.tag_photo(db, pid, kid)
     db.commit()
     client = app.test_client()
 
@@ -345,7 +347,7 @@ def test_state_endpoint_returns_current_flags_and_keyword_status(app_and_db):
     db.photo_review.set_flag(rejected_id, 'rejected')
     db.commit()
     kid = db.keywords.add('Coyote', is_species=True)
-    db.tag_photo(flagged_id, kid)
+    keyword_tagging.tag_photo(db, flagged_id, kid)
     db.commit()
     client = app.test_client()
 
@@ -416,7 +418,7 @@ def test_state_endpoint_ignores_homonym_non_species_keyword(app_and_db):
 
     # Pre-existing 'individual' tag named like the species we're about to type.
     individual_kid = db.keywords.add('Robin', kw_type='individual')
-    db.tag_photo(pid, individual_kid)
+    keyword_tagging.tag_photo(db, pid, individual_kid)
     db.commit()
 
     client = app.test_client()
@@ -446,9 +448,9 @@ def test_state_endpoint_gates_representative_on_current_eligibility(app_and_db):
     kid_live = db.keywords.add('Coyote Live', is_species=True)
     kid_rejected = db.keywords.add('Coyote Rejected', is_species=True)
     kid_untagged = db.keywords.add('Coyote Untagged', is_species=True)
-    db.tag_photo(live_id, kid_live)
-    db.tag_photo(rejected_id, kid_rejected)
-    db.tag_photo(untagged_id, kid_untagged)
+    keyword_tagging.tag_photo(db, live_id, kid_live)
+    keyword_tagging.tag_photo(db, rejected_id, kid_rejected)
+    keyword_tagging.tag_photo(db, untagged_id, kid_untagged)
     db.commit()
     db.set_species_representative('Coyote Live', live_id)
     db.set_species_representative('Coyote Rejected', rejected_id)
@@ -458,7 +460,7 @@ def test_state_endpoint_gates_representative_on_current_eligibility(app_and_db):
     # already filter on. The preference rows themselves remain intact.
     db.photo_review.set_flag(rejected_id, 'rejected')
     db.commit()
-    db.untag_photo(untagged_id, kid_untagged)
+    keyword_tagging.untag_photo(db, untagged_id, kid_untagged)
     db.commit()
 
     client = app.test_client()
@@ -497,9 +499,9 @@ def test_state_endpoint_reports_each_listed_species(app_and_db):
     both_id, teal_only_id, none_id = pids[0], pids[1], pids[2]
     teal = db.keywords.add('Green-winged Teal', is_species=True)
     wigeon = db.keywords.add('American Wigeon', is_species=True)
-    db.tag_photo(both_id, teal)
-    db.tag_photo(both_id, wigeon)
-    db.tag_photo(teal_only_id, teal)
+    keyword_tagging.tag_photo(db, both_id, teal)
+    keyword_tagging.tag_photo(db, both_id, wigeon)
+    keyword_tagging.tag_photo(db, teal_only_id, teal)
     db.commit()
     client = app.test_client()
 

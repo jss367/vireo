@@ -8,7 +8,7 @@ import re
 
 import pytest
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import keyword_tagging, photo_ingest
 
 from e2e.module_pages import install_page_module_exposure
 
@@ -36,7 +36,7 @@ def _seed_large_hawk_life_list(live_server, count=101):
             file_mtime=100.0 + i,
             timestamp=f"2024-03-10T09:{i // 60:02d}:{i % 60:02d}",
         )
-        db.tag_photo(photo_id, keyword_id)
+        keyword_tagging.tag_photo(db, photo_id, keyword_id)
         db.commit()
 
 
@@ -219,7 +219,7 @@ def test_life_list_pick_badge_and_live_promotion(live_server, page):
     hawk_keyword = db.conn.execute(
         "SELECT id FROM keywords WHERE name = 'Red-tailed Hawk'"
     ).fetchone()["id"]
-    db.tag_photo(hawk2, hawk_keyword)
+    keyword_tagging.tag_photo(db, hawk2, hawk_keyword)
     db.commit()
     db.conn.execute(
         "UPDATE photos SET quality_score = CASE id WHEN ? THEN 0.9 ELSE 0.1 END "
@@ -294,7 +294,7 @@ def test_alphabetical_sort_ignores_leading_okina(live_server, page):
             file_mtime=200.0 + i,
             timestamp=f"2024-07-{i + 1:02d}T09:00:00",
         )
-        db.tag_photo(photo_id, keyword_id)
+        keyword_tagging.tag_photo(db, photo_id, keyword_id)
         db.commit()
 
     page.goto(f"{live_server['url']}/life-list")
@@ -358,7 +358,7 @@ def test_taxonomic_group_and_identification_level_filters(live_server, page):
             file_mtime=500.0 + taxon_id,
             timestamp="2024-06-01T12:00:00",
         )
-        db.tag_photo(photo_id, keyword_id)
+        keyword_tagging.tag_photo(db, photo_id, keyword_id)
         db.commit()
     db.conn.commit()
 
@@ -459,7 +459,7 @@ def test_life_list_merges_aliases_and_opens_same_named_taxa_independently(live_s
         keyword = db.keywords.add(name, parent_id=parent_id, is_species=True)
         db.commit()
         db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
-        db.tag_photo(photo, keyword)
+        keyword_tagging.tag_photo(db, photo, keyword)
     db.commit()
 
     page.goto(f"{live_server['url']}/life-list")
@@ -495,7 +495,7 @@ def test_unlinked_life_list_card_pages_its_own_same_named_photos(live_server, pa
                 file_size=1000, file_mtime=1000.0 + keyword * 200 + i,
                 timestamp=f"{year}-01-01T08:{i // 60:02d}:{i % 60:02d}",
             )
-            db.tag_photo(photo, keyword)
+            keyword_tagging.tag_photo(db, photo, keyword)
             db.commit()
             if keyword == unlinked:
                 expected.append(photo)

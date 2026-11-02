@@ -19,6 +19,7 @@ import places
 from db import KEYWORD_TYPES
 from flask import Blueprint, jsonify, request
 from keep_safety import best_batch_application_error
+from services import keyword_tagging
 from services.edit_history import atomic_edit, change_photo_location
 from services.pending_changes import (
     queue_keyword_add,
@@ -469,7 +470,7 @@ def create_batch_blueprint(
 
         with db.transaction():
             for pid in added_ids:
-                db.tag_photo(pid, kid, source='manual')
+                keyword_tagging.tag_photo(db, pid, kid, source='manual')
                 queue_keyword_add(db, pid, name)
             items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in added_ids]
             if items:
@@ -593,7 +594,7 @@ def create_batch_blueprint(
         # Untags, their sidecar work and the one undo entry land together.
         with db.transaction():
             for pid in removed_ids:
-                db.untag_photo(pid, keyword_id, _record_history=True)
+                keyword_tagging.untag_photo(db, pid, keyword_id, _record_history=True)
                 queue_keyword_remove(db, pid, name)
                 # See ``api_remove_keyword``: a ``keyword_remove`` on a
                 # ``type='location'`` tag leaves the sidecar's

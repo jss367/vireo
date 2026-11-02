@@ -4,7 +4,7 @@ import threading
 
 import pytest
 from PIL import Image
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -78,9 +78,9 @@ def _seed_publish_app(tmp_path, monkeypatch):
     cardinal = db.keywords.add("Northern Cardinal", is_species=True)
     sparrow = db.keywords.add("House Sparrow", is_species=True)
     backyard = db.keywords.add("Backyard", kw_type="location")
-    db.tag_photo(p1, cardinal)
-    db.tag_photo(p1, backyard)
-    db.tag_photo(p2, sparrow)
+    keyword_tagging.tag_photo(db, p1, cardinal)
+    keyword_tagging.tag_photo(db, p1, backyard)
+    keyword_tagging.tag_photo(db, p2, sparrow)
     db.commit()
     db.conn.commit()
 

@@ -9,7 +9,7 @@ import os
 
 import pytest
 from PIL import Image
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from services.edit_history import undo_last_edit
 
 
@@ -151,7 +151,7 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
     db.commit()
     db.photo_labels.set(ids["clipped"], "red")
     keyword_id = db.keywords.add("keeper")
-    db.tag_photo(ids["clipped"], keyword_id)
+    keyword_tagging.tag_photo(db, ids["clipped"], keyword_id)
     db.commit()
 
     r = client.get(

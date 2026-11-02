@@ -21,6 +21,21 @@ from repositories.effective_config import subject_types, workspace_effective_con
 from repositories.folder_subtrees import escape_like as _escape_like
 from repositories.folder_subtrees import path_for_subtree_match as _path_for_subtree_match
 from repositories.keyword_provenance import location_component_rank
+
+# The provenance lattice is re-exported: callers import it from ``db``.
+from repositories.keyword_source import _KEYWORD_SOURCE_RANK as _KEYWORD_SOURCE_RANK
+from repositories.keyword_source import (
+    _KEYWORD_SOURCE_UNRECOGNIZED_RANK as _KEYWORD_SOURCE_UNRECOGNIZED_RANK,
+)
+from repositories.keyword_source import KEYWORD_SOURCE_ACCEPT as KEYWORD_SOURCE_ACCEPT
+from repositories.keyword_source import KEYWORD_SOURCE_CONFLICT_SQL as KEYWORD_SOURCE_CONFLICT_SQL
+from repositories.keyword_source import KEYWORD_SOURCE_MANUAL as KEYWORD_SOURCE_MANUAL
+from repositories.keyword_source import KEYWORD_SOURCE_PRECEDENCE as KEYWORD_SOURCE_PRECEDENCE
+from repositories.keyword_source import KEYWORD_SOURCE_UNKNOWN as KEYWORD_SOURCE_UNKNOWN
+from repositories.keyword_source import keyword_source_max as keyword_source_max
+from repositories.keyword_source import keyword_source_max_sql as keyword_source_max_sql
+from repositories.keyword_source import keyword_source_rank as keyword_source_rank
+from repositories.keyword_source import keyword_source_rank_sql as keyword_source_rank_sql
 from repositories.keywords import KEYWORD_TYPES
 from repositories.photo_sql import (
     PHOTO_COLS,
@@ -102,131 +117,6 @@ if TYPE_CHECKING:
 # control flags, repository accessors and transaction APIs have concrete types.
 
 log = logging.getLogger(__name__)
-
-# Durable provenance values for ``photo_keywords.source``.
-#
-# ``KEYWORD_SOURCE_MANUAL`` means "a person explicitly asked for this
-# association"; nothing that prunes generated metadata may delete it.
-# ``KEYWORD_SOURCE_UNKNOWN`` (NULL) means "we genuinely cannot tell" — the
-# only writers allowed to use it are the sidecar readers (scanner, XMP
-# reconcile), where a term may equally have come from the user's Lightroom
-# catalog or from a keyword Vireo itself wrote out.
-#
-# ``tag_photo`` defaults to MANUAL on purpose. The failure mode of a
-# mis-stamped association is asymmetric: guessing "manual" for a generated
-# tag leaves a stale keyword the user can delete, while guessing "unknown"
-# for a hand-added tag lets retirement passes erase user metadata silently
-# and unrecoverably. So the default is the fail-safe value and every
-# provenance-neutral writer has to say so explicitly. See
-# ``test_keyword_provenance_contract.py``, which pins that inventory.
-KEYWORD_SOURCE_MANUAL = "manual"
-# Written by the prediction-accept path (PR #1479 Phase 4). Nothing in this
-# module writes it yet; it is declared here so the lattice below has its
-# middle element and both PRs share one ordering instead of two.
-KEYWORD_SOURCE_ACCEPT = "accept"
-KEYWORD_SOURCE_UNKNOWN = None
-
-# Provenance is a lattice, weakest first: NULL < 'accept' < 'manual'.
-#
-# The rule the lattice exists to state once: **when two associations for the
-# same (photo, keyword) converge, the survivor takes the stronger claim,
-# never the weaker.** Associations converge in more places than they are
-# created — a duplicate merge folds losers onto a winner, a keyword
-# rename/curation-merge repoints rows onto a canonical keyword, RAW/JPEG
-# companion pairing copies a companion's keywords onto the primary, and every
-# ``tag_photo`` re-tag lands on a row that may already exist. Each of those is
-# a place where a hand-added keyword can quietly decay into an unattributed
-# row that a retirement pass reads as generated and deletes (the one-shot
-# Wildlife genre retirement, since removed, worked that way).
-# ``COALESCE(new, old)`` is not the rule — it is only accidentally
-# equal to it while the column is set-or-NULL, and it downgrades 'manual' to
-# 'accept' the moment a third value exists.
-#
-# So the fold is expressed once, here, and every convergence point uses it:
-# ``keyword_source_max`` in Python, ``keyword_source_max_sql`` /
-# ``KEYWORD_SOURCE_CONFLICT_SQL`` in SQL.
-# ``test_keyword_provenance_contract.py`` enumerates the call sites and fails
-# on a new one that does not.
-KEYWORD_SOURCE_PRECEDENCE = (
-    KEYWORD_SOURCE_UNKNOWN,
-    KEYWORD_SOURCE_ACCEPT,
-    KEYWORD_SOURCE_MANUAL,
-)
-_KEYWORD_SOURCE_RANK = {
-    value: rank for rank, value in enumerate(KEYWORD_SOURCE_PRECEDENCE)
-}
-# A stamp this build does not recognise still means "somebody deliberately
-# claimed this row", so it must outrank "no stamp at all" — but it never
-# outranks an explicit 'manual', which is the one value with a delete-safety
-# guarantee attached.
-_KEYWORD_SOURCE_UNRECOGNIZED_RANK = 1
-
-
-def keyword_source_rank(source: str | None) -> int:
-    """Position of ``source`` in the provenance lattice (higher = stronger)."""
-    if source is None:
-        return _KEYWORD_SOURCE_RANK[KEYWORD_SOURCE_UNKNOWN]
-    return _KEYWORD_SOURCE_RANK.get(source, _KEYWORD_SOURCE_UNRECOGNIZED_RANK)
-
-
-def keyword_source_max(*sources: str | None) -> str | None:
-    """Return the strongest of ``sources``: the fold for converging rows.
-
-    Ties keep the first argument, so callers pass the incoming/stronger
-    candidate first when they want it to win a same-rank tie.
-    """
-    best = KEYWORD_SOURCE_UNKNOWN
-    best_rank = keyword_source_rank(KEYWORD_SOURCE_UNKNOWN)
-    for source in sources:
-        rank = keyword_source_rank(source)
-        if rank > best_rank:
-            best, best_rank = source, rank
-    return best
-
-
-def keyword_source_rank_sql(expr: str) -> str:
-    """SQL for ``keyword_source_rank(expr)``, from the same ordering."""
-    whens = " ".join(
-        f"WHEN {expr} = '{value}' THEN {rank}"
-        for rank, value in enumerate(KEYWORD_SOURCE_PRECEDENCE)
-        if value is not None
-    )
-    return (
-        f"(CASE WHEN {expr} IS NULL THEN "
-        f"{_KEYWORD_SOURCE_RANK[KEYWORD_SOURCE_UNKNOWN]} {whens} "
-        f"ELSE {_KEYWORD_SOURCE_UNRECOGNIZED_RANK} END)"
-    )
-
-
-def keyword_source_max_sql(left: str, right: str) -> str:
-    """SQL for ``keyword_source_max(left, right)``.
-
-    ``left`` and ``right`` are SQL expressions and are each substituted twice
-    (once to rank, once to yield the value), so pass column references,
-    literals, or scalar subqueries bound with *named* parameters — positional
-    ``?`` would have to be supplied twice in an order the caller cannot see.
-    """
-    return (
-        f"(CASE WHEN {keyword_source_rank_sql(left)} >= "
-        f"{keyword_source_rank_sql(right)} THEN {left} ELSE {right} END)"
-    )
-
-
-# The upsert clause every ``INSERT INTO photo_keywords`` must end with: an
-# existing row keeps its provenance unless the incoming row's is stronger,
-# and keeps its species_provenance unless it has none. Rows that INSERT only
-# three columns leave ``excluded.species_provenance`` NULL, so COALESCE
-# leaves the surviving row's evidence intact; merge paths that INSERT four
-# columns carry the loser's evidence onto the survivor when the survivor had
-# none, matching the ``_fold_history_state`` rule that keeps the survivor's
-# own stamp over the incoming one.
-KEYWORD_SOURCE_CONFLICT_SQL = (
-    "ON CONFLICT(photo_id, keyword_id) DO UPDATE SET "
-    "source = "
-    + keyword_source_max_sql("excluded.source", "photo_keywords.source")
-    + ", species_provenance = COALESCE("
-    "photo_keywords.species_provenance, excluded.species_provenance)"
-)
 
 _SQLITE_PARAM_CHUNK_SIZE = 800
 
@@ -1367,10 +1257,10 @@ class Database:
         themselves (``services.moves_merge.merge_staged_tree_into_archive``
         passes ``require_workspace_id`` as a callable, after its staged-root
         lookup). The subtree path
-        helpers are ``db`` module functions and are passed in, and so are the
-        two methods of other domains every move or merge runs mid-transaction:
-        the folder parent relink and the keyword-association carry, which
-        re-tags through ``tag_photo`` on the façade.
+        helpers are ``db`` module functions and are passed in, and so is the
+        folder parent relink every move or merge runs mid-transaction. The
+        keyword-association carry is the repository's own; it re-tags through
+        the provenance writer.
         """
         from repositories.moves_merge import MovesMergeRepository
 
@@ -1383,7 +1273,6 @@ class Database:
             # carry, so building it here would recurse.
             relink_parents_by_path=lambda folder_ids: (
                 self.folders.relink_parents_by_path(folder_ids)),
-            carry_keyword_associations=self._carry_keyword_associations_for_merge,
         )
 
     @property
@@ -1445,57 +1334,8 @@ class Database:
             # generated and delete. A queued ``location`` change originates
             # in set_photo_location, so the intent riding along is
             # user-authored.
-            self.tag_photo(surviving_id, kw_id)
+            self.keyword_provenance.tag(surviving_id, kw_id, source=KEYWORD_SOURCE_MANUAL)
         return True
-
-    def _carry_keyword_associations_for_merge(
-            self, losing_id, surviving_id, by_key):
-        """Apply the losing row's winning keyword ops to the survivor's tags.
-
-        ``by_key`` is the grouping built by
-        ``moves_merge.reconcile_conflicting_keyword_edits``; rows it has already
-        deleted are skipped by id. Only keys whose newest surviving change
-        sits on the losing photo are applied -- when the survivor holds the
-        newer change its own association already reflects it.
-        """
-        live = self._moves_merge_repository().live_pending_change_ids(losing_id, surviving_id)
-
-        def _flatten(photo_slot):
-            out = []
-            for ws_sides in photo_slot.values():
-                out.extend(ws_sides["add"] + ws_sides["remove"])
-            return out
-
-        for match_key, slot in by_key.items():
-            loser = [r for r in _flatten(slot[losing_id]) if r["id"] in live]
-            if not loser:
-                continue
-            survivor = [
-                r for r in _flatten(slot[surviving_id]) if r["id"] in live
-            ]
-
-            def key(r):
-                return (r["created_at"] or "", r["id"])
-
-            newest_loser = max(loser, key=key)
-            if survivor and key(max(survivor, key=key)) > key(newest_loser):
-                continue
-            if newest_loser["change_type"] == "keyword_add":
-                # The association the add already wrote is about to be
-                # deleted with the losing photo. Re-point it at the
-                # survivor. If it is somehow absent the catalog is already
-                # inconsistent and there is no id to carry -- leave it to
-                # the sync rather than guessing a keyword by name.
-                for kw_id in self.moves_merge.photo_keyword_ids_matching(
-                        losing_id, match_key):
-                    source = keyword_source_max(
-                        self.moves_merge.photo_keyword_source(losing_id, kw_id))
-                    self.tag_photo(surviving_id, kw_id, source=source)
-                    self.species_provenance.carry(losing_id, surviving_id, keyword_id=kw_id)
-            elif newest_loser["change_type"] == "keyword_remove":
-                for kw_id in self.moves_merge.photo_keyword_ids_matching(
-                        surviving_id, match_key):
-                    self.untag_photo(surviving_id, kw_id)
 
     # -- Photos --
 
@@ -1562,8 +1402,8 @@ class Database:
         ``services/duplicate_resolution.py`` (``apply_duplicate_resolution``,
         ``bulk_resolve_by_folder``, ``keep_duplicate_copy``,
         ``check_and_resolve_duplicates_for_hash``); the merge they share,
-        ``_apply_winner_loser_merge``, stays here because it re-tags the
-        winner through ``tag_photo``.
+        ``_apply_winner_loser_merge``, stays here; it re-tags the winner
+        through the provenance writer (``keyword_provenance.tag``).
         """
         return self._duplicates_repository()
 
@@ -1611,7 +1451,7 @@ class Database:
             if row["species_provenance"] is not None and loser_keyword_evidence.get(kw_id) is None:
                 loser_keyword_evidence[kw_id] = evidence_for_photo_copy(row["species_provenance"], row["photo_id"])
         for kw_id, merged_source in loser_keyword_sources.items():
-            self.tag_photo(
+            self.keyword_provenance.tag(
                 winner_id, kw_id, source=merged_source,
                 species_provenance=loser_keyword_evidence.get(kw_id),
             )
@@ -1697,7 +1537,6 @@ class Database:
         Photos and keywords are catalog-wide; the few workspace-scoped
         methods resolve the active workspace through ``self._ws_id`` at the
         point the original code did, so building the repository never raises.
-        The root merge's ``_merge_keyword_into`` is handed over bound.
         """
         from repositories.locations import LocationRepository
 
@@ -1706,7 +1545,6 @@ class Database:
             self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             photo_date_asc_order=PHOTO_DATE_ASC_ORDER,
-            merge_keyword_into=self._merge_keyword_into,
         )
 
     @property
@@ -2127,8 +1965,8 @@ class Database:
 
         A domain accessor, not a cached attribute: every access builds a
         fresh repository through ``_photo_keyword_repository``. The domain is
-        catalog-wide, so it needs no active workspace. ``untag_photo`` keeps
-        its ``Database`` wrapper beside ``tag_photo``.
+        catalog-wide, so it needs no active workspace. Callers outside the
+        data layer tag and untag through ``services.keyword_tagging``.
         """
         return self._photo_keyword_repository()
 
@@ -2159,8 +1997,6 @@ class Database:
         A domain accessor, not a cached attribute: every access builds a
         fresh repository, whose scoped method resolves the workspace at use.
         Do not retain one across a workspace switch.
-        ``get_photos_with_equivalent_species`` keeps its ``Database`` wrapper:
-        ``repositories/keyword_provenance.py`` binds it by name.
         """
         return self._photo_species_repository()
 
@@ -2168,39 +2004,23 @@ class Database:
         """Build the keyword-provenance repository on this connection.
 
         It holds the ``photo_keywords`` writers that create or converge an
-        association (``tag_photo``, ``_merge_keyword_into``,
-        ``link_keyword_to_place``) and the
-        flows that call them mid-transaction (``_upsert_one_keyword``,
-        ``accept_prediction``). The active
-        workspace is resolved lazily (``Database._ws_id`` is passed as a
-        resolver). Every façade method a moved body calls -- including these
-        methods' calls to each other -- is handed over bound, under its
-        ``Database`` name, so monkeypatches keep reaching the moved code; the
-        class attributes and ``db`` module names the bodies read (``_chunks``,
-        the provenance fold and ``KEYWORD_SOURCE_MANUAL``) are read here, at
-        call time.
+        association (``tag``, ``merge_keyword_into``,
+        ``link_keyword_to_place``) and the flows that call them
+        mid-transaction (``upsert_one_keyword``, ``accept_prediction``). The
+        active workspace is resolved lazily (``Database._ws_id`` is passed as
+        a resolver).
         """
         from repositories.keyword_provenance import KeywordProvenanceRepository
 
-        return KeywordProvenanceRepository(
-            self.conn,
-            self._ws_id,
-            chunks=_chunks,
-            keyword_source_manual=KEYWORD_SOURCE_MANUAL,
-            keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
-            keyword_source_max_sql=keyword_source_max_sql,
-            keyword_source_max=keyword_source_max,
-            decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
-            facade=self,
-        )
+        return KeywordProvenanceRepository(self.conn, self._ws_id)
 
     @property
     def keyword_provenance(self) -> KeywordProvenanceRepository:
-        """The ``photo_keywords`` writers without a ``Database`` wrapper: ``db.keyword_provenance.link_keyword_to_place(...)``.
+        """The ``photo_keywords`` writers: ``db.keyword_provenance.merge_keyword_into(...)`` and friends.
 
-        ``tag_photo``, ``_merge_keyword_into`` and ``accept_prediction`` keep
-        theirs: the provenance contract, the repositories' ``FACADE_METHODS``
-        and ``test_route_contract`` find them by those names.
+        Code outside the data layer tags through ``services.keyword_tagging``
+        and records an accept through ``services.review_decisions``; the
+        provenance contract reads every call of the writer behind them.
 
         A domain accessor, not a cached attribute: every access builds a fresh
         repository through ``_keyword_provenance_repository``, which resolves
@@ -2234,7 +2054,7 @@ class Database:
         """
         merged = 0
         for root_id, placed_id in self.keyword_tree.taxonomy_root_twins():
-            merged += self._merge_keyword_into(
+            merged += self.keyword_provenance.merge_keyword_into(
                 root_id, placed_id, pending_source_only=True,
             )
         if merged:
@@ -2254,9 +2074,8 @@ class Database:
         ``parent_id IS NULL``, so without this later child-place upserts
         would settle on one root and orphan the other's descendants.
         """
-        repaired, merged_roots = (
-            self._location_repository().repair_misclassified_ancestors()
-        )
+        repaired = self._location_repository().repair_misclassified_ancestors()
+        merged_roots = self.keyword_provenance.merge_duplicate_location_roots()
         if repaired:
             log.info(
                 "repaired %d misclassified location ancestor keyword(s)",
@@ -2337,7 +2156,7 @@ class Database:
         # Every caller of this method is a person assigning a place
         # (map click, text entry, batch apply, EXIF-derived confirm), so
         # the association is user-authored.
-        self.tag_photo(
+        self.keyword_provenance.tag(
             photo_id, leaf_keyword_id,
             source=KEYWORD_SOURCE_MANUAL,
         )
@@ -2371,102 +2190,6 @@ class Database:
             latitude=None,
             longitude=None,
         )
-
-    def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
-        """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
-
-        Moves photo associations, then reparents the source's children onto
-        the destination. A child whose name matches an existing sibling
-        under the destination merges into that sibling recursively only when
-        both share the same ``type`` — "Birds > Heron" and "birds > Heron"
-        must converge on one Heron. Match uses ``keyword_match_key`` (ASCII
-        case fold on the display-normalized name), the same key every lookup
-        and dedup path uses, so a case-only variant is a collision even
-        though SQLite's UNIQUE(name, parent_id) index is BINARY — an
-        unchecked reparent would otherwise leave two semantic peers no
-        import could tell apart. When the existing sibling has a different
-        ``type`` (e.g. a 'general' Macro vs. a 'genre' Macro), the dedup
-        boundary is (LOWER(name), parent_id, type), so they are NOT
-        duplicates; preserve both by disambiguating the migrating child's
-        name with an id suffix. Cycles are impossible: parent_id chains are
-        acyclic by construction.
-        Non-link metadata (is_species, coordinates, taxon_id,
-        source_taxon_id) folds into the destination when it lacks its own,
-        so deleting the source can't silently drop species/location info
-        that only the duplicate carried.
-
-        Rewrites pending_changes so an unsynced keyword_add/keyword_remove
-        queued under the source spelling points at the surviving name after
-        the merge. Without this, the merge deletes the source row but leaves
-        the pending change referring to the old spelling, so the next
-        ``sync_to_xmp`` writes a keyword the DB no longer has.
-
-        Explicit merges set ``pending_source_only`` so only photos currently
-        carrying the source have their pending edits rewritten. A photo that
-        already removed the source must still remove that old spelling from
-        its sidecar, even when it also carries the destination keyword.
-
-        Returns the number of keyword rows merged away (>= 1). Caller
-        commits.
-        """
-        return self._keyword_provenance_repository().merge_keyword_into(
-            src_id, dst_id, pending_source_only=pending_source_only,
-        )
-
-    def tag_photo(
-        self,
-        photo_id: int,
-        keyword_id: int,
-        source: str | None = KEYWORD_SOURCE_MANUAL,
-        *,
-        provenance: dict[str, Any] | None = None,
-        species_provenance: str | None = None,
-        _record_provenance: bool = False,
-    ) -> None:
-        """Associate a keyword with a photo.
-
-        Args:
-            source: Durable provenance for the association. The stamp lives on
-                    the row, so authorship survives ``prune_edit_history``
-                    discarding the ``keyword_add`` entry.
-
-                    Defaults to ``KEYWORD_SOURCE_MANUAL`` because that is the
-                    fail-safe answer: a call site that forgets to declare
-                    provenance leaves an association that retirement passes
-                    refuse to delete, rather than one they silently erase.
-                    Only the sidecar readers (scanner, XMP reconcile) may pass
-                    ``KEYWORD_SOURCE_UNKNOWN``, and they must do it
-                    explicitly — the contract test enumerates them.
-
-                    An existing stamp is never downgraded: the upsert stores
-                    the lattice max of the existing and incoming values, so
-                    re-tagging with ``KEYWORD_SOURCE_UNKNOWN`` keeps a
-                    recorded ``'manual'`` (and a future ``'accept'`` re-tag
-                    would too).
-            _record_provenance: Capture attribution only for an undoable edit.
-                    Import and merge writes leave this false.
-            provenance: dict of species evidence the caller is recording
-                    deliberately (a reviewer's identification). Snapshotted
-                    for undo and set after the row is tagged, so it survives
-                    the ON CONFLICT fold that would otherwise keep an
-                    existing value.
-            species_provenance: pre-serialized evidence JSON forwarded during
-                    a merge (loser → winner). Unlike ``provenance`` it does
-                    not snapshot or overwrite -- the shared conflict clause
-                    keeps the surviving row's evidence over the incoming
-                    one, so the loser's row is only applied when the winner
-                    had none.
-
-        Does not commit: the caller's unit of work owns the transaction.
-        """
-        if provenance is not None and _record_provenance:
-            self.species_provenance.remember_before(photo_id, keyword_id, force=True)
-        self._keyword_provenance_repository().tag(
-            photo_id, keyword_id, source=source,
-            species_provenance=species_provenance,
-        )
-        if provenance is not None:
-            self.species_provenance.set(photo_id, keyword_id, provenance)
 
     def _meta_repository(self) -> MetaRepository:
         """Build the (catalog-wide) db_meta repository on this connection."""
@@ -2551,27 +2274,6 @@ class Database:
         """Per-species assignment evidence, independent of photographer flags."""
         from repositories.species_provenance import SpeciesProvenanceRepository
         return SpeciesProvenanceRepository(self.conn, self._species_provenance_before)
-
-    def untag_photo(
-        self, photo_id: int, keyword_id: int, *, _record_history: bool = False
-    ) -> None:
-        """Remove a keyword association from a photo.
-
-        Stays a ``Database`` method beside ``tag_photo``: the structural
-        guards that keep keyword re-tagging on the façade (moves/merge,
-        species curation, predictions) find both writers by these names.
-
-        Does not commit: the caller's unit of work owns the transaction.
-
-        Args:
-            _record_history: Opt in only when the caller will record an
-                     undoable keyword/species edit. Reconciliation, merge and
-                     replay writers leave this false so no stale snapshots
-                     can accumulate or leak into a later edit.
-        """
-        if _record_history:
-            self.species_provenance.remember_before(photo_id, keyword_id)
-        return self._photo_keyword_repository().untag(photo_id, keyword_id)
 
     def get_life_list_unmatched_species(self) -> list[str]:
         """Backward-compatible list of uncounted identification names."""
@@ -2708,7 +2410,7 @@ class Database:
                         # Source-only: a photo that already removed the
                         # old spelling must keep that queued removal even
                         # when it also carries the peer.
-                        self._merge_keyword_into(
+                        self.keyword_provenance.merge_keyword_into(
                             keyword_id, peer["id"], pending_source_only=True,
                         )
                         return peer["id"]
@@ -3111,7 +2813,7 @@ class Database:
             # Deleted vocabulary stays deleted, like ordinary keyword undo.
             row = self.locations.keyword_place_row(link['keyword_id'])
             if row is not None and row['type'] == 'location':
-                self.tag_photo(
+                self.keyword_provenance.tag(
                     pid, link['keyword_id'],
                     source=keyword_source_max(link['source']),
                 )
@@ -3180,7 +2882,7 @@ class Database:
             return None
         # Stamp the recreated association so durable authorship does not
         # disappear merely because untagging deleted the row.
-        self.tag_photo(pid, keyword_id, source='manual')
+        self.keyword_provenance.tag(pid, keyword_id, source=KEYWORD_SOURCE_MANUAL)
         if name:
             self._flip_pending_keyword_change(
                 pid, name, 'keyword_remove', 'keyword_add',
@@ -3189,7 +2891,7 @@ class Database:
 
     def _untag_for_edit(self, pid, keyword_id):
         """Remove a keyword added by an edit; returns the keyword name."""
-        self.untag_photo(pid, keyword_id)
+        self.photo_keywords.untag(pid, keyword_id)
         name = self._edit_history_repository().keyword_name(keyword_id)
         if name:
             self._flip_pending_keyword_change(

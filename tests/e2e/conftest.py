@@ -10,7 +10,7 @@ from e2e.navbar_modules import install_navbar_exposure
 from e2e.threaded_server import start_server, stop_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vireo'))
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 
 def _seed_classifier_model(home_dir):
@@ -76,8 +76,8 @@ def seed_e2e_data(db, thumb_dir):
 
     k1 = db.keywords.add("Red-tailed Hawk", is_species=True)
     k2 = db.keywords.add("American Robin", is_species=True)
-    db.tag_photo(photos[0], k1)
-    db.tag_photo(photos[3], k2)
+    keyword_tagging.tag_photo(db, photos[0], k1)
+    keyword_tagging.tag_photo(db, photos[3], k2)
     db.commit()
 
     db.create_workspace("Field Work")

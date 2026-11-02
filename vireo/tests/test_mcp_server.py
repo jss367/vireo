@@ -34,6 +34,7 @@ from mcp_server import (
     server_command,
 )
 from PIL import Image as PILImage
+from services import keyword_tagging
 
 TOKEN = "test-token-123"
 REPO = Path(__file__).resolve().parents[2]
@@ -309,7 +310,7 @@ def test_species_preview_binds_existing_assignment_evidence(mcp, app_and_db):
     app, _ = app_and_db
     _seed_encounter_cache(app, db, [1, 2])
     keyword = db.keywords.add("Mallard", is_species=True)
-    db.tag_photo(1, keyword)
+    keyword_tagging.tag_photo(db, 1, keyword)
     db.commit()
     provenance = {"method": "direct_visual", "reviewer": "Agent", "reason": "Visible plumage"}
     preview = call(server, "preview_species_assignment", photo_ids=[1], species="Robin", provenance=provenance)
@@ -332,7 +333,7 @@ def test_species_tools_preserve_existing_user_evidence_in_mixed_selection(mcp, a
     app, _ = app_and_db
     _seed_encounter_cache(app, db, [1, 2, 3])
     keyword = db.keywords.add("Robin", is_species=True)
-    db.tag_photo(1, keyword)
+    keyword_tagging.tag_photo(db, 1, keyword)
     db.commit()
     assert app.test_client().post(f"/api/photos/1/species/{keyword}/provenance", json={
         "method": "direct_visual", "reviewer": "User", "reason": "User-reviewed identification",
@@ -388,7 +389,7 @@ def test_species_tools_reject_shared_keyword_promotion_or_rebinding(mcp, app_and
          900001 if kind == "genus" else None),
     ).lastrowid
     db.commit()
-    db.tag_photo(3, keyword)
+    keyword_tagging.tag_photo(db, 3, keyword)
     db.commit()
     original = db.keywords.species_assignment_identity(keyword)
     original_species = db.photo_species.get_species_for_photos([1, 2, 3])
@@ -417,7 +418,7 @@ def test_species_tools_reuse_shared_species_metadata_through_undo_and_redo(mcp, 
         (0 if linked else 1, 900002 if linked else None),
     ).lastrowid
     db.commit()
-    db.tag_photo(3, keyword)
+    keyword_tagging.tag_photo(db, 3, keyword)
     db.commit()
     original = db.keywords.species_assignment_identity(keyword)
     outside = db.species_provenance.assignments(3)
@@ -745,7 +746,7 @@ def test_search_keywords_matches_substrings_and_builds_paths(mcp):
     child = db.keywords.add("Barn owl", parent_id=parent)
     # The tree holds keywords used by photos in the workspace plus their
     # ancestors, so tagging the child surfaces the parent too.
-    db.tag_photo(db.photos.list_page()[0]["id"], child)
+    keyword_tagging.tag_photo(db, db.photos.list_page()[0]["id"], child)
     db.commit()
     found = call(server, "search_keywords", query="owl")
     assert found["total_matches"] == 2

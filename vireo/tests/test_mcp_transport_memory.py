@@ -236,12 +236,13 @@ def test_keyword_write_returns_the_actual_identity_without_name_rediscovery():
             photo_ids_tagged_with=lambda kid, ids: [],
         ),
         transaction=contextlib.nullcontext,
-        tag_photo=lambda pid, kid, **kw: tagged.append((pid, kid)),
         record_edit=lambda *a, **kw: None)
     ns = {"get_db": lambda: db, "request": types.SimpleNamespace(get_json=lambda **kw: body),
           "parse_selection_photo_ids": lambda db, value, **kw: (value["photo_ids"], None),
           "json_error": forbidden, "KEYWORD_TYPES": {"general", "taxonomy", "location"},
           "jsonify": lambda value: value,
+          "keyword_tagging": types.SimpleNamespace(
+              tag_photo=lambda _db, pid, kid, **kw: tagged.append((pid, kid))),
           "queue_keyword_add": lambda db, pid, name, **kw: queued.append((pid, name))}
     exec(compile(ast.Module(body=[route], type_ignores=[]), "<inert keyword route>", "exec"), ns)
     class Client:

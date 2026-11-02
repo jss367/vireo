@@ -1,13 +1,14 @@
 """Reviewers can distinguish species evidence and edit it in Browse."""
 
 from playwright.sync_api import expect
+from services import keyword_tagging
 
 
 def test_species_evidence_editor_persists_and_links_supporting_frames(live_server, page):
     db = live_server['db']
     pid, support = live_server['data']['photos'][:2]
     species = db.keywords.add('Mallard', is_species=True)
-    db.tag_photo(pid, species, provenance={
+    keyword_tagging.tag_photo(db, pid, species, provenance={
         'method': 'adjacent_frames', 'reason': 'The same bird is visible in the next frame',
         'reviewer': 'Field reviewer', 'supporting_photo_ids': [support],
         'confidence': None, 'confidence_meaning': 'No calibrated probability is available',
