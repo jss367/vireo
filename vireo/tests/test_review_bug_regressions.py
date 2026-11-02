@@ -26,7 +26,7 @@ def _keyword(db, name, *, kind="location", parent=None, lat=None, lng=None,
 def test_selective_discard_blocks_row_replacement(app_and_db, monkeypatch):
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
-    db.queue_change(pid, "flag", "flagged")
+    db.pending_changes.queue(pid, "flag", "flagged")
     db.commit()
     change = db.pending_changes.list_all()[0]
     original = SyncRepository.get_by_ids
@@ -62,9 +62,9 @@ def test_selective_discard_rolls_back_when_history_fails(app_and_db, monkeypatch
     pid = db.photos.list_page()[0]["id"]
     ws2 = db.create_workspace("Sibling")
     db.commit()
-    db.queue_change(pid, "keyword_remove_flat", "Wildlife")
+    db.pending_changes.queue(pid, "keyword_remove_flat", "Wildlife")
     db.commit()
-    db.queue_change(pid, "keyword_remove_flat", "Wildlife", workspace_id=ws2)
+    db.pending_changes.queue(pid, "keyword_remove_flat", "Wildlife", workspace_id=ws2)
     db.commit()
     change_id = db.pending_changes.list_all()[0]["id"]
 
@@ -82,7 +82,7 @@ def test_selective_discard_counts_repeated_ids_once(app_and_db):
     from db import _SQLITE_PARAM_CHUNK_SIZE
 
     app, db = app_and_db
-    db.queue_change(db.photos.list_page()[0]["id"], "rating", "4")
+    db.pending_changes.queue(db.photos.list_page()[0]["id"], "rating", "4")
     db.commit()
     cid = db.pending_changes.list_all()[0]["id"]
     response = app.test_client().post(
@@ -187,7 +187,7 @@ def test_location_detail_and_sync_preview_choose_exported_location(client_with_p
         db.commit()
     assert photo_locations.get_photo_location_keyword_ids(db, [pid]) == {pid: chosen}
     assert serialize_photo_location(db, pid)["keyword_id"] == chosen
-    db.queue_change(pid, "location", "effective")
+    db.pending_changes.queue(pid, "location", "effective")
     db.commit()
     photo = app.test_client().get("/api/sync/preview").get_json()["photos"][0]
     assert photo["changes"][0]["presentation"]["after"] == "Paris, France"

@@ -190,8 +190,8 @@ def seed(db):
         )
     db.conn.commit()
 
-    robin_kw = db.add_keyword("Robin", is_species=True)
-    park = db.add_keyword("Park")
+    robin_kw = db.keywords.add("Robin", is_species=True)
+    park = db.keywords.add("Park")
     db.tag_photo(p1, robin_kw)
     db.tag_photo(p1, park)
     db.tag_photo(p3, park)

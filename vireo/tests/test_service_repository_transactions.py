@@ -12,7 +12,7 @@ def test_location_sync_rejects_photo_outside_explicit_workspace(db, tmp_path):
     photo = photo_ingest.add_photo(db, folder, "synthetic.jpg", ".jpg", 1, 1.0)
     other_workspace = db.create_workspace("Other workspace")
     db.commit()
-    db.queue_change(photo, "location", "existing", workspace_id=other_workspace)
+    db.pending_changes.queue(photo, "location", "existing", workspace_id=other_workspace)
     db.commit()
     before = [tuple(row) for row in db.conn.execute("SELECT * FROM pending_changes")]
 

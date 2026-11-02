@@ -556,7 +556,7 @@ def test_species_confirmation_restores_cache_on_commit_failure(
     client = app.test_client()
     ids, _ = _seed(db)
     if cache_only:
-        kid = db.add_keyword('Cardinal', is_species=True)
+        kid = db.keywords.add('Cardinal', is_species=True)
         db.commit()
         for pid in ids:
             db.tag_photo(pid, kid)
@@ -649,7 +649,7 @@ def _seed_species_confirm_cache_entry(db, client, ids):
     ``photo_edit_id`` is recorded, and the confirmation lives only in the
     pipeline cache plus a ``species_confirm_cache`` edit_history row.
     """
-    kid = db.add_keyword('Cardinal', is_species=True)
+    kid = db.keywords.add('Cardinal', is_species=True)
     db.commit()
     for pid in ids:
         db.tag_photo(pid, kid)
@@ -765,7 +765,7 @@ def test_keyword_changing_auto_detach_is_one_atomic_history_action(app_and_db, r
     ids, before = _seed(db)
     before['encounters'][0].update(confirmed_species='Sparrow', species_confirmed=True)
     if replacement:
-        old_kid = db.add_keyword('Sparrow', is_species=True)
+        old_kid = db.keywords.add('Sparrow', is_species=True)
         db.commit()
         for pid in ids[:2]:
             db.tag_photo(pid, old_kid)
@@ -996,7 +996,7 @@ def test_species_confirmation_without_split_restores_labels_and_keywords(app_and
     before['encounters'][0]['bursts'] = [{'photo_ids': ids, 'species_override': None}]
     before['encounters'][0]['burst_count'] = 1
     if replacement:
-        kid = db.add_keyword('Sparrow', is_species=True)
+        kid = db.keywords.add('Sparrow', is_species=True)
         db.commit()
         for pid in ids:
             db.tag_photo(pid, kid)

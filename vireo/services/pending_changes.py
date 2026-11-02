@@ -41,7 +41,7 @@ def queue_keyword_add(
     keyword_name = normalize_keyword_display(keyword_name)
     if not keyword_name:
         return
-    removed = db.remove_pending_changes(
+    removed = db.pending_changes.cancel(
         photo_id, "keyword_remove", keyword_name,
         workspace_id=workspace_id,
     )
@@ -57,7 +57,7 @@ def queue_keyword_add(
         }],
     )
     if removed == 0:
-        db.queue_change(
+        db.pending_changes.queue(
             photo_id, "keyword_add", keyword_name,
             workspace_id=workspace_id,
         )
@@ -72,12 +72,12 @@ def queue_keyword_remove(
     keyword_name = normalize_keyword_display(keyword_name)
     if not keyword_name:
         return
-    removed = db.remove_pending_changes(
+    removed = db.pending_changes.cancel(
         photo_id, "keyword_add", keyword_name,
         workspace_id=workspace_id,
     )
     if removed == 0:
-        db.queue_change(
+        db.pending_changes.queue(
             photo_id, "keyword_remove", keyword_name,
             workspace_id=workspace_id,
         )
@@ -94,10 +94,10 @@ def queue_location_sync_if_enabled(
         return
     # Queue even when assigned-location writes are disabled so sync can
     # remove stale Vireo-authored GPS previously written while enabled.
-    db.remove_pending_changes(
+    db.pending_changes.cancel(
         photo_id, "location", workspace_id=workspace_id,
     )
-    db.queue_change(
+    db.pending_changes.queue(
         photo_id, "location", "effective",
         workspace_id=workspace_id,
     )

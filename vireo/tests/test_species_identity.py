@@ -890,7 +890,7 @@ def test_merged_metadata_updates_do_not_make_one_source_taxon_ambiguous(tmp_path
 @pytest.mark.parametrize("source_backed", [True, False])
 def test_acceptance_binds_source_ids_without_reassigning_same_name_keywords(db, tmp_path, source_backed):
     db.conn.execute("UPDATE taxa SET common_name = 'Shared parrot' WHERE inat_id IN (18976, 18997)")
-    existing = db.add_keyword("Shared parrot", is_species=True)
+    existing = db.keywords.add("Shared parrot", is_species=True)
     db.commit()
     original = dict(db.conn.execute("SELECT * FROM keywords WHERE id = ?", (existing,)).fetchone())
     accepted = []
@@ -1001,7 +1001,7 @@ def _confirmed_species_photo(db, tmp_path, entry, name="photo.jpg"):
     the shape a real catalog carries after an accept or an XMP read.
     """
     pid, _ = _photo(db, tmp_path, name)
-    keyword_id = db.add_keyword(entry["common_name"], is_species=True)
+    keyword_id = db.keywords.add(entry["common_name"], is_species=True)
     db.commit()
     local = db.conn.execute("SELECT id FROM taxa WHERE inat_id = ?", (entry["taxon_id"],)).fetchone()["id"]
     db.conn.execute("UPDATE keywords SET taxon_id = ?, source_taxon_id = ? WHERE id = ?",

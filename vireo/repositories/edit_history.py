@@ -33,6 +33,44 @@ from typing import Any
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 
 
+def edit_prediction_ids(meta, fallback):
+    """Return every accepted prediction id captured on this edit item.
+
+    Accept-subject can accept agreeing predictions from multiple
+    classifier models on one detection, so the ``no_tag`` variant
+    stashes the full list under ``prediction_ids``. Those siblings
+    do not share a single ``(detection_id, classifier_model,
+    labels_fingerprint)`` scope, so undo/redo must reset every
+    recorded id — using only the first drops the other classifiers'
+    accepted rows on undo. Regular accepts still carry a singular
+    ``prediction_id`` or a bare-int ``old_value`` fallback.
+    """
+    ids = []
+    seen = set()
+
+    def _push(raw):
+        if raw is None:
+            return
+        try:
+            pid = int(raw)
+        except (TypeError, ValueError):
+            return
+        if pid in seen:
+            return
+        seen.add(pid)
+        ids.append(pid)
+
+    if meta:
+        _push(meta.get("prediction_id"))
+        raw_ids = meta.get("prediction_ids")
+        if isinstance(raw_ids, list):
+            for raw in raw_ids:
+                _push(raw)
+    if not ids:
+        _push(fallback)
+    return ids
+
+
 class EditHistoryRepository:
     def __init__(
         self,

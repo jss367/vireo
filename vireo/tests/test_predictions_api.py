@@ -654,9 +654,9 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     db.commit()
 
     # Tag each photo with its own species so failure modes are independent.
-    kid_live = db.add_keyword('Coyote Live', is_species=True)
-    kid_rejected = db.add_keyword('Coyote Rejected', is_species=True)
-    kid_untagged = db.add_keyword('Coyote Untagged', is_species=True)
+    kid_live = db.keywords.add('Coyote Live', is_species=True)
+    kid_rejected = db.keywords.add('Coyote Rejected', is_species=True)
+    kid_untagged = db.keywords.add('Coyote Untagged', is_species=True)
     db.tag_photo(live_pid, kid_live)
     db.tag_photo(rejected_pid, kid_rejected)
     db.tag_photo(photos[2]['id'], kid_untagged)
@@ -695,7 +695,7 @@ def test_get_predictions_species_rule_keeps_disagreement_rows(app_and_db):
     _, db = app_and_db
     photos = db.photos.list_page()
     # Confirmed species keyword on p1.
-    robin_id = db.add_keyword('Robin', is_species=True)
+    robin_id = db.keywords.add('Robin', is_species=True)
     db.tag_photo(photos[0]['id'], robin_id)
     db.commit()
     # Pending prediction proposes Sparrow — the reviewer wants to see it.

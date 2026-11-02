@@ -50,15 +50,15 @@ def _collision(db, tmp_path, mode, monkeypatch):
 
 def _alias(db, kind):
     if kind == 'source_only':
-        left, right = db.add_keyword('Common hierarchy'), db.add_keyword('Scientific hierarchy')
-        common = db.add_keyword('Common alias', parent_id=left, is_species=True, source_taxon_id=88001)
-        alias = db.add_keyword('Scientific alias', parent_id=right, is_species=True, source_taxon_id=88001)
+        left, right = db.keywords.add('Common hierarchy'), db.keywords.add('Scientific hierarchy')
+        common = db.keywords.add('Common alias', parent_id=left, is_species=True, source_taxon_id=88001)
+        alias = db.keywords.add('Scientific alias', parent_id=right, is_species=True, source_taxon_id=88001)
         db.commit()
         return db.keywords.name_of(common), alias
     db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88001,?,'Tyrannus melancholicus','Tropical Kingbird','species')", (None if kind == 'local_only' else 88001,))
     db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES (88001,'Yellow Kingbird')")
     label = 'Yellow Kingbird' if kind == 'alternate_common' else 'Tyrannus melancholicus'
-    return 'Tropical Kingbird', db.add_keyword(label, is_species=True)
+    return 'Tropical Kingbird', db.keywords.add(label, is_species=True)
 
 
 @pytest.mark.parametrize('mode', ['staged', 'phantom', 'intra_staged', 'folder', 'companion'])
@@ -80,10 +80,10 @@ def test_drained_alias_confirmation_survives_collision_sync_reimport_and_history
         db.photo_visibility.grant(second, [losing, survivor])
         candidate, alias = _alias(db, alias_kind)
         db.conn.execute("INSERT INTO taxa(id,name,rank) VALUES (88002,'Higher family','family')")
-        higher = db.add_keyword('Higher family', kw_type='taxonomy')
+        higher = db.keywords.add('Higher family', kw_type='taxonomy')
         db.commit()
         db.conn.execute('UPDATE keywords SET taxon_id=88002 WHERE id=?', (higher,))
-        note = db.add_keyword('Unrelated note')
+        note = db.keywords.add('Unrelated note')
         db.tag_photo(survivor, higher, source='manual')
         db.tag_photo(survivor, note, source='manual')
         db.commit()

@@ -75,9 +75,9 @@ def _seed_publish_app(tmp_path, monkeypatch):
     db.conn.execute("UPDATE photos SET mask_path = ? WHERE id = ?", ("masks/cardinal.png", p1))
     db.conn.execute("UPDATE photos SET mask_path = ? WHERE id = ?", ("masks/mystery.png", p3))
 
-    cardinal = db.add_keyword("Northern Cardinal", is_species=True)
-    sparrow = db.add_keyword("House Sparrow", is_species=True)
-    backyard = db.add_keyword("Backyard", kw_type="location")
+    cardinal = db.keywords.add("Northern Cardinal", is_species=True)
+    sparrow = db.keywords.add("House Sparrow", is_species=True)
+    backyard = db.keywords.add("Backyard", kw_type="location")
     db.tag_photo(p1, cardinal)
     db.tag_photo(p1, backyard)
     db.tag_photo(p2, sparrow)

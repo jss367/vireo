@@ -88,7 +88,7 @@ class PhotoReviewService:
             valid_ids = list(old_values)
             self.db.photo_review.set_ratings(valid_ids, rating)
             for pid in valid_ids:
-                self.db.queue_change(pid, "rating", str(rating))
+                self.db.pending_changes.queue(pid, "rating", str(rating))
             description = f"Set rating to {rating}"
             if is_batch:
                 description += f" on {len(photo_ids)} photos"

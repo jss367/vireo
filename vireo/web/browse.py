@@ -309,7 +309,7 @@ def _prediction_suggestion(
     # rather than letting the arbitrary first row hide the others.
     keyworded = set()
     for kid in kids_by_key.get(key, []):
-        keyworded.update(db.get_photos_with_equivalent_species(predicted_ids, kid))
+        keyworded.update(db.photo_species.get_photos_with_equivalent_species(predicted_ids, kid))
     missing_ids = [p for p in predicted_ids if p not in keyworded]
     # A pending prediction on an already-keyworded photo still has to
     # go somewhere: dropping it would leave Review holding the same

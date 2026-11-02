@@ -1388,7 +1388,7 @@ def create_pipeline_blueprint(
         ]
 
         def _species_kid(name: str) -> int | None:
-            # Read-only mirror of the species-aware lookup in db.add_keyword(
+            # Read-only mirror of the species-aware lookup in db.keywords.add(
             # species, is_species=True): match top-level taxonomy/general rows
             # case-insensitively, prefer taxonomy. Excludes homonym rows of
             # other deliberate types (individual, location, genre) so a person

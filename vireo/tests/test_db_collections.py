@@ -751,7 +751,7 @@ def test_keyword_identity_rule(db, folder):
 
     a = _photo(db, folder, "a.jpg")
     _photo(db, folder, "b.jpg")
-    kid = db.add_keyword("Heron")
+    kid = db.keywords.add("Heron")
     db.tag_photo(a, kid)
     db.commit()
     identity = db.conn.execute(
@@ -938,8 +938,8 @@ def test_burst_keys_drop_the_temp_scope(db, folder):
 def test_keyword_filter_values(db, folder):
     a = _photo(db, folder, "a.jpg")
     b = _photo(db, folder, "b.jpg")
-    kid = db.add_keyword("Sunset")
-    other = db.add_keyword("Sunrise")
+    kid = db.keywords.add("Sunset")
+    other = db.keywords.add("Sunrise")
     db.tag_photo(a, kid)
     db.tag_photo(b, kid)
     db.tag_photo(b, other)
@@ -1257,7 +1257,7 @@ def test_top_predicted_species_matches_summary(db, folder):
             )
     db.conn.commit()
     # Conflicting saved metadata must not change a prediction drill-down.
-    db.tag_photo(hawk, db.add_keyword("Robin", is_species=True))
+    db.tag_photo(hawk, db.keywords.add("Robin", is_species=True))
     db.commit()
     def rule(species):
         return [{"field": "top_predicted_species", "op": "is", "value": species}]
