@@ -26,7 +26,7 @@ import pytest
 from db import Database
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.species_curation import SpeciesCurationRepository
-from services import photo_ingest, workspace_folders
+from services import photo_ingest, review_decisions, workspace_folders
 
 
 def _visible(db, sql, params=()):
@@ -923,7 +923,7 @@ def test_species_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
     cardinal_pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (cardinal_det,),
     ).fetchone()["id"]
-    db.update_prediction_status(cardinal_pred, "rejected")
+    review_decisions.update_prediction_status(db, cardinal_pred, "rejected")
 
     assert db.species_curation.get_highlights(
         species="Blue Jay", eligible_only=True

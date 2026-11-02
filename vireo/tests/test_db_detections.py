@@ -22,7 +22,7 @@ from db import Database
 from detection_id import detection_id
 from repositories.detections import DetectionsRepository
 from repositories.model_runs import ModelRunsRepository
-from services import detection_store, miss_flags, photo_ingest, workspace_folders
+from services import detection_store, miss_flags, photo_ingest, review_decisions, workspace_folders
 
 MODEL = "megadetector-v6"
 
@@ -410,7 +410,7 @@ def test_real_manual_review_pins_the_detector_run(db):
     pred_id = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_id,),
     ).fetchone()["id"]
-    db.set_review_status(pred_id, db._ws_id(), "accepted")
+    review_decisions.set_review_status(db, pred_id, db._ws_id(), "accepted")
     assert detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.5)],
                                     runtime_fingerprint="rt-2") == [det_id]
     assert db.conn.execute(

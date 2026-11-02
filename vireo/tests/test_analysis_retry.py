@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
-from services import photo_ingest, workspace_folders
+from services import photo_ingest, review_decisions, workspace_folders
 from services.analysis_retry import explain_selected, run_retry
 from testing.waits import synchronization_timeout
 from web.background_jobs import JobCancelled
@@ -636,7 +636,7 @@ def test_changed_source_with_same_runtime_never_remasks_retained_reviewed_boxes(
     db.commit()
     pred_id = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (did,)).fetchone()[0]
     if pinned:
-        db.set_review_status(pred_id, db.require_workspace_id(), "accepted")
+        review_decisions.set_review_status(db, pred_id, db.require_workspace_id(), "accepted")
     db.photo_review.set_flag(pid, "rejected")
     db.commit()
     db.photo_review.set_rating(pid, 2)

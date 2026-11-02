@@ -29,7 +29,7 @@ from photo_payload import (
     attach_species_representatives,
     render_key_for_recipe,
 )
-from services import prediction_decisions
+from services import prediction_decisions, review_decisions
 from services.edit_history import prediction_status_item
 from services.pending_changes import queue_keyword_add
 from services.prediction_ambiguity import ambiguous_prediction_ids, effective_category_resolver, prediction_is_ambiguous
@@ -181,7 +181,7 @@ def create_predictions_blueprint(
         # own values, so alternatives — whose status is
         # ``alternative`` and whose confidence/species usually differ
         # from the matching parent — would otherwise be dropped by
-        # ``_filter_prediction_rows_by_rules`` before ``alts_by_key`` is
+        # ``filter_prediction_rows_by_rules`` before ``alts_by_key`` is
         # built. The parent would then render with an empty
         # ``alternatives`` list and the user could not accept an
         # alternate species in that filtered view. The
@@ -619,7 +619,7 @@ def create_predictions_blueprint(
                 )
             item = prediction_status_item(
                 db, pred["photo_id"], [pred_id],
-                lambda: db.update_prediction_status(pred_id, "reviewed"),
+                lambda: review_decisions.update_prediction_status(db, pred_id, "reviewed"),
             )
             assert item is not None  # The guarded pending -> reviewed transition changed state.
             db.record_edit(
@@ -657,8 +657,8 @@ def create_predictions_blueprint(
             # species/taxonomy keywords from *every* photo it tags (the whole
             # group, not just this photo) inside one transaction, so grouped
             # photos are replaced consistently.
-            result = db.accept_prediction(
-                pred_id, replace_species=True,
+            result = review_decisions.accept_prediction(
+                db, pred_id, replace_species=True,
                 species_taxonomy=_species_replacement_taxonomy(),
             )
             if result is None:
@@ -1042,8 +1042,8 @@ def create_predictions_blueprint(
         for pid in pred_ids:
             if pid in handled:
                 continue
-            result = db.accept_prediction(
-                pid,
+            result = review_decisions.accept_prediction(
+                db, pid,
                 prediction_ids=submitted_pred_ids,
             )
             handled.add(pid)
@@ -1382,7 +1382,7 @@ def create_predictions_blueprint(
         accepted_by_scope: dict[tuple[int, str, str], set[int]] = {}
         for ids in pick_pred_ids.values():
             for pred_id in ids:
-                db.update_prediction_status(pred_id, "accepted")
+                review_decisions.update_prediction_status(db, pred_id, "accepted")
                 detection_id, model, fingerprint = db.predictions.get_scope(pred_id)
                 accepted_by_scope.setdefault((detection_id, model, fingerprint), set()).add(pred_id)
         for scope, accepted_ids in accepted_by_scope.items():
@@ -1390,7 +1390,7 @@ def create_predictions_blueprint(
                 *scope, sorted(accepted_ids),
             )
             for sid in sibling_ids:
-                db.update_prediction_status(sid, "rejected")
+                review_decisions.update_prediction_status(db, sid, "rejected")
 
     def _stale_group_apply_photos(db: Database, observed: dict[int, str]) -> set[int]:
         """Photos whose group member was decided or regenerated since the modal rendered.
@@ -1695,7 +1695,7 @@ def create_predictions_blueprint(
                     f"prediction already {current_status}; cannot accept",
                     409,
                 )
-            result = db.accept_prediction(pred_id)
+            result = review_decisions.accept_prediction(db, pred_id)
             if result and result["affected"]:
                 # ``changed_tag=False`` means the photo already carried an
                 # equivalent species (hierarchical or root) so the accept only
@@ -1784,7 +1784,7 @@ def create_predictions_blueprint(
                     f"prediction already {current_status}; cannot accept",
                     409,
                 )
-            result = db.accept_subject_species(pred_id)
+            result = review_decisions.accept_subject_species(db, pred_id)
             if result is None:
                 return json_error("prediction not found", 404)
             if result["affected"]:
@@ -1892,7 +1892,7 @@ def create_predictions_blueprint(
 
         def apply() -> None:
             for target_id in ids:
-                db.update_prediction_status(target_id, "rejected")
+                review_decisions.update_prediction_status(db, target_id, "rejected")
 
         return prediction_status_item(db, pred["photo_id"], ids, apply)
 
@@ -2166,13 +2166,13 @@ def create_predictions_blueprint(
         )
 
         for pid in actionable_rejects:
-            db.update_predictions_status_by_photo(pid, 'rejected')
+            review_decisions.update_predictions_status_by_photo(db, pid, 'rejected')
 
         # Ungrouping is not a decision — it changes which rows the burst modal
         # shows together, not what any of them means — so it is not gated on
         # the baseline.
         for pred_id in removed:
-            db.ungroup_prediction(pred_id)
+            review_decisions.ungroup_prediction(db, pred_id)
         # Reported even when zero so the client can tell "nothing was stale"
         # from an older server that never checked.
         return jsonify({"ok": True, "already_decided": len(stale_photos)})

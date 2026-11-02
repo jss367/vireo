@@ -908,14 +908,16 @@ def test_redo_prediction_accept_routes_through_update_prediction_status(
     db, pids, monkeypatch,
 ):
     p = _predictions(db, pids[0])
+    from repositories.predictions import PredictionRepository
+
     calls = []
-    real = db.update_prediction_status
+    real = PredictionRepository.update_status
 
-    def spy(pred_id, status, *args, **kwargs):
+    def spy(self, pred_id, status, *args, **kwargs):
         calls.append((pred_id, status, args, kwargs))
-        return real(pred_id, status, *args, **kwargs)
+        return real(self, pred_id, status, *args, **kwargs)
 
-    monkeypatch.setattr(db, "update_prediction_status", spy)
+    monkeypatch.setattr(PredictionRepository, "update_status", spy)
     db._redo_prediction_accept_statuses({}, str(p["a_low"]))
     assert calls == [(p["a_low"], "accepted", (), {})]
 
@@ -931,9 +933,11 @@ def test_redo_prediction_accept_resolves_workspace_before_status_writes(
     db, pids, monkeypatch,
 ):
     p = _predictions(db, pids[0])
+    from repositories.predictions import PredictionRepository
+
     calls = []
     monkeypatch.setattr(
-        db, "update_prediction_status", lambda *a, **k: calls.append(a),
+        PredictionRepository, "update_status", lambda _self, *a, **k: calls.append(a),
     )
     db.set_active_workspace(None)
     assert db._redo_prediction_accept_statuses({}, None) is None
