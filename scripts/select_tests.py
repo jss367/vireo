@@ -696,13 +696,14 @@ def _add_source_scanning_selections(
             sel.note(f"{source_path}: source-scanning contract in {test_file}")
 
 
-def _add_comment_reading_selections(source_path: str, base: str, cwd: Path, sel: Selection) -> None:
+def _add_comment_reading_selections(source_path: str, head: str, cwd: Path, sel: Selection) -> None:
     """Select the ratchets that read comments for a comment/blank-only edit.
 
     Such an edit executes nothing, but a comment that cites a review or a PR
-    fails ``test_comment_hygiene.py``, so that test must still run.
+    fails ``test_comment_hygiene.py``, so that test must still run. Whether
+    it exists is read at ``head``: the map commit can predate the test.
     """
-    picked = [test for test in COMMENT_READING_TESTS if _show(base, test, cwd) is not None]
+    picked = [test for test in COMMENT_READING_TESTS if _show(head, test, cwd) is not None]
     sel.files.update(picked)
     if picked:
         sel.note(f"{source_path}: comment/blank-only edit; selecting only {', '.join(picked)}")
@@ -892,7 +893,7 @@ def select(
             # skips every fallback. Only the ratchets that read comments
             # can fail on it.
             if hunks and widened is not None and not widened:
-                _add_comment_reading_selections(path, base, cwd, sel)
+                _add_comment_reading_selections(path, head, cwd, sel)
                 continue
 
             # Source-scanning contracts (``glob("*.py")``/``rglob("*.py")``)
