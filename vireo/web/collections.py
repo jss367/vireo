@@ -36,8 +36,9 @@ from web.request_args import (
 if TYPE_CHECKING:
     from sqlite3 import Row
 
-    from db import BrowseStackConfig, Database
+    from db import Database
     from flask.typing import ResponseReturnValue
+    from repositories.collections import BrowseStackConfig
     from services.service_types import JsonDict, JsonError
     from web.web_types import GetDb, MissingOriginalsPayload
 
@@ -79,7 +80,7 @@ def _collection_list_entry(db: Database, c: Row) -> JsonDict:
     # tell users to fix the rule, so labelling a locked/corrupt DB or a
     # bad generated query as count_error would send them to edit rules
     # that aren't the actual problem. ValueError covers both malformed
-    # rules (raised by _build_query_from_rules) and malformed JSON in
+    # rules (raised by build_query_from_rules) and malformed JSON in
     # the rules column (json.JSONDecodeError is a ValueError subclass).
     # Anything else bubbles up as a 500 so real infra failures surface.
     #
@@ -312,7 +313,7 @@ def create_collections_blueprint(
         try:
             count = db.collections.count_photos_for_rules(rules)
         except ValueError as e:
-            # Validation in _build_query_from_rules raises ValueError for every
+            # Validation in build_query_from_rules raises ValueError for every
             # input shape SQLite could not bind, so we don't need to catch
             # sqlite3 errors here — letting them surface as 5xx keeps real
             # backend faults (locked DB, OperationalError, etc.) from being
