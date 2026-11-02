@@ -1,9 +1,8 @@
 """Pipeline domain: launching process runs and the Process Review endpoints.
 
-Step 3 of the ``create_app`` split. Everything here moved verbatim out of
-``app.py``: the launch side (process job, plan, saved processes, config)
-and the Process Review side (cached results, reflow / regroup-live,
-detach, burst-group state and apply, mask variant, per-photo debug).
+The launch side (process job, plan, saved processes, config) and the
+Process Review side (cached results, reflow / regroup-live, detach,
+burst-group state and apply, mask variant, per-photo debug).
 """
 
 from __future__ import annotations
@@ -330,8 +329,8 @@ def create_pipeline_blueprint(
         # the plan describes the run the same job body would produce. Without
         # this, the Identify-birds process (skip_regroup=True + species review)
         # shows Group as "Disabled" in the plan even though the actual run
-        # prepares species review results — the exact "plan summary is wrong
-        # for the default workflow" transparency failure the review flagged.
+        # prepares species review results: a plan summary that misdescribes
+        # the default workflow.
         # Expansion supplies *defaults*; explicitly-present body keys still
         # win, so a Custom caller can pin one flag on top of a process
         # (mirrors the merge /api/jobs/pipeline runs). The process page's Run
@@ -355,8 +354,8 @@ def create_pipeline_blueprint(
         # ``visual_json``. Without this guard, an API caller or stale/bookmarked
         # Process page body posting a visual collection id would receive a plan
         # computed over every metadata match — advertising a widened runnable
-        # job even though ``/api/jobs/pipeline`` already rejects the same id at
-        # start time (Codex review r3622041639).
+        # job even though ``/api/jobs/pipeline`` rejects the same id at
+        # start time.
         db = get_db()
         collection_id = coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
@@ -536,8 +535,8 @@ def create_pipeline_blueprint(
 
         # Enqueue rather than start directly: when pipeline slots are available,
         # ``enqueue_pipeline`` promotes inline
-        # before returning, so this looks identical to the old ``start``
-        # call. When a pipeline is already running, the new run waits in
+        # before returning, so this behaves like a direct start.
+        # When a pipeline is already running, the new run waits in
         # ``status='queued'`` until the slot opens. Callers receive the
         # same {"job_id": ...} response either way; clients learn about
         # the queued state via /api/jobs/<id> polling or the SSE stream.
@@ -597,8 +596,8 @@ def create_pipeline_blueprint(
         pipeline_updates = {k: v for k, v in body.items() if k in allowed_keys}
         if not pipeline_updates:
             return json_error("No valid pipeline config keys provided")
-        # An unknown variant or a non-numeric edge used to be stored as-is,
-        # and every later pipeline job then failed resolving it.
+        # Refuse an unknown variant or a non-numeric edge: stored as-is, it
+        # would fail every later pipeline job that resolves it.
         for key, value in pipeline_updates.items():
             try:
                 pipeline_updates[key] = schema.validate_value(
@@ -1632,10 +1631,10 @@ def create_pipeline_blueprint(
         """Apply flag decisions and photo removals as one history action.
 
         Species confirmation routes through a dedicated path
-        (`/api/encounters/species`), so this endpoint no longer tags any species
+        (`/api/encounters/species`), so this endpoint tags no species
         keyword. Diff-based: only writes flag changes for photos whose flag
         actually changes, and clears flags on photos moved to candidates that
-        were previously flagged/rejected. Returns per-photo new flag state so
+        were flagged/rejected. Returns per-photo new flag state so
         the client can update its rendered cards without reloading.
         """
         from pipeline import load_results_raw
@@ -1691,9 +1690,9 @@ def create_pipeline_blueprint(
                              removed, before, results)
 
         # Return new per-photo state so the client can update without a reload.
-        # `has_species_keyword` is kept in the payload (now always False) so the
-        # client cache-sync code need not change shape; this endpoint no longer
-        # tags species.
+        # `has_species_keyword` is always False (this endpoint tags no
+        # species); it stays in the payload because the client's cache sync
+        # reads it.
         response = {
             "ok": True,
             "photos": _group_apply_photo_states(db, picks + rejects + candidates),
@@ -2530,7 +2529,7 @@ class _PipelineLaunch:
         return None
 
     def reject_import_fields(self) -> ErrorResponse | None:
-        """Reject the import/archive fields this route no longer accepts."""
+        """Reject import/archive fields, which this route does not accept."""
         deprecated_import_fields = [
             key for key in (
                 "destination", "local_processing",

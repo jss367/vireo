@@ -42,11 +42,10 @@ _KEYWORD_UPDATE_FIELDS = {"name", "type", "taxon_id", *_COORDINATE_LIMITS}
 def _keyword_update_fields(body: JsonDict) -> tuple[JsonDict, str | None]:
     """Return ``(fields, error)`` for a keyword PUT body.
 
-    ``fields`` keeps only the keys update_keyword may write. The body used
-    to be splatted into ``update_keyword(keyword_id, **body)``, so a stray
-    ``keyword_id`` key raised a TypeError (500), and a string or object
-    latitude was stored as-is. ``error`` names the first invalid field, or
-    is None.
+    ``fields`` keeps only the keys update_keyword may write: splatting the
+    raw body into ``update_keyword(keyword_id, **body)`` would turn a stray
+    ``keyword_id`` key into a TypeError (500) and store a string or object
+    latitude as-is. ``error`` names the first invalid field, or is None.
     """
     fields = {k: v for k, v in body.items() if k in _KEYWORD_UPDATE_FIELDS}
     if "name" in fields and not isinstance(fields["name"], str):
@@ -74,11 +73,10 @@ def _location_pipe_rename_error(body: JsonDict, old_row: Row | None) -> str | No
     # Reject '|' in a rename that lands on a location keyword before we
     # ever touch the row. ``get_or_create_text_location`` refuses pipes
     # at creation time because XMP keyword hierarchies reserve it as the
-    # delimiter and there is no reversible XMP encoding, but the update
-    # path used to accept them. Once such a rename landed, every sync
-    # of a photo tagged with the row raised in
+    # delimiter and there is no reversible XMP encoding. Once such a rename
+    # lands, every sync of a photo tagged with the row raises in
     # ``SidecarEditor.set_location_keywords``, leaving the ``location``
-    # change queued forever and blocking any other edit that shared
+    # change queued forever and blocking any other edit that shares
     # its sidecar transaction. Guard both a name-only rename of an
     # existing location and a retype-into-location that also renames.
     rename_target = body.get("name")

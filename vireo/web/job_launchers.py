@@ -612,12 +612,10 @@ def create_job_launchers_blueprint(
         """Queue a scan job.
 
         Body accepts either:
-          * ``{"root": "/path"}`` -- single root (back-compat).
+          * ``{"root": "/path"}`` -- single root.
           * ``{"roots": ["/a", "/b", ...]}`` -- multiple roots, scanned
-            serially inside a single job. Multi-root support avoids the
-            SQLite writer-lock contention that used to happen when the
-            UI enqueued one job per root (PR #634 added retry/backoff
-            as defense-in-depth; this is the root-cause fix).
+            serially inside a single job, so roots never contend for the
+            SQLite writer lock the way one job per root would.
         """
         # A scan without an active workspace would create catalog entries
         # invisible to every workspace: the worker calls
@@ -2370,8 +2368,8 @@ def _embedding_precompute_offer(load_label_set: LoadLabelSet, labels_path: str) 
             )
             # Use the shared helper: it validates payload shape and
             # dtype rather than accepting any file at the identity
-            # path, so a truncated or wrong-shape cache no longer
-            # reports as ready here.
+            # path, so a truncated or wrong-shape cache does not
+            # report as ready here.
             if not _embedding_is_cached(
                 labels, active_model["model_str"], model_dir
             ):

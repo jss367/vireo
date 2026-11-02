@@ -9,9 +9,8 @@
   ``<id>/reject``, ``<id>/reviewed``, ``<id>/replace-keywords``,
   ``batch-accept``, ``batch-reject`` and ``group/apply`` -- write
   ``prediction_review`` state, so each takes the shared prediction-decision
-  lock through ``services.prediction_decisions`` (see
-  ``PREDICTION_DECISION_ROUTES`` there; the view names are kept unchanged so
-  that set still matches).
+  lock through ``services.prediction_decisions`` (``PREDICTION_DECISION_ROUTES``
+  there lists them by view name, so renaming a view breaks the match).
 """
 
 from __future__ import annotations
@@ -636,12 +635,10 @@ def create_predictions_blueprint(
     def api_replace_species_keywords_with_prediction(pred_id: int) -> ResponseReturnValue:
         """Accept a prediction and replace existing species keywords atomically.
 
-        Same lock as every other prediction-decision route. Without it, a
-        replace-keywords request racing a batch-reject on the same row would
-        strip conflicting species keywords under an accept while the reject
-        commits the row as ``rejected`` — leaving the replaced photo tagged
-        with a species now marked rejected, and the old species permanently
-        lost even though undo cannot restore it.
+        Takes the prediction-decision lock: a concurrent batch-reject of the
+        same row could otherwise mark it ``rejected`` while this strips the
+        old species keywords, leaving the photo tagged with a rejected
+        species and the old species gone beyond undo.
         """
         db = get_db()
         def _decide_replace_species_keywords_with_prediction() -> ResponseReturnValue:
@@ -738,10 +735,9 @@ def create_predictions_blueprint(
         # what "Accept on 38 Bald Eagle" would tag. Passed through so the
         # endpoint can refuse to accept a row whose grouping (and therefore
         # ``accept_prediction``'s applied species) drifted after the panel
-        # rendered but before the lock. Optional so single-species callers
-        # that already know they only submit one bucket at a time keep
-        # working unchanged; when omitted, the drift check is skipped and
-        # the endpoint's older contract holds.
+        # rendered but before the lock. Optional: single-species callers
+        # submit one bucket at a time and omit it, which skips the drift
+        # check.
         raw_expected = body.get("expected_species")
         expected_species = (
             raw_expected.strip() if isinstance(raw_expected, str) else None
@@ -837,10 +833,9 @@ def create_predictions_blueprint(
     ) -> ErrorResponse | Response:
         """The checks and writes of ``batch-accept``, inside its transaction.
 
-        Split out only so the transaction's boundaries are impossible to
-        misread: every statement here runs with the writer lock already held,
-        and the single ``commit`` at the end is the moment any of it becomes
-        visible to another request.
+        Every statement here runs with the writer lock held, and the single
+        ``commit`` at the end is when any of it becomes visible to another
+        request.
         """
         pred_ids, skipped = _filter_batch_accept_rows(db, pred_ids, expected_species)
         items, keyword_id, species, err = _accept_submitted_predictions(db, pred_ids)
@@ -903,7 +898,7 @@ def create_predictions_blueprint(
             # Rows whose current consensus species no longer matches the one
             # the button named — another tab ungrouped the burst, or per-vote
             # edits shifted the winner. Only computed when the caller passed
-            # ``expected_species``; older callers see 0 here.
+            # ``expected_species``; otherwise 0.
             "skipped_species_drifted": len(skipped["drifted"]),
             "species": species,
         })
@@ -987,7 +982,7 @@ def create_predictions_blueprint(
         # ``accept_prediction`` falls back to the raw per-frame label, and
         # per-vote edits can shift the winner. Skip rows whose current
         # consensus no longer matches. No-op when the caller passes no
-        # species (older tests, single-species callers that never render a
+        # species (single-species callers that never render a
         # multi-species button).
         drifted_ids = _species_drifted_prediction_ids(
             db, _load_prediction_rows(db, pred_ids), expected_species,
@@ -1153,20 +1148,11 @@ def create_predictions_blueprint(
         return keyword_id, species
 
     def _load_prediction_rows(db: Database, pred_ids: list[int]) -> list[Row]:
-        """Load ``pred_ids`` in the shape ``ambiguous_prediction_ids`` wants.
+        """Load ``pred_ids`` by id in the shape ``ambiguous_prediction_ids`` wants.
 
-        Selected by id rather than through ``get_predictions(photo_ids=...)``
-        so a submitted row is judged on its own merits: the photo-scoped query
-        also returns siblings the caller never submitted, and filters to the
-        latest ``labels_fingerprint`` — which would silently drop a superseded
-        row from the ambiguity check and leave the caller unable to tell "not
-        ambiguous" from "not current". Staleness is judged explicitly instead,
-        by ``_superseded_prediction_ids``, and reported under its own name.
-        Workspace scoping is already settled by ``_parse_prediction_ids``,
-        which runs first.
-
-        Chunked for the same reason every other id query here is — a legal
-        payload runs past the 999-variable limit older SQLite builds enforce.
+        By id, not through ``get_predictions(photo_ids=...)``, which adds
+        unsubmitted siblings and drops superseded rows; staleness is reported
+        separately by ``_superseded_prediction_ids``.
         """
         return db.predictions.get_rows_by_ids(pred_ids)
 
@@ -1189,83 +1175,35 @@ def create_predictions_blueprint(
     # fiction. Batch endpoints skip the row and report it as
     # ``already_decided``; single-row endpoints refuse with 409, mirroring
     # ``api_mark_prediction_reviewed``'s own precondition.
-    # Owned by ``Database`` so ``db.py``'s grouped-accept expansion and this
-    # module read the same tuple rather than two copies of it; Browse's panel
-    # mirrors the same three values in ``PREDICTION_DECIDED_STATUSES``.
+    # Owned by ``Database`` so the grouped-accept expansion and this module
+    # read one tuple; Browse's panel mirrors the same three values in
+    # ``PREDICTION_DECIDED_STATUSES``.
     _DECIDED_PREDICTION_STATUSES = Database.DECIDED_PREDICTION_STATUSES
 
     def _decided_prediction_ids(db: Database, pred_ids: list[int]) -> set[int]:
         """Which of ``pred_ids`` already have a decision recorded.
 
-        Both batch endpoints need the same precondition, so neither gets to
-        pick its own status list: the panel that produced this payload listed
-        the rows as pending, but a decision may have landed since — from a
-        double-clicked button, a second tab, or Review. Acting on a row whose
-        decision is already made writes a history item whose recorded
-        "previous" status is a fiction, and the two directions fail in
-        mirrored ways: a stale reject leaves an accepted row's species keyword
-        attached to a row now marked ``rejected``, and a stale accept tags a
-        photo with the loser the user just rejected by accepting its sibling.
-        The statuses live here, not at the call sites, so the pair cannot
-        drift apart again on what "still actionable" means.
-
-        Chunked: a legal payload runs well past the 999-variable limit older
-        SQLite builds enforce.
+        The shared "still actionable" precondition of both batch endpoints: a
+        decision may have landed since the panel rendered (a double click, a
+        second tab, Review), and acting on it again records a false
+        "previous" status in history.
         """
         return db.predictions.decided_ids(pred_ids)
 
     def _prediction_status(db: Database, pred_id: int) -> str | None:
         """Current review status of one prediction in the active workspace.
 
-        Single-row decision endpoints (accept, reject, mark-reviewed,
-        replace-keywords, accept-subject) use this inside
-        ``prediction_decisions.begin_prediction_decision`` to enforce the same
-        "still actionable" precondition the batch endpoints already enforce
-        via ``_decided_prediction_ids``. Same reason the batch helper exists:
-        the rule for which statuses are terminal lives in one place, so the
-        single-row and batch flavors cannot drift on what "already decided"
-        means, and neither flavor can be tightened on one side and forgotten
-        on the other.
-
-        Returns ``"pending"`` when no ``prediction_review`` row exists yet,
-        the stored status string when one does, and ``None`` when the
-        prediction id is unknown. Callers combine that with
-        ``_DECIDED_PREDICTION_STATUSES`` to decide whether to 409.
+        ``"pending"`` when no ``prediction_review`` row exists, ``None`` for an
+        unknown id. Single-row decision routes check it against
+        ``_DECIDED_PREDICTION_STATUSES``, the batch routes' precondition.
         """
         return db.predictions.current_status(pred_id)
 
     def _superseded_prediction_ids(db: Database, pred_ids: list[int]) -> set[int]:
-        """Which of ``pred_ids`` belong to a label set the catalog moved past.
+        """Which of ``pred_ids`` are not on their detection's newest label set.
 
-        The third precondition both batch endpoints share, alongside
-        ``_decided_prediction_ids`` and ``ambiguous_prediction_ids``, and the
-        same *shape* as those two: a payload that was truthful when the panel
-        rendered it and is not truthful any more. Re-classify a detection
-        against a new label set between render and click and the old row stays
-        ``pending`` — nothing rewrites it — while ``get_predictions`` (and so
-        every panel, Review grid and summary) has already moved to the newest
-        ``labels_fingerprint`` for that ``(detection, classifier_model)``.
-        Accepting the old row would tag the photo with a species from a label
-        set the catalog no longer shows, and mark a row accepted that no
-        surface displays; rejecting it would report a dismissal while the
-        current row stays pending in the panel the user is looking at.
-
-        A peer helper rather than a branch inside ``ambiguous_prediction_ids``
-        because the two verdicts are not the same fact and do not lead the user
-        to the same place: an ambiguous row needs a decision in Review, a
-        superseded row needs nothing at all — the panel refresh simply shows
-        the current row in its place. Folding it in would put superseded rows
-        under a ``skipped_ambiguous`` count that names a conflict the user
-        would go looking for and never find, which is the sort of quiet
-        mis-description ``CORE_PHILOSOPHY.md`` rules out. What *is* shared is
-        that the rule has one implementation for both endpoints, so accept and
-        reject cannot drift on what "current" means.
-
-        The latest-fingerprint expression is the one ``get_predictions`` and
-        ``get_top_prediction_for_photo`` both use: newest ``created_at``, ties
-        broken by ``id``.
-
-        Chunked for the same reason every other id query here is.
+        Reported apart from ambiguity: a superseded row needs no decision,
+        the panel refresh shows the current row in its place.
         """
         return db.predictions.superseded_ids(pred_ids)
 
@@ -1333,9 +1271,9 @@ def create_predictions_blueprint(
                 by_photo[row["photo_id"]].append(row["id"])
                 if row["in_group"]:
                     grouped.setdefault(row["photo_id"], []).append(row["id"])
-            # Prefer the burst member rows: a runner-up an earlier reject
-            # turned ``rejected`` is no longer ``alternative``, but it is
-            # still not the member the burst modal showed.
+            # Prefer the burst member rows: a runner-up that a reject turned
+            # ``rejected`` is not ``alternative``, but it is still not the
+            # member the burst modal showed.
             by_photo.update(grouped)
         return by_photo
 
@@ -1351,9 +1289,9 @@ def create_predictions_blueprint(
         ``alternative`` / ``pending`` on undo, which matches "no row".
 
         Two re-open cases need this. A pick can promote a member the user
-        previously rejected, and a pick can settle a sibling the user had
-        already accepted (an accepted alternative, whose grouped primary was
-        rejected). The generic scope reset would restore neither decision.
+        rejected, and a pick can settle a sibling the user had accepted (an
+        accepted alternative, whose grouped primary was rejected). The
+        generic scope reset would restore neither decision.
         """
         pick_to_photo = {pred_id: pid
                          for pid, ids in pick_pred_ids.items()
@@ -1395,21 +1333,12 @@ def create_predictions_blueprint(
     def _stale_group_apply_photos(db: Database, observed: dict[int, str]) -> set[int]:
         """Photos whose group member was decided or regenerated since the modal rendered.
 
-        Group apply is the one decision route where "already decided" is *not*
-        the right precondition. The single-row and batch endpoints can use it
-        because their buttons only exist on pending rows, so a decided row can
-        only have been decided by someone else. The burst modal is different:
-        it opens on any card carrying a ``group_id`` — including one whose
-        members this same user accepted a minute ago — and
-        ``loadGroupData`` re-derives picks/rejects from quality scores rather
-        than from the stored statuses. Refusing every decided row would block
-        a legitimate flow (re-open the burst, change the split, apply) *and*
-        would describe the user's own prior decision as somebody else's.
-
-        So the precondition is compare-and-swap against what the modal
-        actually displayed: skip a photo only when the picture the modal saw
-        has moved. Two shapes of "moved" invalidate a photo, in the same
-        pass so the check cannot narrow to one and miss the other:
+        Group apply cannot use the "already decided" precondition: the burst
+        modal opens on any grouped card, including one this user already
+        decided, and re-opening a burst to change its split is legitimate.
+        Instead it is compare-and-swap against what the modal displayed: skip
+        a photo only when that picture has moved. Two shapes of "moved"
+        invalidate a photo, checked in one pass:
 
         1. **Status drift on an observed row.** An observed row's stored
            status is no longer the one the client displayed — a decision that
@@ -1433,8 +1362,8 @@ def create_predictions_blueprint(
         The latest-fingerprint expression is the one
         ``_superseded_prediction_ids``, ``get_predictions`` and
         ``get_top_prediction_for_photo`` all use: newest ``created_at``, ties
-        broken by ``id``. Keeping one definition of "current" everywhere is
-        the property the rest of this PR's precondition family relies on.
+        broken by ``id``. The decision preconditions rely on that single
+        definition of "current".
         """
         if not observed:
             return set()
@@ -1468,10 +1397,10 @@ def create_predictions_blueprint(
         to one species" precondition below doesn't catch it when *every* row
         drifts to the same new species.
 
-        No-ops when ``expected_species`` is falsy — a caller with no species
-        in hand (Review's single-photo routes, older tests) is out of scope
-        for this check. Compare resolved identities so common/scientific aliases
-        do not register as drift. Unresolved labels retain text matching.
+        No-ops when ``expected_species`` is falsy (Review's single-photo
+        routes have no species in hand). Compares resolved identities so
+        common/scientific aliases do not register as drift; unresolved labels
+        compare as text.
 
         Returns the drifted-row subset of ``rows`` ids.
         """
@@ -1500,13 +1429,10 @@ def create_predictions_blueprint(
         accepts at most ``MAX_SELECTION_PHOTOS`` photos and then emits every
         matching prediction row for them — a count it does not (and should
         not) cap, since a photo legitimately carries one row per detection per
-        classifier model. Counting *ids* here therefore cannot be done without
-        inventing a rows-per-photo guess, and three rounds of review found the
-        guess wrong each time (1,000, then 25,000, then 200,000). Counting
-        distinct photos instead makes the invariant hold by construction: any
-        payload the suggestions endpoint can legally emit spans at most the
-        photo selection it was given, so this endpoint accepts it — no margin
-        to re-tune.
+        classifier model. Any id cap would be a rows-per-photo guess; counting
+        distinct photos holds by construction, since any payload the
+        suggestions endpoint can emit spans at most the photo selection it was
+        given.
         """
         raw_ids = body.get("prediction_ids", [])
         if not isinstance(raw_ids, list) or not raw_ids:
@@ -1702,9 +1628,9 @@ def create_predictions_blueprint(
                 # flipped ``prediction_review.status``. Encode that as a JSON
                 # ``no_tag`` payload so undo/redo can reverse the status change
                 # without untagging (or re-tagging) a keyword the user
-                # deliberately kept. Regular accepts still use the compact
-                # ``str(prediction_id)`` form so existing edit-history rows
-                # keep parsing unchanged.
+                # deliberately kept. Regular accepts use the compact
+                # ``str(prediction_id)`` form, which stored edit-history rows
+                # also carry.
                 def _make_item(a: JsonDict) -> JsonDict:
                     if a.get('changed_tag', True):
                         old_value = str(a['prediction_id'])
@@ -1811,16 +1737,11 @@ def create_predictions_blueprint(
         """Reject a single prediction as one atomic decision.
 
         Serialized with every other prediction-decision route through
-        ``prediction_decisions.begin_prediction_decision`` — see
-        ``api_accept_prediction`` for the full argument. Codex's fresh
-        evidence beyond the batch-atomicity fix: a Browse batch accept
-        overlapping a Review-side single reject on the same row would let the
-        reject read while the batch held the writer lock and then overwrite
-        the newly accepted status *after* the batch committed, leaving the
-        species keyword attached to a row now marked rejected. Same failure
-        mode as the inverse (single accept vs batch reject). The single-row
-        routes now take the same lock and honour the same terminal-status
-        precondition as their batch siblings.
+        ``prediction_decisions.begin_prediction_decision`` (see
+        ``api_accept_prediction``) and refused on a terminal status. Without
+        the lock, a reject that read during a Browse batch accept could
+        overwrite the accepted status after the batch committed, leaving the
+        species keyword on a row marked rejected.
         """
         db = get_db()
         def _decide_reject_prediction() -> ResponseReturnValue:
@@ -2030,9 +1951,9 @@ def create_predictions_blueprint(
         _accept_group_pick_rows(db, pick_pred_ids)
 
         # One history entry covers the keyword and the statuses, so undo
-        # restores both together. Before this the statuses were never
-        # recorded: undo removed the keyword but left the rows accepted,
-        # and a later single Accept of the same photo answered 409.
+        # restores both together. An undo that removed only the keyword would
+        # leave the rows accepted, and a later single Accept of the photo
+        # would answer 409.
         accept_items = []
         for pid in actionable_picks:
             ids = pick_pred_ids.get(pid) or []

@@ -250,8 +250,8 @@ def create_misses_blueprint(
         """Resolve Misses-page filters to an intersected workspace photo set.
 
         The Misses UI sends the shared filter bar's ``rules``/``visual``
-        expression.  The legacy scalar parameters remain accepted for old
-        bookmarks and API callers, but are no longer emitted by the page.
+        expression.  The scalar parameters are still accepted from
+        bookmarks and API callers; the page does not send them.
 
         Returns ``(photo_ids, visual_info)``.  ``photo_ids=None`` means the
         full active-workspace scope; ``visual_info`` mirrors

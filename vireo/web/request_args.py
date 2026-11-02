@@ -170,15 +170,14 @@ def reject_visual_collection(db: Database, collection_id: object, *, json_error:
     regroup/masks jobs, predictions-compare, the Misses legacy API, import
     preview) evaluate ``rules`` only. A visual-only collection would
     otherwise silently scope those runs to every metadata-matching
-    photo instead of the visually-matched subset — the fix Codex
-    flagged in review r3620423210. Pickers hide these collections too,
-    but this is the source-of-truth boundary check.
+    photo instead of the visually-matched subset. Pickers hide these
+    collections too, but this is the source-of-truth boundary check.
 
     Coerce the raw JSON value before the ``visual_json`` lookup:
     SQLite's ``WHERE id = ?`` still matches integer id 1 when handed
     ``"1"`` or ``True``, so an early ``isinstance`` bail-out would let
     a string- or bool-typed id skip the guard and hit the rules-only
-    path anyway (Codex review r3620636582). Return a 400 on an
+    path anyway. Return a 400 on an
     unparseable id so callers can't silently widen the scope.
     """
     coerced = coerce_collection_id(collection_id)

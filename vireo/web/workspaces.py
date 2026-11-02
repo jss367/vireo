@@ -636,9 +636,9 @@ def create_workspace_blueprint(
     def _workspace_name_error(db: Database, name: object, *, ws_id: int | None = None) -> ErrorResponse | None:
         """Why ``name`` can't name a workspace, or None when it can.
 
-        ``workspaces.name`` is UNIQUE, so a taken name used to surface as a
-        500 from the IntegrityError; ``ws_id`` is the workspace being
-        renamed, which may keep its own name.
+        ``workspaces.name`` is UNIQUE, so a taken name would otherwise
+        surface as a 500 from the IntegrityError; ``ws_id`` is the workspace
+        being renamed, which may keep its own name.
         """
         if not isinstance(name, str) or not name.strip():
             return json_error("Name is required")
@@ -663,9 +663,9 @@ def create_workspace_blueprint(
         if err is not None:
             return err
         folder_ids = body.get("folder_ids", [])
-        # Check every id before creating anything: a bad id used to fail
-        # halfway through linking, after the workspace row was committed,
-        # so each retry of the same request left another workspace behind.
+        # Check every id before creating anything: a bad id failing halfway
+        # through linking, after the workspace row is committed, would leave
+        # another workspace behind on each retry of the same request.
         if not isinstance(folder_ids, list) or any(
             not isinstance(fid, int) or isinstance(fid, bool)
             for fid in folder_ids
@@ -1142,12 +1142,12 @@ def create_workspace_blueprint(
                     )
             if not isinstance(existing, dict):
                 existing = {}
-            # A stored "abc" or {} used to write through here and then fail
-            # every reader of the setting. Pipeline Review posts the whole
+            # A value such as "abc" or {} would fail every reader of the
+            # setting, so it is refused. Pipeline Review posts the whole
             # override object back with only its slider changed, so a value
             # equal to what is already stored is not a new write: refusing
-            # it would block the slider behind a value stored before this
-            # check existed (readers fall back past it, see
+            # it would block the slider behind an invalid value stored
+            # without this check (readers fall back past it, see
             # ``config_schema.repair_types``).
             updates = {}
             for k, v in body.items():
@@ -1244,11 +1244,10 @@ def create_workspace_blueprint(
         ``spawned()`` reports whether the most recent ``kickoff_compute`` that
         received this ``on_spawn`` actually started a worker. Only that
         request should block briefly for a result: while a multi-minute walk
-        over a NAS is in flight, every follow-up poll (the client re-polls
-        every 3s) used to sit out the full grace period too, so a single walk
-        produced hundreds of "slow request" warnings and tied up a Flask
-        worker per tab for nothing — the answer was always going to be
-        ``pending``.
+        over a NAS is in flight, a follow-up poll (the client re-polls every
+        3s) that sat out the full grace period too would log hundreds of
+        "slow request" warnings per walk and tie up a Flask worker per tab
+        for nothing — the answer is always ``pending``.
 
         The walk always runs with ``sample_limit=None`` so the cached result
         carries the complete list of new-file paths. That is what lets a

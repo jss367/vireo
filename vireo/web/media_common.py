@@ -189,8 +189,8 @@ def _requested_pair_source(
     Paired files remain one catalog record, but browser image requests can
     select which physical source supplies the pixels with
     ``?source=jpeg`` or ``?source=raw``. Invalid and non-paired choices
-    fall back to the established canonical rendering path so old clients
-    and ordinary photos are unchanged. Live files are preferred, with the
+    fall back to the canonical rendering path, which requests without
+    ``source`` and ordinary photos take. Live files are preferred, with the
     offline-original cache as the fallback; a known pair missing both
     returns the source name with no path so routes can fail explicitly
     instead of showing RAW pixels under a JPEG label.
