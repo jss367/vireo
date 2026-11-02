@@ -14,7 +14,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.subjects import SubjectsRepository
-from services import detection_store, photo_ingest, workspace_folders
+from services import detection_store, photo_ingest, review_decisions, workspace_folders
 
 
 @pytest.fixture
@@ -129,7 +129,7 @@ def test_visible_predictions_filters_floor_rejection_and_stale_labels(db, photo)
     db.predictions.add(ids[1], "Crow", 0.8, "m", labels_fingerprint="new")
     db.commit()
     crow = db.conn.execute("SELECT id FROM predictions WHERE species='Crow'").fetchone()["id"]
-    db.update_prediction_status(crow, "rejected")
+    review_decisions.update_prediction_status(db, crow, "rejected")
 
     rows = db.subjects.visible_predictions(ws, photo_id, 0.5)
     assert [(r["species"], r["status"]) for r in rows] == [("Robin", "pending"), ("Jay", "pending")]

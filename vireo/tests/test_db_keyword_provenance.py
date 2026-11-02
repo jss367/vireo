@@ -31,7 +31,7 @@ from db import (
     KEYWORD_SOURCE_UNKNOWN,
     Database,
 )
-from services import photo_ingest, workspace_folders
+from services import photo_ingest, review_decisions, workspace_folders
 from signature_contract import calling_signature
 
 
@@ -617,11 +617,13 @@ def test_accept_prediction_tags_manual_and_queues_add_through_the_facade(
     db.conn.commit()
     tags = _spy(monkeypatch, db, "tag_photo")
     queued = _spy(monkeypatch, db, "queue_change")
-    statuses = _spy(monkeypatch, db, "update_prediction_status")
+    from repositories.predictions import PredictionRepository
+
+    statuses = _class_spy(monkeypatch, PredictionRepository, "update_status")
     added = _spy(monkeypatch, db, "add_keyword")
 
     with db.transaction():
-        result = db.accept_prediction(pid)
+        result = review_decisions.accept_prediction(db, pid)
 
     kid = result["keyword_id"]
     assert added == [(("Robin",), {"is_species": True})]
@@ -648,7 +650,7 @@ def test_accept_prediction_leaves_commit_to_caller(db, lib):
     p0 = lib["p"][0]
     pid = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
-    db.accept_prediction(pid)
+    review_decisions.accept_prediction(db, pid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM pending_changes") == [(0,)]
     db.conn.rollback()
@@ -664,7 +666,7 @@ def test_replace_species_requires_explicit_taxonomy_before_writes(db, lib):
     before = db.conn.total_changes
 
     with pytest.raises(ValueError, match="explicitly pass None"):
-        db.accept_prediction(prediction, replace_species=True)
+        review_decisions.accept_prediction(db, prediction, replace_species=True)
 
     assert db.conn.total_changes == before
     assert not db.conn.in_transaction
@@ -682,7 +684,7 @@ def test_accept_prediction_rolls_back_when_queueing_fails(db, lib, monkeypatch):
 
     monkeypatch.setattr(db, "queue_change", boom)
     with pytest.raises(RuntimeError, match="queue failed"), db.transaction():
-        db.accept_prediction(pid)
+        review_decisions.accept_prediction(db, pid)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
     assert _visible(db, "SELECT COUNT(*) FROM prediction_review WHERE status = 'accepted'") == [
@@ -690,7 +692,7 @@ def test_accept_prediction_rolls_back_when_queueing_fails(db, lib, monkeypatch):
     ]
     # Without a unit of work the caller owns the rollback.
     with pytest.raises(RuntimeError, match="queue failed"):
-        db.accept_prediction(pid)
+        review_decisions.accept_prediction(db, pid)
     assert db.conn.in_transaction
     db.conn.rollback()
 
@@ -703,7 +705,7 @@ def test_accept_prediction_already_tagged_is_status_only(db, lib, monkeypatch):
     db.conn.commit()
     tags = _spy(monkeypatch, db, "tag_photo")
     queued = _spy(monkeypatch, db, "queue_change")
-    result = db.accept_prediction(pid)
+    result = review_decisions.accept_prediction(db, pid)
     assert tags == [] and queued == []
     assert result["affected"] == [{
         "photo_id": p0, "prediction_id": pid, "old_species": [], "changed_tag": False,
@@ -746,8 +748,8 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
                         lambda self: configs.append(1) or real_config(self))
 
     with db.transaction():
-        r0 = db.accept_prediction(pred0, replace_species=True, species_taxonomy=None)
-        r1 = db.accept_prediction(pred1, replace_species=True, species_taxonomy=None)
+        r0 = review_decisions.accept_prediction(db, pred0, replace_species=True, species_taxonomy=None)
+        r1 = review_decisions.accept_prediction(db, pred1, replace_species=True, species_taxonomy=None)
 
     assert r0["affected"][0]["old_species"] == ["Jay"]
     assert r1["affected"][0]["old_species"] == ["Wren"]
@@ -791,7 +793,7 @@ def test_accept_prediction_hands_the_database_to_species_resolver(db, lib, monke
     monkeypatch.setattr(species_identity, "SpeciesResolver", Spy)
     pid = _pred(db, _det(db, lib["p"][0]), "Robin")
     db.conn.commit()
-    db.accept_prediction(pid)
+    review_decisions.accept_prediction(db, pid)
     assert seen == [db]
 
 
@@ -800,19 +802,19 @@ def test_accept_prediction_requires_an_active_workspace(db, lib):
     db.conn.commit()
     db._active_workspace_id = None
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.accept_prediction(pid)
+        review_decisions.accept_prediction(db, pid)
 
 
 def test_accept_prediction_out_of_scope_is_a_no_op(db, lib):
     p0, p1 = lib["p"][:2]
     pid = _pred(db, _det(db, p0), "Robin")
     db.conn.commit()
-    result = db.accept_prediction(pid, photo_ids=[p1])
+    result = review_decisions.accept_prediction(db, pid, photo_ids=[p1])
     assert result["accepted_prediction_ids"] == []
     assert result["keyword_id"] is None
     assert result["species"] == "Robin"
     assert db.conn.execute("SELECT COUNT(*) FROM keywords WHERE name = 'Robin'").fetchone()[0] == 0
-    assert db.accept_prediction(999_999) is None
+    assert review_decisions.accept_prediction(db, 999_999) is None
 
 
 def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
@@ -826,10 +828,10 @@ def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
             labels_fingerprint="legacy",
         )
         db.commit()
-    db.update_prediction_status(preds[2], "rejected")
+    review_decisions.update_prediction_status(db, preds[2], "rejected")
     db.conn.commit()
     with db.transaction():
-        result = db.accept_prediction(preds[0])
+        result = review_decisions.accept_prediction(db, preds[0])
     assert sorted(result["accepted_prediction_ids"]) == sorted(preds[:2])
     assert sorted(result["photo_ids"]) == sorted([p0, p1])
     assert sorted(_visible(
@@ -842,13 +844,12 @@ def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
 
 
 # Still forwarders on ``Database``: ``tag_photo`` (the provenance contract's
-# fail-safe default lives on it), ``_merge_keyword_into`` (bound into the
-# repositories by name) and ``accept_prediction`` (a decision writer
-# ``test_route_contract`` finds by name).
+# fail-safe default lives on it) and ``_merge_keyword_into`` (bound into the
+# repositories by name). ``accept_prediction`` is a decision writer of
+# ``services.review_decisions``.
 _DELEGATING_PROVENANCE_METHODS = (
     "tag_photo",
     "_merge_keyword_into",
-    "accept_prediction",
 )
 
 # Reached through ``db.keyword_provenance`` now, under their repository names.
@@ -1142,11 +1143,13 @@ def test_keyword_provenance_facade_signatures_unchanged():
             "*, provenance=None, species_provenance=None, _record_provenance=False)"
         ),
         "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",
-        "accept_prediction": (
-            "(self, prediction_id, replace_species=False, photo_ids=None, "
-            "prediction_ids=None, species_taxonomy=Ellipsis)"
-        ),
     }
+    from services import review_decisions
+
+    assert calling_signature(review_decisions.accept_prediction) == (
+        "(db, prediction_id, replace_species=False, photo_ids=None, "
+        "prediction_ids=None, species_taxonomy=Ellipsis)"
+    )
     from repositories.keyword_provenance import KeywordProvenanceRepository
 
     assert str(inspect.signature(KeywordProvenanceRepository.link_keyword_to_place)) == (

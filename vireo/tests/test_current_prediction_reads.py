@@ -1,7 +1,7 @@
 """Regression coverage for the remaining current-prediction ranking surfaces."""
 
 import pytest
-from services import photo_ingest, workspace_folders
+from services import photo_ingest, review_decisions, workspace_folders
 
 
 @pytest.fixture
@@ -96,7 +96,7 @@ def test_highlight_eligibility_tracks_ranking_but_keeps_saved_choices_and_keywor
     # A rejection in another workspace cannot change this workspace's ranking.
     other = db.create_workspace("Other", config_overrides={"detector_confidence": 0.9})
     db.commit()
-    db.set_review_status(current, other, "rejected")
+    review_decisions.set_review_status(db, current, other, "rejected")
     assert _ranked(db, pid) == ("Current",) * 3
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.9})
     db.commit()

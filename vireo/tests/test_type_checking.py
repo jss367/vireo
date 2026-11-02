@@ -11,7 +11,6 @@ import pytest
     "module_name, class_name",
     [
         ("repositories.keyword_provenance", "KeywordProvenanceRepository"),
-        ("repositories.predictions", "PredictionRepository"),
     ],
 )
 def test_facade_method_declarations_match_facade_methods(module_name, class_name):

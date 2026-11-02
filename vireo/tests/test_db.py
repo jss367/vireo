@@ -4,7 +4,7 @@ import sys
 
 import pytest
 from repositories.masks_features import MaskQuality, PipelineFeatures
-from services import folder_merges
+from services import folder_merges, review_decisions
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services import (
@@ -4617,7 +4617,7 @@ def test_update_predictions_status_by_photo(tmp_path):
     db.predictions.add(det_ids[0], species='Robin', confidence=0.95, model='test')
     db.commit()
 
-    db.update_predictions_status_by_photo(pids[0], 'accepted')
+    review_decisions.update_predictions_status_by_photo(db, pids[0], 'accepted')
 
     preds = db.predictions.get_rows(photo_ids=[pids[0]])
     assert preds[0]['status'] == 'accepted'
@@ -4634,7 +4634,7 @@ def test_ungroup_prediction(tmp_path):
     db.commit()
     pred = db.predictions.get_rows(photo_ids=[pids[0]])[0]
 
-    db.ungroup_prediction(pred['id'])
+    review_decisions.ungroup_prediction(db, pred['id'])
 
     updated = db.predictions.get_rows(photo_ids=[pids[0]])[0]
     assert updated['group_id'] is None
@@ -5215,7 +5215,7 @@ def test_accept_prediction_sibling_rejection_scoped_to_fingerprint(tmp_path):
     ).fetchone()["id"]
 
     # Accept the fp-new prediction. The fp-old one must remain pending.
-    db.accept_prediction(pred_new)
+    review_decisions.accept_prediction(db, pred_new)
 
     assert db.predictions.get_review_status(pred_new, ws) == "accepted"
     assert db.predictions.get_review_status(pred_old, ws) == "pending", \
@@ -5665,7 +5665,7 @@ def test_get_geolocated_photos_with_species(tmp_path):
     db.predictions.add(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
     db.commit()
     pred = db.predictions.get_rows(photo_ids=[p1])
-    db.accept_prediction(pred[0]['id'])
+    review_decisions.accept_prediction(db, pred[0]['id'])
 
     results = db.locations.get_geolocated_photos()
     assert len(results) == 1
@@ -5710,7 +5710,7 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     db.commit()
     preds = db.predictions.get_rows(photo_ids=[p1, p2])
     for pr in preds:
-        db.accept_prediction(pr['id'])
+        review_decisions.accept_prediction(db, pr['id'])
 
     results = db.locations.get_geolocated_photos(
         rules=[{"field": "species", "op": "is", "value": "Red-tailed Hawk"}])
@@ -5741,7 +5741,7 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
     db.predictions.add(det_ids[1], "Sparrow", 0.60, 'bioclip')
     db.commit()
     for pr in db.predictions.get_rows(photo_ids=[p1]):
-        db.accept_prediction(pr['id'])
+        review_decisions.accept_prediction(db, pr['id'])
 
     # Photo is tagged with both; either rules value must return it. The
     # species display column shows the latest-confirmed identification
@@ -6034,7 +6034,7 @@ def test_get_accepted_species(tmp_path):
     db.commit()
     preds = db.predictions.get_rows(photo_ids=[p1, p2])
     for pr in preds:
-        db.accept_prediction(pr['id'])
+        review_decisions.accept_prediction(db, pr['id'])
 
     species = db.photo_species.get_accepted_species()
     assert 'Great Blue Heron' in species
@@ -6059,7 +6059,7 @@ def test_get_accepted_species_excludes_non_geolocated(tmp_path):
     preds = db.predictions.get_rows(photo_ids=[p1])
     # Review status now lives in the workspace-scoped prediction_review
     # table; absent rows are 'pending'.
-    db.set_review_status(preds[0]['id'], db._active_workspace_id, 'accepted')
+    review_decisions.set_review_status(db, preds[0]['id'], db._active_workspace_id, 'accepted')
 
     species = db.photo_species.get_accepted_species()
     assert species == []
@@ -6105,7 +6105,7 @@ def test_get_accepted_species_multiple_species_per_photo(tmp_path):
     db.commit()
     preds = db.predictions.get_rows(photo_ids=[p1])
     for pr in preds:
-        db.accept_prediction(pr['id'])
+        review_decisions.accept_prediction(db, pr['id'])
 
     species = db.photo_species.get_accepted_species()
     # Both species keywords tagged on the photo appear, alphabetical.
@@ -6141,7 +6141,7 @@ def test_get_accepted_species_includes_keyword_coord_photos(tmp_path):
     db.commit()
     preds = db.predictions.get_rows(photo_ids=[p1])
     for pr in preds:
-        db.accept_prediction(pr['id'])
+        review_decisions.accept_prediction(db, pr['id'])
 
     assert db.photo_species.get_accepted_species() == ['Red-tailed Hawk']
 
@@ -6174,7 +6174,7 @@ def test_get_accepted_species_ignores_coordless_location_keywords(tmp_path):
     db.commit()
     preds = db.predictions.get_rows(photo_ids=[p1])
     for pr in preds:
-        db.accept_prediction(pr['id'])
+        review_decisions.accept_prediction(db, pr['id'])
 
     assert db.photo_species.get_accepted_species() == []
 
@@ -7527,7 +7527,7 @@ def test_accept_prediction_tags_photo(tmp_path):
     db.predictions.add(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
     db.commit()
     preds = db.predictions.get_rows()
-    result = db.accept_prediction(preds[0]["id"])
+    result = review_decisions.accept_prediction(db, preds[0]["id"])
     assert result["species"] == "Elk"
     kws = db.photo_keywords.get_for_photo(pid)
     assert any(k["name"] == "Elk" for k in kws)
@@ -7562,7 +7562,7 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, prediction_id, replace_species=True, species_taxonomy=None)
 
     root = result["keyword_id"]
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
@@ -7605,7 +7605,7 @@ def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, prediction_id, replace_species=True, species_taxonomy=None)
 
     # Even though no new tag was added (hierarchy leaf already satisfies the
     # target), the stale Sparrow removal must be visible in ``affected`` so
@@ -7697,7 +7697,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, prediction_id, replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Cactus Wren" in names
@@ -7793,7 +7793,7 @@ def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
         "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
     ).fetchone()["id"]
 
-    result = db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, prediction_id, replace_species=True, species_taxonomy=None)
 
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert european in tagged, (
@@ -7867,7 +7867,7 @@ def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
     # becomes the resolved accept target ``kid``. The replace-species
     # branch must recognise that the linked ``robin`` on the photo is a
     # distinct species, not the unlinked target — and untag it.
-    db.accept_prediction(prediction_id, replace_species=True, species_taxonomy=None)
+    review_decisions.accept_prediction(db, prediction_id, replace_species=True, species_taxonomy=None)
 
     tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert legacy_target in tagged, (
@@ -7920,7 +7920,7 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
         if row["classifier_model"] == "bioclip"
     )
 
-    result = db.accept_subject_species(target["id"])
+    result = review_decisions.accept_subject_species(db, target["id"])
 
     assert result["species"] == "Blue-winged Teal"
     assert len(result["prediction_ids"]) == 2
@@ -7985,7 +7985,7 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
         if r["detection_id"] == d_teal
     )
 
-    result = db.accept_prediction(teal_pred["id"], replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, teal_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names        # this subject's corrected ID
@@ -8054,7 +8054,7 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -8120,7 +8120,7 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -8183,7 +8183,7 @@ def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
         if r["detection_id"] == d_target and r["status"] != "alternative"
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -8243,7 +8243,7 @@ def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
+    result = review_decisions.accept_prediction(db, target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -8304,7 +8304,7 @@ def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
         if r["detection_id"] == d_target
     )
 
-    db.accept_prediction(target_pred["id"], replace_species=True, species_taxonomy=None)
+    review_decisions.accept_prediction(db, target_pred["id"], replace_species=True, species_taxonomy=None)
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
@@ -8465,8 +8465,8 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
         if r["detection_id"] == d_target
     )
 
-    result = db.accept_prediction(
-        target_pred["id"], replace_species=True, species_taxonomy=fake_tax,
+    result = review_decisions.accept_prediction(
+        db, target_pred["id"], replace_species=True, species_taxonomy=fake_tax,
     )
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
@@ -8521,7 +8521,7 @@ def test_accept_prediction_queues_normalized_species(tmp_path):
     db.commit()
     pred = db.predictions.get_rows()[0]
 
-    result = db.accept_prediction(pred["id"])
+    result = review_decisions.accept_prediction(db, pred["id"])
     # The stored keyword name is the normalized (clean) spelling.
     row = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (result["keyword_id"],)
@@ -8570,7 +8570,7 @@ def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
 
     monkeypatch.setattr(db, "add_keyword", fail_add_keyword)
     with pytest.raises(RuntimeError, match="simulated accept failure"):
-        db.accept_prediction(pred["id"])
+        review_decisions.accept_prediction(db, pred["id"])
 
     assert db.conn.execute(
         "SELECT 1 FROM keywords WHERE name = 'Outer Marker'"
@@ -8622,7 +8622,7 @@ def test_accept_prediction_out_of_scope_row_mutates_nothing(tmp_path):
     sibling = next(r["id"] for r in rows if r["species"] == "Mule Deer")
 
     # Submitted scope names some *other* row, so the entry row is excluded.
-    result = db.accept_prediction(top, prediction_ids=[sibling + 10_000])
+    result = review_decisions.accept_prediction(db, top, prediction_ids=[sibling + 10_000])
 
     assert result["accepted_prediction_ids"] == []
     assert result["affected"] == []
@@ -8694,7 +8694,7 @@ def test_accept_prediction_grouped_leaves_out_of_scope_entry_row_alone(tmp_path)
     ).fetchone()["id"]
 
     # Entry row is A, but only B was submitted.
-    result = db.accept_prediction(pred_a, prediction_ids=[pred_b])
+    result = review_decisions.accept_prediction(db, pred_a, prediction_ids=[pred_b])
 
     assert result["accepted_prediction_ids"] == [pred_b]
     assert _review_status(db, pred_b) == "accepted"
@@ -8750,11 +8750,11 @@ def test_accept_prediction_grouped_skips_already_decided_members(tmp_path):
     photo_pending, pred_pending = _seed("pending.jpg")
 
     # Decisions the user made in Review before this accept.
-    db.update_prediction_status(pred_rejected, "rejected")
-    db.update_prediction_status(pred_accepted, "accepted")
+    review_decisions.update_prediction_status(db, pred_rejected, "rejected")
+    review_decisions.update_prediction_status(db, pred_accepted, "accepted")
 
     # Unscoped: exactly what Review's single-accept route does.
-    result = db.accept_prediction(pred_entry)
+    result = review_decisions.accept_prediction(db, pred_entry)
 
     assert set(result["accepted_prediction_ids"]) == {pred_entry, pred_pending}
     assert {a["photo_id"] for a in result["affected"]} == {
@@ -8773,8 +8773,8 @@ def test_accept_prediction_grouped_skips_already_decided_members(tmp_path):
 
     # Naming a decided row explicitly is the caller's call to make, and the
     # exemption that keeps ``batch-accept``'s submitted-id scope meaningful.
-    named = db.accept_prediction(
-        pred_entry, prediction_ids=[pred_entry, pred_rejected],
+    named = review_decisions.accept_prediction(
+        db, pred_entry, prediction_ids=[pred_entry, pred_rejected],
     )
     assert pred_rejected in named["accepted_prediction_ids"]
 
@@ -9541,8 +9541,8 @@ def test_get_classifier_run_key_gate_honors_individual_review_override(tmp_path)
               AND labels_fingerprint = ?""",
         (det_id, "bioclip", "fp-reviewed"),
     ).fetchone()["id"]
-    db.set_review_status(
-        pred_id, ws_id, "accepted", individual="Robin the First",
+    review_decisions.set_review_status(
+        db, pred_id, ws_id, "accepted", individual="Robin the First",
     )
 
     accepted, rejected = db.model_runs.get_classifier_run_key_gate(
@@ -16625,10 +16625,10 @@ def test_review_status_absence_is_pending(tmp_path):
     # No row in prediction_review yet → pending
     assert db.predictions.get_review_status(pred_id, ws) == "pending"
 
-    db.set_review_status(pred_id, ws, status="approved")
+    review_decisions.set_review_status(db, pred_id, ws, status="approved")
     assert db.predictions.get_review_status(pred_id, ws) == "approved"
 
-    db.set_review_status(pred_id, ws, status="rejected")
+    review_decisions.set_review_status(db, pred_id, ws, status="rejected")
     assert db.predictions.get_review_status(pred_id, ws) == "rejected"
 
 
@@ -21438,8 +21438,8 @@ def test_get_classifier_run_cache_hits_rejects_obsolete_runtime_fingerprint(
         "SELECT id FROM predictions WHERE detection_id = ?",
         (stale_det,),
     ).fetchone()["id"]
-    db.set_review_status(
-        pred_id, ws_id, "accepted", individual="Robin",
+    review_decisions.set_review_status(
+        db, pred_id, ws_id, "accepted", individual="Robin",
     )
     hits_with_override = classify_preflight.get_classifier_run_cache_hits(
         db, [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
@@ -25464,7 +25464,7 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
         (detection_id,),
     ).fetchone()["id"]
 
-    db.accept_prediction(pred_id, replace_species=True, species_taxonomy=None)
+    review_decisions.accept_prediction(db, pred_id, replace_species=True, species_taxonomy=None)
 
     # Both stale Robin rows must have been detached.
     tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
@@ -27216,7 +27216,7 @@ def test_prediction_confidence_sort_ignores_rejected_predictions(tmp_path):
         " ON d.id = pr.detection_id WHERE d.photo_id = ?",
         (ids["a.jpg"],),
     ).fetchone()["id"]
-    db.update_prediction_status(top, "rejected")
+    review_decisions.update_prediction_status(db, top, "rejected")
 
     assert _sorted_names(db, ids, "prediction_confidence") == [
         "d.jpg", "b.jpg", "a.jpg", "c.jpg"]
@@ -27268,13 +27268,13 @@ def test_prediction_confidence_sort_ignores_alternative_rows(tmp_path):
         row["id"] for row in db.conn.execute(
             "SELECT id FROM predictions ORDER BY confidence DESC")
     ]
-    db.update_prediction_status(runner_up, "alternative")
+    review_decisions.update_prediction_status(db, runner_up, "alternative")
 
     assert db.predictions.get_top_confidences([photo_id]) == {photo_id: 0.8}
 
     # With the displayed top pick rejected, the photo falls back to nothing
     # rather than to its hidden runner-up.
-    db.update_prediction_status(top, "rejected")
+    review_decisions.update_prediction_status(db, top, "rejected")
     assert db.predictions.get_top_confidences([photo_id]) == {}
 
 
@@ -27353,7 +27353,7 @@ def test_prediction_confidence_rejection_is_workspace_scoped(tmp_path):
     db.set_active_workspace(other_ws)
     prediction_id = db.conn.execute(
         "SELECT id FROM predictions").fetchone()["id"]
-    db.update_prediction_status(prediction_id, "rejected")
+    review_decisions.update_prediction_status(db, prediction_id, "rejected")
 
     assert db.predictions.get_top_confidences([photo_id]) == {}
     db.set_active_workspace(home)

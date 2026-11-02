@@ -22,7 +22,7 @@ from repositories.collections import (
     GPS_WITHOUT_LOCATION_KEYWORD_RULES,
     NEEDS_IDENTIFICATION_RULES,
 )
-from services import browse_queries, photo_ingest, workspace_folders
+from services import browse_queries, photo_ingest, review_decisions, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -1269,6 +1269,6 @@ def test_top_predicted_species_matches_summary(db, folder):
     for row in browse_queries.get_browse_summary(db, folder_id=folder)["top_species"]:
         assert len(_ids(db, rule(row["species"]), folder_id=folder)) == row["count"]
     pred_id = db.conn.execute("SELECT id FROM predictions WHERE species = 'Robin'").fetchone()[0]
-    db.update_prediction_status(pred_id, "rejected")
+    review_decisions.update_prediction_status(db, pred_id, "rejected")
     assert _ids(db, rule("Robin")) == []
     assert _ids(db, rule("Runner-up")) == [robin]
