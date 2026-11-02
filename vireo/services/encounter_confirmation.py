@@ -25,7 +25,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
     assignments = {pid: db.species_provenance.assignments(pid) for pid in source_ids}
     target_state = db.keywords.species_confirmation_target(edit.species)
     target = target_state["keyword"]
-    proposed_species = target["name"] if target else db.resolve_species_display_name(edit.species)
+    proposed_species = target["name"] if target else db.keyword_taxa.resolve_species_display(edit.species)
     historical = db.predictions.superseded_ids([
         p["prediction_id"] for photo in evidence for subject in photo["subjects"] for p in subject["predictions"]
     ])

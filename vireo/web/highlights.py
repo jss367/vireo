@@ -120,7 +120,7 @@ class _HighlightsRelabel:
         other on relabel.
 
         Track both the raw prediction label and its canonicalized form
-        via ``resolve_species_display_name``: highlight buckets
+        via ``resolve_species_display``: highlight buckets
         canonicalize hierarchy aliases through that resolver before
         saving (e.g. an unconfirmed prediction ``Desert Verdin`` is
         stored under its unique-taxon root ``Verdin``). Without the
@@ -137,7 +137,7 @@ class _HighlightsRelabel:
             raw_key = keyword_match_key(pred_species)
             if raw_key:
                 predicted_species_by_pid.setdefault(pid_pred, set()).add(raw_key)
-            canonical = self.db.resolve_species_display_name(pred_species)
+            canonical = self.db.keyword_taxa.resolve_species_display(pred_species)
             if canonical and canonical != pred_species:
                 canonical_key = keyword_match_key(canonical)
                 if canonical_key:
@@ -719,7 +719,7 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         # Canonicalize to the spelling add_keyword would store (see
         # _parse_species_highlight_body) so the eligibility prechecks and
         # the DB setters all key on one string.
-        species = get_db().resolve_species_display_name(species)
+        species = get_db().keyword_taxa.resolve_species_display(species)
         if not species:
             return {}, "species required"
 
@@ -872,7 +872,7 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         # prediction casing. The eligibility precheck compares against
         # canonical bucket keys and the DB setters canonicalize on write,
         # so parse-time canonicalization keeps all three in agreement.
-        species = get_db().resolve_species_display_name(species)
+        species = get_db().keyword_taxa.resolve_species_display(species)
         if not species:
             return {}, "species required"
         photo_id = body.get("photo_id")
@@ -1024,7 +1024,7 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         if not species:
             return json_error("species required")
         # Canonicalize the submitted spelling to the final stored keyword
-        # name BEFORE the snapshot passes below. resolve_species_display_name
+        # name BEFORE the snapshot passes below. resolve_species_display
         # mirrors add_keyword's two branches: preserve an existing NOCASE
         # match, otherwise apply the species casing convention (`black
         # phoebe` → `Black Phoebe`). Without this, the `row["species"] ==
@@ -1035,11 +1035,11 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         # prediction-seeded curation with no keyword row — and record
         # dst_existed=false; undo would then delete the user's
         # pre-existing highlight/preference/rep.
-        species = db.resolve_species_display_name(species)
+        species = db.keyword_taxa.resolve_species_display(species)
         from_species, error = _parse_optional_species(body, "from_species")
         if error:
             return json_error(error)
-        # Multi-homonym reconciliation. resolve_species_display_name
+        # Multi-homonym reconciliation. resolve_species_display
         # preserves the caller's spelling when two intentionally-distinct
         # root species keywords share a NOCASE key (legacy general
         # ``Robin`` alongside taxonomy ``robin``) so bucket / parse /
@@ -1086,7 +1086,7 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         return jsonify({
             "ok": True,
             "keyword_id": kid,
-            # The canonical stored spelling (after resolve_species_display_name
+            # The canonical stored spelling (after resolve_species_display
             # and add_keyword's casing convention). The lightbox retargets its
             # active bucket to this exact string, so a request submitted as
             # ``black phoebe`` points the still-open controls at the stored

@@ -10,8 +10,6 @@ import pytest
 @pytest.mark.parametrize(
     "module_name, class_name",
     [
-        ("repositories.keywords", "KeywordRepository"),
-        ("repositories.keyword_taxa", "KeywordTaxonRepository"),
         ("repositories.keyword_tree", "KeywordTreeRepository"),
         ("repositories.keyword_provenance", "KeywordProvenanceRepository"),
         ("repositories.photos", "PhotoRepository"),

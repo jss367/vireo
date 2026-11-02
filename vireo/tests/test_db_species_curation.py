@@ -10,9 +10,9 @@ two renames that stay on the ``Database`` façade. They pin return shapes and
 ordering, that the writers leave the commit to the caller (the caller's
 transaction stays open and nothing is committed), commit visibility from a
 second connection, lazy active-workspace resolution, chunking, and that
-composition still routes where patches reach it: the other domains'
-``resolve_species_display_name`` and ``get_folder_subtree_ids`` through the
-façade, and this domain's own entry points (``rename_representatives``,
+composition still routes where patches reach it: species names through
+``KeywordTaxonRepository.resolve_species_display``, ``get_folder_subtree_ids``
+through the façade, and this domain's own entry points (``rename_representatives``,
 ``set_global_representative``, ...) through the repository class.
 """
 
@@ -24,6 +24,7 @@ import textwrap
 
 import pytest
 from db import Database
+from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.species_curation import SpeciesCurationRepository
 from services import photo_ingest, workspace_folders
 from signature_contract import calling_signature
@@ -546,8 +547,8 @@ def test_set_photo_preference_leaves_commit_to_caller(db, cur):
 def test_set_photo_preference_canonicalizes_species_through_facade(db, cur, monkeypatch):
     p = cur["p"]
     names = []
-    monkeypatch.setattr(db, "resolve_species_display_name",
-                        lambda name: names.append(name) or "Canonical")
+    monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_display",
+                        lambda _repo, name: names.append(name) or "Canonical")
     db.species_curation.set_photo_preference("life_list", "raw label", p["robin1"])
     assert names == ["raw label"]
     assert _prefs(db) == [(cur["ws"], "life_list", "Canonical", p["robin1"])]
@@ -556,8 +557,8 @@ def test_set_photo_preference_canonicalizes_species_through_facade(db, cur, monk
 
 def test_set_photo_preference_resolves_name_before_workspace(db, cur, monkeypatch):
     names = []
-    monkeypatch.setattr(db, "resolve_species_display_name",
-                        lambda name: names.append(name) or name)
+    monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_display",
+                        lambda _repo, name: names.append(name) or name)
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
         db.species_curation.set_photo_preference("life_list", "American Robin", cur["p"]["robin1"])
@@ -637,8 +638,8 @@ def test_representative_lists_canonicalize_species_filter(db, cur, monkeypatch):
     p = cur["p"]
     db.set_species_representative("American Robin", p["robin1"])
     names = []
-    monkeypatch.setattr(db, "resolve_species_display_name",
-                        lambda name: names.append(name) or "American Robin")
+    monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_display",
+                        lambda _repo, name: names.append(name) or "American Robin")
     assert db.species_curation.get_representative_lists(species="american robin") == {
         "American Robin": [p["robin1"]],
     }
@@ -713,8 +714,8 @@ def test_clear_photo_preference_leaves_commit_to_caller(db, cur, monkeypatch):
     with db.transaction():
         db.species_curation.set_photo_preference("custom", "American Robin", cur["p"]["robin1"])
     names = []
-    monkeypatch.setattr(db, "resolve_species_display_name",
-                        lambda name: names.append(name) or "American Robin")
+    monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_display",
+                        lambda _repo, name: names.append(name) or "American Robin")
     db.species_curation.clear_photo_preference("custom", "american robin")
     assert names == ["american robin"]
     assert db.conn.in_transaction
@@ -808,8 +809,8 @@ def test_add_species_highlight_leaves_commit_to_caller(db, cur):
 
 def test_add_species_highlight_canonicalizes_through_facade(db, cur, monkeypatch):
     names = []
-    monkeypatch.setattr(db, "resolve_species_display_name",
-                        lambda name: names.append(name) or "Canonical")
+    monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_display",
+                        lambda _repo, name: names.append(name) or "Canonical")
     db.species_curation.add_highlight("raw", cur["p"]["robin1"])
     assert names == ["raw"]
     assert _highlights(db) == [("Canonical", cur["p"]["robin1"], 1)]
@@ -1026,8 +1027,8 @@ def test_species_highlights_eligible_prediction_root_canonicalization(db, cur):
 def test_species_highlights_canonicalize_species_filter(db, cur, monkeypatch):
     db.species_curation.add_highlight("American Robin", cur["p"]["robin1"])
     names = []
-    monkeypatch.setattr(db, "resolve_species_display_name",
-                        lambda name: names.append(name) or "American Robin")
+    monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_display",
+                        lambda _repo, name: names.append(name) or "American Robin")
     assert db.species_curation.get_highlights(species="american robin") == {
         "American Robin": {cur["p"]["robin1"]: 1},
     }

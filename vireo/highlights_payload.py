@@ -421,7 +421,7 @@ def _normalize_highlight_presence_filter(value):
 
 
 def species_canonicalizer(db):
-    """Memoized wrapper around db.resolve_species_display_name.
+    """Memoized wrapper around db.keyword_taxa.resolve_species_display.
 
     Bucket collection resolves the same handful of species strings for
     thousands of candidate rows; caching avoids a keyword lookup per row.
@@ -430,7 +430,7 @@ def species_canonicalizer(db):
 
     def canonicalize(name):
         if name not in cache:
-            cache[name] = db.resolve_species_display_name(name)
+            cache[name] = db.keyword_taxa.resolve_species_display(name)
         return cache[name]
 
     return canonicalize
