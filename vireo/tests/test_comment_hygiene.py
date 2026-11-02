@@ -83,8 +83,8 @@ def js_comment_texts(src: str) -> list[str]:
     string is not a comment. Identifiers introduced by a binding form are
     tracked so a contextual keyword rebound as a name (``const of = 8``,
     ``function f(of)``, ``const g = (of) => ...``, ``const h = of => ...``,
-    ``const {of} = x``, ``catch (of)``) stays an identifier for the rest of
-    the file and its following ``/`` is division, not a regex.
+    ``const {of} = x``, ``catch (of)``) uses division outside a for-header
+    separator; a real ``for (... of /regex/)`` separator still permits a regex.
     ``test_js_lexer_matches_acorn`` checks it against acorn on every
     first-party script when acorn is installed.
     """
@@ -98,6 +98,9 @@ def js_comment_texts(src: str) -> list[str]:
     pending_params = False
     param_depth = 0
     paren_candidates: list[list[str]] = []
+    for_headers: list[bool] = []
+    pending_for = False
+    previous_word = ""
 
     def template(j: int) -> tuple[int, bool]:
         while j < n:
@@ -159,11 +162,12 @@ def js_comment_texts(src: str) -> list[str]:
             else:
                 if braces:
                     braces.pop()
+                was_destructuring = destr_depth > 0
                 if destr_depth > 0:
                     destr_depth -= 1
             # After a block's ``}`` a ``/`` starts a regex; that is far more
             # common in these scripts than dividing an object literal.
-            i, regex_ok = i + 1, True
+            i, regex_ok = i + 1, not (c == "}" and was_destructuring and destr_depth == 0)
         elif c == "[":
             if expect_binding or destr_depth > 0:
                 destr_depth += 1
@@ -173,12 +177,16 @@ def js_comment_texts(src: str) -> list[str]:
                 destr_depth -= 1
             i, regex_ok = i + 1, False
         elif c == "(":
+            for_headers.append(pending_for)
+            pending_for = False
             paren_candidates.append([])
             if pending_params or param_depth > 0:
                 param_depth += 1
                 pending_params = False
             i, regex_ok = i + 1, True
         elif c == ")":
+            if for_headers:
+                for_headers.pop()
             cands = paren_candidates.pop() if paren_candidates else []
             if param_depth > 0:
                 param_depth -= 1
@@ -192,6 +200,8 @@ def js_comment_texts(src: str) -> list[str]:
             expect_binding = False
             i, regex_ok = i + 1, True
         elif c == ";":
+            if for_headers:
+                for_headers[-1] = False
             expect_binding = False
             destr_depth = 0
             pending_params = False
@@ -199,12 +209,22 @@ def js_comment_texts(src: str) -> list[str]:
         elif match := _JS_IDENT.match(src, i):
             word = match.group()
             i = match.end()
+            separator = (word == "of" and bool(for_headers) and for_headers[-1]
+                         and not regex_ok and destr_depth == 0
+                         and previous_word not in _JS_BINDING_KW
+                         and src[:match.start()].rstrip()[-1:] != ".")
+            pending_for = word == "for" or (word == "await" and previous_word == "for")
+            previous_word = word
             is_binding = expect_binding or destr_depth > 0 or param_depth > 0
             bare_binding = is_binding and destr_depth == 0 and param_depth == 0
-            if is_binding:
+            if separator:
+                expect_binding = False
+                is_binding = False
+                regex_ok = True
+            elif is_binding:
                 bound.add(word)
                 regex_ok = False
-            elif word in bound:
+            elif word in bound or word == "of":
                 regex_ok = False
             else:
                 regex_ok = word in _JS_REGEX_AFTER_WORD
@@ -443,3 +463,26 @@ if __name__ == "__main__":
         sys.exit(write_baseline())
     print(f"usage: {WRITER}", file=sys.stderr)
     sys.exit(2)
+
+
+@pytest.mark.parametrize("source", [
+    r"for (const of of /a\/\//g) { /* Codex */ }",
+    r"for (const {of} of /a\/\//g) { /* Codex */ }",
+    r"for (const [of] of /a\/\//g) { /* Codex */ }",
+    r"for (const x of /a\/\//g) { /* Codex */ }",
+    "for (const x of values.of / 2) { /* Codex */ }",
+    "of => of / 2; // Codex\n",
+])
+def test_contextual_of_separator_and_bare_arrow_comments(source):
+    assert [text.strip() for text in js_comment_texts(source)] == ["Codex"]
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("for (const x of /[//]Codex/) {}", []),
+    ("function f(of) {}\nfor (const x of /[//]Codex/) {}", []),
+    ("const of = 8;\nfor (const x of /[//]Codex/) {}", []),
+    ("for (const of of /[/*]Codex/.source) { /* safe */ }", [" safe "]),
+    ("obj.of / 2; // Codex\n", [" Codex"]),
+])
+def test_for_of_regex_and_of_property_do_not_invent_or_hide_comments(source, expected):
+    assert js_comment_texts(source) == expected

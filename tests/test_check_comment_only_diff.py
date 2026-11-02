@@ -309,3 +309,138 @@ def test_source_changes_detects_non_ascii_path(tmp_path):
     assert old_path == "naïve.py"
     assert new_path == "naïve.py"
     assert suffix == ".py"
+
+
+@needs_node
+@pytest.mark.parametrize("terminator", ["\n", "\r", "\r\n", "\u2028", "\u2029"])
+def test_js_comment_line_terminators_preserve_asi(terminator):
+    before = "function f() { return /* note" + terminator + "*/ value; }"
+    after = "function f() { return /* note */ value; }"
+    assert checker.js_differs(before, after)
+    assert checker.js_differs(before, before.replace("note", "clear explanation")) is None
+
+
+@needs_node
+@pytest.mark.parametrize("before, after", [
+    ("let x=1,y=2; x\n++y;", "let x=1,y=2; x++\ny;"),
+    ("// eslint-disable-next-line\nx();\ny();", "x();\n// eslint-disable-next-line\ny();"),
+    ("// @ts-ignore\nx();\ny();", "x();\n// @ts-ignore\ny();"),
+    ("/** @type {number} */\nlet x;\nlet y;", "let x;\n/** @type {number} */\nlet y;"),
+    ("/* exported x */\nfunction x() {}", "/* exported y */\nfunction x() {}"),
+    ('/* eslint rule: ["a  b"] */\nx();', '/* eslint rule: ["a b"] */\nx();'),
+])
+def test_js_semantic_comment_content_and_attachment(before, after):
+    assert checker.js_differs(before, after)
+
+
+@needs_node
+def test_tagged_template_raw_text_is_preserved():
+    before, after = r"tag`\x41`", "tag`A`"
+    assert checker._js(before)["tokens"] == checker._js(after)["tokens"]
+    assert checker._js(before)["syntax"] != checker._js(after)["syntax"]
+    assert checker.js_differs(before, after)
+
+
+@needs_node
+def test_js_prose_edits_preserve_directives_and_types():
+    before = "// old prose\n/* exported x */\n/** @param {number} y old description */\nfunction x(y) {}"
+    after = "// clear prose\n/* exported x */\n/** @param {number} y clear description */\nfunction x(y) {}"
+    assert checker.js_differs(before, after) is None
+
+
+@pytest.mark.parametrize("before, after", [
+    ('"""short"""\nx = 1  # noqa: F841\n', '"""longer\ndocumentation"""\nx = 1  # noqa: F841\n'),
+    ('"""remove me"""\nx = 1  # noqa: F841\n', 'x = 1  # noqa: F841\n'),
+    ('x = 1  # noqa: F841\n', '"""added documentation"""\nx = 1  # noqa: F841\n'),
+    ('def f():\n    """short"""\n    return 1  # type: ignore\n',
+     'def f():\n    """longer\n    documentation"""\n    return 1  # type: ignore\n'),
+    ('@register\ndef f():\n    """runtime name A"""\n    return 1\n',
+     '@register\ndef f():\n    """runtime name B"""\n    return 1\n'),
+])
+def test_python_docstring_cleanup_remains_allowed_with_manual_semantic_review(before, after):
+    # The decorator/ __doc__ case deliberately remains a manual-review boundary.
+    assert checker.python_differs(before, after) is None
+
+
+@pytest.mark.parametrize("before, after", [
+    ("x = 1  # noqa: F841\ny = 2\n", "x = 1\ny = 2  # noqa: F841\n"),
+    ("x = 1  # type: ignore\ny = 2\n", "x = 1\ny = 2  # type: ignore\n"),
+    ('x = 1  # type: Literal["a  b"]\n', 'x = 1  # type: Literal["a b"]\n'),
+])
+def test_python_tool_pragma_attachment_and_content(before, after):
+    assert checker.python_differs(before, after)
+
+
+@pytest.mark.parametrize("suffix", checker.SOURCE_EXTS)
+@pytest.mark.parametrize("comment_only", [False, True])
+def test_untracked_supported_source_fails_closed(tmp_path, monkeypatch, suffix, comment_only):
+    _run_in_fixture(tmp_path)
+    source = "x = 1\n" if suffix == ".py" else "const x = 1;\n"
+    if comment_only:
+        source = "# prose\n" if suffix == ".py" else "// prose\n"
+    (tmp_path / ("untracked" + suffix)).write_text(source, encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker.main() == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX filename characters")
+def test_tracked_newline_filename_is_compared(tmp_path, monkeypatch):
+    name = "module\nname.py"
+    _run_in_fixture(tmp_path, (name, "x = 1\n"))
+    (tmp_path / name).write_text("x = 2\n", encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker.main() == 1
+
+
+@needs_node
+def test_module_and_commonjs_contexts_are_parsed():
+    assert checker.js_differs("await load();", "// prose\nawait load();", "module") is None
+    assert checker.js_differs("return 1;", "// prose\nreturn 1;", "commonjs") is None
+    assert checker.js_differs("return 1;", "return 2;", "commonjs")
+
+
+@needs_node
+def test_bounded_checker_parses_first_party_js_corpus():
+    files = [rel for rel in checker._git("ls-files", "-z").split("\0")
+             if rel and checker._suffix_of(rel) in checker.JS_EXTS
+             and "vendor" not in Path(rel).parts and not rel.endswith(".min.js")]
+    assert files
+    for rel in files:
+        mode = {".mjs": "module", ".cjs": "commonjs"}.get(Path(rel).suffix)
+        checker._js((ROOT / rel).read_text(encoding="utf-8"), mode)
+
+
+@needs_node
+def test_directive_prologue_raw_spelling_is_semantic():
+    before = "function f(){'use strict';return this;}"
+    after = r"function f(){'use\x20strict';return this;}"
+    assert checker._js(before)["tokens"] == checker._js(after)["tokens"]
+    assert checker._js(before)["syntax"] != checker._js(after)["syntax"]
+    assert checker.js_differs(before, after)
+    assert checker.js_differs(before, before.replace(";return", ";/* prose */return")) is None
+
+
+@needs_node
+@pytest.mark.parametrize("js_code_change", [False, True])
+def test_js_guards_do_not_depend_on_rejecting_python_docstring_edits(tmp_path, monkeypatch, capsys, js_code_change):
+    before = "function f(){return /* prose\n*/ value;}"
+    _run_in_fixture(tmp_path, ("doc.py", '"""old wording"""\nx=1\n'), ("controller.js", before))
+    (tmp_path / "doc.py").write_text('"""new wording"""\nx=1\n', encoding="utf-8")
+    after = before.replace("prose\n", "prose") if js_code_change else before.replace("prose", "clear prose")
+    (tmp_path / "controller.js").write_text(after, encoding="utf-8")
+    original_js = checker._js
+    def fixture_js(source, source_type=None):
+        with monkeypatch.context() as context:
+            context.setattr(checker, "ROOT", ROOT)
+            return original_js(source, source_type)
+    monkeypatch.setattr(checker, "_js", fixture_js)
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker.main() == int(js_code_change)
+    result = capsys.readouterr()
+    assert "ok   doc.py" in result.out
+    if js_code_change:
+        assert "controller.js: code" in result.err
+        assert "doc.py:" not in result.err
