@@ -586,7 +586,7 @@ class CollectionRepository:
         ``classifier_model is not``): ``EXISTS(status != X)`` rather than
         ``NOT EXISTS(status = X)``. That widening is only safe when the
         caller re-evaluates the rule per row afterwards, which
-        ``get_predictions`` does via ``_filter_prediction_rows_by_rules``.
+        ``get_predictions`` does via ``filter_prediction_rows_by_rules``.
         Photo-scoped callers (``/api/photos/query``, saved-collection
         evaluation, calendar/geo totals) MUST leave this False — the
         broad ``NOT EXISTS(status = X)`` form is what includes photos
@@ -3161,7 +3161,7 @@ class _RuleQueryBuilder:
             #     moment any sibling used model X, hiding the
             #     other-model rows the visible filter should keep
             #     (see r3618514362). Row-level clean-up in
-            #     ``_filter_prediction_rows_by_rules`` removes the
+            #     ``filter_prediction_rows_by_rules`` removes the
             #     matching sibling rows.
             #   row_scoped=False (default; photo queries, saved
             #     collections) → broad NOT EXISTS so photos with no
@@ -3203,7 +3203,7 @@ class _RuleQueryBuilder:
             NOT X"). NOT EXISTS would drop the whole photo the
             moment any sibling matched X, hiding pending rows the
             visible filter should keep (see r3618393423). The
-            row-level pass in ``_filter_prediction_rows_by_rules``
+            row-level pass in ``filter_prediction_rows_by_rules``
             then removes the matching sibling rows.
           row_scoped=False (default; photo queries, saved
             collections) → broad NOT EXISTS ("photo has no
@@ -3269,7 +3269,7 @@ class _RuleQueryBuilder:
             whole photo the moment any sibling is pending, hiding
             rows the visible filter should keep (r3619118948).
             The row-level pass in
-            ``_filter_prediction_rows_by_rules`` then removes the
+            ``filter_prediction_rows_by_rules`` then removes the
             pending sibling rows.
           row_scoped=False (default; photo queries, saved
             collections) → broad NOT EXISTS so photos with no

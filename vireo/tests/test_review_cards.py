@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from services import review_decisions
 
 BLUE = {"taxon_id": 138690, "scientific_name": "Cyanistes caeruleus"}
 
@@ -110,7 +111,7 @@ def test_stale_card_is_refused_atomically(app_and_db, decision, changed):
     elif changed == 'workspace':
         body['observed_workspace_id'] += 1
     else:
-        db.update_prediction_status(ids[-1], changed)
+        review_decisions.update_prediction_status(db, ids[-1], changed)
         db.commit()
     before = _statuses(db, ids)
     response = app.test_client().post(f'/api/predictions/{ids[0]}/{decision}', json=body)
@@ -261,7 +262,7 @@ def test_same_species_without_overlap_is_not_merged(app_and_db):
 def test_decided_and_stale_rows_do_not_hide_pending_cards(app_and_db):
     app, db = app_and_db
     _, detections, ids = _seed(db)
-    db.update_prediction_status(ids[1], 'accepted')
+    review_decisions.update_prediction_status(db, ids[1], 'accepted')
     db.commit()
     db.predictions.add(detections[2], 'Blue Tit', .99, 'third-model',
                        labels_fingerprint='old', taxonomy=BLUE)
@@ -347,7 +348,10 @@ def test_mid_card_failure_rolls_back_keywords_statuses_and_history(app_and_db, m
     method = 'record_edit' if failure == 'history' else (
         'accept_prediction' if decision == 'accept' else 'update_prediction_status'
     )
-    real_write = getattr(Database, method)
+    # A decision write goes through its review_decisions writer; history
+    # through Database.record_edit.
+    owner = Database if failure == 'history' else review_decisions
+    real_write = getattr(owner, method)
     observations = []
     calls = 0
 
@@ -364,7 +368,7 @@ def test_mid_card_failure_rolls_back_keywords_statuses_and_history(app_and_db, m
             raise RuntimeError('history failed after inserting its items')
         return result
 
-    monkeypatch.setattr(Database, method, write)
+    monkeypatch.setattr(owner, method, write)
     response = app.test_client().post(f'/api/predictions/{ids[0]}/{decision}', json=_body(db, ids))
     assert response.status_code == 500
     assert observations and all(locked and unpublished for locked, unpublished in observations)

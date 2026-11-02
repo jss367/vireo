@@ -20,7 +20,7 @@ import db as db_module
 import pytest
 from db import AUTO_MATCH_REVIEW_MARKER, Database
 from repositories.model_runs import ModelRunsRepository
-from services import classify_preflight, detection_store, photo_ingest, workspace_folders
+from services import classify_preflight, detection_store, photo_ingest, review_decisions, workspace_folders
 
 MODEL = "BioCLIP-2.5"
 
@@ -86,7 +86,7 @@ def _usable(db, detection_id, fingerprint="fp-a", model=MODEL, **run_kwargs):
 
 
 def _review(db, prediction_id, status, individual=None):
-    db.set_review_status(prediction_id, db._ws_id(), status,
+    review_decisions.set_review_status(db, prediction_id, db._ws_id(), status,
                          individual=individual)
 
 
