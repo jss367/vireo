@@ -833,9 +833,9 @@ def create_predictions_blueprint(
     ) -> ErrorResponse | Response:
         """The checks and writes of ``batch-accept``, inside its transaction.
 
-        Every statement here runs with the writer lock held, and the single
-        ``commit`` at the end is when any of it becomes visible to another
-        request.
+        All checks and writes run with the writer lock held. Writes and
+        history become visible together when the caller's transaction
+        commits; this helper does not commit independently.
         """
         pred_ids, skipped = _filter_batch_accept_rows(db, pred_ids, expected_species)
         items, keyword_id, species, err = _accept_submitted_predictions(db, pred_ids)

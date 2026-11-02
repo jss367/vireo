@@ -96,8 +96,8 @@ def _collection_list_entry(db: Database, c: Row) -> JsonDict:
     # span for null photo_count, and the ✦ visual marker already
     # tells users this collection is visually resolved.
     #
-    # Still validate the metadata rules: counting is the listing's only
-    # check for malformed JSON or unresolvable rule fields. Without it, a
+    # Validate metadata rules separately when visual counts are omitted.
+    # Without this check for malformed JSON or unresolvable fields, a
     # visual collection with degraded rules would look healthy in the
     # sidebar and only 400 later when Browse routes those bad rules
     # through ``/api/photos/query``.

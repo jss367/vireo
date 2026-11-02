@@ -1,11 +1,10 @@
 """Shared launch prologue for background-job routes.
 
-Every route that starts a background job needs the same prologue: get the
-runner off the app, capture the active workspace id from the request
-database, open a worker-thread ``Database`` bound to that workspace inside
-the work closure, call ``runner.start(...)`` with the workspace id, and
-return ``{"job_id": ...}``. ``background_job`` performs it once per request
-and hands the route a :class:`JobLaunch`::
+For routes decorated with ``background_job``, the helper captures the runner,
+active workspace id and database path on the request thread, then hands the
+route a :class:`JobLaunch`. Worker closures can use ``ctx.thread_db()`` to
+open a workspace-bound connection; ``ctx.start(...)`` calls ``runner.start``
+and returns ``{"job_id": ...}``. Routes choose which operations to call::
 
     @app.route("/api/jobs/thumbnails", methods=["POST"])
     @background_job

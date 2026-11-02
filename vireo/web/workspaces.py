@@ -1142,8 +1142,8 @@ def create_workspace_blueprint(
                     )
             if not isinstance(existing, dict):
                 existing = {}
-            # A value such as "abc" or {} would fail every reader of the
-            # setting, so it is refused. Pipeline Review posts the whole
+            # A value such as "abc" or {} is invalid for the setting, so new
+            # writes are refused. Pipeline Review posts the whole
             # override object back with only its slider changed, so a value
             # equal to what is already stored is not a new write: refusing
             # it would block the slider behind an invalid value stored

@@ -240,9 +240,9 @@ def write_workspace_overrides(db: Database, overrides: JsonDict) -> None:
 def _validate_config_snapshot(body: JsonDict) -> str | None:
     """Validate and coerce, in place, every schema setting in a ``/api/config`` body.
 
-    The curated forms post whole snapshots, and a value stored unvalidated
-    (``null`` from an empty number field, ``"abc"``) breaks every reader
-    of that setting, Browse included.
+    The curated forms post whole snapshots. Reject invalid types such as
+    ``null`` from an empty number field or ``"abc"`` at the write boundary,
+    rather than relying on readers' type repair.
     Each schema leaf present in ``body`` goes through the same
     ``validate_value`` as the settings PATCH, and a scalar where a schema
     section (``pipeline``, ``ingest``) belongs is refused. Keys outside the
@@ -763,7 +763,7 @@ def create_settings_blueprint(
         }), 409
 
     def _settings_post_save_side_effects(current: JsonDict, previous: JsonDict | None = None) -> str | None:
-        """Side effects every global settings write shares with a curated-form save.
+        """Shared post-save effects for these settings routes and curated forms.
 
         HF_TOKEN stays in sync, cache budgets take effect immediately, and
         raising the working-copy ceiling makes deliberately evicted rows
