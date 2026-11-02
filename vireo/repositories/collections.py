@@ -256,9 +256,8 @@ STACK_COVER_ORDER = """
 # MIN(filename) reads two different members, so a burst of a.jpg rated 1
 # and z.jpg rated 5 sorts as (5, "a.jpg") and jumps ahead of a single
 # m.jpg rated 5 that outranks z.jpg with Stacks off. An order that
-# silently depends on the Stacks toggle is exactly the hidden behaviour
-# CORE_PHILOSOPHY's "no black boxes" rule forbids in a culling workflow
-# (Codex P2 on PR #1561).
+# silently depends on the Stacks toggle is exactly the hidden behavior
+# CORE_PHILOSOPHY's "no black boxes" rule forbids in a culling workflow.
 STACK_SORT_SPECS = {
     "date": {
         "member": "timestamp IS NULL, timestamp ASC, filename ASC, id ASC",
