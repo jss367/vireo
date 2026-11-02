@@ -25,7 +25,7 @@ _FORBIDDEN_CALLABLE_FACADE_FORMS = frozenset(
 
 
 def _annotation_text(node: ast.expr) -> str:
-    """Return the source text of ``node``, unwrapping a quoted forward reference.
+    """Normalize annotation syntax, recursively unwrapping forward-reference literals.
 
     ``callback: "Callable[..., Any]"`` reaches this function as an
     ``ast.Constant`` holding the string ``"Callable[..., Any]"``. We
@@ -36,8 +36,8 @@ def _annotation_text(node: ast.expr) -> str:
     string once and returns the inner string, not the type it names —
     the exact gap this ratchet must not have.
     """
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value.strip()
+    while isinstance(node, ast.Constant) and isinstance(node.value, str):
+        node = ast.parse(node.value, mode="eval").body
     return ast.unparse(node)
 
 
@@ -131,3 +131,24 @@ def test_callable_facade_matcher_catches_every_quoting_form():
         "fixture.DottedTyping.callback",
         "fixture.Quoted.callback",
     ]
+
+
+def test_callable_facade_matcher_normalizes_quoted_annotation_syntax():
+    for annotation in [
+        '"Callable[...,Any]"', "'typing.Callable [ ..., Any ]'",
+        repr(repr("Callable[..., Any]")),
+    ]:
+        source = (
+            "from __future__ import annotations\n"
+            f"class Repository:\n    callback: {annotation}\n"
+        )
+        assert _callable_facade_offenders(source, "fixture") == ["fixture.Repository.callback"]
+
+
+def test_annotation_normalization_never_executes_expressions():
+    source = (
+        "raise AssertionError('source must not execute')\n"
+        "class Repository:\n"
+        "    callback: \"__import__('untrusted').callback()\"\n"
+    )
+    assert _callable_facade_offenders(source, "fixture") == []
