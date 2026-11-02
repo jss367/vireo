@@ -1,20 +1,23 @@
 """Check that a diff changes only comments and docstrings.
 
-For every Python file the diff touches, the AST with docstrings removed must
-dump identically on both sides and the shebang and ``# coding:`` declaration
-must match (both pick the interpreter or decoder that runs the file, and the
-AST drops them). For every JavaScript file, acorn's token stream (comments
-excluded) must be identical, with regular-expression tokens compared by their
-pattern and flags rather than collapsed to ``[object Object]``, and the
-hashbang line is compared separately because acorn drops it. Comments that
-tools read are compared too, because the AST and the token stream both drop
-them: Python ``noqa`` (``ruff: noqa`` too, and ``NOQA`` case-insensitively)
-/ ``type:`` / ``pyright:`` / ``pragma`` / ``fmt:`` / ``broad:`` pragmas,
-ESLint and ``@ts-`` directives (``@ts-expect-error`` included), and JSDoc
-type tags with ``@import`` module sources captured separately so changing
-the source is detected. Added, deleted and renamed source files are compared
-the same way, against an empty counterpart (or across both paths for a
-rename), so a diff is comment-only only when every A/M/D/R source file is.
+For every Python file (``.py``) the diff touches, the AST with docstrings
+removed must dump identically on both sides and the shebang and ``# coding:``
+declaration must match (both pick the interpreter or decoder that runs the
+file, and the AST drops them). For every JavaScript file (``.js``, ``.mjs``,
+``.cjs``), acorn's token stream (comments excluded) must be identical, with
+regular-expression tokens compared by their pattern and flags rather than
+collapsed to ``[object Object]``, and the hashbang line is compared separately
+because acorn drops it. Comments that tools read are compared too, because
+the AST and the token stream both drop them: Python ``noqa`` (``ruff: noqa``
+too, and ``NOQA`` case-insensitively) / ``type:`` / ``pyright:`` / ``pragma``
+/ ``fmt:`` / ``broad:`` pragmas, ESLint and ``@ts-`` directives
+(``@ts-expect-error`` included), and JSDoc type tags with ``@import`` module
+sources captured separately so changing the source is detected. Added,
+deleted and renamed source files are compared the same way, against an empty
+counterpart (or across both paths for a rename), so a diff is comment-only
+only when every A/M/D/R source file is. A rename to or from a non-source
+suffix (``module.py`` -> ``module.txt``) is treated as a deletion or addition
+of the source file so the rename cannot hide a removed executable module.
 
     python scripts/check_comment_only_diff.py [--base origin/main]
 
@@ -35,6 +38,10 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+PY_EXTS = (".py",)
+JS_EXTS = (".js", ".mjs", ".cjs")
+SOURCE_EXTS = PY_EXTS + JS_EXTS
 
 PY_PRAGMA = re.compile(
     r"#\s*(ruff:\s*noqa\b[^#]*|noqa\b[^#]*|type:\s*\S[^#]*|pyright:[^#]*|pragma\b[^#]*|fmt:\s*\w+|broad:[^#]*)",
@@ -164,12 +171,18 @@ def _git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
 
 
-def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
-    """``(label, old_path, new_path, suffix)`` for every A/M/D/R .py/.js file.
+def _suffix_of(path: str) -> str:
+    return next((s for s in SOURCE_EXTS if path.endswith(s)), "")
 
-    An entry whose status is not A/M/D/R is returned with suffix ``""`` so
-    ``main()`` can fail on it; the labels for added, deleted and renamed
-    files make the change kind readable in the output.
+
+def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
+    """``(label, old_path, new_path, suffix)`` for every A/M/D/R source file.
+
+    Both sides of a rename are inspected so a ``module.py`` renamed to a
+    non-source suffix (``module.txt``) is still reported as a source deletion
+    instead of silently dropped. An entry whose status is not A/M/D/R, or
+    whose rename crosses languages (``.py`` <-> ``.js``), is returned with a
+    sentinel suffix so ``main()`` fails on it rather than certifying it.
     """
     out: list[tuple[str, str, str, str]] = []
     for line in _git("diff", "--name-status", base, "--").splitlines():
@@ -190,9 +203,17 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str]]:
         else:
             out.append((parts[-1], "", "", status))
             continue
-        suffix = next((s for s in (".py", ".js") if (new_path or old_path).endswith(s)), "")
-        if suffix:
-            out.append((label, old_path, new_path, suffix))
+        old_suffix = _suffix_of(old_path)
+        new_suffix = _suffix_of(new_path)
+        if not (old_suffix or new_suffix):
+            continue
+        old_is_js = old_suffix in JS_EXTS
+        new_is_js = new_suffix in JS_EXTS
+        if old_suffix and new_suffix and old_is_js != new_is_js:
+            out.append((label, old_path, new_path, "mixed"))
+            continue
+        suffix = new_suffix or old_suffix
+        out.append((label, old_path, new_path, suffix))
     return out
 
 
@@ -205,12 +226,19 @@ def main() -> int:
     labels: list[str] = []
     for label, old_path, new_path, suffix in entries:
         labels.append(label)
-        if suffix not in {".py", ".js"}:
+        if suffix == "mixed":
+            failures.append(f"{label}: cross-language rename")
+            continue
+        if suffix not in SOURCE_EXTS:
             failures.append(f"{label}: unsupported change kind {suffix!r}")
             continue
-        old = _git("show", f"{base}:{old_path}") if old_path else ""
-        new = (ROOT / new_path).read_text(encoding="utf-8") if new_path else ""
-        reason = js_differs(old, new) if suffix == ".js" else python_differs(old, new)
+        old = _git("show", f"{base}:{old_path}") if old_path and _suffix_of(old_path) else ""
+        new = (
+            (ROOT / new_path).read_text(encoding="utf-8")
+            if new_path and _suffix_of(new_path)
+            else ""
+        )
+        reason = js_differs(old, new) if suffix in JS_EXTS else python_differs(old, new)
         if reason:
             failures.append(f"{label}: {reason}")
     failed_labels = {failure.split(":", 1)[0] for failure in failures}
