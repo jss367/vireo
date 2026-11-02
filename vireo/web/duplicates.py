@@ -258,7 +258,7 @@ def create_duplicates_blueprint(
         # Classify paths via the bounded kernel mount table BEFORE any
         # per-path stat. Calling ``os.path.isfile`` on an unhealthy SMB path
         # can block indefinitely inside this endpoint, meaning the new
-        # network routing inside ``_trash_paths`` would never even be
+        # network routing inside ``trash_paths`` would never even be
         # reached; a stat failure would also be misread as "already
         # missing" and drop the DB row for a photo that reappears on
         # remount. Local paths keep the existing preflight — a fast, safe
@@ -393,11 +393,11 @@ def create_duplicates_blueprint(
         # must match so cleanup is a terminal state either way.
         already_missing_paths: set[str] = set()
         # Pass through our mount-table snapshot — including an explicit
-        # ``None`` when our own query failed — so ``_trash_paths`` does
+        # ``None`` when our own query failed — so ``trash_paths`` does
         # not re-query and overwrite our fail-closed classification. If
         # its second query happened to succeed after the share detached,
         # a custom-mount path we already flagged network (via the
-        # ``/Volumes`` fallback in ``_path_on_network_volume``) would be
+        # ``/Volumes`` fallback in ``path_on_network_volume``) would be
         # silently reclassified as local, reintroducing the unbounded-I/O
         # hang this routing exists to prevent.
         trashed, successful_paths, trash_failures = trash_paths(

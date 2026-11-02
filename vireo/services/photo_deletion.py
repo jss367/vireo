@@ -11,10 +11,10 @@ drop rows.
 
 Nothing here touches ``request`` or builds an HTTP response. ``create_app``
 builds one ``PhotoDeletion``; the filesystem primitives it depends on
-(``_chunked``, ``_trash_paths``, ``_snapshot_parent_device``,
-``_path_confirmed_gone``) still live in ``app.py`` and are injected as
-late-binding callables, so tests that monkeypatch them on the ``app`` module
-keep reaching this code.
+(``sql_chunks.chunked``, ``services.trash.trash_paths`` and
+``services.volumes``' ``snapshot_parent_device`` / ``path_confirmed_gone``)
+are injected through ``app.py`` as late-binding callables, so tests that
+monkeypatch them on the ``app`` module keep reaching this code.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 {
   "analyze.py": 1,
-  "app.py": 4,
+  "app.py": 1,
   "artifact_flight.py": 1,
   "audit.py": 1,
   "capture_time.py": 1,
@@ -105,6 +105,7 @@
   "services/preview_workers.py": 2,
   "services/scan_work.py": 3,
   "services/startup_tasks.py": 13,
+  "services/trash.py": 3,
   "services/visual_scope.py": 2,
   "site_export.py": 2,
   "site_publish.py": 2,
