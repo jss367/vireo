@@ -114,7 +114,7 @@ def tree(db):
     return ws, p, a, b, q
 
 
-# -- add_workspace_folder / _add_workspace_folder_no_commit ------------------
+# -- add_workspace_folder ------------------------------------------------------
 
 
 def test_add_workspace_folder_links_subtree_with_only_target_as_root(db, tree, cache):
@@ -164,29 +164,34 @@ def test_add_workspace_folder_without_restore_keeps_removed_descendants_out(db, 
     assert _links(db, ws) == {p: 1, a: 1}
 
 
-def test_add_workspace_folder_no_commit_leaves_transaction_open(db, tree, cache):
+def test_add_workspace_folder_inside_a_unit_waits_for_its_commit(db, tree, cache):
     ws, p, a, b, q = tree
-    workspace_folders.add_workspace_folder_no_commit(db, ws, p)
-    assert db.conn.in_transaction
-    assert _links(db, ws) == {p: 1, a: 0, b: 0}
-    with _reader(db) as conn:
-        assert _links(db, ws, conn) == {}
+    with pytest.raises(RuntimeError, match="owner rolls back"), db.transaction():
+        workspace_folders.add_workspace_folder(db, ws, p, restore_removed=False)
+        assert db.conn.in_transaction
+        assert _links(db, ws) == {p: 1, a: 0, b: 0}
+        with _reader(db) as conn:
+            assert _links(db, ws, conn) == {}
+        raise RuntimeError("owner rolls back")
+    # Rolled back with its owner: no links, and no invalidation either.
     assert cache.invalidated == []
-    db.conn.rollback()
     assert _links(db, ws) == {}
 
 
-def test_add_workspace_folder_no_commit_skips_removed_unless_restoring(db, tree):
+def test_the_no_commit_twin_is_gone():
+    assert not hasattr(workspace_folders, "add_workspace_folder_no_commit")
+
+
+def test_add_workspace_folder_inside_a_unit_skips_removed_unless_restoring(db, tree):
     ws, p, a, b, q = tree
     workspace_folders.add_workspace_folder(db, ws, p)
     workspace_folders.remove_workspace_folder_tree(db, ws, a)
-    workspace_folders.add_workspace_folder_no_commit(db, ws, p)
-    db.commit()
+    with db.transaction():
+        workspace_folders.add_workspace_folder(db, ws, p, restore_removed=False)
     assert _links(db, ws) == {p: 1}
-    workspace_folders.add_workspace_folder_no_commit(db, ws, p, restore_removed=True, is_root=False)
-    db.commit()
+    with db.transaction():
+        workspace_folders.add_workspace_folder(db, ws, p, restore_removed=True, is_root=False)
     assert _links(db, ws) == {p: 1, a: 0, b: 0}
-    db.conn.commit()
 
 
 def test_add_workspace_folder_chunks_root_update_for_wide_subtrees(db, cache):
@@ -1275,7 +1280,7 @@ _REMOVED_WRAPPERS = (
 # ``db.workspace_folders.photo_in_workspace`` / ``visible_ids`` and the merge
 # binds ``db.workspace_folders.root_*_exists``.
 _MOVED_METHODS = {
-    "_add_workspace_folder_no_commit": "add_workspace_folder_no_commit",
+    "_add_workspace_folder_no_commit": "add_workspace_folder",
     "add_workspace_folder": "add_workspace_folder",
     "add_workspace_folder_exact": "add_workspace_folder_exact",
     "_remember_workspace_folder_removals": "remember_workspace_folder_removals",
@@ -1309,8 +1314,8 @@ def test_workspace_folder_workflow_lives_in_the_service(old_name):
         f"workspace_folders.{_MOVED_METHODS[old_name]} touches the connection; "
         "move the SQL to WorkspaceFolderRepository"
     )
-    # ``add_workspace_folder`` delegates through ``add_workspace_folder_no_commit``.
-    assert "db.workspace_folders" in source or "add_workspace_folder_no_commit(" in source, (
+    # ``add_workspace_folder`` delegates through ``_link_folder_subtree``.
+    assert "db.workspace_folders" in source or "_link_folder_subtree(" in source, (
         f"workspace_folders.{_MOVED_METHODS[old_name]} no longer delegates to WorkspaceFolderRepository"
     )
 

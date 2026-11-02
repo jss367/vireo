@@ -134,8 +134,9 @@ def test_rollback_does_not_prune_shared_results(db, tmp_path):
     path = tmp_path / f"pipeline_results_ws{db.active_workspace_id}.json"
     _pipeline(path, [photo])
     original = path.read_bytes()
-    catalog_deletion.delete_photos(db, [photo], commit=False)
-    db.rollback()
+    with pytest.raises(RuntimeError, match="caller rolls back"), db.transaction():
+        catalog_deletion.delete_photos(db, [photo])
+        raise RuntimeError("caller rolls back")
     assert db.photos.get(photo)
     assert path.read_bytes() == original
 

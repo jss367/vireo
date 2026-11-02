@@ -1,7 +1,13 @@
 # Unit of work: explicit transaction ownership in the data layer
 
-Date: 2026-10-25. Status: design, with a ratchet test that holds the migration
-in place (`vireo/tests/test_transaction_ownership.py`).
+Date: 2026-10-25. Status: done (2026-11-01). Both ratchet counts in
+`vireo/tests/test_transaction_ownership.py` are zero, and the commit hold is
+replaced by a guard: inside a unit of work, `commit()`, `rollback()`, `with
+conn:`, `begin()` and `begin_immediate()` raise `TransactionOwnershipError`
+(`unit_of_work.GuardedConnection`). Two migration rules remain: an outermost
+plain `transaction()` adopts a transaction its caller began outside any unit,
+and `join=True` runs a savepoint inside one. The appendix below is the
+2026-10-25 inventory, kept as history.
 
 ## Problem
 

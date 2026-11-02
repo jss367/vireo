@@ -1004,12 +1004,12 @@ class FolderRepository:
 
         # No commit: the caller's one unit of work keeps a failure partway
         # from committing the photo deletes while leaving the folder rows
-        # behind. ``commit=False`` also defers delete_photos' pipeline-cache
-        # prune (a non-transactional file write) until after that commit.
+        # behind (each chunk is a savepoint of it). The caller prunes the
+        # pipeline cache (a non-transactional file write) after that commit.
         files = []
         deleted_ids = []
         for chunk in self._chunks(photo_ids):
-            inner = delete_photos(chunk, commit=False)
+            inner = delete_photos(chunk)
             files.extend(inner.get("files", []))
             deleted_ids.extend(inner.get("ids", []))
         # Reparent kept subtree heads before any folder DELETE — their

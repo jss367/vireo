@@ -431,13 +431,19 @@ def test_apply_resolution_chunks_its_candidate_lookup(db, folder, monkeypatch):
 # -- _apply_winner_loser_merge --------------------------------------------------
 
 
-def test_merge_raises_rating_rejects_losers_and_commits(db, folder):
+def _merge(db, *args, **kwargs):
+    """The merge in its own unit, as every duplicate-resolution service runs it."""
+    with db.transaction():
+        db._apply_winner_loser_merge(*args, **kwargs)
+
+
+def test_merge_raises_rating_rejects_losers_and_commits_with_its_unit(db, folder):
     fid, _ = folder
     w = _photo(db, fid, "w.jpg", "H", rating=2)
     l1 = _photo(db, fid, "l1.jpg", "H", rating=5)
     l2 = _photo(db, fid, "l2.jpg", "H", rating=None)
 
-    db._apply_winner_loser_merge(w, [l1, l2])
+    _merge(db, w, [l1, l2])
 
     assert not db.conn.in_transaction
     assert _committed_rating(db, w) == 5
@@ -466,7 +472,7 @@ def test_merge_preserves_embedded_suppression_and_survivor_removals(
     db.tag_photo(loser, manual, source="manual")
     db.commit()
 
-    db._apply_winner_loser_merge(winner, [loser])
+    _merge(db, winner, [loser])
     names = {k["name"] for k in db.photo_keywords.get_for_photo(winner)}
     assert ("Robin" in names) is not removed
     assert "Field note" in names
@@ -502,7 +508,7 @@ def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
     db.tag_photo(loser, robin, source="manual")
     db.commit()
 
-    db._apply_winner_loser_merge(winner, [loser])
+    _merge(db, winner, [loser])
 
     names = {k["name"] for k in db.photo_keywords.get_for_photo(winner)}
     assert "Robin" in names, (
@@ -525,7 +531,7 @@ def test_merge_embedded_suppression_from_one_loser_does_not_block_another(db, fo
     db.conn.commit()
     _import_embedded_keywords_for_photo(db, attached, metadata)
 
-    db._apply_winner_loser_merge(winner, [detached, attached])
+    _merge(db, winner, [detached, attached])
     assert {k["name"] for k in db.photo_keywords.get_for_photo(winner)} == {"Robin"}
     assert db.photo_keywords.embedded_offered_keys(winner) == {"robin"}
 
@@ -536,7 +542,7 @@ def test_merge_leaves_a_higher_winner_rating_alone(db, folder):
     lo = _photo(db, fid, "l.jpg", "H", rating=1)
 
     with _SqlRecorder(db) as rec:
-        db._apply_winner_loser_merge(w, [lo])
+        _merge(db, w, [lo])
 
     assert rec.matching("UPDATE photos SET rating") == []
     assert _committed_rating(db, w) == 4
@@ -549,7 +555,7 @@ def test_merge_treats_null_winner_rating_as_zero(db, folder):
     lo = _photo(db, fid, "l.jpg", "H", rating=0)
 
     with _SqlRecorder(db) as rec:
-        db._apply_winner_loser_merge(w, [lo])
+        _merge(db, w, [lo])
 
     # new_rating (0) equals the winner's coerced rating (0): no UPDATE,
     # so the NULL survives.
@@ -574,7 +580,7 @@ def test_merge_carries_the_strongest_loser_source_per_keyword(db, folder):
     db.tag_photo(l1, k_shared, source="manual")
     db.commit()
 
-    db._apply_winner_loser_merge(w, [l1, l2])
+    _merge(db, w, [l1, l2])
 
     assert _keyword_sources(db, w) == {
         k_manual: "manual",
@@ -600,7 +606,7 @@ def test_merge_tags_through_the_facade_inside_its_transaction(db, folder, monkey
 
     monkeypatch.setattr(db, "tag_photo", _record)
 
-    db._apply_winner_loser_merge(w, [lo])
+    _merge(db, w, [lo])
 
     assert calls == [(w, kid, "accept", None, True)]
     assert not db.conn.in_transaction
@@ -621,7 +627,7 @@ def test_merge_rolls_back_everything_when_tagging_fails(db, folder, monkeypatch)
     monkeypatch.setattr(db, "tag_photo", _boom)
 
     with pytest.raises(RuntimeError, match="tag failed"):
-        db._apply_winner_loser_merge(w, [lo])
+        _merge(db, w, [lo])
 
     assert not db.conn.in_transaction
     assert _committed_rating(db, w) == 1
@@ -634,7 +640,7 @@ def test_merge_logs_the_verdict(db, folder, caplog):
     lo = _photo(db, fid, "l.jpg", "H")
 
     with caplog.at_level(logging.INFO, logger="db"):
-        db._apply_winner_loser_merge(w, [lo])
+        _merge(db, w, [lo])
 
     assert f"Duplicate resolved: kept id={w}, rejected id(s)=[{lo}]" in caplog.text
 
@@ -650,7 +656,7 @@ def test_merge_reads_pending_changes_without_copying_them(db, folder):
     )
     db.conn.commit()
 
-    db._apply_winner_loser_merge(w, [lo])
+    _merge(db, w, [lo])
 
     rows = db.conn.execute(
         "SELECT photo_id FROM pending_changes ORDER BY id"
@@ -663,7 +669,7 @@ def test_merge_with_no_losers_only_logs(db, folder):
     fid, _ = folder
     w = _photo(db, fid, "w.jpg", "H", rating=3)
 
-    db._apply_winner_loser_merge(w, [])
+    _merge(db, w, [])
 
     assert _committed_rating(db, w) == 3
     assert _flags(db, [w]) == {w: "none"}
@@ -686,7 +692,7 @@ def test_merge_chunks_loser_reads_and_rejections(db, folder):
     db.commit()
 
     with _SqlRecorder(db) as rec:
-        db._apply_winner_loser_merge(w, losers)
+        _merge(db, w, losers)
 
     # Two chunks each for keyword reads and suppression-state copies.
     assert len(rec.matching("WHERE photo_id IN (")) == 4
@@ -1158,3 +1164,13 @@ def test_duplicates_has_no_forwarding_wrappers_on_database():
     }
     assert "_duplicates_repository" in attrs
     assert "conn" not in attrs
+
+
+def test_merge_never_commits_on_its_own(db, folder):
+    fid, _ = folder
+    w = _photo(db, fid, "w.jpg", "H", rating=2)
+    lo = _photo(db, fid, "l.jpg", "H", rating=5)
+    db._apply_winner_loser_merge(w, [lo])
+    assert db.conn.in_transaction
+    assert _committed_rating(db, w) == 2
+    db.rollback()

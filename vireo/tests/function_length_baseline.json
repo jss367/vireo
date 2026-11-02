@@ -3,7 +3,7 @@
   "models.py:_hf_download_with_retry": 109,
   "models.py:download_model": 245,
   "models.py:ensure_timm_label_descriptions": 159,
-  "services/moves_merge.py:merge_staged_tree_into_archive": 118,
+  "services/moves_merge.py:merge_staged_tree_into_archive": 117,
   "web/models.py:create_models_blueprint.api_classify_readiness": 160,
   "web/models.py:create_models_blueprint.api_job_download_darktable": 271,
   "web/storage.py:create_storage_blueprint.api_storage": 202

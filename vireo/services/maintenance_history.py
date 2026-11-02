@@ -43,7 +43,7 @@ def remove_orphans_with_history(db: Database, photo_ids: list[int]) -> JsonDict:
 
     with db.transaction(immediate=True):
         confirmed = confirmed_orphan_ids(db, photo_ids)
-        result = catalog_deletion.delete_photos(db, confirmed, commit=False)
+        result = catalog_deletion.delete_photos(db, confirmed)
         if result['deleted']:
             # Photo-linked items cascade away on deletion. Keep the removed
             # IDs and paths on the parent entry so the audit survives that FK.

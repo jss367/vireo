@@ -6,7 +6,10 @@ folder subtree and its photos unless another workspace still links to it, and
 ``prune_pipeline_cache_for_ids`` drops deleted ids from every workspace's
 on-disk pipeline results. None of them touches files on disk other than that
 cache: each returns the file list its caller's cleanup needs
-(``cleanup_cached_files_for_deleted_photos``, Trash).
+(``cleanup_cached_files_for_deleted_photos``, Trash). ``delete_photos`` prunes
+that cache itself only when its own unit of work committed the delete; inside
+a caller's unit the caller prunes once that unit commits, with the ids of
+every chunk it deleted.
 
 The new-images cache is ``Database``'s process cache, so the invalidations go
 through the façade's public invalidators, in the same order relative to the
@@ -18,7 +21,6 @@ whole subtree delete has committed.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 from functools import partial
@@ -56,21 +58,21 @@ def prune_pipeline_cache_for_ids(db: Database, ids: Iterable[int] | None) -> Non
 
 
 def delete_photos(
-    db: Database, photo_ids: Iterable[int], include_companions: bool = False, commit: bool = True,
+    db: Database, photo_ids: Iterable[int], include_companions: bool = False,
 ) -> JsonDict:
-    """Delete photos and all associated data.
+    """Delete photos and all associated data, as one unit of work.
 
     Returns dict with 'deleted' count, 'ids' list of deleted photo IDs
     (post-companion-resolution), and 'files' list of
     {photo_id, folder_path, filename, companion_path} for file cleanup.
 
-    When ``commit`` is ``False``, this call participates in an outer
-    transaction managed by the caller: no ``commit()``/``rollback()`` is
-    issued here, **and** the non-DB pipeline-cache prune is skipped so
-    a later failed chunk can roll the DB back without leaving a
-    permanently-mutated cache file on disk. The caller is responsible
-    for invoking ``prune_pipeline_cache_for_ids`` with the union of
-    returned ``ids`` after the outer commit succeeds.
+    Called with no unit open, this call owns its unit: it commits the
+    delete and then prunes the pipeline review cache. Inside a caller's
+    unit it is a savepoint, so a chunked caller's later failure rolls every
+    chunk back together, and the non-DB cache prune is the caller's, once
+    its unit has committed (``prune_pipeline_cache_for_ids`` with the
+    returned ``ids``), so a rolled-back chunk never leaves a
+    permanently-mutated cache file.
     """
     resolved = db.photos.resolve_for_delete(
         photo_ids, include_companions=include_companions,
@@ -100,10 +102,9 @@ def delete_photos(
     # serving the stale pre-delete ``new_count`` until the TTL expired.
     affected_folder_ids = list(folder_counts.keys())
 
+    owns_unit = not db.in_unit_of_work
     try:
-        # With ``commit`` this call is its own unit of work; without it the
-        # caller's transaction owns the rows (and their rollback).
-        with db.transaction() if commit else contextlib.nullcontext():
+        with db.transaction():
             db.photos.delete(
                 all_ids,
                 folder_counts,
@@ -119,12 +120,8 @@ def delete_photos(
             db.invalidate_new_images_cache_for_folders(affected_folder_ids)
 
     # Prune the pipeline review cache so deleted photos don't render as
-    # blank cards on the pipeline review page. Skipped when ``commit`` is
-    # False so chunked callers can defer this non-transactional side
-    # effect until after their outer commit — otherwise a rolled-back
-    # later chunk would leave the on-disk cache permanently stripped of
-    # rows the DB just restored.
-    if commit:
+    # blank cards on the pipeline review page, once the delete is durable.
+    if owns_unit:
         prune_pipeline_cache_for_ids(db, all_ids)
     return {"deleted": len(all_ids), "ids": all_ids, "files": files}
 
