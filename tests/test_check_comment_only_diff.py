@@ -254,7 +254,7 @@ def test_source_changes_detects_cjs_file(tmp_path):
     assert any(label.endswith("helper.cjs") and suffix == ".cjs" for label, _, _, suffix, _ in entries), entries
 
 
-def test_source_changes_rename_to_non_source_is_not_dropped(tmp_path):
+def test_source_changes_rename_to_non_source_is_rejected(tmp_path):
     """A ``.py`` renamed to ``.txt`` is a source deletion, not a non-event."""
     _run_in_fixture(tmp_path, ("module.py", "import os\nX = 1\n"))
     subprocess.run(["git", "-C", str(tmp_path), "mv", "module.py", "module.txt"], check=True)
@@ -271,10 +271,10 @@ def test_source_changes_rename_to_non_source_is_not_dropped(tmp_path):
     label, old_path, new_path, suffix, _ = entries[0]
     assert old_path == "module.py"
     assert new_path == "module.txt"
-    assert suffix == ".py"
+    assert suffix == "renamed"
 
 
-def test_source_changes_rename_from_non_source_is_an_addition(tmp_path):
+def test_source_changes_rename_from_non_source_is_rejected(tmp_path):
     _run_in_fixture(tmp_path, ("module.txt", "not source\n"))
     subprocess.run(["git", "-C", str(tmp_path), "mv", "module.txt", "module.py"], check=True)
     base = subprocess.run(
@@ -288,7 +288,7 @@ def test_source_changes_rename_from_non_source_is_an_addition(tmp_path):
         checker.ROOT = orig_root
     assert entries
     _, _, new_path, suffix, _ = entries[0]
-    assert new_path == "module.py" and suffix == ".py"
+    assert new_path == "module.py" and suffix == "renamed"
 
 
 def test_source_changes_cross_language_rename_is_mixed(tmp_path):
@@ -447,3 +447,82 @@ def test_git_blob_text_preserves_universal_newline_contract(tmp_path, monkeypatc
     path.write_bytes(b"# line\r\nx = 1\r")
     subprocess.run(["git", "-C", str(tmp_path), "add", "source.py"], check=True)
     assert checker._git("show", ":source.py") == path.read_text(encoding="utf-8") == "# line\nx = 1\n"
+
+
+@pytest.mark.parametrize("suffix", [".py", ".js", ".mjs", ".cjs"])
+@pytest.mark.parametrize("edit_comment", [False, True])
+def test_source_rename_rejected_even_with_equal_code(tmp_path, monkeypatch, capsys, suffix, edit_comment):
+    old, new = "old" + suffix, "new" + suffix
+    body = "x = 1\ny = 2\nz = 3\n" if suffix == ".py" else "const x = 1;\n"
+    _run_in_fixture(tmp_path, (old, body))
+    old_blob = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD:" + old], text=True,
+    ).strip()
+    subprocess.run(["git", "-C", str(tmp_path), "mv", old, new], check=True)
+    assert subprocess.check_output(
+        ["git", "-C", str(tmp_path), "hash-object", new], text=True,
+    ).strip() == old_blob, "pure rename must preserve blob identity"
+    if edit_comment:
+        comment = "# wording\n" if suffix == ".py" else "// wording\n"
+        (tmp_path / new).write_text(body + comment, encoding="utf-8")
+        subprocess.run(["git", "-C", str(tmp_path), "add", new], check=True)
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker._source_changes("HEAD") == [(f"{old} -> {new}", old, new, "renamed", False)]
+    assert checker.main() == 1
+    assert "source path renamed" in capsys.readouterr().err
+
+
+def test_unicode_source_rename_rejected(tmp_path, monkeypatch, capsys):
+    old, new = "鳥.py", "naïve.py"
+    _run_in_fixture(tmp_path, (old, "x = 1\n"), rename=(old, new))
+    assert subprocess.check_output(
+        ["git", "-C", str(tmp_path), "hash-object", new], text=True,
+    ).strip() == subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD:" + old], text=True, encoding="utf-8",
+    ).strip()
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker._source_changes("HEAD") == [(f"{old} -> {new}", old, new, "renamed", False)]
+    assert checker.main() == 1
+    assert "source path renamed" in capsys.readouterr().err
+
+
+def test_source_copy_rejected_when_git_reports_copy(tmp_path, monkeypatch, capsys):
+    body = "x = 1\n"
+    _run_in_fixture(tmp_path, ("source.py", body))
+    (tmp_path / "source.py").write_text(body + "# wording\n", encoding="utf-8")
+    (tmp_path / "copy.py").write_text(body, encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "source.py", "copy.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "diff.renames", "copies"], check=True)
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert " C100\0source.py\0copy.py\0" in checker._git("diff", "--raw", "-z", "HEAD", "--")
+    entries = checker._source_changes("HEAD")
+    assert ("source.py -> copy.py", "source.py", "copy.py", "copied", False) in entries
+    assert checker.main() == 1
+    assert "source path copied" in capsys.readouterr().err
+
+
+def test_same_path_python_comment_cleanup_still_passes(tmp_path, monkeypatch):
+    _run_in_fixture(tmp_path, ("module.py", "x = 1\n# old wording\n"))
+    (tmp_path / "module.py").write_text("x = 1\n# clear wording\n", encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker.main() == 0
+
+
+@needs_node
+def test_same_path_js_comment_cleanup_still_passes(tmp_path, monkeypatch):
+    _run_in_fixture(tmp_path, ("module.js", "const x = 1; // old wording\n"))
+    (tmp_path / "module.js").write_text("const x = 1; // clear wording\n", encoding="utf-8")
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    # Acorn remains a tool of the actual repository, not the inert Git fixture.
+    real_js = checker._js
+    def fixture_js(source):
+        with monkeypatch.context() as context:
+            context.setattr(checker, "ROOT", ROOT)
+            return real_js(source)
+    monkeypatch.setattr(checker, "_js", fixture_js)
+    monkeypatch.setattr(sys, "argv", ["check_comment_only_diff.py", "--base", "HEAD"])
+    assert checker.main() == 0

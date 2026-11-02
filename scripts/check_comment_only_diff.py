@@ -15,12 +15,11 @@ them: Python ``noqa`` (``ruff: noqa`` too, and ``NOQA`` case-insensitively) /
 ``type:`` / ``pyright:`` / ``pragma`` / ``fmt:`` / ``broad:`` pragmas, ESLint
 and ``@ts-`` directives (``@ts-expect-error`` included), and JSDoc type tags
 with ``@import`` module sources captured separately so changing the source is
-detected. Added, deleted and renamed source files are compared the same way,
-against an empty counterpart (or across both paths for a rename), so a diff
-is comment-only only when every A/M/D/R source file is. A rename to or from a
-non-source suffix (``module.py`` -> ``module.txt``) is treated as a deletion
-or addition of the source file so the rename cannot hide a removed executable
-module.
+detected. Added and deleted tracked source is compared against an empty
+counterpart. Any rename or copy involving a supported source suffix is
+rejected because module and script paths are executable interfaces, even
+when blob content is identical. Nonignored untracked supported source must
+be staged before comparison.
 
     python scripts/check_comment_only_diff.py [--base origin/main]
 
@@ -188,13 +187,12 @@ def _suffix_of(path: str) -> str:
 
 
 def _source_changes(base: str) -> list[tuple[str, str, str, str, bool]]:
-    """``(label, old_path, new_path, suffix, mode_changed)`` for every A/M/D/R source file.
+    """``(label, old_path, new_path, suffix, mode_changed)`` for every A/M/D/R/C source file.
 
-    Both sides of a rename are inspected so a ``module.py`` renamed to a
-    non-source suffix (``module.txt``) is still reported as a source deletion
-    instead of silently dropped. An entry whose status is not A/M/D/R, or
-    whose rename crosses languages (``.py`` <-> ``.js``), is returned with a
-    sentinel suffix so ``main()`` fails on it rather than certifying it. The
+    Renames and copies involving either source path are rejected through
+    sentinel suffixes, even if their content is identical. Cross-language
+    renames retain the mixed sentinel. Unsupported change kinds also fail
+    closed instead of certifying their blobs. The
     ``-z`` flag emits NUL-separated records so a non-ASCII, quote, tab,
     backslash or newline in a path cannot be dropped by ``core.quotePath``.
     ``--raw`` carries the old and new Git modes so a mode-only edit
@@ -237,6 +235,9 @@ def _source_changes(base: str) -> list[tuple[str, str, str, str, bool]]:
         if old_suffix and new_suffix and old_is_js != new_is_js:
             out.append((label, old_path, new_path, "mixed", False))
             continue
+        if status in ("R", "C"):
+            out.append((label, old_path, new_path, "renamed" if status == "R" else "copied", False))
+            continue
         suffix = new_suffix or old_suffix
         mode_changed = status in ("M", "R", "C") and old_mode != new_mode
         out.append((label, old_path, new_path, suffix, mode_changed))
@@ -259,6 +260,9 @@ def main() -> int:
         labels.append(label)
         if suffix == "untracked":
             failures.append(f"{label}: untracked source file; stage it for comparison")
+            continue
+        if suffix in ("renamed", "copied"):
+            failures.append(f"{label}: source path {suffix}")
             continue
         if suffix == "mixed":
             failures.append(f"{label}: cross-language rename")
