@@ -15,7 +15,7 @@ import re
 
 import pytest
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import keyword_tagging, photo_ingest
 
 
 def _total(page):
@@ -495,8 +495,8 @@ def test_missing_tag_shortcuts_combine_and_distinguish_gps(live_server, page):
     photos = live_server["data"]["photos"]
     place = db.keywords.add("City Park", kw_type="location")
     # A named place without coordinates counts as tagged; GPS alone does not.
-    db.tag_photo(photos[0], place)
-    db.tag_photo(photos[1], place)
+    keyword_tagging.tag_photo(db, photos[0], place)
+    keyword_tagging.tag_photo(db, photos[1], place)
     db.commit()
     with db.conn:
         db.conn.execute(
@@ -577,8 +577,8 @@ def test_missing_shortcuts_preserve_multiple_existing_clauses(live_server, page,
     db = live_server["db"]
     photos = live_server["data"]["photos"]
     place = db.keywords.add("City Park", kw_type="location")
-    db.tag_photo(photos[0], place)
-    db.tag_photo(photos[1], place)
+    keyword_tagging.tag_photo(db, photos[0], place)
+    keyword_tagging.tag_photo(db, photos[1], place)
     db.commit()
     _open_browse(page, live_server)
     missing_species = {"field": "has_species", "op": "is", "value": 0}

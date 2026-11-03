@@ -8,7 +8,9 @@ future author remembering to stamp it.
 
 Three mechanisms enforce it, and this module pins all three:
 
-1. ``Database.tag_photo`` defaults ``source`` to ``'manual'``. The failure
+1. ``services.keyword_tagging.tag_photo``, the entry point every caller
+   outside the data layer tags through, defaults ``source`` to
+   ``'manual'``. The failure
    modes are asymmetric — a wrongly-manual generated tag is a stale keyword
    the user can delete, while a wrongly-unknown manual tag is silent,
    unrecoverable data loss — so the default is the fail-safe one and a call
@@ -22,14 +24,21 @@ Three mechanisms enforce it, and this module pins all three:
    onto its JPEG, and every re-tag lands on a row that may already exist.
    Each is a place where the surviving row can silently take the weaker of
    two claims. The fold rule — lattice max, never a downgrade — lives once in
-   ``db.py`` (``keyword_source_max`` / ``keyword_source_max_sql`` /
-   ``KEYWORD_SOURCE_CONFLICT_SQL``), and the convergence guard below requires
-   every site that writes a ``photo_keywords`` row to be a listed, reviewed
-   site that uses it. The writers behind the ``Database`` façade live in
-   ``repositories/keyword_provenance.py``, which receives the fold from
-   ``db`` and reads it as ``self.<name>``; the guards below scan every
-   production module and accept a fold symbol either as a bare name or as an
-   attribute, so the contract holds wherever a writer lives.
+   ``repositories/keyword_source.py`` (``keyword_source_max`` /
+   ``keyword_source_max_sql`` / ``KEYWORD_SOURCE_CONFLICT_SQL``, re-exported
+   by ``db``), and the convergence guard below requires every site that
+   writes a ``photo_keywords`` row to be a listed, reviewed site that uses
+   it. The writers live in ``repositories/keyword_provenance.py``; the
+   guards below scan every production module and accept a fold symbol
+   either as a bare name or as an attribute, so the contract holds wherever
+   a writer lives.
+
+The source scan reads every call of the entry point (``tag_photo(db,
+photo_id, keyword_id, source)``) and every call of the repository writer
+behind it (``<...>.keyword_provenance.tag(..., source=...)``,
+``KeywordProvenanceRepository(...).tag(...)``, a local bound to either, and
+``self.tag(...)`` inside the provenance repository), so a writer that skips
+the entry point still has to declare its provenance.
 
 Sites are keyed by ``(module relative to vireo/ in POSIX form, enclosing
 function)``, so a writer that moves between modules has to be re-listed here.
@@ -41,7 +50,7 @@ import re
 from pathlib import Path
 
 import pytest
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 VIREO_DIR = Path(__file__).resolve().parent.parent
 
@@ -58,7 +67,7 @@ PROVENANCE_NEUTRAL_WRITERS = {
 # value is computed, so this test can't read it statically — the allowlist is
 # the review gate instead.
 PROVENANCE_CARRYING_WRITERS = {
-    ("db.py", "_carry_keyword_associations_for_merge"): "forwards the winning source association's existing stamp",
+    ("repositories/moves_merge.py", "carry_keyword_associations_for_merge"): "forwards the winning source association's existing stamp",
     ("services/identity_alternatives.py", "replay_identity_edit"): "identity history restores original candidate association stamps",
     ("db.py", "restore_photo_location_state"): "history restores the original location stamps",
     ("db.py", "_apply_winner_loser_merge"): "duplicate merge carries the losers' stamps",
@@ -78,10 +87,10 @@ PROVENANCE_FOLD_SYMBOLS = {
 # row onto one that may already exist). Each is a convergence point: two
 # claims about the same (photo, keyword) meet and one survives.
 #
-# ``Database.tag_photo``, ``_merge_keyword_into`` and ``link_keyword_to_place``
-# are one-line wrappers; their writes live in ``KeywordProvenanceRepository``
-# under the names keyed here (``link_keyword_to_place``'s in its
-# ``_absorb_into_canonical_place`` helper).
+# ``keyword_tagging.tag_photo`` and the merges reach their writes in
+# ``KeywordProvenanceRepository`` under the names keyed here
+# (``link_keyword_to_place``'s in its ``_absorb_into_canonical_place``
+# helper).
 _PROVENANCE_MODULE = "repositories/keyword_provenance.py"
 PROVENANCE_CONVERGENCE_POINTS = {
     ("repositories/identity_alternatives.py", "remap_identity_for_photo_merge"): "identity collision carries candidate stamps through the shared fold",
@@ -117,28 +126,113 @@ def _enclosing_function_name(tree, target):
     return name
 
 
+_PROVENANCE_REPOSITORY_CLASS = "KeywordProvenanceRepository"
+
+# The entry point forwards its caller's declared ``source`` to the repository
+# writer; ``test_tag_photo_defaults_to_manual_provenance`` pins its default.
+_ENTRY_POINT = ("services/keyword_tagging.py", "tag_photo")
+
+
+def _provenance_repository_constructors(tree):
+    """Recognize constructor imports as syntax, without importing modules.
+
+    Collect all relevant import bindings conservatively across branches,
+    as the existing receiver-alias scan does for assignments.
+    """
+    module = "repositories.keyword_provenance"
+    names = {_PROVENANCE_REPOSITORY_CLASS}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                local = alias.asname or alias.name
+                if node.module == module and alias.name == _PROVENANCE_REPOSITORY_CLASS:
+                    names.add(local)
+                elif node.module == "repositories" and alias.name == "keyword_provenance":
+                    names.add(f"{local}.{_PROVENANCE_REPOSITORY_CLASS}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == module:
+                    names.add(f"{alias.asname or module}.{_PROVENANCE_REPOSITORY_CLASS}")
+                elif alias.name == "repositories":
+                    local = alias.asname or alias.name
+                    names.add(f"{local}.keyword_provenance.{_PROVENANCE_REPOSITORY_CLASS}")
+    return names
+
+
+def _builds_provenance_repository(node, constructors):
+    """A provenance accessor or an imported repository constructor call."""
+    if isinstance(node, ast.Attribute) and node.attr == "keyword_provenance":
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Name, ast.Attribute))
+        and ast.unparse(node.func) in constructors
+    )
+
+
+def _writer_calls(rel, tree):
+    """Yield ``(call, source_node)`` for every association write in ``tree``.
+
+    The entry point ``tag_photo(db, photo_id, keyword_id, source)`` (bare or
+    as ``<module>.tag_photo``) declares ``source`` by keyword or as its
+    fourth positional argument. The repository writer ``tag`` takes it
+    keyword-only, through any receiver that is a provenance repository.
+    """
+    constructors = _provenance_repository_constructors(tree)
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _builds_provenance_repository(node.value, constructors):
+            aliases.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.value is not None
+            and _builds_provenance_repository(node.value, constructors)
+            and isinstance(node.target, ast.Name)
+        ):
+            aliases.add(node.target.id)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        keyword = next((kw.value for kw in node.keywords if kw.arg == "source"), None)
+        is_entry = (
+            (isinstance(func, ast.Attribute) and func.attr == "tag_photo")
+            or (isinstance(func, ast.Name) and func.id == "tag_photo")
+        )
+        if is_entry:
+            if keyword is None and len(node.args) >= 4:
+                keyword = node.args[3]
+            yield node, keyword
+            continue
+        if not (isinstance(func, ast.Attribute) and func.attr == "tag"):
+            continue
+        receiver = func.value
+        on_repository = (
+            _builds_provenance_repository(receiver, constructors)
+            or (isinstance(receiver, ast.Name) and receiver.id in aliases)
+            or (rel == _PROVENANCE_MODULE
+                and isinstance(receiver, ast.Name) and receiver.id == "self")
+        )
+        if on_repository:
+            yield node, keyword if keyword is not None else _REQUIRED_SOURCE
+
+
+# A repository-writer call with no ``source=``: the writer has no default, so
+# the call cannot even run; reported as unrecognized.
+_REQUIRED_SOURCE = ast.Constant(value=object())
+
+
 def _tag_photo_calls():
-    """Yield (relpath, function, lineno, source_kwarg_node_or_MISSING)."""
+    """Yield (relpath, function, lineno, source_node_or_None) for every write."""
     for rel, path in _production_modules():
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
+        for node, source in _writer_calls(rel.as_posix(), tree):
+            function = _enclosing_function_name(tree, node)
+            if (rel.as_posix(), function) == _ENTRY_POINT:
                 continue
-            func = node.func
-            if not isinstance(func, ast.Attribute) or func.attr != "tag_photo":
-                continue
-            source = next(
-                (kw.value for kw in node.keywords if kw.arg == "source"), None,
-            )
-            # A positional third argument is also a source declaration.
-            if source is None and len(node.args) >= 3:
-                source = node.args[2]
-            yield (
-                rel.as_posix(),
-                _enclosing_function_name(tree, node),
-                node.lineno,
-                source,
-            )
+            yield rel.as_posix(), function, node.lineno, source
 
 
 def _declared_source(node):
@@ -146,6 +240,8 @@ def _declared_source(node):
     if node is None:
         return "<omitted>"
     if isinstance(node, ast.Constant):
+        if not isinstance(node.value, (str, type(None))):
+            return "<unrecognized>"
         return node.value
     if isinstance(node, ast.Name):
         return {
@@ -163,11 +259,19 @@ def _declared_source(node):
 def test_tag_photo_defaults_to_manual_provenance():
     """The unstamped path must degrade to 'never delete this', not the reverse."""
     from db import KEYWORD_SOURCE_MANUAL, KEYWORD_SOURCE_UNKNOWN, Database
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+    from services import keyword_tagging
 
     assert KEYWORD_SOURCE_MANUAL == "manual"
     assert KEYWORD_SOURCE_UNKNOWN is None
+    # One entry point, outside the data layer; the repository writer behind
+    # it has no default of its own to fall back on.
+    assert not hasattr(Database, "tag_photo")
+    writer = inspect.signature(KeywordProvenanceRepository.tag).parameters["source"]
+    assert writer.default is inspect.Parameter.empty
+    assert writer.kind is inspect.Parameter.KEYWORD_ONLY
 
-    sig = inspect.signature(Database.tag_photo)
+    sig = inspect.signature(keyword_tagging.tag_photo)
     assert sig.parameters["source"].default == KEYWORD_SOURCE_MANUAL, (
         "tag_photo's source default is the fail-safe for every call site that "
         "forgets to declare provenance; it must stay 'manual'."
@@ -175,7 +279,7 @@ def test_tag_photo_defaults_to_manual_provenance():
 
 
 def test_only_sidecar_readers_decline_manual_provenance():
-    """A new provenance-neutral tag_photo() call site must be a deliberate act."""
+    """A new provenance-neutral writer call site must be a deliberate act."""
     neutral = set()
     carrying = set()
     for rel, func, lineno, node in _tag_photo_calls():
@@ -430,7 +534,7 @@ def test_unstamped_tag_photo_is_recorded_as_manual(prov_db):
     )
     kid = prov_db.keywords.add("Wildlife", kw_type="genre")
 
-    prov_db.tag_photo(pid, kid)
+    keyword_tagging.tag_photo(prov_db, pid, kid)
     prov_db.commit()
 
     row = prov_db.conn.execute(
@@ -451,7 +555,7 @@ def test_sidecar_import_leaves_provenance_unknown(prov_db):
     )
     kid = prov_db.keywords.add("Wildlife", kw_type="genre")
 
-    prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(prov_db, pid, kid, source=KEYWORD_SOURCE_UNKNOWN)
     prov_db.commit()
 
     row = prov_db.conn.execute(
@@ -478,12 +582,12 @@ def test_duplicate_merge_carries_manual_provenance_to_the_winner(prov_db):
     scanned = prov_db.keywords.add("Imported", kw_type="general")
     shared = prov_db.keywords.add("Shared", kw_type="general")
     owned = prov_db.keywords.add("Owned", kw_type="general")
-    prov_db.tag_photo(winner, shared, source=KEYWORD_SOURCE_UNKNOWN)
-    prov_db.tag_photo(winner, owned)  # manual
-    prov_db.tag_photo(loser, hand_added)
-    prov_db.tag_photo(loser, scanned, source=KEYWORD_SOURCE_UNKNOWN)
-    prov_db.tag_photo(loser, shared)
-    prov_db.tag_photo(loser, owned, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(prov_db, winner, shared, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(prov_db, winner, owned)  # manual
+    keyword_tagging.tag_photo(prov_db, loser, hand_added)
+    keyword_tagging.tag_photo(prov_db, loser, scanned, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(prov_db, loser, shared)
+    keyword_tagging.tag_photo(prov_db, loser, owned, source=KEYWORD_SOURCE_UNKNOWN)
     prov_db.commit()
 
     prov_db._apply_winner_loser_merge(winner, [loser])
@@ -537,15 +641,15 @@ def test_keyword_merge_folds_provenance_on_overlapping_photos(prov_db):
     src = prov_db.keywords.add("Heron", kw_type="general")
     dst = prov_db.keywords.add("Grey Heron", kw_type="general")
 
-    prov_db.tag_photo(weak_dst, dst, source=KEYWORD_SOURCE_UNKNOWN)
-    prov_db.tag_photo(weak_dst, src)  # manual
-    prov_db.tag_photo(strong_dst, dst)  # manual
-    prov_db.tag_photo(strong_dst, src, source=KEYWORD_SOURCE_ACCEPT)
-    prov_db.tag_photo(mid_dst, dst, source=KEYWORD_SOURCE_UNKNOWN)
-    prov_db.tag_photo(mid_dst, src, source=KEYWORD_SOURCE_ACCEPT)
+    keyword_tagging.tag_photo(prov_db, weak_dst, dst, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(prov_db, weak_dst, src)  # manual
+    keyword_tagging.tag_photo(prov_db, strong_dst, dst)  # manual
+    keyword_tagging.tag_photo(prov_db, strong_dst, src, source=KEYWORD_SOURCE_ACCEPT)
+    keyword_tagging.tag_photo(prov_db, mid_dst, dst, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(prov_db, mid_dst, src, source=KEYWORD_SOURCE_ACCEPT)
     prov_db.commit()
 
-    prov_db._merge_keyword_into(src, dst)
+    prov_db.keyword_provenance.merge_keyword_into(src, dst)
 
     stamps = {
         row["photo_id"]: row["source"]
@@ -583,8 +687,8 @@ def test_tag_photo_never_moves_provenance_down_the_lattice(prov_db):
             prov_db, folder_id=fid, filename=f"{first}-{second}.jpg", extension=".jpg",
             file_size=10, file_mtime=1.0,
         )
-        prov_db.tag_photo(pid, kid, source=first)
-        prov_db.tag_photo(pid, kid, source=second)
+        keyword_tagging.tag_photo(prov_db, pid, kid, source=first)
+        keyword_tagging.tag_photo(prov_db, pid, kid, source=second)
         prov_db.commit()
         return prov_db.conn.execute(
             "SELECT source FROM photo_keywords "
@@ -630,8 +734,8 @@ def test_manual_stamp_survives_a_later_neutral_retag(prov_db):
     )
     kid = prov_db.keywords.add("Wildlife", kw_type="genre")
 
-    prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_MANUAL)
-    prov_db.tag_photo(pid, kid, source=KEYWORD_SOURCE_UNKNOWN)
+    keyword_tagging.tag_photo(prov_db, pid, kid, source=KEYWORD_SOURCE_MANUAL)
+    keyword_tagging.tag_photo(prov_db, pid, kid, source=KEYWORD_SOURCE_UNKNOWN)
     prov_db.commit()
 
     row = prov_db.conn.execute(
@@ -639,3 +743,72 @@ def test_manual_stamp_survives_a_later_neutral_retag(prov_db):
         (pid, kid),
     ).fetchone()
     assert row["source"] == "manual"
+
+
+def test_writer_call_scan_finds_every_way_to_reach_the_writer():
+    """Pin the scan: the entry point and each route to the repository writer."""
+    tree = ast.parse(
+        "def write(db, conn, ws):\n"
+        "    keyword_tagging.tag_photo(db, 1, 2)\n"
+        "    keyword_tagging.tag_photo(db, 1, 2, None)\n"
+        "    tag_photo(db, 1, 2, source='manual')\n"
+        "    db.keyword_provenance.tag(1, 2, source=None)\n"
+        "    KeywordProvenanceRepository(conn).tag(1, 2, source='accept')\n"
+        "    repo = db.keyword_provenance\n"
+        "    repo.tag(1, 2)\n"
+        "    annotated: KeywordProvenanceRepository = db.keyword_provenance\n"
+        "    annotated.tag(1, 2, source=None)\n"
+        "    bare: KeywordProvenanceRepository\n"
+        "    db.tags.tag(1)\n"
+    )
+    found = [
+        (node.lineno, _declared_source(source))
+        for node, source in _writer_calls("services/example.py", tree)
+    ]
+    assert found == [
+        (2, "<omitted>"), (3, None), (4, "manual"), (5, None), (6, "accept"),
+        (8, "<unrecognized>"), (10, None),
+    ]
+    self_tree = ast.parse("def f(self):\n    self.tag(1, 2, source=None)\n")
+    assert [_declared_source(src) for _, src in _writer_calls(_PROVENANCE_MODULE, self_tree)] == [None]
+    assert list(_writer_calls("repositories/other.py", self_tree)) == []
+
+
+def test_writer_call_scan_resolves_constructor_imports():
+    """Only recognized repository import paths identify aliased constructors."""
+    tree = ast.parse(
+        "from repositories.keyword_provenance import KeywordProvenanceRepository as Repo\n"
+        "import repositories.keyword_provenance as kp\n"
+        "import repositories.keyword_provenance\n"
+        "import repositories as repos\n"
+        "from repositories import keyword_provenance as provenance\n"
+        "from unrelated import KeywordProvenanceRepository as Other\n"
+        "import unrelated as other\n"
+        "def write(conn):\n"
+        "    Repo(conn).tag(1, 2, source=None)\n"
+        "    kp.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    repositories.keyword_provenance.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    repos.keyword_provenance.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    provenance.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    alias = Repo(conn)\n"
+        "    alias.tag(1, 2, source='manual')\n"
+        "    annotated: Repo = kp.KeywordProvenanceRepository(conn)\n"
+        "    annotated.tag(1, 2, source='accept')\n"
+        "    Other(conn).tag(1, 2, source=None)\n"
+        "    other.KeywordProvenanceRepository(conn).tag(1, 2, source=None)\n"
+        "    kp.UnrelatedRepository(conn).tag(1, 2, source=None)\n"
+        "    Repo(conn).get(1)\n"
+    )
+    found = [
+        (ast.unparse(call.func), _declared_source(source))
+        for call, source in _writer_calls("services/example.py", tree)
+    ]
+    assert found == [
+        ("Repo(conn).tag", None),
+        ("kp.KeywordProvenanceRepository(conn).tag", None),
+        ("repositories.keyword_provenance.KeywordProvenanceRepository(conn).tag", None),
+        ("repos.keyword_provenance.KeywordProvenanceRepository(conn).tag", None),
+        ("provenance.KeywordProvenanceRepository(conn).tag", None),
+        ("alias.tag", "manual"),
+        ("annotated.tag", "accept"),
+    ]

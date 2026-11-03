@@ -25,7 +25,7 @@ from repositories.edit_history import EditHistoryRepository
 from repositories.photo_labels import PhotoLabelRepository
 from repositories.photo_review import PhotoReviewRepository
 from repositories.species_curation import SpeciesCurationRepository
-from services import photo_ingest, workspace_folders, workspace_lifecycle
+from services import keyword_tagging, photo_ingest, workspace_folders, workspace_lifecycle
 from services.edit_history import redo_last_undo, undo_last_edit
 
 
@@ -451,7 +451,7 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
     ws = db._active_workspace_id
     pid = pids[0]
     kid = db.keywords.add("Robin", is_species=True)
-    db.tag_photo(pid, kid)
+    keyword_tagging.tag_photo(db, pid, kid)
     db.commit()
     p = _predictions(db, pid)
     _set_status(db, p["a_top"], "rejected")
@@ -740,7 +740,7 @@ def test_prediction_accept_flat_removals_restore_only_live_workspaces(db, pids):
     db.commit()
     db.set_active_workspace(ws)
     kid = db.keywords.add("Hawk")
-    db.tag_photo(pids[0], kid)
+    keyword_tagging.tag_photo(db, pids[0], kid)
     db.commit()
     old_value = json.dumps({
         "keyword_only": True,
@@ -949,7 +949,7 @@ def test_redo_prediction_accept_resolves_workspace_before_status_writes(
 def test_prediction_accept_undo_redo_round_trip(db, pids):
     p = _predictions(db, pids[0])
     kid = db.keywords.add("Finch", is_species=True)
-    db.tag_photo(pids[0], kid)
+    keyword_tagging.tag_photo(db, pids[0], kid)
     db.commit()
     _set_status(db, p["a_mid"], "accepted")
     _set_status(db, p["a_top"], "rejected")
@@ -1194,7 +1194,7 @@ def test_species_replace_undo_redo_moves_curation(db, pids):
     p0 = pids[0]
     old_kid = db.keywords.add("Old Bird", is_species=True)
     new_kid = db.keywords.add("New Bird", is_species=True)
-    db.tag_photo(p0, new_kid)
+    keyword_tagging.tag_photo(db, p0, new_kid)
     db.commit()
     _hl(db, ws, "New Bird", p0, 1)
     db.conn.commit()

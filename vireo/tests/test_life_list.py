@@ -7,7 +7,7 @@ import os
 import pytest
 from page_scripts import page_with_scripts
 from PIL import Image
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -79,11 +79,11 @@ def life_app(tmp_path, monkeypatch):
     db.commit()
     db.conn.commit()
 
-    db.tag_photo(p1, k_card)
-    db.tag_photo(p2, k_card)
-    db.tag_photo(p_rej, k_card)
-    db.tag_photo(p3, k_sparrow)
-    db.tag_photo(p2, k_loc)
+    keyword_tagging.tag_photo(db, p1, k_card)
+    keyword_tagging.tag_photo(db, p2, k_card)
+    keyword_tagging.tag_photo(db, p_rej, k_card)
+    keyword_tagging.tag_photo(db, p3, k_sparrow)
+    keyword_tagging.tag_photo(db, p2, k_loc)
     db.commit()
 
     for pid in (p1, p2, p3):
@@ -120,7 +120,7 @@ def _add_cardinal_photos(db, ids, count, prefix="card-extra"):
             file_mtime=20.0 + i,
             timestamp=f"2024-05-01T08:{i // 60:02d}:{i % 60:02d}",
         )
-        db.tag_photo(pid, k_card)
+        keyword_tagging.tag_photo(db, pid, k_card)
         db.commit()
         photo_ids.append(pid)
     return photo_ids
@@ -416,7 +416,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
         db, folder_id=jan_fid, filename="jan-cardinal.jpg", extension=".jpg",
         file_size=1000, file_mtime=10.0, timestamp="2024-01-10T09:00:00",
     )
-    db.tag_photo(jan_pid, kid)
+    keyword_tagging.tag_photo(db, jan_pid, kid)
     db.commit()
     db.set_species_representative(species, jan_pid)
     db.commit()
@@ -427,7 +427,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
         db, folder_id=feb_fid, filename="feb-cardinal.jpg", extension=".jpg",
         file_size=1000, file_mtime=20.0, timestamp="2024-02-10T09:00:00",
     )
-    db.tag_photo(feb_pid, kid)
+    keyword_tagging.tag_photo(db, feb_pid, kid)
     db.commit()
     db.set_species_representative(species, feb_pid)
     db.commit()
@@ -770,7 +770,7 @@ def _seed_higher_rank_accipiter(db, folder_id):
         file_mtime=6.0,
         timestamp="2024-06-01T12:00:00",
     )
-    db.tag_photo(photo_id, keyword_id)
+    keyword_tagging.tag_photo(db, photo_id, keyword_id)
     db.commit()
     db.conn.commit()
     return {"aves": aves, "accipiter": accipiter, "photo": photo_id,
@@ -783,7 +783,7 @@ def test_higher_rank_taxonomy_identification_is_listed(life_app):
     # Tag the same photo with an existing location keyword so the entry
     # must surface its location chip / CSV value like species-rank rows do.
     location_id = db.keywords.add("Backyard", kw_type="location")
-    db.tag_photo(seed["photo"], location_id)
+    keyword_tagging.tag_photo(db, seed["photo"], location_id)
     db.commit()
     db.conn.commit()
 
@@ -949,10 +949,10 @@ def _seed_robin_with_ancestor_keywords(db, folder_id):
         file_mtime=7.0,
         timestamp="2024-07-01T12:00:00",
     )
-    db.tag_photo(photo_id, k_robin)
-    db.tag_photo(photo_id, k_turdus)
-    db.tag_photo(photo_id, k_turdidae)
-    db.tag_photo(photo_id, k_aves)
+    keyword_tagging.tag_photo(db, photo_id, k_robin)
+    keyword_tagging.tag_photo(db, photo_id, k_turdus)
+    keyword_tagging.tag_photo(db, photo_id, k_turdidae)
+    keyword_tagging.tag_photo(db, photo_id, k_aves)
     db.commit()
     db.conn.commit()
     return {
@@ -1003,7 +1003,7 @@ def test_life_list_locations_omit_ancestor_buckets(life_app):
     app, db, ids = life_app
     seed = _seed_robin_with_ancestor_keywords(db, ids["folder"])
     location_id = db.keywords.add("Backyard", kw_type="location")
-    db.tag_photo(seed["photo"], location_id)
+    keyword_tagging.tag_photo(db, seed["photo"], location_id)
     db.commit()
     db.conn.commit()
 
@@ -1115,8 +1115,8 @@ def test_life_list_keeps_unrelated_higher_rank_identifications(life_app):
         db, folder_id=ids["folder"], filename="mixed.jpg", extension=".jpg",
         file_size=1000, file_mtime=8.0, timestamp="2024-08-01T09:00:00",
     )
-    db.tag_photo(pid, k_aves)
-    db.tag_photo(pid, k_mam)
+    keyword_tagging.tag_photo(db, pid, k_aves)
+    keyword_tagging.tag_photo(db, pid, k_mam)
     db.commit()
     db.conn.commit()
 
@@ -1186,8 +1186,8 @@ def test_same_named_species_keywords_dedupe_photos(life_app):
         "Northern Cardinal", parent_id=parent_b, is_species=True)
     db.commit()
     assert twin_a != twin_b
-    db.tag_photo(ids["p2"], twin_a)
-    db.tag_photo(ids["p2"], twin_b)
+    keyword_tagging.tag_photo(db, ids["p2"], twin_a)
+    keyword_tagging.tag_photo(db, ids["p2"], twin_b)
     db.commit()
     db.conn.commit()
 
@@ -1295,8 +1295,8 @@ def test_life_list_export_csv_escapes_formula_leading_cells(life_app):
     )
     k_species = db.keywords.add("=2+2", is_species=True)
     k_location = db.keywords.add("+Backyard", kw_type="location")
-    db.tag_photo(p_formula, k_species)
-    db.tag_photo(p_formula, k_location)
+    keyword_tagging.tag_photo(db, p_formula, k_species)
+    keyword_tagging.tag_photo(db, p_formula, k_location)
     db.commit()
 
     resp = app.test_client().get(
@@ -1362,7 +1362,7 @@ def test_life_list_summary_exports_ignore_hidden_all_photo_scope(life_app):
             file_mtime=40.0 + i,
             timestamp=f"2024-07-{i + 1:02d}T08:00:00",
         )
-        db.tag_photo(pid, k_card)
+        keyword_tagging.tag_photo(db, pid, k_card)
         db.commit()
 
     resp = app.test_client().get("/api/life-list/export?format=json&photos=all")
@@ -1395,7 +1395,7 @@ def test_life_list_file_export_keeps_duplicate_filenames_by_photo_id(life_app):
             file_mtime=30.0 + folder_id,
             timestamp=f"2024-06-{folder_id:02d}T08:00:00",
         )
-        db.tag_photo(pid, k_card)
+        keyword_tagging.tag_photo(db, pid, k_card)
         db.commit()
 
     resp = app.test_client().get("/api/life-list/export?format=file&photos=all")
@@ -1490,8 +1490,8 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
         "VALUES ('Verdin', NULL, 1, 'taxonomy', ?)",
         (taxon_id,),
     ).lastrowid
-    db.tag_photo(pid_hier, nested)
-    db.tag_photo(pid_root, root)
+    keyword_tagging.tag_photo(db, pid_hier, nested)
+    keyword_tagging.tag_photo(db, pid_root, root)
     db.commit()
     db.conn.commit()
 
@@ -1558,7 +1558,7 @@ def test_life_list_merges_apostrophe_variant_species_into_one_entry(life_app):
             file_mtime=300.0 + i,
             timestamp=f"2026-02-0{i + 1}T09:00:00",
         )
-        db.tag_photo(pid, ascii_kw)
+        keyword_tagging.tag_photo(db, pid, ascii_kw)
         db.commit()
 
     data = _get_life_list(app)
@@ -1607,7 +1607,7 @@ def test_life_list_numbering_places_okina_species_under_a(life_app):
             file_mtime=100.0,
             timestamp="2022-01-01T00:00:00",
         )
-        db.tag_photo(pid, kw)
+        keyword_tagging.tag_photo(db, pid, kw)
         db.commit()
     db.conn.commit()
 
@@ -1661,14 +1661,14 @@ def test_life_list_groups_taxon_aliases_with_paging_and_curation(
             file_size=1000, file_mtime=500.0 + i,
             timestamp=f"2026-05-0{i + 1}T09:00:00",
         )
-        db.tag_photo(photo, keywords[i % 2])
+        keyword_tagging.tag_photo(db, photo, keywords[i % 2])
         db.commit()
         photos.append(photo)
     # Carry both aliases on one photo: count it once and dedupe locations.
-    db.tag_photo(photos[2], keywords[1])
+    keyword_tagging.tag_photo(db, photos[2], keywords[1])
     db.commit()
     for photo, name in zip(photos, ("France", "Hawaii", "France"), strict=True):
-        db.tag_photo(photo, db.keywords.add(name, kw_type="location"))
+        keyword_tagging.tag_photo(db, photo, db.keywords.add(name, kw_type="location"))
         db.commit()
     # The most recent representative was selected under the second alias.
     db.species_curation.set_global_representative(stored_names[0], photos[0])
@@ -1729,8 +1729,8 @@ def test_life_list_keeps_different_taxa_with_the_same_name_separate(life_app):
             (f"Distinctus species{i}",),
         ).lastrowid
         db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
-        db.tag_photo(photo, keyword)
-        db.tag_photo(photo, db.keywords.add(f"Place {i}", kw_type="location"))
+        keyword_tagging.tag_photo(db, photo, keyword)
+        keyword_tagging.tag_photo(db, photo, db.keywords.add(f"Place {i}", kw_type="location"))
         db.commit()
     db.species_curation.set_global_representative("Shared Bird", ids["p1"])
     db.commit()
@@ -1750,7 +1750,7 @@ def test_life_list_keeps_different_taxa_with_the_same_name_separate(life_app):
 def test_life_list_does_not_guess_identity_from_similar_unlinked_names(life_app):
     app, db, ids = life_app
     for photo, name in zip((ids["p1"], ids["p2"]), ("Unlinked bird", "Unlinked-bird"), strict=True):
-        db.tag_photo(photo, db.keywords.add(name, is_species=True))
+        keyword_tagging.tag_photo(db, photo, db.keywords.add(name, is_species=True))
         db.commit()
     entries = [entry for entry in _get_life_list(app)["species"]
                if entry["species"].startswith("Unlinked")]
@@ -1772,7 +1772,7 @@ def test_life_list_pages_same_named_taxa_by_identity(life_app):
         ).lastrowid
         taxa.append(taxon)
         db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon, keyword))
-        db.tag_photo(photo, keyword)
+        keyword_tagging.tag_photo(db, photo, keyword)
         db.commit()
     for taxon, photo in zip(taxa, (ids["p1"], ids["p2"]), strict=True):
         response = app.test_client().get("/api/life-list/species", query_string={
@@ -1805,7 +1805,7 @@ def test_life_list_pages_unlinked_homonym_without_appending_linked_photos(life_a
                 file_size=1000, file_mtime=1000.0 + keyword * 200 + i,
                 timestamp=f"{year}-01-01T08:{i // 60:02d}:{i % 60:02d}",
             )
-            db.tag_photo(photo, keyword)
+            keyword_tagging.tag_photo(db, photo, keyword)
             db.commit()
             expected[keyword].add(photo)
     entries = [entry for entry in _get_life_list(app)["species"] if entry["species"] == "Shared Bird"]

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from offline_cache import cache_photo_original, release_photo_original, resolve_original_path
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -43,7 +43,7 @@ def test_release_preserves_sources_metadata_and_generated_assets(client_with_pho
     db.set_photo_edit_recipe(pid, {"rotation": 90})
     db.commit()
     keyword = db.keywords.add("Hawk")
-    db.tag_photo(pid, keyword)
+    keyword_tagging.tag_photo(db, pid, keyword)
     db.commit()
     before = dict(db.photos.get(pid))
     thumb = Path(app.config["THUMB_CACHE_DIR"]) / f"{pid}.jpg"

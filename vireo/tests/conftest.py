@@ -11,7 +11,7 @@ import config  # noqa: F401  (installs the settings provider the Database reads)
 import pytest
 from db import Database
 from PIL import Image
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -334,8 +334,8 @@ def app_and_db(tmp_path, monkeypatch, request):
 
     k1 = db.keywords.add('Cardinal')
     k2 = db.keywords.add('Sparrow')
-    db.tag_photo(p1, k1)
-    db.tag_photo(p2, k2)
+    keyword_tagging.tag_photo(db, p1, k1)
+    keyword_tagging.tag_photo(db, p2, k2)
     db.commit()
 
     for pid in [p1, p2, p3]:

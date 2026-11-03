@@ -22,7 +22,7 @@ import config as cfg
 import pytest
 from db import Database
 from repositories.stats import StatsRepository
-from services import dashboard_stats, photo_ingest, stage_counts, workspace_folders
+from services import dashboard_stats, keyword_tagging, photo_ingest, stage_counts, workspace_folders
 
 MODEL = "bioclip"
 OTHER_MODEL = "other-model"
@@ -192,10 +192,10 @@ def seed(db):
 
     robin_kw = db.keywords.add("Robin", is_species=True)
     park = db.keywords.add("Park")
-    db.tag_photo(p1, robin_kw)
-    db.tag_photo(p1, park)
-    db.tag_photo(p3, park)
-    db.tag_photo(p4, park)
+    keyword_tagging.tag_photo(db, p1, robin_kw)
+    keyword_tagging.tag_photo(db, p1, park)
+    keyword_tagging.tag_photo(db, p3, park)
+    keyword_tagging.tag_photo(db, p4, park)
     db.commit()
 
     best = db.collections.add(

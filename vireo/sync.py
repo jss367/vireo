@@ -19,7 +19,7 @@ from keyword_identity import (
     validate_import_locations,
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
-from services import moves_merge, pending_changes, photo_locations
+from services import keyword_tagging, moves_merge, pending_changes, photo_locations
 from sidecar_identity import missing_sidecar_identity
 from xmp import SidecarEditor, read_keyword_snapshot
 
@@ -1148,7 +1148,7 @@ def _untag_keywords_missing_from_sidecar(
             # here), so suppress the species-evidence snapshot that would
             # otherwise leak into a later unrelated ``record_edit`` call on
             # the same ``Database`` instance.
-            db.untag_photo(photo_id, kw["id"], _record_history=False)
+            keyword_tagging.untag_photo(db, photo_id, kw["id"], _record_history=False)
 
 
 def sync_from_xmp(db, photo_ids):
@@ -1223,7 +1223,7 @@ def sync_from_xmp(db, photo_ids):
                 for kid in imported_ids:
                     resolved_ids.add(kid)
                     # Reconciling from a sidecar cannot establish authorship.
-                    db.tag_photo(
+                    keyword_tagging.tag_photo(db, 
                         photo_id,
                         kid,
                         source=KEYWORD_SOURCE_UNKNOWN,

@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 from db import Database
 from repositories.identity_alternatives import IdentityMergeConflict, _check_merge_confirmations
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 
 def _setup(tmp_path, alias_count):
@@ -36,7 +36,7 @@ def test_resolved_collision_uses_linked_primary_keys_and_preserves_conflict_sema
     try:
         selected = [aliases[0], other if conflict else aliases[1]]
         for photo, keyword in zip(photos, selected, strict=True):
-            db.tag_photo(photo, keyword, source='accept')
+            keyword_tagging.tag_photo(db, photo, keyword, source='accept')
             db.commit()
         before = [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords')]
         queries = _identity_queries(db)
@@ -61,7 +61,7 @@ def test_resolved_collision_chunks_large_link_union_under_legacy_parameter_limit
     db, photos, aliases, _, state = _setup(tmp_path, 1200)
     try:
         for index, keyword in enumerate(aliases):
-            db.tag_photo(photos[index % 2], keyword, source='accept')
+            keyword_tagging.tag_photo(db, photos[index % 2], keyword, source='accept')
         db.commit()
         db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
         queries = _identity_queries(db)
@@ -79,7 +79,7 @@ def test_empty_or_one_sided_collision_skips_identity_comparison_query(tmp_path, 
     db, photos, aliases, _, state = _setup(tmp_path, 2)
     try:
         if linked_photos:
-            db.tag_photo(photos[0], aliases[0])
+            keyword_tagging.tag_photo(db, photos[0], aliases[0])
             db.commit()
         queries = _identity_queries(db)
         _check_merge_confirmations(db.conn, *photos, state)

@@ -7,14 +7,12 @@ import tempfile
 import threading
 import time
 
-from services import folder_merges
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from db import Database
 from scanner import ScanOptions
-from services import catalog_deletion, photo_ingest, workspace_folders
+from services import catalog_deletion, folder_merges, photo_ingest, workspace_folders
 
 
 def _tmp_folds_case():

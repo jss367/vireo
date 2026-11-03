@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import repositories.duplicates as dup_repo
 from db import Database
-from services import duplicate_resolution, photo_ingest, workspace_folders
+from services import duplicate_resolution, keyword_tagging, photo_ingest, workspace_folders
 
 
 def _resolved_pair(tmp_path, file_hash="HKEEP", touch=(True, True)):
@@ -74,7 +74,7 @@ def test_keep_promotes_rejected_copy_and_rejects_the_kept_one(tmp_path):
 def test_keep_moves_rating_and_keywords_to_the_chosen_copy(tmp_path):
     db, kept, rejected = _resolved_pair(tmp_path)
     kw_id = db.keywords.add("Red Kangaroo")
-    db.tag_photo(kept, kw_id)
+    keyword_tagging.tag_photo(db, kept, kw_id)
     db.commit()
     db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (kept,))
     db.conn.commit()

@@ -20,7 +20,7 @@ import textwrap
 
 import pytest
 from db import Database
-from services import keyword_duplicates, photo_ingest, workspace_folders
+from services import keyword_duplicates, keyword_tagging, photo_ingest, workspace_folders
 from signature_contract import calling_signature
 
 
@@ -483,16 +483,16 @@ def test_tag_and_untag_leave_commit_to_caller(db, lib):
     p = lib["p"][0]
     with db.transaction():
         kid = db.keywords.add("Sunset")
-    db.tag_photo(p, kid)
+    keyword_tagging.tag_photo(db, p, kid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
     db.conn.commit()
-    db.untag_photo(p, kid)
+    keyword_tagging.untag_photo(db, p, kid)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(1,)]
     db.conn.rollback()
     with db.transaction():
-        db.untag_photo(p, kid)
+        keyword_tagging.untag_photo(db, p, kid)
     assert not db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(0,)]
 
@@ -501,9 +501,9 @@ def test_photo_keyword_reads(db, lib):
     p0, p1, p2, _ = lib["p"]
     a = db.keywords.add("Alpha")
     b = db.keywords.add("American Robin", is_species=True)
-    db.tag_photo(p0, a)
-    db.tag_photo(p0, b)
-    db.tag_photo(p1, b)
+    keyword_tagging.tag_photo(db, p0, a)
+    keyword_tagging.tag_photo(db, p0, b)
+    keyword_tagging.tag_photo(db, p1, b)
     assert [tuple(r) for r in db.photo_keywords.get_for_photo(p0)] == [
         (a, "Alpha", None, "general"), (b, "American Robin", None, "taxonomy"),
     ]
@@ -516,7 +516,7 @@ def test_photo_keyword_reads(db, lib):
 
 def test_keywords_for_photos_chunks(db, lib):
     p0 = lib["p"][0]
-    db.tag_photo(p0, db.keywords.add("Alpha"))
+    keyword_tagging.tag_photo(db, p0, db.keywords.add("Alpha"))
     statements = _trace(db)
     got = db.photo_keywords.get_for_photos(list(range(10_000, 10_800)) + [p0])
     db.conn.set_trace_callback(None)
@@ -567,9 +567,9 @@ def test_get_photo_ids_with_keyword_and_chunks(db, lib):
     p0, p1, p2, _ = lib["p"]
     kid = db.keywords.add("Alpha")
     other = db.keywords.add("Beta")
-    db.tag_photo(p0, kid)
-    db.tag_photo(p2, kid)
-    db.tag_photo(p1, other)
+    keyword_tagging.tag_photo(db, p0, kid)
+    keyword_tagging.tag_photo(db, p2, kid)
+    keyword_tagging.tag_photo(db, p1, other)
     assert db.photo_keywords.photo_ids_tagged_with(kid, []) == set()
     assert db.photo_keywords.photo_ids_tagged_with(kid, (p0, p1)) == {p0}
     statements = _trace(db)
@@ -618,9 +618,9 @@ def test_get_photo_workspaces_with_keyword_lists_each_visible_workspace(db, lib)
     db.commit()
     workspace_folders.add_workspace_folder(db, other_ws, lib["fid"])
     kid = db.keywords.add("Alpha")
-    db.tag_photo(p0, kid)
-    db.tag_photo(p1, kid)
-    db.tag_photo(p2, db.keywords.add("Beta"))
+    keyword_tagging.tag_photo(db, p0, kid)
+    keyword_tagging.tag_photo(db, p1, kid)
+    keyword_tagging.tag_photo(db, p2, db.keywords.add("Beta"))
     got = sorted(tuple(r) for r in db.photo_keywords.photo_workspaces_tagged_with(kid))
     assert got == sorted(
         [(p0, lib["ws"]), (p1, lib["ws"]), (p0, other_ws), (p1, other_ws)]
@@ -638,11 +638,11 @@ def test_get_keyword_subtree_photo_workspaces_walks_descendants(db, lib):
     park = _raw_kw(db, "Parc Monceau", parent_id=city, kw_type="location")
     elsewhere = _raw_kw(db, "Spain", kw_type="location")
     db.conn.commit()
-    db.tag_photo(p0, city)
-    db.tag_photo(p0, park)  # two subtree links, one row
-    db.tag_photo(p1, park)
-    db.tag_photo(p2, country)
-    db.tag_photo(p3, elsewhere)
+    keyword_tagging.tag_photo(db, p0, city)
+    keyword_tagging.tag_photo(db, p0, park)  # two subtree links, one row
+    keyword_tagging.tag_photo(db, p1, park)
+    keyword_tagging.tag_photo(db, p2, country)
+    keyword_tagging.tag_photo(db, p3, elsewhere)
     ws = lib["ws"]
     assert sorted(tuple(r) for r in db.photo_keywords.subtree_photo_workspaces(country)) == [
         (p0, ws), (p1, ws), (p2, ws),
@@ -661,11 +661,11 @@ def test_get_keyword_duplicate_groups_and_workspace_photo_counts(db, lib):
     species = _raw_kw(db, "HERON", is_species=1)  # a different merge slot
     lone = _raw_kw(db, "Egret")
     db.conn.commit()
-    db.tag_photo(p0, upper)
-    db.tag_photo(p1, upper)
-    db.tag_photo(p2, lower)
-    db.tag_photo(p3, species)
-    db.tag_photo(p3, lone)
+    keyword_tagging.tag_photo(db, p0, upper)
+    keyword_tagging.tag_photo(db, p1, upper)
+    keyword_tagging.tag_photo(db, p2, lower)
+    keyword_tagging.tag_photo(db, p3, species)
+    keyword_tagging.tag_photo(db, p3, lone)
     groups = db.keyword_tree.workspace_duplicate_groups(ws)
     assert len(groups) == 1
     assert groups[0]["lname"] == "heron"
@@ -698,8 +698,8 @@ def test_delete_keyword_detaches_children_unlinks_photos_with_the_callers_unit(d
     parent = _raw_kw(db, "France", kw_type="location")
     child = _raw_kw(db, "Paris", parent_id=parent, kw_type="location")
     db.conn.commit()
-    db.tag_photo(p0, parent)
-    db.tag_photo(p1, child)
+    keyword_tagging.tag_photo(db, p0, parent)
+    keyword_tagging.tag_photo(db, p1, child)
     # Writes the caller left open join the unit and share the delete's commit.
     db.pending_changes.queue(p1, "location", "effective")
     with db.transaction():
@@ -769,7 +769,7 @@ def confirmed(db, lib):
     db.conn.commit()
     for pid, kid in ((p0, alias), (p0, root), (p0, general), (p1, homonym),
                      (p1, genus), (p2, alias)):
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
     return {"p": lib["p"], "root": root, "alias": alias, "homonym": homonym}
 
 
@@ -832,7 +832,7 @@ def test_species_rank_keywords_for_photo(db, lib):
     flagged = _raw_kw(db, "Old Species", is_species=1)  # general, is_species
     plain = _raw_kw(db, "Sunset")
     for kid in (unlinked, species, genus, flagged, plain):
-        db.tag_photo(p0, kid)
+        keyword_tagging.tag_photo(db, p0, kid)
     rows = db.photo_species.species_rank_keywords_for_photo(p0)
     # is_species rows first, then most recently tagged first.
     assert [tuple(r) for r in rows] == [
@@ -845,11 +845,11 @@ def test_species_rank_keywords_for_photo(db, lib):
 
 def test_photo_ids_with_species_rank_keyword(db, lib):
     p0, p1, p2, p3 = lib["p"]
-    db.tag_photo(p0, _raw_kw(db, "American Robin", kw_type="taxonomy", taxon_id=3))
-    db.tag_photo(p0, _raw_kw(db, "Mystery", is_species=1))
-    db.tag_photo(p1, _raw_kw(db, "Turdus", kw_type="taxonomy", taxon_id=2))
-    db.tag_photo(p2, _raw_kw(db, "Sunset"))
-    db.tag_photo(p3, _raw_kw(db, "Unlinked", kw_type="taxonomy"))
+    keyword_tagging.tag_photo(db, p0, _raw_kw(db, "American Robin", kw_type="taxonomy", taxon_id=3))
+    keyword_tagging.tag_photo(db, p0, _raw_kw(db, "Mystery", is_species=1))
+    keyword_tagging.tag_photo(db, p1, _raw_kw(db, "Turdus", kw_type="taxonomy", taxon_id=2))
+    keyword_tagging.tag_photo(db, p2, _raw_kw(db, "Sunset"))
+    keyword_tagging.tag_photo(db, p3, _raw_kw(db, "Unlinked", kw_type="taxonomy"))
     assert db.photo_species.photo_ids_with_species_rank_keyword([p0, p1, p2, p3]) == {p0, p3}
     assert db.photo_species.photo_ids_with_species_rank_keyword([]) == set()
 
@@ -875,9 +875,9 @@ def test_species_keywords_and_equivalents(db, lib):
     birds = db.keywords.add("Birds")
     leaf = _raw_kw(db, "american robin", birds, "taxonomy", 1, taxon_id=3)
     genus = db.keywords.add("Turdus")
-    db.tag_photo(p0, root)
-    db.tag_photo(p1, leaf)
-    db.tag_photo(p2, genus)
+    keyword_tagging.tag_photo(db, p0, root)
+    keyword_tagging.tag_photo(db, p1, leaf)
+    keyword_tagging.tag_photo(db, p2, genus)
     got = db.photo_species.get_species_for_photos([p0, p1, p2, p3])
     assert got[p0] == ["American Robin"]
     assert got[p1] == ["American Robin"]
@@ -901,11 +901,11 @@ def test_is_keyword_species(db, lib):
 
 def test_filter_out_subject_tagged(db, lib, monkeypatch):
     p0, p1, p2, p3 = lib["p"]
-    db.tag_photo(p0, db.keywords.add("American Robin", is_species=True))
+    keyword_tagging.tag_photo(db, p0, db.keywords.add("American Robin", is_species=True))
     legacy = _raw_kw(db, "Legacy Bird", kw_type="general", is_species=1)
     db.conn.commit()
-    db.tag_photo(p1, legacy)
-    db.tag_photo(p2, db.keywords.add("Party", kw_type="genre"))
+    keyword_tagging.tag_photo(db, p1, legacy)
+    keyword_tagging.tag_photo(db, p2, db.keywords.add("Party", kw_type="genre"))
     ids = [p3, p2, p1, p0]
     assert db.photo_keywords.filter_out_subject_tagged(ids, []) == ids
     assert db.photo_keywords.filter_out_subject_tagged([], ["taxonomy"]) == []
@@ -924,12 +924,12 @@ def test_keyword_tree_and_counts(db, lib):
     birds = db.keywords.add("Birds")
     heron = db.keywords.add("Heron", parent_id=birds)
     db.keywords.add("Unused")
-    db.tag_photo(p0, heron)
+    keyword_tagging.tag_photo(db, p0, heron)
     tree = [tuple(r) for r in db.keyword_tree.get_tree()]
     assert tree == [(birds, "Birds", None, "general"), (heron, "Heron", birds, "general")]
     assert db.keywords.count() == 1
     assert db.keywords.count_in_workspace() == 1
-    db.tag_photo(p1, birds)
+    keyword_tagging.tag_photo(db, p1, birds)
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (lib["fid"],))
     assert db.keywords.count() == 0
     assert db.keywords.count_in_workspace() == 2
@@ -952,11 +952,11 @@ def test_get_all_keywords_counts(db, lib):
     herons = db.keywords.add("Herons", parent_id=birds)
     heron = db.keywords.add("Great Blue Heron", parent_id=herons)
     egret = db.keywords.add("Great Egret", parent_id=herons)
-    db.tag_photo(p0, heron)
-    db.tag_photo(p0, egret)  # one photo under two siblings counts once for each ancestor
-    db.tag_photo(p1, egret)
-    db.tag_photo(p2, birds)
-    db.tag_photo(hidden, heron)  # tagged, but outside the active workspace
+    keyword_tagging.tag_photo(db, p0, heron)
+    keyword_tagging.tag_photo(db, p0, egret)  # one photo under two siblings counts once for each ancestor
+    keyword_tagging.tag_photo(db, p1, egret)
+    keyword_tagging.tag_photo(db, p2, birds)
+    keyword_tagging.tag_photo(db, hidden, heron)  # tagged, but outside the active workspace
     rows = {r["name"]: (r["photo_count"], r["direct_photo_count"]) for r in db.keyword_tree.list_all()}
     assert rows == {
         "Birds": (3, 1),
@@ -968,7 +968,7 @@ def test_get_all_keywords_counts(db, lib):
 
 def test_get_all_keywords_counts_without_per_keyword_subqueries(db, lib):
     """A correlated count per keyword re-scanned the workspace's links for every row (~150 s on 65k photos)."""
-    db.tag_photo(lib["p"][0], db.keywords.add("Heron", parent_id=db.keywords.add("Birds")))
+    keyword_tagging.tag_photo(db, lib["p"][0], db.keywords.add("Heron", parent_id=db.keywords.add("Birds")))
     statements = _trace(db)
     db.keyword_tree.list_all()
     db.conn.set_trace_callback(None)
@@ -979,13 +979,13 @@ def test_get_all_keywords_counts_without_per_keyword_subqueries(db, lib):
 
 def test_get_accepted_species(db, lib):
     p0, p1, p2 = lib["p"][:3]
-    db.tag_photo(p0, db.keywords.add("American Robin", is_species=True))
-    db.tag_photo(p1, db.keywords.add("Cougar", is_species=True))
-    db.tag_photo(p2, db.keywords.add("Egret", is_species=True))
+    keyword_tagging.tag_photo(db, p0, db.keywords.add("American Robin", is_species=True))
+    keyword_tagging.tag_photo(db, p1, db.keywords.add("Cougar", is_species=True))
+    keyword_tagging.tag_photo(db, p2, db.keywords.add("Egret", is_species=True))
     db.conn.execute("UPDATE photos SET latitude = 1, longitude = 2 WHERE id = ?", (p0,))
     place = db.keywords.add("Park", kw_type="location")
     db.conn.execute("UPDATE keywords SET latitude = 1, longitude = 2 WHERE id = ?", (place,))
-    db.tag_photo(p1, place)
+    keyword_tagging.tag_photo(db, p1, place)
     assert db.photo_species.get_accepted_species() == ["American Robin", "Cougar"]
 
 
@@ -1049,15 +1049,17 @@ def test_update_keyword_merges_into_same_slot_peer(db, lib, monkeypatch):
     p0 = lib["p"][0]
     keep = db.keywords.add("Heron")
     dup = db.keywords.add("Egret")
-    db.tag_photo(p0, dup)
+    keyword_tagging.tag_photo(db, p0, dup)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
     merges = []
-    real = db._merge_keyword_into
+    real = KeywordProvenanceRepository.merge_keyword_into
 
-    def recording(src, dst, **kwargs):
+    def recording(repo, src, dst, **kwargs):
         merges.append((src, dst))
-        return real(src, dst, **kwargs)
+        return real(repo, src, dst, **kwargs)
 
-    monkeypatch.setattr(db, "_merge_keyword_into", recording)
+    monkeypatch.setattr(KeywordProvenanceRepository, "merge_keyword_into", recording)
     with db.transaction():
         assert db.update_keyword(dup, name="heron") == keep
     assert merges == [(dup, keep)]
@@ -1078,10 +1080,10 @@ def test_update_keyword_merge_keeps_unrelated_pending_removal(db, lib):
     ws = lib["ws"]
     heron = db.keywords.add("Heron")
     egret = db.keywords.add("Egret")
-    db.tag_photo(p0, heron)
-    db.tag_photo(p0, egret)
-    db.tag_photo(p1, egret)
-    db.untag_photo(p0, egret)
+    keyword_tagging.tag_photo(db, p0, heron)
+    keyword_tagging.tag_photo(db, p0, egret)
+    keyword_tagging.tag_photo(db, p1, egret)
+    keyword_tagging.untag_photo(db, p0, egret)
     db.pending_changes.queue(p0, "keyword_remove", "Egret", workspace_id=ws)
     db.commit()
     db.pending_changes.queue(p1, "keyword_add", "Egret", workspace_id=ws)
@@ -1110,8 +1112,8 @@ def test_merge_duplicate_keywords_keeps_unrelated_pending_removal(db, lib):
     keep = _raw_kw(db, "Heron")
     dup = _raw_kw(db, "heron")
     db.conn.commit()
-    db.tag_photo(p0, keep)
-    db.tag_photo(p1, dup)
+    keyword_tagging.tag_photo(db, p0, keep)
+    keyword_tagging.tag_photo(db, p1, dup)
     db.pending_changes.queue(p0, "keyword_remove", "heron", workspace_id=ws)
     db.commit()
 
@@ -1148,13 +1150,15 @@ def test_merge_duplicate_keywords_merges_with_the_callers_unit(db, lib, monkeypa
     b = _raw_kw(db, "heron")
     c = _raw_kw(db, "Heron!")  # different match key? normalize strips edge punct
     db.conn.commit()
-    db.tag_photo(p0, a)
-    db.tag_photo(p1, b)
-    db.tag_photo(p1, c)
+    keyword_tagging.tag_photo(db, p0, a)
+    keyword_tagging.tag_photo(db, p1, b)
+    keyword_tagging.tag_photo(db, p1, c)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
     merges = []
-    real = db._merge_keyword_into
-    monkeypatch.setattr(db, "_merge_keyword_into",
-                        lambda s, d, **kw: merges.append((s, d)) or real(s, d, **kw))
+    real = KeywordProvenanceRepository.merge_keyword_into
+    monkeypatch.setattr(KeywordProvenanceRepository, "merge_keyword_into",
+                        lambda r, s, d, **kw: merges.append((s, d)) or real(r, s, d, **kw))
     with db.transaction():
         total = keyword_duplicates.merge_duplicate_keywords(db)
     assert total >= 1
@@ -1168,15 +1172,18 @@ def test_merge_duplicate_keywords_rolls_back_on_failure(db, lib, monkeypatch):
     a = _raw_kw(db, "Heron")
     b = _raw_kw(db, "heron")
     db.conn.commit()
-    db.tag_photo(p0, a)
-    db.tag_photo(p1, b)
+    keyword_tagging.tag_photo(db, p0, a)
+    keyword_tagging.tag_photo(db, p1, b)
     db.commit()
 
     def boom(src, dst, **kwargs):
         db.conn.execute("UPDATE keywords SET name = 'changed' WHERE id = ?", (dst,))
         raise RuntimeError("merge failed")
 
-    monkeypatch.setattr(db, "_merge_keyword_into", boom)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "merge_keyword_into",
+                        lambda _repo, *a, **k: boom(*a, **k))
     with pytest.raises(RuntimeError, match="merge failed"), db.transaction(immediate=True):
         keyword_duplicates.merge_duplicate_keywords(db)
     assert not db.conn.in_transaction
@@ -1189,9 +1196,9 @@ def test_merge_duplicate_pass_skips_blank_keys_and_stale_groups(db, lib, monkeyp
     a = _raw_kw(db, "Heron")
     b = _raw_kw(db, "heron")
     db.conn.commit()
-    db.tag_photo(p0, blank)
-    db.tag_photo(p1, a)
-    db.tag_photo(p2, b)
+    keyword_tagging.tag_photo(db, p0, blank)
+    keyword_tagging.tag_photo(db, p1, a)
+    keyword_tagging.tag_photo(db, p2, b)
     calls = []
     from repositories.keyword_tree import KeywordTreeRepository
 
@@ -1205,7 +1212,10 @@ def test_merge_duplicate_pass_skips_blank_keys_and_stale_groups(db, lib, monkeyp
         db.conn.execute("DELETE FROM keywords WHERE id = ?", (src,))
         return 1
 
-    monkeypatch.setattr(db, "_merge_keyword_into", fake_merge)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "merge_keyword_into",
+                        lambda _repo, *a, **k: fake_merge(*a, **k))
     assert keyword_duplicates.merge_duplicate_keywords_pass(db, lib["ws"]) == 1
     assert calls == [a]
     assert _kw(db, blank) is not None
@@ -1219,7 +1229,7 @@ def test_merge_duplicate_pass_skips_group_whose_survivor_vanished(db, lib, monke
     child_b = _raw_kw(db, "heron", parent_a)
     db.conn.commit()
     for pid, kid in zip(p, (parent_a, parent_b, child_a, child_b), strict=False):
-        db.tag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid)
     order = []
 
     def fake_merge(src, dst, **kwargs):
@@ -1232,7 +1242,10 @@ def test_merge_duplicate_pass_skips_group_whose_survivor_vanished(db, lib, monke
         db.conn.execute("DELETE FROM keywords WHERE id = ?", (src,))
         return 1
 
-    monkeypatch.setattr(db, "_merge_keyword_into", fake_merge)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "merge_keyword_into",
+                        lambda _repo, *a, **k: fake_merge(*a, **k))
     assert keyword_duplicates.merge_duplicate_keywords_pass(db, lib["ws"]) == 1
     assert order == [(parent_b, parent_a)]
 
@@ -1263,7 +1276,7 @@ def test_rename_keyword_dependents(db, lib, monkeypatch):
     ws = lib["ws"]
     kid = _raw_kw(db, "'Verdin'", kw_type="taxonomy", is_species=1)
     db.conn.commit()
-    db.tag_photo(p0, kid)
+    keyword_tagging.tag_photo(db, p0, kid)
     db.conn.executemany(
         "INSERT INTO pending_changes (photo_id, change_type, value, workspace_id) "
         "VALUES (?, ?, ?, ?)",
@@ -1417,7 +1430,6 @@ def test_resolve_species_by_lineage(db, lib):
 # methods that delegate their statements; each mapped to the factory of the
 # repository that holds its SQL.
 _DELEGATING_KEYWORD_METHODS = {
-    "untag_photo": "_photo_keyword_repository",
     "update_keyword": "_keyword_tree_repository",
 }
 
@@ -1499,18 +1511,14 @@ _REMOVED_KEYWORD_WRAPPERS = (
     "_reparent_disambiguated",
 )
 
-# The provenance writers and the methods that call ``_merge_keyword_into``
+# The provenance writers and the methods that call ``merge_keyword_into``
 # mid-flight live in ``KeywordProvenanceRepository``, not here (see
 # ``test_db_keyword_provenance``); ``test_keyword_provenance_contract`` keys
 # the writers to that module.
-_KEYWORD_METHODS_IN_PROVENANCE_REPOSITORY = (
-    "tag_photo",
-    "_merge_keyword_into",
-)
-
 _PROVENANCE_WRITERS = (
     "tag_photo",
     "_merge_keyword_into",
+    "merge_keyword_into",
     "link_keyword_to_place",
     "_apply_winner_loser_merge",
 )
@@ -1563,30 +1571,19 @@ def test_keyword_accessors_build_a_fresh_repository_per_access(db, module_name):
     assert first.conn is db.conn
 
 
-@pytest.mark.parametrize("name", _KEYWORD_METHODS_IN_PROVENANCE_REPOSITORY)
-def test_provenance_writers_and_their_merge_callers_delegate_to_provenance_repository(
-    name,
-):
-    attrs = _self_attrs(getattr(Database, name))
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; its SQL belongs in "
-        "KeywordProvenanceRepository"
-    )
-    assert "_keyword_provenance_repository" in attrs, (
-        f"Database.{name} no longer delegates to KeywordProvenanceRepository"
-    )
-    assert "_keyword_repository" not in attrs, (
-        f"Database.{name} is a photo_keywords writer (or merges mid-flight); "
-        "it must not route through KeywordRepository"
-    )
+def test_provenance_writers_have_no_database_wrappers():
+    """The writers live in ``KeywordProvenanceRepository`` and are reached
+    through ``db.keyword_provenance`` or ``services.keyword_tagging``."""
+    for name in ("tag_photo", "untag_photo", "_merge_keyword_into"):
+        assert not hasattr(Database, name), f"Database.{name} came back"
 
 
-def test_split_methods_still_call_merge_on_the_facade():
-    assert "_merge_keyword_into" in _self_attrs(Database.update_keyword)
+def test_split_methods_merge_through_the_provenance_repository():
+    assert "keyword_provenance" in _self_attrs(Database.update_keyword)
     from services import keyword_duplicates
 
     source = inspect.getsource(keyword_duplicates.merge_duplicate_keywords_pass)
-    assert "db._merge_keyword_into(" in source
+    assert "db.keyword_provenance.merge_keyword_into(" in source
 
 
 @pytest.mark.parametrize("module_name", sorted(_KEYWORD_REPOSITORIES))
@@ -1638,9 +1635,6 @@ def test_keyword_repositories_without_facade_methods_take_no_facade():
 def test_keyword_facade_signatures_unchanged():
     sig = {n: calling_signature(getattr(Database, n))
            for n in _DELEGATING_KEYWORD_METHODS}
-    assert sig["untag_photo"] == (
-        "(self, photo_id, keyword_id, *, _record_history=False)"
-    )
     assert sig["update_keyword"] == "(self, keyword_id, **kwargs)"
     from repositories.keyword_taxa import KeywordTaxonRepository
     from repositories.keyword_tree import KeywordTreeRepository
@@ -1791,10 +1785,10 @@ def test_merge_taxonomy_root_twins_folds_top_level_rows_into_tree(db, lib):
     other_taxon = _raw_kw(db, "Turdus", kw_type="taxonomy", taxon_id=2)
     _raw_kw(db, "Turdus", _raw_kw(db, "Aves"), kw_type="taxonomy", taxon_id=1)
     db.conn.commit()
-    db.tag_photo(p0, twin, source=None)
-    db.tag_photo(p1, placed, source=None)
-    db.tag_photo(p1, twin)
-    db.tag_photo(p2, placed, source=None)
+    keyword_tagging.tag_photo(db, p0, twin, source=None)
+    keyword_tagging.tag_photo(db, p1, placed, source=None)
+    keyword_tagging.tag_photo(db, p1, twin)
+    keyword_tagging.tag_photo(db, p2, placed, source=None)
     db.pending_changes.queue(p1, "keyword_add", "American Robin")
     db.commit()
     pending = _visible(db, "SELECT photo_id, change_type, value FROM pending_changes")
@@ -1820,14 +1814,17 @@ def test_merge_taxonomy_root_twins_rolls_back_on_failure(db, lib, monkeypatch):
     _parent, placed = _placed_robin(db)
     twin = _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=3)
     db.conn.commit()
-    db.tag_photo(lib["p"][0], twin)
+    keyword_tagging.tag_photo(db, lib["p"][0], twin)
     db.commit()
 
     def boom(src, dst, **kwargs):
         db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (src,))
         raise RuntimeError("merge failed")
 
-    monkeypatch.setattr(db, "_merge_keyword_into", boom)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "merge_keyword_into",
+                        lambda _repo, *a, **k: boom(*a, **k))
     with pytest.raises(RuntimeError, match="merge failed"), db.transaction(immediate=True):
         db.merge_taxonomy_root_twins()
     assert not db.conn.in_transaction

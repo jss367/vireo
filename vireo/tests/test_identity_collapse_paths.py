@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import catalog_deletion, folder_merges, moves_merge, photo_ingest, workspace_folders
+from services import catalog_deletion, folder_merges, keyword_tagging, moves_merge, photo_ingest, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
@@ -44,7 +44,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     db.set_active_workspace(ws)
     workspace_folders.add_workspace_folder(db, sharing, source)
     note = db.keywords.add('Unrelated note')
-    db.tag_photo(survivor, note, source='manual')
+    keyword_tagging.tag_photo(db, survivor, note, source='manual')
     db.commit()
     db.photo_review.set_flag(survivor, 'rejected')
     db.commit()
@@ -114,7 +114,7 @@ def test_collapse_conflicts_keep_pair_data_and_folder_transaction_untouched(db, 
             save_alternatives(db, [survivor], ['Heron', 'Egret'], 'Other evidence', 'Call')
         else:
             keyword = db.keywords.add('Heron', is_species=True)
-            db.tag_photo(survivor, keyword, source='manual')
+            keyword_tagging.tag_photo(db, survivor, keyword, source='manual')
     # A rejection must preserve unrelated writes in its caller's unit: the
     # refused pair rolls back to its own savepoint, nothing further.
     tables = ['photos', 'folders', 'photo_keywords', 'photo_identity_alternatives', 'pending_changes', 'edit_history_items']
@@ -136,7 +136,7 @@ def test_collapse_conflicts_keep_pair_data_and_folder_transaction_untouched(db, 
 def test_collapse_keeps_current_tags_for_redo_only_identity_history(db, tmp_path, path):
     source, target, survivor, losing, target_path = _fixture(db, tmp_path, path)
     keyword = db.keywords.add('Heron', is_species=True)
-    db.tag_photo(losing, keyword, source='accept')
+    keyword_tagging.tag_photo(db, losing, keyword, source='accept')
     db.commit()
     with db.transaction():
         saved = save_alternatives(db, [losing], ['Heron', 'Egret'], 'Redo evidence', 'Bill')
@@ -226,7 +226,7 @@ def test_folder_identity_conflict_rolls_back_earlier_duplicate_carries(db, tmp_p
     from repositories.identity_alternatives import IdentityMergeConflict
     source, target, survivor, losing, target_path = _fixture(db, tmp_path, 'folder')
     keyword = db.keywords.add('Earlier embedded note')
-    db.tag_photo(losing, keyword, source='manual')
+    keyword_tagging.tag_photo(db, losing, keyword, source='manual')
     db.photo_keywords.record_embedded_offered_keys(losing, ['earlier embedded note'])
     db.commit()
     later_target = _photo(db, target, 'later.jpg')

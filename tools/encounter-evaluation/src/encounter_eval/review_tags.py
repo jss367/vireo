@@ -16,6 +16,13 @@ def ensure_tag_sync(conn):
 
 def _apply_tags(db, photo, answer, marker):
     """One library transaction, including a receipt for crash-safe retries."""
+    # Deferred alongside pending_changes: the ``vireo-review-encounters``
+    # entry point imports this module before ``main`` calls
+    # ``configure_repo``, which is what adds ``vireo/`` to ``sys.path``, so
+    # importing ``services.keyword_tagging`` at module load would fail with
+    # ``ModuleNotFoundError`` before bootstrap. By the time ``_apply_tags``
+    # runs, ``sync_review_tags`` has called ``configure_repo``.
+    from services import keyword_tagging
     from services.pending_changes import queue_keyword_add, queue_keyword_remove
 
     pid = photo['id']
@@ -68,12 +75,12 @@ def _apply_tags(db, photo, answer, marker):
         existing = {r['id'] for r in rows}
         removed = [r for r in rows if r['id'] not in desired and db.keyword_taxa.is_species(r['id'])] if answer['status'] == 'complete' else []
         for row in removed:
-            db.untag_photo(pid, row['id'])
+            keyword_tagging.untag_photo(db, pid, row['id'])
             queue_keyword_remove(db, pid, row['name'])
             db.record_edit('keyword_remove', f'Species review: removed "{row["name"]}"', str(row['id']),
                            [{'photo_id': pid, 'old_value': str(row['id']), 'new_value': ''}])
         for kid in sorted(desired):
-            db.tag_photo(pid, kid, source='manual')
+            keyword_tagging.tag_photo(db, pid, kid, source='manual')
             if kid not in existing:
                 name = db.conn.execute('SELECT name FROM keywords WHERE id=?', (kid,)).fetchone()['name']
                 queue_keyword_add(db, pid, name)

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import places
 from db import KEYWORD_TYPES
 from flask import Blueprint, jsonify, request
+from services import keyword_tagging
 from services.edit_history import atomic_edit, change_photo_location
 from services.pending_changes import (
     queue_keyword_add,
@@ -109,7 +110,7 @@ def create_photo_location_keywords_blueprint(
         # itself keeps authorship recoverable after prune_edit_history()
         # drops the keyword_add entry recorded just below.
         with db.transaction():
-            db.tag_photo(photo_id, kid, source='manual')
+            keyword_tagging.tag_photo(db, photo_id, kid, source='manual')
             queue_keyword_add(db, photo_id, name)
             db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
                            [{'photo_id': photo_id, 'old_value': '', 'new_value': str(kid)}])
@@ -133,7 +134,7 @@ def create_photo_location_keywords_blueprint(
         else:
             return jsonify({"ok": True})
         with db.transaction():
-            db.untag_photo(photo_id, keyword_id, _record_history=True)
+            keyword_tagging.untag_photo(db, photo_id, keyword_id, _record_history=True)
             queue_keyword_remove(db, photo_id, kw_name)
             # A ``keyword_remove`` on a ``type='location'`` tag strips the flat
             # and hierarchical entries but leaves ``vireo:locationKeywords`` and

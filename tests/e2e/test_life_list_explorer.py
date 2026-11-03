@@ -4,7 +4,7 @@ import json
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import keyword_tagging, photo_ingest
 
 
 def _seed_hummingbird_tree(db):
@@ -91,7 +91,7 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
         "UPDATE keywords SET taxon_id=?, is_species=1 WHERE id=?",
         (ids["Trochilidae"], redundant_id),
     )
-    db.tag_photo(existing_photo, redundant_id)
+    keyword_tagging.tag_photo(db, existing_photo, redundant_id)
     db.commit()
 
     broad_photo = photo_ingest.add_photo(
@@ -104,7 +104,7 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
         "UPDATE keywords SET taxon_id=?, is_species=1 WHERE id=?",
         (ids["Incertae sedis"], broad_id),
     )
-    db.tag_photo(broad_photo, broad_id)
+    keyword_tagging.tag_photo(db, broad_photo, broad_id)
     db.commit()
 
     unmatched_photo = photo_ingest.add_photo(
@@ -112,7 +112,7 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
         file_size=1, file_mtime=11.0,
     )
     unmatched_id = db.keywords.add("Mystery hybrid", kw_type="taxonomy")
-    db.tag_photo(unmatched_photo, unmatched_id)
+    keyword_tagging.tag_photo(db, unmatched_photo, unmatched_id)
     db.commit()
     db.conn.commit()
 

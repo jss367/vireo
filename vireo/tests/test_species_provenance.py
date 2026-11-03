@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 from db import Database
-from services import catalog_deletion, folder_merges, moves_merge, workspace_folders
+from services import catalog_deletion, folder_merges, keyword_tagging, moves_merge, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 
 
@@ -53,8 +53,8 @@ def test_existing_manual_and_imports_are_unspecified(app_and_db):
     app, db = app_and_db
     manual = db.keywords.add('Manual bird', is_species=True)
     imported = db.keywords.add('Imported bird', is_species=True)
-    db.tag_photo(1, manual)
-    db.tag_photo(1, imported, source=None)
+    keyword_tagging.tag_photo(db, 1, manual)
+    keyword_tagging.tag_photo(db, 1, imported, source=None)
     db.commit()
     result = assignments(app.test_client())
     assert result['Manual bird']['method'] == 'manual_unspecified'
@@ -147,7 +147,7 @@ def test_migration_keeps_historical_labels_unspecified(app_and_db):
     import schema
     app, db = app_and_db
     kid = db.keywords.add('Old manual bird', is_species=True)
-    db.tag_photo(1, kid)
+    keyword_tagging.tag_photo(db, 1, kid)
     db.commit()
     with sqlite3.connect(db._db_path) as conn:
         conn.execute('ALTER TABLE photo_keywords DROP COLUMN species_provenance')
@@ -183,7 +183,7 @@ def test_unknown_source_survives_remove_and_undo(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     kid = db.keywords.add('Imported bird', is_species=True)
-    db.tag_photo(1, kid, source=None)
+    keyword_tagging.tag_photo(db, 1, kid, source=None)
     db.commit()
     original = assignments(client)['Imported bird']
     assert client.delete(f'/api/photos/1/keywords/{kid}').status_code == 200
@@ -218,8 +218,8 @@ def test_same_named_distinct_species_do_not_share_evidence(app_and_db):
     db.conn.execute("INSERT INTO taxa(id, name, rank) VALUES (102, 'Other robin', 'species')")
     db.conn.execute('UPDATE keywords SET taxon_id=101 WHERE id=?', (first,))
     db.conn.execute('UPDATE keywords SET taxon_id=102 WHERE id=?', (second,))
-    db.tag_photo(1, first)
-    db.tag_photo(1, second)
+    keyword_tagging.tag_photo(db, 1, first)
+    keyword_tagging.tag_photo(db, 1, second)
     db.commit()
     assignment = next(a for a in db.species_provenance.assignments(1) if a['keyword_id'] == first)
     assert evidence(client, assignment, method='direct_visual', reason='First subject markings').status_code == 200
@@ -236,9 +236,9 @@ def test_keyword_merge_retargets_evidence_and_undo(app_and_db):
     source = assignments(client)['Robin']
     assert evidence(client, source, method='adjacent_frames', reason='Compared adjacent frames').status_code == 200
     survivor = db.keywords.add('Surviving Robin', is_species=True)
-    db.tag_photo(1, survivor, source='accept')
+    keyword_tagging.tag_photo(db, 1, survivor, source='accept')
     db.commit()
-    db._merge_keyword_into(source['keyword_id'], survivor)
+    db.keyword_provenance.merge_keyword_into(source['keyword_id'], survivor)
     db.commit()
     merged = assignments(client)['Surviving Robin']
     assert merged['method'] == 'adjacent_frames'
@@ -256,14 +256,14 @@ def test_sidecar_reconciliation_does_not_leak_into_later_undo(app_and_db):
 
     app, db = app_and_db
     kid = db.keywords.add('Sidecar species', is_species=True)
-    db.tag_photo(1, kid, provenance={'method': 'adjacent_frames', 'reason': 'Original evidence'})
+    keyword_tagging.tag_photo(db, 1, kid, provenance={'method': 'adjacent_frames', 'reason': 'Original evidence'})
     db.commit()
     assert db._species_provenance_before == {}
     _untag_keywords_missing_from_sidecar(db, 1, db.photo_keywords.get_for_photo(1), {}, set(), set())
     db.commit()
     assert db._species_provenance_before == {}
     new = {'method': 'direct_visual', 'reason': 'New independent confirmation'}
-    db.tag_photo(1, kid, provenance=new)
+    keyword_tagging.tag_photo(db, 1, kid, provenance=new)
     db.commit()
     client = app.test_client()
     confirm(client, 'Other bird')
@@ -281,8 +281,8 @@ def test_non_undoable_species_removals_do_not_accumulate_snapshots(db):
     pid = photo_ingest.add_photo(db, fid, 'bird.jpg', '.jpg', 100, 1.0)
     for index in range(100):
         kid = db.keywords.add(f'Species {index}', is_species=True)
-        db.tag_photo(pid, kid, provenance={'method': 'direct_visual', 'reason': 'x' * 4000})
-        db.untag_photo(pid, kid)
+        keyword_tagging.tag_photo(db, pid, kid, provenance={'method': 'direct_visual', 'reason': 'x' * 4000})
+        keyword_tagging.untag_photo(db, pid, kid)
     db.commit()
     assert db._species_provenance_before == {}
 
@@ -306,12 +306,12 @@ def test_photo_association_moves_preserve_evidence(db, tmp_path, operation, exis
                 'reason': 'Same bird across frames', 'evidence_source': 'Burst review',
                 'supporting_photo_ids': [survivor], 'confidence': None,
                 'confidence_meaning': 'No calibrated value'}
-    db.tag_photo(losing, kid, provenance=original)
+    keyword_tagging.tag_photo(db, losing, kid, provenance=original)
     db.photo_keywords.record_embedded_offered_keys(losing, ['mallard'])
     db.commit()
     if existing_evidence:
         expected = {'method': 'direct_visual', 'reason': 'Survivor markings'}
-        db.tag_photo(survivor, kid, provenance=expected)
+        keyword_tagging.tag_photo(db, survivor, kid, provenance=expected)
         db.commit()
     else:
         expected = original
@@ -339,7 +339,7 @@ def test_copied_subject_evidence_keeps_origin_and_remains_editable(app_and_db):
                                  'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
     db.commit()
     kid = db.keywords.add('Mallard', is_species=True)
-    db.tag_photo(1, kid, provenance={'method': 'direct_visual', 'detection_id': did,
+    keyword_tagging.tag_photo(db, 1, kid, provenance={'method': 'direct_visual', 'detection_id': did,
                                   'reason': 'Visible markings'})
     db.commit()
     db.keyword_provenance.carry_companion_keywords(1, 2)
@@ -366,7 +366,7 @@ def test_copied_historical_subject_can_be_preserved_after_source_deletion(app_an
                                  'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
     db.commit()
     kid = db.keywords.add('Mallard', is_species=True)
-    db.tag_photo(1, kid, provenance={'method': 'direct_visual', 'detection_id': did, 'supporting_photo_ids': [1]})
+    keyword_tagging.tag_photo(db, 1, kid, provenance={'method': 'direct_visual', 'detection_id': did, 'supporting_photo_ids': [1]})
     db.commit()
     db.keyword_provenance.carry_companion_keywords(1, 2)
     catalog_deletion.delete_photos(db, [1])
@@ -396,7 +396,7 @@ def test_archive_photo_merge_preserves_evidence(db, tmp_path, same_hash):
     original = {'method': 'adjacent_frames', 'reviewer': 'Reviewer',
                 'reason': 'Adjacent frame', 'supporting_photo_ids': [survivor],
                 'confidence': None, 'confidence_meaning': 'No calibrated value'}
-    db.tag_photo(losing, kid, provenance=original)
+    keyword_tagging.tag_photo(db, losing, kid, provenance=original)
     db.photo_keywords.record_embedded_offered_keys(losing, ['mallard'])
     db.commit()
     moves_merge.merge_staged_tree_into_archive(db, tree['stage_root'], tree['arch'])
@@ -534,10 +534,10 @@ def test_sync_untag_does_not_leak_into_later_record_edit(app_and_db, tmp_path, m
 def test_intermediate_commit_does_not_discard_an_explicit_undo_snapshot(app_and_db):
     app, db = app_and_db
     kid = db.keywords.add('Robin', is_species=True)
-    db.tag_photo(1, kid, source='accept', provenance={'method': 'direct_visual', 'reason': 'Original'})
+    keyword_tagging.tag_photo(db, 1, kid, source='accept', provenance={'method': 'direct_visual', 'reason': 'Original'})
     db.commit()
     before = db.species_provenance.state(1, kid)
-    db.untag_photo(1, kid, _record_history=True)
+    keyword_tagging.untag_photo(db, 1, kid, _record_history=True)
     db.commit()
     assert db._species_provenance_before
     db.record_edit('keyword_remove', 'Removed Robin', str(kid),
@@ -579,7 +579,7 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
     old_evidence = {'method': 'direct_visual', 'reason': 'Old evidence'}
     if direction == 'redo':
         for pid in (1, 2):
-            db.tag_photo(pid, kid, provenance=old_evidence)
+            keyword_tagging.tag_photo(db, pid, kid, provenance=old_evidence)
             db.commit()
     with db.transaction():
         save_alternatives(db, [1, 2], [candidate, other], 'Need calls', 'Audio')
@@ -588,10 +588,10 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
     else:
         with db.transaction():
             resolve_alternatives(db, [1, 2], candidate)
-        db.tag_photo(1, kid, provenance=old_evidence)
+        keyword_tagging.tag_photo(db, 1, kid, provenance=old_evidence)
         db.commit()
     if failure == 'stale':
-        db.tag_photo(2, db.keywords.add(other, is_species=True))
+        keyword_tagging.tag_photo(db, 2, db.keywords.add(other, is_species=True))
         db.commit()
         expected_error = IdentityHistoryStale
     else:
@@ -614,7 +614,7 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
     current = assignments(client)[candidate]
     assert evidence(client, current, method='direct_visual', reason='New evidence').status_code == 200
     independent = db.keywords.add('Independent species', is_species=True)
-    db.tag_photo(1, independent)
+    keyword_tagging.tag_photo(db, 1, independent)
     db.commit()
     db.record_edit('keyword_add', 'Independent edit', str(independent), [
         {'photo_id': 1, 'old_value': '', 'new_value': str(independent)},

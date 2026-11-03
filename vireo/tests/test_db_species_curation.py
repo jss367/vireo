@@ -26,7 +26,7 @@ import pytest
 from db import Database
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.species_curation import SpeciesCurationRepository
-from services import photo_ingest, review_decisions, workspace_folders
+from services import keyword_tagging, photo_ingest, review_decisions, workspace_folders
 
 
 def _visible(db, sql, params=()):
@@ -147,18 +147,18 @@ def cur(db):
     _link(db, k["turdus"], 3)
     _link(db, k["puma"], 8)
     db.conn.commit()
-    db.tag_photo(p["robin1"], k["robin"])
-    db.tag_photo(p["robin1"], k["turdus"])  # suppressed ancestor
-    db.tag_photo(p["robin1"], k["loc"])
-    db.tag_photo(p["robin2"], k["robin"])
-    db.tag_photo(p["robin2"], k["park"])
-    db.tag_photo(p["card1"], k["cardinal"])
-    db.tag_photo(p["card1"], k["sunset"])
-    db.tag_photo(p["card2"], k["turdus"])  # genus only: uncounted
-    db.tag_photo(p["puma"], k["puma"])
-    db.tag_photo(p["plain"], k["mystery"])  # unmatched
-    db.tag_photo(p["rejected"], k["cardinal"])
-    db.tag_photo(p["outside"], k["cardinal"])
+    keyword_tagging.tag_photo(db, p["robin1"], k["robin"])
+    keyword_tagging.tag_photo(db, p["robin1"], k["turdus"])  # suppressed ancestor
+    keyword_tagging.tag_photo(db, p["robin1"], k["loc"])
+    keyword_tagging.tag_photo(db, p["robin2"], k["robin"])
+    keyword_tagging.tag_photo(db, p["robin2"], k["park"])
+    keyword_tagging.tag_photo(db, p["card1"], k["cardinal"])
+    keyword_tagging.tag_photo(db, p["card1"], k["sunset"])
+    keyword_tagging.tag_photo(db, p["card2"], k["turdus"])  # genus only: uncounted
+    keyword_tagging.tag_photo(db, p["puma"], k["puma"])
+    keyword_tagging.tag_photo(db, p["plain"], k["mystery"])  # unmatched
+    keyword_tagging.tag_photo(db, p["rejected"], k["cardinal"])
+    keyword_tagging.tag_photo(db, p["outside"], k["cardinal"])
     db.commit()
     return {"ws": ws, "fid": fid, "sub": sub, "p": p, "k": k}
 
@@ -306,7 +306,7 @@ def test_life_list_candidates_species_filter_follows_taxon_root(db, cur):
     leaf = _leaf(db, "american robin leaf", cur["k"]["turdus"])
     _link(db, leaf, 4)
     db.conn.commit()
-    db.tag_photo(p["card2"], leaf)
+    keyword_tagging.tag_photo(db, p["card2"], leaf)
     db.commit()
     rows = db.species_curation.get_life_list_candidates(species="American Robin")
     assert [(r["species"], r["id"]) for r in rows] == [
@@ -363,7 +363,7 @@ def test_uncounted_identifications_route_class_lookup_through_facade(db, cur, mo
 
 def test_uncounted_filter_token_keeps_non_ascii(db, cur):
     kid = db.keywords.add("Mésange", is_species=True)
-    db.tag_photo(cur["p"]["card2"], kid)
+    keyword_tagging.tag_photo(db, cur["p"]["card2"], kid)
     db.commit()
     names = {g["name"]: g for g in db.species_curation.get_life_list_uncounted_identifications()}
     assert names["Mésange"]["filter_token"] == '{"name":"Mésange","taxon_id":null}'
@@ -468,10 +468,10 @@ def test_photo_life_list_species_canonicalizes_leaves_to_root(db, cur):
     upper = _leaf(db, "zeta", None, kw_type="general", is_species=1)
     lower = _leaf(db, "Alpha", None, kw_type="general", is_species=1)
     db.conn.commit()
-    db.tag_photo(p["card2"], leaf)
-    db.tag_photo(p["card2"], orphan_leaf)
-    db.tag_photo(p["card2"], upper)
-    db.tag_photo(p["card2"], lower)
+    keyword_tagging.tag_photo(db, p["card2"], leaf)
+    keyword_tagging.tag_photo(db, p["card2"], orphan_leaf)
+    keyword_tagging.tag_photo(db, p["card2"], upper)
+    keyword_tagging.tag_photo(db, p["card2"], lower)
     db.commit()
     assert db.species_curation.get_photo_life_list_species(p["card2"]) == [
         "Alpha", "American Robin", "orphan leaf", "zeta",
@@ -486,7 +486,7 @@ def test_life_list_locations(db, cur):
         "American Robin": ["Backyard", "Park"],
     }
     assert db.species_curation.get_life_list_locations(species="Northern Cardinal") == {}
-    db.tag_photo(cur["p"]["card1"], cur["k"]["loc"])
+    keyword_tagging.tag_photo(db, cur["p"]["card1"], cur["k"]["loc"])
     db.commit()
     assert db.species_curation.get_life_list_locations(species="Northern Cardinal") == {
         "Northern Cardinal": ["Backyard"],
@@ -618,7 +618,7 @@ def test_representative_lists_eligible_only(db, cur):
     leaf = _leaf(db, "robin leaf", cur["k"]["turdus"])
     _link(db, leaf, 4)
     db.conn.commit()
-    db.tag_photo(p["puma"], leaf)
+    keyword_tagging.tag_photo(db, p["puma"], leaf)
     db.commit()
     db.set_species_representative("American Robin", p["puma"])
     assert db.species_curation.get_representative_lists(eligible_only=True) == {
@@ -1495,7 +1495,7 @@ def test_life_list_preference_eligibility(db, cur):
     # A hierarchy leaf matches through its taxon's root identification.
     leaf = _leaf(db, "robin (leaf)", k["sunset"])
     _link(db, leaf, 4)
-    db.tag_photo(p["card1"], leaf)
+    keyword_tagging.tag_photo(db, p["card1"], leaf)
     db.commit()
     assert eligible("American Robin", p["card1"])
     assert eligible("robin (leaf)", p["card1"])

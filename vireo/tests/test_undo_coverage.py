@@ -3,6 +3,7 @@
 import sqlite3
 
 import pytest
+from services import keyword_tagging
 from services.edit_history import redo_last_undo, undo_last_edit
 
 
@@ -16,8 +17,8 @@ def test_location_history_restores_mixed_originals_and_provenance(app_and_db, ro
     client = app.test_client()
     pids = [p['id'] for p in db.photos.list_page()][:2]
     old_ids = [db.get_or_create_text_location(name) for name in ['Old place', 'Other place']]
-    db.tag_photo(pids[0], old_ids[0], source=None)
-    db.tag_photo(pids[0], old_ids[1], source='accept')
+    keyword_tagging.tag_photo(db, pids[0], old_ids[0], source=None)
+    keyword_tagging.tag_photo(db, pids[0], old_ids[1], source='accept')
     db.commit()
     db.locations.save_gps_reviews([(pids[0], 'kept-gps')])
     db.commit()

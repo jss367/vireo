@@ -263,6 +263,7 @@ def test_submit_observation_wraps_auth_error_as_partial_upload():
 
 
 from PIL import Image
+from services import keyword_tagging
 
 
 @pytest.fixture
@@ -1397,7 +1398,7 @@ def test_api_inat_prepare_lists_confirmed_species_first(app_and_db):
     app, db, pid = app_and_db
     _add_second_subject(db, pid)
     for name in ("Northern Cardinal", "House Finch"):
-        db.tag_photo(pid, db.keywords.add(name, is_species=True))
+        keyword_tagging.tag_photo(db, pid, db.keywords.add(name, is_species=True))
         db.commit()
     data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
     assert data["species"] == "Northern Cardinal"

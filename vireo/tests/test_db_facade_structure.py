@@ -305,7 +305,7 @@ def test_set_progress_handler_interrupts_and_clears(db):
 # never raise it. Methods that coordinate more than one call (``add_photo``
 # resolving duplicates after the insert, cross-domain composition) are not
 # forwarders and are not counted.
-FORWARDING_WRAPPER_LIMIT = 1
+FORWARDING_WRAPPER_LIMIT = 0
 
 
 def _is_forwarding_wrapper(fn):
@@ -381,15 +381,9 @@ def test_forwarding_wrapper_detector_matches_known_shapes():
 #   still hands to a repository constructor, keyed by the handing method.
 #   Domain accessors (properties that build another repository) and class
 #   constants are not callbacks and are not listed.
-FACADE_BINDING_MODULES = {
-    "keyword_provenance",
-}
+FACADE_BINDING_MODULES: set[str] = set()
 
-FACTORY_CALLBACKS = {
-    "_keyword_provenance_repository": {"<Database>"},
-    "_location_repository": {"_merge_keyword_into"},
-    "_moves_merge_repository": {"_carry_keyword_associations_for_merge"},
-}
+FACTORY_CALLBACKS: dict[str, set[str]] = {}
 
 # The active-workspace resolver a factory may hand over: a repository takes the
 # workspace id or this resolver, never anything else of the façade.

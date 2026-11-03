@@ -1,6 +1,7 @@
 import re
 
 from playwright.sync_api import expect
+from services import keyword_tagging
 
 from e2e.stack_seed import seed_browse_stack
 
@@ -482,7 +483,7 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     seed_browse_stack(db, burst_ids)
     # A general keyword narrows the view to one member without splitting the
     # stack: only species and location keywords are part of a burst's identity.
-    db.tag_photo(burst_ids[0], db.keywords.add("Portfolio", kw_type="general"))
+    keyword_tagging.tag_photo(db, burst_ids[0], db.keywords.add("Portfolio", kw_type="general"))
     db.commit()
     with db.conn:
         db.conn.execute(

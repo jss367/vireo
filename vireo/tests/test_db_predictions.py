@@ -825,7 +825,9 @@ def test_accept_prediction_leaves_commit_to_caller_and_rolls_back_with_its_unit(
     def boom(*a, **k):
         raise RuntimeError("tag failed")
 
-    monkeypatch.setattr(db, "tag_photo", boom)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(KeywordProvenanceRepository, "tag", boom)
     with pytest.raises(RuntimeError, match="tag failed"), db.transaction():
         review_decisions.accept_prediction(db, pid)
     assert not db.conn.in_transaction

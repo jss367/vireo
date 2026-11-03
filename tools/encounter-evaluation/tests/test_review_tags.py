@@ -6,7 +6,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 from services.edit_history import undo_last_edit
 
 from encounter_eval.common import write_json
@@ -38,7 +38,7 @@ def writable_queue(tmp_path):
         genus = db.keywords.add('Plegadis', kw_type='taxonomy')
         db.conn.execute('UPDATE keywords SET taxon_id=3 WHERE id=?', (genus,))
         for kid in [old, genre, genus]:
-            db.tag_photo(pid, kid)
+            keyword_tagging.tag_photo(db, pid, kid)
     run = tmp_path/'run'
     manifest = prepare(path, run, workspace=ws)
     for entry in manifest['sessions']:
@@ -167,7 +167,7 @@ def test_retry_after_library_commit_does_not_repeat_or_overwrite_later_edits(wri
     assert save_and_sync(queue, pid, ['inat:102'])['status'] == 'pending'
     added = (keywords(db, pid) - preserved).pop()
     with db.transaction():
-        db.untag_photo(pid, added)  # An explicit later user edit must survive retry.
+        keyword_tagging.untag_photo(db, pid, added)  # An explicit later user edit must survive retry.
     monkeypatch.setattr(review_tags, '_apply_tags', original)
     with connect(queue) as conn:
         assert sync_review_tags(conn, pid)['status'] == 'applied'
@@ -301,3 +301,34 @@ def test_sync_review_tags_bootstraps_settings_provider_in_fresh_process(writable
         assert preserved <= after
     finally:
         db2.close()
+
+
+def test_review_tags_imports_before_bootstrap_without_vireo_on_path(tmp_path):
+    """The ``vireo-review-encounters`` entry point imports ``review_server``
+    (which imports ``review_tags``) BEFORE ``main`` calls ``configure_repo``.
+
+    A module-level ``from services import ...`` in ``review_tags`` would
+    therefore fail with ``ModuleNotFoundError`` at process startup, breaking
+    even ``vireo-review-encounters --help``. Reproduce that pre-bootstrap
+    environment: only the tool's ``src`` on ``sys.path``, ``vireo/`` absent.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    script = tmp_path/'drive.py'
+    script.write_text(textwrap.dedent(f"""
+        import sys
+        from pathlib import Path
+        src = Path({str(repo_root)!r})/'tools'/'encounter-evaluation'/'src'
+        sys.path.insert(0, str(src))
+        # Pre-bootstrap: vireo/ is NOT on sys.path, so a module-level
+        # ``from services import ...`` in review_tags would fail here.
+        import encounter_eval.review_tags  # noqa: F401
+        import encounter_eval.review_server  # noqa: F401
+        assert 'services' not in sys.modules
+        print('OK')
+    """))
+    completed = subprocess.run(
+        [sys.executable, '-I', str(script)],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, (completed.returncode, completed.stdout, completed.stderr)
+    assert completed.stdout.strip() == 'OK', (completed.stdout, completed.stderr)

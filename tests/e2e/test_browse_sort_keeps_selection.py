@@ -16,7 +16,7 @@ import json
 import re
 
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import keyword_tagging, photo_ingest
 
 from e2e.stack_seed import seed_browse_stack
 
@@ -684,7 +684,7 @@ def _seed_two_adjacent_stacks(db, ids):
     keyword_id = db.keywords.add("Merlin", is_species=True)
     db.commit()
     for photo_id in ids[:2]:
-        db.tag_photo(photo_id, keyword_id)
+        keyword_tagging.tag_photo(db, photo_id, keyword_id)
         db.commit()
     return keyword_id
 
@@ -731,7 +731,7 @@ def test_history_reload_restores_the_frames_the_user_picked(live_server, page):
     # The edit an undo/redo would replay: the picked pair gains the keyword
     # that was keeping it apart from its neighbours, so all four merge.
     for photo_id in picked:
-        db.tag_photo(photo_id, keyword_id)
+        keyword_tagging.tag_photo(db, photo_id, keyword_id)
         db.commit()
     page.evaluate("() => pageModules.predictionPanels.afterHistoryChange()")
     page.wait_for_function("() => !pageModules.pagination.pagination.loading", timeout=15000)

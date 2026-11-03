@@ -9,18 +9,15 @@ the catalog reads and writes of ``move.py``'s file-move jobs (reached through
 ``db.moves_merge``), which leave every commit to the caller so the commit
 points stay among the filesystem steps they guard.
 
-``Database`` keeps the composition. Most keyword re-tagging stays on the façade
-(``Database.tag_photo`` / ``untag_photo``), whose writes live in
-``repositories/keyword_provenance.py``, so the keyword-provenance fold applies
-and its contract test (``test_keyword_provenance_contract``) sees every
-re-tag call site. Embedded associations carried here use the injected shared
-provenance fold. The merge and ``move_folder_path`` call other domains'
-methods mid-transaction; those are passed in as callbacks so the bodies here
-stay verbatim and patched methods still take effect. The two every caller
-needs (``FolderRepository.relink_parents_by_path`` and
-``Database._carry_keyword_associations_for_merge``) are bound when the façade
-builds the repository; the merge's workspace-link and new-images hooks arrive
-per call. Calls within this domain (the GPS-review and edit-recipe carries
+Keyword re-tagging goes through the provenance writer
+(``KeywordProvenanceRepository.tag``, whose upsert folds provenance), so the
+keyword-provenance contract (``test_keyword_provenance_contract``) sees every
+re-tag call site; ``carry_keyword_associations_for_merge`` is one of its
+listed provenance-carrying writers. Embedded associations carried here use
+the shared provenance fold. The merge and ``move_folder_path`` call
+``FolderRepository.relink_parents_by_path`` mid-transaction, bound when the
+façade builds the repository; the merge's workspace-link and new-images
+hooks arrive per call. Calls within this domain (the GPS-review and edit-recipe carries
 inside ``transfer_review_state``, the merge's per-collision transfers) go
 through the repository itself.
 
@@ -42,28 +39,78 @@ from repositories.identity_alternatives import (
     remap_identity_for_photo_merge,
     remap_identity_keyword_intents,
 )
+from repositories.keyword_provenance import KeywordProvenanceRepository
+from repositories.keyword_source import keyword_source_max
+from repositories.photo_keywords import PhotoKeywordRepository
 from repositories.photo_review import PhotoReviewRepository
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import (
     keep_photo_visible_across_folder_change,
     remap_photo_visibility,
 )
+from repositories.species_provenance import SpeciesProvenanceRepository
 
 log = logging.getLogger(__name__)
 
 
 class MovesMergeRepository:
     def __init__(self, conn, *, subtree_prefix, subtree_relative, join_subtree_path,
-                 relink_parents_by_path, carry_keyword_associations):
+                 relink_parents_by_path):
         self.conn = conn
         self._subtree_prefix = subtree_prefix
         self._subtree_relative = subtree_relative
         self._join_subtree_path = join_subtree_path
-        # ``FolderRepository.relink_parents_by_path`` (resolved at call time)
-        # and ``Database._carry_keyword_associations_for_merge``, which
-        # re-tags through the façade so the provenance contract sees it.
+        # ``FolderRepository.relink_parents_by_path`` (resolved at call time).
         self.relink_parents_by_path = relink_parents_by_path
-        self.carry_keyword_associations = carry_keyword_associations
+
+
+    def carry_keyword_associations_for_merge(self, losing_id, surviving_id, by_key):
+        """Apply the losing row's winning keyword ops to the survivor's tags.
+
+        ``by_key`` is the grouping built by
+        ``moves_merge.reconcile_conflicting_keyword_edits``; rows it has already
+        deleted are skipped by id. Only keys whose newest surviving change
+        sits on the losing photo are applied -- when the survivor holds the
+        newer change its own association already reflects it.
+        """
+        live = self.live_pending_change_ids(losing_id, surviving_id)
+
+        def _flatten(photo_slot):
+            out = []
+            for ws_sides in photo_slot.values():
+                out.extend(ws_sides["add"] + ws_sides["remove"])
+            return out
+
+        for match_key, slot in by_key.items():
+            loser = [r for r in _flatten(slot[losing_id]) if r["id"] in live]
+            if not loser:
+                continue
+            survivor = [
+                r for r in _flatten(slot[surviving_id]) if r["id"] in live
+            ]
+
+            def key(r):
+                return (r["created_at"] or "", r["id"])
+
+            newest_loser = max(loser, key=key)
+            if survivor and key(max(survivor, key=key)) > key(newest_loser):
+                continue
+            if newest_loser["change_type"] == "keyword_add":
+                # The association the add already wrote is about to be
+                # deleted with the losing photo. Re-point it at the
+                # survivor. If it is somehow absent the catalog is already
+                # inconsistent and there is no id to carry -- leave it to
+                # the sync rather than guessing a keyword by name.
+                for kw_id in self.photo_keyword_ids_matching(
+                        losing_id, match_key):
+                    source = keyword_source_max(
+                        self.photo_keyword_source(losing_id, kw_id))
+                    KeywordProvenanceRepository(self.conn).tag(surviving_id, kw_id, source=source)
+                    SpeciesProvenanceRepository(self.conn).carry(losing_id, surviving_id, keyword_id=kw_id)
+            elif newest_loser["change_type"] == "keyword_remove":
+                for kw_id in self.photo_keyword_ids_matching(
+                        surviving_id, match_key):
+                    PhotoKeywordRepository(self.conn).untag(surviving_id, kw_id)
 
     def create_rule(self, name, destination, criteria):
         """Insert a move rule (no commit). Returns the rule id."""
@@ -304,8 +351,9 @@ class MovesMergeRepository:
         """Return ``losing_id``'s location keyword ids and drop the survivor's.
 
         Deletes ``surviving_id``'s links to ``type='location'`` keywords without
-        committing; the caller re-tags the returned ids through
-        ``Database.tag_photo`` so they carry the provenance fold.
+        committing; the caller re-tags the returned ids through the
+        provenance writer (``keyword_provenance.tag``) so they carry the
+        provenance fold.
         """
         losing_kw_ids = [
             r["keyword_id"] for r in self.conn.execute(
@@ -458,7 +506,7 @@ class MovesMergeRepository:
                 "dropped %d older queue row(s)",
                 match_key, losing_id, surviving_id, len(drop),
             )
-        self.carry_keyword_associations(
+        self.carry_keyword_associations_for_merge(
             losing_id, surviving_id, by_key)
         return dropped
 

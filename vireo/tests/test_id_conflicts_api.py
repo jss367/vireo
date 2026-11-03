@@ -11,7 +11,7 @@ import os
 import sys
 
 import pytest
-from services import review_decisions
+from services import keyword_tagging, review_decisions
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -25,7 +25,7 @@ def compare_collection(app_and_db):
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
     cardinal = db.keywords.add("Cardinal", is_species=True)
-    db.tag_photo(photo_ids[0], cardinal)
+    keyword_tagging.tag_photo(db, photo_ids[0], cardinal)
     db.commit()
     for index, photo_id in enumerate(photo_ids):
         det_ids = db.detections.save(photo_id, [{
@@ -173,8 +173,8 @@ def test_refresh_photo_id_picks_up_a_sibling_that_just_joined(app_and_db):
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
     bird = db.keywords.add("Bird", is_species=True)
-    db.tag_photo(photo_ids[0], bird)
-    db.tag_photo(photo_ids[1], bird)
+    keyword_tagging.tag_photo(db, photo_ids[0], bird)
+    keyword_tagging.tag_photo(db, photo_ids[1], bird)
     db.commit()
     # Only photos with the "Bird" species keyword satisfy the rule, so the
     # third photo starts outside the collection until it is tagged too.
@@ -195,7 +195,7 @@ def test_refresh_photo_id_picks_up_a_sibling_that_just_joined(app_and_db):
     first = _get(app, cid, filter="all")
     assert first["total"] == 2
 
-    db.tag_photo(photo_ids[2], bird)
+    keyword_tagging.tag_photo(db, photo_ids[2], bird)
     db.commit()
 
     refresh_url = (
@@ -290,8 +290,8 @@ def test_a_joining_sibling_that_carries_a_new_model_reassesses(app_and_db):
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
     bird = db.keywords.add("Bird", is_species=True)
-    db.tag_photo(photo_ids[0], bird)
-    db.tag_photo(photo_ids[1], bird)
+    keyword_tagging.tag_photo(db, photo_ids[0], bird)
+    keyword_tagging.tag_photo(db, photo_ids[1], bird)
     db.commit()
     for photo_id in photo_ids:
         det_ids = db.detections.save(photo_id, [{
@@ -315,7 +315,7 @@ def test_a_joining_sibling_that_carries_a_new_model_reassesses(app_and_db):
     first = _get(app, cid, filter="all")
     assert first["models"] == ["model-a"]
 
-    db.tag_photo(photo_ids[2], bird)
+    keyword_tagging.tag_photo(db, photo_ids[2], bird)
     db.commit()
     refreshed = app.test_client().get(
         f"/api/predictions/compare?collection_id={cid}&filter=all"
@@ -353,7 +353,7 @@ def test_a_widening_refresh_shows_every_model_it_advertises(app_and_db):
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
     bird = db.keywords.add("Bird", is_species=True)
-    db.tag_photo(photo_ids[0], bird)
+    keyword_tagging.tag_photo(db, photo_ids[0], bird)
     db.commit()
     for photo_id in photo_ids:
         det_ids = db.detections.save(photo_id, [{
@@ -373,7 +373,7 @@ def test_a_widening_refresh_shows_every_model_it_advertises(app_and_db):
     db.commit()
 
     first = _get(app, cid, filter="all")
-    db.tag_photo(photo_ids[1], bird)
+    keyword_tagging.tag_photo(db, photo_ids[1], bird)
     db.commit()
     refreshed = app.test_client().get(
         f"/api/predictions/compare?collection_id={cid}&filter=all"
@@ -399,7 +399,7 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
         db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     ]
     bird = db.keywords.add("Bird", is_species=True)
-    db.tag_photo(photo_ids[0], bird)
+    keyword_tagging.tag_photo(db, photo_ids[0], bird)
     db.commit()
     for photo_id in photo_ids:
         det_ids = db.detections.save(photo_id, [{
@@ -421,7 +421,7 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
     first = _get(app, cid, filter="all", model="model-a")
     assert first["models"] == ["model-a"]
 
-    db.tag_photo(photo_ids[1], bird)
+    keyword_tagging.tag_photo(db, photo_ids[1], bird)
     db.commit()
     refreshed = app.test_client().get(
         f"/api/predictions/compare?collection_id={cid}&filter=all"
@@ -484,7 +484,7 @@ def test_multi_species_counts_real_case_variant_unlinked_keywords(compare_collec
         keyword = db.keywords.add(f"Distinct Robin {index}", is_species=True)
         db.commit()
         db.conn.execute("UPDATE keywords SET name=? WHERE id=?", (name, keyword))
-        db.tag_photo(pid, keyword)
+        keyword_tagging.tag_photo(db, pid, keyword)
         db.commit()
     photo = next(p for p in id_conflicts.build_comparison(db, cid)["photos"] if p["photo_id"] == pid)
     assert photo["species_identity_count"] == 2

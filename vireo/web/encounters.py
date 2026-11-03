@@ -24,7 +24,7 @@ from config import config_value
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from pipeline_results import auto_detach_burst_for_species
-from services import prediction_decisions
+from services import keyword_tagging, prediction_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 
 if TYPE_CHECKING:
@@ -925,7 +925,7 @@ class _SpeciesConfirmation:
         for pid, old_rows in self.old_rows_by_photo.items():
             remove_names = []
             for old in old_rows:
-                self.db.untag_photo(pid, old["id"], _record_history=True)
+                keyword_tagging.untag_photo(self.db, pid, old["id"], _record_history=True)
                 # A same-taxon alias replace re-adds ``kid`` right
                 # after, so its sidecar remove is skipped; a remove
                 # must queue every untagged row.
@@ -940,7 +940,7 @@ class _SpeciesConfirmation:
 
     def tag_new_species(self, ws_id: int) -> None:
         for pid in self.newly_tagged:
-            self.db.tag_photo(pid, cast(int, self.kid), source="manual",
+            keyword_tagging.tag_photo(self.db, pid, cast(int, self.kid), source="manual",
                               provenance=self.provenance, _record_provenance=True)
             queue_keyword_add(
                 self.db, pid, self.species, workspace_id=ws_id,
