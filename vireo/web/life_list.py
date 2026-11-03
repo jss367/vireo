@@ -170,8 +170,8 @@ def _build_explorer_payload(db: Database, root_id: int | None = None) -> JsonDic
                  "common_name": root.get("common_name"), "rank": root["rank"]},
         "summary": summary,
         "nodes": top,
-        # Retain the old name-only field for API compatibility. New clients use
-        # the structured, reasoned field below.
+        # Name-only field for API clients that read it; the page uses the
+        # structured, reasoned field below.
         "unmatched_species": {
             "count": len(visible_uncounted),
             "names": [entry["name"] for entry in visible_uncounted[:200]],

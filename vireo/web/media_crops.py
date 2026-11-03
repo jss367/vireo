@@ -74,8 +74,7 @@ def _load_crop_source(config: AppConfig, db: Database, photo: Row) -> object | I
         # that the quota pass holds across a full scandir of the
         # cache; holding it across a decode as well would serialize
         # every interactive image read in the app against every
-        # other one and against eviction, which is exactly the
-        # stall this PR set out to remove. A `utime` under the lock
+        # other one and against eviction. A `utime` under the lock
         # costs microseconds. If eviction unlinks the file between
         # the touch and the open, the decode returns None and the
         # original-source fallback below handles it — that path

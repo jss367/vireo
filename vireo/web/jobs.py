@@ -104,7 +104,7 @@ def create_jobs_blueprint(
             "active": active,
             "history": history,
             # Vireo is overriding the system's idle-sleep setting while a
-            # job runs (issue #1397). Surfacing it keeps that visible
+            # job runs. Surfacing it keeps that visible
             # rather than silent — see CORE_PHILOSOPHY "no black boxes".
             "keeping_awake": runner.sleep_blocker.active,
             "resource_budget": get_resource_ledger().snapshot(),
@@ -630,9 +630,9 @@ def create_jobs_blueprint(
             try:
                 # Go through load_local_taxonomy() rather than constructing
                 # Taxonomy directly: it drops the cached instance before
-                # parsing the replacement. Constructing here bypassed that,
-                # so a refresh held the old ~2.8GB parse alive alongside the
-                # new one and could OOM. It also seeds the cache, so the
+                # parsing the replacement. Constructing one here would hold
+                # the old ~2.8GB parse alive alongside the new one and could
+                # OOM. It also seeds the cache, so the
                 # next compare/accept request reuses this parse instead of
                 # paying for its own.
                 #
@@ -732,7 +732,7 @@ def create_jobs_blueprint(
             for r in result["results"]:
                 ctx.checkpoint(job)
                 if r["group_size"] > 1 and r["is_best"]:
-                    # Durable boundary: one flagged candidate at a time, as before.
+                    # Durable boundary: one flagged candidate per transaction.
                     with thread_db.transaction():
                         flagged = thread_db.photo_review.flag_ranked_candidate(r["photo_id"])
                     best_count += int(flagged)
