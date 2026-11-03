@@ -478,7 +478,7 @@ async function nativeMenuPhotoCommand(command) {
     case 'photo_compare':
       var openBrowseCompare = Vireo.pageHook('openBrowseCompare');
       if (openBrowseCompare) openBrowseCompare();
-      else nativeMenuRoute('/id-conflicts');
+      else nativeMenuError('Compare Selected is available from Browse after selecting photos.');
       break;
     case 'photo_add_keyword':
       var batchAddKeyword = Vireo.pageHook('batchAddKeyword');

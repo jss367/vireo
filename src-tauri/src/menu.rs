@@ -29,7 +29,6 @@ pub mod ids {
     pub const NAV_JOBS: &str = "nav_jobs";
     pub const NAV_DUPLICATES: &str = "nav_duplicates";
     pub const NAV_LIGHTROOM: &str = "nav_lightroom";
-    pub const NAV_SHORTCUTS: &str = "nav_shortcuts";
     pub const NAV_DASHBOARD: &str = "nav_dashboard";
     pub const NAV_WORKSPACE: &str = "nav_workspace";
     pub const NAV_SETTINGS: &str = "nav_settings";
@@ -84,7 +83,6 @@ pub mod ids {
     pub const TOOLS_SYNC_METADATA: &str = "tools_sync_metadata";
     pub const TOOLS_VERIFY_MODELS: &str = "tools_verify_models";
     pub const TOOLS_CANCEL_JOB: &str = "tools_cancel_job";
-    pub const TOOLS_REVIEW_PIPELINE: &str = "tools_review_pipeline";
     pub const HELP_KEYBOARD_SHORTCUTS: &str = "help_keyboard_shortcuts";
     pub const HELP_OPEN_HELP: &str = "help_open_help";
     pub const HELP_OPEN_LOGS: &str = "help_open_logs";
@@ -117,12 +115,10 @@ pub fn route_for_id(id: &str) -> Option<&'static str> {
         ids::NAV_DUPLICATES => Some("/duplicates"),
         ids::NAV_LIGHTROOM => Some("/lightroom"),
         ids::FILE_IMPORT_LIGHTROOM => Some("/lightroom"),
-        ids::NAV_SHORTCUTS => Some("/shortcuts"),
         ids::NAV_DASHBOARD => Some("/dashboard"),
         ids::NAV_WORKSPACE => Some("/workspace"),
         ids::NAV_SETTINGS => Some("/settings"),
         ids::NAV_LOGS => Some("/logs"),
-        ids::TOOLS_REVIEW_PIPELINE => Some("/pipeline/review"),
         ids::HELP_KEYBOARD_SHORTCUTS => Some("/shortcuts"),
         ids::HELP_OPEN_LOGS => Some("/logs"),
         _ => None,
@@ -142,7 +138,11 @@ pub fn sync_navigation_shortcuts(app: &AppHandle, paths: &[String]) -> tauri::Re
                 if let tauri::menu::MenuItemKind::MenuItem(item) = item {
                     // Settings keeps its conventional Cmd/Ctrl+, binding;
                     // its numbered shortcut is handled by the web key handler.
-                    if item.id().0.starts_with("nav_") && item.id().0 != ids::NAV_SETTINGS {
+                    // Shortcuts lives in Help but can still be a numbered tab.
+                    let id = item.id().0.as_str();
+                    if (id.starts_with("nav_") && id != ids::NAV_SETTINGS)
+                        || id == ids::HELP_KEYBOARD_SHORTCUTS
+                    {
                         item.set_accelerator(None::<&str>)?;
                         items.push(item);
                     }
@@ -260,7 +260,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     };
 
     // -- File menu --
-    let file_menu = SubmenuBuilder::new(app, "File")
+    let file_builder = SubmenuBuilder::new(app, "File")
         .item(
             &MenuItemBuilder::with_id(ids::FILE_NEW_WORKSPACE, "New Workspace...")
                 .accelerator("CmdOrCtrl+Shift+N")
@@ -288,10 +288,10 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .build(app)?,
         )
         .separator()
-        .close_window()
-        .separator()
-        .quit()
-        .build()?;
+        .close_window();
+    #[cfg(not(target_os = "macos"))]
+    let file_builder = file_builder.separator().quit();
+    let file_menu = file_builder.build()?;
 
     // -- Edit menu (required for Cmd+C/V/X/A/Z on macOS) --
     let edit_menu = SubmenuBuilder::new(app, "Edit")
@@ -390,7 +390,6 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+Shift+L")
                 .build(app)?,
         )
-        .item(&MenuItemBuilder::with_id(ids::NAV_SHORTCUTS, "Shortcuts").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::NAV_LIGHTROOM, "Lightroom").build(app)?);
 
     // Settings in View menu only on non-macOS (it is in the app submenu on macOS)
@@ -499,10 +498,6 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+Return")
                 .build(app)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::TOOLS_REVIEW_PIPELINE, "Review Process Results")
-                .build(app)?,
-        )
         .separator()
         .item(&MenuItemBuilder::with_id(ids::TOOLS_SCAN_LIBRARY, "Scan Library...").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::TOOLS_RESCAN, "Rescan Folders...").build(app)?)
@@ -527,7 +522,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         window_builder = window_builder.fullscreen();
     }
 
-    let window_menu = window_builder.separator().close_window().build()?;
+    let window_menu = window_builder.build()?;
 
     // -- Help menu --
     #[allow(unused_mut)]
