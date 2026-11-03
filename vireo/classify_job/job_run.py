@@ -366,9 +366,9 @@ class _ClassifyJobRun:
         runtime_fingerprint. Without this, a stale run (weights or preprocessing changed under
         the same classifier_model, unchanged label fingerprint) still
         satisfies the coverage join and the caller shortcuts to
-        ``_finalize_cached_only`` on wrong-runtime results. Falling back to
-        ``None`` keeps the fresh-install case (undownloaded weights,
-        missing revision file) working as before.
+        ``_finalize_cached_only`` on wrong-runtime results. ``None`` on a
+        fresh install (undownloaded weights, missing revision file), where
+        the cache check runs without the runtime filter.
         """
         peek_model = peek.peek_model
         try:

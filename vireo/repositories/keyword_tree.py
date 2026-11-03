@@ -14,9 +14,9 @@ edits that change it:
   ``apply_update``), the rename state the ``/api/keywords`` route compares
   (``rename_state``), and the dependent strings a rename carries along
   (``rename_dependents``, ``normalize_row_name``);
-- duplicate merges: ``merge_duplicates`` and the scope and liveness reads of
-  ``Database._merge_duplicate_keywords_pass`` (``duplicate_scope_rows``,
-  ``live_ids``), plus the duplicate groups the Keywords page lists
+- duplicate merges: the scope and liveness reads of
+  ``services.keyword_duplicates`` (``duplicate_scope_rows``, ``live_ids``),
+  plus the duplicate groups the Keywords page lists
   (``workspace_duplicate_groups``);
 - ``delete``.
 
@@ -25,72 +25,40 @@ is tagged on are ``repositories/photo_keywords.py``.
 
 What lives in ``repositories/keyword_provenance.py`` instead: the
 ``photo_keywords`` writers that create or converge an association, among them
-``_merge_keyword_into``, which ``test_keyword_provenance_contract`` keys to
-that module. The control flow of ``_merge_duplicate_keywords_pass`` and
-``update_keyword`` stays on ``Database`` with its
-``self._merge_keyword_into(...)`` call on the façade; they delegate only
-their statements here. This module never references one of those writers,
-and a structural test fails if it does.
+``merge_keyword_into``, which ``test_keyword_provenance_contract`` keys to
+that module. The duplicate-merge loop (``services.keyword_duplicates``) and
+``Database.update_keyword`` call the merge; they use this repository only for
+their statements. This module never references one of those writers, and a
+structural test fails if it does.
 
-The method bodies moved verbatim from ``repositories/keywords.py`` (and
-before that from ``Database``); only their signatures gained annotations.
-``self._chunks`` is ``db._chunks``, injected by
-``Database._keyword_tree_repository``, and ``workspace_id`` resolves the
-active workspace lazily through ``Database._ws_id`` at exactly the points the
-original code called it. Every façade method a moved body calls is bound from
-the ``Database`` instance under its own name (see ``FACADE_METHODS``) and
-called as ``self.<name>(...)``, so monkeypatches of ``Database`` methods keep
-reaching the moved code. The SQL text, parameter order, chunk sizes and
-commit placement are unchanged: ``_commit=False`` callers own their
-transaction, and no method here commits unless the ``Database`` method it
-backs did.
+The repository takes its connection and the workspace resolver
+(``Database._ws_id``), resolved lazily at each scoped read. A rename carries
+into the species-curation tables through a ``SpeciesCurationRepository`` on
+the same connection. Nothing here commits: the caller's unit of work owns
+the transaction.
 
 Callers reach it through the ``db.keyword_tree`` accessor, which builds a
 fresh repository per access; do not hold one across a workspace switch.
-``_rename_keyword_dependents`` and ``_reparent_disambiguated`` keep their
-``Database`` wrappers, which the keyword repositories bind by name.
 """
 
 import sqlite3
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from keyword_normalization import normalize_keyword_display
+from repositories import chunks
 from repositories.identity_alternatives import retarget_candidate_names
-
-# ``Database`` methods the moved bodies call through the façade.
-FACADE_METHODS = (
-    "_merge_duplicate_keywords_pass",
-    "_rename_keyword_dependents",
-    "rename_photo_preferences_species",
-    "rename_species_highlights_species",
-)
+from repositories.species_curation import SpeciesCurationRepository
 
 
 class KeywordTreeRepository:
-    # Bound ``Database`` methods that ``__init__`` installs from
-    # ``FACADE_METHODS``, declared so the type checker sees them.
-    _merge_duplicate_keywords_pass: Callable[..., Any]
-    _rename_keyword_dependents: Callable[..., Any]
-    rename_photo_preferences_species: Callable[..., Any]
-    rename_species_highlights_species: Callable[..., Any]
-
     def __init__(
         self,
         conn: sqlite3.Connection,
         resolve_workspace_id: Callable[[], int],
-        *,
-        chunks: Callable[..., Iterator[list[Any]]],
-        facade: object,
     ) -> None:
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
-        # ``db._chunks`` itself (its size default is bound at import), kept
-        # under its module name so the moved bodies read ``self._chunks``.
-        self._chunks = chunks
-        # Bound ``Database`` methods, kept under their façade names.
-        for name in FACADE_METHODS:
-            setattr(self, name, getattr(facade, name))
 
     @property
     def workspace_id(self) -> int:
@@ -262,7 +230,7 @@ class KeywordTreeRepository:
             "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
             (dst_id, new_name, child["id"]),
         )
-        self._rename_keyword_dependents(child["id"], child["name"], new_name)
+        self.rename_dependents(child["id"], child["name"], new_name)
 
 
     # -- renames and retypes ---------------------------------------------------
@@ -378,7 +346,7 @@ class KeywordTreeRepository:
         # new_name) row is dropped rather than duplicated, matching
         # queue_change's dedupe contract.
         if affected_photo_ids:
-            for chunk in self._chunks(affected_photo_ids):
+            for chunk in chunks(affected_photo_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 self.conn.execute(
                     f"""DELETE FROM pending_changes
@@ -413,11 +381,12 @@ class KeywordTreeRepository:
         # ``species_representatives`` in its scoped branch, so a separate
         # representatives rename isn't needed here.
         if photo_workspace_pairs:
-            self.rename_species_highlights_species(
+            curation = SpeciesCurationRepository(self.conn, self._resolve_workspace_id)
+            curation.rename_highlights(
                 old_name, new_name,
                 photo_workspace_pairs=photo_workspace_pairs,
             )
-            self.rename_photo_preferences_species(
+            curation.rename_photo_preferences(
                 old_name, new_name,
                 photo_workspace_pairs=photo_workspace_pairs,
             )
@@ -452,46 +421,13 @@ class KeywordTreeRepository:
         except sqlite3.IntegrityError:
             return
         # Keep every dependent name string in lockstep with the row.
-        self._rename_keyword_dependents(keyword_id, old_name, cleaned)
+        self.rename_dependents(keyword_id, old_name, cleaned)
 
 
     # -- duplicate merges ------------------------------------------------------
     #
-    # ``Database._merge_duplicate_keywords_pass`` keeps its control flow (and
-    # its ``self._merge_keyword_into(...)`` call) in db.py; the scope and
-    # liveness reads it issues live here, unchanged.
-
-    def merge_duplicates(self) -> int:
-        """Find and merge normalized duplicate keywords in active workspace.
-
-        Duplicates are grouped by (normalized name, parent_id, type,
-        species-bearing) — name alone is not identity: the location system
-        deliberately creates same-name keywords under different parents
-        (Springfield under Illinois vs. Missouri), and same-name keywords of
-        different types (species vs. genre) are distinct by design. Legacy
-        ``type='general', is_species=1`` rows are also distinct from ordinary
-        general homonyms. Merging across those slots retags photos with the
-        wrong place/kind.
-
-        A keyword is in scope when it — or any descendant — is tagged on a
-        photo in the active workspace. XMP import only tags the leaf of a
-        hierarchical keyword ("Birds > Heron" tags Heron, not Birds), so
-        duplicate ancestors usually have no photo_keywords rows of their
-        own; walking up from the tagged leaves brings them in scope while
-        still leaving other workspaces' keywords untouched.
-
-        Keeps the lowest ID (earliest created), moves all photo associations,
-        reparents any child keywords onto the survivor (the parent_id FK
-        would otherwise block the DELETE), and deletes the duplicates.
-        Runs passes until convergence so case-duplicate parent chains
-        ("Birds">"Heron" vs "birds">"heron") fully collapse: the children
-        only become same-parent duplicates after their parents merge.
-        The whole pass is all-or-nothing within the caller's unit of work: an
-        exception propagates and the unit rolls every pending merge back.
-        Does not commit. Returns count of merges performed.
-        """
-        return self._merge_duplicate_keywords_pass(self.workspace_id)
-
+    # ``services.keyword_duplicates`` runs the convergence loop (and its
+    # provenance-folding merges); the scope and liveness reads live here.
 
     def duplicate_scope_rows(self, ws: int) -> list[sqlite3.Row]:
         """Keywords tagged on a photo in workspace ``ws``, plus their ancestors.

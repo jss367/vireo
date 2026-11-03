@@ -1090,8 +1090,8 @@ class _SyncPreviewPage:
 def create_sync_blueprint(get_db: GetDb, json_error: JsonError, get_runner: GetRunner) -> Blueprint:
     """Build the sync blueprint.
 
-    ``get_runner`` returns the app's job runner, used to spot a sync job
-    already running in the active workspace.
+    ``get_runner`` returns the app's job runner, which tells whether a sync
+    job is already running in the active workspace.
     """
     blueprint = Blueprint("sync", __name__)
 

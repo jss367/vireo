@@ -1,7 +1,7 @@
 """App-wide request hooks and the per-request ``Database``.
 
-``register_app_hooks`` installs, in one place, every hook ``create_app``
-used to define inline:
+``register_app_hooks`` installs the app-wide hooks listed below.
+``start_after_first_request`` separately registers deferred maintenance.
 
 * ``before_request``, in this order: request timing and id
   (``_start_timer``), the browser-surface guard

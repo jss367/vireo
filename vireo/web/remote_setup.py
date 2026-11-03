@@ -382,7 +382,7 @@ def create_remote_setup_blueprint(get_db: GetDb, json_error: JsonError, config: 
         local archive root exists.
 
         The archive-root check is the one that catches a typo'd
-        ``local_archive_root`` (issue #1377): the connection itself is fine,
+        ``local_archive_root``: the connection itself is fine,
         so ``ok`` stays true, but a bare "Connection OK" would let the user
         walk away from Settings believing the chained move is configured
         and only find out on the Import page, where the hint can't name

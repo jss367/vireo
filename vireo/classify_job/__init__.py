@@ -1,7 +1,8 @@
-"""Classification job logic extracted from app.py.
+"""The standalone classify job.
 
 This package contains the background work function for the /api/jobs/classify
-endpoint. The route handler in app.py parses the request and delegates here.
+endpoint. The route handler in ``web.job_launchers`` parses the request and
+delegates here.
 
 Modules, by responsibility:
 

@@ -75,8 +75,8 @@ def create_folders_blueprint(
         # workspace ID in two independent requests would let a cross-tab
         # workspace switch pair A's rows with B's id, so opt-in callers
         # get both from a single read snapshot instead of following up
-        # with /api/workspaces/active (Codex review r3799038685). The
-        # legacy array response is preserved for every other caller.
+        # with /api/workspaces/active. Every other caller gets the plain
+        # array response.
         include_workspace = request.args.get("with_workspace") in ("1", "true")
         if include_workspace:
             db.begin()
@@ -115,8 +115,7 @@ def create_folders_blueprint(
         # fallback in loadMissingFolders() (fired when the modal opens before
         # any poll seeds the snapshot) can distinguish a cross-workspace
         # flip — which must NOT reset the active Browse — from a real
-        # active-workspace transition that still needs to notify Browse
-        # (Codex review r3686191131).
+        # active-workspace transition that still needs to notify Browse.
         ws_missing_before = {f["id"] for f in db.folders.missing()}
         changed = workspace_folders.check_folder_health(db)
         # A folder flipping ok→missing turns every one of its photos into a

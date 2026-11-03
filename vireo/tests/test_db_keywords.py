@@ -20,7 +20,7 @@ import textwrap
 
 import pytest
 from db import Database
-from services import photo_ingest, workspace_folders
+from services import keyword_duplicates, photo_ingest, workspace_folders
 from signature_contract import calling_signature
 
 
@@ -1115,7 +1115,7 @@ def test_merge_duplicate_keywords_keeps_unrelated_pending_removal(db, lib):
     db.queue_change(p0, "keyword_remove", "heron", workspace_id=ws)
     db.commit()
 
-    assert db.keyword_tree.merge_duplicates() >= 1
+    assert keyword_duplicates.merge_duplicate_keywords(db) >= 1
 
     assert _kw(db, dup) is None
     assert _visible(
@@ -1156,11 +1156,11 @@ def test_merge_duplicate_keywords_merges_with_the_callers_unit(db, lib, monkeypa
     monkeypatch.setattr(db, "_merge_keyword_into",
                         lambda s, d, **kw: merges.append((s, d)) or real(s, d, **kw))
     with db.transaction():
-        total = db.keyword_tree.merge_duplicates()
+        total = keyword_duplicates.merge_duplicate_keywords(db)
     assert total >= 1
     assert all(dst == a for _src, dst in merges)
     assert not db.conn.in_transaction
-    assert db.keyword_tree.merge_duplicates() == 0
+    assert keyword_duplicates.merge_duplicate_keywords(db) == 0
 
 
 def test_merge_duplicate_keywords_rolls_back_on_failure(db, lib, monkeypatch):
@@ -1178,7 +1178,7 @@ def test_merge_duplicate_keywords_rolls_back_on_failure(db, lib, monkeypatch):
 
     monkeypatch.setattr(db, "_merge_keyword_into", boom)
     with pytest.raises(RuntimeError, match="merge failed"), db.transaction(immediate=True):
-        db.keyword_tree.merge_duplicates()
+        keyword_duplicates.merge_duplicate_keywords(db)
     assert not db.conn.in_transaction
     assert _kw(db, a)[0] == "Heron"
 
@@ -1206,7 +1206,7 @@ def test_merge_duplicate_pass_skips_blank_keys_and_stale_groups(db, lib, monkeyp
         return 1
 
     monkeypatch.setattr(db, "_merge_keyword_into", fake_merge)
-    assert db._merge_duplicate_keywords_pass(lib["ws"]) == 1
+    assert keyword_duplicates.merge_duplicate_keywords_pass(db, lib["ws"]) == 1
     assert calls == [a]
     assert _kw(db, blank) is not None
 
@@ -1233,7 +1233,7 @@ def test_merge_duplicate_pass_skips_group_whose_survivor_vanished(db, lib, monke
         return 1
 
     monkeypatch.setattr(db, "_merge_keyword_into", fake_merge)
-    assert db._merge_duplicate_keywords_pass(lib["ws"]) == 1
+    assert keyword_duplicates.merge_duplicate_keywords_pass(db, lib["ws"]) == 1
     assert order == [(parent_b, parent_a)]
 
 
@@ -1243,9 +1243,11 @@ def test_normalize_keyword_row_name(db, lib, monkeypatch):
     clean = _raw_kw(db, "Heron", birds)
     kid = _raw_kw(db, '"Heron"', birds, kw_type="taxonomy")
     db.conn.commit()
+    from repositories.keyword_tree import KeywordTreeRepository
+
     renames = []
-    monkeypatch.setattr(db, "_rename_keyword_dependents",
-                        lambda k, old, new: renames.append((k, old, new)))
+    monkeypatch.setattr(KeywordTreeRepository, "rename_dependents",
+                        lambda _repo, k, old, new: renames.append((k, old, new)))
     db.keyword_tree.normalize_row_name(clean)
     db.keyword_tree.normalize_row_name(kid)  # collides with the general 'Heron'
     assert renames == []
@@ -1274,19 +1276,21 @@ def test_rename_keyword_dependents(db, lib, monkeypatch):
         ],
     )
     db.conn.commit()
+    from repositories.species_curation import SpeciesCurationRepository
+
     calls = []
-    monkeypatch.setattr(db, "rename_species_highlights_species",
-                        lambda o, n, photo_workspace_pairs=None:
+    monkeypatch.setattr(SpeciesCurationRepository, "rename_highlights",
+                        lambda _repo, o, n, photo_workspace_pairs=None:
                         calls.append(("hl", o, n, photo_workspace_pairs)))
-    monkeypatch.setattr(db, "rename_photo_preferences_species",
-                        lambda o, n, photo_workspace_pairs=None:
+    monkeypatch.setattr(SpeciesCurationRepository, "rename_photo_preferences",
+                        lambda _repo, o, n, photo_workspace_pairs=None:
                         calls.append(("pref", o, n, photo_workspace_pairs)))
     statements = _trace(db)
-    db._rename_keyword_dependents(kid, "'Verdin'", "'Verdin'")
-    db._rename_keyword_dependents(kid, "", "Verdin")
+    db.keyword_tree.rename_dependents(kid, "'Verdin'", "'Verdin'")
+    db.keyword_tree.rename_dependents(kid, "", "Verdin")
     db.conn.set_trace_callback(None)
     assert statements == []
-    db._rename_keyword_dependents(kid, "'Verdin'", "Verdin")
+    db.keyword_tree.rename_dependents(kid, "'Verdin'", "Verdin")
     assert calls == [
         ("hl", "'Verdin'", "Verdin", [(p0, ws)]),
         ("pref", "'Verdin'", "Verdin", [(p0, ws)]),
@@ -1307,20 +1311,22 @@ def test_rename_keyword_dependents(db, lib, monkeypatch):
     # An untagged keyword touches no pending rows and no curation.
     lone = _raw_kw(db, "Lone")
     calls.clear()
-    db._rename_keyword_dependents(lone, "Lone", "Alone")
+    db.keyword_tree.rename_dependents(lone, "Lone", "Alone")
     assert calls == []
 
 
-def test_reparent_disambiguated_routes_through_facade(db, lib, monkeypatch):
+def test_reparent_disambiguated_carries_the_rename(db, lib, monkeypatch):
+    from repositories.keyword_tree import KeywordTreeRepository
+
     birds = _raw_kw(db, "Birds")
     kid = _raw_kw(db, "Heron (dup)", birds)
     db.conn.commit()
     calls = []
-    monkeypatch.setattr(db, "_rename_keyword_dependents",
-                        lambda k, old, new: calls.append((k, old, new)))
+    monkeypatch.setattr(KeywordTreeRepository, "rename_dependents",
+                        lambda _repo, k, old, new: calls.append((k, old, new)))
     other = _raw_kw(db, "Waders")
     child = db.conn.execute("SELECT id, name FROM keywords WHERE id = ?", (kid,)).fetchone()
-    db._reparent_disambiguated(child, other, "Heron")
+    db.keyword_tree.reparent_disambiguated(child, other, "Heron")
     assert calls == [(kid, "Heron (dup)", "Heron")]
     assert _kw(db, kid)[:2] == ("Heron", other)
     assert db.conn.in_transaction  # caller commits
@@ -1413,9 +1419,6 @@ def test_resolve_species_by_lineage(db, lib):
 # repository that holds its SQL.
 _DELEGATING_KEYWORD_METHODS = {
     "add_keyword": "_keyword_repository",
-    "_merge_duplicate_keywords_pass": "_keyword_tree_repository",
-    "_rename_keyword_dependents": "_keyword_tree_repository",
-    "_reparent_disambiguated": "_keyword_tree_repository",
     "untag_photo": "_photo_keyword_repository",
     "get_photos_with_equivalent_species": "_photo_species_repository",
     "update_keyword": "_keyword_tree_repository",
@@ -1423,7 +1426,7 @@ _DELEGATING_KEYWORD_METHODS = {
 
 # The keyword-domain repositories that still bind ``Database`` methods by name
 # (``FACADE_METHODS``). The others take no façade at all.
-_KEYWORD_REPOSITORIES_WITH_FACADE_METHODS = {"repositories.keyword_tree"}
+_KEYWORD_REPOSITORIES_WITH_FACADE_METHODS: set[str] = set()
 
 # Every keyword-domain repository: its module, class, ``Database`` accessor
 # and the factory the accessor builds it through.
@@ -1492,6 +1495,9 @@ _REMOVED_KEYWORD_WRAPPERS = (
     "_lookup_taxon_id_for_keyword",
     "_add_source_species_keyword",
     "_resolve_species_by_lineage",
+    "_merge_duplicate_keywords_pass",
+    "_rename_keyword_dependents",
+    "_reparent_disambiguated",
 )
 
 # The provenance writers and the methods that call ``_merge_keyword_into``
@@ -1576,9 +1582,12 @@ def test_provenance_writers_and_their_merge_callers_delegate_to_provenance_repos
     )
 
 
-@pytest.mark.parametrize("name", ["_merge_duplicate_keywords_pass", "update_keyword"])
-def test_split_methods_still_call_merge_on_the_facade(name):
-    assert "_merge_keyword_into" in _self_attrs(getattr(Database, name))
+def test_split_methods_still_call_merge_on_the_facade():
+    assert "_merge_keyword_into" in _self_attrs(Database.update_keyword)
+    from services import keyword_duplicates
+
+    source = inspect.getsource(keyword_duplicates.merge_duplicate_keywords_pass)
+    assert "db._merge_keyword_into(" in source
 
 
 @pytest.mark.parametrize("module_name", sorted(_KEYWORD_REPOSITORIES))

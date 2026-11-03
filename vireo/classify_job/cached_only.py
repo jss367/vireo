@@ -83,8 +83,8 @@ def _finalize_cached_only(
     lack burst grouping metadata — the ordinary finalize path
     (``_store_grouped_predictions``) performs auto-match reconciliation
     against destination XMP/taxonomy and stamps group_id / vote counts.
-    Skipping it silently leaves imported predictions unreconciled, which
-    is why the earlier early-return "success" was actually a bug.
+    Returning "success" without it would silently leave imported
+    predictions unreconciled.
 
     ``peek_*`` — the labels/mode/metadata resolved earlier in
     ``run_classify_job`` before this shortcut fired. ``peek_succeeded`` is
@@ -92,8 +92,7 @@ def _finalize_cached_only(
     the caller falling back to model-only cache filtering). Used only to
     publish the ``label_source`` line on the classify step, so a re-run
     against a fully cached collection still records which lists produced
-    its predictions — otherwise the classify history row is unlabeled,
-    exactly the state this feature set out to eliminate.
+    its predictions rather than leaving the history row unlabeled.
 
     Returns the count dict ``run_classify_job`` returns to the runner.
     """

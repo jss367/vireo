@@ -35,9 +35,8 @@ def detect_stage(
     classification. Populates detect_state so each per-model classify
     step can pull cached detections rather than re-running MegaDetector.
 
-    Splitting detect out (it used to run interleaved with model 1's
-    classify loop) lets users see detection as its own row in the jobs
-    view, and lets a multi-model run amortize one detection pass across
+    A separate detect pass shows detection as its own row in the jobs
+    view and lets a multi-model run amortize one detection pass across
     every classifier.
     """
     collection_ready.wait()

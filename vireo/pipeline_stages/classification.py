@@ -246,7 +246,7 @@ class _SpecPass:
     # overcount attribution can be scoped: recording an overcount for a
     # photo the preflight never counted would deflate the projected
     # cache-hit rate for unrelated photos and prematurely inflate
-    # ``remaining_uncached`` (Codex #1468 P2).
+    # ``remaining_uncached``.
     preflight_cached_ids: set[int] = field(default_factory=set)
     # Photos whose runtime path deterministically skips inference
     # because they have no eligible animal target but do have a
@@ -292,7 +292,7 @@ class _SpecPass:
     # Photos observed to hit the confident-non-animal skip branch this
     # spec. Paired with ``preflight_unclassifiable_ids`` so the ETA can
     # subtract the unvisited share from remaining work instead of
-    # treating a fast tail as inference work (Codex #1468 P2).
+    # treating a fast tail as inference work.
     photos_unclassifiable: set[int] = field(default_factory=set)
     # Photos whose per-photo iteration was actually entered in THIS
     # spec. Scopes the reclassify clear so it never wipes predictions
@@ -302,11 +302,11 @@ class _SpecPass:
     # skipped without ever producing a replacement prediction. Without
     # this, ``clear_predictions`` on a ``reclassify=True`` run would
     # delete the prior predictions for those photos even though nothing
-    # in this run had a chance to rewrite them (Codex #1388 P1).
+    # in this run had a chance to rewrite them.
     reached_photo_ids: set[int] = field(default_factory=set)
-    # Source skips scoped to just THIS spec's reads. Codex #1388 P2
-    # (r3663642360): if the folder was unreachable for model A but
-    # returned before model B, the run-wide skipped set would still
+    # Source skips scoped to just THIS spec's reads: if the folder was
+    # unreachable for model A but returned before model B, the run-wide
+    # skipped set would still
     # exclude that photo from model B's reclassify clear — leaving model
     # B's stale prediction in place. Because ``add_prediction`` uses
     # ``INSERT OR IGNORE``, that stale row can win over the fresh result
@@ -329,7 +329,7 @@ class _SpecPass:
     # ``inference_attempts`` by that walltime yields an artificially low
     # rate and inflates the ETA for the uncached tail. Accumulate the
     # seconds spent preparing images and inside ``_flush_batch`` here so
-    # the ETA rate reflects inference throughput only (Codex #1468 P2).
+    # the ETA rate reflects inference throughput only.
     inference_seconds: float = 0.0
     inference_batch: list[_InferenceEntry] = field(default_factory=list)
     has_flushed: bool = False
@@ -369,8 +369,8 @@ class _ClassifyPass:
 
         # Track which per-model rows have reached a terminal state so a
         # fatal error raised by one model doesn't overwrite the status of
-        # already-completed models (P2 from the Codex review). Set here,
-        # before anything can raise, so ``fail`` can always read them.
+        # already-completed models. Set here, before anything can raise, so
+        # ``fail`` can always read them.
         self.completed_step_ids: set = set()
         self.failed_step_ids: set = set()
 
@@ -648,10 +648,10 @@ class _ClassifyPass:
         # the row should be ``failed`` — the Jobs page reads
         # ``step.status`` directly and auto-collapses ``completed``
         # rows without warnings, so leaving this ``completed`` would
-        # show a failed job with a green, collapsed classifier row
-        # (Codex #1388 P2 r3664058179). The later stage-status
-        # rollup in ``_finalize`` isn't mapped back to the
-        # ``classify:<model>`` step, so the fix has to land here.
+        # show a failed job with a green, collapsed classifier row.
+        # The later stage-status rollup in ``_finalize`` isn't mapped
+        # back to the ``classify:<model>`` step, so the status has to
+        # be decided here.
         spec_failed = bool(self.offline_reason or spec.source_skipped_photo_ids)
         if spec_failed:
             self.failed_step_ids.add(spec.step_id)
@@ -758,18 +758,18 @@ class _ClassifyPass:
         Contextual-weak photos use the lower ``weak_detection_confidence``
         floor to match the runtime cache-hit predicate; otherwise the
         cached weak tail is omitted from ``cached_est`` and the ETA
-        overstates remaining time (Codex #1468 P2).
+        overstates remaining time.
 
         Whenever detection ran, pass its in-memory map so both estimates
         use the exact candidates the classify loop will consume. Rows
         from another detector model can remain in the DB after either a
         reclassify or an ordinary runtime-fingerprint miss; letting
         those stale rows into preflight can invent work or hide a fresh
-        cache hit (Codex #1468 P2). ``processed_ids`` is what
+        cache hit. ``processed_ids`` is what
         ``_detect_batch`` actually completed this run. Photos absent from
         it are ones the detector raised on and runtime will DB-fallback
         for, so they must be evaluated against DB rows here too instead
-        of treated as "no fresh animal" (Codex #1468 P2).
+        of treated as "no fresh animal".
 
         The cache estimate is skipped on reclassify runs because the
         cache gate is bypassed and every photo is re-inferred.
@@ -820,7 +820,7 @@ class _ClassifyPass:
         preflight overcounts rows whose runtime rolled since the prior
         classify pass, and no observation can correct the estimate until
         those rows are visited — so the UI reads "finishing…" while
-        inference is still pending (Codex #1468 P2).
+        inference is still pending.
         """
         labels_full, model_identity, tax_identity = self._portable_identity()
         if not (labels_full and model_identity):
@@ -873,9 +873,8 @@ class _ClassifyPass:
                 self._classify_photo(spec, photo)
 
             # Batch boundary: surface the per-photo accumulated
-            # count + cached to the UI. Replaces the old per-batch
-            # pre-advance which lied about progress when batches
-            # contained cache hits.
+            # count + cached to the UI. Advancing by batch size up front
+            # would overstate progress when batches contain cache hits.
             self._drain_pending_inference(spec)
             self._emit_batch_progress(spec)
 
@@ -958,8 +957,8 @@ class _ClassifyPass:
         # Sending the entire human/vehicle frame to the wildlife
         # classifier would persist a spurious species prediction. Skip
         # the fallback in that case and leave the photo without a
-        # classifier run, matching the old raw-detection guard's intent
-        # while still rescuing sub-threshold animal photos.
+        # classifier run, while still rescuing sub-threshold animal
+        # photos.
         if self._has_confident_non_animal(photo_id):
             # This is the only no-target path that skips inference.
             # Track it so the ETA does not project confident person/
@@ -1011,7 +1010,7 @@ class _ClassifyPass:
                 # V6 evidence. Keep the detector-failure DB fallback
                 # on that same candidate set so a stale,
                 # higher-confidence foreign row cannot diverge from
-                # the cache preflight's selected crop (Codex #1468 P2).
+                # the cache preflight's selected crop.
                 detector_model=(
                     "megadetector-v6" if is_contextual_weak else None
                 ),
@@ -1040,8 +1039,7 @@ class _ClassifyPass:
             # inferring the higher-ID box while the preflight marked the
             # photo cached via a portable-cache run on the lower-ID box;
             # the overcount tracker then can't correct it because the
-            # runtime-selected detection has no run key of its own
-            # (Codex #1468 P2).
+            # runtime-selected detection has no run key of its own.
             photo_dets = sorted(
                 photo_dets,
                 key=lambda d: (
@@ -1146,7 +1144,7 @@ class _ClassifyPass:
             # partially cached combined-pipeline run re-classifies
             # detections whose no-match verdict was already recorded and
             # can replace an authoritative "nothing in this list fits"
-            # outcome with a fresh inference (Codex P2 on a1be510). The
+            # outcome with a fresh inference. The
             # preflight counts a match-score-backed run as cached too
             # (``ModelRunsRepository.get_classifier_run_cache_hits``), so
             # there is no overcount to reconcile.
@@ -1166,7 +1164,7 @@ class _ClassifyPass:
             # lacked any run key was never in ``cached_est`` to begin
             # with, and treating this fall-through as a failed preflight
             # prediction would deflate the projection for unrelated
-            # cache-heavy tails (Codex #1468 P2).
+            # cache-heavy tails.
             if photo["id"] in spec.preflight_cached_ids:
                 spec.photos_cache_overcounted.add(photo["id"])
         elif run_key in rejected_keys:
@@ -1179,7 +1177,7 @@ class _ClassifyPass:
             # collection made entirely of these rows sees
             # ``remaining_uncached`` collapse to zero after the first
             # uncached batch and the UI reports "finishing…" while most
-            # photos still need inference (Codex #1468 P2). Same
+            # photos still need inference. Same
             # preflight-membership guard: an unrelated detection without
             # any run key on this photo means the preflight never
             # counted it, so this branch isn't a preflight miss to
@@ -1210,7 +1208,7 @@ class _ClassifyPass:
         # below, a photo whose only key is gate-rejected sits in
         # ``cached_est`` forever and ETA prematurely reads "finishing…"
         # on runs where the detector fingerprint has rolled since the
-        # prior classifier pass (Codex #1468 P2).
+        # prior classifier pass.
         if expected_classifier_runtime is not None:
             run_keys, rejected_keys = thread_db.model_runs.get_classifier_run_key_gate(
                 detection["id"],
@@ -1288,31 +1286,16 @@ class _ClassifyPass:
         ``None`` when the photo is broken or its folder is unreachable;
         ``gave_up`` is ``True`` when classify stopped on a dead source.
 
-        Before blaming the photo, check whether the source itself
-        vanished. A dropped share fails every remaining read instantly,
-        so counting these as per-photo failures would report the
-        untouched remainder of the collection as broken images.
+        A failed read first checks whether the source itself vanished: a
+        dropped share fails every remaining read instantly, and those are
+        not broken photos. A mount-scoped outage pauses and retries in a
+        loop, so a mount still dead after Resume latches ``offline_reason``
+        even on the last read (downstream stages then skip the dead
+        source); ``_MAX_SOURCE_OFFLINE_PAUSES`` bounds the loop.
 
-        Loop rather than one-shot pause+retry so a mount that stays dead
-        across a resume also gets latched when this happens to be the
-        last photo (or last detection) needing an image read: silently
-        continuing on the failed retry would leave ``offline_reason``
-        unset, abort clear, and extract_masks / eye_keypoints would
-        still walk every detected photo reissuing reads against the dead
-        share (Codex #1388 P1 r3663278142). ``_handle_source_offline``
-        bounds the total pause/retry cycles via
-        ``_MAX_SOURCE_OFFLINE_PAUSES``, so this can't loop forever.
-
-        Image preparation time is tracked apart from the pause loop and
-        folded into ``spec.inference_seconds`` only when the photo
-        actually enters the inference batch. Cache-hit and
-        image-decode-fail paths never contribute to
-        ``inference_attempts``, so their prep time must not count toward
-        the rate; a photo whose retries eventually succeed DOES count, so
-        accumulate across every ``_prepare_image`` call for this
-        detection (Codex #1468 P2). Without it, RAW/JPEG-heavy or
-        slow-storage runs publish a rate that only reflects GPU work and
-        understate the ETA.
+        Prep time across every attempt is added to
+        ``spec.inference_seconds`` only when an image loads, so the ETA rate
+        includes decode time but not cache hits or failed decodes.
         """
         prep_seconds = 0.0
         prep_started = time.time()
@@ -1335,8 +1318,7 @@ class _ClassifyPass:
                 # so a multi-subject photo (N qualifying detections)
                 # counts once, not N times — the per-spec ``total`` and
                 # step summary are photo-scoped, and without this the row
-                # could report e.g. ``3 unreachable`` out of ``1`` photo
-                # (Codex #1388 P2 r3664348763).
+                # could report e.g. ``3 unreachable`` out of ``1`` photo.
                 if photo["id"] not in spec.source_skipped_photo_ids:
                     spec.source_skipped += 1
                 self._mark_source_skipped(spec, photo)
@@ -1351,14 +1333,14 @@ class _ClassifyPass:
                 # Give-up: image never loaded, so this photo is
                 # unreached — same bucket as the folder-scoped skip
                 # above. Keeps the reclassify clear from wiping its prior
-                # prediction (Codex #1388 P1 r3663159360).
+                # prediction.
                 self._mark_source_skipped(spec, photo)
                 return None, folder_path, image_path, True
             # Resumed. Retry the same read before advancing — silently
             # skipping the paused-during photo would leave it
             # unclassified even though the source came back, and on a
             # reclassify run finalization would clear its old prediction
-            # with no replacement (Codex #1388 P2). If the retry also
+            # with no replacement. If the retry also
             # fails, the loop re-probes and either pauses again
             # (bounded), degrades to folder-scope, or gives up.
             prep_started = time.time()
@@ -1373,8 +1355,8 @@ class _ClassifyPass:
                 # still gets its own bounded retry window. Without this,
                 # three separately-recovered outages exhaust the budget
                 # and the fourth outage immediately takes the give-up
-                # branch without ever offering Resume (Codex #1388 P2
-                # r3663816327). The pause bound is meant to protect
+                # branch without ever offering Resume. The pause bound
+                # is meant to protect
                 # against a user who resumes WITHOUT actually remounting
                 # the share — a successful read is proof the share IS
                 # back, so the counter can honestly reset.
@@ -1405,8 +1387,8 @@ class _ClassifyPass:
         # Don't push a pause message into ``errors``: a successful
         # reconnect+resume leaves classify completing normally, but
         # templates/pipeline.html treats every ``[classify]`` error
-        # as a failed stage and suppresses the success redirect
-        # (Codex #1388 P1). ``pause_job`` below already flips the
+        # as a failed stage and suppresses the success redirect.
+        # ``pause_job`` below already flips the
         # job state to ``pausing``/``paused`` (that's what the UI
         # renders while parked), and the give-up path in ``_finalize``
         # appends its own ``[classify] Fatal:`` entry — so a run
@@ -1437,8 +1419,7 @@ class _ClassifyPass:
             # so the job's public state is already ``pausing``
             # and a second pause request is a no-op. Treating (b)
             # as "can't pause" would waste the user's Pause
-            # click by giving up instead of parking (Codex
-            # #1388 P2 r3663383518); check
+            # click by giving up instead of parking; check
             # ``pause_requested`` and fall through to the
             # checkpoint so the run parks on the user's
             # already-in-flight request.
@@ -1470,19 +1451,13 @@ class _ClassifyPass:
     def _publish_pause_reason(self, reason: str, step_id: str | None) -> None:
         """Surface the offline reason on transient progress/pause state.
 
-        Codex #1388 P1 r3663383513: the pause itself was only
-        reported via server-side log; the jobs UI showed a generic
-        ``paused`` state with no indication of *why* classify
-        parked, so users could not tell they needed to remount a
-        named volume and might keep pressing Resume until the
-        bounded retry budget converted a recoverable outage into a
-        failed run. Publish the reason via the progress event
-        (mirrored onto ``job['progress']`` for /api/jobs polls and
-        the SSE stream alike) and set the classify step's
-        ``current_file`` so the reason renders directly beneath
-        the paused pipeline step, right next to the Resume button.
-        Kept off ``errors`` so a successful resume still finalizes
-        as ``completed``.
+        A bare ``paused`` state does not tell the user to remount a named
+        volume, and pressing Resume without remounting spends the bounded
+        retry budget. The reason goes out on the progress event (mirrored
+        onto ``job['progress']`` for /api/jobs polls and the SSE stream)
+        and into the classify step's ``current_file``, beneath the paused
+        step next to Resume. It stays off ``errors`` so a successful resume
+        still finalizes as ``completed``.
         """
         run = self.run
         message = (
@@ -1592,7 +1567,7 @@ class _ClassifyPass:
 
         # Photo-scoped ``count`` bookkeeping: each distinct photo whose
         # flush yielded at least one successful classification counts
-        # once. If it was previously bucketed as fully-cached (an earlier
+        # once. If it is already bucketed as fully-cached (an earlier
         # detection hit the cache), migrate it — decrement ``cached`` and
         # add it to ``count`` — so ``count + cached`` stays bounded by
         # the (photo-scoped) ``total``.
@@ -1633,7 +1608,7 @@ class _ClassifyPass:
                     # Inference-active seconds only. Wall time since
                     # ``start_time`` includes the cache-traversal prefix
                     # and would deflate the per-attempt rate on
-                    # cache-heavy runs (Codex #1468 P2).
+                    # cache-heavy runs.
                     elapsed=spec.inference_seconds,
                     cache_overcount=len(spec.photos_cache_overcounted),
                     unclassifiable_estimate=len(
@@ -1671,8 +1646,8 @@ class _ClassifyPass:
         """Persist this spec's predictions; returns how many were stored."""
         thread_db = self.thread_db
         # Reclassify clear, deferred until classification finished so a
-        # mid-batch cancel leaves the user's prior predictions intact
-        # (Codex P1 review on #710). Scope by labels_fingerprint so
+        # mid-batch cancel leaves the user's prior predictions intact.
+        # Scope by labels_fingerprint so
         # reclassifying one workspace's label set doesn't wipe another
         # workspace's cached predictions on the same photos under its own
         # fingerprint (shared-folder setups). ``clear_run_keys=False``
@@ -1685,14 +1660,14 @@ class _ClassifyPass:
         # as source-offline: an unreached photo (mount-scoped give-up, or
         # every photo under a vanished folder) is one this run had no
         # chance to rewrite, so wiping its prior prediction would leave
-        # it with nothing at all (Codex #1388 P1). Use the per-spec
+        # it with nothing at all. Use the per-spec
         # skipped set rather than the run-wide one so a photo skipped for
         # an earlier spec but successfully reached this spec still has
         # its stale prior prediction cleared before
         # ``_store_grouped_predictions`` writes the fresh row —
         # ``add_prediction`` is ``INSERT OR IGNORE`` and would otherwise
-        # keep the stale species/confidence (Codex #1388 P2
-        # r3663642360). Fall back to the collection-wide clear when no
+        # keep the stale species/confidence. Fall back to the
+        # collection-wide clear when no
         # source outage hit this spec — that's still the desired
         # behavior on a clean reclassify.
         if self.run.params.reclassify:
@@ -1770,8 +1745,7 @@ class _ClassifyPass:
         # purge below would delete any pre-run detection ids whose boxes
         # differ from the fresh boxes even for photos we never classified
         # — cascading through their prior predictions despite the
-        # ``clear_predictions`` exclusion that already spares them (Codex
-        # #1388 P1 r3663922709).
+        # ``clear_predictions`` exclusion that already spares them.
         purge_ids = (
             (self.first_model_photo_ids & self.detect_state["processed_ids"])
             - self.source_skipped_photo_ids
@@ -1885,7 +1859,7 @@ class _ClassifyPass:
             )
 
         # Roll up per-photo failures into a single classify stage status
-        # + errors[] entry, matching the pattern in #562. Per-model step
+        # + errors[] entry, like the other stages. Per-model step
         # rows already carry their own summary; the stage status reflects
         # the whole classify pass.  error_count uses unique failed photo
         # IDs (not per-model attempt count) so the badge can never
@@ -1897,8 +1871,7 @@ class _ClassifyPass:
         # need this even on the folder-scoped path (abort deliberately
         # stays clear so healthy folders keep processing) — otherwise
         # they still walk every detected photo in the missing folder
-        # and re-issue reads against the offline share (Codex #1388
-        # P2 r3664058173).
+        # and re-issue reads against the offline share.
         self.source_offline_state["skipped_photo_ids"] = (
             set(self.source_skipped_photo_ids)
         )
