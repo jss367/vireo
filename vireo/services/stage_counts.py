@@ -365,7 +365,7 @@ def count_eye_keypoint_eligible(
     prediction sits on a non-primary detection — the stage cannot
     produce eye keypoints for those, so review readiness would
     repeatedly flag missing keypoints while the plan reported the
-    stage complete (Codex r4056621190).
+    stage complete.
     """
     repo = _scoped_stats(db)
     min_conf = _detector_confidence(db, None)
@@ -411,8 +411,8 @@ def count_eye_keypoint_attemptable(
     Match ``list_photos_for_eye_keypoint_stage``'s selected-primary
     + active-mask predicates and its "best routable row per photo"
     selection so a taxonomy-bearing prediction wins over a
-    taxonomy-less one on the *same* selected detection (Codex
-    r4056621190). Predictions that route only via the scientific
+    taxonomy-less one on the *same* selected detection. Predictions
+    that route only via the scientific
     name → taxa-table fallback are *not* counted here (the SQL
     filter is taxonomy_class-only); those photos will still be
     attempted by the stage but will be undercounted in the target,
