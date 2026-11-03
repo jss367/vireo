@@ -11,11 +11,11 @@ photo-level ``NOT EXISTS`` would over-restrict on, and
 import sqlite3
 
 # The one definition of "this prediction's review is already settled".
-# ``app.py`` binds ``_DECIDED_PREDICTION_STATUSES`` to it, the grouped
-# accept expansion below uses it, and Browse's panel mirrors it in JS, so
-# no surface can drift on which rows are still actionable. See
-# ``app.py``'s ``_decided_prediction_ids`` for why ``alternative`` is
-# absent and what each endpoint then does with those rows.
+# ``web/predictions.py`` binds its alias through
+# ``Database.DECIDED_PREDICTION_STATUSES``; grouped expansion in
+# ``keyword_provenance._acceptance_targets`` uses the same tuple.
+# Browse's panel mirrors it in JS. See ``web/predictions.py``'s
+# ``_decided_prediction_ids`` for why ``alternative`` is absent.
 DECIDED_PREDICTION_STATUSES = ("accepted", "rejected", "reviewed")
 
 # Row-level filterable fields: those the row's own values can prove.
@@ -75,7 +75,7 @@ def _relax_negated_walk(node, negated, prediction_fields, broad):
             # prediction leaves would be compiled by the outer
             # ``NOT EXISTS(...)`` in a way that lets its metadata
             # siblings prune photos before the row filter sees them
-            # (see ``Database._relax_negated_prediction_leaves``). Drop the whole subgroup so
+            # (see ``relax_negated_prediction_leaves``). Drop the whole subgroup so
             # SQL broadens; the row filter re-evaluates the
             # ORIGINAL tree per row.
             if (
