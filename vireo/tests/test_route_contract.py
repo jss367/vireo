@@ -2012,15 +2012,18 @@ def _repository_decision_writer_calls(tree):
     """Candidate repository writer calls in ``tree``, as ``(lineno, call)``.
 
     Recognize known class spellings (bare or qualified), their from-import
-    aliases, known Database factory calls, and simple Name assignments or
-    annotated bindings of constructors and instances. Regular parameters and
-    local declarations can supply a known class annotation, quoted or bare.
+    aliases, known Database factory calls, and simple Name bindings through
+    Assign, AnnAssign, or NamedExpr (walrus) nodes. Named expressions also
+    retain their value inline, including nested class/factory/instance forms.
+    Regular parameters and local declarations can supply a known class
+    annotation, quoted or bare.
 
     Bindings are conservative module-wide candidates, not a scope/control-flow
     proof. Propagate finite candidate sets until stable, retaining alternatives
     and terminating on cycles. Annotations are parsed, never evaluated. This
     does not infer arbitrary call returns, resolve cross-module exports, or
-    follow dynamic getattr, containers, unpacking, or stored object fields.
+    follow dynamic getattr, containers, unpacking, stored object fields, or
+    other computed right-hand-side forms outside the cases above.
     """
     nodes = list(ast.walk(tree))
     classes: dict[str, set[str]] = {
@@ -2036,13 +2039,20 @@ def _repository_decision_writer_calls(tree):
                         _REPOSITORY_CLASSES[alias.name],
                     )
 
+    def named_value(expr):
+        while isinstance(expr, ast.NamedExpr):
+            expr = expr.value
+        return expr
+
     def class_of(expr):
+        expr = named_value(expr)
         if isinstance(expr, ast.Name):
             return classes.get(expr.id, set())
         kind = _REPOSITORY_CLASSES.get(expr.attr) if isinstance(expr, ast.Attribute) else None
         return {kind} if kind else set()
 
     def builder_of(expr):
+        expr = named_value(expr)
         candidates = class_of(expr)
         if isinstance(expr, ast.Name):
             return candidates | builders.get(expr.id, set())
@@ -2051,6 +2061,7 @@ def _repository_decision_writer_calls(tree):
         return candidates
 
     def repository_of(expr):
+        expr = named_value(expr)
         if isinstance(expr, ast.Name):
             return instances.get(expr.id, set())
         if isinstance(expr, ast.Attribute) and expr.attr in _REPOSITORY_DECISION_WRITERS:
@@ -2077,7 +2088,7 @@ def _repository_decision_writer_calls(tree):
     while changed:
         changed = False
         for node in nodes:
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for target in targets:
                     if not isinstance(target, ast.Name):
@@ -2302,5 +2313,83 @@ read_alias = read_repo
 read_alias.get_rows()
 items = [read_repo]
 items.update_status(4)
+''')
+    assert list(_repository_decision_writer_calls(tree)) == []
+
+
+def test_repository_writer_named_expressions_cover_instances_classes_and_factories():
+    """Walrus expressions bind names and retain their value without evaluation."""
+    for cls, module, writer, factory in [
+        ('PredictionRepository', 'predictions', 'update_status', '_prediction_repository'),
+        ('KeywordProvenanceRepository', 'keyword_provenance', 'accept_prediction', '_keyword_provenance_repository'),
+    ]:
+        tree = ast.parse(f'''
+from repositories.{module} import {cls} as Imported
+import repositories.{module} as mod
+
+def route(db):
+    if (guarded := db.{module}) is not None:
+        guarded.{writer}(1)
+    (inline := db.{module}).{writer}(2)
+    (outer := (inner := Imported(conn))).{writer}(3)
+    copied = outer
+    copied.{writer}(4)
+    if (Ctor := mod.{cls}) is not None:
+        Ctor(conn).{writer}(5)
+    (InlineCtor := Imported)(conn).{writer}(6)
+    (OuterCtor := (InnerCtor := Imported))(conn).{writer}(7)
+    if (Maker := db.{factory}) is not None:
+        Maker().{writer}(8)
+    (InlineMaker := db.{factory})().{writer}(9)
+    (OuterMaker := (InnerMaker := db.{factory}))().{writer}(10)
+    (product := db.{factory}()).{writer}(11)
+    (DirectClass := mod.{cls}).{writer}(outer, 12)
+    typed: Imported = (captured := Imported(conn))
+    typed.{writer}(13)
+    captured.{writer}(14)
+''')
+        expected = [
+            f'guarded.{writer}', f'(inline := db.{module}).{writer}',
+            f'(outer := (inner := Imported(conn))).{writer}', f'copied.{writer}',
+            f'Ctor(conn).{writer}', f'(InlineCtor := Imported)(conn).{writer}',
+            f'(OuterCtor := (InnerCtor := Imported))(conn).{writer}', f'Maker().{writer}',
+            f'(InlineMaker := db.{factory})().{writer}',
+            f'(OuterMaker := (InnerMaker := db.{factory}))().{writer}',
+            f'(product := db.{factory}()).{writer}',
+            f'(DirectClass := mod.{cls}).{writer}', f'typed.{writer}', f'captured.{writer}',
+        ]
+        assert sorted(call for _, call in _repository_decision_writer_calls(tree)) == sorted(expected)
+
+
+def test_repository_writer_named_expression_alternatives_and_cycles():
+    tree = ast.parse('''
+from repositories.predictions import PredictionRepository as P
+from repositories.keyword_provenance import KeywordProvenanceRepository as K
+if TYPE_CHECKING:
+    (Constructor := P)
+else:
+    (Constructor := K)
+(Alias := Constructor)
+(repo := Alias(conn))
+(copy := repo)
+copy.update_status(1)
+copy.accept_prediction(2)
+(cycle_a := cycle_b)
+(cycle_b := cycle_a)
+cycle_a.update_status(3)
+''')
+    assert [call for _, call in _repository_decision_writer_calls(tree)] == [
+        'copy.update_status', 'copy.accept_prediction',
+    ]
+
+
+def test_repository_writer_named_expressions_ignore_unrelated_and_read_only_values():
+    tree = ast.parse('''
+if (other := OtherRepository(conn)) is not None:
+    other.update_status(1)
+(factory := db._unrelated_repository)().update_status(2)
+(dynamic := arbitrary_return()).accept_prediction(3)
+(values := [PredictionRepository(conn)]).update_status(4)
+(reader := PredictionRepository(conn)).get_rows()
 ''')
     assert list(_repository_decision_writer_calls(tree)) == []
