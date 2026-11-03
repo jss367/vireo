@@ -1,14 +1,16 @@
 """Persistence for folders: rows, trees, parent repair, health, relocation.
 
-``Database`` keeps the active-workspace state and the new-images cache, and
-the façade or a service makes every call into another domain. Where a folder
-method composes other domains mid-transaction (``delete_photos`` and the
-removal record in ``delete_folder``), the caller passes the function in, so
-monkeypatches of it still apply and the call happens at the same point in the
-SQL; the merge's GPS-review and embedded-offer carries are bound once when the façade builds the
-repository. Calls within this domain (``nearest_ancestor_id`` in parent
-repair, ``merge_into_existing`` in ``relocate``) go through the repository
-itself. Workspace-scoped reads use ``self.workspace_id``, which resolves
+``Database`` keeps the active-workspace state and the new-images cache, and a
+service makes every call into another domain. Where a folder method composes
+other domains mid-transaction (``delete_photos`` and the removal record in
+``delete_folder``), the caller passes the function in, so the call happens at
+the same point in the SQL. Relocating onto a path another row tracks, and
+merging a missing folder into that row, are ``services.folder_merges``: the
+service folds each photo across domains and calls this repository's steps
+(``path_conflict``, ``relocate_unclaimed``, ``photos_in_folder``,
+``carry_merged_photo_keywords``, ``finish_merge``). Calls within this domain
+(``nearest_ancestor_id`` in parent repair) go through the repository itself.
+Workspace-scoped reads use ``self.workspace_id``, which resolves
 ``Database._ws_id()`` at each read (raising when no workspace is active);
 catalog-wide methods never read it, so ``db.folders`` serves both.
 Workspace-folder membership lives in ``repositories/workspace_folders.py``.
@@ -16,7 +18,6 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.photo_row_deletion import photo_row_deletion
@@ -31,20 +32,11 @@ class OriginalPathReturned(ValueError):
     """
 
 
-@dataclass(frozen=True)
-class FolderMergeHooks:
-    """The coordinated carries a folder collapse performs in its transaction."""
-
-    transfer_gps_review: Callable[[int, int], object] | None
-    transfer_embedded_offered: Callable[[int, int], object] | None
-    prepare_identity_merge: Callable[[int, int], None] | None = None
-
-
 class FolderRepository:
     def __init__(self, conn, resolve_workspace_id, *,
                  path_for_subtree_match, stored_parent_path, subtree_prefix,
                  subtree_relative, join_subtree_path, chunk_size=800,
-                 merge_hooks: FolderMergeHooks, keyword_source_conflict_sql):
+                 keyword_source_conflict_sql):
         self.conn = conn
         # ``Database._ws_id``, uncalled: only the workspace-scoped reads
         # resolve it, so the catalog-wide methods work with no workspace set.
@@ -58,17 +50,11 @@ class FolderRepository:
         self.subtree_relative = subtree_relative
         self.join_subtree_path = join_subtree_path
         self.chunk_size = chunk_size
-        # What ``merge_into_existing`` hands to other domains, all run inside
-        # its transaction: the GPS-review carry (moves/merge), the
-        # embedded-keyword offer carry (``PhotoKeywordRepository``) and the
-        # ``db`` module's ``KEYWORD_SOURCE_CONFLICT_SQL``, the shared ON
-        # CONFLICT clause the ``photo_keywords`` carry uses so a losing row's
-        # keyword that lands on an existing survivor association keeps the
-        # stronger of the two provenance stamps.
-        self.transfer_gps_review = merge_hooks.transfer_gps_review
-        self.transfer_embedded_offered = merge_hooks.transfer_embedded_offered
+        # The ``db`` module's ``KEYWORD_SOURCE_CONFLICT_SQL``, the shared ON
+        # CONFLICT clause the merge's ``photo_keywords`` carry uses so a
+        # losing row's keyword that lands on an existing survivor association
+        # keeps the stronger of the two provenance stamps.
         self.KEYWORD_SOURCE_CONFLICT_SQL = keyword_source_conflict_sql
-        self.prepare_identity_merge = merge_hooks.prepare_identity_merge
 
     @property
     def workspace_id(self):
@@ -562,43 +548,29 @@ class FolderRepository:
         """Set one folder's status to 'ok' (no commit)."""
         self.conn.execute("UPDATE folders SET status = 'ok' WHERE id = ?", (folder_id,))
 
-    def relocate(self, folder_id, new_path):
-        """Update folder path and set status to 'ok' (no commit).
-
-        Also checks if missing child folders exist at corresponding paths
-        under new_path. If they do, relocates them too.
-
-        If new_path is already tracked by another folder, merges photos from
-        the missing folder into the existing one and removes the missing folder.
-        If the missing folder's own path is back on disk, raises
-        ``OriginalPathReturned`` without writing; any other refusal is a
-        ``ValueError``, possibly raised part-way through the merge, so run it
-        in a savepoint (``services.folder_relocation.relocate_folder``).
-
-        Returns list of child folder dicts that were also relocated.
-        """
-        # Check for duplicate path
-        conflict = self.conn.execute(
+    def path_conflict(self, folder_id, new_path):
+        """The other folder row already tracking ``new_path``, or None."""
+        return self.conn.execute(
             "SELECT id FROM folders WHERE path = ? AND id != ?",
             (new_path, folder_id),
         ).fetchone()
-        if conflict:
-            # Only merge if source folder is missing; for ok folders, reject
-            source_row = self.conn.execute(
-                "SELECT status, path FROM folders WHERE id = ?", (folder_id,)
-            ).fetchone()
-            if source_row and source_row["status"] == "missing":
-                # Revalidate: if the original path came back, refuse without
-                # writing; the caller refreshes the status (``mark_ok``).
-                if os.path.isdir(source_row["path"]):
-                    raise OriginalPathReturned(
-                        f"Path is already tracked as folder {conflict['id']}"
-                    )
-                return self.merge_into_existing(folder_id, conflict["id"], new_path)
-            raise ValueError(
-                f"Path is already tracked as folder {conflict['id']}"
-            )
 
+    def status_and_path(self, folder_id):
+        """``status`` and ``path`` of one folder row, or None."""
+        return self.conn.execute(
+            "SELECT status, path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+
+    def relocate_unclaimed(self, folder_id, new_path):
+        """Point a folder at a path no other row tracks and mark it 'ok' (no commit).
+
+        Also checks if missing child folders exist at corresponding paths
+        under new_path. If they do, relocates them too. A path another row
+        already tracks is ``services.folder_merges.relocate``'s to decide
+        (merge or refuse).
+
+        Returns list of child folder dicts that were also relocated.
+        """
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
@@ -638,82 +610,57 @@ class FolderRepository:
         self.relink_parents_by_path([folder_id] + [c["id"] for c in cascaded])
         return cascaded
 
-    def _fold_source_photos(
-        self, source_folder_id, target_folder_id, new_path, transfer_gps_review,
-        transfer_embedded_offered, KEYWORD_SOURCE_CONFLICT_SQL,
-    ):
-        """Move or drop each photo of the merged folder.
-
-        A photo the target already holds is folded into that row (GPS
-        review, keyword associations, embedded-offered keys) and dropped.
-        Returns ``(drop_ids, collection_remap)``.
-        """
-        # Get photos from the missing folder
-        source_photos = self.conn.execute(
+    def photos_in_folder(self, folder_id):
+        """``id`` and ``filename`` of every photo row in one folder."""
+        return self.conn.execute(
             "SELECT id, filename FROM photos WHERE folder_id = ?",
-            (source_folder_id,),
+            (folder_id,),
         ).fetchall()
 
-        # Reassign or drop each photo
-        drop_ids = []
-        # Where each dropped id's collection memberships go: the duplicate
-        # that absorbs it, or nowhere for a phantom.
-        collection_remap = {}
-        for photo in source_photos:
-            existing = self.conn.execute(
-                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
-                (target_folder_id, photo["filename"]),
-            ).fetchone()
-            if existing:
-                if self.prepare_identity_merge:
-                    self.prepare_identity_merge(photo["id"], existing["id"])
-                transfer_gps_review(photo["id"], existing["id"])
-                # Move the embedded-offered suppression onto the surviving
-                # row so a user's keyword removal is not resurrected by a
-                # later rescan of the same embedded value. The non-cascading
-                # FK on ``photo_embedded_keyword_offered.photo_id`` would
-                # also abort the ``DELETE FROM photos`` below without this.
-                # Carry the losing row's keyword associations onto the
-                # survivor before the batch delete below drops them. Without
-                # this, a tag the loser carried but the survivor did not
-                # (common when the embedded import tagged the loser from
-                # ``Robin`` in file metadata) would be lost -- and the
-                # suppression transferred above would then make every later
-                # embedded rescan skip the key as "already offered",
-                # permanently filtering the tag out. The shared conflict
-                # clause folds provenance when both rows carried the keyword
-                # so a hand-added manual tag on the survivor cannot be
-                # silently downgraded to an unknown by the import's stamp.
-                from repositories.keyword_identity_sql import embedded_keyword_associations_for_merge
+    def photo_named(self, folder_id, filename):
+        """The photo row named ``filename`` in ``folder_id``, or None."""
+        return self.conn.execute(
+            "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+            (folder_id, filename),
+        ).fetchone()
 
-                for keyword in embedded_keyword_associations_for_merge(
-                        self.conn, photo["id"], existing["id"]):
-                    # Species evidence rides along for the same reason as the
-                    # ``source`` stamp: a folder collision that collapses two
-                    # rows must not silently discard a reviewer's identification
-                    # claim recorded only on the losing side. The shared
-                    # conflict clause keeps the survivor's existing evidence
-                    # over the incoming one.
-                    self.conn.execute(
-                        "INSERT INTO photo_keywords "
-                        "(photo_id, keyword_id, source, species_provenance) "
-                        "VALUES (?, ?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
-                        (existing["id"], keyword["id"],
-                         keyword["source"], keyword["species_provenance"]),
-                    )
-                transfer_embedded_offered(photo["id"], existing["id"])
-                drop_ids.append(photo["id"])
-                collection_remap[photo["id"]] = existing["id"]
-            elif os.path.exists(os.path.join(new_path, photo["filename"])):
-                self.conn.execute(
-                    "UPDATE photos SET folder_id = ? WHERE id = ?",
-                    (target_folder_id, photo["id"]),
-                )
-            else:
-                # File doesn't exist on disk at target — drop phantom record
-                drop_ids.append(photo["id"])
-                collection_remap[photo["id"]] = None
-        return drop_ids, collection_remap
+    def move_photo_to_folder(self, photo_id, folder_id):
+        """Reassign one photo row to another folder (no commit)."""
+        self.conn.execute(
+            "UPDATE photos SET folder_id = ? WHERE id = ?",
+            (folder_id, photo_id),
+        )
+
+    def carry_merged_photo_keywords(self, losing_id, survivor_id):
+        """Carry a merged-away photo's keyword associations onto the survivor (no commit).
+
+        Runs before the merge's batch delete drops the loser's rows. Without
+        it, a tag the loser carried but the survivor did not (common when the
+        embedded import tagged the loser from ``Robin`` in file metadata)
+        would be lost, and the embedded-offered suppression the merge moves
+        onto the survivor would then make every later embedded rescan skip
+        the key as "already offered", permanently filtering the tag out. The
+        shared conflict clause folds provenance when both rows carried the
+        keyword, so a hand-added manual tag on the survivor cannot be
+        silently downgraded to an unknown by the import's stamp.
+        """
+        from repositories.keyword_identity_sql import embedded_keyword_associations_for_merge
+
+        for keyword in embedded_keyword_associations_for_merge(
+                self.conn, losing_id, survivor_id):
+            # Species evidence rides along for the same reason as the
+            # ``source`` stamp: a folder collision that collapses two
+            # rows must not silently discard a reviewer's identification
+            # claim recorded only on the losing side. The shared
+            # conflict clause keeps the survivor's existing evidence
+            # over the incoming one.
+            self.conn.execute(
+                "INSERT INTO photo_keywords "
+                "(photo_id, keyword_id, source, species_provenance) "
+                "VALUES (?, ?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
+                (survivor_id, keyword["id"],
+                 keyword["source"], keyword["species_provenance"]),
+            )
 
     def _drop_merged_photos(self, drop_ids, collection_remap):
         """Delete the merged folder's duplicate and phantom photo rows."""
@@ -754,34 +701,19 @@ class FolderRepository:
                     (link["workspace_id"], target_folder_id),
                 )
 
-    def merge_into_existing(self, source_folder_id, target_folder_id, new_path):
-        """Merge photos from a missing folder into an existing folder at the same path.
+    def finish_merge(self, source_folder_id, target_folder_id, new_path, old_path,
+                     drop_ids, collection_remap):
+        """Finish a folder merge after its photos were folded (no commit).
 
-        - Photos with matching filenames in the target are dropped from source
-        - Other photos are reassigned to the target folder
-        - The source folder entry is deleted
-        - Missing child folders are cascade-relocated using old_path -> new_path
-
-        Returns list of child folder dicts that were also relocated (same as
-        ``relocate``).
-
-        The GPS-review and embedded-offer carries and
-        ``relink_parents_by_path`` run inside the caller's unit of work; this
-        never commits. A shared-identity conflict raises
-        ``IdentityMergeConflict`` part-way through, so a caller that catches
-        it runs the merge in a savepoint of its own (``relocate_folder``); one
-        that lets it propagate rolls back with it (the local-copy restores).
+        ``services.folder_merges.merge_into_existing`` folds each photo of
+        the merged folder (``drop_ids`` were folded into a duplicate or are
+        phantoms; ``collection_remap`` maps each to its survivor or None).
+        This deletes those rows, reparents child folders, gives the target
+        the source's workspace links, deletes the source folder, clears the
+        stale move provenance on ``old_path``, refreshes the target and
+        cascades to missing children. Returns the relocated child folder
+        dicts.
         """
-        old_row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
-        ).fetchone()
-        old_path = old_row["path"] if old_row else ""
-
-        drop_ids, collection_remap = self._fold_source_photos(
-            source_folder_id, target_folder_id, new_path, self.transfer_gps_review,
-            self.transfer_embedded_offered, self.KEYWORD_SOURCE_CONFLICT_SQL,
-        )
-
         self._drop_merged_photos(drop_ids, collection_remap)
 
         # Reparent child folders from source to target

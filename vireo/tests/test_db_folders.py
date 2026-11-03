@@ -28,7 +28,7 @@ from db import Database, MissingPhotosCancelled
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.stats import StatsRepository
-from services import catalog_deletion, missing_originals, photo_ingest, workspace_folders
+from services import catalog_deletion, folder_merges, missing_originals, photo_ingest, workspace_folders
 
 
 class _RecordingCache:
@@ -717,7 +717,7 @@ def test_relocate_folder_rejects_conflict_with_ok_source(db):
     a = workspace_folders.add_folder(db, "/rel/a")
     b = workspace_folders.add_folder(db, "/rel/b")
     with pytest.raises(ValueError, match=f"Path is already tracked as folder {b}"):
-        db.folders.relocate(a, "/rel/b")
+        folder_merges.relocate(db, a, "/rel/b")
         db.commit()
 
 
@@ -741,17 +741,17 @@ def test_relocate_folder_conflict_revalidates_missing_source_that_came_back(db, 
         assert r.execute("SELECT status FROM folders WHERE id = ?", (a,)).fetchone()[0] == "ok"
 
 
-def test_relocate_folder_conflict_merges_missing_source_via_facade(db, monkeypatch):
+def test_relocate_folder_conflict_merges_missing_source_via_the_service(db, monkeypatch):
     a = workspace_folders.add_folder(db, "/rel/gone")
     b = workspace_folders.add_folder(db, "/rel/b")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (a,))
     db.conn.commit()
     calls = []
     monkeypatch.setattr(
-        FolderRepository, "merge_into_existing",
-        lambda self, *args, **kw: (calls.append((args, kw)), ["merged"])[1],
+        folder_merges, "merge_into_existing",
+        lambda _db, *args, **kw: (calls.append((args, kw)), ["merged"])[1],
     )
-    assert db.folders.relocate(a, "/rel/b") == ["merged"]
+    assert folder_merges.relocate(db, a, "/rel/b") == ["merged"]
     assert calls == [((a, b, "/rel/b"), {})]
 
 
@@ -787,7 +787,7 @@ def test_relocate_folder_moves_row_cascades_children_and_rebases(db, tmp_path, m
         FolderRepository, "relink_parents_by_path",
         lambda self, ids: (relinked.append(list(ids)), real(self, ids))[1],
     )
-    cascaded = db.folders.relocate(old, str(new_root))
+    cascaded = folder_merges.relocate(db, old, str(new_root))
     db.commit()
     assert cascaded == [
         {"id": kid, "old_path": "/old/kid", "new_path": str(new_root / "kid")},
@@ -811,8 +811,8 @@ def test_relocate_folder_moves_row_cascades_children_and_rebases(db, tmp_path, m
 
 def test_relocate_folder_unknown_id_and_same_path(db):
     a = workspace_folders.add_folder(db, "/same")
-    assert db.folders.relocate(a, "/same") == []
-    assert db.folders.relocate(99999, "/nowhere") == []
+    assert folder_merges.relocate(db, a, "/same") == []
+    assert folder_merges.relocate(db, 99999, "/nowhere") == []
     assert _folder_row(db, a)["status"] == "ok"
 
 
@@ -859,7 +859,7 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
         FolderRepository, "relink_parents_by_path",
         lambda self, ids: (relinked.append(list(ids)), real(self, ids))[1],
     )
-    cascaded = db.folders.merge_into_existing(source, target, str(target_dir))
+    cascaded = folder_merges.merge_into_existing(db, source, target, str(target_dir))
     db.commit()
     assert cascaded == [{"id": kid, "old_path": "/src/kid", "new_path": str(target_dir / "kid")}]
     assert transfers == [(dup, survivor)]
@@ -905,7 +905,7 @@ def test_merge_into_existing_repoints_collection_photo_ids(db, tmp_path):
     ).lastrowid
     db.conn.commit()
 
-    db.folders.merge_into_existing(source, target, str(target_dir))
+    folder_merges.merge_into_existing(db, source, target, str(target_dir))
     db.commit()
 
     rules = json.loads(db.conn.execute(
@@ -920,7 +920,7 @@ def test_merge_into_existing_leaves_commit_to_caller(db, tmp_path):
     source = workspace_folders.add_folder(db, "/gone-src")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
     db.conn.commit()
-    assert db.folders.merge_into_existing(source, target, str(tmp_path)) == []
+    assert folder_merges.merge_into_existing(db, source, target, str(tmp_path)) == []
     assert db.conn.in_transaction
     db.conn.rollback()
     assert _folder_row(db, source) is not None
@@ -930,7 +930,7 @@ def test_merge_into_existing_preserves_non_root_link(db, tmp_path):
     ws = db._ws_id()
     target = workspace_folders.add_folder(db, str(tmp_path), link_to_workspace=False)
     source = workspace_folders.add_folder(db, "/nr-src", workspace_root=False)
-    db.folders.merge_into_existing(source, target, str(tmp_path))
+    folder_merges.merge_into_existing(db, source, target, str(tmp_path))
     db.commit()
     assert _links(db, target) == {(ws, 0)}
 
@@ -958,7 +958,7 @@ def test_merge_into_existing_moves_embedded_keyword_offered_onto_survivor(
     assert db.photo_keywords.embedded_offered_keys(dup) == {"robin"}
     assert db.photo_keywords.embedded_offered_keys(survivor) == set()
 
-    db.folders.merge_into_existing(source, target, str(target_dir))
+    folder_merges.merge_into_existing(db, source, target, str(target_dir))
     db.commit()
 
     with _reader(db) as r:
@@ -990,7 +990,7 @@ def test_merge_into_existing_drops_phantom_embedded_keyword_offered(
     db.photo_keywords.record_embedded_offered_keys(phantom, ["robin"])
     db.commit()
 
-    db.folders.merge_into_existing(source, target, str(target_dir))
+    folder_merges.merge_into_existing(db, source, target, str(target_dir))
     db.commit()
 
     with _reader(db) as r:
@@ -1034,7 +1034,7 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
     db.commit()
     db.conn.commit()
 
-    db.folders.merge_into_existing(source, target, str(target_dir))
+    folder_merges.merge_into_existing(db, source, target, str(target_dir))
     db.commit()
 
     with _reader(db) as r:
@@ -1082,7 +1082,7 @@ def test_folder_merge_respects_embedded_keyword_removals(
             db.untag_photo(survivor, keyword["id"])
             db.commit()
 
-    db.folders.merge_into_existing(source, target, str(target_dir))
+    folder_merges.merge_into_existing(db, source, target, str(target_dir))
     db.commit()
 
     assert {k["name"] for k in db.photo_keywords.get_for_photo(survivor)} == (
@@ -1561,30 +1561,32 @@ def test_folders_accessor_builds_a_fresh_repository_and_resolves_the_workspace_l
         repo.tree()
 
 
-# Façade methods a folder wrapper hands to the repository, so the call still
-# routes through ``Database`` (and its monkeypatches) at the same point in the
-# SQL.
-_FACADE_CALLBACKS = {
-    "_folder_repository": {
-        "transfer_gps_review": "moves_merge.transfer_gps_review",
-        "transfer_embedded_offered": "photo_keywords.transfer_embedded_offered_keys",
-    },
-}
+def test_folder_merge_folds_each_photo_across_domains_in_order(db, tmp_path, monkeypatch):
+    """The service runs the cross-domain carries a fold needs, in order."""
+    from repositories.moves_merge import MovesMergeRepository
+    from repositories.photo_keywords import PhotoKeywordRepository
 
-
-@pytest.mark.parametrize("name", sorted(_FACADE_CALLBACKS))
-def test_folder_wrapper_passes_facade_methods_as_callbacks(name):
-    # ``self.<method>``, or ``self.<accessor>.<method>`` for a domain accessor.
-    passed = {
-        kw.arg: ast.unparse(kw.value).removeprefix("self.")
-        for node in ast.walk(_method_ast(name))
-        if isinstance(node, ast.Call)
-        for kw in node.keywords
-        if isinstance(kw.value, ast.Attribute)
-        and ast.unparse(kw.value).startswith("self.")
-    }
-    for kwarg, facade in _FACADE_CALLBACKS[name].items():
-        assert passed.get(kwarg) == facade, (name, kwarg)
+    source = workspace_folders.add_folder(db, "/merge/gone")
+    target = workspace_folders.add_folder(db, str(tmp_path))
+    loser = photo_ingest.add_photo(db, source, "a.jpg", ".jpg", 1, 1.0)
+    survivor = photo_ingest.add_photo(db, target, "a.jpg", ".jpg", 1, 1.0)
+    db.commit()
+    calls = []
+    monkeypatch.setattr(folder_merges, "prepare_photo_merge",
+                        lambda _db, l, s: calls.append(("identity", l, s)))
+    monkeypatch.setattr(MovesMergeRepository, "transfer_gps_review",
+                        lambda _r, l, s: calls.append(("gps", l, s)))
+    real_carry = FolderRepository.carry_merged_photo_keywords
+    monkeypatch.setattr(FolderRepository, "carry_merged_photo_keywords",
+                        lambda r, l, s: (calls.append(("keywords", l, s)), real_carry(r, l, s))[1])
+    monkeypatch.setattr(PhotoKeywordRepository, "transfer_embedded_offered_keys",
+                        lambda _r, l, s: calls.append(("offered", l, s)))
+    with db.transaction():
+        folder_merges.merge_into_existing(db, source, target, str(tmp_path))
+    assert calls == [
+        ("identity", loser, survivor), ("gps", loser, survivor),
+        ("keywords", loser, survivor), ("offered", loser, survivor),
+    ]
 
 
 def test_delete_folder_passes_the_photo_delete_and_removal_record_as_callbacks():
@@ -1642,12 +1644,12 @@ def test_folder_repository_imports_no_db_code():
 
 
 def test_folder_repository_chunks_by_its_chunk_size(db):
-    from repositories.folders import FolderMergeHooks, FolderRepository
+    from repositories.folders import FolderRepository
 
     repo = FolderRepository(
         db.conn, None, path_for_subtree_match=None,
         stored_parent_path=None, subtree_prefix=None, subtree_relative=None,
-        join_subtree_path=None, chunk_size=2, merge_hooks=FolderMergeHooks(None, None),
+        join_subtree_path=None, chunk_size=2,
         keyword_source_conflict_sql="",
     )
     assert list(repo._chunks(range(5))) == [[0, 1], [2, 3], [4]]
