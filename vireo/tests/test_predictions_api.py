@@ -1341,6 +1341,38 @@ def test_group_apply_skips_photos_decided_since_the_modal_rendered(app_and_db):
     assert db.photos.get(photo_b)['flag'] == 'rejected'
 
 
+def test_group_apply_missing_observed_rows_falls_back_to_current_members(app_and_db):
+    """Missing observed IDs do not mark a photo stale; current members apply."""
+    app, db = app_and_db
+    (deleted, photo), _ = _seed_burst_group(db, 'gmissingobserved')
+    detection = db.conn.execute(
+        "SELECT detection_id FROM predictions WHERE id = ?", (deleted,),
+    ).fetchone()['detection_id']
+    db.conn.execute("DELETE FROM predictions WHERE id = ?", (deleted,))
+    db.predictions.add(
+        detection_id=detection, species='Azure Jay', confidence=0.9,
+        model='test-model', category='new', group_id='gmissingobserved',
+        labels_fingerprint='replacement',
+    )
+    db.commit()
+    current = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection,),
+    ).fetchone()['id']
+    assert current != deleted
+    missing = [deleted, 987_654_321]
+    assert db.predictions.statuses_with_supersession(missing) == []
+    assert db.predictions.photo_ids_by_prediction(missing) == {}
+
+    response = app.test_client().post('/api/predictions/group/apply', json={
+        'picks': [photo], 'rejects': [], 'removed': [], 'species': 'Azure Jay',
+        'observed': {str(pred): 'pending' for pred in missing},
+    })
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.get_json()['already_decided'] == 0
+    assert db.predictions.get_review_status(current, db._active_workspace_id) == 'accepted'
+    assert db.photos.get(photo)['flag'] == 'flagged'
+    assert 'Azure Jay' in {keyword['name'] for keyword in db.photo_keywords.get_for_photo(photo)}
+
 def test_group_apply_allows_a_deliberate_re_decision(app_and_db):
     """Re-opening an applied burst and changing the split still works.
 

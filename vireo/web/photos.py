@@ -721,8 +721,7 @@ def create_photos_blueprint(
         # built by ``_build_collection_query`` and evaluates ``rules`` alone.
         # ``/api/v1/photos`` aliases this view, so a headless caller that
         # scopes to a visual collection here would silently widen to every
-        # metadata match instead of the saved visual result set (Codex
-        # review r3621634298).
+        # metadata match instead of the saved visual result set.
         err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
@@ -836,8 +835,8 @@ def create_photos_blueprint(
         # focused position described, so the photo Browse is holding onto goes
         # missing and the selection is cleared. Open the snapshot here — ahead
         # of the visual clause, which returns before the rules path's ``BEGIN``
-        # — and release it on every exit, error paths included (Codex review on
-        # PR #1658). Reads only; ``rollback`` is what releases it.
+        # — and release it on every exit, error paths included. Reads only;
+        # ``rollback`` is what releases it.
         if query.focus_photo_id is not None:
             db.begin()
 
@@ -907,8 +906,7 @@ def create_photos_blueprint(
         collection_id = request.args.get("collection_id", None, type=int)
         # Rules-only path — see ``api_photos``. ``db.photos.get_ids`` also
         # goes through ``_build_collection_query``, so a visual collection
-        # id would silently widen to every metadata match (Codex review
-        # r3621634298).
+        # id would silently widen to every metadata match.
         err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
@@ -956,7 +954,7 @@ def create_photos_blueprint(
         # ``get_calendar_data`` narrows through ``_build_collection_query``,
         # which reads only ``collections.rules``. Without ``visual``, a saved
         # visual collection would silently widen calendar counts to every
-        # metadata match (Codex review r3622521597).
+        # metadata match.
         err = reject_visual_collection(db, collection_id, json_error=json_error)
         if err is not None:
             return err
@@ -1949,9 +1947,8 @@ class _PhotosQuery:
         # which reads only ``collections.rules``. An API/headless caller
         # posting ``{"collection_id": <visual id>}`` would therefore silently
         # widen to every metadata match instead of the saved visual result
-        # set; the Browse reopen path already sends the stored ``rules`` +
-        # ``visual`` without relying on ``collection_id`` (Codex review
-        # r3621903988).
+        # set; the Browse reopen path sends the stored ``rules`` +
+        # ``visual`` without relying on ``collection_id``.
         err = reject_visual_collection(self.db, collection_id, json_error=json_error)
         if err is not None:
             return err
@@ -2101,8 +2098,7 @@ class _PhotosQuery:
             # inserts each stack's visible cover ahead of its
             # hidden members and Best Batch, burst-review,
             # and export preview start from the visible first
-            # card rather than a hidden burst frame (Codex
-            # P2 on PR #1561).
+            # card rather than a hidden burst frame.
             stack_items = db.collections.collapse_browse_stack_photo_ids(
                 ordered_ids,
                 stack_config=workspace_config.browse_stack_settings(db, cfg.load()),
@@ -2217,11 +2213,11 @@ class _PhotosQuery:
     def rules_ids_response(self, visual_info: JsonDict | None) -> ErrorResponse | Response:
         """Select-all and other bulk flows need the complete matching id
         set; it must resolve exactly the photos the filtered grid shows, so
-        it shares this endpoint rather than a legacy path. Under
+        it shares this endpoint. Under
         ``stacks=true`` emit each stack's cover ahead of its hidden members
         — matching the collection ``/photo-ids`` projection — so Best Batch,
         burst-review, and export preview start from the visible first card
-        rather than a hidden burst frame (Codex P2 on PR #1561).
+        rather than a hidden burst frame.
         """
         db = self.db
         try:

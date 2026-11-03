@@ -71,10 +71,9 @@ def load_model_bundle(
         # ``_pause_checkpoint`` and block on ``wait_if_paused`` while
         # the shared load_lock is still held, so any unpaused peer
         # waiting on the same cache entry would stay blocked until
-        # Resume (Codex discussion_r3791005913 — sibling of the
-        # resource-probe rebinding in ``model_cache.py``, which only
-        # covers the bound resource cancel probe, not this explicit
-        # captured callback). Cancel still fires; pause is honored at
+        # Resume. (The resource-probe rebinding in ``model_cache.py``
+        # covers only the bound resource cancel probe, not this
+        # captured callback.) Cancel still fires; pause is honored at
         # the next outer ``_pause_checkpoint`` after ``load_lock`` is
         # released.
         def cancel_check() -> bool:

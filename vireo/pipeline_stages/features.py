@@ -285,22 +285,21 @@ class _MaskPass:
         # it, ``em_failed`` is zero (offline photos are pre-filtered from
         # the worklist), and the finalizer flips the stage back to
         # ``completed`` — silently masking the outage. The end-of-run
-        # rollup at ~L7005 reads only stage ``status`` values, so the job
+        # rollup reads only stage ``status`` values, so the job
         # would complete "successfully" with the missing masks folded
-        # away in ``errors`` (Codex #1388 P1 r3665130244).
+        # away in ``errors``.
         self.em_offline_latched = False
         # Photos the pre-flight probe removed from the worklist because
         # their folder was already unreachable. They never reach the
         # per-photo loop, so without carrying the count forward every
         # counter reads zero on a stage that simultaneously reports
-        # unreachable photos — which the Extract card then rendered as
-        # "No photos needed masks" (Codex #1392 P2).
+        # unreachable photos — which the Extract card renders as
+        # "No photos needed masks".
         self.em_preflight_unreadable = 0
         # Dropped photos that already carried a usable mask. They are a
         # successful outcome — the online cache-hit path counts exactly
         # this state as ``masked`` — so they belong in the counters
-        # instead of vanishing from the stage's coverage entirely
-        # (Codex #1392 P2).
+        # instead of vanishing from the stage's coverage entirely.
         self.em_preflight_masked = 0
         # The pre-flight outage message, kept so an early exit can put it
         # on the failed step instead of a benign "no detections" summary.
@@ -386,7 +385,7 @@ class _MaskPass:
         # probe below has to know the *precise* rescue set and each
         # frame's floor — a plain "look this low" candidacy floor
         # over-counts unrelated sub-threshold photos as at-risk,
-        # inflating the outage report (Codex #1392 P2 r3687403366).
+        # inflating the outage report.
         # Compute them on the pre-filter ``photos`` list so the
         # eligibility set covers photos we're about to drop, and mirror
         # the loop's anchor-species gate exactly.
@@ -425,37 +424,22 @@ class _MaskPass:
     def drop_offline_folders(self) -> None:
         """Drop photos whose folder is offline.
 
-        Without this we'd render_proxy every one of them, they'd all skip
-        with proxy=None, and the stage summary would land as "N skipped" —
-        obscuring the real cause (missing folder) with a mask-extraction
-        failure count (Codex #1388 P2 r3664058173). The folder-scoped
-        branch in classify deliberately leaves ``abort`` clear so healthy
-        folders keep processing here; this filter is how "healthy folders
-        keep processing" stays true without dragging the missing folder's
-        photos along.
+        Otherwise every one of them would render_proxy to None and the
+        stage would report "N skipped", hiding the missing folder behind a
+        mask-extraction failure count. Classify leaves ``abort`` clear on a
+        folder-scoped outage so healthy folders keep processing; this
+        filter keeps the missing folder's photos out.
 
-        Always probe the worklist's folders — do NOT gate on
-        ``source_skipped_photo_ids`` (Codex #1388 P1 r3664891993). A
-        fully-cached classify (every detection + classifier result already
-        stored, only masks missing — e.g. after a SAM variant change)
-        makes no image opens, so the seed set stays empty even though
-        every remaining file is on an unreachable share. Without the
-        unconditional probe, extract_masks would then reopen the dead
-        source photo-by-photo, count each failed render_proxy as merely
-        skipped, and the pipeline could finish "successfully" with no
-        masks made.
+        Always probes the worklist's folders rather than trusting
+        ``source_skipped_photo_ids``: a fully-cached classify (only masks
+        missing, e.g. after a SAM variant change) opens no images, so that
+        set stays empty even when every file is on an unreachable share,
+        and the run could finish "successfully" with no masks made.
 
-        Filter by FOLDER, not by photo id: the classify seed only
-        accumulates photos that reached ``_prepare_image``, so the
-        non-reclassify cache branch — which appends the cached prediction
-        to raw_results and ``continue``s without any disk touch — never
-        contributes its photos to the seed set. An ID-only filter would
-        leave those cached photos in place, and mask/eye-keypoint stages
-        would reopen the same dead source (Codex #1388 P2 r3664694179).
-        Re-probing per folder also handles the multi-spec recovery case
-        where a folder that dropped for spec A comes back before mask
-        extraction runs, so its photos aren't silently excluded
-        (Codex #1388 P2 r3664348758).
+        Filters by FOLDER, not photo id, because cached classify results
+        never add their photos to that set. Re-probing per folder also lets
+        a folder that dropped for spec A and came back before this stage
+        rejoin.
         """
         worklist_folder_ids = {
             fid for fid in (_row_folder_id(p) for p in self.photos)
@@ -501,12 +485,12 @@ class _MaskPass:
             # doesn't flip the stage back to ``completed``
             # (offline photos were removed above, so
             # ``em_failed`` is zero at the bottom of the loop
-            # regardless — Codex #1388 P1 r3665130244).
+            # regardless).
             # The Fatal error string itself is built below
             # once ``total`` (the kept mask-candidate count) is
             # known, so its denominator matches the stage
             # result's ``total`` instead of the whole
-            # collection worklist (Codex #1392 P2 r3687499184).
+            # collection worklist.
             self.run.stages["extract_masks"]["status"] = "failed"
             self.em_offline_latched = True
         log.warning(
@@ -522,14 +506,14 @@ class _MaskPass:
         # already carries an active mask for the configured
         # variant won't be rejected for that, so counting it
         # overstates the damage from an outage that never harmed
-        # it (Codex #1392 P2).
+        # it.
         # Photos that will be rejected as `no_subject_mask`
         # because of this outage — i.e. the dropped ones that
         # don't already have a mask. The already-masked ones need
         # no source read and are at no risk, so they drive neither
         # the count nor the failure latch below: latching on them
         # would fail the stage and demand a reconnect that would
-        # change nothing (Codex #1392 P2).
+        # change nothing.
         return self.preflight_mask_outcomes(
             self.thread_db, dropped, self.sam2_variant, self.dinov2_variant,
             self.detector_confidence,
@@ -649,12 +633,9 @@ class _MaskPass:
         # Now that ``total`` is known, build the preflight outage
         # message. The denominator has to be the mask-candidate
         # total (loop total + preflight-dropped mask candidates),
-        # matching the stage result's ``total``. Using
-        # ``total_before`` — the whole collection worklist —
-        # produced messages like "1 of 100 photos unreachable"
-        # when only 1 was a mask candidate and the result showed
-        # ``total: 1``, so the reader couldn't reconcile the two
-        # (Codex #1392 P2 r3687499184).
+        # matching the stage result's ``total``. ``total_before`` —
+        # the whole collection worklist — would produce "1 of 100
+        # photos unreachable" beside a result showing ``total: 1``.
         if self.em_preflight_unreadable > 0:
             self.em_offline_preflight_error = (
                 f"[extract_masks] Fatal: "
@@ -693,7 +674,7 @@ class _MaskPass:
         # Unreadable photos attributable to a latched source outage,
         # tracked apart from the total so the reconnect message can't
         # claim credit for a corrupt file in a healthy folder — or for
-        # photos behind a *different* dead source (Codex #1392 P2).
+        # photos behind a *different* dead source.
         self.em_offline_unreadable = 0
         self.em_offline_reasons: list = []
         self.start_time = time.time()
@@ -1000,7 +981,7 @@ class _MaskPass:
         # here, after the cache branch: a cached mask
         # only stats the local mask file, so it succeeds
         # even when the source volume is gone and must
-        # still count as masked (Codex #1392 P2). Progress
+        # still count as masked. Progress
         # is pushed too, otherwise the bar freezes on the
         # photo the outage started on while the stage
         # walks the rest of the worklist.
@@ -1040,11 +1021,10 @@ class _MaskPass:
             return _STOP
 
         # GPU serialisation lives inside masking.generate_mask
-        # (around the encoder/decoder session.run calls). The
-        # wider wrap previously here held the semaphore through
-        # SAM weight load + image preprocessing + prompt-coord
-        # math, blocking other pipelines' GPU work for CPU-only
-        # phases.
+        # (around the encoder/decoder session.run calls). Holding
+        # the semaphore here, through SAM weight load + image
+        # preprocessing + prompt-coord math, would block other
+        # pipelines' GPU work for CPU-only phases.
         with self._timed("segment"):
             mask = self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
         if mask is None:
@@ -1140,8 +1120,7 @@ class _MaskPass:
         # denormalised subject state is fresh —
         # a subject A→B→A round-trip would have
         # nulled the variant here before the
-        # embedding could go stale (Codex P2
-        # r4056402007).
+        # embedding could go stale.
         state = self.thread_db.masks_features.photo_mask_state(item.photo_id)
         return bool(
             state is not None
@@ -1170,8 +1149,8 @@ class _MaskPass:
             # the local disk — writing off everything
             # still unprocessed would skip masks we
             # could have made and file those photos
-            # under an outage that never touched them
-            # (Codex #1392 P1). Other folders cost one
+            # under an outage that never touched them.
+            # Other folders cost one
             # failed read each to discover, which is
             # nothing next to a wrongly abandoned run.
             self.em_offline_folder_ids.add(
@@ -1328,9 +1307,9 @@ class _MaskPass:
     def _dino_embeddings(self, proxy: Image.Image, mask: np.ndarray) -> tuple[bytes | None, bytes]:
         """Return the (subject, global) DINOv2 embedding blobs for a mask."""
         # GPU serialisation lives inside dino_embed.embed /
-        # embed_batch (around the session.run call). The wider
-        # wrap previously here held the semaphore through
-        # per-image resize/normalize preprocessing.
+        # embed_batch (around the session.run call), so the
+        # semaphore is not held through per-image
+        # resize/normalize preprocessing.
         subject_crop = self.crop_subject(proxy, mask, margin=0.15)
         if subject_crop is not None:
             embs = self.embed_batch(
@@ -1350,8 +1329,8 @@ class _MaskPass:
     def finish_cancelled(self) -> None:
         """Distinguish a user cancel from a clean completion: pin a
         "Cancelled" summary on the final step update so the job tree
-        doesn't report a half-done stage as if it ran to term. Mirrors the
-        classify-cancel path PR #710 added.
+        doesn't report a half-done stage as if it ran to term, as the
+        classify-cancel path does.
         """
         run = self.run
         run.stages["extract_masks"]["status"] = "completed"
@@ -1370,8 +1349,7 @@ class _MaskPass:
             # so the cancel branch has to as well or a cancel
             # that arrives after a source dropped shows a
             # zero-warning row alongside a result that records
-            # positive ``unreadable`` (Codex #1392 P2
-            # r3687499188).
+            # positive ``unreadable``.
             error_count=(
                 self.em_failed + self.em_unreadable
                 + self.em_preflight_unreadable
@@ -1383,7 +1361,7 @@ class _MaskPass:
             "unreadable": self.em_unreadable + self.em_preflight_unreadable,
             # Preflight-inclusive, matching the normal finalizer:
             # the loop total alone can't cover photos that never
-            # reached the loop (Codex #1392 P2).
+            # reached the loop.
             "total": (
                 self.total + self.em_preflight_unreadable
                 + self.em_preflight_masked
@@ -1407,7 +1385,7 @@ class _MaskPass:
         # be the denominator once pre-flight drops are folded into
         # the outcome counts — that publishes impossible tallies
         # like "3 unreadable of 0" and breaks any consumer deriving
-        # coverage from them (Codex #1392 P2). Progress reporting
+        # coverage from them. Progress reporting
         # keeps using the loop-scoped ``total``.
         em_masked_all = self.masked + self.em_preflight_masked
         em_total_candidates = (
@@ -1453,8 +1431,8 @@ class _MaskPass:
         # Emit the actionable Fatal last so any collapse-by-stage
         # consumer that keeps whichever entry appeared last for
         # each stage still sees the reconnect instruction rather
-        # than the generic "failed mask extraction" rollup
-        # (Codex #1392 P2 r3687118058). The Extract card and
+        # than the generic "failed mask extraction" rollup.
+        # The Extract card and
         # top-level banner already prefer Fatal explicitly; this
         # protects other listeners (job event streams, exports)
         # from the same silent-last-wins collapse.
@@ -1540,16 +1518,14 @@ def eye_keypoints_stage(
         eyes.finalize()
     except ResourceWaitCancelled:
         # ``detect_eye_keypoints_stage`` catches ``ResourceWaitCancelled``
-        # per-photo in ``pipeline.py`` today, so this outer handler is
-        # currently unreachable from the per-photo inference path. Keep
-        # it as defense-in-depth: a future regression in that inner
-        # handler — or a fresh call site inside this outer ``try``
-        # (e.g. a cache-lock guard reached before the download loop) —
-        # would otherwise get caught below as ``Exception`` and be
-        # recorded as "[eye_keypoints] Fatal", inflating the failure
-        # count for what was actually a cooperative cancel. Mirror the
-        # ``extract_masks`` handler at line ~7293 so the summary lines
-        # up with the other stages' cancel outcomes.
+        # per-photo in ``pipeline.py``, so the per-photo inference path
+        # never reaches this outer handler. It is defense-in-depth: a
+        # cancel raised elsewhere inside this ``try`` (e.g. a cache-lock
+        # guard reached before the download loop) would otherwise be
+        # caught below as ``Exception`` and recorded as "[eye_keypoints]
+        # Fatal", inflating the failure count for a cooperative cancel.
+        # Mirrors the ``extract_masks`` cancel handler so the summary
+        # lines up with the other stages' cancel outcomes.
         run.abort.set()
         eyes.finish_cancelled()
     except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
@@ -1670,20 +1646,10 @@ class _EyeKeypointPass:
         eye_keypoints also opens the source image (via the pipeline
         detect_eye_keypoints_stage → keypoint runners), so without this it
         would walk every unreachable photo and record them as eye-detection
-        failures — the same downstream-hammering pattern the classify pause
-        is meant to prevent (Codex #1388 P2 r3664058173).
-
-        Always probe the worklist's folders — not just when classify
-        populated ``source_skipped_photo_ids`` (Codex #1388 P1
-        r3664891993). A fully-cached-classify / eye-only rerun makes no
-        image reads in classify, so the seed set can stay empty even when
-        every remaining file is on an unreachable share.
-
-        Filter by FOLDER, not by photo id — cached photos never populate
-        the classify seed set, so an ID-only filter would leave them in the
-        worklist (Codex #1388 P2 r3664694179). Re-probing per folder also
-        lets a folder that recovered between classify and this stage rejoin
-        (Codex #1388 P2 r3664348758).
+        failures. Same rules as ``extract_masks``: always probe the
+        worklist's folders (a cached classify or eye-only rerun reads no
+        images, so ``source_skipped_photo_ids`` can be empty), filter by
+        folder rather than photo id, and let a recovered folder rejoin.
         """
         worklist_folder_ids = {
             fid for fid in (
@@ -1709,8 +1675,7 @@ class _EyeKeypointPass:
         # only drives the weight-download planner and
         # ``total``. Merge the offline IDs into the stage's
         # exclusion set so the actual keypoint runners
-        # don't reopen the dead source (CodeRabbit
-        # r3664548813).
+        # don't reopen the dead source.
         self.eye_exclude_ids.update(dropped_ids)
         # Publish for anyone downstream that may probe
         # ``source_offline_state`` later.
