@@ -45,8 +45,8 @@ def test_resolution_refreshes_identity_after_keyword_creation_in_same_transactio
     try:
         folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
         photo = photo_ingest.add_photo(db, folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=1, file_mtime=1)
-        common = db.add_keyword('Choice')  # promoted by resolution, not a species yet
-        alias = db.add_keyword('Scientific alias', is_species=True, source_taxon_id=99001)
+        common = db.keywords.add('Choice')  # promoted by resolution, not a species yet
+        alias = db.keywords.add('Scientific alias', is_species=True, source_taxon_id=99001)
         db.tag_photo(photo, alias, source='accept')
         db.commit()
         with db.transaction():
@@ -73,7 +73,7 @@ def test_batch_identity_reuse_keeps_each_photo_association_check_live(tmp_path, 
     try:
         folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
         photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
-        keyword = db.add_keyword('Heron', is_species=True)
+        keyword = db.keywords.add('Heron', is_species=True)
         db.commit()
         original = IdentityAlternativesRepository.set_state
 
@@ -108,11 +108,11 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
         db.conn.execute('INSERT INTO taxa(id,inat_id,name,rank) VALUES (99001,101,?,?)', ('Puma', rank))
         db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (99002,102,'Puma concolor','Cougar','species')")
         db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES (99002,'Puma')")
-        higher = db.add_keyword('Puma', kw_type='taxonomy')
+        higher = db.keywords.add('Puma', kw_type='taxonomy')
         db.commit()
         db.conn.execute('UPDATE keywords SET taxon_id=99001,source_taxon_id=101,is_species=0 WHERE id=?', (higher,))
-        scientific = db.add_keyword('Puma concolor', is_species=True)
-        note = db.add_keyword('Unrelated note')
+        scientific = db.keywords.add('Puma concolor', is_species=True)
+        note = db.keywords.add('Unrelated note')
         db.tag_photo(photo, higher, source='manual')
         db.tag_photo(photo, scientific, source='accept')
         db.tag_photo(photo, note, source='manual')
@@ -149,7 +149,7 @@ def test_photo_collapse_without_identity_names_skips_taxonomy_scans(tmp_path):
                                          extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
         db.conn.executemany("INSERT INTO keywords(name,type,is_species) VALUES (?,'taxonomy',1)",
                             [(f'Catalog species {i}',) for i in range(2000)])
-        db.queue_change(photos[0], 'keyword_add', 'Catalog species 1')
+        db.pending_changes.queue(photos[0], 'keyword_add', 'Catalog species 1')
         db.commit()
         before = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
         scans = []

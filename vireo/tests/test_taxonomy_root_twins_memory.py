@@ -165,9 +165,13 @@ def setup():
 
     prov = ns["KeywordProvenanceRepository"]()
     prov.conn = conn
-    prov.db = db
     prov._chunks = lambda xs: [list(xs)[i : i + 100] for i in range(0, len(xs), 100)]
-    prov._edit_prediction_ids = lambda *_a: []
+    ns["edit_prediction_ids"] = lambda *_a: []
+    ns["KeywordMergeRepository"] = lambda conn: types.SimpleNamespace(
+        inat_id_of_taxon=lambda taxon_id: conn.execute(
+            "SELECT inat_id FROM taxa WHERE id = ?", (taxon_id,),
+        ).fetchone(),
+    )
     prov._species_curation = lambda: types.SimpleNamespace(
         rename_highlights=forbidden, rename_photo_preferences=forbidden,
     )

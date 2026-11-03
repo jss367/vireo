@@ -1027,7 +1027,7 @@ def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_s
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
 
-    perch_kid = db.add_keyword("Perched portrait")
+    perch_kid = db.keywords.add("Perched portrait")
     db.tag_photo(data["photos"][1], perch_kid)
     db.commit()
     db.conn.commit()

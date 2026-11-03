@@ -176,7 +176,7 @@ def test_compare_legacy_aliases_undo_redo_tags_and_sidecar_intent(
     aliases = ['Verdin', 'Auriparus flaviceps']
     if reverse_order:
         aliases.reverse()
-    keywords = {name: db.add_keyword(name, is_species=True) for name in aliases}
+    keywords = {name: db.keywords.add(name, is_species=True) for name in aliases}
     if existing_alias:
         db.tag_photo(photo_id, keywords[existing_alias])
         db.commit()
@@ -278,7 +278,7 @@ def test_decided_and_stale_rows_do_not_hide_pending_cards(app_and_db):
 def test_card_undo_preserves_existing_keyword_and_prior_alternative_decision(app_and_db):
     app, db = app_and_db
     photos, detections, ids = _seed(db)
-    kid = db.add_keyword('Blue Tit', is_species=True)
+    kid = db.keywords.add('Blue Tit', is_species=True)
     db.tag_photo(photos[1], kid)
     db.commit()
     db.predictions.add(detections[1], 'Other bird', .1, 'BioCLIP',

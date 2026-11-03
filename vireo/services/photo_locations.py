@@ -99,7 +99,7 @@ def queue_location_changes_for_tagged_photos(db: Database) -> dict[str, int]:
     """
     with db.transaction():
         result = db.locations.queue_changes_for_tagged_photos(
-            queue_change=db.queue_change,
+            queue_change=db.pending_changes.queue,
         )
     log.info(
         "Queued %d location change(s) for %d located photo(s)",

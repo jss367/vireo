@@ -450,7 +450,7 @@ def test_field_setters_route_through_facade(db, pids, monkeypatch):
 def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeypatch):
     ws = db._active_workspace_id
     pid = pids[0]
-    kid = db.add_keyword("Robin", is_species=True)
+    kid = db.keywords.add("Robin", is_species=True)
     db.tag_photo(pid, kid)
     db.commit()
     p = _predictions(db, pid)
@@ -488,7 +488,7 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
 
 
 def test_keyword_remove_redo_untags_again(db, pids):
-    kid = db.add_keyword("Hawk")
+    kid = db.keywords.add("Hawk")
     db.commit()
     db.record_edit(
         "keyword_remove", "Removed Hawk", str(kid),
@@ -702,7 +702,7 @@ def test_retire_stale_grouping_entry_does_not_commit(db):
 
 
 def test_keyword_name_and_prediction_scope(db, pids):
-    kid = db.add_keyword("Heron")
+    kid = db.keywords.add("Heron")
     db.commit()
     assert db.edit_history.keyword_name(kid) == "Heron"
     assert db.edit_history.keyword_name(kid + 1000) is None
@@ -739,7 +739,7 @@ def test_prediction_accept_flat_removals_restore_only_live_workspaces(db, pids):
     gone = db.create_workspace("Gone")
     db.commit()
     db.set_active_workspace(ws)
-    kid = db.add_keyword("Hawk")
+    kid = db.keywords.add("Hawk")
     db.tag_photo(pids[0], kid)
     db.commit()
     old_value = json.dumps({
@@ -948,7 +948,7 @@ def test_redo_prediction_accept_resolves_workspace_before_status_writes(
 
 def test_prediction_accept_undo_redo_round_trip(db, pids):
     p = _predictions(db, pids[0])
-    kid = db.add_keyword("Finch", is_species=True)
+    kid = db.keywords.add("Finch", is_species=True)
     db.tag_photo(pids[0], kid)
     db.commit()
     _set_status(db, p["a_mid"], "accepted")
@@ -1192,8 +1192,8 @@ def test_reapply_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
 def test_species_replace_undo_redo_moves_curation(db, pids):
     ws = db._active_workspace_id
     p0 = pids[0]
-    old_kid = db.add_keyword("Old Bird", is_species=True)
-    new_kid = db.add_keyword("New Bird", is_species=True)
+    old_kid = db.keywords.add("Old Bird", is_species=True)
+    new_kid = db.keywords.add("New Bird", is_species=True)
     db.tag_photo(p0, new_kid)
     db.commit()
     _hl(db, ws, "New Bird", p0, 1)
@@ -1323,7 +1323,9 @@ def test_edit_old_value_meta_non_string_int(db):
     ({"prediction_id": "bad"}, "bad", []),
 ])
 def test_edit_prediction_ids(db, meta, fallback, ids):
-    assert db._edit_prediction_ids(meta, fallback) == ids
+    from repositories.edit_history import edit_prediction_ids
+
+    assert edit_prediction_ids(meta, fallback) == ids
     assert db._edit_prediction_id(meta, fallback) == (ids[0] if ids else None)
 
 
@@ -1388,7 +1390,7 @@ def test_workspace_reads_raise_before_any_sql_without_a_workspace(db, pids):
 
 def test_id_keyed_reads_need_no_workspace(db, pids):
     edit = _raw_edit(db, "keyword_add", items=[(pids[0], "", "1")])
-    kid = db.add_keyword("Heron")
+    kid = db.keywords.add("Heron")
     db.commit()
     db.set_active_workspace(None)
     history = db.edit_history
@@ -1481,7 +1483,7 @@ _DOMAIN = _DELEGATING + (
     "_edit_set_edit_recipe", "_undo_rating", "_redo_rating",
     "_flip_pending_keyword_change", "_retag_for_edit", "_untag_for_edit",
     "_undo_keyword_remove", "_redo_keyword_remove", "_edit_old_value_meta",
-    "_edit_prediction_ids", "_edit_prediction_id",
+    "_edit_prediction_id",
     "_restore_edit_prediction_status", "_reject_edit_prediction",
 )
 

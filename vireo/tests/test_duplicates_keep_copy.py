@@ -73,7 +73,7 @@ def test_keep_promotes_rejected_copy_and_rejects_the_kept_one(tmp_path):
 
 def test_keep_moves_rating_and_keywords_to_the_chosen_copy(tmp_path):
     db, kept, rejected = _resolved_pair(tmp_path)
-    kw_id = db.add_keyword("Red Kangaroo")
+    kw_id = db.keywords.add("Red Kangaroo")
     db.tag_photo(kept, kw_id)
     db.commit()
     db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (kept,))

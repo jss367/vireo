@@ -100,7 +100,7 @@ def test_api_photos_marks_species_representative(app_and_db):
     """List payloads expose representative state for card views and menus."""
     app, db = app_and_db
     photo = db.photos.list_page()[0]
-    kid = db.add_keyword("American Robin", is_species=True)
+    kid = db.keywords.add("American Robin", is_species=True)
     db.tag_photo(photo["id"], kid)
     db.commit()
     db.set_species_representative("American Robin", photo["id"])
@@ -595,8 +595,8 @@ def test_api_photos_keyword_whole_word_option(app_and_db):
     photos = db.photos.list_page(sort="name")
     western_id = photos[0]["id"]
     tern_id = photos[1]["id"]
-    db.tag_photo(western_id, db.add_keyword("Western Gull"))
-    db.tag_photo(tern_id, db.add_keyword("Common Tern"))
+    db.tag_photo(western_id, db.keywords.add("Western Gull"))
+    db.tag_photo(tern_id, db.keywords.add("Common Tern"))
     db.commit()
 
     client = app.test_client()
@@ -1128,7 +1128,7 @@ def test_photo_detail_life_list_lists_eligible_species(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]["id"]
-    kid = db.add_keyword("American Robin", is_species=True)
+    kid = db.keywords.add("American Robin", is_species=True)
     db.tag_photo(pid, kid)
     db.commit()
 
@@ -1148,7 +1148,7 @@ def test_photo_detail_life_list_marks_current_representative(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]["id"]
-    kid = db.add_keyword("American Robin", is_species=True)
+    kid = db.keywords.add("American Robin", is_species=True)
     db.tag_photo(pid, kid)
     db.commit()
     db.species_curation.set_photo_preference("life_list", "American Robin", pid)
@@ -1171,7 +1171,7 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
     client = app.test_client()
     photos = db.photos.list_page()
     p1, p2 = photos[0]["id"], photos[1]["id"]
-    kid = db.add_keyword("American Robin", is_species=True)
+    kid = db.keywords.add("American Robin", is_species=True)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
     db.commit()
@@ -1196,7 +1196,7 @@ def test_photo_detail_life_list_marks_only_primary_of_multiple_reps(app_and_db):
     client = app.test_client()
     photos = db.photos.list_page()
     p1, p2 = photos[0]["id"], photos[1]["id"]
-    kid = db.add_keyword("American Robin", is_species=True)
+    kid = db.keywords.add("American Robin", is_species=True)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
     db.commit()
@@ -1232,7 +1232,7 @@ def test_photo_detail_life_list_uses_primary_eligible_rep(app_and_db):
     client = app.test_client()
     photos = db.photos.list_page()
     p1, p2 = photos[0]["id"], photos[1]["id"]
-    kid = db.add_keyword("American Robin", is_species=True)
+    kid = db.keywords.add("American Robin", is_species=True)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
     db.commit()
@@ -1258,7 +1258,7 @@ def test_photo_detail_life_list_excludes_non_species_keyword(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]["id"]
-    kid = db.add_keyword("Central Park", kw_type="location")
+    kid = db.keywords.add("Central Park", kw_type="location")
     db.tag_photo(pid, kid)
     db.commit()
 
@@ -1297,8 +1297,8 @@ def test_photo_detail_life_list_multiple_species_independent_state(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]["id"]
-    db.tag_photo(pid, db.add_keyword("American Robin", is_species=True))
-    db.tag_photo(pid, db.add_keyword("Blue Jay", is_species=True))
+    db.tag_photo(pid, db.keywords.add("American Robin", is_species=True))
+    db.tag_photo(pid, db.keywords.add("Blue Jay", is_species=True))
     db.commit()
     db.species_curation.set_photo_preference("life_list", "Blue Jay", pid)
     db.commit()
@@ -1314,7 +1314,7 @@ def test_photo_detail_life_list_empty_for_rejected_photo(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]["id"]
-    kid = db.add_keyword("American Robin", is_species=True)
+    kid = db.keywords.add("American Robin", is_species=True)
     db.tag_photo(pid, kid)
     db.commit()
     db.photo_review.set_flag(pid, "rejected")
@@ -1650,7 +1650,7 @@ def test_api_photos_geo_unplottable_focus_names_coordless_location(app_and_db):
         "UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE filename='bird1.jpg'"
     )
     db.conn.commit()
-    lake = db.add_keyword("Laguna Lake", kw_type="location")
+    lake = db.keywords.add("Laguna Lake", kw_type="location")
     db.tag_photo(photos["bird2.jpg"], lake)
     db.commit()
 
@@ -1701,7 +1701,7 @@ def test_api_photos_geo_unplottable_focus_missing_folder_outranks_no_coordinates
     app, db = app_and_db
     photos = {p["filename"]: (p["id"], p["folder_id"]) for p in db.photos.list_page()}
     bird2_id, folder_id = photos["bird2.jpg"]
-    lake = db.add_keyword("Laguna Lake", kw_type="location")
+    lake = db.keywords.add("Laguna Lake", kw_type="location")
     db.tag_photo(bird2_id, lake)
     db.commit()
     db.conn.execute(
@@ -10015,11 +10015,11 @@ def test_map_review_assignment_repairs_legacy_california_taxonomy_node(
 ):
     """Map assignment heals the pre-type-preservation California corruption."""
     app, db = app_and_db
-    country_id = db.add_keyword("United States", kw_type="location")
-    state_id = db.add_keyword(
+    country_id = db.keywords.add("United States", kw_type="location")
+    state_id = db.keywords.add(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
-    county_id = db.add_keyword(
+    county_id = db.keywords.add(
         "San Diego County", parent_id=state_id, kw_type="location",
     )
     db.commit()

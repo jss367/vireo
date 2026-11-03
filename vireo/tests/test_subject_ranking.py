@@ -134,7 +134,7 @@ def test_photo_keyword_and_pending_top_prediction_do_not_confirm_subject(compari
     for row in db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (ids[pids[0]][0],)).fetchall():
         review_decisions.update_prediction_status(db, row["id"], "pending")
         db.commit()
-    keyword = db.add_keyword(TARGET, is_species=True)
+    keyword = db.keywords.add(TARGET, is_species=True)
     db.tag_photo(pids[0], keyword)
     db.commit()
     pack = _pack(app, pids, requested_species=TARGET)

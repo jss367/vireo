@@ -12,8 +12,8 @@ def _setup(tmp_path, alias_count):
     db = Database(str(tmp_path / 'lookup.db'))
     folder = workspace_folders.add_folder(db, str(tmp_path / 'photos'))
     photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
-    common = db.add_keyword('Common alpha', is_species=True, source_taxon_id=88001)
-    other = db.add_keyword('Common beta', is_species=True, source_taxon_id=88002)
+    common = db.keywords.add('Common alpha', is_species=True, source_taxon_id=88001)
+    other = db.keywords.add('Common beta', is_species=True, source_taxon_id=88002)
     db.commit()
     ids = []
     for index in range(alias_count):
@@ -96,7 +96,7 @@ def test_pending_identity_remap_bounds_scans_for_empty_and_duplicate_alias_names
         alias = db.keywords.name_of(aliases[0])
         for index in range(3):
             workspace = db.require_workspace_id() if index == 0 else db.create_workspace(f'Pending alias {index}')
-            db.queue_change(photos[0], 'keyword_add', alias, workspace_id=workspace)
+            db.pending_changes.queue(photos[0], 'keyword_add', alias, workspace_id=workspace)
             db.commit()
         before = [dict(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
         scans = []

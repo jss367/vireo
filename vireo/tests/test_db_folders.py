@@ -840,7 +840,7 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
     dup = _photo(db, source, "dup.jpg")
     moved = _photo(db, source, "moved.jpg")
     phantom = _photo(db, source, "phantom.jpg")
-    kw = db.add_keyword("K")
+    kw = db.keywords.add("K")
     db.tag_photo(dup, kw)
     db.commit()
     witness = _photo(db, target, "w.jpg")
@@ -1023,7 +1023,7 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
     # Source carries an embedded-imported Robin tag; the survivor has no
     # keyword yet. The suppression key is what a prior embedded scan of
     # ``bird.jpg`` on the source row recorded.
-    robin_id = db.add_keyword("Robin")
+    robin_id = db.keywords.add("Robin")
     db.commit()
     db.conn.execute(
         "INSERT INTO photo_keywords (photo_id, keyword_id, source) "

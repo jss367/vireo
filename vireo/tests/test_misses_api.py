@@ -150,7 +150,7 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
     db.photo_review.set_rating(ids["clipped"], 5)
     db.commit()
     db.photo_labels.set(ids["clipped"], "red")
-    keyword_id = db.add_keyword("keeper")
+    keyword_id = db.keywords.add("keeper")
     db.tag_photo(ids["clipped"], keyword_id)
     db.commit()
 

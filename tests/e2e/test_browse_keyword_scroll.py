@@ -18,7 +18,7 @@ from e2e.stack_seed import seed_browse_stack
 
 def _seed_filtered_library(db, folder_id, count=160):
     """Photos that all match one keyword, so a keyword filter is scrollable."""
-    kw = db.add_keyword("Marsh")
+    kw = db.keywords.add("Marsh")
     db.commit()
     for i in range(count):
         pid = photo_ingest.add_photo(
@@ -155,7 +155,7 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
     """Accepting a species must leave the same photos ready for a second edit."""
     db = live_server["db"]
     _seed_filtered_library(db, live_server["data"]["folders"][0])
-    old_keyword = db.add_keyword("Needs identification")
+    old_keyword = db.keywords.add("Needs identification")
     db.commit()
     photo_ids = [row[0] for row in db.conn.execute(
         "SELECT id FROM photos WHERE filename LIKE 'marsh%'"

@@ -5993,12 +5993,12 @@ def test_pending_archive_sync_first_guards_final_verification(app_and_db, tmp_pa
     archive_id = imported["config"]["pending_archive_id"]
     staging = Path(imported["config"]["managed_staging"]["destination"])
     photo_id = imported["result"]["photo_ids"][0]
-    db.queue_change(photo_id, "keyword_add", "Osprey")
+    db.pending_changes.queue(photo_id, "keyword_add", "Osprey")
     db.commit()
     sibling = db.create_workspace("Sibling metadata edits")
     db.commit()
     workspace_folders.add_workspace_folder(db, sibling, workspace_folders.add_folder(db, str(staging)), is_root=True)
-    db.queue_change(photo_id, "keyword_add", "Kestrel", workspace_id=sibling)
+    db.pending_changes.queue(photo_id, "keyword_add", "Kestrel", workspace_id=sibling)
     db.commit()
     entered, release = threading.Event(), threading.Event()
     verify = move.folder_transfer._first_missing_source_file
@@ -6202,21 +6202,21 @@ def test_pending_archive_separates_this_workspace_from_the_others(app_and_db, tm
     elsewhere.mkdir()
     outside = photo_ingest.add_photo(db, workspace_folders.add_folder(db, str(elsewhere), name="already-on-nas"),
                            "elsewhere.jpg", ".jpg", 10, 0)
-    db.queue_change(outside, "keyword_add", "Elsewhere")
+    db.pending_changes.queue(outside, "keyword_add", "Elsewhere")
     db.commit()
     assert item()["unsynced_photos"] == 0
 
     # Two changes on one photo are one photo's worth of stale sidecar.
-    db.queue_change(first, "keyword_add", "Osprey")
+    db.pending_changes.queue(first, "keyword_add", "Osprey")
     db.commit()
-    db.queue_change(first, "rating", "3")
+    db.pending_changes.queue(first, "rating", "3")
     db.commit()
     assert item()["unsynced_photos"] == 1
 
     sibling = db.create_workspace("Sibling")
     db.commit()
     workspace_folders.add_workspace_folder(db, sibling, workspace_folders.add_folder(db, staging), is_root=True)
-    db.queue_change(second, "keyword_add", "Kestrel", workspace_id=sibling)
+    db.pending_changes.queue(second, "keyword_add", "Kestrel", workspace_id=sibling)
     db.commit()
     assert item()["unsynced_photos"] == 1, "a sibling's edit is not ours to write"
     assert item()["unsynced_photos_other_workspaces"] == 1
@@ -6227,7 +6227,7 @@ def test_pending_archive_separates_this_workspace_from_the_others(app_and_db, tm
     # shared and only this workspace's half will be written. Surfaced as
     # a separate overlap count so the "other workspaces" number does not
     # read as extra photos.
-    db.queue_change(first, "keyword_add", "Kestrel", workspace_id=sibling)
+    db.pending_changes.queue(first, "keyword_add", "Kestrel", workspace_id=sibling)
     db.commit()
     assert item()["unsynced_photos"] == 1
     assert item()["unsynced_photos_other_workspaces"] == 1
@@ -6248,7 +6248,7 @@ def test_pending_archive_finds_staging_unlinked_from_its_own_workspace(app_and_d
     staging = imported["config"]["managed_staging"]["destination"]
     owning = db._ws_id()
 
-    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
     db.commit()
     staged_folders = [
         row["id"] for row in db.conn.execute(
@@ -6275,7 +6275,7 @@ def test_pending_archive_sync_first_writes_sidecars_before_the_transfer(app_and_
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
     staging = imported["config"]["managed_staging"]["destination"]
-    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
     db.commit()
     assert not list((tmp_path / "staging").rglob("*.xmp"))
 
@@ -6322,7 +6322,7 @@ def test_pending_archive_sync_first_writes_when_staging_unlinked_from_workspace(
     staging = imported["config"]["managed_staging"]["destination"]
     owning = db._ws_id()
     photo_id = imported["result"]["photo_ids"][0]
-    db.queue_change(photo_id, "keyword_add", "Osprey")
+    db.pending_changes.queue(photo_id, "keyword_add", "Osprey")
     db.commit()
 
     # Unlink every staged folder from the workspace that imported it. The
@@ -6366,7 +6366,7 @@ def test_pending_archive_sync_first_writes_a_rating_only_sidecar(app_and_db, tmp
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
-    db.queue_change(imported["result"]["photo_ids"][0], "rating", "3")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "rating", "3")
     db.commit()
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
@@ -6390,7 +6390,7 @@ def test_pending_archive_send_leaves_sidecars_alone_without_sync_first(app_and_d
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
-    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
     db.commit()
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
@@ -6414,7 +6414,7 @@ def test_pending_archive_sync_drains_edits_queued_while_it_runs(app_and_db, tmp_
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
     first, second = imported["result"]["photo_ids"]
-    db.queue_change(first, "keyword_add", "Osprey")
+    db.pending_changes.queue(first, "keyword_add", "Osprey")
     db.commit()
 
     real_sync, late = sync_mod.sync_to_xmp, []
@@ -6424,7 +6424,7 @@ def test_pending_archive_sync_drains_edits_queued_while_it_runs(app_and_db, tmp_
         # Stands in for the user tagging a photo while "Sending to NAS…" shows.
         if not late:
             late.append(True)
-            worker_db.queue_change(second, "keyword_add", "Kestrel")
+            worker_db.pending_changes.queue(second, "keyword_add", "Kestrel")
             worker_db.commit()
         return result
 
@@ -6452,12 +6452,12 @@ def test_pending_archive_reports_edits_that_missed_the_transfer(app_and_db, tmp_
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
     first, second = imported["result"]["photo_ids"]
-    db.queue_change(first, "keyword_add", "Osprey")
+    db.pending_changes.queue(first, "keyword_add", "Osprey")
     db.commit()
 
     def queue_during_the_move(*a, **kw):
         # Past the last drain, so this edit cannot travel.
-        db.queue_change(second, "keyword_add", "Kestrel")
+        db.pending_changes.queue(second, "keyword_add", "Kestrel")
         db.commit()
         raise FileNotFoundError()
 
@@ -6490,7 +6490,7 @@ def test_pending_archive_says_so_when_the_residual_recheck_fails(app_and_db, tmp
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
-    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
     db.commit()
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
@@ -6526,7 +6526,7 @@ def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_
     archive_id = imported["config"]["pending_archive_id"]
     db.workspaces.update(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
     db.commit()
-    db.queue_change(imported["result"]["photo_ids"][0], "flag", "flagged")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "flag", "flagged")
     db.commit()
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
@@ -6549,7 +6549,7 @@ def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
-    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
     db.commit()
 
     def failing_sync(*a, **kw):
@@ -6652,7 +6652,7 @@ def test_pending_archive_sync_first_waits_for_a_running_xmp_sync(app_and_db, tmp
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
-    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
     db.commit()
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
@@ -6686,7 +6686,7 @@ def test_pending_archive_sync_first_cancellable_while_waiting_for_lock(app_and_d
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
-    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+    db.pending_changes.queue(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
     db.commit()
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
@@ -13937,7 +13937,7 @@ def test_pending_archive_sync_repairs_keyword_cancelled_during_publish(app_and_d
     archive_id = imported["config"]["pending_archive_id"]
     staging = imported["config"]["managed_staging"]["destination"]
     photo_id = imported["result"]["photo_ids"][0]
-    db.queue_change(photo_id, "keyword_add", "Osprey")
+    db.pending_changes.queue(photo_id, "keyword_add", "Osprey")
     db.commit()
     real_publish = xmp.document._write_tree_atomic
     cancelled = []

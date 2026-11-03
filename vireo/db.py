@@ -16,9 +16,11 @@ from keyword_normalization import (
     normalize_keyword_display,
 )
 from new_images_cache import get_shared_cache
+from repositories.edit_history import edit_prediction_ids
 from repositories.effective_config import subject_types, workspace_effective_config
 from repositories.folder_subtrees import escape_like as _escape_like
 from repositories.folder_subtrees import path_for_subtree_match as _path_for_subtree_match
+from repositories.keyword_provenance import location_component_rank
 from repositories.keywords import KEYWORD_TYPES
 from repositories.photo_sql import (
     PHOTO_COLS,
@@ -413,28 +415,6 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
     values = list(values)
     for idx in range(0, len(values), size):
         yield values[idx:idx + size]
-
-
-
-_LOCATION_COMPONENT_RANKS = {
-    "country": 10,
-    "administrative_area_level_1": 20,
-    "administrative_area_level_2": 30,
-    "administrative_area_level_3": 40,
-    "administrative_area_level_4": 50,
-    "administrative_area_level_5": 60,
-    "administrative_area_level_6": 70,
-    "administrative_area_level_7": 80,
-    "locality": 90,
-    "postal_town": 90,
-    "sublocality": 100,
-    "sublocality_level_1": 100,
-    "sublocality_level_2": 110,
-    "sublocality_level_3": 120,
-    "sublocality_level_4": 130,
-    "sublocality_level_5": 140,
-    "neighborhood": 150,
-}
 
 
 
@@ -2070,9 +2050,8 @@ class Database:
 
         A domain accessor, not a cached attribute: every access builds a
         fresh repository, whose scoped methods resolve the workspace at use.
-        Do not retain one across a workspace switch. ``add_keyword`` keeps
-        its ``Database`` wrapper while ``repositories/keyword_provenance.py``
-        binds it by name, as does ``untag_photo`` beside ``tag_photo``.
+        Do not retain one across a workspace switch. Insert a keyword with
+        ``db.keywords.add``.
         """
         return self._keyword_repository()
 
@@ -2171,7 +2150,7 @@ class Database:
         """
         from repositories.photo_species import PhotoSpeciesRepository
 
-        return PhotoSpeciesRepository(self.conn, self._ws_id, chunks=_chunks)
+        return PhotoSpeciesRepository(self.conn, self._ws_id)
 
     @property
     def photo_species(self) -> PhotoSpeciesRepository:
@@ -2244,73 +2223,6 @@ class Database:
 
         return KeywordMergeRepository(self.conn)
 
-    def add_keyword(
-        self,
-        name: str,
-        parent_id: int | None = None,
-        is_species: bool = False,
-        kw_type: str | None = None,
-        source_taxon_id: int | None = None,
-        _resolve_alias: bool = False,
-    ) -> int:
-        """Insert a keyword (no commit). Returns existing id if duplicate (case-insensitive).
-
-        If a keyword with the same name but different casing exists, reuses
-        the existing one rather than creating a duplicate.
-
-        For new species keywords, auto-detects the user's casing convention
-        from existing keywords and applies it (unless overridden by config).
-
-        Args:
-            kw_type: Optional explicit keyword type. Must be one of
-                     ``KEYWORD_TYPES`` if provided. When ``None``, the type is
-                     auto-detected (``taxonomy`` for species or names matching
-                     a known taxon, otherwise ``general``).
-            source_taxon_id: Explicit iNaturalist ID for a species keyword;
-                     bypass common-name inference and reuse only that identity.
-            _resolve_alias: Import callers opt in for leaf keywords only.
-                     Manual additions must not inherit imported keyword aliases,
-                     and a leaf alias must not relocate a new parent chain.
-        """
-        return self._keyword_repository().add(
-            name, parent_id=parent_id, is_species=is_species, kw_type=kw_type,
-            source_taxon_id=source_taxon_id, _resolve_alias=_resolve_alias,
-        )
-
-    def _restore_misclassified_location_ancestor(
-        self, keyword_id, allow_leaf=False,
-    ):
-        """Restore one legacy taxonomy row that is structurally a location.
-
-        Before explicit keyword types were protected during taxonomy marking,
-        geographic homonyms such as ``California`` could be changed from a
-        location into taxonomy. A taxonomy row below a location parent that
-        sits above a location descendant connected only through other
-        taxonomy rows is an administrative location-tree node. A place-
-        bearing row is also unambiguously a location, regardless of where
-        it sits. ``allow_leaf`` is reserved for an explicit Google
-        administrative-component match, where the place response supplies
-        the evidence a coordless leaf lacks during startup.
-
-        Root rows (``parent_id IS NULL``) lack a location parent proving
-        they belong to a legacy location chain, so a location descendant
-        alone is not enough evidence — a genuine taxonomy root with a
-        mixed-hierarchy location descendant (e.g. ``Ardea`` → ``Backyard``)
-        would otherwise be retyped and lose its taxonomy metadata. A bare
-        name collision from ``allow_leaf`` is also not enough: a genuine
-        root taxonomy homonym such as ``Turkey`` (the species) would be
-        clobbered when the user later saves the Google country ``Turkey``.
-        SQLite permits multiple ``parent_id IS NULL`` rows with the same
-        name, so the caller can safely insert a separate location root
-        instead. Roots therefore need stronger structural evidence: an
-        existing ``place_id`` or a location descendant reachable through
-        taxonomy rows. Clear stale taxonomy metadata and restore the
-        row's type when evidence is sufficient.
-        """
-        return self._location_repository().restore_misclassified_ancestor(
-            keyword_id, allow_leaf=allow_leaf,
-        )
-
     def merge_taxonomy_root_twins(self) -> int:
         """Fold each top-level species twin into the row filed in the tree.
 
@@ -2343,9 +2255,7 @@ class Database:
         would settle on one root and orphan the other's descendants.
         """
         repaired, merged_roots = (
-            self._location_repository().repair_misclassified_ancestors(
-                restore_ancestor=self._restore_misclassified_location_ancestor,
-            )
+            self._location_repository().repair_misclassified_ancestors()
         )
         if repaired:
             log.info(
@@ -2358,116 +2268,6 @@ class Database:
                 merged_roots,
             )
         return repaired
-
-    @staticmethod
-    def _location_component_rank(component):
-        """Return a broad-to-narrow rank for useful location components."""
-        types = component.get("types") if isinstance(component, dict) else []
-        if not isinstance(types, list):
-            return None
-        ranks = [
-            _LOCATION_COMPONENT_RANKS[t]
-            for t in types
-            if isinstance(t, str) and t in _LOCATION_COMPONENT_RANKS
-        ]
-        if not ranks:
-            return None
-        return min(ranks)
-
-    def _location_parent_components(self, components, leaf_name="", leaf_types=None):
-        """Return address components suitable for keyword parents.
-
-        Google address components can include street numbers, routes, postal
-        codes, rooms, and other address fragments. Those are useful for a
-        formatted address, but they make noisy keyword parents such as "1200"
-        or "94107". Keep administrative/geographic levels only and sort by
-        component type so postal-code placement in Google's response cannot
-        become the root of the hierarchy.
-        """
-        leaf_type_set = (
-            {t for t in (leaf_types or []) if isinstance(t, str)}
-            if isinstance(leaf_types, list)
-            else set()
-        )
-        candidates = []
-        seen = set()
-        leaf_norm = leaf_name.strip().casefold() if isinstance(leaf_name, str) else ""
-        for index, comp in enumerate(components or []):
-            if not isinstance(comp, dict):
-                continue
-            name = (comp.get("name") or comp.get("long_name") or "").strip()
-            if not name:
-                continue
-            rank = self._location_component_rank(comp)
-            if rank is None:
-                continue
-            types = tuple(t for t in comp.get("types", []) if isinstance(t, str))
-            candidates.append((rank, index, name, types))
-
-        leaf_component = None
-        if leaf_norm and leaf_type_set:
-            leaf_matches = [
-                item for item in candidates
-                if item[2].casefold() == leaf_norm
-                and any(
-                    t in leaf_type_set and t in _LOCATION_COMPONENT_RANKS
-                    for t in item[3]
-                )
-            ]
-            if leaf_matches:
-                # If a leaf has the same text as multiple admin levels
-                # ("New York" city and state), drop only the narrowest
-                # matching component and keep the broader parent.
-                leaf_component = max(leaf_matches, key=lambda item: item[0])
-
-        normalized = []
-        for candidate in candidates:
-            rank, index, name, _types = candidate
-            if leaf_component is not None and candidate == leaf_component:
-                continue
-            key = (rank, name.casefold())
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append((rank, index, {"name": name}))
-        normalized.sort(key=lambda item: (item[0], item[1]))
-        return [item[2] for item in normalized]
-
-    def _upsert_location_parent_chain(
-        self,
-        components,
-        leaf_name="",
-        leaf_types=None,
-        exclude_keyword_id=None,
-    ):
-        """Upsert a chain of parent location keywords from ``address_components``.
-
-        Walks broadest → narrowest, returning the list of visited keyword ids
-        in broadest → narrowest order. Returns an empty list if ``components``
-        is empty / all entries lack a name. The deepest (narrowest) parent is
-        ``chain[-1]`` if non-empty. ``exclude_keyword_id`` prevents an
-        existing selected place from being reused as its own parent when its
-        display name differs from the matching address component. Caller is
-        responsible for the surrounding transaction.
-        """
-        chain: list[int] = []
-        parent_id = None
-        for comp in self._location_parent_components(components, leaf_name, leaf_types):
-            if not comp.get("name"):
-                continue
-            component_id = self.keyword_provenance.upsert_one_keyword(
-                name=comp["name"],
-                parent_id=parent_id,
-                place_id=None,
-                latitude=None,
-                longitude=None,
-                reuse_location_component=True,
-            )
-            if component_id == exclude_keyword_id:
-                continue
-            parent_id = component_id
-            chain.append(component_id)
-        return chain
 
     def upsert_place_chain(self, details: Mapping[str, Any]) -> int:
         """Upsert a Google Place + its parent chain. Returns the leaf id.
@@ -2497,7 +2297,7 @@ class Database:
         components = details.get("address_components") or []
 
         existing_leaf = self._location_repository().find_place_keyword(details["place_id"])
-        chain = self._upsert_location_parent_chain(
+        chain = self.keyword_provenance.upsert_location_parent_chain(
             components,
             leaf_name=name,
             leaf_types=details.get("types"),
@@ -2513,7 +2313,7 @@ class Database:
             latitude=lat,
             longitude=lng,
             reuse_location_component=(
-                self._location_component_rank({
+                location_component_rank({
                     "types": details.get("types"),
                 }) is not None
             ),
@@ -2772,29 +2572,6 @@ class Database:
         if _record_history:
             self.species_provenance.remember_before(photo_id, keyword_id)
         return self._photo_keyword_repository().untag(photo_id, keyword_id)
-
-    def get_photos_with_equivalent_species(
-        self,
-        photo_ids: Collection[int],
-        keyword_id: int,
-        exclude_keyword_ids: Iterable[int] | None = None,
-    ) -> set[int]:
-        """Return submitted photo ids already carrying the target species.
-
-        Species identity is the linked taxon when available, not a particular
-        keyword row. This lets a hierarchical ``Birds|Verdin`` tag satisfy a
-        later confirmation that resolved to the top-level Verdin keyword.
-        Unlinked legacy species fall back to the normalized display name.
-
-        When ``exclude_keyword_ids`` is provided, keyword rows with those ids
-        are ignored during the match. Callers use this to look past rows that
-        are about to be removed — for example, a same-taxon replacement where
-        the "already carries this species" answer must reflect only the rows
-        that will survive the mutation.
-        """
-        return self._photo_species_repository().get_photos_with_equivalent_species(
-            photo_ids, keyword_id, exclude_keyword_ids=exclude_keyword_ids,
-        )
 
     def get_life_list_unmatched_species(self) -> list[str]:
         """Backward-compatible list of uncounted identification names."""
@@ -3122,66 +2899,13 @@ class Database:
         is set). Do not hold the returned repository across
         ``set_active_workspace``.
 
-        Coordinated queue work stays on ``Database`` where something binds it
-        by name: ``queue_change`` and ``remove_pending_changes`` (bound into
-        the keyword-provenance and location repositories, so a patch of the
-        ``Database`` method reaches them) and ``queue_flag_change_if_enabled``
-        (the undo replay's flag setter). The claim, the token removal and the
-        clears live in ``services/pending_changes.py``. Queue a change
-        through ``db.queue_change``, not ``db.pending_changes.queue``.
+        Queue a change with ``queue`` and cancel one with ``cancel`` (which
+        queues the inverse of a keyword intent that may already have reached
+        a sidecar). ``queue_flag_change_if_enabled`` (the undo replay's flag
+        setter) stays on ``Database``. The claim, the token removal and the
+        clears live in ``services/pending_changes.py``.
         """
         return self._sync_repository()
-
-    def queue_change(
-        self,
-        photo_id: int,
-        change_type: str,
-        value: str,
-        workspace_id: int | None = None,
-    ) -> str | None:
-        """Add a change to the sync queue, skipping redundant intents.
-
-        Returns the inserted pending change token, or None if already queued.
-        A rating only deduplicates against its latest queued value: 1 -> 2 -> 1
-        must retain the last 1 so chronological sync writes the current rating.
-        If workspace_id is not provided, uses the active workspace.
-
-        """
-        return self._sync_repository().queue(
-            photo_id, change_type, value, workspace_id=workspace_id,
-        )
-
-    def remove_pending_changes(
-        self,
-        photo_id: int,
-        change_type: str | None = None,
-        value: str | None = None,
-        workspace_id: int | None = None,
-    ) -> int:
-        """Delete matching pending changes, preserving captured keyword intents.
-
-        Return the number of rows removed.
-
-        If a keyword may already have reached a writer, cancelling it queues
-        its inverse in the same transaction. The inverse is also marked as
-        possibly written: further toggles must keep explicit repair work
-        until a sync acknowledges it, even if the first write fails.
-
-        """
-        ws_id = workspace_id if workspace_id is not None else self._ws_id()
-        repo = self._sync_repository()
-        removed = repo.delete_matching(
-            photo_id, ws_id, change_type=change_type, value=value,
-        )
-        inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
-        for row in removed:
-            if row["change_type"] in inverse and (
-                row["sync_started"] or repo.keyword_sidecar_alias(photo_id, ws_id, row["value"])
-            ):
-                kind = inverse[row["change_type"]]
-                self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id)
-                repo.mark_sync_started(photo_id, ws_id, kind, row["value"])
-        return len(removed)
 
     def queue_flag_change_if_enabled(
         self, photo_id: int, flag: str | None, workspace_id: int | None = None
@@ -3189,7 +2913,7 @@ class Database:
         """Queue a flag write when the active config opts into XMP flag sync."""
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         flag = flag or "none"
-        self.remove_pending_changes(photo_id, "flag", workspace_id=ws_id)
+        self.pending_changes.cancel(photo_id, "flag", workspace_id=ws_id)
         if flag not in {"none", "flagged", "rejected"}:
             log.warning("Not queueing invalid XMP flag value for photo %s: %r", photo_id, flag)
             return None
@@ -3201,7 +2925,7 @@ class Database:
         if not enabled:
             return None
 
-        token = self.queue_change(photo_id, "flag", flag, workspace_id=ws_id)
+        token = self.pending_changes.queue(photo_id, "flag", flag, workspace_id=ws_id)
         return token
 
     # -- Edit History --
@@ -3420,8 +3144,8 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         self.photo_review.set_rating(pid, int(old_val), verify_workspace=False)
         if old_val != entry['new_value']:
-            self.remove_pending_changes(pid, 'rating', entry['new_value'])
-            self.queue_change(pid, 'rating', old_val)
+            self.pending_changes.cancel(pid, 'rating', entry['new_value'])
+            self.pending_changes.queue(pid, 'rating', old_val)
 
     def _redo_rating(self, entry, item):
         pid, old_val, new_val = item['photo_id'], item['old_value'], item['new_value']
@@ -3429,8 +3153,8 @@ class Database:
             pid, int(new_val) if new_val else 0, verify_workspace=False,
         )
         if old_val != new_val:
-            self.remove_pending_changes(pid, 'rating', old_val)
-            self.queue_change(pid, 'rating', new_val)
+            self.pending_changes.cancel(pid, 'rating', old_val)
+            self.pending_changes.queue(pid, 'rating', new_val)
 
     # -- keyword helpers shared by the keyword / species handlers ----------
 
@@ -3444,8 +3168,8 @@ class Database:
         add -> remove -> undo flow leaves the tag on the photo with no
         pending sidecar write, and the restored keyword never syncs.
         """
-        if self.remove_pending_changes(pid, cancel_type, name) == 0:
-            self.queue_change(pid, queue_type, name)
+        if self.pending_changes.cancel(pid, cancel_type, name) == 0:
+            self.pending_changes.queue(pid, queue_type, name)
 
     def _retag_for_edit(self, pid, keyword_id):
         """Re-add a keyword removed by an edit; returns the keyword name."""
@@ -3523,7 +3247,7 @@ class Database:
                     if self._edit_history_repository().workspace_exists(
                         removal['workspace_id'],
                     ):
-                        self.queue_change(
+                        self.pending_changes.queue(
                             pid, 'keyword_remove_flat', removal['value'],
                             workspace_id=removal['workspace_id'],
                         )
@@ -3557,7 +3281,7 @@ class Database:
                 # Cancel the removal restored by undo before queueing an add.
                 self._retag_for_edit(pid, kid)
                 for removal in old_meta.get('flat_removals', []):
-                    self.remove_pending_changes(
+                    self.pending_changes.cancel(
                         pid, 'keyword_remove_flat', removal['value'],
                         workspace_id=removal['workspace_id'],
                     )
@@ -3585,7 +3309,7 @@ class Database:
         one detection, so iterate and dedupe by (detection, model,
         fingerprint) so each unique sibling scope is reset exactly once.
         """
-        pred_ids = self._edit_prediction_ids(old_meta, old_val)
+        pred_ids = edit_prediction_ids(old_meta, old_val)
         if not pred_ids:
             return
         self._edit_history_repository().undo_prediction_accept_statuses(
@@ -3620,7 +3344,7 @@ class Database:
         from rejection, since a no-tag accept can hold several ids in one
         scope.
         """
-        pred_ids = self._edit_prediction_ids(old_meta, old_val)
+        pred_ids = edit_prediction_ids(old_meta, old_val)
         if not pred_ids:
             return
         # Resolve the active workspace up front, before any status write.
@@ -3740,45 +3464,8 @@ class Database:
         except (TypeError, ValueError):
             return {"keyword_id": None, "keyword_ids": []}
 
-    def _edit_prediction_ids(self, meta, fallback):
-        """Return every accepted prediction id captured on this edit item.
-
-        Accept-subject can accept agreeing predictions from multiple
-        classifier models on one detection, so the ``no_tag`` variant
-        stashes the full list under ``prediction_ids``. Those siblings
-        do not share a single ``(detection_id, classifier_model,
-        labels_fingerprint)`` scope, so undo/redo must reset every
-        recorded id — using only the first drops the other classifiers'
-        accepted rows on undo. Regular accepts still carry a singular
-        ``prediction_id`` or a bare-int ``old_value`` fallback.
-        """
-        ids = []
-        seen = set()
-
-        def _push(raw):
-            if raw is None:
-                return
-            try:
-                pid = int(raw)
-            except (TypeError, ValueError):
-                return
-            if pid in seen:
-                return
-            seen.add(pid)
-            ids.append(pid)
-
-        if meta:
-            _push(meta.get("prediction_id"))
-            raw_ids = meta.get("prediction_ids")
-            if isinstance(raw_ids, list):
-                for raw in raw_ids:
-                    _push(raw)
-        if not ids:
-            _push(fallback)
-        return ids
-
     def _edit_prediction_id(self, meta, fallback):
-        ids = self._edit_prediction_ids(meta, fallback)
+        ids = edit_prediction_ids(meta, fallback)
         return ids[0] if ids else None
 
     def _restore_edit_prediction_status(self, meta):

@@ -11,9 +11,9 @@ def starling_photo(app_and_db):
     app, db = app_and_db
     db.conn.execute("INSERT INTO taxa (id, inat_id, name, common_name, rank) "
                     "VALUES (6424, 14850, 'Sturnus vulgaris', 'European Starling', 'species')")
-    parent = db.add_keyword('Birds')
-    root = db.add_keyword('Common starling', kw_type='taxonomy', is_species=True)
-    leaf = db.add_keyword('European starling', parent_id=parent, kw_type='taxonomy', is_species=True)
+    parent = db.keywords.add('Birds')
+    root = db.keywords.add('Common starling', kw_type='taxonomy', is_species=True)
+    leaf = db.keywords.add('European starling', parent_id=parent, kw_type='taxonomy', is_species=True)
     db.conn.execute('UPDATE keywords SET taxon_id=6424 WHERE id IN (?, ?)', (root, leaf))
     # Unused taxonomy aliases need not overwhelm the photo's saved names.
     db.conn.execute("INSERT INTO taxa_common_names (taxon_id, name, locale) "
@@ -54,7 +54,7 @@ def test_aliases_follow_taxon_not_common_name(starling_photo):
     _, db, leaf, _ = starling_photo
     db.conn.execute("INSERT INTO taxa (id, name, common_name, rank) "
                     "VALUES (6425, 'Other species', 'European Starling', 'species')")
-    other = db.add_keyword('Different bird', kw_type='taxonomy', is_species=True)
+    other = db.keywords.add('Different bird', kw_type='taxonomy', is_species=True)
     db.conn.execute('UPDATE keywords SET taxon_id=6425 WHERE id=?', (other,))
     db.tag_photo(1, other)
     rows = {a['keyword_id']: a for a in db.species_provenance.assignments(1)}
@@ -66,7 +66,7 @@ def test_aliases_follow_taxon_not_common_name(starling_photo):
 def test_missing_common_name_and_unlinked_keywords(starling_photo):
     _, db, leaf, _ = starling_photo
     db.conn.execute('UPDATE taxa SET common_name=NULL WHERE id=6424')
-    unlinked = db.add_keyword('Unresolved bird', is_species=True)
+    unlinked = db.keywords.add('Unresolved bird', is_species=True)
     db.tag_photo(1, unlinked)
     rows = {a['keyword_id']: a for a in db.species_provenance.assignments(1)}
     assert rows[leaf]['display_name'] == 'Sturnus vulgaris'
@@ -96,7 +96,7 @@ def test_display_identity_prefers_explicit_source_over_local_link(starling_photo
     db.conn.execute('UPDATE keywords SET source_taxon_id=14850, taxon_id=? WHERE id=?',
                     (6425 if stale_rank else None, leaf))
     # A stale local starling link must not make another source's keyword an alias.
-    other = db.add_keyword('Unrelated bird alias', is_species=True)
+    other = db.keywords.add('Unrelated bird alias', is_species=True)
     db.conn.execute('UPDATE keywords SET source_taxon_id=99000, taxon_id=6424 WHERE id=?', (other,))
     db.commit()
     before = [tuple(r) for r in db.conn.execute('SELECT * FROM photo_keywords WHERE photo_id=1')]

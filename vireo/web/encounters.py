@@ -829,7 +829,7 @@ class _SpeciesConfirmation:
             self.newly_tagged = []
             return
         self.kid = (self.preserved_keyword_id if self.preserved_keyword_id is not None
-                    else db.add_keyword(self.species, is_species=True))
+                    else db.keywords.add(self.species, is_species=True))
         # Queue/record the stored spelling (see api_add_keyword).
         stored = db.keywords.name_of(self.kid)
         if stored:
@@ -839,7 +839,7 @@ class _SpeciesConfirmation:
         # keyword row with a different id/casing. Compare by taxon_id
         # (or normalized name for taxonomy-less legacy rows), otherwise
         # a confirmation creates a redundant top-level association.
-        self.already_has_new = db.get_photos_with_equivalent_species(
+        self.already_has_new = db.photo_species.get_photos_with_equivalent_species(
             self.photo_ids, self.kid,
         )
         self.newly_tagged = [
@@ -909,7 +909,7 @@ class _SpeciesConfirmation:
         )
         if not replacement_covered:
             return
-        survivors = self.db.get_photos_with_equivalent_species(
+        survivors = self.db.photo_species.get_photos_with_equivalent_species(
             replacement_covered, cast(int, self.kid),
             exclude_keyword_ids=excluded_ids,
         )

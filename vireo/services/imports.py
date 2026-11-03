@@ -814,12 +814,12 @@ class ImportService:
         self, db: Database, photo_id: int, keyword_name: str, workspace_id: int,
     ) -> None:
         """Thread-safe equivalent of queue_keyword_add for import jobs (no commit)."""
-        removed = db.remove_pending_changes(
+        removed = db.pending_changes.cancel(
             photo_id, "keyword_remove", keyword_name,
             workspace_id=workspace_id,
         )
         if removed == 0:
-            db.queue_change(
+            db.pending_changes.queue(
                 photo_id, "keyword_add", keyword_name,
                 workspace_id=workspace_id,
             )
@@ -927,7 +927,7 @@ class ImportService:
                 summary["skipped"] = "import cancelled"
                 break
             try:
-                keyword_id = thread_db.add_keyword(
+                keyword_id = thread_db.keywords.add(
                     requested_name, kw_type="general",
                 )
                 stored = thread_db.keywords.import_tag_row(keyword_id)

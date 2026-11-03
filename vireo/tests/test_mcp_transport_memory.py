@@ -227,8 +227,8 @@ def test_keyword_write_returns_the_actual_identity_without_name_rediscovery():
         assert norm["normalize_keyword_display"](name) == rows[1]["name"]
         return rows[1]["id"]
     db = types.SimpleNamespace(
-        add_keyword=add,
         keywords=types.SimpleNamespace(
+            add=add,
             name_of=lambda kid: next(r["name"] for r in rows if r["id"] == kid),
             get_row=lambda kid: next((r for r in rows if r["id"] == kid), None),
         ),
