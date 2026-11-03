@@ -92,8 +92,7 @@ def resolve_remote_archive_target[E](
     Callers still own their own mutual-exclusivity /
     local_processing checks — this helper handles only the shared
     target-lookup + resolve_remote_archive + rsync-availability
-    block that was duplicated across the two endpoints. See PR
-    #1113 review.
+    block.
     """
     import config as cfg
     import move as move_mod

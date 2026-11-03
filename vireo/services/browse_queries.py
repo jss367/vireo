@@ -141,7 +141,7 @@ def get_collection_photo_ids_stacked(
     Without this, Select-all-matching with Stacks enabled would seed
     Best Batch, Burst Review, and the export-preview filename from a
     hidden member whenever a stack's quality-ranked cover isn't its
-    earliest member under the selected sort (Codex P2 on PR #1561).
+    earliest member under the selected sort.
     """
     return db.collections._stacked_photo_ids(
         [], sort=sort, collection_id=collection_id,
@@ -161,7 +161,7 @@ def query_photo_ids_stacked(
     workspace, folder, dashboard-collection, or unsaved-filter paths
     would seed Best Batch, Burst Review, and the export-preview filename
     from a hidden member whenever a stack's quality-ranked cover isn't
-    its earliest member under the selected sort (Codex P2 on PR #1561).
+    its earliest member under the selected sort.
     """
     return db.collections._stacked_photo_ids(
         rules, sort=sort, collection_id=collection_id, folder_id=folder_id,

@@ -472,11 +472,11 @@ def build_scan_work(
     ``POST /api/folders/<id>/rescan`` so per-folder rescans reuse the
     same scan + thumbnail pipeline as a full scan.
 
-    ``roots`` may be a single path string (back-compat, one root) or a
+    ``roots`` may be a single path string (one root) or a
     list of paths. When multiple roots are given they are scanned
     **serially** inside this single job -- that's the whole point of
-    this wrapper: parallel scan jobs used to fight for the SQLite
-    writer lock, so we now process roots one after another. A failure
+    this wrapper: parallel scan jobs would fight for the SQLite
+    writer lock. A failure
     on one root does not abort the others; the error is recorded and
     the job ends in ``"failed"`` (mixed-outcome rollup convention).
 
