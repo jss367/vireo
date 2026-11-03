@@ -9,90 +9,71 @@ This module owns the SQL behind the predictions domain:
   reads Review, Browse, the pipeline and iNat use (``get_rows``,
   ``get_group``, ``get_states``, ``get_top_for_photo``,
   ``get_top_confidences``, ``get_for_photo``, ``get_existing_photo_ids``,
-  the Pipeline inspector's ``inspector_rows_for_photo``, whose SQL came
-  from ``web/pipeline.py`` unchanged), and the Highlights confirm/relabel
-  read of each photo's top unrejected prediction (``top_unrejected_by_photo``,
-  SQL unchanged from ``web/highlights.py``, chunked through ``self._chunks``);
+  the Pipeline inspector's ``inspector_rows_for_photo``), and the
+  Highlights confirm/relabel read of each photo's top unrejected prediction
+  (``top_unrejected_by_photo``);
 - per-workspace review state (``prediction_review``): status updates, burst
   grouping metadata (``update_group_info`` / ``clear_group_info`` /
   ``ungroup``), the auto-match reconciliation, the raw
   ``get_review_status`` / ``set_review_status`` pair, the legacy
   mixed-species burst repair, and ``accept_subject_species``' target and
-  agreeing-row reads;
+  agreeing-row reads (``subject_accept_target``,
+  ``pending_current_on_detection``);
 - the prediction-decision reads: the status, supersession, workspace,
   scope-sibling and burst-member checks the decision routes in
   ``web/predictions.py`` and ``services/prediction_decisions`` run under
   ``BEGIN IMMEDIATE`` (``get_decision_row`` through
-  ``burst_group_members``). Their SQL came from those modules unchanged,
-  except that chunking goes through ``self._chunks`` and the three
-  single-row reads of a decision's target (reject, batch reject, mark
+  ``burst_group_members``). The three single-row reads of a decision's target (reject, batch reject, mark
   reviewed) share ``get_decision_row``, which selects the union of their
   columns.
 
 - the classify job's two statements (``replace_row``, the ``INSERT OR
   REPLACE`` of one classifier output, and ``id_for_key``, which
-  ``_existing_prediction_id`` shares), SQL unchanged from ``classify_job``.
+  ``_existing_prediction_id`` shares).
 
 Callers reach these through the ``db.predictions`` accessor, which builds a
-fresh repository per access. Only the prediction-decision writers keep
-one-line ``Database`` wrappers (see below).
+fresh repository per access. The repository takes its connection and the
+workspace resolver (``Database._ws_id``), resolved lazily at exactly the
+points each method needs it. It builds the rules engine (a
+``CollectionRepository``) on the same connection, and evaluates
+prediction-field rules per row with ``repositories.prediction_rules``.
 
-The other method bodies were moved verbatim from ``Database``. The only edits are
-``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
-the ``db`` module helpers and constants listed in ``__init__``; the SQL text,
-parameter order, chunk sizes and commit placement are unchanged.
-
-What lives in ``repositories/keyword_provenance.py`` instead:
-``accept_prediction``, whole. It tags the accepted species through
-``tag_photo`` (and ``queue_change``, the curation renames and
-``remove_pending_changes``) in the middle of its own transaction, so it
-sits with the ``photo_keywords`` writers that
-``test_keyword_provenance_contract`` keys to that module.
-``accept_subject_species`` lives in this module, but reaches it through the
-façade (``self.accept_prediction(...)``). A structural test fails if this
-module ever references ``tag_photo``.
-
-What deliberately stays on ``Database``:
-
-- The prediction-decision mutators keep their ``Database`` names
-  (``update_prediction_status``, ``update_predictions_status_by_photo``,
-  ``ungroup_prediction``, ``set_review_status``, ``accept_prediction``,
-  ``accept_subject_species``), which ``test_route_contract`` looks up.
-- The rules helpers with no SQL of their own:
-  ``_relax_negated_prediction_leaves`` and
-  ``_filter_prediction_rows_by_rules`` (with ``_PREDICTION_ROW_FIELDS`` and
-  ``_RELAX_BROAD``), plus ``DECIDED_PREDICTION_STATUSES``.
-- The active-workspace state. ``workspace_id`` is resolved lazily through
-  ``Database._ws_id`` at exactly the points the original code called it.
-- Composition. Every façade method a moved body calls is bound from the
-  ``Database`` instance under its own name (see ``FACADE_METHODS``) and
-  called as ``self.<name>(...)``, so monkeypatches of ``Database`` methods
-  keep reaching the moved code.
+The review-decision writers here (``update_status``,
+``update_status_by_photo``, ``ungroup``, ``set_review_status``) are reached
+only through ``services.review_decisions``, the single entry point
+``test_route_contract`` keys the decision lock to. That service also holds
+``accept_subject_species``, which composes this repository's
+``subject_accept_target`` and ``pending_current_on_detection`` reads with
+``accept_prediction``; ``accept_prediction`` itself lives in
+``repositories/keyword_provenance.py`` beside the ``photo_keywords``
+writers it tags through. A structural test fails if this module ever
+references ``tag_photo``.
 
 No writer here commits. The prediction-decision unit of work owns the
-review-decision writes (``update_status``, ``update_status_by_photo``,
-``ungroup``, ``accept_subject_species``, ``set_review_status``), and the
-classify job owns its classifier-output writes (``add``,
-``retain_candidates``, ``reconcile_match_review_state``, ``clear``,
-``update_group_info``, ``clear_group_info``), one unit per photo or burst
-group.
+review-decision writes, and the classify job owns its classifier-output
+writes (``add``, ``retain_candidates``, ``reconcile_match_review_state``,
+``clear``, ``update_group_info``, ``clear_group_info``), one unit per photo
+or burst group.
 """
 
-from collections.abc import Callable
 from typing import Any
 
 from keyword_normalization import normalize_keyword_display
+from repositories import chunks
 from repositories.collections import CollectionRepository
 from repositories.effective_config import active_effective_config
-from repositories.prediction_review import prediction_review_join, prediction_review_status
-from settings_source import config_value
-
-# ``Database`` methods the moved bodies call through the façade.
-FACADE_METHODS = (
-    "_relax_negated_prediction_leaves",
-    "_filter_prediction_rows_by_rules",
-    "accept_prediction",
+from repositories.photo_sql import TOP_PREDICTION_CONFIDENCE_EXPR
+from repositories.prediction_review import (
+    AUTO_MATCH_REVIEW_MARKER,
+    prediction_review_join,
+    prediction_review_status,
 )
+from repositories.prediction_rules import (
+    DECIDED_PREDICTION_STATUSES,
+    filter_prediction_rows_by_rules,
+    relax_negated_prediction_leaves,
+)
+from settings_source import config_value
 
 
 class DeferredIdentificationError(ValueError):
@@ -100,39 +81,9 @@ class DeferredIdentificationError(ValueError):
 
 
 class PredictionRepository:
-    # Bound ``Database`` methods that ``__init__`` installs from
-    # ``FACADE_METHODS``, declared so the type checker sees them.
-    _relax_negated_prediction_leaves: Callable[..., Any]
-    _filter_prediction_rows_by_rules: Callable[..., Any]
-    accept_prediction: Callable[..., Any]
-
-    def __init__(
-        self,
-        conn,
-        resolve_workspace_id,
-        *,
-        chunks,
-        auto_match_review_marker,
-        top_prediction_confidence_expr,
-        decided_prediction_statuses,
-        facade,
-        species_resolver,
-    ):
+    def __init__(self, conn, resolve_workspace_id):
         self.conn = conn
-        self._species_resolver = species_resolver
         self._resolve_workspace_id = resolve_workspace_id
-        # ``db`` module helpers and constants, kept under their module names
-        # so the moved bodies read them as ``self.<name>``. ``_chunks`` is
-        # ``db._chunks`` itself (its size default is bound at import).
-        self._chunks = chunks
-        self.AUTO_MATCH_REVIEW_MARKER = auto_match_review_marker
-        self._TOP_PREDICTION_CONFIDENCE_EXPR = top_prediction_confidence_expr
-        # ``Database.DECIDED_PREDICTION_STATUSES``: the statuses ``decided_ids``
-        # counts as a decision.
-        self.DECIDED_PREDICTION_STATUSES = decided_prediction_statuses
-        # Bound ``Database`` methods, kept under their façade names.
-        for name in FACADE_METHODS:
-            setattr(self, name, getattr(facade, name))
 
     @property
     def workspace_id(self):
@@ -343,7 +294,7 @@ class PredictionRepository:
             if (
                 review is not None
                 and review["status"] in {"accepted", "rejected"}
-                and review["individual"] != self.AUTO_MATCH_REVIEW_MARKER
+                and review["individual"] != AUTO_MATCH_REVIEW_MARKER
             ):
                 if refresh_output:
                     # Review decisions survive reinference, but burst
@@ -353,7 +304,7 @@ class PredictionRepository:
                                total_votes=?, individual=?
                                WHERE prediction_id=? AND workspace_id=?""",
                         (group_id, vote_count, total_votes,
-                         None if individual == self.AUTO_MATCH_REVIEW_MARKER else individual,
+                         None if individual == AUTO_MATCH_REVIEW_MARKER else individual,
                          pred_id, ws_id),
                     )
                 return
@@ -535,7 +486,7 @@ class PredictionRepository:
                 "DELETE FROM prediction_review "
                 "WHERE prediction_id = ? AND workspace_id = ? "
                 "AND status = 'accepted' AND individual = ?",
-                (pred_id, ws, self.AUTO_MATCH_REVIEW_MARKER),
+                (pred_id, ws, AUTO_MATCH_REVIEW_MARKER),
             )
         if row["category"] != category:
             self.conn.execute(
@@ -708,7 +659,7 @@ class PredictionRepository:
         # model already loaded. Chunks partition disjoint photo ids, so the
         # union of chunked DELETEs equals the single big one.
         if collection_photo_ids is not None:
-            id_chunks = list(self._chunks(collection_photo_ids))
+            id_chunks = list(chunks(collection_photo_ids))
         else:
             id_chunks = [None]
 
@@ -782,7 +733,7 @@ class PredictionRepository:
             }
             for pid in ids
         }
-        for chunk in self._chunks(ids):
+        for chunk in chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             for row in self.conn.execute(
                 f"""SELECT photo_id, COUNT(*) AS n FROM detector_runs
@@ -829,7 +780,7 @@ class PredictionRepository:
         ws = self.workspace_id
         ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
         rows_by_photo = {}
-        for chunk in self._chunks(ids):
+        for chunk in chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             for row in self.conn.execute(
                 f"""SELECT d.photo_id, pr.detection_id, pr.species,
@@ -866,9 +817,9 @@ class PredictionRepository:
         # a sibling row over the threshold — even when the 0.10 sibling
         # satisfies the outer expression at the row level. Strip prediction
         # leaves nested inside a ``none`` group before scoping photos so
-        # ``_filter_prediction_rows_by_rules`` can decide those per row
+        # ``filter_prediction_rows_by_rules`` can decide those per row
         # against the ORIGINAL tree — see r3618822252.
-        scope_rules = self._relax_negated_prediction_leaves(rules)
+        scope_rules = relax_negated_prediction_leaves(rules)
         # row_scoped=True selects broader candidate SQL for the negative
         # prediction-field operators — the row filter below drops the
         # matching sibling rows so we can safely widen photo selection.
@@ -903,7 +854,7 @@ class PredictionRepository:
         The rules subquery scopes photos (``p.id IN (...)``), returning every
         current prediction for matching photos. For Review-only fields
         (``prediction_confidence``, ``prediction_status``, ``classifier_model``,
-        ``taxonomy_*``), ``_filter_prediction_rows_by_rules`` also evaluates
+        ``taxonomy_*``), ``filter_prediction_rows_by_rules`` also evaluates
         each row so Review and Accept All exclude nonmatching siblings.
         It applies only when the tree can be resolved safely per row — see
         that method's docstring for the fallback to the SQL result.
@@ -937,7 +888,7 @@ class PredictionRepository:
         # cap. Chunks partition disjoint photo ids; the merged rows are
         # re-sorted in Python to preserve the single-query ORDER BY.
         if photo_ids is not None:
-            id_chunks = list(self._chunks(list(dict.fromkeys(photo_ids))))
+            id_chunks = list(chunks(list(dict.fromkeys(photo_ids))))
         else:
             id_chunks = [None]
         rows = []
@@ -975,12 +926,12 @@ class PredictionRepository:
                 key=lambda r: (r["confidence"] is None, -(r["confidence"] or 0))
             )
         if rules is not None:
-            rows = self._filter_prediction_rows_by_rules(rows, rules)
+            rows = filter_prediction_rows_by_rules(rows, rules, self._collections())
         return rows
 
     def require_identifiable_subjects(self, prediction_ids):
         """Prevent stale accepts and hidden burst members from bypassing deferral."""
-        for chunk in self._chunks(list(dict.fromkeys(prediction_ids))):
+        for chunk in chunks(list(dict.fromkeys(prediction_ids))):
             placeholders = ','.join('?' for _ in chunk)
             deferred = self.conn.execute(
                 f"""SELECT 1 FROM predictions pr
@@ -998,7 +949,7 @@ class PredictionRepository:
     def evidence_context(self, prediction_ids):
         """Batch evidence at the exact prediction/run key, scoped to this workspace."""
         result = {}
-        for chunk in self._chunks(list(dict.fromkeys(prediction_ids))):
+        for chunk in chunks(list(dict.fromkeys(prediction_ids))):
             placeholders = ','.join('?' for _ in chunk)
             rows = self.conn.execute(
                 f"""SELECT pr.id, d.category AS subject_category,
@@ -1362,7 +1313,7 @@ class PredictionRepository:
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"""SELECT p.id AS photo_id,
-                           {self._TOP_PREDICTION_CONFIDENCE_EXPR} AS confidence
+                           {TOP_PREDICTION_CONFIDENCE_EXPR} AS confidence
                     FROM photos p
                     WHERE p.id IN ({placeholders})""",
                 (*conf_params, *chunk),
@@ -1448,7 +1399,7 @@ class PredictionRepository:
         ws = self.workspace_id
         detector_floor = config_value(self.effective_config(), "detector_confidence")
         results = {}
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"""SELECT photo_id, detection_id, id, species, confidence,
@@ -1622,22 +1573,15 @@ class PredictionRepository:
             (pred_id, ws, individual, group_id, vote_count, total_votes),
         )
 
-    def accept_subject_species(self, prediction_id):
-        """Accept agreeing model predictions for one detected subject.
+    def subject_accept_target(self, prediction_id):
+        """The prediction ``accept_subject_species`` starts from, if visible.
 
-        Compare uses this for an additional-species suggestion: the species
-        keyword is added once to the photo, the existing species keywords are
-        preserved, and every current-model prediction that names the same
-        species on the same detection is resolved together. Grouped
-        predictions are explicitly limited to this photo so accepting a
-        subject in Compare cannot silently tag the rest of a burst.
-
-        Does not commit: ``api_accept_subject_species`` bundles the accept
-        with its own writes (edit history, precondition checks) in the
-        prediction-decision unit of work.
+        ``id``, ``detection_id``, ``species`` and ``photo_id``, or None when
+        the prediction is unknown or its photo is outside the active
+        workspace.
         """
         ws = self.workspace_id
-        target = self.conn.execute(
+        return self.conn.execute(
             """SELECT pr.id, pr.detection_id, pr.species, d.photo_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -1647,13 +1591,15 @@ class PredictionRepository:
                WHERE pr.id = ?""",
             (ws, prediction_id),
         ).fetchone()
-        if target is None:
-            return None
 
-        resolver = self._species_resolver()
-        target_key = resolver.consensus(self.get_rows_by_ids([prediction_id])[0]).key
+    def pending_current_on_detection(self, detection_id):
+        """Pending predictions of the detection's current label set, best first.
 
-        agreeing = self.conn.execute(
+        ``id`` rows, highest confidence first; the candidates
+        ``accept_subject_species`` resolves together.
+        """
+        ws = self.workspace_id
+        return self.conn.execute(
             f"""SELECT pr.id
                FROM predictions pr
                {prediction_review_join('pr')}
@@ -1667,43 +1613,8 @@ class PredictionRepository:
                      LIMIT 1
                  )
                ORDER BY pr.confidence DESC, pr.id ASC""",
-            (ws, target["detection_id"]),
+            (ws, detection_id),
         ).fetchall()
-
-        identities = {row['id']: resolver.consensus(row).key
-                      for row in self.get_rows_by_ids([p['id'] for p in agreeing])}
-        agreeing = [row for row in agreeing if identities[row['id']] == target_key]
-
-        accepted_ids = []
-        affected = []
-        result = None
-        for row in agreeing:
-            accepted = self.accept_prediction(
-                row["id"],
-                photo_ids=[target["photo_id"]],
-                prediction_ids=[row["id"]],
-            )
-            # A row whose grouped scope excluded this photo accepts
-            # nothing, so it must not be reported as an accepted id (nor
-            # supply the returned keyword, which is None when the species
-            # keyword does not exist yet).
-            if accepted and accepted["accepted_prediction_ids"]:
-                result = accepted
-                accepted_ids.append(row["id"])
-                # Equivalent legacy labels can return different keyword
-                # IDs. History must retain the ID each accept touched.
-                affected.extend({**a, "keyword_id": accepted["keyword_id"]}
-                                for a in accepted["affected"])
-
-        if result is None:
-            return None
-        return {
-            "species": result["species"],
-            "keyword_id": result["keyword_id"],
-            "photo_id": target["photo_id"],
-            "prediction_ids": accepted_ids,
-            "affected": affected,
-        }
 
     def get_review_status(self, prediction_id, workspace_id):
         row = self.conn.execute(
@@ -1781,7 +1692,7 @@ class PredictionRepository:
             return []
         ws = self.workspace_id
         rows = []
-        for chunk in self._chunks(prediction_ids):
+        for chunk in chunks(prediction_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT pr.id, pr.species, pr.category, pr.detection_id,
@@ -1802,10 +1713,10 @@ class PredictionRepository:
         ws = self.workspace_id
         if not prediction_ids:
             return set()
-        statuses = self.DECIDED_PREDICTION_STATUSES
+        statuses = DECIDED_PREDICTION_STATUSES
         status_ph = ",".join("?" for _ in statuses)
         found = set()
-        for chunk in self._chunks(prediction_ids):
+        for chunk in chunks(prediction_ids):
             placeholders = ",".join("?" for _ in chunk)
             found.update(
                 row["prediction_id"] for row in self.conn.execute(
@@ -1822,7 +1733,7 @@ class PredictionRepository:
         if not prediction_ids:
             return set()
         found = set()
-        for chunk in self._chunks(prediction_ids):
+        for chunk in chunks(prediction_ids):
             placeholders = ",".join("?" for _ in chunk)
             found.update(
                 row["id"] for row in self.conn.execute(
@@ -1847,7 +1758,7 @@ class PredictionRepository:
         # The LEFT JOIN keeps a row for every prediction id regardless of
         # folder membership; the WHERE clause selects the misses.
         found = set()
-        for chunk in self._chunks(prediction_ids):
+        for chunk in chunks(prediction_ids):
             placeholders = ",".join("?" for _ in chunk)
             found.update(
                 row["id"] for row in self.conn.execute(
@@ -1872,7 +1783,7 @@ class PredictionRepository:
         resolved in full; the caller sees the overflow in the partial result.
         """
         photo_by_pred = {}
-        for chunk in self._chunks(prediction_ids):
+        for chunk in chunks(prediction_ids):
             placeholders = ",".join("?" for _ in chunk)
             photo_by_pred.update({
                 row["id"]: row["photo_id"] for row in self.conn.execute(
@@ -1897,7 +1808,7 @@ class PredictionRepository:
         """
         ws = self.workspace_id
         rows = []
-        for chunk in self._chunks(photo_ids):
+        for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT pr.id, d.photo_id,
@@ -1922,7 +1833,7 @@ class PredictionRepository:
         """
         ws = self.workspace_id
         rows = []
-        for chunk in self._chunks(prediction_ids):
+        for chunk in chunks(prediction_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT pick.id AS pick_id, pr.id AS prediction_id,
@@ -1994,7 +1905,7 @@ class PredictionRepository:
         """
         ws = self.workspace_id
         rows = []
-        for chunk in self._chunks(prediction_ids):
+        for chunk in chunks(prediction_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(self.conn.execute(
                 f"""SELECT pr.id AS prediction_id, d.photo_id AS photo_id,

@@ -1,5 +1,5 @@
 {
-  "db.py": {"pr_ref": 2, "review_id": 2, "used_to": 3},
+  "db.py": {"pr_ref": 2, "used_to": 1},
   "repositories/collections.py": {"codex": 1, "pr_ref": 2, "review_id": 6, "used_to": 2},
   "repositories/detections.py": {"used_to": 1},
   "repositories/edit_history.py": {"pr_ref": 1},
@@ -9,7 +9,7 @@
   "repositories/photo_labels.py": {"used_to": 1},
   "repositories/photo_species.py": {"moved_verbatim": 1},
   "repositories/photos.py": {"used_to": 2},
-  "repositories/predictions.py": {"moved_verbatim": 1, "review_id": 2, "used_to": 3},
+  "repositories/predictions.py": {"review_id": 2, "used_to": 3},
   "repositories/species_curation.py": {"moved_verbatim": 1},
   "repositories/workspaces.py": {"used_to": 1}
 }

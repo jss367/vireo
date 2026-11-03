@@ -15,7 +15,7 @@ from keyword_normalization import keyword_match_key
 from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_label_file, save_labels
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
-from services import detection_store, photo_ingest, workspace_folders
+from services import detection_store, photo_ingest, review_decisions, workspace_folders
 from species_identity import (
     PREDICTION_TAXONOMY_COLUMNS,
     SpeciesResolver,
@@ -902,7 +902,7 @@ def test_acceptance_binds_source_ids_without_reassigning_same_name_keywords(db, 
         db.predictions.add(det, "Shared parrot", .9, "BioCLIP", labels_fingerprint="custom" if source_backed else "tol", taxonomy=evidence)
         db.commit()
         prediction = detection_store.get_predictions_for_detection(db, det, min_classifier_conf=0)[0]
-        result = db.accept_prediction(prediction["id"])
+        result = review_decisions.accept_prediction(db, prediction["id"])
         row = db.conn.execute("SELECT k.*, t.inat_id FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id WHERE k.id = ?",
                               (result["keyword_id"],)).fetchone()
         assert row["inat_id"] == row["source_taxon_id"] == tid
@@ -921,7 +921,7 @@ def test_unknown_accepted_source_id_survives_name_changes_and_taxonomy_import(db
         db.predictions.add(det, name, .9, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": 900001})
         db.commit()
         prediction = detection_store.get_predictions_for_detection(db, det, min_classifier_conf=0)[0]
-        accepted.append(db.accept_prediction(prediction["id"])["keyword_id"])
+        accepted.append(review_decisions.accept_prediction(db, prediction["id"])["keyword_id"])
     assert accepted[0] == accepted[1]
     keyword = db.conn.execute("SELECT * FROM keywords WHERE id = ?", (accepted[0],)).fetchone()
     assert keyword["source_taxon_id"] == 900001 and keyword["taxon_id"] is None

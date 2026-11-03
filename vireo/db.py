@@ -24,9 +24,10 @@ from repositories.photo_sql import (
     PHOTO_COLS,
     PHOTO_DATE_ASC_ORDER,
     PHOTO_DETAIL_COLS,
-    TOP_PREDICTION_CONFIDENCE_EXPR,
     inclusive_date_to,
 )
+from repositories.prediction_review import AUTO_MATCH_REVIEW_MARKER
+from repositories.prediction_rules import DECIDED_PREDICTION_STATUSES as _DECIDED_PREDICTION_STATUSES
 from unit_of_work import (
     GuardedConnection,
     InOwnUnit,
@@ -99,8 +100,6 @@ if TYPE_CHECKING:
 # control flags, repository accessors and transaction APIs have concrete types.
 
 log = logging.getLogger(__name__)
-
-AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
 
 # Durable provenance values for ``photo_keywords.source``.
 #
@@ -524,189 +523,6 @@ def execute_with_retry(
     raise ValueError("max_retries must be nonnegative")
 
 
-
-def _contains_prediction_field(node, prediction_fields):
-    """Whether a rule node is, or (transitively) holds, a prediction leaf."""
-    if not isinstance(node, dict):
-        return False
-    if "rules" in node and "field" not in node:
-        return any(
-            _contains_prediction_field(c, prediction_fields)
-            for c in node.get("rules") or []
-        )
-    return node.get("field") in prediction_fields
-
-
-def _relax_negated_walk(node, negated, prediction_fields, broad):
-    """``_relax_negated_prediction_leaves``'s recursive pass over one node."""
-    if isinstance(node, dict) and "rules" in node and "field" not in node:
-        mode = node.get("mode", "all")
-        child_negated = negated or (mode == "none")
-        new_children = []
-        had_broad = False
-        for child in node.get("rules") or []:
-            is_group = (
-                isinstance(child, dict)
-                and "rules" in child
-                and "field" not in child
-            )
-            # Under negation, a subgroup that mixes metadata with
-            # prediction leaves would be compiled by the outer
-            # ``NOT EXISTS(...)`` in a way that lets its metadata
-            # siblings prune photos before the row filter sees them
-            # (see ``Database._relax_negated_prediction_leaves``). Drop the whole subgroup so
-            # SQL broadens; the row filter re-evaluates the
-            # ORIGINAL tree per row.
-            if (
-                child_negated
-                and is_group
-                and _contains_prediction_field(child, prediction_fields)
-            ):
-                had_broad = True
-                continue
-            stripped = _relax_negated_walk(
-                child, child_negated, prediction_fields, broad,
-            )
-            if stripped is None:
-                # Bare row-level leaf dropped under negation:
-                # SQL for that leaf broadens to TRUE.
-                had_broad = True
-                continue
-            if stripped is broad:
-                had_broad = True
-                continue
-            new_children.append(stripped)
-        # ``any`` with any broad child is TRUE at the photo
-        # level — the whole OR broadens. ``all``/``none`` drop
-        # broad children silently (they don't restrict) unless
-        # every child broadened, in which case the group itself
-        # is broad and must propagate.
-        if mode == "any" and had_broad:
-            return broad
-        if had_broad and not new_children:
-            return broad
-        new_node = dict(node)
-        new_node["rules"] = new_children
-        return new_node
-    if negated and isinstance(node, dict) and \
-            node.get("field") in prediction_fields:
-        return None
-    return node
-
-
-def _rule_truthy(value):
-    """Whether a rule value reads as boolean true."""
-    return value is True or value == 1 or value == "1" or value == "true"
-
-
-def _rule_num_match(row_val, op, want):
-    """A numeric rule leaf evaluated against one row value."""
-    if row_val is None:
-        return False
-    try:
-        a = float(row_val)
-    except (TypeError, ValueError):
-        return False
-    if op == "between":
-        if not isinstance(want, list) or len(want) != 2:
-            return False
-        try:
-            lo, hi = float(want[0]), float(want[1])
-        except (TypeError, ValueError):
-            return False
-        return lo <= a <= hi
-    try:
-        b = float(want)
-    except (TypeError, ValueError):
-        return False
-    if op == ">=":
-        return a >= b
-    if op == "<=":
-        return a <= b
-    if op == ">":
-        return a > b
-    if op == "<":
-        return a < b
-    if op in ("equals", "is"):
-        return a == b
-    if op == "is not":
-        return a != b
-    return False
-
-
-def _rule_text_match(row_val, op, want):
-    """A case-insensitive text rule leaf evaluated against one row value."""
-    a = "" if row_val is None else str(row_val)
-    b = "" if want is None else str(want)
-    if op == "contains":
-        return b.lower() in a.lower()
-    if op == "not_contains":
-        return b.lower() not in a.lower()
-    if op == "starts_with":
-        return a.lower().startswith(b.lower())
-    if op == "ends_with":
-        return a.lower().endswith(b.lower())
-    if op in ("equals", "is"):
-        return a.lower() == b.lower()
-    if op == "is not":
-        return a.lower() != b.lower()
-    return False
-
-
-def _rule_enum_match(row_val, op, want):
-    """An enum rule leaf evaluated against one row value."""
-    a = "" if row_val is None else str(row_val)
-    if op in ("in", "not_in"):
-        values = [str(v) for v in (want or [])]
-        inside = a in values
-        return inside if op == "in" else not inside
-    if op in ("equals", "is"):
-        return a == str(want)
-    if op == "is not":
-        return a != str(want)
-    return False
-
-
-def _prediction_leaf_row_match(rule, row, leaf_photo_sets):
-    """One rule leaf evaluated against one prediction row.
-
-    ``leaf_photo_sets`` maps ``id(leaf)`` to the photo ids a metadata leaf
-    inside an ``any``/``none`` group matches (``None``: match every row).
-    """
-    field = rule.get("field")
-    op = rule.get("op", "")
-    value = rule.get("value")
-    if field == "prediction_confidence":
-        return _rule_num_match(row["confidence"], op, value)
-    if field == "prediction_status":
-        return _rule_enum_match(row["status"], op, value)
-    if field == "classifier_model":
-        return _rule_text_match(row["classifier_model"], op, value)
-    if field in (
-        "taxonomy_kingdom",
-        "taxonomy_phylum",
-        "taxonomy_class",
-        "taxonomy_order",
-        "taxonomy_family",
-        "taxonomy_genus",
-    ):
-        col = row[field] if field in row.keys() else None  # noqa: SIM118 -- sqlite3.Row supports `in` on keys() but not on the row itself
-        if op == "contains":
-            return _rule_text_match(col, "contains", value)
-        return _rule_text_match(col, op, value)
-    if field == "needs_review":
-        is_pending = str(row["status"] or "pending") == "pending"
-        return is_pending if _rule_truthy(value) else not is_pending
-    # Non-prediction leaf. In a pure ``all`` position the SQL
-    # subquery already proved this photo satisfies it, so shortcut
-    # to True. Inside a mixed ``any``/``none`` group we can't
-    # shortcut (SQL only proved *some* sibling matched at the
-    # photo level, not this leaf), so answer from the pre-resolved
-    # per-leaf photo-id set.
-    pset = leaf_photo_sets.get(id(rule))
-    if pset is None:
-        return True
-    return row["photo_id"] in pset
 
 
 def _check_keyword_type_kwarg(kwargs):
@@ -3140,26 +2956,11 @@ class Database:
         The active workspace is resolved lazily (``Database._ws_id`` is
         passed as a resolver): several methods only consult it on some
         paths (``add_prediction`` only when it writes review state), so
-        they keep raising at exactly the point they always did. The façade
-        methods the moved bodies call are handed over bound, so
-        monkeypatches of ``Database`` keep reaching the moved code, and the
-        ``db`` module names the bodies read (``_chunks``, ``log``, the
-        auto-match marker, the top confidence expression) are read here, at
-        call time.
+        they keep raising at exactly the point they always did.
         """
         from repositories.predictions import PredictionRepository
-        from species_identity import SpeciesResolver
 
-        return PredictionRepository(
-            self.conn,
-            self._ws_id,
-            chunks=_chunks,
-            auto_match_review_marker=AUTO_MATCH_REVIEW_MARKER,
-            top_prediction_confidence_expr=TOP_PREDICTION_CONFIDENCE_EXPR,
-            decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
-            facade=self,
-            species_resolver=lambda: SpeciesResolver(db=self),
-        )
+        return PredictionRepository(self.conn, self._ws_id)
 
     @property
     def predictions(self) -> PredictionRepository:
@@ -3167,341 +2968,16 @@ class Database:
 
         A domain accessor, not a cached attribute: every access builds a fresh
         repository through ``_prediction_repository``, so the connection and
-        the lazily resolved workspace are read per use. Only the prediction-decision writers keep ``Database``
-        wrappers (``update_prediction_status``,
-        ``update_predictions_status_by_photo``, ``ungroup_prediction``,
-        ``set_review_status``, ``accept_subject_species``): ``test_route_contract``
-        finds decision routes by those names.
+        the lazily resolved workspace are read per use. Routes record review
+        decisions through ``services.review_decisions``, never through this
+        repository's writers (``test_route_contract`` holds them to it).
         """
         return self._prediction_repository()
 
-    # Row-level filterable fields: those the row's own values can prove.
-    # ``species`` is intentionally excluded — the SQL ``species`` leaf
-    # (``build_query_from_rules``) matches confirmed photo keywords via
-    # ``photo_keywords → keywords → taxa``, whereas ``pr.species`` on the
-    # returned row holds the model's *proposed* species. Re-checking the
-    # proposed species against a keyword filter would silently hide the
-    # exact disagreement/refinement rows users would filter for
-    # (e.g. a photo tagged ``Robin`` with a pending ``Sparrow`` prediction
-    # would be selected by SQL and then dropped here).
-    _PREDICTION_ROW_FIELDS = frozenset({
-        "prediction_confidence",
-        "prediction_status",
-        "classifier_model",
-        "taxonomy_kingdom",
-        "taxonomy_phylum",
-        "taxonomy_class",
-        "taxonomy_order",
-        "taxonomy_family",
-        "taxonomy_genus",
-        "needs_review",
-    })
 
-    def _relax_negated_prediction_leaves(self, rules):
-        """Strip prediction-field leaves — and mixed subgroups containing
-        them — that sit under a ``none`` group so
-        ``get_predictions``'s photo-scoping subquery doesn't
-        over-restrict on row-level predicates.
-
-        ``build_query_from_rules`` compiles a ``none`` group as
-        photo-level ``NOT EXISTS(...)``. For a bare leaf like
-        ``prediction_confidence >= 0.8`` that removes any photo with a
-        sibling row above the threshold, even though the 0.10 sibling
-        satisfies ``none(prediction_confidence >= 0.8)`` per row —
-        dropping the leaf broadens the SQL to a no-op there and lets
-        ``_filter_prediction_rows_by_rules`` evaluate the ORIGINAL
-        tree per row.
-
-        A mixed subgroup like ``none(all(rating >= 5, conf >= 0.8))``
-        is trickier: stripping only the prediction leaf leaves
-        ``none(all(rating >= 5))`` = ``NOT EXISTS(rating >= 5)``,
-        which excludes every rating-5 photo — including one whose only
-        high-conf row is 0.10 and should PASS the outer expression at
-        the row level (see r3618935666). Whenever a negated subgroup
-        (transitively) contains a prediction row field we therefore
-        drop the whole subgroup so SQL becomes a no-op there; the
-        row-level pass then evaluates the original expression per row
-        against the actual metadata + prediction values.
-
-        Leaves and subgroups in ``all``/``any`` positions still pull
-        their weight in the SQL — an ``all`` narrows and an ``any``
-        widens correctly at the photo level.
-
-        A negated branch that ends up fully emptied by this pass
-        represents "broaden to TRUE at photo level" (the row filter
-        will decide per row). Under an ``any`` parent that TRUE
-        satisfies the OR for every photo, so we propagate a broad
-        marker up: an ``any`` group with any broad child becomes broad
-        itself, and a top-level broad marker resolves to empty rules
-        (no photo-level restriction). Without this, ``any(none(
-        prediction_confidence >= 0.8), rating >= 5)`` compiled as just
-        ``rating >= 5``, hiding rating-3 photos whose low-confidence
-        rows satisfy the outer OR at the row level (see r3619014565).
-        """
-        broad = self._RELAX_BROAD
-
-        fields = self._PREDICTION_ROW_FIELDS
-
-        if isinstance(rules, list):
-            wrapped = _relax_negated_walk(
-                {"mode": "all", "rules": rules}, False, fields, broad,
-            )
-            if wrapped is broad or wrapped is None:
-                return []
-            return wrapped.get("rules", [])
-        walked = _relax_negated_walk(rules, False, fields, broad)
-        if walked is broad or walked is None:
-            return {"mode": "all", "rules": []}
-        return walked
-
-    # Sentinel returned by ``_relax_negated_prediction_leaves`` when a
-    # branch broadens to TRUE at the photo level. Identity-compared with
-    # ``is``; never stored in a rules tree that reaches SQL.
-    _RELAX_BROAD = object()
-
-    def _filter_prediction_rows_by_rules(self, rows, rules):
-        """Drop returned prediction rows that don't satisfy prediction-field
-        rules at the row level.
-
-        The SQL rules subquery limits the set of *photos* whose predictions
-        surface, but leaves like ``prediction_confidence >= 0.8`` return
-        every current prediction for a photo that has any matching one.
-        This walks the rule tree per row: prediction-field leaves are
-        evaluated against the row's own values; every other leaf is treated
-        as satisfied (the photo already matched via the SQL subquery).
-
-        The satisfied-by-default shortcut is only sound inside pure ``all``
-        intersections — SQL ensured every non-prediction leaf was True at
-        the photo level. Inside an ``any`` or ``none`` group the shortcut
-        would incorrectly contribute True for a leaf that may have been
-        False for this photo (e.g. ``(rating >= 5 OR prediction_confidence
-        >= 0.8)`` — a rating-3 photo with one 0.95 and one 0.10 prediction:
-        SQL keeps both rows because of the 0.95, but the 0.10 row must not
-        be shown and shortcutting ``rating >= 5`` to True would let it
-        through). For non-prediction leaves nested inside a mixed ``any``/
-        ``none`` group we therefore resolve the leaf to its actual matching
-        photo ids and answer per-row from that set, so prediction leaves in
-        the same group still filter and the metadata leaf's truth is real.
-        """
-        if not rows:
-            return rows
-        # Normalize to the same shape ``build_query_from_rules`` accepts so
-        # both list and grouped-tree inputs go through the same walker.
-        if isinstance(rules, list):
-            root = {"mode": "all", "rules": rules}
-        elif isinstance(rules, dict) and "rules" in rules:
-            root = rules
-        else:
-            return rows
-
-        def _touches_prediction(node):
-            if not isinstance(node, dict):
-                return False
-            if "rules" in node and "field" not in node:
-                return any(_touches_prediction(c) for c in node.get("rules") or [])
-            return node.get("field") in self._PREDICTION_ROW_FIELDS
-
-        if not _touches_prediction(root):
-            return rows
-
-        # Resolve non-prediction leaves nested inside ``any``/``none`` groups
-        # to the photo-id set they actually match. Anywhere else the outer
-        # SQL subquery already proved the leaf holds for the photo, so we
-        # keep the True-shortcut. ``id(node)`` is stable across this call —
-        # the dict identity is what we look up in ``_prediction_leaf_row_match``.
-        leaf_photo_sets = {}
-
-        def _collect_alt_metadata_leaves(node, inside_alt=False):
-            if not isinstance(node, dict):
-                return
-            if "rules" in node and "field" not in node:
-                mode = node.get("mode", "all")
-                child_alt = inside_alt or mode in ("any", "none")
-                for c in node.get("rules") or []:
-                    _collect_alt_metadata_leaves(c, child_alt)
-                return
-            if inside_alt and node.get("field") not in self._PREDICTION_ROW_FIELDS:
-                key = id(node)
-                if key in leaf_photo_sets:
-                    return
-                try:
-                    leaf_photo_sets[key] = set(self.collections.query_photo_ids([node]))
-                except (ValueError, sqlite3.Error):
-                    # Malformed / unresolvable leaf: fall back to matching
-                    # every photo the SQL subquery kept. Never hide rows
-                    # the outer filter should have allowed through.
-                    leaf_photo_sets[key] = None
-
-        _collect_alt_metadata_leaves(root)
-
-        def _eval(node, row):
-            if "rules" in node and "field" not in node:
-                mode = node.get("mode", "all")
-                children = node.get("rules") or []
-                if not children:
-                    # Empty group: match SQL (all=True, any=False, none=True).
-                    return mode != "any"
-                if mode == "any":
-                    return any(_eval(c, row) for c in children)
-                if mode == "none":
-                    return not any(_eval(c, row) for c in children)
-                return all(_eval(c, row) for c in children)
-            return _prediction_leaf_row_match(node, row, leaf_photo_sets)
-
-        return [r for r in rows if _eval(root, r)]
-
-    # The one definition of "this prediction's review is already settled".
-    # ``app.py`` binds ``_DECIDED_PREDICTION_STATUSES`` to it, the grouped
-    # accept expansion below uses it, and Browse's panel mirrors it in JS, so
-    # no surface can drift on which rows are still actionable. See
-    # ``app.py``'s ``_decided_prediction_ids`` for why ``alternative`` is
-    # absent and what each endpoint then does with those rows.
-    DECIDED_PREDICTION_STATUSES = ("accepted", "rejected", "reviewed")
-
-    def update_prediction_status(
-        self, prediction_id: int, status: str
-    ) -> None:
-        """Update per-workspace review status for a prediction (no commit).
-
-        Review state lives in ``prediction_review`` keyed by
-        (prediction_id, workspace_id); we upsert here rather than UPDATE
-        so the "first review in a fresh workspace" path still writes a row.
-        """
-        return self._prediction_repository().update_status(prediction_id, status)
-
-    def update_predictions_status_by_photo(
-        self, photo_id: int, status: str
-    ) -> None:
-        """Upsert review status for every prediction of a photo in the active workspace.
-
-        Review state is workspace-scoped (``prediction_review``); detections
-        and predictions are global.  We enumerate the prediction ids via the
-        detections join and upsert each review row.
-
-        Does not commit: the caller holds the prediction decision lock
-        (``services.prediction_decisions``) and owns the transaction.
-
-        Deliberately unconditional. The stale-overwrite this method used to
-        enable — a group apply flipping an ``accepted`` row to ``rejected``
-        while the keyword the accept added stays on the photo — is guarded
-        one level up, in ``api_prediction_group_apply``, against the statuses
-        the burst modal displayed (``_stale_group_apply_photos``). A
-        ``WHERE status NOT IN DECIDED_PREDICTION_STATUSES`` clause on the
-        ``ON CONFLICT`` below was tried first and removed: it cannot tell a
-        stale payload from the user re-opening an applied burst and changing
-        the split, which is a reachable flow (Review's default tab is "All",
-        and every grouped card there renders "Review Burst Group"), so it
-        silently froze the statuses while the flag and keyword writes above
-        it — which run before this call and outside the lock — went ahead
-        anyway. Guarding here is both too strict and too late.
-        """
-        return self._prediction_repository().update_status_by_photo(
-            photo_id, status,
-        )
-
-    def ungroup_prediction(self, prediction_id: int) -> None:
-        """Remove a prediction from its group in the active workspace (no commit).
-
-        ``group_id`` lives in ``prediction_review``; this only clears the
-        review row for the current workspace.
-        """
-        return self._prediction_repository().ungroup(prediction_id)
-
-    def accept_prediction(
-        self,
-        prediction_id: int,
-        replace_species: bool = False,
-        photo_ids: Collection[int] | None = None,
-        prediction_ids: Collection[int] | None = None,
-        species_taxonomy: Any = ...,
-    ) -> dict[str, Any] | None:
-        """Accept a prediction: mark as accepted and add species keyword.
-
-        If the prediction belongs to a group, derives the consensus species
-        from the individual votes and applies that to all photos.
-
-        When ``replace_species`` is True, every photo that receives the new
-        keyword first has its existing species/taxonomy keywords removed, so
-        grouped photos are replaced consistently rather than accumulating both
-        the old and new species tags. Each entry in the returned ``affected``
-        list carries the ``old_species`` names that were stripped from that
-        photo (empty when ``replace_species`` is False).
-
-        When ``photo_ids`` is provided for a grouped prediction, only matching
-        group members are tagged and marked accepted. This lets callers apply a
-        grouped accept to a filtered subset without changing hidden photos.
-
-        ``prediction_ids`` is the stricter form of the same limit, for callers
-        that already know the exact prediction rows they are acting on: the
-        grouped accept touches only those rows. Prefer it over ``photo_ids``
-        whenever the caller has a submitted id list. A photo is not a unique
-        key for a prediction — one photo can carry several rows in the same
-        burst group (one per classifier model, or per detection) — so a
-        photo-id limit lets a grouped accept reach a row on an allowed photo
-        that the caller never submitted. ``photo_ids`` remains for callers
-        whose intent really is "these photos" (highlight confirm, accept
-        subject), where the row set is chosen by this method.
-
-        Independently of either limit, group expansion only ever *discovers*
-        undecided rows: a group member already ``accepted`` or ``rejected`` is
-        left alone unless the caller named it (as the entry row, or in
-        ``prediction_ids``). Accepting one burst member must not resurrect a
-        sibling the user rejected in Review, nor re-flip a long-accepted one
-        into a history item whose "previous" status never happened.
-
-        Both limits are settled before the first write, so a call whose scope
-        excludes every candidate row is a true no-op: no keyword row is
-        created, no sibling alternative is rejected, no status is flipped. It
-        returns ``accepted_prediction_ids: []`` with ``keyword_id`` set to the
-        existing keyword for the resolved species (``None`` when no such
-        keyword exists yet).
-
-        The returned ``accepted_prediction_ids`` lists every prediction row
-        this call marked accepted, so a caller looping over a submitted batch
-        can skip rows a previous grouped accept already covered instead of
-        re-accepting them into duplicate history items.
-
-        ``species_key`` is the resolved consensus identity, independent of
-        the particular keyword alias used to tag the photos. Batch callers
-        compare this key and record each result's actual ``keyword_id`` for
-        undo/redo rather than requiring equivalent aliases to share an ID.
-
-        ``species_taxonomy`` is the loaded taxonomy (``load_local_taxonomy()``)
-        a ``replace_species`` accept uses to keep keywords a neighbouring
-        subject's prediction supports as broader/same/narrower. Replacement
-        requires an explicit choice: pass the loaded taxonomy, or pass None
-        to choose exact-name protection when taxonomy is unavailable. Omitting
-        it raises ValueError before any writes. The caller loads it, so the
-        data layer never reads the taxonomy file.
-
-        Does not commit: the caller's unit of work (the prediction-decision
-        lock) makes the accept atomic.
-        """
-        return self._keyword_provenance_repository().accept_prediction(
-            prediction_id, replace_species=replace_species, photo_ids=photo_ids,
-            prediction_ids=prediction_ids,
-            species_taxonomy=species_taxonomy,
-        )
-
-    def accept_subject_species(
-        self, prediction_id: int
-    ) -> dict[str, Any] | None:
-        """Accept agreeing model predictions for one detected subject.
-
-        Compare uses this for an additional-species suggestion: the species
-        keyword is added once to the photo, the existing species keywords are
-        preserved, and every current-model prediction that names the same
-        species on the same detection is resolved together. Grouped
-        predictions are explicitly limited to this photo so accepting a
-        subject in Compare cannot silently tag the rest of a burst.
-
-        Does not commit: ``api_accept_subject_species`` bundles the accept
-        with its own writes (edit history, precondition checks) in the
-        prediction-decision unit of work.
-        """
-        return self._prediction_repository().accept_subject_species(
-            prediction_id,
-        )
+    # The one definition of a settled review lives in
+    # ``repositories.prediction_rules``; callers read it here too.
+    DECIDED_PREDICTION_STATUSES = _DECIDED_PREDICTION_STATUSES
 
     # Reads the prediction-decision routes run under ``BEGIN IMMEDIATE``
     # (see ``services.prediction_decisions``). None of them commits.
@@ -3558,18 +3034,6 @@ class Database:
         ``db.commit()`` / ``db.rollback()``.
         """
         return self._computation_cache_repository()
-
-    def set_review_status(
-        self,
-        prediction_id: int,
-        workspace_id: int,
-        status: str,
-        individual: str | None = None,
-        group_id: str | None = None,
-    ) -> None:
-        return self._prediction_repository().set_review_status(
-            prediction_id, workspace_id, status, individual=individual, group_id=group_id,
-        )
 
     def _detections_repository(self) -> DetectionsRepository:
         """Build the detections repository on this connection.
@@ -3948,7 +3412,7 @@ class Database:
             if current_identity.get('photo_id') != pid:
                 continue
             if current_identity.get('prediction_instance_id') == state['identity']['prediction_instance_id']:
-                self.update_prediction_status(int(pred_id), state['status'])
+                self.predictions.update_status(int(pred_id), state['status'])
 
     # -- rating -----------------------------------------------------------
 
@@ -4130,7 +3594,7 @@ class Database:
         # A Highlights confirm of a ``reviewed`` row records that status, so
         # undo restores the user's earlier decision instead of ``pending``.
         if old_meta.get("prior_status") == "reviewed" and old_meta.get("prediction_id"):
-            self.update_prediction_status(int(old_meta["prediction_id"]), "reviewed")
+            self.predictions.update_status(int(old_meta["prediction_id"]), "reviewed")
         # Group apply snapshots each pick row's pre-apply review status so
         # undo can restore a member the user had previously rejected. The
         # scope reset above lands every row at ``alternative`` / ``pending``;
@@ -4145,7 +3609,7 @@ class Database:
                     pred_id = int(pred_id_str)
                 except (TypeError, ValueError):
                     continue
-                self.update_prediction_status(pred_id, status)
+                self.predictions.update_status(pred_id, status)
 
     def _redo_prediction_accept_statuses(self, old_meta, old_val):
         """Re-accept every recorded prediction and re-reject its siblings.
@@ -4167,7 +3631,7 @@ class Database:
             scope = self.edit_history.prediction_scope(pred_id)
             if scope is None:
                 continue
-            self.update_prediction_status(pred_id, 'accepted')
+            self.predictions.update_status(pred_id, 'accepted')
             accepted_by_scope.setdefault(scope, set()).add(pred_id)
         history.reject_accept_siblings(accepted_by_scope)
         # Group apply also rejects a sibling that was already ``accepted``
@@ -4183,7 +3647,7 @@ class Database:
             except (TypeError, ValueError):
                 continue
             if pred_id not in accepted_ids:
-                self.update_prediction_status(pred_id, 'rejected')
+                self.predictions.update_status(pred_id, 'rejected')
 
     # -- species_replace --------------------------------------------------
     #
@@ -4322,13 +3786,13 @@ class Database:
         if not pred_id:
             return
         status = meta.get("prediction_status") or "pending"
-        self.update_prediction_status(int(pred_id), status)
+        self.predictions.update_status(int(pred_id), status)
 
     def _reject_edit_prediction(self, meta):
         pred_id = meta.get("prediction_id")
         if not pred_id:
             return
-        self.update_prediction_status(int(pred_id), "rejected")
+        self.predictions.update_status(int(pred_id), "rejected")
 
     def prune_edit_history(self) -> dict[str, int]:
         """Delete the active workspace's oldest entries beyond the configured bounds.

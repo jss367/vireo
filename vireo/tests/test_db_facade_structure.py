@@ -305,7 +305,7 @@ def test_set_progress_handler_interrupts_and_clears(db):
 # never raise it. Methods that coordinate more than one call (``add_photo``
 # resolving duplicates after the insert, cross-domain composition) are not
 # forwarders and are not counted.
-FORWARDING_WRAPPER_LIMIT = 11
+FORWARDING_WRAPPER_LIMIT = 5
 
 
 def _is_forwarding_wrapper(fn):
@@ -383,14 +383,12 @@ def test_forwarding_wrapper_detector_matches_known_shapes():
 #   constants are not callbacks and are not listed.
 FACADE_BINDING_MODULES = {
     "keyword_provenance",
-    "predictions",
 }
 
 FACTORY_CALLBACKS = {
     "_keyword_provenance_repository": {"<Database>"},
     "_location_repository": {"_merge_keyword_into"},
     "_moves_merge_repository": {"_carry_keyword_associations_for_merge"},
-    "_prediction_repository": {"<Database>"},
 }
 
 # The active-workspace resolver a factory may hand over: a repository takes the

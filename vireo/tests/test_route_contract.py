@@ -6,9 +6,13 @@ from services.prediction_decisions import PREDICTION_DECISION_ROUTES
 VIREO_DIR = Path(__file__).resolve().parents[1]
 APP_SOURCE = VIREO_DIR / "app.py"
 
-# Every ``Database`` method that writes a row's review decision. A route that
-# can reach one of these is a prediction-decision route and must hold the
-# writer lock across its precondition read and its writes.
+# Every function that writes a row's review decision: the writers of
+# ``services.review_decisions``, the one entry point for recording a
+# decision (``test_only_the_decision_service_calls_the_decision_writers``
+# keeps everything else off the repository writers behind them), plus
+# undo/redo. A route that can reach one of these is a prediction-decision
+# route and must hold the writer lock across its precondition read and its
+# writes.
 _PREDICTION_MUTATORS = frozenset({
     "accept_prediction",
     "accept_subject_species",
@@ -23,6 +27,24 @@ _PREDICTION_MUTATORS = frozenset({
 
 # The function that takes the lock (``vireo/services/prediction_decisions.py``).
 _DECISION_LOCK = "begin_prediction_decision"
+
+# The decision service, and the repository writers only it may call. Each
+# key is the ``Database`` accessor that reaches the repository.
+_DECISION_SERVICE = "services/review_decisions.py"
+_REPOSITORY_DECISION_WRITERS = {
+    "predictions": frozenset({
+        "update_status", "update_status_by_photo", "ungroup", "set_review_status",
+    }),
+    "keyword_provenance": frozenset({"accept_prediction"}),
+}
+_REPOSITORY_CLASSES = {
+    "PredictionRepository": "predictions",
+    "KeywordProvenanceRepository": "keyword_provenance",
+}
+_REPOSITORY_FACTORIES = {
+    "_prediction_repository": "predictions",
+    "_keyword_provenance_repository": "keyword_provenance",
+}
 
 
 def _decision_sources():
@@ -1984,3 +2006,390 @@ def test_route_contract_matches_snapshot(app_and_db):
     actual = contract.splitlines()
 
     assert actual == expected
+
+
+def _repository_decision_writer_calls(tree):
+    """Candidate repository writer calls in ``tree``, as ``(lineno, call)``.
+
+    Recognize known class spellings (bare or qualified), their from-import
+    aliases, known Database factory calls, and simple Name bindings through
+    Assign, AnnAssign, or NamedExpr (walrus) nodes. Named expressions also
+    retain their value inline, including nested class/factory/instance forms.
+    Regular parameters and local declarations can supply a known class
+    annotation, quoted or bare.
+
+    Bindings are conservative module-wide candidates, not a scope/control-flow
+    proof. Propagate finite candidate sets until stable, retaining alternatives
+    and terminating on cycles. Annotations are parsed, never evaluated. This
+    does not infer arbitrary call returns, resolve cross-module exports, or
+    follow dynamic getattr, containers, unpacking, stored object fields, or
+    other computed right-hand-side forms outside the cases above.
+    """
+    nodes = list(ast.walk(tree))
+    classes: dict[str, set[str]] = {
+        name: {kind} for name, kind in _REPOSITORY_CLASSES.items()
+    }
+    builders: dict[str, set[str]] = {}
+    instances: dict[str, set[str]] = {}
+    for node in nodes:
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _REPOSITORY_CLASSES:
+                    classes.setdefault(alias.asname or alias.name, set()).add(
+                        _REPOSITORY_CLASSES[alias.name],
+                    )
+
+    def named_value(expr):
+        while isinstance(expr, ast.NamedExpr):
+            expr = expr.value
+        return expr
+
+    def class_of(expr):
+        expr = named_value(expr)
+        if isinstance(expr, ast.Name):
+            return classes.get(expr.id, set())
+        kind = _REPOSITORY_CLASSES.get(expr.attr) if isinstance(expr, ast.Attribute) else None
+        return {kind} if kind else set()
+
+    def builder_of(expr):
+        expr = named_value(expr)
+        candidates = class_of(expr)
+        if isinstance(expr, ast.Name):
+            return candidates | builders.get(expr.id, set())
+        if isinstance(expr, ast.Attribute) and expr.attr in _REPOSITORY_FACTORIES:
+            return candidates | {_REPOSITORY_FACTORIES[expr.attr]}
+        return candidates
+
+    def repository_of(expr):
+        expr = named_value(expr)
+        if isinstance(expr, ast.Name):
+            return instances.get(expr.id, set())
+        if isinstance(expr, ast.Attribute) and expr.attr in _REPOSITORY_DECISION_WRITERS:
+            return {expr.attr}
+        if isinstance(expr, ast.Call):
+            return builder_of(expr.func)
+        return set()
+
+    def annotation_repository(annotation):
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value, mode="eval").body
+            except SyntaxError:
+                return set()
+        return class_of(annotation)
+
+    def bind(mapping, name, candidates):
+        added = candidates - mapping.get(name, set())
+        if added:
+            mapping.setdefault(name, set()).update(added)
+        return bool(added)
+
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    changed |= bind(classes, target.id, class_of(node.value))
+                    changed |= bind(builders, target.id, builder_of(node.value))
+                    changed |= bind(instances, target.id, repository_of(node.value))
+                    if isinstance(node, ast.AnnAssign):
+                        changed |= bind(instances, target.id, annotation_repository(node.annotation))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+                    changed |= bind(instances, arg.arg, annotation_repository(arg.annotation))
+    for node in nodes:
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        receiver = node.func.value
+        candidates = repository_of(receiver) | class_of(receiver)
+        if any(node.func.attr in _REPOSITORY_DECISION_WRITERS[kind] for kind in candidates):
+            yield node.lineno, ast.unparse(node.func)
+
+
+def test_only_the_decision_service_calls_the_decision_writers():
+    """Routes record decisions through ``services.review_decisions`` alone.
+
+    The decision-route analysis above keys on the service's writer names. A
+    route (or a helper it calls) that reached the repository writer directly
+    would write ``prediction_review`` without the analysis seeing it, so no
+    production module outside the data layer may call those writers except
+    the service itself.
+    """
+    offenders = []
+    for path in sorted(VIREO_DIR.rglob("*.py")):
+        rel = path.relative_to(VIREO_DIR).as_posix()
+        if rel.split("/")[0] in {"tests", "testing", "repositories"}:
+            continue
+        if rel in {"db.py", _DECISION_SERVICE}:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders += [f"{rel}:{line} {call}" for line, call in _repository_decision_writer_calls(tree)]
+    assert not offenders, (
+        "These call a prediction-decision writer behind services.review_decisions "
+        "directly, which the decision-route analysis cannot see. Call the "
+        "review_decisions function instead:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_decision_service_defines_every_decision_writer():
+    """The mutator names are the service's functions, not leftovers."""
+    import inspect
+
+    from services import review_decisions
+
+    defined = {
+        name for name, fn in inspect.getmembers(review_decisions, inspect.isfunction)
+        if fn.__module__ == review_decisions.__name__
+    }
+    assert _PREDICTION_MUTATORS - {"undo_last_edit", "redo_last_undo"} == defined
+    from db import Database
+
+    for name in _PREDICTION_MUTATORS - {"undo_last_edit", "redo_last_undo"}:
+        assert not hasattr(Database, name), f"Database.{name} came back; call review_decisions"
+
+
+def test_decision_writer_guard_detects_direct_calls():
+    """Pin accessor, inline-constructor and local-initializer call detection."""
+    tree = ast.parse(
+        "def route(db):\n"
+        "    db.predictions.update_status(1, 'rejected')\n"
+        "    PredictionRepository(db.conn, ws).ungroup(2)\n"
+        "    preds = db.predictions\n"
+        "    preds.set_review_status(3, 1, 'reviewed')\n"
+        "    annotated: PredictionRepository = db.predictions\n"
+        "    annotated.update_status(6, 'rejected')\n"
+        "    db.keyword_provenance.accept_prediction(4)\n"
+        "    review_decisions.update_prediction_status(db, 5, 'rejected')\n"
+        "    db.predictions.get_rows()\n"
+    )
+    calls = [call for _, call in _repository_decision_writer_calls(tree)]
+    assert calls == [
+        "db.predictions.update_status",
+        "PredictionRepository(db.conn, ws).ungroup",
+        "preds.set_review_status",
+        "annotated.update_status",
+        "db.keyword_provenance.accept_prediction",
+    ]
+
+
+def test_decision_writer_guard_detects_annotated_parameters_without_evaluation():
+    """Parse parameter types as syntax, with unrelated and read-only controls."""
+    tree = ast.parse(
+        "def apply(preds: PredictionRepository, /):\n"
+        "    preds.update_status(1, 'rejected')\n"
+        "async def accept(*, provenance: 'KeywordProvenanceRepository'):\n"
+        "    provenance.accept_prediction(2)\n"
+        "def qualified(repo: 'repositories.predictions.PredictionRepository'):\n"
+        "    repo.ungroup(3)\n"
+    )
+    assert [call for _, call in _repository_decision_writer_calls(tree)] == [
+        'preds.update_status', 'provenance.accept_prediction', 'repo.ungroup',
+    ]
+    controls = ast.parse(
+        "def unrelated(other: OtherRepository, many: list[PredictionRepository],\n"
+        "              payload: '__import__(\"os\").system(\"never execute\")'):\n"
+        "    other.update_status(1)\n"
+        "    many.update_status(2)\n"
+        "    payload.update_status(3)\n"
+        "def reader(reads: PredictionRepository):\n"
+        "    reads.get_rows()\n"
+    )
+    assert list(_repository_decision_writer_calls(controls)) == []
+    alternatives = ast.parse(
+        "def a(repo: PredictionRepository):\n"
+        "    repo.update_status(1)\n"
+        "def b(repo: KeywordProvenanceRepository):\n"
+        "    repo.accept_prediction(2)\n"
+    )
+    assert [call for _, call in _repository_decision_writer_calls(alternatives)] == [
+        'repo.update_status', 'repo.accept_prediction',
+    ]
+
+
+def test_decision_writer_guard_detects_repository_factories():
+    """Inspect known Database factories as syntax without calling them."""
+    tree = ast.parse(
+        "def route(db):\n"
+        "    db._prediction_repository().update_status(1, 'rejected')\n"
+        "    db._keyword_provenance_repository().accept_prediction(2)\n"
+        "    assigned = db._prediction_repository()\n"
+        "    assigned.ungroup(3)\n"
+        "    annotated: PredictionRepository = db._prediction_repository()\n"
+        "    annotated.set_review_status(4, 1, 'reviewed')\n"
+        "    db._prediction_repository().get_rows()\n"
+        "    db._unrelated_repository().update_status(5)\n"
+    )
+    assert [call for _, call in _repository_decision_writer_calls(tree)] == [
+        'db._prediction_repository().update_status',
+        'db._keyword_provenance_repository().accept_prediction',
+        'assigned.ungroup', 'annotated.set_review_status',
+    ]
+
+
+def test_repository_writer_guard_tracks_import_constructor_and_instance_aliases():
+    """Exercise both repository kinds using only inert source syntax."""
+    for cls, module, writer, factory in [
+        ('PredictionRepository', 'predictions', 'update_status', '_prediction_repository'),
+        ('KeywordProvenanceRepository', 'keyword_provenance', 'accept_prediction', '_keyword_provenance_repository'),
+    ]:
+        tree = ast.parse(f'''
+from repositories.{module} import {cls} as Imported
+import repositories.{module} as mod
+
+def route(db, parameter: 'Imported'):
+    repositories.{module}.{cls}(db.conn).{writer}(1)
+    mod.{cls}(db.conn).{writer}(2)
+    Imported(db.conn).{writer}(3)
+    assigned = mod.{cls}(db.conn)
+    assigned.{writer}(4)
+    annotated: mod.{cls} = Imported(db.conn)
+    annotated.{writer}(5)
+    Constructor = mod.{cls}
+    ConstructorAlias: type[Imported] = Constructor
+    made = ConstructorAlias(db.conn)
+    made.{writer}(6)
+    second = made
+    third: Imported = second
+    third.{writer}(7)
+    from_property = db.{module}
+    property_alias = from_property
+    property_alias.{writer}(8)
+    bound_factory = db.{factory}
+    bound_factory().{writer}(9)
+    parameter.{writer}(10)
+    Imported.{writer}(made, 11)
+    declared: 'mod.{cls}'
+    declared.{writer}(12)
+''')
+        calls = [call for _, call in _repository_decision_writer_calls(tree)]
+        assert calls == [
+            f'repositories.{module}.{cls}(db.conn).{writer}',
+            f'mod.{cls}(db.conn).{writer}', f'Imported(db.conn).{writer}',
+            f'assigned.{writer}', f'annotated.{writer}', f'made.{writer}',
+            f'third.{writer}', f'property_alias.{writer}',
+            f'bound_factory().{writer}', f'parameter.{writer}',
+            f'Imported.{writer}', f'declared.{writer}',
+        ]
+
+
+def test_repository_writer_alias_candidates_terminate_and_do_not_hide_alternatives():
+    tree = ast.parse('''
+from repositories.predictions import PredictionRepository as P
+from repositories.keyword_provenance import KeywordProvenanceRepository as K
+if TYPE_CHECKING:
+    Constructor = P
+else:
+    Constructor = K
+Alias = Constructor
+repo = Alias(conn)
+copy = repo
+copy.update_status(1)
+copy.accept_prediction(2)
+cycle_a = cycle_b
+cycle_b = cycle_a
+cycle_a.update_status(3)
+''')
+    assert [call for _, call in _repository_decision_writer_calls(tree)] == [
+        'copy.update_status', 'copy.accept_prediction',
+    ]
+
+
+def test_repository_writer_alias_scan_ignores_unrelated_and_read_only_forms():
+    tree = ast.parse('''
+from unrelated import OtherRepository as Other
+import unrelated as mod
+Ctor = Other
+repo = Ctor(conn)
+alias = repo
+alias.update_status(1)
+mod.OtherRepository(conn).accept_prediction(2)
+unknown().update_status(3)
+read_repo = repositories.predictions.PredictionRepository(conn)
+read_alias = read_repo
+read_alias.get_rows()
+items = [read_repo]
+items.update_status(4)
+''')
+    assert list(_repository_decision_writer_calls(tree)) == []
+
+
+def test_repository_writer_named_expressions_cover_instances_classes_and_factories():
+    """Walrus expressions bind names and retain their value without evaluation."""
+    for cls, module, writer, factory in [
+        ('PredictionRepository', 'predictions', 'update_status', '_prediction_repository'),
+        ('KeywordProvenanceRepository', 'keyword_provenance', 'accept_prediction', '_keyword_provenance_repository'),
+    ]:
+        tree = ast.parse(f'''
+from repositories.{module} import {cls} as Imported
+import repositories.{module} as mod
+
+def route(db):
+    if (guarded := db.{module}) is not None:
+        guarded.{writer}(1)
+    (inline := db.{module}).{writer}(2)
+    (outer := (inner := Imported(conn))).{writer}(3)
+    copied = outer
+    copied.{writer}(4)
+    if (Ctor := mod.{cls}) is not None:
+        Ctor(conn).{writer}(5)
+    (InlineCtor := Imported)(conn).{writer}(6)
+    (OuterCtor := (InnerCtor := Imported))(conn).{writer}(7)
+    if (Maker := db.{factory}) is not None:
+        Maker().{writer}(8)
+    (InlineMaker := db.{factory})().{writer}(9)
+    (OuterMaker := (InnerMaker := db.{factory}))().{writer}(10)
+    (product := db.{factory}()).{writer}(11)
+    (DirectClass := mod.{cls}).{writer}(outer, 12)
+    typed: Imported = (captured := Imported(conn))
+    typed.{writer}(13)
+    captured.{writer}(14)
+''')
+        expected = [
+            f'guarded.{writer}', f'(inline := db.{module}).{writer}',
+            f'(outer := (inner := Imported(conn))).{writer}', f'copied.{writer}',
+            f'Ctor(conn).{writer}', f'(InlineCtor := Imported)(conn).{writer}',
+            f'(OuterCtor := (InnerCtor := Imported))(conn).{writer}', f'Maker().{writer}',
+            f'(InlineMaker := db.{factory})().{writer}',
+            f'(OuterMaker := (InnerMaker := db.{factory}))().{writer}',
+            f'(product := db.{factory}()).{writer}',
+            f'(DirectClass := mod.{cls}).{writer}', f'typed.{writer}', f'captured.{writer}',
+        ]
+        assert sorted(call for _, call in _repository_decision_writer_calls(tree)) == sorted(expected)
+
+
+def test_repository_writer_named_expression_alternatives_and_cycles():
+    tree = ast.parse('''
+from repositories.predictions import PredictionRepository as P
+from repositories.keyword_provenance import KeywordProvenanceRepository as K
+if TYPE_CHECKING:
+    (Constructor := P)
+else:
+    (Constructor := K)
+(Alias := Constructor)
+(repo := Alias(conn))
+(copy := repo)
+copy.update_status(1)
+copy.accept_prediction(2)
+(cycle_a := cycle_b)
+(cycle_b := cycle_a)
+cycle_a.update_status(3)
+''')
+    assert [call for _, call in _repository_decision_writer_calls(tree)] == [
+        'copy.update_status', 'copy.accept_prediction',
+    ]
+
+
+def test_repository_writer_named_expressions_ignore_unrelated_and_read_only_values():
+    tree = ast.parse('''
+if (other := OtherRepository(conn)) is not None:
+    other.update_status(1)
+(factory := db._unrelated_repository)().update_status(2)
+(dynamic := arbitrary_return()).accept_prediction(3)
+(values := [PredictionRepository(conn)]).update_status(4)
+(reader := PredictionRepository(conn)).get_rows()
+''')
+    assert list(_repository_decision_writer_calls(tree)) == []
