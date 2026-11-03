@@ -52,7 +52,6 @@ def _batch_preflight(
     # and consulting them against a remounted share would count fresh
     # card files as duplicates of copies that never completed. Refuse
     # every remaining file rather than risk a stale-cache hit.
-    # See PR #1400 review (Codex P2 r3688614624).
     if state.mount_ever_lost:
         _fail_whole_batch(
             state, rel, batch,
@@ -86,7 +85,6 @@ def _batch_preflight(
     # killing the background job instead of returning a controlled
     # unsafe result). This mirror at the batch boundary keeps the
     # failure quiet and preserves the ``ok`` field for the API.
-    # See PR #1107 review.
     #
     # On the remote path the same guard also protects the duplicate
     # gate: when the mount base is an ancestor of a selected source and
@@ -96,13 +94,12 @@ def _batch_preflight(
     # hash those source-backed candidates, byte-match them against the
     # card, and count them as ``skipped_duplicate`` — with
     # ``verify_by_hash=true`` that would let ``safe_to_format`` go
-    # green over a card whose bytes never crossed the network. See PR
-    # #1113 review. (Since spec decision 13 the shared walk refuses
-    # source-backed candidates on its own, so that is now defense in
-    # depth rather than the only guard — but this batch-level refusal
-    # is still the one that keeps ``os.makedirs`` off the card, and it
-    # is still the honest verdict for a geometry where EVERY candidate
-    # is poisoned rather than just one entry.)
+    # green over a card whose bytes never crossed the network. (The
+    # shared walk also refuses source-backed candidates on its own, so
+    # that part is defense in depth — but this batch-level refusal is
+    # the one that keeps ``os.makedirs`` off the card, and it is the
+    # honest verdict for a geometry where EVERY candidate is poisoned
+    # rather than just one entry.)
     if ctx.path_under_any_source(dest_folder):
         _fail_whole_batch(
             state, rel, batch,
@@ -149,12 +146,11 @@ def _refuse_unmounted_archive(
     # then hide the moment the real share remounts over it. Probed per
     # batch rather than once up front: a card import runs for hours
     # against a network archive, and the share can drop *during* the
-    # run — a Tailscale/SMB archive did exactly that on 2026-07-30
-    # (unmounted two hours into an import, after which ``os.makedirs``
-    # walked straight into the vacated mount point), and only a
-    # root-owned ``/Volumes`` turned the shadow write into a crash
-    # instead of silent data misplacement. A start-of-job preflight
-    # cannot see a mid-run drop; the probe is a couple of
+    # run (a Tailscale/SMB archive can unmount hours into an import,
+    # after which ``os.makedirs`` walks straight into the vacated mount
+    # point; only a root-owned ``/Volumes`` turns that shadow write
+    # into a crash instead of silent data misplacement). A start-of-job
+    # preflight cannot see a mid-run drop; the probe is a couple of
     # ``os.path.lexists`` calls on the mount root, so paying it once
     # per destination folder is free next to the copy work.
     #
@@ -166,7 +162,7 @@ def _refuse_unmounted_archive(
     # wraps the pipeline path's ``_missing_archive_mount_root`` helper
     # (only fires for the ``/Volumes/X``, ``/mnt/X``, and
     # ``/media/user/X`` shapes that denote removable/network mount
-    # roots). See PR #1113 review.
+    # roots).
     missing_mount_root = missing_root_check()
     if missing_mount_root:
         _fail_whole_batch(
@@ -255,7 +251,7 @@ def _create_dest_folder(
     # We just makedirs'd ``dest_folder`` so the path definitely exists;
     # any row still labelled ``'missing'`` is stale. Preserve
     # ``'partial'`` (a real prior-scan signal that the folder needs a
-    # rescan). See PR #1107 / PR #1113 reviews.
+    # rescan).
     db.imports.promote_missing_folder_at(dest_folder)
     db.commit()
 
@@ -286,7 +282,7 @@ def _rollback_on_mount_loss(
     exception partway through must not leave later batches refused
     while this batch's counts still stand.
 
-    ``db`` and ``workspace_id`` are passed by the batch loop and used to
+    ``db`` and ``workspace_id`` are passed by the batch loop to
     revoke the ``workspace_photos`` grants (and demote the
     status-promoted folders) this batch's accepted duplicates created
     via :meth:`PhotoVisibilityRepository.grant_verified_twins_tracked`. Pre-existing
@@ -301,7 +297,7 @@ def _rollback_on_mount_loss(
     # accounted for and the card looks safe to erase over an archive
     # holding none of the bytes. ``dup_dirs`` is dropped for the same
     # reason — linking those folders would pull shadow paths into the
-    # workspace. See PR #1396 review (Codex P1 r3687506040).
+    # workspace.
     for skipped_file, counted_unverified in batch_st.dup_skips:
         state.skipped_duplicate -= 1
         _counts(state, batch_st.rel)["skipped_duplicate"] -= 1
@@ -356,8 +352,7 @@ def _rollback_on_mount_loss(
     # refused at the top of the loop rather than allowed to consult
     # the intra-run duplicate cache (which still holds identities
     # for the files just rolled back above; the checker has no
-    # removal API). LAST — see the docstring. See PR #1400 review
-    # (Codex P2 r3688614624).
+    # removal API). LAST — see the docstring.
     state.mount_ever_lost = batch_st.mount_lost
 
 
@@ -365,10 +360,6 @@ def _drop_queued_transfers(state: _ImportRunState, batch_st: _ImportBatchState, 
     # Queued-but-untransferred files: nothing landed, so no
     # counter rollback — book the failure and drop the queue
     # so the rsync below has nothing to send.
-    #
-    # (Formerly a nested def whose default-arg binding of
-    # ``batch_st`` / ``rel`` silenced ruff B023; module-level
-    # explicit parameters replace that binding.)
     for queued_file, _dest_basename, _queued_hash, _sz, _mt \
             in batch_st.to_transfer:
         _fail(

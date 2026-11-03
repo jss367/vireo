@@ -52,7 +52,7 @@ def _catalog_scan_and_prescan(
     """Run the restricted per-batch catalog scan for everything in
     ``batch_st.landed`` (fresh copies/transfers AND adoptions), capturing
     each landed path's pre-scan photo-row hash first so the caller's
-    derived-cache diff loop can compare. Shared verbatim by both import
+    derived-cache diff loop can compare. Shared by both import
     paths; the caller owns the ``if batch_st.landed and not
     batch_st.dest_read_cancelled:`` gate. Returns ``pre_scan_hashes``.
     On scan failure every landed entry is reclassified to failed and
@@ -65,7 +65,7 @@ def _catalog_scan_and_prescan(
     permits until the batch finishes.
 
     Deliberately does NOT wire a cancel probe: the caller's contract
-    (run_import_job comment at ~lines 4422-4425) is that this scan is
+    (``_ImportBatchLoop._catalog_batch``) is that this scan is
     the preservation catalog for what already landed on disk, and it
     must run to completion even after Stop so those files reach a
     valid catalog state. Passing a cancel_check that already-fired
@@ -77,21 +77,20 @@ def _catalog_scan_and_prescan(
     # "skipped_duplicate"), so their photo rows get created by the
     # restricted scan. The explicit file set is also what prevents a
     # duplicate-only import from falling back to a whole-directory
-    # discovery walk. See PR #1113 review.
+    # discovery walk.
     landed_paths = {entry.dest_path for entry in batch_st.landed}
     # Capture the pre-scan (photo_id, file_hash) for every landed
     # dest_path. Scanner's own ``_invalidate_derived_caches``
     # fires on content-changed rows during the batch scan below
-    # (now that ``vireo_dir`` is passed through so pairing keeps
-    # its cache context), but the manual invalidation loop below
-    # remains as defense-in-depth for the batch-scan's
+    # (``vireo_dir`` is passed through so pairing keeps its cache
+    # context), but the manual invalidation loop below is
+    # defense-in-depth for the batch-scan's
     # ``skip_working_copies=True`` path: the deferred end-of-run
-    # ``_extract_working_copies`` still skips rows with
+    # ``_extract_working_copies`` skips rows with
     # ``working_copy_path IS NOT NULL``, so any stale WC pointer
-    # left behind by scanner's own path (e.g. a codepath change,
-    # or a legacy row scanner declines to invalidate) would
-    # otherwise persist. Idempotent with scanner's call. See PR
-    # #1107 review.
+    # left behind by scanner's own path (e.g. a row scanner
+    # declines to invalidate) would otherwise persist. Idempotent
+    # with scanner's call.
     pre_scan_hashes = {}
     for entry in batch_st.landed:
         dest_path = entry.dest_path
@@ -147,8 +146,7 @@ def _run_preservation_scan(
     # silently loses the local pass. ``skip_working_copies``
     # keeps the per-batch WC extraction deferred to the
     # end-of-run pass (per-batch extraction would race
-    # RAW+JPEG pairing across batch boundaries). See PR
-    # #1107 review.
+    # RAW+JPEG pairing across batch boundaries).
     #
     # Deliberately NOT incremental: a landed path is not
     # necessarily uncataloged — a stale row can survive for a
@@ -161,11 +159,11 @@ def _run_preservation_scan(
     # fine is reported failed — with retries unable to refresh
     # the row. ``restrict_files`` already narrows these batches
     # to a handful of paths, so incremental buys nothing here
-    # anyway. See PR #1398 review.
+    # anyway.
     # Deliberately no cancel_check: the caller's contract is that
     # this scan runs to completion even after Stop so already-landed
-    # files reach a valid catalog state (run_import_job comment at
-    # ~lines 4422-4425). Passing an already-fired probe would let
+    # files reach a valid catalog state
+    # (``_ImportBatchLoop._catalog_batch``). Passing an already-fired probe would let
     # ``scan()`` raise ``ScanCancelled``, and the surrounding
     # handler would reclassify every landed entry as failed while
     # the bytes remain on disk uncataloged.
@@ -177,7 +175,7 @@ def _run_preservation_scan(
     # raises ``ResourceWaitCancelled`` even when permits are
     # immediately available. Suppress the binding just for this
     # scan by re-binding to ``None`` — same shape as classify_job's
-    # preservation pass in 4be1fa9b / ccd44bc4. ``JobRunner`` still
+    # preservation pass (``finish_cleared_only``). ``JobRunner`` still
     # owns hard shutdown via its own deadline. The pause probe is
     # kept, so a user Pause still unwinds the scan pool cleanly.
     #
@@ -327,7 +325,6 @@ def _validate_rowless_landing(
     # was scanned in the same batch legitimately has no
     # row of its own. Look it up as another row's
     # companion_path before deciding "not cataloged".
-    # See PR #1107/#1113 reviews.
     companion = db.imports.photo_with_companion(
         os.path.dirname(dest_path),
         os.path.basename(dest_path),
@@ -352,8 +349,7 @@ def _validate_rowless_landing(
     # normalizes to ``EMPTY_FILE_SHA256`` at
     # ``_LandedFile`` construction), so an empty
     # companion whose file vanished cannot be
-    # confused with a legitimately empty one. See
-    # PR #1107/#1113/#1437 reviews.
+    # confused with a legitimately empty one.
     try:
         actual = _rehash_dest_or_none(
             dest_path, stop_requested)
@@ -371,8 +367,7 @@ def _validate_rowless_landing(
         # end-of-run ``_extract_working_copies``
         # skips rows whose ``working_copy_path IS
         # NOT NULL`` — a stale RAW-only cache would
-        # persist past this import otherwise. See
-        # PR #1107 review.
+        # persist past this import otherwise.
         raw_companion_invalidations.add(
             companion["id"],
         )
@@ -423,7 +418,7 @@ def _stamp_cataloged_landing(
         # vanished, changed, or became unreadable between
         # scan and stamping fails instead of keeping
         # ``hash_status='ok'`` with ``safe_to_format``
-        # green. See PR #1107/#1113/#1437 reviews.
+        # green.
         try:
             actual = _rehash_dest_or_none(
                 dest_path, stop_requested)
@@ -479,7 +474,7 @@ def _invalidate_changed_and_sweep(
     """Invalidate derived caches for landed rows whose content identity
     changed (pre-scan hash differs from the attested hash) and for RAW
     rows that gained a companion this batch, then commit the batch and
-    sweep untracked preview files. Shared verbatim by both import paths.
+    sweep untracked preview files. Shared by both import paths.
     """
     invalidated_photo_ids = set()
     if params.vireo_dir:
@@ -493,7 +488,7 @@ def _invalidate_changed_and_sweep(
                 # caches exist for this photo yet.
                 continue
             # A pre-scan row existed. Its ``file_hash`` may be
-            # ``NULL`` (legacy row, or a prior scan that couldn't
+            # ``NULL`` (a row without a stored hash, or a scan that couldn't
             # read the file), and such a row can still carry
             # ``working_copy_path``/thumb/preview caches from
             # earlier processing. Scanner's own content-change
@@ -501,8 +496,8 @@ def _invalidate_changed_and_sweep(
             # invalidating transition (see scanner.scan()'s
             # ``content_identity_changed`` block); mirror that
             # here so restoring a deleted archive file whose
-            # legacy row lost its hash still clears the stale
-            # derived caches. See PR #1107 review.
+            # row has no hash still clears the stale
+            # derived caches.
             pre_hash = pre_scan_hashes[dest_path]
             verified_hash = entry.verified_hash
             if pre_hash == verified_hash:
@@ -545,8 +540,8 @@ def _invalidate_changed_and_sweep(
 
 def _fill_wc_overrides(state: _ImportRunState, batch_st: _ImportBatchState, params: ImportParams) -> None:
     """Record the card-side working-copy source override for every landed
-    entry the post-scan checks did not reclassify. Shared verbatim by
-    both import paths.
+    entry the post-scan checks did not reclassify. Shared by both
+    import paths.
     """
     # Accumulate the card-source mapping for the deferred
     # end-of-run ``_extract_working_copies`` call. Extraction
@@ -582,7 +577,7 @@ def _extract_deferred_working_copies(
 ) -> None:
     """One working-copy extraction pass over every folder this run
     touched, after all batches have landed and been paired. Shared
-    verbatim by both import paths.
+    by both import paths.
     """
     # Reads card-side bytes for any dest_path present in
     # ``wc_source_paths``; anything else (crash-recovery adopted files

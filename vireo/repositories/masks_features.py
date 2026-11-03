@@ -15,13 +15,14 @@ Callers reach it as ``db.masks_features`` (a fresh repository per access,
 see ``Database.masks_features``); there are no forwarding wrappers on
 ``Database``. It keeps everything that is not SQL: the workspace detector
 floor (``get_effective_config``), the photo-scope clause (``StatsRepository.scope_clause``),
-the workspace guard on embedding writes, and the masks-directory containment
-check (``_safe_remove_mask_file``), which the cleanup deletes receive as
-``remove_file`` so file removal keeps its place between the reads and the
-``DELETE``.
+and the workspace guard on embedding writes. The masks directory arrives
+as a value; the cleanup deletes remove files through ``remove_file``
+(``safe_remove_mask_file``, the containment check) between the reads and
+the ``DELETE``.
 """
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -118,19 +119,63 @@ def _first_eye_stage_row_per_photo(rows: Sequence[sqlite3.Row]) -> list[dict[str
     return result
 
 
+log = logging.getLogger(__name__)
+
+
+def safe_remove_mask_file(masks_dir: str | None, path: str | None) -> None:
+    """``os.remove`` ``path`` only if it resolves inside ``masks_dir``.
+
+    ``masks_dir`` is the realpath of the catalog's masks directory
+    (``Database._masks_dir_real``), or None when it cannot be resolved, in
+    which case nothing is removed. The user-triggerable storage cleanup endpoints feed
+    ``photo_masks.path`` straight into this; without the realpath
+    containment check, a corrupted or migrated row pointing at
+    ``/etc/...`` could cause arbitrary file deletion. Mirrors the
+    defense already in place on ``/api/masks/<pid>/<variant>.png``.
+    """
+    if not path:
+        return
+    if masks_dir is None:
+        log.warning(
+            "Refusing to remove mask file %s (no masks dir resolved)",
+            path,
+        )
+        return
+    try:
+        abs_path = os.path.realpath(path)
+    except OSError:
+        log.warning("Failed to resolve mask path %s", path)
+        return
+    if not (abs_path == masks_dir
+            or abs_path.startswith(masks_dir + os.sep)):
+        log.warning(
+            "Refusing to remove mask file %s outside masks dir %s",
+            path, masks_dir,
+        )
+        return
+    try:
+        if os.path.isfile(abs_path):
+            os.remove(abs_path)
+    except OSError:
+        log.warning("Failed to remove mask file %s", abs_path)
+
+
 class MasksFeaturesRepository:
     def __init__(
         self,
         conn: sqlite3.Connection,
         workspace_id_fn: Callable[[], int],
         *,
-        remove_file: Callable[[str], None],
+        masks_dir: str | None,
     ) -> None:
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn
-        # ``Database._safe_remove_mask_file``: deletes a mask file only inside
-        # the masks directory.
-        self.remove_file = remove_file
+        # The realpath of the masks directory; file deletes stay inside it.
+        self.masks_dir = masks_dir
+
+    def remove_file(self, path: str | None) -> None:
+        """Delete a mask file, only inside the masks directory."""
+        safe_remove_mask_file(self.masks_dir, path)
 
     @property
     def workspace_id(self) -> int:

@@ -11,13 +11,12 @@ from xmp.properties import _SimpleProperties
 class SidecarEditor:
     """Accumulate sidecar edits and publish them in a single atomic write.
 
-    Every writer below used to parse the sidecar, mutate it, and republish it
-    on its own. One publish is a temp-file create, an fsync, an ACL and
+    One publish is a temp-file create, an fsync, an ACL and
     extended-attribute copy, and a rename -- roughly 0.4s on an SMB-mounted
-    NAS -- so a photo whose sync queued keywords, a flag and a rating paid
-    that price four times over, re-reading the file before each one. The
-    editor parses once, applies every mutation to the same tree, and writes
-    once.
+    NAS -- so publishing per writer would make a photo whose sync queued
+    keywords, a flag and a rating pay that price four times over,
+    re-reading the file before each one. The editor parses once, applies
+    every mutation to the same tree, and writes once.
 
     It also tracks whether any mutation actually changed something, so
     re-syncing a sidecar that already carries the requested metadata costs a
@@ -29,7 +28,7 @@ class SidecarEditor:
     The editor is a coordinator. ``document`` holds the parsed tree and the
     dirty flag every collaborator sets, and publishes; ``properties`` writes
     simple properties; ``keywords``, ``fields``, ``gps`` and ``locations``
-    implement the public mutations below, which delegate to them unchanged.
+    implement the public mutations below, which delegate to them.
     """
 
     def __init__(self, xmp_path):

@@ -1,13 +1,12 @@
 """Pairing a JPEG with its RAW before the JPEG gets a row.
 
-A camera JPEG beside its RAW used to be inserted as its own photo and
-merged into the RAW by the end-of-scan pairing pass. Between the two
-its id was live: ``photo_callback`` reported it, so the pipeline's
-and import-in-place's collections, thumbnail queue and counts kept a
-deleted id, and because ``photos`` has no AUTOINCREMENT the next
-insert could take that id and join those collections. The scan now
-makes the pairing decision first and records a paired JPEG straight
-onto its RAW's row, so the transient row never exists.
+The scan decides the pairing first and records a paired JPEG straight
+onto its RAW's row. A JPEG inserted as its own photo and merged into the
+RAW later would have a live id in between: ``photo_callback`` would
+report it, the pipeline's and import-in-place's collections, thumbnail
+queue and counts would keep a deleted id, and because ``photos`` has no
+AUTOINCREMENT the next insert could take that id and join those
+collections.
 
 ``_CompanionGroups`` owns the same-stem groups the per-file loop is
 waiting on, decides each group once all its files have been seen, and
@@ -129,7 +128,7 @@ class _CompanionGroups:
         The candidates are the cataloged rows of the group plus each waiting
         JPEG as a row-less member, decided by the same
         ``_pick_compatible_raw_jpeg_pairs`` the end-of-scan pass uses, so
-        #1970's one-companion rule and the metadata checks hold unchanged.
+        the one-companion rule and the metadata checks are the same.
         """
         items = self._waiting_companions.pop(key)
         folder_id = items[0].folder_id
@@ -174,8 +173,8 @@ class _CompanionGroups:
     def _attach_companion(self, item: _IndexedFile, owner: PairingRow) -> bool:
         """Record ``item`` as ``owner``'s companion without a row; True if done.
 
-        Does what inserting the JPEG and merging it used to leave on the
-        RAW: ``companion_path``, the import identity re-import checks, the
+        Writes what a merged JPEG row would leave on the RAW:
+        ``companion_path``, the import identity re-import checks, the
         JPEG-only metadata filling the RAW's gaps, the JPEG's embedded and
         sidecar keywords, and dropping the RAW's companion-derived display
         caches. A changed companion takes the same path with fresh values.

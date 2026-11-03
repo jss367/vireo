@@ -13,7 +13,7 @@ except ImportError:
     from db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
 from .paths import _case_insensitive_root, _path_equal_or_descends
 
-# The package's one logger, named as before the split.
+# The package's one logger, ``move``, shared by every module in it.
 log = logging.getLogger("move")
 
 

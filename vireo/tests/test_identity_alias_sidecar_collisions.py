@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from db import Database
 from scanner.companions import _pair_raw_jpeg_companions
-from services import moves_merge, workspace_folders
+from services import folder_merges, moves_merge, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 from sync import sync_from_xmp, sync_to_xmp
@@ -39,7 +39,7 @@ def _collision(db, tmp_path, mode, monkeypatch):
     elif mode == 'folder':
         source, destination, losing, survivor, target_dir = folder_twins(db, tmp_path)
         target = Path(target_dir) / 'bird.raf'
-        collapse = partial(db.folders.merge_into_existing, source, destination, target_dir)
+        collapse = partial(folder_merges.merge_into_existing, db, source, destination, target_dir)
     else:
         folder = workspace_folders.add_folder(db, str(tmp_path / 'paired'))
         survivor, losing = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')

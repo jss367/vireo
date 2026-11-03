@@ -172,8 +172,8 @@ class _Discovery:
             dp = Path(d)
             # The outer ``is_excluded_scan_path(root_path)`` guard above only
             # covers ``root``. restrict_dirs entries can independently point
-            # into an other-app data bundle — e.g. a stale folder row from
-            # before this guard, or a duplicate the caller built from
+            # into an other-app data bundle — e.g. a stale folder row, or a
+            # duplicate the caller built from
             # workspace_folders pointing at
             # ``~/Pictures/Photos Library.photoslibrary/originals``. Calling
             # ``dp.is_dir()`` / ``dp.iterdir()`` on that subtree would still
@@ -206,8 +206,7 @@ class _Discovery:
                 # walk that backs safe_iter_dir takes minutes for a full
                 # day-folder, and materializing here would delay every
                 # heartbeat below until after that wait — the same silent
-                # hang the heartbeat exists to break (PR #1385 Codex /
-                # CodeRabbit review).
+                # hang the heartbeat exists to break.
                 for f in safe_iter_dir(str(dp), onerror=self._on_walk_error):
                     self.signals.check_cancelled()
                     checked += 1

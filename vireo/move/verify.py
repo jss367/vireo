@@ -129,13 +129,13 @@ def remote_verify_files(rsync_bin, src_specs, rsync_target, remote,
     """
     if not src_specs:
         return None
-    # ``--copy-links`` matches the import-transfer rsync (``_run_remote_import
-    # _job`` passes it): the transfer sends the REFERENCED file bytes for a
+    # ``--copy-links`` matches the import-transfer rsync (the import job's
+    # ``_RsyncTransport`` passes it): the transfer sends the REFERENCED file bytes for a
     # symlinked source, so the source-side hash here must be computed on the
     # same referenced file (not the symlink itself). Without it, ``rsync
     # -an`` (which includes ``-l``) sees a symlink at the source and a real
     # file on the NAS, treats them as mismatched, and reports the just-
-    # transferred file as verification-failed. See PR #1113 review.
+    # transferred file as verification-failed.
     cmd = [rsync_bin, "-an", "--checksum", "--copy-links",
            "--out-format=%n", "-e", _ssh_rsh_string(remote)]
     cmd += list(src_specs)
@@ -311,7 +311,7 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
                                is_merge=False, progress=None):
     """Return the relative path of the first source file absent (or
     size-mismatched, or a symlink) at dest_path, or None if every source
-    file is present and matches. Used to verify a merge before deleting
+    file is present and matches. Verifies a merge before deleting
     originals.
 
     With ``verify_contents``, compare fresh bytes as well before allowing

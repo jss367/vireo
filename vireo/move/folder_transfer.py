@@ -24,7 +24,7 @@ from .verify import (
     _remote_verify_complete,
 )
 
-# The package's one logger, named as before the split.
+# The package's one logger, ``move``, shared by every module in it.
 log = logging.getLogger("move")
 
 

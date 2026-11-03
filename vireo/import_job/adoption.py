@@ -89,9 +89,8 @@ _WALK_PLACED = "placed"
 # suppresses both the post-loop mount probe and the batch's catalog pass.
 # A healthy Stop observed between probes is no evidence of a sick mount,
 # and suppressing the catalog pass for it would leave already-copied files
-# uncataloged until some later run adopted them. See the catalog block's
-# "A plain user Stop on a healthy mount leaves dest_read_cancelled False"
-# comment, and the Codex review of PR #1450.
+# uncataloged until some later run adopted them. See
+# ``_ImportBatchLoop._catalog_batch``.
 _WALK_CANCELLED = "cancelled"
 
 
@@ -157,9 +156,8 @@ def _resolve_dest_collision(
             # file with the misleading reason "copy verification failed".
             # (It does not write THROUGH the link: the copy goes to a
             # hidden sibling temp and is promoted by link/rename, neither
-            # of which follows a symlink. Verified before the fix; see
-            # spec row 13.) Nothing to adopt either — there are no bytes
-            # behind it — so advance.
+            # of which follows a symlink.) Nothing to adopt either — there
+            # are no bytes behind it — so advance.
             adopt = _existing_candidate_adoption(
                 ctx, src, cand_path=cand_path,
                 stop_requested=stop_requested,
@@ -198,10 +196,7 @@ def _stopped_while_advancing(counter: int, stop_requested: StopCheck) -> bool:
     # which is the walk's only other cancellation poll. Without
     # this a Stop goes unobserved for the whole collision chain
     # while the walk keeps probing a (possibly slow, possibly
-    # dying) network destination. Codex review of PR #1450;
-    # before flip B the rsync walk got this for free by hashing
-    # every existing candidate, and the local walk — which has
-    # always size-gated — never had it at all.
+    # dying) network destination.
     #
     # Reported as a VERDICT, not as ``DestReadCancelled``: no
     # destination read was interrupted here, so this must not
@@ -235,7 +230,7 @@ def _skip_claimed_identical_sibling(
     # ``skipped_duplicate`` — which would otherwise let a
     # verified run report ``safe_to_format=True`` because
     # ``copied + skipped_duplicate == discovered`` without an
-    # off-card row for it. See PR #1113 review.
+    # off-card row for it.
     if checker is not None and claimed_hash == src.hash_fn():
         state.skipped_duplicate += 1
         _counts(state, src.rel)["skipped_duplicate"] += 1
