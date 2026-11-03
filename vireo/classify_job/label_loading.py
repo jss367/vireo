@@ -81,13 +81,13 @@ def _select_labels(
         selected = _any_present(requested)
         log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
     elif labels_file and os.path.exists(labels_file):
-        # One file, same normalization as a list of them. A hand-authored
-        # .txt used to be passed to the classifier as written, which made
+        # One file, same normalization as a list of them. Passing a
+        # hand-authored .txt to the classifier as written would make
         # ``Robin`` and ``robin`` two classes here and one through
         # ``labels_files`` — so readiness, the embedding matrix and
-        # precompute (which all report the merged list) described a run
-        # this branch would not perform, and warmed an embedding identity
-        # it would not look up. There is one answer to "what does this
+        # precompute (which all report the merged list) would describe a
+        # run this branch does not perform, and warm an embedding identity
+        # it does not look up. There is one answer to "what does this
         # file classify as" and it is the merged one.
         labels, label_metas = load_merged_labels_with_metas(
             _saved_label_metas([labels_file]),
