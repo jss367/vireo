@@ -163,11 +163,12 @@ def _builds_provenance_repository(node, constructors):
     """A provenance accessor or an imported repository constructor call."""
     if isinstance(node, ast.Attribute) and node.attr == "keyword_provenance":
         return True
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, (ast.Name, ast.Attribute))
-        and ast.unparse(node.func) in constructors
-    )
+    if not isinstance(node, ast.Call):
+        return False
+    callee = node.func
+    while isinstance(callee, ast.NamedExpr):
+        callee = callee.value
+    return isinstance(callee, (ast.Name, ast.Attribute)) and ast.unparse(callee) in constructors
 
 
 def _writer_calls(rel, tree):
@@ -176,22 +177,63 @@ def _writer_calls(rel, tree):
     The entry point ``tag_photo(db, photo_id, keyword_id, source)`` (bare or
     as ``<module>.tag_photo``) declares ``source`` by keyword or as its
     fourth positional argument. The repository writer ``tag`` takes it
-    keyword-only, through any receiver that is a provenance repository.
+    keyword-only. Recognize repository accessors, imported constructors,
+    directly annotated parameters and simple local bindings. This finite,
+    module-wide candidate scan may combine unrelated scopes or branches;
+    dynamic returns, containers, unpacking and computed annotations are not
+    resolved. Quoted annotations are parsed, never evaluated.
     """
     constructors = _provenance_repository_constructors(tree)
     aliases: set[str] = set()
+
+    def unquoted(node):
+        # Forward references are parsed as inert syntax, never evaluated.
+        while isinstance(node, ast.Constant) and isinstance(node.value, str):
+            try:
+                node = ast.parse(node.value, mode="eval").body
+            except (SyntaxError, ValueError, RecursionError):
+                return None
+        return node
+
+    def named_value(node):
+        while isinstance(node, ast.NamedExpr):
+            node = node.value
+        return node
+
+    def repository(node):
+        node = named_value(node)
+        return _builds_provenance_repository(node, constructors) or (
+            isinstance(node, ast.Name) and node.id in aliases
+        )
+
+    bindings = []
+    parameters = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and _builds_provenance_repository(node.value, constructors):
-            aliases.update(
-                target.id for target in node.targets if isinstance(target, ast.Name)
-            )
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and node.value is not None
-            and _builds_provenance_repository(node.value, constructors)
-            and isinstance(node.target, ast.Name)
-        ):
-            aliases.add(node.target.id)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            bindings.extend((target.id, node.value) for target in targets
+                            if isinstance(target, ast.Name) and node.value is not None)
+        elif isinstance(node, ast.arg) and node.annotation is not None:
+            annotation = unquoted(node.annotation)
+            parameters.append((node.arg, annotation))
+
+    # Finite, module-wide candidates deliberately overapproximate scopes and
+    # branch alternatives. Support simple constructor/instance aliases and
+    # named expressions; dynamic returns, containers and unpacking are outside
+    # this syntax-only guard. No imports or annotations are executed.
+    changed = True
+    while changed:
+        before = (len(constructors), len(aliases))
+        for name, value in bindings:
+            value = named_value(value)
+            if isinstance(value, (ast.Name, ast.Attribute)) and ast.unparse(value) in constructors:
+                constructors.add(name)
+            if repository(value):
+                aliases.add(name)
+        for name, annotation in parameters:
+            if isinstance(annotation, (ast.Name, ast.Attribute)) and ast.unparse(annotation) in constructors:
+                aliases.add(name)
+        changed = before != (len(constructors), len(aliases))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -210,8 +252,7 @@ def _writer_calls(rel, tree):
             continue
         receiver = func.value
         on_repository = (
-            _builds_provenance_repository(receiver, constructors)
-            or (isinstance(receiver, ast.Name) and receiver.id in aliases)
+            repository(receiver)
             or (rel == _PROVENANCE_MODULE
                 and isinstance(receiver, ast.Name) and receiver.id == "self")
         )
@@ -812,3 +853,72 @@ def test_writer_call_scan_resolves_constructor_imports():
         ("alias.tag", "manual"),
         ("annotated.tag", "accept"),
     ]
+
+
+@pytest.mark.parametrize("annotation", [
+    "KeywordProvenanceRepository", "Repo", "kp.KeywordProvenanceRepository",
+    "repos.keyword_provenance.KeywordProvenanceRepository", "Constructor",
+    '"Repo"', '\'"kp.KeywordProvenanceRepository"\'',
+])
+@pytest.mark.parametrize("function_kind", ["def", "async def"])
+@pytest.mark.parametrize("signature", ["repo: {ann}", "repo: {ann}, /", "*, repo: {ann}", "*repo: {ann}", "**repo: {ann}"])
+def test_writer_call_scan_tracks_typed_parameters(annotation, signature, function_kind):
+    # Vararg annotations are conservative candidates too, even though their
+    # runtime container normally cannot expose .tag.
+    source = (
+        "from repositories.keyword_provenance import KeywordProvenanceRepository as Repo\n"
+        "import repositories.keyword_provenance as kp\n"
+        "import repositories as repos\n"
+        "Constructor = Repo\n"
+        f"{function_kind} write({signature.format(ann=annotation)}):\n"
+        "    alias = repo\n"
+        "    annotated: object = alias\n"
+        "    if (bound := annotated):\n"
+        "        bound.tag(1, 2, source=None)\n"
+        "    (inline := repo).tag(1, 2)\n"
+    )
+    found = [_declared_source(src) for _, src in _writer_calls("services/example.py", ast.parse(source))]
+    assert found == ["<unrecognized>", None]
+
+
+def test_writer_parameter_scan_is_inert_and_bounded():
+    tree = ast.parse(
+        "from unrelated import KeywordProvenanceRepository as Other\n"
+        "def write(other: Other, malformed: 'Repo[', computed: 'explode()', plain: object):\n"
+        "    other.tag(1, 2, source=None)\n"
+        "    malformed.tag(1, 2, source=None)\n"
+        "    computed.tag(1, 2, source=None)\n"
+        "    plain.tag(1, 2, source=None)\n"
+        "    cycle_a = cycle_b\n"
+        "    cycle_b = cycle_a\n"
+        "    cycle_a.tag(1, 2, source=None)\n"
+    )
+    assert list(_writer_calls("services/example.py", tree)) == []
+    tree = ast.parse(
+        "def write(repo: KeywordProvenanceRepository):\n"
+        "    repo.get(1)\n"
+        "    repo.tag(1, 2, source='manual')\n"
+        "    constructor = KeywordProvenanceRepository\n"
+        "    (instance := constructor(conn)).tag(1, 2, source=None)\n"
+    )
+    assert [_declared_source(src) for _, src in _writer_calls("services/example.py", tree)] == ["manual", None]
+
+
+def test_writer_parameter_scan_preserves_alias_alternatives_and_cycles():
+    tree = ast.parse(
+        "from repositories.keyword_provenance import KeywordProvenanceRepository as Repo\n"
+        "if flag:\n"
+        "    Constructor = Repo\n"
+        "else:\n"
+        "    Constructor = object\n"
+        "def write(repo: 'Constructor'):\n"
+        "    first = second\n"
+        "    second = first\n"
+        "    first = repo\n"
+        "    second.tag(1, 2, source=None)\n"
+        "    (outer := (inner := repo)).tag(1, 2, source='manual')\n"
+        "    (Builder := Repo)\n"
+        "    Builder(conn).tag(1, 2, source=None)\n"
+        "    (InlineBuilder := Repo)(conn).tag(1, 2, source=None)\n"
+    )
+    assert [_declared_source(src) for _, src in _writer_calls("services/example.py", tree)] == [None, "manual", None, None]
