@@ -203,7 +203,7 @@ def _is_case_insensitive_path(path):
 
 def _case_insensitive_root(path):
     """Realpath of the deepest existing ancestor of `path` whose filesystem
-    folds case, or None when no such ancestor exists. Used to scope the
+    folds case, or None when no such ancestor exists. Scopes the
     case-folded fallback in `_path_equal_or_descends` to the subtree that
     actually folds — see that function's docstring for why a full-path
     `.lower()` would otherwise collapse genuinely distinct paths on the

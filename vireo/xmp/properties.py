@@ -259,9 +259,9 @@ class _SimpleProperties:
         at write time). So on removal only ONE plain occurrence is
         Vireo's to restore; anything a later external tool added
         alongside it carries data Vireo didn't overwrite and can't
-        vouch for (Codex finding: looping the whole plain set
-        overwrites a newly-added external ``30,0N'' back to the
-        pre-write ``10,0N''). Restore just the first plain
+        vouch for (restoring the whole plain set would overwrite a
+        newly-added external ``30,0N'' back to the pre-write
+        ``10,0N''). Restore just the first plain
         occurrence in document order -- the same one
         ``_get_plain_property_value'' would read -- and leave
         every other occurrence (plain OR qualified) entirely

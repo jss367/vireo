@@ -78,9 +78,7 @@ def _apply_selection(files: list[Path], params: ImportParams) -> _Selection:
     """Filter the discovered files by the user's selection and measure drift.
 
     THE single home for the pre-copy-loop selection block, called by the
-    ``run_import_job`` orchestrator for both transports. It used to be
-    duplicated across the two pre-merge copy paths, and the copies'
-    comments had diverged on the very commit that created them.
+    ``run_import_job`` orchestrator for both transports.
 
     ``files`` is the raw discovery result; ``discovered`` (its length) is
     the caller's, and stays the card-safety denominator.
@@ -206,11 +204,10 @@ def _append_selection_unsafe(unsafe_files: list[UnsafeFile], *, deselected: int,
     pill red appends a line here, because ``renderResult`` HIDES the unsafe
     list when it is empty — otherwise the user gets "Do NOT format the card
     yet" with no stated reason. That property holds for the selection
-    signals only; it is NOT a general invariant of the callers today. Known
-    pre-existing gap: ``partial_scope`` (``recursive=False``, or a narrowed
-    ``file_types``) flips ``safe_to_format`` False and appends nothing, so
-    that path still renders a bare red pill. Out of scope here; don't read
-    this helper as evidence it was fixed.
+    signals only, not for every caller: ``partial_scope``
+    (``recursive=False``, or a narrowed ``file_types``) flips
+    ``safe_to_format`` False and appends nothing, so that path renders a
+    bare red pill.
 
     These lines *attribute* the gap between what was previewed and what was
     copied; they do not claim to enumerate it. Deselect one file, have

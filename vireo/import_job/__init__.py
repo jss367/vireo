@@ -1,6 +1,6 @@
 """Import job: copy card -> archive directly, hash-verify, catalog incrementally.
 
-Implements the import half of the import/process split (design doc
+The import half of the import/process split (design doc
 2026-07-04-import-process-split-design.md). The core invariant:
 
     A photo row is created only when its file verifiably exists at its
@@ -15,7 +15,7 @@ may supply managed temporary storage for a process-before-archive run,
 then chain a verified move to the final destination. This job always
 catalogs the supplied destination; failed runs keep those local originals.
 
-Reconnaissance notes (Task 2.0, verified 2026-07-04):
+How the job relies on the rest of Vireo:
 
 1. ``scanner.scan()`` computes and writes ``photos.file_hash`` itself
    (``_compute_file_features`` hashes every new/changed file). It does
