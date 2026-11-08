@@ -98,3 +98,34 @@ def test_legacy_custom_preferences_migrate_across_pages(live_server, page, sourc
         snapshot = page.evaluate("JSON.parse(localStorage.getItem('vireo.export.customSettings'))")
         assert snapshot["metadata_fields"] == ["capture_date", "location"]
         page.locator("#exportOverlay [data-export-cancel]").click()
+
+
+@pytest.mark.parametrize("stale_snapshot", [False, True])
+def test_snapshot_write_failure_does_not_change_last_preset(live_server, page, stale_snapshot):
+    open_export(page, live_server, "browse")
+    if stale_snapshot:
+        page.locator("#exportTemplate").fill("old_{original}")
+    page.locator("#exportPreset").select_option("web-jpg")
+    previous = page.evaluate("localStorage.getItem('vireo.export.customSettings')")
+    page.evaluate("""() => {
+        const original = Storage.prototype.setItem;
+        window.restoreExportStorage = () => { Storage.prototype.setItem = original; };
+        Storage.prototype.setItem = function(key, value) {
+            if (key === 'vireo.export.customSettings') {
+                throw new DOMException('Storage quota exceeded', 'QuotaExceededError');
+            }
+            return original.call(this, key, value);
+        };
+    }""")
+    page.locator("#exportTemplate").fill("new_{original}")
+    expect(page.locator("#exportPreset")).to_have_value("custom")
+    expect(page.locator("#exportTemplate")).to_have_value("new_{original}")
+    assert page.evaluate("localStorage.getItem('vireo.export.lastPreset')") == "web-jpg"
+    assert page.evaluate("localStorage.getItem('vireo.export.customSettings')") == previous
+    expect(page.get_by_text("Could not remember export settings. You can still export with these settings.", exact=True)).to_be_visible()
+    expect(page.locator("#exportSubmitBtn")).to_be_enabled()
+    page.evaluate("window.restoreExportStorage()")
+    page.locator("#exportTemplate").fill("recovered_{original}")
+    assert page.evaluate("localStorage.getItem('vireo.export.lastPreset')") == "custom"
+    open_export(page, live_server, "editor")
+    expect(page.locator("#exportTemplate")).to_have_value("recovered_{original}")

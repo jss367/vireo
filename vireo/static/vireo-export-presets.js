@@ -19,6 +19,7 @@ var VireoExportPresets = (function() {
   var SAVED_PREFIX = 'saved:';
   var LAST_USED_KEY = 'vireo.export.lastPreset';
   var CUSTOM_SETTINGS_KEY = 'vireo.export.customSettings';
+  var customStorageWarningShown = false;
   var CAPTURE_SPLIT_KEY =
     'vireo.browse.export.metadata.captureDateTime.presetFields';
   var DEFAULT_SUBFOLDER = 'exported';
@@ -339,7 +340,7 @@ var VireoExportPresets = (function() {
       if (applyPreset) applyPreset(value);
     }
     if (value === 'custom') rememberCustomSettings();
-    VireoViewPreferences.write(LAST_USED_KEY, value);
+    else VireoViewPreferences.write(LAST_USED_KEY, value);
     updateButtons();
   }
 
@@ -575,7 +576,6 @@ var VireoExportPresets = (function() {
       }
       if (VireoViewPreferences.read(LAST_USED_KEY) === SAVED_PREFIX + name) {
         rememberCustomSettings();
-        VireoViewPreferences.write(LAST_USED_KEY, 'custom');
       }
       var refreshResult = await refresh();
       var edited = editGeneration !== modalEditGeneration;
@@ -651,7 +651,19 @@ var VireoExportPresets = (function() {
   }
 
   function rememberCustomSettings() {
-    VireoViewPreferences.write(CUSTOM_SETTINGS_KEY, JSON.stringify(collectSettings()));
+    var snapshot = JSON.stringify(collectSettings());
+    VireoViewPreferences.write(CUSTOM_SETTINGS_KEY, snapshot);
+    // The shared storage helper tolerates quota/security errors. Verify the
+    // snapshot before changing the marker so it cannot point at stale data.
+    var saved = VireoViewPreferences.read(CUSTOM_SETTINGS_KEY) === snapshot;
+    if (saved) {
+      VireoViewPreferences.write(LAST_USED_KEY, 'custom');
+      saved = VireoViewPreferences.read(LAST_USED_KEY) === 'custom';
+    }
+    if (!saved && !customStorageWarningShown && typeof showToast === 'function') {
+      showToast('Could not remember export settings. You can still export with these settings.', 'warning');
+    }
+    customStorageWarningShown = !saved;
   }
 
   function migrateLegacyCustomSettings() {
@@ -758,7 +770,6 @@ var VireoExportPresets = (function() {
           // rather than silently using the host defaults in its place.
           if (refreshResult.ok) {
             rememberCustomSettings();
-            VireoViewPreferences.write(LAST_USED_KEY, 'custom');
             sel.value = 'custom';
             restoreCaptureSplitHint();
             restorationComplete = true;
@@ -809,7 +820,6 @@ var VireoExportPresets = (function() {
     var markPageCustom = Vireo.pageHook('markExportCustom');
     if (markPageCustom) markPageCustom();
     rememberCustomSettings();
-    VireoViewPreferences.write(LAST_USED_KEY, 'custom');
     updateButtons();
   }
 
