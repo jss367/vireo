@@ -465,6 +465,128 @@ def test_delete_inactive_masks(db, monkeypatch):
     assert db.masks_features.delete_inactive() == 0
 
 
+def test_drop_cache_entry_pins_the_row_to_the_supplied_path(db):
+    # The DELETE must guard by path so a concurrent writer that has
+    # published a replacement generation (mask files use unique
+    # generation paths) is not discarded along with the row that was
+    # measured as corrupt.
+    pid = _photo(db, "a.jpg")
+    old = _mask_file(db, "old.png")
+    _mask(db, pid, "sam2-small", path=old, subject_size=0.3,
+          subject_tenengrad=1.5)
+    # Simulate a concurrent writer publishing a new generation for the
+    # same (photo_id, variant). The mask file's generation path differs.
+    fresh = _mask_file(db, "fresh.png")
+    db.conn.execute(
+        "UPDATE photo_masks SET path=? WHERE photo_id=? AND variant=?",
+        (fresh, pid, "sam2-small"),
+    )
+    db.commit()
+
+    # The caller still holds a snapshot that names the old path.
+    dropped = db.masks_features.drop_cache_entry(pid, "sam2-small", old)
+    db.commit()
+
+    assert dropped is False
+    row = db.masks_features.get_mask(pid, "sam2-small")
+    assert row is not None and row["path"] == fresh
+    # The fresh file stays; only the mismatched old path was offered.
+    assert os.path.exists(fresh)
+
+
+def test_drop_cache_entry_clears_the_active_projection_in_the_same_transaction(db):
+    # The corrupt row is the photo's active variant: dropping just
+    # ``photo_masks`` leaves ``photos.mask_path`` / ``active_mask_variant``
+    # and every denormalized feature column pointing at the invalid
+    # generation. Downstream consumers (readiness checks, mask-based
+    # filters) would still treat the photo as masked even though its
+    # backing row is gone. The eye projection must come down too: the
+    # eye stage skips a photo whose stored fingerprint matches the
+    # pipeline's current version, so leaving a stale fingerprint would
+    # strand the regenerated mask's keypoints.
+    pid = _photo(db, "a.jpg")
+    _det(db, pid)
+    fa = _mask_file(db, "active.png")
+    _mask(db, pid, "sam2-small", path=fa, subject_size=0.3,
+          subject_tenengrad=1.5)
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small")
+    db.conn.execute(
+        "UPDATE photos SET eye_x=?, eye_y=?, eye_conf=?, eye_tenengrad=?, "
+        "eye_kp_fingerprint=? WHERE id=?",
+        (0.4, 0.5, 0.9, 2.5, "kp-v1:stale", pid),
+    )
+    db.commit()
+    before = _row(db, pid)
+    assert before["active_mask_variant"] == "sam2-small"
+    assert before["mask_path"] == fa
+    assert before["subject_size"] == 0.3
+    assert before["subject_tenengrad"] == 1.5
+    assert before["eye_kp_fingerprint"] == "kp-v1:stale"
+
+    assert db.masks_features.drop_cache_entry(pid, "sam2-small", fa) is True
+    db.commit()
+
+    after = _row(db, pid)
+    assert after["active_mask_variant"] is None
+    assert after["mask_path"] is None
+    for col in (
+        "subject_size", "subject_tenengrad", "bg_tenengrad", "crop_complete",
+        "quality_input_recipe", "subject_clip_high", "subject_clip_low",
+        "subject_y_median", "bg_separation", "phash_crop", "noise_estimate",
+        "subject_detail", "subject_detail_px",
+        "eye_x", "eye_y", "eye_conf", "eye_tenengrad", "eye_kp_fingerprint",
+    ):
+        assert after[col] is None, f"{col} should be cleared when the active row drops"
+    assert not os.path.exists(fa)
+
+
+def test_drop_cache_entry_preserves_another_variants_active_projection(db):
+    # Only the projection that still matches (variant, path) is
+    # cleared. A different variant may have been activated since the
+    # measurement snapshot, and its denormalized columns stay intact.
+    pid = _photo(db, "a.jpg")
+    _det(db, pid)
+    fa_old = _mask_file(db, "old.png")
+    fa_new = _mask_file(db, "new.png")
+    _mask(db, pid, "sam2-small", path=fa_old, subject_size=0.3,
+          subject_tenengrad=1.5)
+    _mask(db, pid, "sam2-base", path=fa_new, subject_size=0.6,
+          subject_tenengrad=4.0)
+    subject_masks.set_active_mask_variant(db, pid, "sam2-base")
+    db.commit()
+    before = _row(db, pid)
+    assert before["active_mask_variant"] == "sam2-base"
+
+    dropped = db.masks_features.drop_cache_entry(pid, "sam2-small", fa_old)
+    db.commit()
+
+    assert dropped is True
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
+    # The active variant's projection is untouched.
+    after = _row(db, pid)
+    assert after["active_mask_variant"] == "sam2-base"
+    assert after["mask_path"] == fa_new
+    assert after["subject_size"] == 0.6
+    assert after["subject_tenengrad"] == 4.0
+    # The sam2-base row is also untouched.
+    assert db.masks_features.get_mask(pid, "sam2-base")["path"] == fa_new
+
+
+def test_drop_cache_entry_leaves_the_file_when_the_row_did_not_match(db):
+    # When another connection has already replaced the generation, the
+    # old path argument matches no row. The file on disk is not
+    # unlinked, because it may be the fresh generation's file.
+    pid = _photo(db, "a.jpg")
+    old = _mask_file(db, "stale-but-not-ours.png")
+    _mask(db, pid, "sam2-small", path="/nowhere/some-other-path.png")
+
+    assert db.masks_features.drop_cache_entry(pid, "sam2-small", old) is False
+    db.commit()
+
+    assert os.path.exists(old)
+    assert db.masks_features.get_mask(pid, "sam2-small") is not None
+
+
 def test_find_stale_masks(db):
     fid = _folder(db)
     a, b, c = (_photo(db, n, fid) for n in ("a.jpg", "b.jpg", "c.jpg"))
@@ -883,7 +1005,7 @@ def test_workspace_mask_candidate_detections_rows_and_order(db):
     assert got == [(a, 0.9), (a, 0.5), (c, 0.3)]
     first = dict(rows[0])
     assert first == {
-        "id": a, "folder_id": fid, "filename": "a.jpg",
+        "id": a, "folder_id": fid, "filename": "a.jpg", "width": 40, "height": 30,
         "detector_model": "megadetector-v6",
         "box_x": BOX[0], "box_y": BOX[1], "box_w": BOX[2], "box_h": BOX[3],
         "detector_confidence": 0.9,

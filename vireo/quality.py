@@ -14,8 +14,16 @@ import logging
 
 import numpy as np
 from PIL import Image
+from scoring import DETAIL_SCALE_PX
 
 log = logging.getLogger(__name__)
+
+# A saved mask PNG whose file is missing or will not decode: the cached mask
+# is invalid, distinct from a source we simply cannot re-read right now. The
+# detail-measurement entry point returns this so the caller can drop the
+# stale mask and let the next run regenerate it, instead of looping on the
+# same decode failure forever.
+MASK_CACHE_INVALID: object = object()
 
 
 def _background_ring(mask, dilation_frac=0.10):
@@ -324,6 +332,173 @@ def compute_eye_tenengrad(image, eye_xy, bbox, k=0.08):
     gray = _to_grayscale_array(window)
     mask = np.ones_like(gray, dtype=bool)
     return round(_multiscale_tenengrad(gray, mask), 2)
+
+
+# Subject detail is the one sharpness measurement meant to be compared across
+# encounters: the subject is resampled so its bounding box spans
+# scoring.DETAIL_SCALE_PX (the scale the cross-encounter composite reads it
+# at) before the gradients are summed, so a bird that filled the frame and
+# one that was a speck in it are measured on the same footing (how much
+# detail the frame holds when the bird is viewed at one size). The
+# proxy-scale subject_tenengrad is not comparable that way: at a fixed frame
+# scale, a small subject's edges fall on fewer pixels and read as sharper.
+#
+# DETAIL_MARGIN is the context kept around the subject box so the Sobel
+# window at the mask edge reads real pixels, as a fraction of the box's
+# width and height.
+DETAIL_MARGIN = 0.08
+
+
+def frame_size(photo):
+    """A photo row's native ``(width, height)``, or None when unrecorded."""
+    try:
+        width, height = photo["width"], photo["height"]
+    except (KeyError, IndexError):
+        return None
+    return (width, height) if width and height else None
+
+
+def mask_bbox_fractions(mask):
+    """The mask's bounding box as (x0, y0, x1, y1) fractions of its frame, or None when empty."""
+    ys, xs = np.nonzero(mask)
+    if len(ys) == 0:
+        return None
+    h, w = mask.shape
+    return (xs.min() / w, ys.min() / h, (xs.max() + 1) / w, (ys.max() + 1) / h)
+
+
+def detail_decode_edge(mask):
+    """The longest frame edge, in pixels, that lets the subject span DETAIL_SCALE_PX.
+
+    A frame decoded smaller than this is upsampled to the detail scale, so
+    the measurement would read interpolated pixels rather than the detail
+    the source holds. Callers cap it at the source's native size: a subject
+    too small for the scale even at native resolution is measured upsampled,
+    and the low value honestly reports how little detail the frame has.
+    Returns None for an empty mask.
+    """
+    bbox = mask_bbox_fractions(mask)
+    if bbox is None:
+        return None
+    x0, y0, x1, y1 = bbox
+    mask_h, mask_w = mask.shape
+    # The box's longer side as a fraction of the frame's longer side (the
+    # mask shares the frame's aspect), so a tall box in a wide frame is not
+    # read as a fraction of the short side.
+    frac = max((x1 - x0) * mask_w, (y1 - y0) * mask_h) / max(mask_w, mask_h)
+    return int(np.ceil(DETAIL_SCALE_PX / frac))
+
+
+def compute_subject_detail(image, mask, frame_size=None):
+    """Multi-scale Tenengrad over the subject resampled to DETAIL_SCALE_PX.
+
+    The subject's bounding box (from ``mask``, at any resolution) is cropped
+    from ``image`` with DETAIL_MARGIN of context, resampled so the box's
+    longer side is DETAIL_SCALE_PX pixels (LANCZOS; the mask follows with
+    NEAREST), and measured with the same operator as subject_tenengrad.
+
+    Args:
+        image: PIL Image of the whole frame, ideally decoded at or above
+            ``detail_decode_edge(mask)`` so no interpolation is measured.
+        mask: boolean array (H, W) of the subject, any resolution.
+        frame_size: ``(width, height)`` of the native source, used only to
+            report the subject's size in source pixels; defaults to ``image.size``.
+
+    Returns:
+        dict with ``subject_detail`` (the measurement; 0.0 for an empty
+        mask) and ``subject_detail_px`` (the subject box's longer side in
+        source pixels, None for an empty mask).
+    """
+    bbox = mask_bbox_fractions(mask)
+    if bbox is None:
+        return {"subject_detail": 0.0, "subject_detail_px": None}
+    x0, y0, x1, y1 = bbox
+    img_w, img_h = image.size
+    native_w, native_h = frame_size or image.size
+    box_w, box_h = (x1 - x0) * img_w, (y1 - y0) * img_h
+    scale = DETAIL_SCALE_PX / max(box_w, box_h)
+    mx, my = (x1 - x0) * DETAIL_MARGIN, (y1 - y0) * DETAIL_MARGIN
+    cx0, cy0 = max(0.0, x0 - mx), max(0.0, y0 - my)
+    cx1, cy1 = min(1.0, x1 + mx), min(1.0, y1 + my)
+    crop = image.crop((int(cx0 * img_w), int(cy0 * img_h),
+                       int(np.ceil(cx1 * img_w)), int(np.ceil(cy1 * img_h))))
+    size = (max(1, round(crop.width * scale)), max(1, round(crop.height * scale)))
+    gray = _to_grayscale_array(crop.resize(size, Image.LANCZOS))
+    mask_h, mask_w = mask.shape
+    region = Image.fromarray(mask.astype(np.uint8) * 255).crop(
+        (int(cx0 * mask_w), int(cy0 * mask_h), int(np.ceil(cx1 * mask_w)), int(np.ceil(cy1 * mask_h))),
+    ).resize(size, Image.NEAREST)
+    region = np.array(region) > 127
+    if not region.any():
+        return {"subject_detail": 0.0, "subject_detail_px": None}
+    return {
+        "subject_detail": round(_multiscale_tenengrad(gray, region), 2),
+        "subject_detail_px": round(max((x1 - x0) * native_w, (y1 - y0) * native_h), 1),
+    }
+
+
+def measure_subject_detail(proxy, mask, *, source_path, frame_size=None):
+    """Subject detail from the proxy, or from a larger decode of the source.
+
+    The proxy serves when the subject already spans DETAIL_SCALE_PX in it;
+    a smaller subject reads ``source_path`` again at the edge the scale
+    needs (the loader caps it at the native size). Returns the
+    ``compute_subject_detail`` dict, or {} when the source cannot be read,
+    so the measurement stays unmade rather than interpolated.
+    """
+    from image_loader import load_image
+
+    needed = detail_decode_edge(mask)
+    if needed is None:
+        return {"subject_detail": 0.0, "subject_detail_px": None}
+    if needed <= max(proxy.size):
+        return compute_subject_detail(proxy, mask, frame_size=frame_size)
+    image = load_image(source_path, max_size=needed)
+    if image is None:
+        return {}
+    try:
+        return compute_subject_detail(image, mask, frame_size=frame_size)
+    finally:
+        image.close()
+
+
+def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
+    """Subject detail for a saved mask PNG whose row predates the measurement.
+
+    Reads the mask from disk and the source at the edge the detail scale
+    needs; SAM does not run. Returns the ``compute_subject_detail`` dict on
+    success, ``MASK_CACHE_INVALID`` when the mask PNG cannot be decoded (the
+    cached mask is lost; the caller should drop it so the next run
+    regenerates), or None when the source cannot be read.
+    """
+    from image_loader import load_image
+
+    try:
+        with Image.open(mask_path) as mask_image:
+            mask = np.asarray(mask_image.convert("L")) > 127
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+        # OSError covers the file missing or unreadable; the others cover
+        # Pillow decode failures that bypass OSError — a post-IDAT zTXt
+        # chunk with an invalid compression method raises SyntaxError on
+        # convert, a truncated IHDR chunk raises ValueError, and a
+        # header that declares more pixels than MAX_IMAGE_PIXELS raises
+        # DecompressionBombError. The cache file is lost either way, so
+        # the caller drops the row and the next run regenerates. Scoped
+        # to the open+convert read so unrelated processing failures in
+        # detail_decode_edge / load_image / compute_subject_detail below
+        # still propagate.
+        log.warning("Could not read mask %s for the subject detail measurement", mask_path, exc_info=True)
+        return MASK_CACHE_INVALID
+    needed = detail_decode_edge(mask)
+    if needed is None:
+        return {"subject_detail": 0.0, "subject_detail_px": None}
+    image = load_image(source_path, max_size=needed)
+    if image is None:
+        return None
+    try:
+        return compute_subject_detail(image, mask, frame_size=frame_size)
+    finally:
+        image.close()
 
 
 def compute_all_quality_features(image, mask):

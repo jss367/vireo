@@ -10,10 +10,20 @@ interface CullSourcePhoto {
   quality_composite?: number | null; subject_sharpness?: number | null; label?: string;
   /** The scorer's focus measurement: eye or subject Tenengrad and which it was. */
   focus_evidence?: {basis: string; measurement?: number | null; measurement_name?: string} | null;
+  /** The quality comparable across encounters, null until the subject detail is measured. */
+  comparable_quality?: CullComparableQuality | null;
   /** The saved record of what this reject lost to (``filename`` null once that photo is deleted). */
   reject_keeper?: CullRejectKeeper;
 }
-interface CullComparison {basis: string; measurement_name: string; photo: number; keeper: number; scope: string;}
+/** ``scoring.comparable_quality``: the detail measurement, its scale, and the composite of absolute terms. */
+interface CullComparableQuality {
+  score: number; detail: number; detail_px: number | null; scale_px: number; measurement_name: string; basis: string;
+}
+interface CullComparison {
+  basis: string; measurement_name: string; photo: number; keeper: number; scope: string;
+  /** Detail comparisons: the subject scale measured at, and each photo's cross-encounter quality. */
+  scale_px?: number; photo_quality?: number; keeper_quality?: number;
+}
 interface CullRejectKeeper {
   photo_id: number; filename: string | null; comparison: CullComparison | null;
   /** False when the keeper is not visible in the active workspace (no thumbnail then). */
@@ -38,6 +48,8 @@ interface CullDisplayPhoto {
   photo_id: number; filename: string; quality: number; day: string; burst_id: string;
   action: CullAction; decision_source: string; suggested_action: CullAction;
   favorite?: boolean; group_index?: number; quality_score?: number | null; sharpness?: number | null;
+  /** The cross-encounter quality score, null until measured. */
+  comparable?: number | null;
   timestamp?: string | null; pipeline_label?: string;
   /** The photo's other species, when it is listed under more than one. */
   also_species?: string[];

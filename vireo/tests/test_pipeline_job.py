@@ -37,6 +37,24 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
 
+@pytest.fixture(autouse=True)
+def stub_subject_detail(monkeypatch):
+    # The mask stage's subject detail measurement re-reads the source and
+    # saved mask PNGs; the stage tests here stub the proxy with arrays and
+    # write placeholder mask bytes, so the measurement is stubbed to a fixed
+    # value. Tests of the measurement itself re-patch these.
+    import quality
+
+    monkeypatch.setattr(
+        quality, "measure_subject_detail",
+        lambda proxy, mask, *, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+    )
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail",
+        lambda mask_path, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+    )
+
+
 def _open_db(tmp_path):
     """Create the test catalog at tmp_path/test.db and return
     ``(db_path, db, active_workspace_id)``."""
@@ -9180,7 +9198,7 @@ def test_extract_masks_overlaps_quality_analysis_with_embedding(tmp_path, monkey
     ).fetchall()
     assert [tuple(row) for row in stored] == [(photo_ids[0], 42.0), (photo_ids[1], 42.0)]
     assert threading.current_thread().name not in analysis_threads
-    assert set(em["phase_seconds"]) == {"decode", "segment", "analyze", "embed", "store"}
+    assert set(em["phase_seconds"]) == {"decode", "segment", "analyze", "detail", "embed", "store"}
     assert all(seconds >= 0 for seconds in em["phase_seconds"].values())
 
 
@@ -19592,3 +19610,373 @@ def test_pipeline_notes_a_timm_model_without_common_names(tmp_path, monkeypatch)
         stage, SimpleNamespace(), "BioCLIP", "classify:b",
     ) is None
     assert notes == []
+
+
+# ---------------------------------------------------------------------------
+# Subject detail for cached masks
+#
+# A mask made before the fixed-scale subject detail existed is a cache hit
+# the stage keeps; it measures the detail from the source without SAM and
+# reports what it could not measure.
+# ---------------------------------------------------------------------------
+
+
+def _rerun_extract_masks_cached(tmp_path, monkeypatch, db, *, expect_error=None):
+    """Run the stage again over a catalog whose masks are all cache hits.
+
+    A failed stage fails the job (``_raise_if_stages_failed``); pass the
+    expected message as ``expect_error`` to assert that and read the stage's
+    final step update instead of the result."""
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+
+    def no_sam(*a, **k):
+        raise AssertionError("a cache hit must not run SAM")
+
+    monkeypatch.setattr(masking, "render_proxy", lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8))
+    monkeypatch.setattr(masking, "generate_mask", no_sam)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(dino_embed, "embed", lambda p, variant=None: np.zeros(384, dtype=np.float32))
+    monkeypatch.setattr(dino_embed, "embed_batch", lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32))
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+    cfg.save({"pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"}})
+    col_id = db.conn.execute("SELECT id FROM collections ORDER BY id LIMIT 1").fetchone()[0]
+    params = PipelineParams(collection_id=col_id, skip_classify=True, skip_extract_masks=False, skip_regroup=True)
+    runner = FakeRunner()
+    job = _make_job()
+    if expect_error is None:
+        result = run_pipeline_job(job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params)
+        stage = result["stages"]["extract_masks"]
+    else:
+        with pytest.raises(RuntimeError, match=expect_error):
+            run_pipeline_job(job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params)
+        stage = None
+    final = [kw for _, step, kw in runner.step_updates if step == "extract_masks" and "status" in kw][-1]
+    return stage, final
+
+
+def _null_subject_detail(db, pid):
+    db.conn.execute("UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL WHERE photo_id=?", (pid,))
+    db.conn.execute("UPDATE photos SET subject_detail=NULL, subject_detail_px=NULL WHERE id=?", (pid,))
+    db.conn.commit()
+
+
+def test_cached_mask_without_subject_detail_is_measured_without_sam(tmp_path, monkeypatch):
+    import quality
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    mask_path = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    _null_subject_detail(db, pid)
+    measured = []
+
+    def fake_measure(path, source_path, frame_size=None):
+        measured.append((path, os.path.basename(source_path), frame_size))
+        return {"subject_detail": 4321.0, "subject_detail_px": 800.0}
+
+    monkeypatch.setattr(quality, "measure_cached_subject_detail", fake_measure)
+    stage, final = _rerun_extract_masks_cached(tmp_path, monkeypatch, db)
+
+    assert [(path, name) for path, name, _ in measured] == [(mask_path, "a.jpg")]
+    assert stage["masked"] == 1 and stage["detail_measured"] == 1 and stage["detail_unreadable"] == 0
+    assert final["status"] == "completed"
+    assert "1 detail measured" in final["summary"]
+    row = db.masks_features.get_mask(pid, "sam2-small")
+    assert (row["subject_detail"], row["subject_detail_px"]) == (4321.0, 800.0)
+    photo = db.conn.execute("SELECT subject_detail, subject_detail_px FROM photos WHERE id=?", (pid,)).fetchone()
+    assert tuple(photo) == (4321.0, 800.0)
+    # Measured once: the next run has nothing to measure.
+    stage, _ = _rerun_extract_masks_cached(tmp_path, monkeypatch, db)
+    assert measured[1:] == [] and stage["detail_measured"] == 0
+
+
+def test_cached_mask_whose_source_cannot_be_read_stays_masked_but_fails_the_stage(tmp_path, monkeypatch):
+    import quality
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    _null_subject_detail(db, pid)
+    monkeypatch.setattr(quality, "measure_cached_subject_detail", lambda *a, **k: None)
+    _, final = _rerun_extract_masks_cached(
+        tmp_path, monkeypatch, db, expect_error="1 cached mask still lacks a subject detail measurement",
+    )
+
+    assert final["status"] == "failed" and final["error_count"] == 1
+    assert "1 masked" in final["summary"] and "1 detail unmeasured" in final["summary"]
+    assert "still lacks a subject detail measurement" in final["error"]
+    assert db.masks_features.get_mask(pid, "sam2-small")["subject_detail"] is None
+    assert db.masks_features.get_mask(pid, "sam2-small")["path"]
+
+
+def test_fresh_mask_detail_unmeasured_fails_the_stage_like_cached(tmp_path, monkeypatch):
+    # A freshly made mask whose detail re-read fails (the proxy already
+    # decoded but the source became unreachable before the larger-edge
+    # re-read) must be reported the same way as a cached mask with
+    # pending detail: ``_measure_subject_detail`` returning {} would
+    # otherwise store a mask with NULL detail and ``finalize`` would
+    # quietly mark the stage completed despite planned work pending.
+    import quality
+
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = workspace_folders.add_folder(db, folder_path)
+    photo_id = _add_photo_with_detection(db, folder_id, folder_path, "bird.jpg")
+    collection_id = db.collections.add(
+        "Fresh detail", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+    db.commit()
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    monkeypatch.setattr(
+        quality, "measure_subject_detail",
+        lambda proxy, mask, *, source_path, frame_size=None: {},
+    )
+
+    runner, result = _run_extract_masks_only(db_path, ws_id, collection_id)
+
+    em = result["stages"]["extract_masks"]
+    assert em["masked"] == 1
+    assert em["detail_unreadable"] == 1
+    final = _extract_masks_final_update(runner)
+    assert final["status"] == "failed"
+    assert "detail unmeasured" in final["summary"]
+
+
+def test_cached_mask_png_that_will_not_decode_is_dropped_and_rebuilt_next_run(tmp_path, monkeypatch):
+    # The cache check only stats the mask file, so a mask row whose PNG is
+    # corrupt would be reused forever: the detail re-read would fail on
+    # every run, be reported as "source could not be read", and the mask
+    # would never be regenerated. Distinguishing a mask-decode failure
+    # from a source read lets the stage drop the stale file and surface
+    # the regeneration instead of looping on it.
+    import quality
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    _null_subject_detail(db, pid)
+    mask_path = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    assert os.path.isfile(mask_path)
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail",
+        lambda *a, **k: quality.MASK_CACHE_INVALID,
+    )
+    _, final = _rerun_extract_masks_cached(
+        tmp_path, monkeypatch, db, expect_error="cached mask PNG was unreadable",
+    )
+
+    assert final["status"] == "failed" and final["error_count"] == 1
+    assert "1 mask cache dropped" in final["summary"]
+    assert "will be rebuilt on the next Process run" in final["error"]
+    # The row is gone too, so the next cache check misses even when the
+    # unlink is refused — see
+    # ``test_mask_cache_invalidation_drops_the_row_when_the_unlink_is_refused``.
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
+    # The stale PNG is gone so ``_reuse_cached_mask`` misses on the next
+    # run; the stage never increments ``detail_unreadable`` because the
+    # cache is the problem, not an unreachable source.
+    assert not os.path.isfile(mask_path)
+    assert "detail unmeasured" not in final["summary"]
+
+
+def test_mask_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
+    tmp_path, monkeypatch,
+):
+    # ``MasksFeaturesRepository.remove_file`` is best-effort: it logs
+    # and returns without raising when the masks dir is unresolved,
+    # the stored path lies outside it, or ``os.remove`` itself fails.
+    # If invalidation relied on that unlink alone, the row would still
+    # point at the corrupt PNG, ``os.path.isfile`` on the next run
+    # would reuse it, and the stage would loop on the same decode
+    # error. Dropping the row is what breaks the loop.
+    import quality
+    from repositories import masks_features
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    _null_subject_detail(db, pid)
+    mask_path = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    assert os.path.isfile(mask_path)
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail",
+        lambda *a, **k: quality.MASK_CACHE_INVALID,
+    )
+    monkeypatch.setattr(
+        masks_features, "safe_remove_mask_file",
+        lambda masks_dir, path: None,
+    )
+
+    _, final = _rerun_extract_masks_cached(
+        tmp_path, monkeypatch, db, expect_error="cached mask PNG was unreadable",
+    )
+
+    assert final["status"] == "failed" and final["error_count"] == 1
+    # The row is gone even though the file was not unlinked.
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
+    assert os.path.isfile(mask_path)
+
+
+def test_cancel_after_cached_mask_invalidation_preserves_rebuild_accounting(
+    tmp_path, monkeypatch,
+):
+    """A cancel that arrives after ``_measure_cached_detail`` dropped a
+    mask row must keep ``mask_cache_invalidated`` on the stage result,
+    fold it into the step's ``error_count`` so the Jobs row warns, and
+    emit the "will be rebuilt on the next Process run" rollup. Before
+    the fix, the cancel branch dropped these counters and the warning
+    even though the photo now had no mask on disk, so the user saw a
+    zero-warning cancelled row next to a quietly broken cache.
+    """
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+    import pipeline_job as pj
+    import quality
+
+    specs = [
+        {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"},
+        {"filename": "b.jpg", "box": (30, 40, 120, 220), "model": "MegaDetector"},
+    ]
+    db, _, _, (pid_a, pid_b) = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", specs,
+    )
+    _null_subject_detail(db, pid_a)
+    _null_subject_detail(db, pid_b)
+
+    # Second run uses the cache for both photos. The first call to
+    # measure_cached_subject_detail invalidates photo A's cache AND
+    # cancels the job so the top-of-loop abort check short-circuits
+    # photo B into ``finish_cancelled``.
+    def no_sam(*a, **k):
+        raise AssertionError("a cache hit must not run SAM")
+
+    monkeypatch.setattr(masking, "render_proxy", lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8))
+    monkeypatch.setattr(masking, "generate_mask", no_sam)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(dino_embed, "embed", lambda p, variant=None: np.zeros(384, dtype=np.float32))
+    monkeypatch.setattr(dino_embed, "embed_batch", lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32))
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+    cfg.save({"pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"}})
+
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1",
+    ).fetchone()[0]
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    def invalidate_then_cancel(path, source_path, frame_size=None):
+        runner.cancelled_ids.add(job["id"])
+        return quality.MASK_CACHE_INVALID
+
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail", invalidate_then_cancel,
+    )
+
+    result = run_pipeline_job(
+        job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params,
+    )
+    em = result["stages"]["extract_masks"]
+    assert em.get("cancelled") is True, f"Expected a cancelled stage; got {em!r}"
+    # The cancel branch must still report the dropped cache so the
+    # photo's missing mask is not silently absorbed by "Cancelled".
+    assert em["mask_cache_invalidated"] == 1, (
+        f"Cancelled stage must preserve mask_cache_invalidated; got {em!r}"
+    )
+    # The Jobs row renders warnings off ``error_count`` — a cancel after
+    # an invalidation must count the dropped mask the same way the
+    # mid-loop updates and ``finalize`` do.
+    final = _extract_masks_final_update(runner)
+    assert final.get("error_count", 0) >= 1, (
+        f"error_count must at least cover the dropped mask; got "
+        f"final={final!r}, em={em!r}"
+    )
+    # And the rebuild rollup is appended so the user sees why the
+    # photo will be re-masked on the next Process run.
+    rebuild = [
+        e for e in result.get("errors", [])
+        if "will be rebuilt on the next Process run" in e
+    ]
+    assert rebuild, (
+        f"Expected a rebuild rollup after a cancelled invalidation; got "
+        f"{result.get('errors')!r}"
+    )
+    # The data layer bookkeeping that Codex flagged stays consistent:
+    # the row was dropped, and the file was removed (or at least the
+    # row drop broke the cache-hit loop for the next run).
+    assert db.masks_features.get_mask(pid_a, "sam2-small") is None
+    # Also make sure we did not touch photo B's row — it was cancelled
+    # before its iteration ran, so its mask stays intact for the next
+    # Process run.
+    assert db.masks_features.get_mask(pid_b, "sam2-small") is not None
+    # pj is imported just to exercise the stage module path used
+    # throughout this file; keep the import visible so a future
+    # module split doesn't silently detach this test from it.
+    assert hasattr(pj, "run_pipeline_job")
+
+
+def test_detail_reread_outage_records_the_reason_for_the_fatal_message(tmp_path, monkeypatch):
+    # When the detail re-read of a freshly made mask detects that the
+    # source is offline, the folder is latched so later photos in the
+    # same folder are credited unreadable without another probe. If the
+    # latch recorded only the folder id, ``_build_rollups`` would join
+    # an empty ``em_offline_reasons`` and produce a malformed fatal
+    # line like "photos unreachable — ." with no source named to
+    # reconnect.
+    import pipeline_job as pj
+    import quality
+
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = workspace_folders.add_folder(db, folder_path)
+    first = _add_photo_with_detection(db, folder_id, folder_path, "bird-a.jpg")
+    second = _add_photo_with_detection(db, folder_id, folder_path, "bird-b.jpg")
+    collection_id = db.collections.add(
+        "Outage reason", json.dumps([{"field": "photo_ids", "value": [first, second]}]),
+    )
+    db.commit()
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    # The proxy decodes, but the larger-edge detail re-read sees the
+    # share drop out; the next photo is a fresh cache miss that lands
+    # on the latched folder.
+    monkeypatch.setattr(
+        quality, "measure_subject_detail",
+        lambda proxy, mask, *, source_path, frame_size=None: {},
+    )
+    monkeypatch.setattr(
+        pj, "_source_offline_reason",
+        lambda folder_path, image_path: (
+            "mount", "volume /Volumes/Photography is not mounted",
+        ),
+    )
+
+    _runner, result = _run_extract_masks_only(db_path, ws_id, collection_id)
+
+    outage_errors = [
+        e for e in result["errors"] if "unreachable" in e
+    ]
+    assert outage_errors, f"Expected a fatal outage rollup; got {result['errors']!r}"
+    assert "/Volumes/Photography" in outage_errors[0], (
+        f"The fatal line must name the source to reconnect; got "
+        f"{outage_errors[0]!r}"
+    )
+    assert "unreachable — ." not in outage_errors[0], (
+        f"Empty reason list produces a malformed fatal line; got "
+        f"{outage_errors[0]!r}"
+    )

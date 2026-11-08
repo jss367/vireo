@@ -177,9 +177,11 @@ function assignCullFavorites(sg) {
   });
   Object.keys(days).forEach(function(day) {
     var dayPhotos = days[day] || [];
+    // A day spans encounters, so the cross-encounter quality orders the
+    // candidates when they have it; the encounter rank is the fallback.
     var candidates = dayPhotos.filter(function(p) {
       return p.decision_source === 'auto' && p.suggested_action === 'keep';
-    }).sort(function(a, b) { return b.quality - a.quality || a.photo_id - b.photo_id; });
+    }).sort(cullQualityOrder);
     // Give different encounters, then different bursts, a chance before
     // filling the shortlist with neighboring frames of the same moment.
     var encounters = new Set();
@@ -266,7 +268,7 @@ function cullFavoritesHtml(sg, si) {
   Object.keys(days).sort().forEach(function(day) {
     html += '<div class="cull-favorite-day"><div class="cull-day-label">' + escapeHtml(day || 'Date unknown') + '</div><div class="pose-strip">';
     (days[day] || []).sort(function(a, b) {
-      return Number(a.decision_source === 'auto') - Number(b.decision_source === 'auto') || b.quality - a.quality;
+      return Number(a.decision_source === 'auto') - Number(b.decision_source === 'auto') || cullQualityOrder(a, b);
     }).forEach(function(p) {
       html += cullCardHtml(p, si, /** @type {number} */ (p.group_index), 'cullPose_' + si + '_' + p.group_index, true);
     });
@@ -308,11 +310,14 @@ function cullCardHtml(photo, si, pi, poseKey, favorite) {
         '<span>' + (chosen.saved ? '' : 'Will be ') + 'rejected instead of ' + escapeHtml(chosen.name) + '</span></div>'
       : '<div class="cull-keeper none">Nothing kept to compare against</div>';
   }
+  var detailLine = cullDetailLine(id);
+  var detail = detailLine
+    ? '<div class="cull-detail" title="' + escapeAttr(detailLine.title) + '">' + escapeHtml(detailLine.text) + '</div>' : '';
   var html = '<div class="' + cardClass + '" data-photo-id="' + id + '" data-filename="' + escapeAttr(photo.filename) + '">' +
     '<div class="cull-card-image">' + badge + source + '<button class="cull-image-button" onclick="' + click + '" aria-label="' + escapeAttr((favorite ? 'Select reference: ' : 'Compare: ') + photo.filename) + '">' +
     '<img src="' + escapeAttr(thumb) + '" alt="' + escapeAttr(photo.filename) + '" loading="lazy"></button></div>' +
     '<div class="cull-card-info"><div class="cull-quality">' + status + (reference ? ' · Reference' : '') + '</div>' +
-    '<div class="cull-filename">' + escapeHtml(photo.filename) + '</div>' + also + keeper + '<div class="cull-card-controls">';
+    '<div class="cull-filename">' + escapeHtml(photo.filename) + '</div>' + detail + also + keeper + '<div class="cull-card-controls">';
   if (!favorite) html += '<button onclick="setCullAction(' + id + ',\'keep\')">Add favorite</button>';
   else html += '<button onclick="setCullAction(' + id + ',\'review\')">Remove favorite</button>';
   html += photo.action === 'reject' ? '<button onclick="setCullAction(' + id + ',\'review\')">Undecided</button>' : '<button onclick="setCullAction(' + id + ',\'reject\')">Reject</button>';

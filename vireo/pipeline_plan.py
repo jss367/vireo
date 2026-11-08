@@ -834,6 +834,32 @@ def _extract_no_eligible_plan(params, photo_ids, new_count):
     }
 
 
+def _extract_summary(work, detail_pending, new_count, eligible):
+    """The Extract pill's text: masks to make, cached masks to measure, both."""
+    measure = (
+        f" and measure subject detail for {detail_pending} cached "
+        f"mask{_plural(detail_pending)}"
+    ) if detail_pending else ""
+    if new_count > 0:
+        # Up-to-N new imports will need masks once classify produces
+        # detections for them. Treat them as eligible+pending so the pill
+        # reflects the run's full work, not just the existing-scope stragglers.
+        return (
+            f"Will extract masks for {work} existing + up to "
+            f"{new_count} new photo{_plural(new_count)}{measure} "
+            f"({eligible + new_count} eligible)"
+        )
+    if work == 0:
+        return (
+            f"Will measure subject detail for {detail_pending} cached "
+            f"mask{_plural(detail_pending)} ({eligible} eligible)"
+        )
+    return (
+        f"Will extract masks for {work} "
+        f"photo{_plural(work)}{measure} ({eligible} eligible)"
+    )
+
+
 def _extract_plan(db, params, photo_ids, effective_cfg, new_count=0):
     pipeline_cfg = effective_cfg.get("pipeline", {})
     if params.skip_extract_masks:
@@ -869,10 +895,14 @@ def _extract_plan(db, params, photo_ids, effective_cfg, new_count=0):
     stale = stage_counts.count_extract_stale(
         db, sam2_variant, photo_ids, detector_confidence=min_conf, rescue_floors=rescue_floors,
     )
+    # Cached masks made before subject detail existed: kept, but measured.
+    detail_pending = stage_counts.count_mask_detail_pending(
+        db, sam2_variant, photo_ids, detector_confidence=min_conf, rescue_floors=rescue_floors,
+    )
     sam_warning = subject_masks.sam_variant_rerun_warning(db, sam2_variant, photo_ids)
     if eligible == 0:
         return _extract_no_eligible_plan(params, photo_ids, new_count)
-    if pending == 0 and stale == 0 and new_count == 0:
+    if pending == 0 and stale == 0 and detail_pending == 0 and new_count == 0:
         return {
             "state": "done-prior",
             "summary": (
@@ -880,7 +910,7 @@ def _extract_plan(db, params, photo_ids, effective_cfg, new_count=0):
                 f"photo{_plural(eligible)}"
             ),
             "detail": {"eligible": eligible, "pending": 0,
-                       "stale": 0, "fingerprint_outdated": False},
+                       "stale": 0, "detail_pending": 0, "fingerprint_outdated": False},
         }
     # Stale masks (stored prompt no longer matches current detection) are
     # work the stage will redo, just like photos with no mask at all.
@@ -892,24 +922,12 @@ def _extract_plan(db, params, photo_ids, effective_cfg, new_count=0):
     # a complete active row. Without those gates, interrupted rows would land
     # in both buckets and inflate work past eligible.
     work = pending + stale
-    if new_count > 0:
-        # Up-to-N new imports will need masks once classify produces
-        # detections for them. Treat them as eligible+pending so the pill
-        # reflects the run's full work, not just the existing-scope stragglers.
-        summary = (
-            f"Will extract masks for {work} existing + up to "
-            f"{new_count} new photo{_plural(new_count)} "
-            f"({eligible + new_count} eligible)"
-        )
-    else:
-        summary = (
-            f"Will extract masks for {work} "
-            f"photo{_plural(work)} ({eligible} eligible)"
-        )
+    summary = _extract_summary(work, detail_pending, new_count, eligible)
     detail = {
         "eligible": eligible + new_count,
-        "pending": work + new_count,
+        "pending": work + detail_pending + new_count,
         "stale": stale,
+        "detail_pending": detail_pending,
         "fingerprint_outdated": stale > 0,
     }
     if sam_warning:

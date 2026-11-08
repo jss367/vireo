@@ -5,6 +5,8 @@ interface BestBatchCard {
   flag?: string; label?: string;
   quality_pct?: number | null; focus?: number | null; focus_basis?: string;
   focus_evidence?: {measurement: number; cohort_size: number; absolute_status: string} | null;
+  /** The cross-encounter quality: fixed-scale subject detail and the composite of absolute terms. */
+  comparable_quality?: {detail: number; scale_px: number; score: number} | null;
   sharpness?: number | null; eye_x?: number | null; eye_y?: number | null;
   crop_url?: string | null; focus_crop_url?: string | null; evidence_status?: string;
   eye_status?: string | null; analysis?: {width: number; height: number} | null;

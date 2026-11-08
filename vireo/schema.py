@@ -283,6 +283,31 @@ def _validate_classifier_background_match(conn):
     _validate_flag_attribution_keeper(conn)
 
 
+SUBJECT_DETAIL_COLUMNS = (("subject_detail", "REAL"), ("subject_detail_px", "REAL"))
+
+
+def _add_subject_detail(conn):
+    """Add the fixed-scale subject detail measurement to masks and photos.
+
+    Rows stay NULL until the mask stage measures them; a NULL means "not
+    measured", never "no detail". The stage treats a cached mask without a
+    measurement as pending work, so the next Process run fills them in.
+    """
+    for table in ("photo_masks", "photos"):
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, definition in SUBJECT_DETAIL_COLUMNS:
+            if column not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _validate_subject_detail(conn):
+    for table in ("photo_masks", "photos"):
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        missing = [column for column, _ in SUBJECT_DETAIL_COLUMNS if column not in present]
+        if missing:
+            raise RuntimeError(f"{table} is missing {', '.join(missing)}")
+
+
 # Job types only Vireo itself started before ``origin`` was recorded: the
 # hourly storage maintenance and the two recurring discovery checks.
 _HISTORICAL_SYSTEM_JOB_TYPES = (
@@ -405,6 +430,7 @@ MIGRATIONS = (
         34, "classifier_background_match",
         _add_classifier_background_match, _validate_classifier_background_match,
     ),
+    Migration(35, "subject_detail", _add_subject_detail, _validate_subject_detail),
 )
 
 

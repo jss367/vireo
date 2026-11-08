@@ -594,3 +594,19 @@ def test_cached_selected_masks_follow_file_mask_focus_rejection_policy():
             assert actual["reject_reasons"] == expected["reject_reasons"]
             assert actual["focus_score"] == expected["focus_score"]
             assert actual["label"] == expected["label"]
+
+
+def test_score_encounter_attaches_the_cross_encounter_quality_when_detail_is_measured():
+    """Beside the encounter rank, each scored photo carries comparable_quality
+    (None until its subject detail is measured); review photos carry None."""
+    from scoring import comparable_quality, score_encounter
+
+    measured = _make_base_photo(id=1, subject_detail=16000.0, subject_detail_px=900.0)
+    unmeasured = _make_base_photo(id=2)
+    unready = _make_base_photo(id=3, subject_detail=16000.0, mask_path=None)
+    encounter = score_encounter({"photos": [measured, unmeasured, unready]})
+    by_id = {p["id"]: p for p in encounter["photos"]}
+    assert by_id[1]["comparable_quality"] == comparable_quality(measured)
+    assert by_id[1]["comparable_quality"]["detail"] == 16000.0
+    assert by_id[2]["comparable_quality"] is None
+    assert by_id[3]["comparable_quality"] is None and by_id[3]["label"] == "REVIEW"

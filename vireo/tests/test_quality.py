@@ -8,6 +8,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 from PIL import Image, ImageFilter
 from repositories.masks_features import PipelineFeatures
 
@@ -418,3 +419,244 @@ def test_compute_eye_tenengrad_empty_window_returns_zero():
     bbox = (0, 0, 100, 100)
     result = compute_eye_tenengrad(img, (-50.0, -50.0), bbox, k=0.1)
     assert result == 0.0
+
+
+# -- Subject detail (fixed-scale, comparable across encounters) --
+
+
+def _band_limited_scene(frame_long_edge, subject_frac, *, seed=3, blur=0.0):
+    """A gray frame with a textured square subject whose texture is band
+    limited (drawn at 48 px and upsampled), so the same scene rendered at
+    two frame sizes holds the same detail."""
+    rng = np.random.default_rng(seed)
+    texture = Image.fromarray(rng.integers(40, 220, (48, 48), dtype=np.uint8), mode="L")
+    w, h = frame_long_edge, int(frame_long_edge * 0.75)
+    side = int(frame_long_edge * subject_frac)
+    frame = Image.new("L", (w, h), 128)
+    frame.paste(texture.resize((side, side), Image.BICUBIC), (w // 4, h // 4))
+    if blur:
+        frame = frame.filter(ImageFilter.GaussianBlur(blur))
+    mask = np.zeros((h, w), dtype=bool)
+    mask[h // 4:h // 4 + side, w // 4:w // 4 + side] = True
+    return frame.convert("RGB"), mask
+
+
+def test_detail_decode_edge_is_the_frame_edge_that_puts_the_subject_at_scale():
+    from quality import DETAIL_SCALE_PX, detail_decode_edge
+
+    mask = np.zeros((300, 400), dtype=bool)
+    mask[0:75, 0:100] = True  # a quarter of the frame's long edge
+    assert detail_decode_edge(mask) == DETAIL_SCALE_PX * 4
+    assert detail_decode_edge(np.zeros((300, 400), dtype=bool)) is None
+
+
+def test_subject_detail_drops_with_blur_and_reports_the_subject_size():
+    from quality import compute_subject_detail
+
+    sharp, mask = _band_limited_scene(1600, 0.4)
+    blurred, _ = _band_limited_scene(1600, 0.4, blur=6.0)
+    got = compute_subject_detail(sharp, mask, frame_size=(6000, 4500))
+    soft = compute_subject_detail(blurred, mask, frame_size=(6000, 4500))
+    assert got["subject_detail"] > 1.5 * soft["subject_detail"] > 0
+    # The subject spans 40% of the frame's long edge, reported in native pixels.
+    assert got["subject_detail_px"] == pytest.approx(0.4 * 6000, abs=10)
+
+
+def test_subject_detail_is_the_same_whichever_frame_size_the_subject_came_in():
+    """Two renders of one scene (subject 960 px and 640 px across, both above the
+    512 px scale) measure alike; the proxy-scale Tenengrad does not."""
+    from quality import compute_subject_detail, compute_subject_tenengrad
+
+    big, big_mask = _band_limited_scene(2400, 0.4)
+    small, small_mask = _band_limited_scene(1600, 0.4)
+    detail_big = compute_subject_detail(big, big_mask)["subject_detail"]
+    detail_small = compute_subject_detail(small, small_mask)["subject_detail"]
+    assert detail_big == pytest.approx(detail_small, rel=0.15)
+    proxy_big = compute_subject_tenengrad(big, big_mask)
+    proxy_small = compute_subject_tenengrad(small, small_mask)
+    assert abs(proxy_big - proxy_small) / max(proxy_big, proxy_small) > 0.3
+
+
+def test_subject_detail_from_a_frame_decoded_below_the_scale_reads_lower():
+    """A decode too small for the scale is upsampled and honestly reads softer
+    than the same frame decoded large enough (per-pixel texture, so the small
+    decode really has lost detail)."""
+    from quality import compute_subject_detail
+
+    rng = np.random.default_rng(5)
+    full = Image.new("L", (1600, 1200), 128)
+    full.paste(Image.fromarray(rng.integers(40, 220, (640, 640), dtype=np.uint8), mode="L"), (400, 300))
+    full = full.convert("RGB")
+    full_mask = np.zeros((1200, 1600), dtype=bool)
+    full_mask[300:940, 400:1040] = True
+    small = full.resize((400, 300), Image.LANCZOS)
+    small_mask = np.array(Image.fromarray(full_mask.astype(np.uint8) * 255).resize((400, 300), Image.NEAREST)) > 127
+    assert compute_subject_detail(small, small_mask)["subject_detail"] < 0.5 * compute_subject_detail(full, full_mask)["subject_detail"]
+
+
+def test_subject_detail_empty_mask():
+    from quality import compute_subject_detail
+
+    assert compute_subject_detail(Image.new("RGB", (100, 80)), np.zeros((80, 100), dtype=bool)) == {
+        "subject_detail": 0.0, "subject_detail_px": None,
+    }
+
+
+def test_measure_subject_detail_rereads_the_source_only_when_the_proxy_is_too_small(tmp_path, monkeypatch):
+    import image_loader
+    from quality import DETAIL_SCALE_PX, compute_subject_detail, measure_subject_detail
+
+    frame, mask = _band_limited_scene(1600, 0.4)
+    source = tmp_path / "scene.png"
+    frame.save(source)
+    loads = []
+    real = image_loader.load_image
+
+    def recording_load(path, max_size=1024, **kwargs):
+        loads.append(max_size)
+        return real(path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", recording_load)
+    # The subject spans 640 px of this proxy: enough, no reload.
+    direct = measure_subject_detail(frame, mask, source_path=str(source), frame_size=(1600, 1200))
+    assert loads == []
+    assert direct == compute_subject_detail(frame, mask, frame_size=(1600, 1200))
+    # A 400 px proxy holds the subject at 160 px: the source is read at the edge the scale needs.
+    proxy = frame.resize((400, 300), Image.LANCZOS)
+    proxy_mask = np.array(Image.fromarray(mask.astype(np.uint8) * 255).resize((400, 300), Image.NEAREST)) > 127
+    reloaded = measure_subject_detail(proxy, proxy_mask, source_path=str(source), frame_size=(1600, 1200))
+    assert loads == [int(np.ceil(DETAIL_SCALE_PX / 0.4))]
+    assert reloaded["subject_detail"] == pytest.approx(direct["subject_detail"], rel=0.15)
+    assert reloaded["subject_detail_px"] == pytest.approx(640, abs=10)
+    # An unreadable source leaves the measurement unmade rather than interpolated.
+    assert measure_subject_detail(proxy, proxy_mask, source_path=str(tmp_path / "gone.png")) == {}
+
+
+def test_measure_cached_subject_detail_reads_the_saved_mask_and_source(tmp_path):
+    from masking import save_mask
+    from quality import MASK_CACHE_INVALID, compute_subject_detail, measure_cached_subject_detail
+
+    frame, mask = _band_limited_scene(1600, 0.4)
+    source = tmp_path / "scene.png"
+    frame.save(source)
+    mask_path = save_mask(mask, str(tmp_path / "masks"), 7, "sam2-small")
+    got = measure_cached_subject_detail(mask_path, str(source), (1600, 1200))
+    assert got["subject_detail"] == pytest.approx(compute_subject_detail(frame, mask)["subject_detail"], rel=0.05)
+    assert got["subject_detail_px"] == pytest.approx(640, abs=10)
+    # A missing or undecodable mask PNG is the cache going bad and is
+    # distinguished from a source we simply cannot read right now, so
+    # the caller can drop the stale cache instead of looping on it.
+    assert measure_cached_subject_detail(str(tmp_path / "missing.png"), str(source)) is MASK_CACHE_INVALID
+    assert measure_cached_subject_detail(mask_path, str(tmp_path / "gone.png")) is None
+    placeholder = tmp_path / "placeholder.png"
+    placeholder.write_bytes(b"mask")
+    assert measure_cached_subject_detail(str(placeholder), str(source)) is MASK_CACHE_INVALID
+
+
+def _png_chunk(ctype, data):
+    import struct
+    import zlib
+
+    crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+
+def _grayscale_png_parts():
+    """Minimal 2x2 8-bit grayscale PNG as (signature, ihdr, idat, iend)."""
+    import struct
+    import zlib
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 0, 0, 0, 0))
+    # Two rows, each (filter byte 0) + two gray pixels.
+    raw = b"\x00\xff\xff" + b"\x00\xff\xff"
+    idat = _png_chunk(b"IDAT", zlib.compress(raw))
+    iend = _png_chunk(b"IEND", b"")
+    return sig, ihdr, idat, iend
+
+
+def test_cached_mask_with_bad_ztxt_chunk_returns_mask_cache_invalid(tmp_path):
+    """A post-IDAT zTXt chunk with an invalid compression method raises
+    SyntaxError during convert(). The OSError-only catch would propagate
+    it; the broadened catch returns MASK_CACHE_INVALID so the caller can
+    drop the stale row and let the next run regenerate.
+    """
+    from quality import MASK_CACHE_INVALID, measure_cached_subject_detail
+
+    sig, ihdr, idat, iend = _grayscale_png_parts()
+    # zTXt: keyword\0 + compression_method(1) + compressed_text. Method
+    # 0xff is undefined, so PngImagePlugin raises SyntaxError.
+    ztxt = _png_chunk(b"zTXt", b"Author\x00\xff\x78\x9c\x00")
+    mask_path = tmp_path / "bad_ztxt.png"
+    mask_path.write_bytes(sig + ihdr + idat + ztxt + iend)
+    source = tmp_path / "source.png"
+    Image.new("L", (16, 16), 128).save(source)
+
+    assert measure_cached_subject_detail(str(mask_path), str(source)) is MASK_CACHE_INVALID
+
+
+def test_cached_mask_with_truncated_ihdr_returns_mask_cache_invalid(tmp_path):
+    """A truncated IHDR (declared length < 13 bytes) raises ValueError
+    during open, which bypasses the OSError-only catch.
+    """
+    from quality import MASK_CACHE_INVALID, measure_cached_subject_detail
+
+    sig, _, idat, iend = _grayscale_png_parts()
+    truncated_ihdr = _png_chunk(b"IHDR", b"\x00" * 10)
+    mask_path = tmp_path / "truncated_ihdr.png"
+    mask_path.write_bytes(sig + truncated_ihdr + idat + iend)
+    source = tmp_path / "source.png"
+    Image.new("L", (16, 16), 128).save(source)
+
+    assert measure_cached_subject_detail(str(mask_path), str(source)) is MASK_CACHE_INVALID
+
+
+def test_cached_mask_with_oversized_header_returns_mask_cache_invalid(tmp_path):
+    """An IHDR declaring more pixels than MAX_IMAGE_PIXELS raises
+    DecompressionBombError, which bypasses the OSError-only catch.
+    """
+    import struct
+
+    from quality import MASK_CACHE_INVALID, measure_cached_subject_detail
+
+    sig, _, idat, iend = _grayscale_png_parts()
+    # 65535x65535 = ~4.3e9 pixels; well above the default
+    # ``Image.MAX_IMAGE_PIXELS`` (~1.79e8), which triggers the bomb check.
+    oversized = _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 65535, 65535, 8, 0, 0, 0, 0))
+    mask_path = tmp_path / "oversized.png"
+    mask_path.write_bytes(sig + oversized + idat + iend)
+    source = tmp_path / "source.png"
+    Image.new("L", (16, 16), 128).save(source)
+
+    assert measure_cached_subject_detail(str(mask_path), str(source)) is MASK_CACHE_INVALID
+
+
+def test_cached_mask_processing_error_still_propagates(tmp_path, monkeypatch):
+    """Expanding the cached-mask except block kept it scoped to the
+    Image.open + convert read. A ValueError raised by the downstream
+    detail computation must still propagate so an unrelated bug doesn't
+    get mis-counted as an invalid cache.
+    """
+    import quality
+    from masking import save_mask
+    from quality import measure_cached_subject_detail
+
+    frame, mask = _band_limited_scene(1600, 0.4)
+    source = tmp_path / "scene.png"
+    frame.save(source)
+    mask_path = save_mask(mask, str(tmp_path / "masks"), 7, "sam2-small")
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("synthetic processing failure")
+
+    monkeypatch.setattr(quality, "compute_subject_detail", boom)
+    with pytest.raises(ValueError, match="synthetic processing failure"):
+        measure_cached_subject_detail(mask_path, str(source), (1600, 1200))
+
+
+def test_frame_size_reads_rows_and_dicts():
+    from quality import frame_size
+
+    assert frame_size({"width": 40, "height": 30}) == (40, 30)
+    assert frame_size({"width": None, "height": 30}) is None
+    assert frame_size({"id": 1}) is None

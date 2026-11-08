@@ -48,6 +48,7 @@ class SubjectsRepository:
             "OR subject_tenengrad IS NOT NULL OR bg_tenengrad IS NOT NULL "
             "OR crop_complete IS NOT NULL OR bg_separation IS NOT NULL "
             "OR phash_crop IS NOT NULL OR noise_estimate IS NOT NULL "
+            "OR subject_detail IS NOT NULL OR subject_detail_px IS NOT NULL "
             "OR dino_subject_embedding IS NOT NULL "
             "OR eye_x IS NOT NULL OR eye_y IS NOT NULL "
             "OR eye_conf IS NOT NULL OR eye_tenengrad IS NOT NULL "
@@ -140,6 +141,7 @@ class SubjectsRepository:
         subject_clip_high=NULL, subject_clip_low=NULL, subject_y_median=NULL,
         subject_tenengrad=NULL, bg_tenengrad=NULL, crop_complete=NULL,
         bg_separation=NULL, phash_crop=NULL, noise_estimate=NULL,
+        subject_detail=NULL, subject_detail_px=NULL,
         eye_x=NULL, eye_y=NULL, eye_conf=NULL, eye_tenengrad=NULL,
         eye_kp_fingerprint=NULL, dino_subject_embedding=NULL WHERE id=?""", (photo_id,))
 

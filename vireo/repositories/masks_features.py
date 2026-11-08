@@ -41,7 +41,9 @@ class MaskQuality:
     measured). ``subject_size`` is the fraction of the frame the mask
     covers; the rest are the ``quality.compute_*`` features of the masked
     subject and ``quality_input_recipe`` names the pixels they were read
-    from.
+    from. ``subject_detail`` / ``subject_detail_px`` are
+    ``quality.compute_subject_detail``, the fixed-scale sharpness that is
+    comparable across encounters.
     """
 
     subject_size: float | None = None
@@ -55,6 +57,8 @@ class MaskQuality:
     bg_separation: float | None = None
     phash_crop: str | None = None
     noise_estimate: float | None = None
+    subject_detail: float | None = None
+    subject_detail_px: float | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,8 @@ class PipelineFeatures:
     eye_tenengrad: Any = UNSET
     eye_kp_fingerprint: Any = UNSET
     quality_input_recipe: Any = UNSET
+    subject_detail: Any = UNSET
+    subject_detail_px: Any = UNSET
 
     def columns(self) -> dict[str, Any]:
         """The columns this patch writes, in field order."""
@@ -176,6 +182,64 @@ class MasksFeaturesRepository:
     def remove_file(self, path: str | None) -> None:
         """Delete a mask file, only inside the masks directory."""
         safe_remove_mask_file(self.masks_dir, path)
+
+    def drop_cache_entry(
+        self, photo_id: int, variant: str, path: str | None,
+    ) -> bool:
+        """Invalidate a cached mask: drop its row, its projection, and the file.
+
+        A best-effort unlink alone is not enough. ``remove_file`` logs
+        and returns without raising when the masks dir is unresolved,
+        the stored path is outside it, or ``os.remove`` fails, so the
+        row still points at the corrupt PNG and the next run's
+        ``os.path.isfile`` check reuses it. Deleting the row makes the
+        next pass see a clean cache miss and regenerate the mask from
+        scratch regardless of whether the file actually left disk.
+
+        The DELETE pins the row to the supplied ``path`` so that a
+        concurrent writer that has already published a replacement
+        generation (mask files use unique generation paths) is not
+        discarded: when the caller measured an older generation that
+        has since been superseded, the DELETE matches nothing and we
+        return ``False`` without unlinking the fresh file or clearing
+        the projection. The caller uses that to skip counting a
+        spurious invalidation.
+
+        When the delete matches, also clear the denormalized projection
+        on ``photos`` if it still names this exact (variant, path); a
+        later activation of another variant or another generation of
+        the same variant stays untouched. The unlink runs only after
+        the row and projection are gone, so the file is not removed
+        while something still references it. No commit — the caller
+        owns it.
+        """
+        cur = self.conn.execute(
+            "DELETE FROM photo_masks WHERE photo_id=? AND variant=? AND path=?",
+            (photo_id, variant, path),
+        )
+        if cur.rowcount <= 0:
+            return False
+        # Clear the eye projection too: ``eye_kp_fingerprint`` is the only
+        # thing that makes ``list_photos_for_eye_keypoint_stage`` skip a
+        # photo, and the stored fingerprint describes the dropped mask. If
+        # the pipeline's current fingerprint version happens to match it,
+        # the regenerated mask would never be fed to the eye stage and
+        # ``eye_x``/``eye_y``/``eye_conf``/``eye_tenengrad`` would stay
+        # pinned to the discarded generation.
+        self.conn.execute(
+            "UPDATE photos SET mask_path=NULL, active_mask_variant=NULL, "
+            "subject_size=NULL, subject_tenengrad=NULL, bg_tenengrad=NULL, "
+            "crop_complete=NULL, quality_input_recipe=NULL, "
+            "subject_clip_high=NULL, subject_clip_low=NULL, "
+            "subject_y_median=NULL, bg_separation=NULL, phash_crop=NULL, "
+            "noise_estimate=NULL, subject_detail=NULL, subject_detail_px=NULL, "
+            "eye_x=NULL, eye_y=NULL, eye_conf=NULL, eye_tenengrad=NULL, "
+            "eye_kp_fingerprint=NULL "
+            "WHERE id=? AND active_mask_variant=? AND mask_path=?",
+            (photo_id, variant, path),
+        )
+        self.remove_file(path)
+        return True
 
     @property
     def workspace_id(self) -> int:
@@ -313,12 +377,34 @@ class MasksFeaturesRepository:
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
             "crop_complete=?, quality_input_recipe=?, subject_clip_high=?, subject_clip_low=?, "
-            "subject_y_median=?, bg_separation=?, phash_crop=?, noise_estimate=? WHERE id=?",
+            "subject_y_median=?, bg_separation=?, phash_crop=?, noise_estimate=?, "
+            "subject_detail=?, subject_detail_px=? WHERE id=?",
             (row["path"], variant, row["subject_size"],
              row["subject_tenengrad"], row["bg_tenengrad"],
              row["crop_complete"], row["quality_input_recipe"],
              row["subject_clip_high"], row["subject_clip_low"], row["subject_y_median"],
-             row["bg_separation"], row["phash_crop"], row["noise_estimate"], photo_id),
+             row["bg_separation"], row["phash_crop"], row["noise_estimate"],
+             row["subject_detail"], row["subject_detail_px"], photo_id),
+        )
+
+    def set_subject_detail(
+        self, photo_id: int, variant: str, subject_detail: float, subject_detail_px: float | None,
+    ) -> None:
+        """Record a later detail measurement on an existing mask row.
+
+        The mask stage measures cached masks that predate the measurement
+        without rerunning SAM. The photos row follows only while the
+        variant is the photo's active one, so the denormalized columns
+        never describe another variant's mask. Does not commit.
+        """
+        self.conn.execute(
+            "UPDATE photo_masks SET subject_detail=?, subject_detail_px=? WHERE photo_id=? AND variant=?",
+            (subject_detail, subject_detail_px, photo_id, variant),
+        )
+        self.conn.execute(
+            "UPDATE photos SET subject_detail=?, subject_detail_px=? "
+            "WHERE id=? AND active_mask_variant=?",
+            (subject_detail, subject_detail_px, photo_id, variant),
         )
 
     # -- storage cleanup -----------------------------------------------------
@@ -650,9 +736,10 @@ class MasksFeaturesRepository:
                 photo_id, variant, path, created_at,
                 detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
                 subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
-                subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate
+                subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate,
+                subject_detail, subject_detail_px
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(photo_id, variant) DO UPDATE SET
                 path=excluded.path,
                 created_at=excluded.created_at,
@@ -671,13 +758,15 @@ class MasksFeaturesRepository:
                 subject_y_median=excluded.subject_y_median,
                 bg_separation=excluded.bg_separation,
                 phash_crop=excluded.phash_crop,
-                noise_estimate=excluded.noise_estimate
+                noise_estimate=excluded.noise_estimate,
+                subject_detail=excluded.subject_detail,
+                subject_detail_px=excluded.subject_detail_px
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
              q.subject_size, q.subject_tenengrad, q.bg_tenengrad, q.crop_complete, q.quality_input_recipe,
              q.subject_clip_high, q.subject_clip_low, q.subject_y_median, q.bg_separation, q.phash_crop,
-             q.noise_estimate),
+             q.noise_estimate, q.subject_detail, q.subject_detail_px),
         )
 
     def save_subject_raw_analysis(self, detection_id: int, report: dict[str, Any]) -> None:
@@ -720,7 +809,7 @@ class MasksFeaturesRepository:
         """
         from repositories.subject_order import primary_order_sql
         return self.conn.execute(
-            f"""SELECT p.id, p.folder_id, p.filename,
+            f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       d.detector_model,
                       d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence

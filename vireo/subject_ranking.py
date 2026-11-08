@@ -252,6 +252,7 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
                     quality_pct=round(photo["quality_composite"] * 100), focus=photo["focus_score"],
                     focus_basis="eye" if photo.get("eye_focus_score") is not None else "subject",
                     focus_evidence=photo.get("focus_evidence"),
+                    comparable_quality=photo.get("comparable_quality"),
                     reject_reasons=photo.get("reject_reasons", []),
                     reasons=_best_batch_reasons(photo, eligible, is_best=photo is best))
     cards.sort(key=lambda c: (c["rank"] is None, c["rank"] or 0))

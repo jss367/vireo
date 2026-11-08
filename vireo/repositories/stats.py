@@ -852,6 +852,53 @@ class StatsRepository:
         ).fetchone()
         return row["n"] or 0
 
+    def count_mask_detail_pending(
+        self, sam2_variant, detector_confidence, scope_sql, scope_params, *, rescue_floors=None,
+    ):
+        """Count current, complete masks that lack a subject detail measurement.
+
+        The complement of ``count_extract_stale`` on the same rows: the
+        selected-variant row is active, has a path, matches the primary
+        detection's prompt (so it is a cache hit the stage re-activates
+        rather than re-extracts) and ``subject_detail`` is NULL. Disjoint
+        from both ``pending`` (no usable row) and ``stale`` (prompt
+        mismatch, re-extracted with its detail) by those gates.
+        """
+        ws = self.workspace_id_fn()
+        detection_predicate = self._mask_detection_predicate("d0", rescue_floors)
+        primary_predicate = detection_predicate.replace("d0.", "d2.")
+        from repositories.subject_order import primary_order_sql
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
+                FROM photo_masks pm
+                JOIN photos p ON p.id = pm.photo_id
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
+               WHERE pm.variant = ?
+                 AND p.mask_path IS NOT NULL
+                 AND pm.path IS NOT NULL
+                 AND pm.path != ''
+                 AND pm.subject_detail IS NULL
+                 AND EXISTS (
+                    SELECT 1 FROM detections d
+                     WHERE d.id = (
+                           SELECT d2.id
+                             FROM detections d2
+                            WHERE d2.photo_id = pm.photo_id
+                              AND {primary_predicate}
+                            ORDER BY {primary_order_sql("d2")}
+                            LIMIT 1
+                       )
+                       AND d.detector_model = pm.detector_model
+                       AND d.box_x = pm.prompt_x
+                       AND d.box_y = pm.prompt_y
+                       AND d.box_w = pm.prompt_w
+                       AND d.box_h = pm.prompt_h
+                 ){scope_sql}""",
+            (ws, sam2_variant, detector_confidence, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
     def count_eye_keypoint_eligible(self, min_conf, scope_sql, scope_params):
         """Count photos eligible for the eye-keypoint stage."""
         from repositories.subject_order import primary_order_sql

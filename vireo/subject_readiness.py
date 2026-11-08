@@ -17,7 +17,7 @@ REQUIRED_QUALITY_FIELDS = (
 )
 SCORE_FIELDS = (
     "focus_score", "eye_focus_score", "exposure_score", "composition_score",
-    "area_score", "noise_score", "quality_composite",
+    "area_score", "noise_score", "quality_composite", "comparable_quality",
 )
 
 

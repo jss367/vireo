@@ -36,6 +36,7 @@ function cullGroupPhoto(p, enc, ei, decision) {
     photo_id: p.id,
     quality: p.quality_composite || 0,
     quality_score: p.quality_composite != null ? p.quality_composite : null,
+    comparable: p.comparable_quality ? p.comparable_quality.score : null,
     sharpness: p.subject_sharpness != null ? p.subject_sharpness : null,
     filename: p.filename || '',
     timestamp: p.timestamp || null,

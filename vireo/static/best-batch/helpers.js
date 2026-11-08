@@ -51,6 +51,11 @@ export function scoreText(card) {
     parts.push('Raw Tenengrad ' + card.focus_evidence.measurement.toFixed(2) + ' among ' + card.focus_evidence.cohort_size + ' same-basis batch photos');
     parts.push('Absolute focus unvalidated');
   } else if (card.sharpness != null) parts.push('Subject Tenengrad ' + Math.round(card.sharpness) + '; comparison group unavailable');
+  // The one measurement that compares across batches: the subject resampled to a fixed scale.
+  if (card.comparable_quality && typeof card.comparable_quality.detail === 'number') {
+    parts.push('Subject detail ' + Math.round(card.comparable_quality.detail) + ' at ' + card.comparable_quality.scale_px +
+      ' px, quality ' + Math.round(card.comparable_quality.score * 100) + '/100 across encounters');
+  }
   return parts.join(' · ') || 'No score';
 }
 

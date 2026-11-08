@@ -9,8 +9,10 @@ All weights and thresholds are configurable with defaults from the design doc.
 
 import logging
 import math
+from collections.abc import Mapping
+from typing import Any
 
-from subject_readiness import explicit_decision, mark_analysis_readiness, subject_analysis_readiness
+from subject_readiness import _measured, explicit_decision, mark_analysis_readiness, subject_analysis_readiness
 
 log = logging.getLogger(__name__)
 
@@ -449,6 +451,9 @@ def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
     photo["area_score"] = round(a, 4)
     photo["noise_score"] = round(n, 4)
     photo["quality_composite"] = q
+    # The absolute companion to the encounter rank, for comparisons that
+    # cross encounters; None until the subject detail is measured.
+    photo["comparable_quality"] = comparable_quality(photo)
 
     photo["reject_reasons"] = hard_reject_reasons(photo, q, config=cfg)
     photo["label"] = explicit_decision(photo) or ("REJECT" if photo["reject_reasons"] else None)
@@ -479,4 +484,97 @@ def _record_focus_evidence(photo, basis, values):
         "method": "eye_percentile" if basis == "eye" else "subject_percentile_background_ratio",
         "cohort_key": basis, "cohort_size": len(values), "cohort_scope": "encounter",
         "absolute_status": "not_validated",
+    }
+
+
+# -- Cross-encounter quality --
+#
+# quality_composite ranks a photo against the other frames of its encounter:
+# its focus, noise and background terms are percentiles, so two values from
+# different encounters say nothing about which photo is better. Culling one
+# species across outings needs the opposite: terms that mean the same thing
+# for every photo in the catalog. comparable_quality combines absolute terms
+# only: the fixed-scale subject detail (quality.compute_subject_detail,
+# measured with the subject resampled to DETAIL_SCALE_PX, so distance and
+# sensor resolution cancel out) through a fixed log-sigmoid, the exposure
+# score, crop_complete and the area score. The relative terms are left out
+# rather than faked. The detail mapping's constants were chosen on a catalog
+# sample (docs/comparable-quality.md) so photos spread over the range; they
+# order photos by detail and set how much a detail difference is worth
+# against clipping, a clipped wing or a small subject, and are not a
+# calibrated sharpness scale. Texture and lighting still move the detail
+# value, so the number is most trustworthy within one species.
+
+# The subject scale, in pixels of the subject box's longer side, that
+# subject_detail is measured at. Defined here, beside the composite that
+# interprets it, so quality (a member of the pipeline's import cycle) can
+# import it without pulling scoring into that cycle.
+DETAIL_SCALE_PX = 512
+
+# Detail value mapped to 0.5, and the width of the sigmoid in decades of
+# detail. On the catalog sample (docs/comparable-quality.md) picks had a
+# median detail near 16,000 and rejects near 7,000; 8,000 is the midpoint
+# of their spread and 0.35 decades puts 2,000 near 0.15 and 40,000 near 0.9.
+DETAIL_ANCHOR = 8000.0
+DETAIL_WIDTH_DECADES = 0.35
+
+# The composite's weights are the encounter scorer's for the same terms,
+# renormalized without its relative noise term; composition keeps only the
+# crop part of its weight because background separation is relative too.
+_TERM_WEIGHTS = {
+    "detail": DEFAULTS["w_focus"],
+    "exposure": DEFAULTS["w_exposure"],
+    "crop": DEFAULTS["w_composition"] * DEFAULTS["w_crop_complete"],
+    "area": DEFAULTS["w_area"],
+}
+WEIGHTS = {name: weight / sum(_TERM_WEIGHTS.values()) for name, weight in _TERM_WEIGHTS.items()}
+
+MEASUREMENT_NAME = f"Tenengrad at {DETAIL_SCALE_PX} px subject scale"
+
+REQUIRED_FIELDS = (
+    "subject_detail", "subject_clip_high", "subject_clip_low", "subject_y_median",
+    "crop_complete", "subject_size",
+)
+
+
+def detail_score(value: float) -> float:
+    """Map a subject detail measurement onto [0, 1]; a zero measurement is 0."""
+    if value <= 0:
+        return 0.0
+    return 1.0 / (1.0 + math.exp(-(math.log10(value) - math.log10(DETAIL_ANCHOR)) / DETAIL_WIDTH_DECADES))
+
+
+def comparable_quality(photo: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The cross-encounter quality of one photo, or None until its inputs are measured.
+
+    Takes the photo's feature fields as the pipeline loads them. The result
+    carries every term so a reader can see what the score is made of:
+    ``score`` in [0, 1], ``detail`` and ``detail_px`` (the measurement and
+    the subject's size in source pixels), ``scale_px`` (the scale it was
+    measured at), ``measurement_name``, ``basis`` (``subject``; a head or
+    eye basis is a later tier), the four term scores, and ``weights``.
+    """
+    if any(not _measured(photo.get(field)) for field in REQUIRED_FIELDS):
+        return None
+    detail = float(photo["subject_detail"])
+    terms = {
+        "detail": detail_score(detail),
+        "exposure": exposure_score(photo["subject_clip_high"], photo["subject_clip_low"], photo["subject_y_median"]),
+        "crop": max(0.0, min(1.0, float(photo["crop_complete"]))),
+        "area": area_score(photo["subject_size"]),
+    }
+    score = sum(WEIGHTS[name] * value for name, value in terms.items())
+    detail_px = photo.get("subject_detail_px")
+    return {
+        "score": round(score, 4),
+        "detail": detail,
+        "detail_px": float(detail_px) if _measured(detail_px) else None,
+        "scale_px": DETAIL_SCALE_PX,
+        "measurement_name": MEASUREMENT_NAME,
+        "basis": "subject",
+        "detail_score": round(terms["detail"], 4),
+        "exposure_score": round(terms["exposure"], 4),
+        "crop_score": round(terms["crop"], 4),
+        "area_score": round(terms["area"], 4),
+        "weights": {name: round(weight, 4) for name, weight in WEIGHTS.items()},
     }

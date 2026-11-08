@@ -2695,6 +2695,16 @@ def _patch_extract_masks_deps(monkeypatch, generate_mask_calls):
             "noise_estimate": 5.0,
         },
     )
+    # The detail measurement re-reads the source and mask files, which the
+    # array proxy and placeholder mask bytes here do not provide.
+    monkeypatch.setattr(
+        quality, "measure_subject_detail",
+        lambda proxy, mask, *, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+    )
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail",
+        lambda mask_path, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+    )
     monkeypatch.setattr(
         dino_embed, "embed",
         lambda p, variant=None: np.zeros(384, dtype=np.float32),
