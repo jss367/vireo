@@ -298,11 +298,21 @@ function cullCardHtml(photo, si, pi, poseKey, favorite) {
   var also = (photo.also_species || []).length
     ? '<div class="cull-also-species" title="This photo shows more than one species. Its decision is the same under each.">Also under ' + escapeHtml((photo.also_species || []).join(', ')) + '</div>' : '';
   var click = favorite ? 'selectCullReference(' + si + ',' + id + ')' : 'openCullComparison(' + si + ',' + id + ')';
+  var keeper = '';
+  if (photo.action === 'reject') {
+    var group = (sg.scene_groups || sg.pose_groups || [])[pi];
+    var chosen = group ? cullCardKeeper(photo, group, sg) : null;
+    keeper = chosen
+      ? '<div class="cull-keeper" title="' + escapeAttr(chosen.text) + '">' +
+        (chosen.photo_id != null ? '<img src="/thumbnails/' + chosen.photo_id + '.jpg" alt="" loading="lazy">' : '') +
+        '<span>' + (chosen.saved ? '' : 'Will be ') + 'rejected instead of ' + escapeHtml(chosen.name) + '</span></div>'
+      : '<div class="cull-keeper none">Nothing kept to compare against</div>';
+  }
   var html = '<div class="' + cardClass + '" data-photo-id="' + id + '" data-filename="' + escapeAttr(photo.filename) + '">' +
     '<div class="cull-card-image">' + badge + source + '<button class="cull-image-button" onclick="' + click + '" aria-label="' + escapeAttr((favorite ? 'Select reference: ' : 'Compare: ') + photo.filename) + '">' +
     '<img src="' + escapeAttr(thumb) + '" alt="' + escapeAttr(photo.filename) + '" loading="lazy"></button></div>' +
     '<div class="cull-card-info"><div class="cull-quality">' + status + (reference ? ' · Reference' : '') + '</div>' +
-    '<div class="cull-filename">' + escapeHtml(photo.filename) + '</div>' + also + '<div class="cull-card-controls">';
+    '<div class="cull-filename">' + escapeHtml(photo.filename) + '</div>' + also + keeper + '<div class="cull-card-controls">';
   if (!favorite) html += '<button onclick="setCullAction(' + id + ',\'keep\')">Add favorite</button>';
   else html += '<button onclick="setCullAction(' + id + ',\'review\')">Remove favorite</button>';
   html += photo.action === 'reject' ? '<button onclick="setCullAction(' + id + ',\'review\')">Undecided</button>' : '<button onclick="setCullAction(' + id + ',\'reject\')">Reject</button>';
@@ -380,6 +390,9 @@ function decideCullComparison(action) {
   var candidates = cullComparePhotos();
   var index = candidates.findIndex(function(p) { return p.photo_id === state.photoId; });
   var id = state.photoId;
+  // A reject decided here is a reject in favor of the reference on screen.
+  var reference = cullFavoriteReferences[state.species];
+  if (action === 'reject' && reference) cullRejectKeepers[id] = reference;
   setCullAction(id, action);
   candidates = cullComparePhotos();
   if (!candidates.length) return browseCompare.close();
@@ -401,6 +414,8 @@ function syncCullSourceFlags(results) {
     if (saved) {
       p.flag = saved.flag;
       p.flag_confirmation_status = saved.flag_confirmation_status || 'unverified';
+      if (saved.reject_keeper) p.reject_keeper = saved.reject_keeper;
+      else delete p.reject_keeper;
     }
   });
 }
@@ -438,6 +453,27 @@ function closeCullRejected() {
   if (dialog && dialog.open) dialog.close();
 }
 
+/**
+ * Every reject on screen, once, with the keeper its card shows.
+ *
+ * @returns {{photo: CullDisplayPhoto, keeper: ReturnType<typeof cullCardKeeper>}[]}
+ */
+function cullRejectedWithKeepers() {
+  var seen = new Set();
+  /** @type {{photo: CullDisplayPhoto, keeper: ReturnType<typeof cullCardKeeper>}[]} */
+  var out = [];
+  (cullData ? cullData.species_groups : []).forEach(function(sg) {
+    cullGroupsForSpecies(sg).forEach(function(group) {
+      group.photos.forEach(function(p) {
+        if (p.action !== 'reject' || seen.has(p.photo_id)) return;
+        seen.add(p.photo_id);
+        out.push({photo: p, keeper: cullCardKeeper(p, group, sg)});
+      });
+    });
+  });
+  return out;
+}
+
 /** Each photo on screen once, though a two-species photo is listed twice. */
 function cullDistinctPhotos() {
   var seen = new Set();
@@ -450,17 +486,20 @@ function cullDistinctPhotos() {
 
 function reviewCullRejected() {
   if (cullOperationPending()) return;
-  var rejected = cullDistinctPhotos().filter(function(p) { return p.action === 'reject'; });
+  var rejected = cullRejectedWithKeepers();
   var list = /** @type {HTMLElement} */ (document.getElementById('cullRejectedPhotos'));
   list.replaceChildren();
-  rejected.forEach(function(p) {
+  rejected.forEach(function(entry) {
+    var p = entry.photo;
     var card = document.createElement('div');
     var img = document.createElement('img');
     img.src = '/thumbnails/' + p.photo_id + '.jpg'; img.alt = p.filename;
     var name = document.createElement('div'); name.textContent = p.filename;
+    var why = document.createElement('div'); why.className = 'cull-hint';
+    why.textContent = entry.keeper ? entry.keeper.text : 'Nothing kept to compare against';
     var restore = document.createElement('button'); restore.textContent = 'Keep undecided';
     restore.addEventListener('click', function() { setCullAction(p.photo_id, 'review'); reviewCullRejected(); });
-    card.append(img, name, restore); list.appendChild(card);
+    card.append(img, name, why, restore); list.appendChild(card);
   });
   /** @type {HTMLButtonElement} */ (document.getElementById('cullDeleteRejected')).disabled = !rejected.length;
   /** @type {HTMLElement} */ (document.getElementById('cullRejectedCount')).textContent = rejected.length + ' rejected photos in this selection';
@@ -553,13 +592,20 @@ function initializeCullFavorites() {
       if (p) {
         p.flag = e.detail.flag;
         p.flag_confirmation_status = 'confirmed';
+        // A hand flag drops the relation (the flag trigger clears the attribution).
+        delete p.reject_keeper;
       }
     });
     delete cullManualDecisions[id]; delete cullAppliedDecisions[id];
     cullDirty = unappliedPinCount() > 0;
     rebuildCullDataFromPipeline();
+    // The photo may have been another reject's keeper.
+    loadCullOrphans();
   });
-  document.addEventListener('lightbox:photodeleted', function(e) { removeCullPhotos([e.detail.photoId]); });
+  document.addEventListener('lightbox:photodeleted', function(e) {
+    removeCullPhotos([e.detail.photoId]);
+    loadCullOrphans();
+  });
 }
 
 /** @param {string} endpoint @param {string} [statusText] @param {boolean} [sourceOnly] */

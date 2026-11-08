@@ -8,6 +8,23 @@ interface CullSourcePhoto {
   flag_confirmation_status?: 'confirmed' | 'unverified';
   flag?: string; rating?: number; width?: number; height?: number;
   quality_composite?: number | null; subject_sharpness?: number | null; label?: string;
+  /** The scorer's focus measurement: eye or subject Tenengrad and which it was. */
+  focus_evidence?: {basis: string; measurement?: number | null; measurement_name?: string} | null;
+  /** The saved record of what this reject lost to (``filename`` null once that photo is deleted). */
+  reject_keeper?: CullRejectKeeper;
+}
+interface CullComparison {basis: string; measurement_name: string; photo: number; keeper: number; scope: string;}
+interface CullRejectKeeper {
+  photo_id: number; filename: string | null; comparison: CullComparison | null;
+  /** False when the keeper is not visible in the active workspace (no thumbnail then). */
+  visible?: boolean;
+}
+interface CullRejection {photo_id: number; keeper_photo_id: number | null; comparison: CullComparison | null;}
+/** The keeper a reject loses to and how it was chosen: compared, encounter or species. */
+interface CullKeeperChoice {keeper: CullDisplayPhoto; scope: string;}
+interface CullOrphan {
+  photo_id: number; filename: string; keeper_photo_id: number; keeper_filename: string | null;
+  comparison: CullComparison | null; orphan_reason: 'keeper_deleted' | 'keeper_rejected'; description: string; at: string;
 }
 type CullBurst = number[] | {photo_ids: number[]};
 interface CullEncounter {

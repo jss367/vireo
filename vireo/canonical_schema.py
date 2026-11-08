@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -166,6 +166,14 @@ def create_formerly_lazy_objects(conn):
 
 
 
+# ``keeper_photo_id`` and ``comparison`` make a reject relational: the photo
+# kept instead of this one and the measurement that decided it (JSON: basis,
+# measurement name, the two values). ``keeper_photo_id`` is deliberately not
+# a foreign key: a keeper deleted later must stay recorded, so the orphan
+# check (``PhotoReviewRepository.orphaned_rejections``) can resurface a
+# reject whose justification is gone. ``photos`` ids are reused (no
+# AUTOINCREMENT), so the deletion is stamped in ``keeper_deleted_at`` rather
+# than inferred from a missing row, and every keeper join requires it NULL.
 CURRENT_FLAG_ATTRIBUTION_OBJECTS = (
     """CREATE TABLE IF NOT EXISTS current_flag_attribution (
         photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
@@ -174,7 +182,10 @@ CURRENT_FLAG_ATTRIBUTION_OBJECTS = (
         source TEXT,
         reason TEXT,
         description TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        keeper_photo_id INTEGER,
+        comparison TEXT,
+        keeper_deleted_at TEXT
     )""",
     """CREATE TRIGGER IF NOT EXISTS invalidate_current_flag_attribution
     AFTER UPDATE OF flag ON photos

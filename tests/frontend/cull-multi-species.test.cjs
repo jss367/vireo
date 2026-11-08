@@ -8,7 +8,7 @@ const {test} = require('node:test');
 const vm = require('node:vm');
 
 const CULL = path.join(__dirname, '../../vireo/static/cull');
-const FILES = ['state', 'decisions', 'data', 'focus', 'actions', 'favorites'];
+const FILES = ['state', 'decisions', 'keepers', 'data', 'focus', 'actions', 'favorites'];
 
 function page() {
   const nodes = new Map();
@@ -159,5 +159,9 @@ test('Apply sends a two-species photo once', async () => {
   ctx.syncCullSourceFlags = () => {};
   ctx.rebuildCullDataFromPipeline = () => {};
   await ctx.applyCulling();
-  assert.deepEqual(posted, [['/api/culling/apply', {keepers: [1], rejects: [2], unflag: []}]]);
+  // The reject is recorded in favor of the kept photo of its encounter.
+  assert.deepEqual(posted, [['/api/culling/apply', {
+    keepers: [1], rejects: [2], unflag: [],
+    rejections: [{photo_id: 2, keeper_photo_id: 1, comparison: null}],
+  }]]);
 });

@@ -30,6 +30,8 @@ var CULL_HANDLERS = {
   saveGroupingDefaults: function() { saveGroupingDefaults(); },
   closeCullRejected: function() { closeCullRejected(); },
   deleteCullRejected: function() { return deleteCullRejected(); },
+  reviewCullOrphans: function() { reviewCullOrphans(); },
+  closeCullOrphans: function() { closeCullOrphans(); },
 };
 
 function bindCullMarkup() {
@@ -63,5 +65,6 @@ document.addEventListener('DOMContentLoaded', async function() {
   await loadPipelineSliderDefaults();
   await loadCollections();
   await loadCullingResults();
+  await loadCullOrphans();
 });
 document.addEventListener('DOMContentLoaded', function() { initializeCullFavorites(); });

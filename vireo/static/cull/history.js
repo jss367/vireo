@@ -31,7 +31,7 @@ async function cullAfterHistoryChange(result) {
       // grouping and refresh flags rather than restoring an older cache.
       var copy = /** @type {CullSourceResults} */ (JSON.parse(JSON.stringify(pipelineResults)));
       results = copy;
-      var state = /** @type {{photos: Record<number, {flag?: string, flag_confirmation_status?: 'confirmed' | 'unverified'} | undefined>}} */ (await safeFetch('/api/pipeline/group/state', {
+      var state = /** @type {{photos: Record<number, {flag?: string, flag_confirmation_status?: 'confirmed' | 'unverified', reject_keeper?: CullRejectKeeper | null} | undefined>}} */ (await safeFetch('/api/pipeline/group/state', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({photo_ids: Array.from(new Set((cullSourceResults && cullSourceResults.photos || []).concat(copy.photos).map(function(photo) { return photo.id; })))}),
       }, {toast: false}));
@@ -44,6 +44,8 @@ async function cullAfterHistoryChange(result) {
             // Refresh confirmation from the server too, so an older Apply's
             // "confirmed" marker cannot survive on the restored flag value.
             photo.flag_confirmation_status = saved.flag_confirmation_status || 'unverified';
+            if (saved.reject_keeper) photo.reject_keeper = saved.reject_keeper;
+            else delete photo.reject_keeper;
           }
         });
       });
@@ -66,6 +68,7 @@ async function cullAfterHistoryChange(result) {
     syncCullSourceFlags(/** @type {CullSourceResults} */ (results));
     setPipelineResults(/** @type {CullSourceResults} */ (results),
       result.undone ? 'Undone: ' + result.undone : 'Redone: ' + result.redone, hasCullFilters());
+    loadCullOrphans();
   } catch (error) {
     cullData = null;
     renderCulling();

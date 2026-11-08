@@ -27,6 +27,7 @@ function toggleCullAction(speciesIdx, poseIdx, photoId) {
 function setCullAction(photoId, action) {
   if (cullOperationPending()) return;
   cullManualDecisions[photoId] = action;
+  if (action !== 'reject') delete cullRejectKeepers[photoId];
   cullDirty = unappliedPinCount() > 0;
   rebuildCullDataFromPipeline();
 }
@@ -37,6 +38,7 @@ function releaseCullDecision(photoId) {
   if (!cullManualDecisions[photoId]) return;
   delete cullManualDecisions[photoId];
   delete cullAppliedDecisions[photoId];
+  delete cullRejectKeepers[photoId];
   cullDirty = unappliedPinCount() > 0;
   rebuildCullDataFromPipeline();
 }
@@ -46,6 +48,7 @@ function clearPinnedDecisions() {
   if (!manualDecisionCount()) return;
   cullManualDecisions = {};
   cullAppliedDecisions = {};
+  cullRejectKeepers = {};
   cullDirty = false;
   rebuildCullDataFromPipeline();
   var status = /** @type {HTMLElement} */ (document.getElementById('cullStatus'));
@@ -55,7 +58,7 @@ function clearPinnedDecisions() {
   }
 }
 
-/** @param {CullData} data @returns {{keepers: number[], rejects: number[], unflag: number[], appliedPins: Record<string, CullAction>}} */
+/** @param {CullData} data @returns {{keepers: number[], rejects: number[], unflag: number[], rejections: CullRejection[], appliedPins: Record<string, CullAction>}} */
 function collectCullingApplyPayload(data) {
   /** @type {number[]} */
   var keepers = [];
@@ -84,7 +87,7 @@ function collectCullingApplyPayload(data) {
       });
     });
   });
-  return {keepers: keepers, rejects: rejects, unflag: unflag, appliedPins: appliedPins};
+  return {keepers: keepers, rejects: rejects, unflag: unflag, rejections: cullRejectionsPayload(data), appliedPins: appliedPins};
 }
 
 /**
@@ -140,6 +143,48 @@ function updateCullStateAfterApply(keepers, rejects, unflag, appliedPins) {
   rebuildCullDataFromPipeline();
 }
 
+/**
+ * Mirror the keepers Apply just saved onto the source photos, so a reject
+ * card says what it lost to without a reload.
+ *
+ * @param {CullRejection[]} rejections
+ */
+function recordAppliedRejectKeepers(rejections) {
+  /** @type {Record<number, CullRejection>} */
+  var byId = Object.create(null);
+  rejections.forEach(function(r) { byId[r.photo_id] = r; });
+  (pipelineResults ? pipelineResults.photos : []).forEach(function(photo) {
+    var rejection = byId[photo.id];
+    if (!rejection) return;
+    delete cullRejectKeepers[photo.id];
+    if (rejection.keeper_photo_id == null) {
+      delete photo.reject_keeper;
+      return;
+    }
+    var keeper = cullSourcePhoto(rejection.keeper_photo_id);
+    photo.reject_keeper = {photo_id: rejection.keeper_photo_id, filename: keeper ? keeper.filename : null,
+      comparison: rejection.comparison};
+  });
+}
+
+/**
+ * How the rejects break down for the confirm prompt: decided now with a
+ * keeper, decided now with nothing kept to compare against, and already
+ * saved (sent as a flag alone; their saved record stays as it is).
+ *
+ * @param {number[]} rejects @param {CullRejection[]} rejections
+ */
+function describeRejections(rejects, rejections) {
+  var withKeeper = rejections.filter(function(r) { return r.keeper_photo_id != null; }).length;
+  var withoutKeeper = rejections.length - withKeeper;
+  var unchanged = rejects.length - rejections.length;
+  var parts = [];
+  if (withKeeper) parts.push(withKeeper + ' recorded with the photo kept instead');
+  if (withoutKeeper) parts.push(withoutKeeper + ' with nothing kept to compare');
+  if (unchanged) parts.push(unchanged + ' already saved, unchanged');
+  return parts.join('; ');
+}
+
 async function applyCulling() {
   if (!cullData || cullOperationPending()) return;
 
@@ -147,12 +192,14 @@ async function applyCulling() {
   var keepers = payload.keepers;
   var rejects = payload.rejects;
   var unflag = payload.unflag;
+  var rejections = payload.rejections;
   var appliedPins = payload.appliedPins;
   var split = splitUnflagByCurrentState(unflag);
 
   var confirmMsg = 'Apply culling decisions?\n\n' +
     keepers.length + ' photos flagged as keepers\n' +
     rejects.length + ' photos flagged as rejected';
+  if (rejects.length) confirmMsg += ' (' + describeRejections(rejects, rejections) + ')';
   if (split.clearing) {
     confirmMsg += '\n' + split.clearing + ' photos cleared back to no flag (moved to Review)';
   }
@@ -169,10 +216,12 @@ async function applyCulling() {
       await safeFetch('/api/culling/apply', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({keepers: keepers, rejects: rejects, unflag: unflag}),
+        body: JSON.stringify({keepers: keepers, rejects: rejects, unflag: unflag, rejections: rejections}),
       }, { toast: false })
     );
+    recordAppliedRejectKeepers(rejections);
     updateCullStateAfterApply(keepers, rejects, unflag, appliedPins);
+    loadCullOrphans();
     var serverCleared = resp && typeof resp.cleared === 'number' ? resp.cleared : split.clearing;
     var serverReview = Math.max(0, unflag.length - serverCleared);
     var statusMsg = 'Applied! ' + keepers.length + ' keepers, ' + rejects.length + ' rejected';

@@ -38,7 +38,7 @@ def test_filter_change_during_collection_load_restarts_collection_source(live_se
     page.on('dialog', lambda dialog: dialog.accept())
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
-    assert posted == [{'keepers': [10], 'rejects': [], 'unflag': []}]
+    assert posted == [{'keepers': [10], 'rejects': [], 'unflag': [], 'rejections': []}]
 
 
 def test_failed_initial_scoped_follow_up_blocks_apply(live_server, page):
