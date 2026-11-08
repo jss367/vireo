@@ -686,9 +686,13 @@ class _MaskPass:
         self.detail_measured = 0
         self.detail_unreadable = 0
         # Cached mask PNGs that could not be decoded this run. We drop
-        # the stale file so the next run misses the cache check and
-        # rebuilds the mask, and surface the regeneration in the
-        # stage error message.
+        # both the stale file and its ``photo_masks`` row so the next
+        # run misses the cache check and rebuilds the mask, and surface
+        # the regeneration in the stage error message. Dropping the row
+        # is what keeps the loop broken when the unlink itself is
+        # refused (unresolved masks dir, stored path outside it, or an
+        # ``os.remove`` failure): the cache check only consults the row
+        # plus ``os.path.isfile``.
         self.mask_cache_invalidated = 0
         # Photos whose source file could not be read. Kept out of
         # ``skipped`` because the two mean opposite things to the
@@ -1172,28 +1176,33 @@ class _MaskPass:
 
     def _count_unreadable_source(self, item: _MaskPhoto) -> None:
         self.em_unreadable += 1
+        if self._latch_offline_folder(item):
+            self.em_offline_unreadable += 1
+
+    def _latch_offline_folder(self, item: _MaskPhoto) -> bool:
+        """Probe the source; on an outage record the reason and latch the folder.
+
+        Returns True when the probe confirmed the source went offline.
+        The reason feeds the fatal end-of-stage message; omitting it
+        produces a malformed "photos unreachable — ." line that names no
+        source to reconnect. Latch the folder, not the run: a
+        mount-scoped outage proves the photos on that volume are gone,
+        but a collection can span several volumes and the local disk —
+        writing off everything still unprocessed would skip masks we
+        could have made and file those photos under an outage that
+        never touched them. Other folders cost one failed read each
+        to discover, which is nothing next to a wrongly abandoned run.
+        """
         offline = self.source_offline_reason(
             item.folder_path, item.image_path,
         )
-        if offline is not None:
-            _scope, reason = offline
-            self.em_offline_unreadable += 1
-            if reason not in self.em_offline_reasons:
-                self.em_offline_reasons.append(reason)
-            # Latch the folder, not the run. A
-            # mount-scoped outage proves the photos
-            # on that volume are gone, but a
-            # collection can span several volumes and
-            # the local disk — writing off everything
-            # still unprocessed would skip masks we
-            # could have made and file those photos
-            # under an outage that never touched them.
-            # Other folders cost one
-            # failed read each to discover, which is
-            # nothing next to a wrongly abandoned run.
-            self.em_offline_folder_ids.add(
-                item.photo["folder_id"],
-            )
+        if offline is None:
+            return False
+        _scope, reason = offline
+        if reason not in self.em_offline_reasons:
+            self.em_offline_reasons.append(reason)
+        self.em_offline_folder_ids.add(item.photo["folder_id"])
+        return True
 
     def _analyze_and_embed(
         self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
@@ -1276,8 +1285,7 @@ class _MaskPass:
             )
         if not measured:
             self.detail_unreadable += 1
-            if self.source_offline_reason(item.folder_path, item.image_path) is not None:
-                self.em_offline_folder_ids.add(item.photo["folder_id"])
+            self._latch_offline_folder(item)
         return measured
 
     def _measure_cached_detail(self, item: _MaskPhoto) -> None:
@@ -1287,9 +1295,11 @@ class _MaskPass:
         source that cannot be read keeps the photo masked and credits
         ``detail_unreadable``; the measurement stays NULL and pending for
         the next run. A mask PNG that fails to decode is a different
-        failure: the cache is lost, so the file is dropped and the next
-        run regenerates the mask from scratch rather than looping forever
-        on the same decode error.
+        failure: the cache is lost, so the file AND its row are dropped
+        and the next run regenerates the mask from scratch. Dropping the
+        row (not just the file) is what breaks the loop when the unlink
+        itself is refused, since the cache check only consults the row
+        and ``os.path.isfile``.
         """
         existing = item.existing
         if existing is None:
@@ -1302,13 +1312,15 @@ class _MaskPass:
                 existing["path"], item.image_path, self.frame_size(item.photo),
             )
         if measured is self.mask_cache_invalid:
-            self.thread_db.masks_features.remove_file(existing["path"])
+            self.thread_db.masks_features.drop_cache_entry(
+                item.photo_id, self.sam2_variant, existing["path"],
+            )
+            self.thread_db.commit_with_retry()
             self.mask_cache_invalidated += 1
             return
         if measured is None:
             self.detail_unreadable += 1
-            if self.source_offline_reason(item.folder_path, item.image_path) is not None:
-                self.em_offline_folder_ids.add(item.photo["folder_id"])
+            self._latch_offline_folder(item)
             return
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],

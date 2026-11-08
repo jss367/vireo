@@ -183,6 +183,26 @@ class MasksFeaturesRepository:
         """Delete a mask file, only inside the masks directory."""
         safe_remove_mask_file(self.masks_dir, path)
 
+    def drop_cache_entry(
+        self, photo_id: int, variant: str, path: str | None,
+    ) -> None:
+        """Invalidate a cached mask: remove its file and drop its row.
+
+        A best-effort unlink alone is not enough. ``remove_file`` logs
+        and returns without raising when the masks dir is unresolved,
+        the stored path is outside it, or ``os.remove`` fails, so the
+        row still points at the corrupt PNG and the next run's
+        ``os.path.isfile`` check reuses it. Deleting the row makes the
+        next pass see a clean cache miss and regenerate the mask from
+        scratch regardless of whether the file actually left disk. No
+        commit — the caller owns it.
+        """
+        self.remove_file(path)
+        self.conn.execute(
+            "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
+            (photo_id, variant),
+        )
+
     @property
     def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""

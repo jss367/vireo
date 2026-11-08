@@ -207,10 +207,9 @@ class _MaskExtractionRun:
         # completion with planned work pending.
         self.detail_measured = 0
         self.detail_unreadable = 0
-        # Cached mask PNGs that failed to decode this run: the file
-        # is dropped so ``_reuse_cached_mask`` misses next time and
-        # the next Extract rebuilds the mask instead of looping on
-        # the same decode error.
+        # Cached mask PNGs that failed to decode this run: see
+        # ``_measure_cached_detail`` for how the drop is done and why
+        # dropping the row is what breaks the loop.
         self.mask_cache_invalidated = 0
         job["_start_time"] = time.time()
 
@@ -470,8 +469,11 @@ class _MaskExtractionRun:
         The mask stays valid when its source cannot be read; only the
         measurement stays pending, counted apart so the result says so.
         A mask PNG that fails to decode is a different failure: the cache
-        is lost, so the file is dropped and the next Extract regenerates
-        the mask instead of looping on the same decode error.
+        is lost, so the file AND its row are dropped so the next Extract
+        regenerates the mask instead of looping on the same decode error.
+        Dropping the row (not just the file) is what breaks the loop when
+        the unlink itself is refused, since the cache check only consults
+        the row and ``os.path.isfile``.
         """
         existing = item.existing
         if existing is None:
@@ -480,7 +482,10 @@ class _MaskExtractionRun:
             existing["path"], item.image_path, self.deps.frame_size(item.photo),
         )
         if measured is self.deps.mask_cache_invalid:
-            self.thread_db.masks_features.remove_file(existing["path"])
+            self.thread_db.masks_features.drop_cache_entry(
+                item.photo_id, self.sam2_variant, existing["path"],
+            )
+            self.thread_db.commit_with_retry()
             self.mask_cache_invalidated += 1
             return
         if measured is None:

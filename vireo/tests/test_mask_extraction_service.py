@@ -253,4 +253,46 @@ def test_cached_mask_whose_png_will_not_decode_is_dropped_so_extract_rebuilds_it
     assert result["ok"] is False
     assert any("will be rebuilt on the next Extract run" in e for e in result["errors"])
     assert not mask_path.is_file()
+    # The cache row is also gone, so the next cache check misses even
+    # when the file could not be unlinked — see the next test.
+    assert db.masks_features.get_mask(first, "sam2-base") is None
+    assert_released(extraction, first)
+
+
+def test_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
+    db, tmp_path, extraction, monkeypatch,
+):
+    # ``remove_file`` is best-effort: it logs and returns without
+    # raising when the masks dir is unresolved, the stored path lies
+    # outside it, or ``os.remove`` itself fails. If the row were left
+    # in place, the next cache check would still take the hit on the
+    # unchanged file and loop on the same decode error. Dropping the
+    # row is the piece that actually breaks the loop.
+    import quality
+    from repositories import masks_features
+
+    first = seed_photo(db, tmp_path, "unlink-refused")
+    assert run(extraction)["masked"] == 1
+    mask_path = Path(db.masks_features.get_mask(first, "sam2-base")["path"])
+    assert mask_path.is_file()
+    db.conn.execute(
+        "UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL "
+        "WHERE photo_id=?",
+        (first,),
+    )
+    db.commit()
+    extraction.deps.measure_cached_subject_detail = (
+        lambda mask_path, source_path, frame_size=None: quality.MASK_CACHE_INVALID
+    )
+    monkeypatch.setattr(
+        masks_features, "safe_remove_mask_file",
+        lambda masks_dir, path: None,
+    )
+
+    result = run(extraction)
+
+    assert result["mask_cache_invalidated"] == 1
+    # The row is gone even though the file was not unlinked.
+    assert db.masks_features.get_mask(first, "sam2-base") is None
+    assert mask_path.is_file()
     assert_released(extraction, first)

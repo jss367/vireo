@@ -19773,8 +19773,102 @@ def test_cached_mask_png_that_will_not_decode_is_dropped_and_rebuilt_next_run(tm
     assert final["status"] == "failed" and final["error_count"] == 1
     assert "1 mask cache dropped" in final["summary"]
     assert "will be rebuilt on the next Process run" in final["error"]
+    # The row is gone too, so the next cache check misses even when the
+    # unlink is refused — see
+    # ``test_mask_cache_invalidation_drops_the_row_when_the_unlink_is_refused``.
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
     # The stale PNG is gone so ``_reuse_cached_mask`` misses on the next
     # run; the stage never increments ``detail_unreadable`` because the
     # cache is the problem, not an unreachable source.
     assert not os.path.isfile(mask_path)
     assert "detail unmeasured" not in final["summary"]
+
+
+def test_mask_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
+    tmp_path, monkeypatch,
+):
+    # ``MasksFeaturesRepository.remove_file`` is best-effort: it logs
+    # and returns without raising when the masks dir is unresolved,
+    # the stored path lies outside it, or ``os.remove`` itself fails.
+    # If invalidation relied on that unlink alone, the row would still
+    # point at the corrupt PNG, ``os.path.isfile`` on the next run
+    # would reuse it, and the stage would loop on the same decode
+    # error. Dropping the row is what breaks the loop.
+    import quality
+    from repositories import masks_features
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    _null_subject_detail(db, pid)
+    mask_path = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    assert os.path.isfile(mask_path)
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail",
+        lambda *a, **k: quality.MASK_CACHE_INVALID,
+    )
+    monkeypatch.setattr(
+        masks_features, "safe_remove_mask_file",
+        lambda masks_dir, path: None,
+    )
+
+    _, final = _rerun_extract_masks_cached(
+        tmp_path, monkeypatch, db, expect_error="cached mask PNG was unreadable",
+    )
+
+    assert final["status"] == "failed" and final["error_count"] == 1
+    # The row is gone even though the file was not unlinked.
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
+    assert os.path.isfile(mask_path)
+
+
+def test_detail_reread_outage_records_the_reason_for_the_fatal_message(tmp_path, monkeypatch):
+    # When the detail re-read of a freshly made mask detects that the
+    # source is offline, the folder is latched so later photos in the
+    # same folder are credited unreadable without another probe. If the
+    # latch recorded only the folder id, ``_build_rollups`` would join
+    # an empty ``em_offline_reasons`` and produce a malformed fatal
+    # line like "photos unreachable — ." with no source named to
+    # reconnect.
+    import pipeline_job as pj
+    import quality
+
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = workspace_folders.add_folder(db, folder_path)
+    first = _add_photo_with_detection(db, folder_id, folder_path, "bird-a.jpg")
+    second = _add_photo_with_detection(db, folder_id, folder_path, "bird-b.jpg")
+    collection_id = db.collections.add(
+        "Outage reason", json.dumps([{"field": "photo_ids", "value": [first, second]}]),
+    )
+    db.commit()
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    # The proxy decodes, but the larger-edge detail re-read sees the
+    # share drop out; the next photo is a fresh cache miss that lands
+    # on the latched folder.
+    monkeypatch.setattr(
+        quality, "measure_subject_detail",
+        lambda proxy, mask, *, source_path, frame_size=None: {},
+    )
+    monkeypatch.setattr(
+        pj, "_source_offline_reason",
+        lambda folder_path, image_path: (
+            "mount", "volume /Volumes/Photography is not mounted",
+        ),
+    )
+
+    _runner, result = _run_extract_masks_only(db_path, ws_id, collection_id)
+
+    outage_errors = [
+        e for e in result["errors"] if "unreachable" in e
+    ]
+    assert outage_errors, f"Expected a fatal outage rollup; got {result['errors']!r}"
+    assert "/Volumes/Photography" in outage_errors[0], (
+        f"The fatal line must name the source to reconnect; got "
+        f"{outage_errors[0]!r}"
+    )
+    assert "unreachable — ." not in outage_errors[0], (
+        f"Empty reason list produces a malformed fatal line; got "
+        f"{outage_errors[0]!r}"
+    )
