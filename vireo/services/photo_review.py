@@ -159,7 +159,8 @@ class PhotoReviewService:
         Apply or not currently rejected, so a reject is never recorded against
         a photo that cannot justify it. The attribution then names it so the
         reject stays explainable and the orphan check can find it if the
-        keeper is later deleted or rejected.
+        keeper is later deleted or rejected. A reject already saved with a
+        keeper and sent again without a rejection keeps its saved record.
         """
         rejections = dict(rejections or {})
         ids = list(keepers) + list(rejects) + list(unflag)
@@ -190,12 +191,22 @@ class PhotoReviewService:
                     self.db.photo_review.set_flag(pid, flag)
                     self.db.queue_flag_change_if_enabled(pid, flag)
                     items.append({"photo_id": pid, "old_value": old[pid], "new_value": flag})
-                plain_ids = [pid for pid in photo_ids if pid not in rejections]
+                # A reject already saved in favor of a keeper keeps that record
+                # when Apply rewrites it unchanged: the flag UPDATE drops the
+                # attribution, and a fresh summary note would erase the relation.
+                preserved = {
+                    pid for pid in photo_ids
+                    if flag == "rejected" and pid not in rejections and old[pid] == "rejected"
+                    and before.get(pid, {}).get("keeper_photo_id") is not None
+                }
+                plain_ids = [pid for pid in photo_ids if pid not in rejections and pid not in preserved]
                 if plain_ids:
                     self.db.photo_review.set_current_flag_note(plain_ids, flag, summary)
                 for pid in photo_ids:
                     if pid in rejections:
                         self._note_relational_reject(pid, rejections[pid], photos, summary)
+                    elif pid in preserved:
+                        self.db.photo_review.republish_flag_note(pid, before[pid])
             if items:
                 edit_id = self.db.record_edit(
                     "flag", summary, "culling_apply", items, is_batch=True,

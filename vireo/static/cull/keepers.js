@@ -119,8 +119,10 @@ function cullCardKeeper(photo, group, sg) {
 }
 
 /**
- * The relational rejects Apply records: every reject on screen with the
- * keeper it loses to, once per photo.
+ * The relational rejects Apply records: every reject you decided this
+ * session, with the keeper it loses to, once per photo. A reject already
+ * saved is sent again only as a flag; the server keeps the record it has,
+ * so a later Apply never rewrites what an earlier one said it lost to.
  *
  * @param {CullData} data @returns {CullRejection[]}
  */
@@ -131,7 +133,7 @@ function cullRejectionsPayload(data) {
   data.species_groups.forEach(function(sg) {
     (sg.scene_groups || sg.pose_groups || []).forEach(function(group) {
       group.photos.forEach(function(p) {
-        if (p.action !== 'reject' || seen.has(p.photo_id)) return;
+        if (p.action !== 'reject' || p.decision_source !== 'manual' || seen.has(p.photo_id)) return;
         seen.add(p.photo_id);
         var choice = resolveCullKeeper(p, group, sg);
         if (!choice) return;

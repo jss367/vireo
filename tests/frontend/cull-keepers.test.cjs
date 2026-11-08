@@ -118,6 +118,19 @@ test('a Compare reject keeps its reference when the photo is listed under anothe
   assert.equal(rejection.keeper_photo_id, 3);
 });
 
+test('a reject saved earlier is sent as a flag alone, so its record is kept', () => {
+  const {ctx} = page();
+  const data = results();
+  data.photos[1].flag = 'rejected';
+  data.photos[1].flag_confirmation_status = 'confirmed';
+  data.photos[1].reject_keeper = {photo_id: 3, filename: 'p3.jpg', comparison: null};
+  ctx.setPipelineResults(data);
+  ctx.setCullAction(1, 'keep');
+  const payload = plain(ctx.collectCullingApplyPayload(ctx.cullData));
+  assert.deepEqual(payload.rejects, [2]);
+  assert.deepEqual(payload.rejections, []);
+});
+
 test('a reject with nothing kept anywhere is sent without a keeper', () => {
   const {ctx} = page();
   ctx.setPipelineResults(results());

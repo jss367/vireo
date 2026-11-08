@@ -199,3 +199,51 @@ def test_merging_the_keeper_into_a_survivor_retargets_the_reject(app_and_db):
     assert client.post("/api/undo").status_code == 200
     assert client.post("/api/redo").status_code == 200
     assert flag_note(db, loser, "rejected")["keeper_photo_id"] == survivor
+
+
+def test_a_later_apply_keeps_a_saved_rejects_record(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    keeper, loser, other = _three(db)
+    _apply(client, keeper, [loser])
+    # Apply again with the reject sent as a flag alone (what the page sends
+    # for a reject it did not decide this session) while picking another photo.
+    resp = client.post("/api/culling/apply", json={"keepers": [keeper, other], "rejects": [loser], "unflag": []})
+    assert resp.status_code == 200
+    note = flag_note(db, loser, "rejected")
+    assert note["keeper_photo_id"] == keeper
+    assert note["comparison"] == COMPARISON
+    # The saved record survives undo and redo of that later Apply too.
+    assert client.post("/api/undo").status_code == 200
+    assert flag_note(db, loser, "rejected")["keeper_photo_id"] == keeper
+    assert client.post("/api/redo").status_code == 200
+    assert flag_note(db, loser, "rejected")["keeper_photo_id"] == keeper
+
+
+def test_a_reused_photo_id_cannot_impersonate_a_deleted_keeper(app_and_db):
+    from services import photo_ingest
+
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.photos.list_page()
+    keeper = max(p["id"] for p in photos)
+    loser = min(p["id"] for p in photos)
+    folder_id = db.photos.get(keeper)["folder_id"]
+    _apply(client, keeper, [loser])
+    catalog_deletion.delete_photos(db, [keeper])
+    # photos has no AUTOINCREMENT: the next insert takes the freed id.
+    newcomer = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="newcomer.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    assert newcomer == keeper
+    note = flag_note(db, loser, "rejected")
+    assert note["keeper_status"] == "deleted"
+    assert note["keeper_filename"] is None
+    data = client.get("/api/culling/orphans").get_json()
+    assert data["count"] == 1
+    assert data["orphans"][0]["orphan_reason"] == "keeper_deleted"
+    assert data["orphans"][0]["keeper_filename"] is None
+    # Undo and redo of the original Apply carry the deletion stamp along.
+    assert client.post("/api/undo").status_code == 200
+    assert client.post("/api/redo").status_code == 200
+    assert flag_note(db, loser, "rejected")["keeper_status"] == "deleted"

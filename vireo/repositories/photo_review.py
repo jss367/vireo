@@ -26,12 +26,29 @@ from collections.abc import Collection, Iterable, Iterator
 def remap_flag_attribution_keepers(conn: sqlite3.Connection, mapping: dict[int, int | None]) -> None:
     """Point rejects at the photo that absorbed their keeper when catalog photos merge.
 
-    A plain delete (target None) leaves the dangling id for the orphan check
-    to find. The replay snapshots in ``flag_attribution_history`` are
-    rewritten too, so an undo or redo cannot restore the stale id.
+    A plain delete (target None) stamps ``keeper_deleted_at`` instead: the
+    row id can be handed to a later import, so a missing row cannot stand
+    for the deletion. The replay snapshots in ``flag_attribution_history``
+    are rewritten the same way, so an undo or redo cannot restore a stale id
+    or forget a deletion.
     """
     for source, target in mapping.items():
-        if target is None or source == target:
+        if source == target:
+            continue
+        if target is None:
+            conn.execute(
+                """UPDATE current_flag_attribution SET keeper_deleted_at = datetime('now')
+                   WHERE keeper_photo_id = ? AND keeper_deleted_at IS NULL""",
+                (source,),
+            )
+            for column in ("old_state", "new_state"):
+                conn.execute(
+                    f"""UPDATE flag_attribution_history
+                        SET {column} = json_set({column}, '$.keeper_deleted_at', datetime('now'))
+                        WHERE json_extract({column}, '$.keeper_photo_id') = ?
+                          AND json_extract({column}, '$.keeper_deleted_at') IS NULL""",
+                    (source,),
+                )
             continue
         conn.execute(
             "UPDATE current_flag_attribution SET keeper_photo_id = ? WHERE keeper_photo_id = ?",
@@ -225,7 +242,7 @@ class PhotoReviewRepository:
                       a.keeper_photo_id, a.comparison, k.filename AS keeper_filename,
                       k.flag AS keeper_flag
                FROM current_flag_attribution a JOIN photos p ON p.id=a.photo_id
-               LEFT JOIN photos k ON k.id=a.keeper_photo_id
+               LEFT JOIN photos k ON k.id=a.keeper_photo_id AND a.keeper_deleted_at IS NULL
                WHERE a.photo_id=? AND a.workspace_id=? AND a.flag IS p.flag
                  AND (a.source IS NOT NULL OR a.reason IS NOT NULL
                       OR a.keeper_photo_id IS NOT NULL)""",
@@ -250,7 +267,7 @@ class PhotoReviewRepository:
                FROM current_flag_attribution a
                JOIN photos p ON p.id=a.photo_id AND p.flag IS a.flag
                JOIN photo_workspace_visibility v ON v.photo_id=p.id AND v.workspace_id=?
-               LEFT JOIN photos k ON k.id=a.keeper_photo_id
+               LEFT JOIN photos k ON k.id=a.keeper_photo_id AND a.keeper_deleted_at IS NULL
                WHERE a.flag='rejected' AND a.keeper_photo_id IS NOT NULL
                  AND (k.id IS NULL OR k.flag='rejected')
                ORDER BY a.created_at DESC, a.photo_id""",
@@ -281,7 +298,7 @@ class PhotoReviewRepository:
                     FROM photos p
                     JOIN photo_workspace_visibility v ON v.photo_id=p.id AND v.workspace_id=?
                     LEFT JOIN current_flag_attribution a ON a.photo_id=p.id AND a.flag IS p.flag
-                    LEFT JOIN photos k ON k.id=a.keeper_photo_id
+                    LEFT JOIN photos k ON k.id=a.keeper_photo_id AND a.keeper_deleted_at IS NULL
                     WHERE p.id IN ({placeholders})""", [self.workspace_id, *chunk],
             )
             result.update({row["id"]: self._decode_comparison(dict(row)) for row in rows})
@@ -330,11 +347,12 @@ class PhotoReviewRepository:
             self.conn.execute(
                 """INSERT INTO current_flag_attribution
                    (photo_id,workspace_id,flag,source,reason,description,created_at,
-                    keeper_photo_id,comparison)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                    keeper_photo_id,comparison,keeper_deleted_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (surviving_id, state["workspace_id"], flag, state["source"],
                  state["reason"], state["description"], state["created_at"],
-                 state.get("keeper_photo_id"), state.get("comparison")),
+                 state.get("keeper_photo_id"), state.get("comparison"),
+                 state.get("keeper_deleted_at")),
             )
 
     def record_flag_attribution_history(self, edit_id, photo_ids, before, after):
@@ -359,16 +377,28 @@ class PhotoReviewRepository:
         state = json.loads(row[0])
         if state["photo_id"] != photo_id:
             raise ValueError("Flag attribution belongs to a different photo")
-        # History rows written before the keeper columns existed carry neither key.
+        self.republish_flag_note(photo_id, state)
+
+    def republish_flag_note(self, photo_id, state):
+        """Re-insert a captured attribution row, if the photo still holds its flag.
+
+        ``state`` is a row as ``flag_attributions`` captured it (comparison
+        as stored JSON). Rows captured before the keeper columns existed
+        carry none of those keys. Used by replay and by an Apply that
+        rewrites an unchanged reject's flag, whose trigger would otherwise
+        drop the relation the user already saved.
+        """
+        if not self.conn.in_transaction:
+            raise RuntimeError("Current flag attribution requires the flag write transaction")
         self.conn.execute(
-            """INSERT INTO current_flag_attribution
+            """INSERT OR REPLACE INTO current_flag_attribution
                (photo_id,workspace_id,flag,source,reason,description,created_at,
-                keeper_photo_id,comparison)
-               SELECT p.id,(SELECT id FROM workspaces WHERE id=?),p.flag,?,?,?,?,?,? FROM photos p
+                keeper_photo_id,comparison,keeper_deleted_at)
+               SELECT p.id,(SELECT id FROM workspaces WHERE id=?),p.flag,?,?,?,?,?,?,? FROM photos p
                WHERE p.id=? AND p.flag IS ?""",
             (state["workspace_id"], state["source"], state["reason"], state["description"],
              state["created_at"], state.get("keeper_photo_id"), state.get("comparison"),
-             photo_id, state["flag"]),
+             state.get("keeper_deleted_at"), photo_id, state["flag"]),
         )
 
     def _verify_photo(self, photo_id):

@@ -303,15 +303,17 @@ def _validate_detection_subject_verdict(conn):
 def _add_flag_attribution_keeper(conn):
     """Record the photo a cull reject was rejected in favor of, and the comparison."""
     columns = {row[1] for row in conn.execute("PRAGMA table_info(current_flag_attribution)")}
-    for name, definition in (("keeper_photo_id", "INTEGER"), ("comparison", "TEXT")):
+    for name, definition in (
+        ("keeper_photo_id", "INTEGER"), ("comparison", "TEXT"), ("keeper_deleted_at", "TEXT"),
+    ):
         if name not in columns:
             conn.execute(f"ALTER TABLE current_flag_attribution ADD COLUMN {name} {definition}")
 
 
 def _validate_flag_attribution_keeper(conn):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(current_flag_attribution)")}
-    if not {"keeper_photo_id", "comparison"} <= columns:
-        raise RuntimeError("current_flag_attribution is missing keeper_photo_id or comparison")
+    if not {"keeper_photo_id", "comparison", "keeper_deleted_at"} <= columns:
+        raise RuntimeError("current_flag_attribution is missing its keeper columns")
 
 
 MIGRATIONS = (
