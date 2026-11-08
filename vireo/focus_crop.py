@@ -93,6 +93,37 @@ def validate_raster_geometry(image_size, photo):
         raise ValueError("Source raster geometry differs from the catalog; place a manual center")
 
 
+def window_clips_subject(window, image_size, box):
+    """Whether the subject box reaches outside ``window`` in the upright raster.
+
+    A native window centered on the middle of a box larger than itself shows
+    the torso and cuts off the head (or tail) of a big or close bird, so the
+    reviewer has to be told the crop is partial before judging it.
+    """
+    if not valid_subject_box(box):
+        return None
+    iw, ih = image_size
+    x1, y1, x2, y2 = window
+    bx, by, bw, bh = (float(box["box_" + k]) for k in "xywh")
+    return (bx * iw < x1 - 1 or by * ih < y1 - 1
+            or (bx + bw) * iw > x2 + 1 or (by + bh) * ih > y2 + 1)
+
+
+def subject_exceeds_window(box, width, height, size):
+    """Whether a native ``size`` square cannot hold the whole subject box.
+
+    True when it cannot, False when it can, None when that is unknown.
+    Catalog ``width``/``height`` are the unrotated sensor axes while boxes
+    are normalized to the upright frame, so both axis assignments are tried
+    and only an answer they agree on is returned.
+    """
+    if not width or not height or not valid_subject_box(box):
+        return None
+    bw, bh = float(box["box_w"]), float(box["box_h"])
+    answers = {max(bw * w, bh * h) > size for w, h in ((width, height), (height, width))}
+    return answers.pop() if len(answers) == 1 else None
+
+
 def focus_window(image_size, center, size):
     """Clamp a window in the loader's upright raster without resampling it."""
     iw, ih = image_size
@@ -153,9 +184,15 @@ def prefer_original(image_size, photo, *, downsized_below=0.98):
     return scale is not None and scale < downsized_below
 
 
-def focus_headers(basis, center, window, image_size, source, mask_applied, scale=None):
-    """Scale 1 means decoded-raster pixels; ``scale`` says how those relate to the original."""
+def focus_headers(basis, center, window, image_size, source, mask_applied, scale=None, subject=None):
+    """Scale 1 means decoded-raster pixels; ``scale`` says how those relate to the original.
+
+    With a ``subject`` box, ``X-Vireo-Focus-Subject-Clipped`` says whether
+    part of that animal lies outside the window.
+    """
+    clipped = window_clips_subject(window, image_size, subject) if subject is not None else None
     return {
+        "X-Vireo-Focus-Subject-Clipped": "unknown" if clipped is None else ("1" if clipped else "0"),
         "X-Vireo-Focus-Basis": basis,
         "X-Vireo-Focus-Center": f"{center[0]:.4f},{center[1]:.4f}",
         "X-Vireo-Focus-Scale": "1",

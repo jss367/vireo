@@ -114,6 +114,9 @@ pure["SCORING_DEFAULTS"] = ast.literal_eval(
     )
 )
 load("burst_evidence.py", pure, assignments=True)
+load("focus_crop.py", pure, {"subject_exceeds_window", "valid_subject_box"})
+# Inert packs have no detections, so no focus box to fit.
+pure["focus_subject_detections"] = lambda db, photo_id: []
 # The builder must never import or invoke the real pipeline.
 pure["build_best_batch_response"] = lambda *a: (None, "invented unscored")
 
@@ -372,9 +375,9 @@ def rows_checks():
     )
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
-    c.executescript("""CREATE TABLE folders(id,status);CREATE TABLE photos(id,folder_id,filename,extension,timestamp,flag,rating,quality_score,sharpness,mask_path,subject_tenengrad,eye_tenengrad,crop_complete,subject_size);CREATE TABLE photo_workspace_visibility(photo_id,workspace_id);CREATE TABLE detections(photo_id,category,detector_model,detector_confidence,subject_verdict);
+    c.executescript("""CREATE TABLE folders(id,status);CREATE TABLE photos(id,folder_id,filename,extension,timestamp,flag,rating,quality_score,sharpness,mask_path,subject_tenengrad,eye_tenengrad,crop_complete,subject_size,width,height);CREATE TABLE photo_workspace_visibility(photo_id,workspace_id);CREATE TABLE detections(photo_id,category,detector_model,detector_confidence,subject_verdict);
     INSERT INTO folders VALUES(1,'ok'),(2,'offline'),(3,'partial');
-    INSERT INTO photos VALUES(1,1,'DSC_01.jpg','.jpg',NULL,'none',0,0,0,'mask',10,20,1,.1),(2,1,'DSC_02.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL),(3,2,'DSC_03.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL),(4,3,'DSC_04.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL);
+    INSERT INTO photos VALUES(1,1,'DSC_01.jpg','.jpg',NULL,'none',0,0,0,'mask',10,20,1,.1,6000,4000),(2,1,'DSC_02.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL),(3,2,'DSC_03.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL),(4,3,'DSC_04.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
     INSERT INTO photo_workspace_visibility VALUES(1,1),(2,2),(3,1),(4,1);
     INSERT INTO detections(photo_id,category,detector_model,detector_confidence) VALUES(1,'animal','detector',.9),(1,'animal','detector',.1),(1,'animal','full-image',1),(1,'person','detector',.9);""")
     c.executescript("""ALTER TABLE photos ADD COLUMN active_mask_variant;
@@ -396,7 +399,7 @@ def rows_checks():
     c.execute("UPDATE photo_masks SET path='mask' WHERE photo_id=1 AND variant='invented-v1'")
     assert (row["has_mask"], row["has_quality"], row["has_eye"], row["detection_count"]) == (1, 1, 1, 1)
     c.execute(
-        "INSERT INTO photos SELECT 5,folder_id,filename,extension,timestamp,flag,rating,quality_score,sharpness,mask_path,subject_tenengrad,eye_tenengrad,crop_complete,subject_size,active_mask_variant FROM photos WHERE id=1"
+        "INSERT INTO photos SELECT 5,folder_id,filename,extension,timestamp,flag,rating,quality_score,sharpness,mask_path,subject_tenengrad,eye_tenengrad,crop_complete,subject_size,width,height,active_mask_variant FROM photos WHERE id=1"
     )
     c.execute("INSERT INTO photo_workspace_visibility VALUES(5,1)")
     assert len(r.best_batch_folder_rows(1, limit=1)) == 1
@@ -776,10 +779,10 @@ def test_full_mask_urls_require_verified_active_variant():
     for variant in (None, "", "../other", "a/b", "x?y", "x%2fy"):
         assert urls(7, has_mask=True, mask_variant=variant)["mask_url"] is None
     assert urls(7, has_mask=False, mask_variant="invented-v1")["mask_url"] is None
-    assert pure["_attach_evidence"]({"id": 7}, None, 512)["mask_url"] is None
+    assert pure["_attach_evidence"](None, {"id": 7}, None, 512)["mask_url"] is None
     evidence = dict(has_mask=True, has_quality=False, has_eye=False, detection_count=0,
                     crop_complete=None, subject_size=None, mask_variant="invented-v1")
-    assert pure["_attach_evidence"]({"id": 7}, evidence, 512)["mask_url"] == "/api/masks/7/invented-v1.png"
+    assert pure["_attach_evidence"](None, {"id": 7}, evidence, 512)["mask_url"] == "/api/masks/7/invented-v1.png"
     print("PASS active-mask URL identity, unavailable/null and variant path-component guards without mask reads")
 
 

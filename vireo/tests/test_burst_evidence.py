@@ -797,3 +797,34 @@ def test_stale_populated_features_are_uncovered_in_burst_ranking(app_and_db):
     assert unavailable["scored"] is False and unavailable["best_photo_id"] is None
     assert unavailable["coverage"]["with_quality"] == 0
     assert unavailable["ambiguity"]["needs_review"] is True
+
+
+def test_burst_evidence_withholds_unbound_eyes_and_flags_a_clipped_subject(app_and_db):
+    app, db = app_and_db
+    pids = _seed_burst(db, _folder_id(db), 3069, [10, 80])
+    for pid in pids:
+        db.conn.execute("UPDATE photos SET width = 6000, height = 4000 WHERE id = ?", (pid,))
+    # A legacy photo-level eye the focus crop will not center on.
+    db.conn.execute("UPDATE photos SET eye_x = 0.8, eye_y = 0.8, eye_conf = 0.9, eye_tenengrad = 40 WHERE id = ?",
+                    (pids[0],))
+    # A close bird: the active-mask prompt box spans 0.5 x 0.6 of the frame.
+    db.conn.execute("DELETE FROM detections WHERE photo_id = ?", (pids[1],))
+    db.detections.save(pids[1], [{"box": {"x": 0.2, "y": 0.2, "w": 0.5, "h": 0.6},
+                                   "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    db.conn.execute("UPDATE photo_masks SET prompt_x = 0.2, prompt_y = 0.2, prompt_w = 0.5, prompt_h = 0.6 "
+                    "WHERE photo_id = ?", (pids[1],))
+    db.commit()
+
+    client = app.test_client()
+    pack = client.get(f"/api/photos/{pids[0]}/burst-evidence").get_json()
+    cards = {c["id"]: c for c in pack["cards"]}
+    legacy = cards[pids[0]]
+    assert legacy["eye_x"] is None and legacy["eye_y"] is None and legacy["eye_conf"] is None
+    assert legacy["eye_status"] == "unbound"
+    # The 0.2 x 0.2 box is 1200 x 800 pixels; the close bird is 3000 x 2400.
+    assert legacy["focus_crop_clips_subject"] is True
+    assert cards[pids[1]]["focus_crop_clips_subject"] is True
+    db.conn.execute("UPDATE photos SET width = 600, height = 400 WHERE id = ?", (pids[0],))
+    db.commit()
+    pack = client.get(f"/api/photos/{pids[0]}/burst-evidence?focus_size=256").get_json()
+    assert {c["id"]: c["focus_crop_clips_subject"] for c in pack["cards"]} == {pids[0]: False, pids[1]: True}
