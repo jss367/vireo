@@ -828,3 +828,15 @@ def test_burst_evidence_withholds_unbound_eyes_and_flags_a_clipped_subject(app_a
     db.commit()
     pack = client.get(f"/api/photos/{pids[0]}/burst-evidence?focus_size=256").get_json()
     assert {c["id"]: c["focus_crop_clips_subject"] for c in pack["cards"]} == {pids[0]: False, pids[1]: True}
+
+
+def test_selected_subject_fit_uses_the_bound_eye_center():
+    from burst_evidence import _selected_focus_fit
+    subject = {"detection_id": 7, "candidates": [{"detection_id": 7, "box": {"x": .5, "y": .5, "w": .06, "h": .06}}]}
+    card = {"subject": subject, "focus_crop_url": "/photos/1/focus-crop?size=512&detection_id=7&analysis_key=k",
+            "eye_x": .502, "eye_y": .502, "eye_tenengrad": 40}
+    evidence = {"width": 6000, "height": 4000}
+    # 360 x 240 pixels fits a window on the box middle; the eye at its corner does not.
+    assert _selected_focus_fit(card, evidence, 512, eye_enabled=False) is False
+    assert _selected_focus_fit(card, evidence, 512, eye_enabled=True) is True
+    assert _selected_focus_fit({**card, "focus_crop_url": None}, evidence, 512, eye_enabled=True) is None

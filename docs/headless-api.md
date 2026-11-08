@@ -219,8 +219,9 @@ subject or its mask generation, so the default pack withholds them (`eye_x`,
 scorer used) and `basis=eye` without a selected subject returns 404.
 Otherwise the crop is centered on the detection box, which on a perched bird
 is usually the body. Each card's `focus_crop_clips_subject` is `true` when
-that box is larger than the crop in native pixels, so the crop cannot show
-the whole animal and may miss the head; `false` when it fits; `null` when
+the crop's native window, centered where the crop centers (the box middle, or
+a selected subject's bound eye), cuts off part of the box, so the crop cannot
+show the whole animal and may miss the head; `false` when it fits; `null` when
 unknown (no box or catalog size, or the answer depends on an EXIF rotation
 the pack does not read). The crop's `X-Vireo-Focus-Subject-Clipped` header
 (`1`, `0` or `unknown`) gives the exact answer for the decoded raster. When a

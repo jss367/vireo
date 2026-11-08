@@ -47,7 +47,7 @@ from best_batch import (
     limit_batch_rows,
 )
 from config import config_value
-from focus_crop import focus_subject_detections, subject_exceeds_window
+from focus_crop import focus_point, focus_subject_detections, subject_exceeds_window
 from scoring import DEFAULTS as SCORING_DEFAULTS
 from scoring import _normalize_scoring_config
 
@@ -315,11 +315,28 @@ def card_urls(photo_id, *, has_mask, focus_size=DEFAULT_FOCUS_CROP_SIZE, mask_va
     }
 
 
-def _focus_fit(box, evidence, focus_size):
+def _focus_fit(box, evidence, focus_size, center=None):
     """``focus_crop_clips_subject`` for one card: True, False or None (unknown)."""
     if box is None or not evidence:
         return None
-    return subject_exceeds_window(box, evidence["width"], evidence["height"], focus_size)
+    return subject_exceeds_window(box, evidence["width"], evidence["height"], focus_size, center=center)
+
+
+def _selected_focus_fit(card, evidence, focus_size, eye_enabled):
+    """The fit of a selected-subject crop, centered where the crop route centers it.
+
+    With eye scoring on, a bound eye inside the selected box moves the window
+    off the box middle (``focus_point``), so a box smaller than the window can
+    still be clipped at its far end.
+    """
+    box = _selected_box(card["subject"])
+    if box is None or not card["focus_crop_url"]:
+        return None
+    try:
+        center, _ = focus_point(card, [box], "auto", eye_enabled=eye_enabled)
+    except ValueError:
+        return None
+    return _focus_fit(box, evidence, focus_size, center=center)
 
 
 def _unbound_focus_box(db, photo_id):
@@ -461,11 +478,15 @@ def build_evidence_pack(
 
 
 def _selected_box(selection):
-    """The selected detection's box from a comparison card's candidates, in detection-row keys."""
+    """The selected detection's box from a comparison card's candidates, as a detection row.
+
+    Only an animal detection is ever selected, which ``focus_point`` checks.
+    """
     detection_id = selection.get("detection_id")
     for candidate in selection.get("candidates", []):
         if candidate["detection_id"] == detection_id:
-            return {"box_" + k: v for k, v in candidate["box"].items()}
+            box = {"box_" + k: v for k, v in candidate["box"].items()}
+            return {**box, "category": "animal", "detector_model": "selected"}
     return None
 
 
@@ -475,9 +496,9 @@ def _subject_evidence_pack(db, seed_photo_id, rows, comparison, scoring, margin,
     evidence_rows = db.photos.analysis_evidence_rows([row["id"] for row in rows], scoring["detector_confidence"])
     for card in pack["cards"]:
         card.update(subject_urls(card["id"], card["subject"], focus_size))
-        card["focus_crop_clips_subject"] = _focus_fit(
-            _selected_box(card["subject"]), evidence_rows.get(card["id"]), focus_size,
-        ) if card["focus_crop_url"] else None
+        card["focus_crop_clips_subject"] = _selected_focus_fit(
+            card, evidence_rows.get(card["id"]), focus_size, scoring["eye_detect_enabled"],
+        )
     pack["coverage"] = coverage_counts(pack["cards"])
     pack["coverage"]["with_selected_subject"] = sum(c["subject"]["detection_id"] is not None for c in pack["cards"])
     pack["ambiguity"] = _evidence_ambiguity(pack, scoring, margin)

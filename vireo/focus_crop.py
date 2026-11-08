@@ -109,18 +109,25 @@ def window_clips_subject(window, image_size, box):
             or (bx + bw) * iw > x2 + 1 or (by + bh) * ih > y2 + 1)
 
 
-def subject_exceeds_window(box, width, height, size):
-    """Whether a native ``size`` square cannot hold the whole subject box.
+def subject_exceeds_window(box, width, height, size, center=None):
+    """Whether the native ``size`` window the crop takes cuts off part of the subject box.
 
-    True when it cannot, False when it can, None when that is unknown.
+    ``center`` is the normalized upright point the crop centers on (an eye,
+    say); by default the middle of the box, as for a subject crop. The window
+    is clamped to the frame exactly as ``focus_window`` does. True when it
+    clips the box, False when it holds all of it, None when that is unknown.
     Catalog ``width``/``height`` are the unrotated sensor axes while boxes
     are normalized to the upright frame, so both axis assignments are tried
     and only an answer they agree on is returned.
     """
     if not width or not height or not valid_subject_box(box):
         return None
-    bw, bh = float(box["box_w"]), float(box["box_h"])
-    answers = {max(bw * w, bh * h) > size for w, h in ((width, height), (height, width))}
+    if center is None:
+        center = (float(box["box_x"]) + float(box["box_w"]) / 2, float(box["box_y"]) + float(box["box_h"]) / 2)
+    answers = set()
+    for raster in ((width, height), (height, width)):
+        window, _ = focus_window(raster, center, size)
+        answers.add(window_clips_subject(window, raster, box))
     return answers.pop() if len(answers) == 1 else None
 
 

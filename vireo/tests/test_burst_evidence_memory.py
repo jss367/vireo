@@ -114,7 +114,8 @@ pure["SCORING_DEFAULTS"] = ast.literal_eval(
     )
 )
 load("burst_evidence.py", pure, assignments=True)
-load("focus_crop.py", pure, {"subject_exceeds_window", "valid_subject_box"})
+load("focus_crop.py", pure, {"subject_exceeds_window", "valid_subject_box", "focus_window",
+                            "window_clips_subject", "focus_point", "point_in_subject"})
 # Inert packs have no detections, so no focus box to fit.
 pure["focus_subject_detections"] = lambda db, photo_id: []
 # The builder must never import or invoke the real pipeline.
