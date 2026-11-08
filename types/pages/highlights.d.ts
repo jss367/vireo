@@ -41,7 +41,11 @@ interface Window {
     appendParams(params: URLSearchParams, options: Record<string, boolean | undefined>, matchCaseKey?: string, wholeWordKey?: string): void;
     toggle(namespace: string, option: string, callback: () => unknown): void;
   };
-  VireoViewPreferences: {restoreAll(root: HTMLElement): void};
+  VireoViewPreferences: {
+    restoreAll(root: HTMLElement): void;
+    read(key: string): string | null;
+    write(key: string, value: string): void;
+  };
   safeFetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
   showToast?(message: string, kind?: string): void;
   openLightbox(id: number, filename: string, photos: HighlightsLightboxPhoto[]): void;
