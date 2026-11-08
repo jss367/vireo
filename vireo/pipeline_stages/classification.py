@@ -1167,7 +1167,7 @@ class _ClassifyPass:
             # cache-heavy tails.
             if photo["id"] in spec.preflight_cached_ids:
                 spec.photos_cache_overcounted.add(photo["id"])
-        elif run_key in rejected_keys:
+        elif run_key in rejected_keys and photo["id"] in spec.preflight_cached_ids:
             # A classifier_runs row exists but its
             # ``runtime_fingerprint`` no longer matches (typically the
             # detector was re-run since the prior classify). Preflight
@@ -1182,8 +1182,7 @@ class _ClassifyPass:
             # any run key on this photo means the preflight never
             # counted it, so this branch isn't a preflight miss to
             # reconcile.
-            if photo["id"] in spec.preflight_cached_ids:
-                spec.photos_cache_overcounted.add(photo["id"])
+            spec.photos_cache_overcounted.add(photo["id"])
         return False
 
     def _classifier_run_key_gate(self, detection: DetectionDict) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
