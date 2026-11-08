@@ -75,10 +75,13 @@ function cullComparison(photoId, keeperId, scope) {
     var fa = a.focus_evidence;
     var fb = b.focus_evidence;
     if (fa && fb && fa.basis === fb.basis && typeof fa.measurement === 'number' && typeof fb.measurement === 'number') {
-      return {
+      /** @type {CullComparison} */
+      var record = {
         basis: fa.basis, measurement_name: fa.measurement_name || 'Tenengrad',
         photo: Math.round(fa.measurement), keeper: Math.round(fb.measurement), scope: scope,
       };
+      if (typeof fa.scale_px === 'number') record.scale_px = fa.scale_px;
+      return record;
     }
     if (typeof a.quality_composite === 'number' && typeof b.quality_composite === 'number') {
       return {basis: 'quality', measurement_name: 'quality rank in encounter',
@@ -128,8 +131,12 @@ function cullQualityOrder(a, b) {
 function cullKeeperText(keeperName, comparison) {
   var text = 'Instead of ' + keeperName;
   if (!comparison) return text + ' (no shared measurement)';
+  // A detail comparison made inside one encounter is the scorer's own
+  // evidence; the cross-encounter record is the one carrying each
+  // photo's cross-encounter quality beside the measurement.
   var where = comparison.scope === 'compared' ? 'compared side by side'
-    : comparison.basis === 'detail' ? 'across encounters' : 'same encounter';
+    : comparison.basis === 'detail' && typeof comparison.photo_quality === 'number' ? 'across encounters'
+    : 'same encounter';
   if (comparison.basis === 'detail') {
     return text + ' · subject detail ' + comparison.photo + ' vs ' + comparison.keeper +
       (comparison.scale_px ? ' at ' + comparison.scale_px + ' px' : '') + ' (' + where + ')';

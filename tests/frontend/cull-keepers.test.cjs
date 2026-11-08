@@ -245,6 +245,23 @@ test('across encounters a reject is compared by the fixed-scale subject detail',
     'Instead of p3.jpg · subject detail 6100 vs 9400 at 512 px (compared side by side)');
 });
 
+test('inside one encounter a detail-ranked reject is compared by the scorer\'s detail evidence', () => {
+  const {ctx} = page();
+  const data = resultsWithDetail();
+  const evidence = (value) => ({basis: 'detail', measurement: value, measurement_name: 'Tenengrad at 512 px subject scale', scale_px: 512});
+  data.photos[0].focus_evidence = evidence(18200.4);
+  data.photos[1].focus_evidence = evidence(6100.2);
+  ctx.setPipelineResults(data);
+  const comparison = plain(ctx.cullComparison(2, 1, 'encounter'));
+  assert.deepEqual(comparison, {
+    basis: 'detail', measurement_name: 'Tenengrad at 512 px subject scale', photo: 6100, keeper: 18200,
+    scope: 'encounter', scale_px: 512,
+  });
+  // No cross-encounter quality beside it, so the text says where the comparison was made.
+  assert.equal(ctx.cullKeeperText('p1.jpg', comparison),
+    'Instead of p1.jpg · subject detail 6100 vs 18200 at 512 px (same encounter)');
+});
+
 test('the Apply record carries the detail comparison for a cross-encounter keeper', () => {
   const {ctx} = page();
   ctx.setPipelineResults(resultsWithDetail());

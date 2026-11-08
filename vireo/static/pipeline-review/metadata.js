@@ -343,14 +343,24 @@ function buildRelativeFocusHtml(photo) {
     html += '<p>Measurement basis and comparison group were not recorded for this saved score. Rerun scoring to inspect them.</p>';
     if (photo.eye_tenengrad != null) html += '<p>Cached eye Tenengrad: ' + Number(photo.eye_tenengrad).toFixed(2) + '</p>';
   } else {
-    var basis = evidence.basis === 'eye' ? 'Eye window (multiple scales)' : 'Subject mask (multiple scales)';
-    html += '<p>Measurement basis: ' + basis + '. Raw Tenengrad: ' + evidence.measurement.toFixed(2) + ' (mean squared image gradients).</p>';
+    var basis = evidence.basis === 'eye' ? 'Eye window (multiple scales)'
+      : evidence.basis === 'detail' ? 'Subject mask resampled to ' + evidence.scale_px + ' px (multiple scales)'
+      : 'Subject mask (multiple scales)';
+    html += '<p>Measurement basis: ' + basis + '. Raw ' + escapeHtml(evidence.measurement_name || 'Tenengrad') + ': ' +
+      evidence.measurement.toFixed(2) + ' (mean squared image gradients).</p>';
     html += '<p>Within-group percentile: ' + (evidence.percentile * 100).toFixed(2) + '% among ' + evidence.cohort_size +
       ' photos with current subject analysis and the same measurement basis in the encounter, including this photo.</p>';
-    html += evidence.method === 'eye_percentile'
-      ? '<p>Relative focus score equals the eye percentile. Ties receive their midpoint rank; a single photo receives 50%.</p>'
-      : '<p>Relative focus score = 70% subject percentile + 30% subject / (subject + background) Tenengrad. Background Tenengrad: ' +
+    if (evidence.method === 'eye_percentile') {
+      html += '<p>Relative focus score equals the eye percentile. Ties receive their midpoint rank; a single photo receives 50%.</p>';
+    } else if (evidence.basis === 'detail') {
+      // The separation term reads the proxy-scale pair, not the resampled detail.
+      html += '<p>Relative focus score = 70% detail percentile + 30% subject / (subject + background) Tenengrad at proxy scale. Subject Tenengrad: ' +
+        Number(evidence.separation_measurement).toFixed(2) + ', background Tenengrad: ' + Number(evidence.background_measurement).toFixed(2) +
+        '. A measured zero detail receives a score of 0. Ties receive their midpoint rank; a single photo receives 50%.</p>';
+    } else {
+      html += '<p>Relative focus score = 70% subject percentile + 30% subject / (subject + background) Tenengrad. Background Tenengrad: ' +
         Number(evidence.background_measurement).toFixed(2) + '. Measured zero subject gradients receive a score of 0. Ties receive their midpoint rank; a single photo receives 50%.</p>';
+    }
     html += buildFocusCohortHtml(photo, evidence);
   }
   html += '<p>Absolute sharpness: unvalidated. Relative scores and raw gradients do not establish that a photo is out of focus. ' +

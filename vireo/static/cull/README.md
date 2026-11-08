@@ -41,7 +41,7 @@ comes with converting the page to modules.
   compare against); an already-saved reject is sent as a flag alone and the
   server preserves the record it has. `cullComparison` records the scorer's
   own evidence when both photos are in one encounter (the focus evidence
-  when they share its basis, else the composite quality; both are relative
+  when they share its basis (eye, detail or subject), else the composite quality; both are relative
   to that encounter's frames and are never compared across two). Across
   encounters it records the subject detail (`comparable_quality.detail`,
   Tenengrad at a fixed 512 px subject scale, `docs/comparable-quality.md`)

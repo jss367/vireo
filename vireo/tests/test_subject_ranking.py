@@ -82,10 +82,13 @@ def test_sharp_other_species_never_promotes_soft_target(comparison_library):
     assert pack["ranking_status"] == "provisional"
     assert pack["suggested_reject_ids"] == pack["alternate_ids"] == []
     assert soft["rank"] == 3 and soft["sharpness"] == 0
-    assert soft["focus_evidence"]["basis"] == "subject"
-    assert soft["focus_evidence"]["measurement"] == soft["sharpness"]
+    # The comparison measures the fixed-scale subject detail, so every card is ranked on it.
+    assert soft["focus_evidence"]["basis"] == "detail"
+    assert soft["focus_evidence"]["measurement"] == soft["subject_detail"] == 0
+    assert soft["focus_evidence"]["separation_measurement"] == soft["sharpness"]
     assert soft["focus_evidence"]["absolute_status"] == "not_validated"
-    assert set(pack["focus_cohorts"]["subject"]["photo_ids"]) == set(pids)
+    assert set(pack["focus_cohorts"]["detail"]["photo_ids"]) == set(pids)
+    assert pack["focus_cohorts"]["subject"]["photo_ids"] == []
     assert soft["label"] == "REVIEW" and soft["id"] not in pack["suggested_reject_ids"]
     assert not any(reason.startswith(("out_of_focus", "eye_soft")) for reason in soft["reject_reasons"])
     for card in pack["cards"]:
