@@ -106,14 +106,14 @@ class StartupTasks:
                     "retained-cache-maintenance", self._maintain_retained_caches,
                     workspace_id=None, singleton_key="retained-cache-maintenance",
                     lineage=JobLineage.system(
-                        "Hourly cleanup of generated files (previews, working "
+                        "Daily cleanup of generated files (previews, working "
                         "copies, analysis caches) Vireo can rebuild"
                     ),
                 )
             except Exception:
                 log.exception("Could not start retained generated-file maintenance")
             if not self._retained_cache_stopped.is_set():
-                self.schedule_retained_cache_maintenance(3600.0)
+                self.schedule_retained_cache_maintenance(24 * 60 * 60)
 
         self._retained_cache_timer = threading.Timer(delay, launch)
         self._retained_cache_timer.daemon = True

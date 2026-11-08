@@ -826,7 +826,7 @@ def test_scheduled_maintenance_launches_and_joins_real_singleton_job(app_and_db,
         assert timers[0].delay == 10
         timers[0].callback()
         assert started.wait(synchronization_timeout(5))
-        assert timers[1].delay == 3600
+        assert timers[1].delay == 24 * 60 * 60
         timers[1].callback()
         jobs = [job for job in app._job_runner.list_jobs() if job["type"] == "retained-cache-maintenance"]
         assert len(jobs) == 1 and jobs[0]["workspace_id"] is None
