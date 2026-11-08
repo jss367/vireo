@@ -132,17 +132,21 @@ test('details button expands the matching row even when the panel is already ope
 
 test('a toast whose entry was evicted from history silently no-ops rather than crashing', () => {
   const h = ui();
-  // Build a toast whose entry id does not match anything in history: simulate
-  // eviction by clearing the store after the toast is rendered.
   h.context.showToast('Earlier warning', 'warning', {details: 'details-1'});
-  h.context.store?.clear?.();
-  // Replace the store entries directly: clear the on-disk map so renderHistory finds no match.
-  // The toast itself still has its click handler.
+  // The module binds `store` as a top-level const, so it is not reachable
+  // through h.context. Simulate eviction by clearing the backing storage
+  // the module reads from: the next store.read() returns an empty list, so
+  // renderHistory finds no match and detailElements stays empty.
+  h.context.localStorage.setItem('vireo.notifications.v1', '[]');
   const detailsButton = h.container.children[0].children[1];
-  // This must not throw; the open-history call will render an empty list, and expandEntry is a no-op.
+  // This must not throw; openHistory renders an empty list, and expandEntry
+  // is a no-op because the entry's id is absent from detailElements.
   detailsButton.click();
-  // Panel is open; the row for the now-evicted entry is not present.
+  // Panel is open, the list shows the empty-state placeholder, and no row
+  // exists for the evicted entry.
   assert.equal(h.elements.notificationHistory.hidden, false);
+  assert.equal(h.elements.notificationList.textContent, 'No notifications yet.');
+  assert.equal(h.elements.notificationList.children.length, 0);
 });
 
 test('notification text is rendered as text and stored details survive page reload', () => {
