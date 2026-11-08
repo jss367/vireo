@@ -91,6 +91,21 @@ test('an expired job does not claim success', () => {
   assert.equal(outcome({status: 'expired', result: null}).type, 'warning');
 });
 
+test('a cancelled export with a zero-photo result reads the same in toast and history', () => {
+  const toasts = [];
+  const job = load({
+    safeEventSource(url, callbacks) { callbacks.onComplete({
+      status: 'cancelled', result: {exported: 0, errors: [], destinations: ['/out']},
+    }); },
+    showToast(message, type, options) { toasts.push([message, type, options]); },
+  });
+  job.watch('export-cancel');
+  // The persistent summary (first argument) and the expanded details must agree,
+  // not read "Export stopped after exporting 0 photos" against "stopped before any photo".
+  assert.equal(toasts[0][0], 'Export stopped before any photo was exported.');
+  assert.equal(toasts[0][2].details, 'Export stopped before any photo was exported');
+});
+
 test('watch toasts the outcome when the job stream completes', () => {
   const toasts = [];
   let streamed;

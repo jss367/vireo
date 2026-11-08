@@ -146,7 +146,8 @@ var VireoExportJob = (function() {
     if (!result) return done.status === 'expired' ? 'Export result is no longer available.'
       : done.status === 'cancelled' ? 'Export stopped.' : 'Export failed.';
     var count = result.exported || 0;
-    var message = done.status === 'cancelled' ? 'Export stopped after exporting ' + photos(count)
+    var message = done.status === 'cancelled'
+      ? (count ? 'Export stopped after exporting ' + photos(count) : 'Export stopped before any photo was exported')
       : count ? 'Exported ' + photos(count) : 'Nothing was exported';
     if (result.errors?.length) message += '. ' + photos(result.errors.length) + ' failed';
     if (missingMetadata(result)) message += '. ' + metadataWarning(result);

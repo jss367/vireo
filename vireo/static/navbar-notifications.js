@@ -8,6 +8,11 @@ const button = document.getElementById('notificationsToggle');
 const panel = document.getElementById('notificationHistory');
 const list = document.getElementById('notificationList');
 let escapeToken = 0;
+// The <details> element rendered for each history entry, keyed by its id,
+// so a toast's "View notification details" can expand the matching row.
+// A later renderHistory() replaces the map, and an entry evicted by the
+// 100-row cap is simply absent — expandEntry treats that as a no-op.
+const detailElements = new Map();
 
 /** @param {string} label @param {() => void} action */
 function actionButton(label, action) {
@@ -37,11 +42,13 @@ function updateBadge() {
 function renderHistory() {
   if (!list) return;
   list.replaceChildren();
+  detailElements.clear();
   const entries = store.read().slice().reverse();
   if (!entries.length) list.textContent = 'No notifications yet.';
   entries.forEach(entry => {
     const row = document.createElement('li');
     row.dataset.type = entry.type;
+    row.dataset.id = entry.id;
     const heading = document.createElement('div');
     heading.textContent = entry.type + (entry.read ? '' : ' · Unread') + ' · ' + new Date(entry.time).toLocaleString();
     heading.className = 'notification-meta';
@@ -56,6 +63,7 @@ function renderHistory() {
       text.textContent = entry.details;
       details.append(summary, text);
       row.appendChild(details);
+      detailElements.set(entry.id, details);
     }
     appendJobLink(row, entry.jobId);
     if (!entry.read) row.appendChild(actionButton('Mark read', () => {
@@ -63,6 +71,15 @@ function renderHistory() {
     }));
     list.appendChild(row);
   });
+}
+
+/** Open the matching history row's details, or no-op if it has been evicted.
+ * @param {string} id */
+function expandEntry(id) {
+  const details = detailElements.get(id);
+  if (!details) return;
+  details.open = true;
+  details.scrollIntoView?.({block: 'nearest'});
 }
 
 function closeHistory() {
@@ -115,7 +132,11 @@ export function showToast(msg, type, options = {}) {
   toast.appendChild(message);
   appendJobLink(toast, entry.jobId);
   if (entry.details) toast.appendChild(actionButton('View notification details', () => {
+    // Open the panel if needed (renderHistory populates detailElements), then
+    // expand the matching row whether it was just rendered or already visible.
+    // An entry evicted by the 100-row cap simply cannot be expanded.
     if (panel?.hidden) openHistory();
+    expandEntry(entry.id);
   }));
   if (type === 'warning' || type === 'error') toast.appendChild(actionButton('Dismiss', () => {
     store.markRead([entry.id]); toast.remove(); updateBadge();

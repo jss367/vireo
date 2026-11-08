@@ -172,6 +172,8 @@ export function bindJobListClicks() {
     if (!(e.target instanceof Element)) return;
     var viewItem = e.target.closest('[data-view]');
     if (viewItem) {
+      // The user chose a view; any pending ?job=X link is superseded.
+      state.pendingLinkedJobId = null;
       state.currentView = viewItem.getAttribute('data-view') || 'active';
       state.selectedJobId = null;
       state.selectedSource = null;

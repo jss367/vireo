@@ -1,12 +1,10 @@
 // Page startup: the module the template loads. Binds the list, filter and
 // detail-pane listeners, then runs the first fetches and the pollers.
 
-import { selectJob } from './selection.js';
-import { showToast } from './shared.js';
 import { jobsElement, state } from './state.js';
 import { bindDetailPaneActions } from './actions.js';
 import { applyFilters, applyOriginFilter, bindJobListClicks } from './list.js';
-import { fetchHistory, fetchJobs, retryJobsPolling } from './polling.js';
+import { fetchHistory, fetchJobs, resolvePendingLinkedJob, retryJobsPolling } from './polling.js';
 import { bindSourceCleanupConfirm } from './source-cleanup.js';
 import { bindStepRetryButtons } from './steps.js';
 
@@ -22,14 +20,13 @@ jobsElement('filterType', HTMLSelectElement).addEventListener('change', applyFil
 jobsElement('filterStatus', HTMLSelectElement).addEventListener('change', applyFilters);
 jobsElement('filterOrigin', HTMLSelectElement).addEventListener('change', applyOriginFilter);
 
-// Initial load. A failed snapshot leaves its lane empty or stale, so only
-// report the job as missing once both lanes have actually loaded.
-Promise.all([fetchJobs(), fetchHistory()]).then(([activeOk, historyOk]) => {
-  const jobId = new URLSearchParams(window.location.search).get('job');
-  if (!jobId) return;
-  if (state.activeJobs.some(job => job.id === jobId)) selectJob(jobId, 'active');
-  else if (state.historyJobs.some(job => job.id === jobId)) selectJob(jobId, 'history');
-  else if (activeOk && historyOk) showToast('This job is not in the recent job history. Its notification details remain in Notifications.', 'warning');
-});
+// A ?job=X link is retained across polling failures: each successful apply
+// retries the selection through resolvePendingLinkedJob(), and a transient
+// first-snapshot failure recovers when its lane next loads. The missing
+// warning only fires once both lanes have actually loaded; a user who
+// picks another job or view clears the pending link (selection.js, list.js).
+const linkedJobId = new URLSearchParams(window.location.search).get('job');
+if (linkedJobId) state.pendingLinkedJobId = linkedJobId;
+Promise.all([fetchJobs(), fetchHistory()]).then(resolvePendingLinkedJob);
 state.pollTimer = setInterval(function() { fetchJobs(true); }, 2000);
 setInterval(function() { fetchHistory(false, true); }, 10000);

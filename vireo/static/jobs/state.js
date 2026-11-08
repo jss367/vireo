@@ -13,6 +13,10 @@
  *   Active jobs and history refresh independently. A new explicit refresh
  *   retires its lane's older request; scheduled polls wait for that lane to
  *   settle.
+ * @property {string | null} pendingLinkedJobId
+ *   The `?job=X` URL parameter kept across failed polls so a transient
+ *   first-snapshot failure does not abandon the selection. Each successful
+ *   poll retries resolution; a job selection or view change clears it.
  * @property {string | null} historyRefreshSelectionId
  * @property {EventSource | null} sseSource
  * @property {Record<string, {name: string; status: string}[]>} leafBuffers
@@ -47,6 +51,7 @@ export const state = {
   selectedSource: null,
   pollTimer: null,
   jobsPollState: {active: pollLane(), history: pollLane()},
+  pendingLinkedJobId: null,
   historyRefreshSelectionId: null,
   sseSource: null,
   leafBuffers: {},

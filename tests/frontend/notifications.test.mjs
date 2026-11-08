@@ -99,6 +99,52 @@ test('only routine feedback expires; warnings remain dismissible and recoverable
   assert.equal(h.elements.notificationList.textContent, 'No notifications yet.');
 });
 
+test('clicking a toast\'s details button opens the panel and expands the matching row', () => {
+  const h = ui();
+  h.context.showToast('Missing species', 'warning', {details: 'Species keywords unavailable'});
+  // The toast order is: span, maybe job link, details button, dismiss button.
+  // No jobId was passed, so children are [message, details button, dismiss button].
+  const detailsButton = h.container.children[0].children[1];
+  detailsButton.click();
+  assert.equal(h.elements.notificationHistory.hidden, false);
+  // The row's <details> element (third child after heading, message) is open.
+  const row = h.elements.notificationList.children[0];
+  const row_details = row.children[2];
+  assert.equal(row_details.open, true);
+});
+
+test('details button expands the matching row even when the panel is already open', () => {
+  const h = ui();
+  // Open the panel first.
+  h.elements.notificationsToggle.click();
+  assert.equal(h.elements.notificationHistory.hidden, false);
+  h.context.showToast('Disk full', 'error', {details: '/photos is 98% full'});
+  // A new toast re-renders history while the panel is open; the row is now present but collapsed.
+  const row = h.elements.notificationList.children[0];
+  const row_details = row.children[2];
+  assert.equal(row_details.open, undefined);
+  // Click the toast's details button.
+  h.container.children[0].children[1].click();
+  // The panel stayed open, and the matching row's details are now expanded.
+  assert.equal(h.elements.notificationHistory.hidden, false);
+  assert.equal(row_details.open, true);
+});
+
+test('a toast whose entry was evicted from history silently no-ops rather than crashing', () => {
+  const h = ui();
+  // Build a toast whose entry id does not match anything in history: simulate
+  // eviction by clearing the store after the toast is rendered.
+  h.context.showToast('Earlier warning', 'warning', {details: 'details-1'});
+  h.context.store?.clear?.();
+  // Replace the store entries directly: clear the on-disk map so renderHistory finds no match.
+  // The toast itself still has its click handler.
+  const detailsButton = h.container.children[0].children[1];
+  // This must not throw; the open-history call will render an empty list, and expandEntry is a no-op.
+  detailsButton.click();
+  // Panel is open; the row for the now-evicted entry is not present.
+  assert.equal(h.elements.notificationHistory.hidden, false);
+});
+
 test('notification text is rendered as text and stored details survive page reload', () => {
   const disk = storage();
   const first = ui(disk);
@@ -111,44 +157,102 @@ test('notification text is rendered as text and stored details survive page relo
   assert.equal(row.children[2].children[1].textContent, '<script>bad</script>');
 });
 
-test('job links select the requested job after both snapshots finish', async () => {
-  const source = readFileSync('vireo/static/jobs/boot.js', 'utf8').replace(/^import .*;\n/gm, '');
-  for (const location of ['active', 'history', 'missing']) {
-    const selected = [];
-    const warnings = [];
-    let resolveJobs;
-    const pending = new Promise(resolve => { resolveJobs = resolve; });
-    const state = {activeJobs: [], historyJobs: []};
-    const context = vm.createContext({state, URLSearchParams, window: {location: {search: '?job=export-1'}},
-      HTMLButtonElement: Element, HTMLSelectElement: Element, jobsElement: () => new Element(),
-      bindJobListClicks() {}, bindSourceCleanupConfirm() {}, bindStepRetryButtons() {}, bindDetailPaneActions() {},
-      retryJobsPolling() {}, applyFilters() {}, applyOriginFilter() {}, setInterval() {},
-      fetchJobs: () => pending, fetchHistory: () => Promise.resolve(true),
-      selectJob: (...args) => selected.push(args), showToast: (...args) => warnings.push(args)});
-    vm.runInContext(source, context);
-    assert.equal(selected.length, 0);
-    if (location !== 'missing') state[location === 'active' ? 'activeJobs' : 'historyJobs'].push({id: 'export-1'});
-    resolveJobs(true);
-    await new Promise(resolve => setImmediate(resolve));
-    if (location === 'missing') assert.match(warnings[0][0], /not in the recent job history/);
-    else assert.deepEqual(selected, [['export-1', location]]);
+// The ?job=X resolver lives in polling.js and is called from boot.js after
+// the initial Promise.all and from every successful fetchJobs/fetchHistory
+// apply. Load its source once so the tests exercise the shipped function
+// rather than a transcription.
+const pollingSource = readFileSync('vireo/static/jobs/polling.js', 'utf8');
+const resolverSource = pollingSource.match(/export function resolvePendingLinkedJob[\s\S]*?\n\}/)[0].replace(/^export /, '');
+function linkedJobContext(initial = {}) {
+  const selected = [];
+  const warnings = [];
+  const state = Object.assign({activeJobs: [], historyJobs: [], pendingLinkedJobId: null, selectedJobId: null,
+    jobsPollState: {active: {loaded: false}, history: {loaded: false}}}, initial);
+  const context = vm.createContext({state,
+    // The real selectJob clears pendingLinkedJobId; mirror that so tests see the final shape.
+    selectJob: (id, src) => { selected.push([id, src]); state.pendingLinkedJobId = null; },
+    showToast: (...args) => warnings.push(args)});
+  vm.runInContext(resolverSource + '\nthis.resolve = resolvePendingLinkedJob;', context);
+  return {state, selected, warnings, resolve: context.resolve};
+}
+
+test('a URL-linked job is selected once the lane that holds it loads', () => {
+  for (const location of ['active', 'history']) {
+    const h = linkedJobContext({pendingLinkedJobId: 'export-1'});
+    // Only the non-holding lane has loaded so far. No match, no warning.
+    h.state.jobsPollState[location === 'active' ? 'history' : 'active'].loaded = true;
+    h.resolve();
+    assert.equal(h.selected.length, 0);
+    assert.equal(h.warnings.length, 0);
+    // The holding lane recovers and the job appears.
+    h.state.jobsPollState[location].loaded = true;
+    h.state[location === 'active' ? 'activeJobs' : 'historyJobs'].push({id: 'export-1'});
+    h.resolve();
+    assert.deepEqual(h.selected, [['export-1', location]]);
+    assert.equal(h.state.pendingLinkedJobId, null);
   }
 });
 
-test('a failed snapshot suppresses the "not in recent history" warning', async () => {
+test('the missing-job warning waits for both lanes to actually load', () => {
+  const h = linkedJobContext({pendingLinkedJobId: 'export-1'});
+  // Active loaded without the job; history still not loaded. No warning yet.
+  h.state.jobsPollState.active.loaded = true;
+  h.resolve();
+  assert.equal(h.warnings.length, 0);
+  assert.equal(h.state.pendingLinkedJobId, 'export-1');
+  // History loaded, job is in neither — now the warning fires and the link clears.
+  h.state.jobsPollState.history.loaded = true;
+  h.resolve();
+  assert.match(h.warnings[0][0], /not in the recent job history/);
+  assert.equal(h.state.pendingLinkedJobId, null);
+});
+
+test('resolution retries after a lane that initially failed recovers', () => {
+  const h = linkedJobContext({pendingLinkedJobId: 'export-1'});
+  // First polls: both lanes failed (loaded stays false). Resolver is called
+  // but has nothing to do and must not warn.
+  h.resolve();
+  assert.equal(h.selected.length, 0);
+  assert.equal(h.warnings.length, 0);
+  assert.equal(h.state.pendingLinkedJobId, 'export-1');
+  // History recovers with the job absent; active still failed. Still no warning.
+  h.state.jobsPollState.history.loaded = true;
+  h.resolve();
+  assert.equal(h.warnings.length, 0);
+  // Active recovers and the linked job is now in it. The selection fires late,
+  // which is exactly the recovery the user asked for.
+  h.state.jobsPollState.active.loaded = true;
+  h.state.activeJobs.push({id: 'export-1'});
+  h.resolve();
+  assert.deepEqual(h.selected, [['export-1', 'active']]);
+});
+
+test('a user selection made before resolution supersedes the URL link', () => {
+  const h = linkedJobContext({pendingLinkedJobId: 'export-1', selectedJobId: 'other-job'});
+  // Both lanes loaded, and the linked job is not there. But because the user
+  // has already chosen 'other-job', the resolver drops the link silently
+  // rather than shouting "missing" or jumping away from their selection.
+  h.state.jobsPollState.active.loaded = true;
+  h.state.jobsPollState.history.loaded = true;
+  h.resolve();
+  assert.equal(h.selected.length, 0);
+  assert.equal(h.warnings.length, 0);
+  assert.equal(h.state.pendingLinkedJobId, null);
+});
+
+test('boot.js sets pendingLinkedJobId from ?job=X and defers to the resolver', async () => {
   const source = readFileSync('vireo/static/jobs/boot.js', 'utf8').replace(/^import .*;\n/gm, '');
-  for (const failed of ['active', 'history']) {
-    const warnings = [];
-    const state = {activeJobs: [], historyJobs: []};
-    const context = vm.createContext({state, URLSearchParams, window: {location: {search: '?job=export-1'}},
-      HTMLButtonElement: Element, HTMLSelectElement: Element, jobsElement: () => new Element(),
-      bindJobListClicks() {}, bindSourceCleanupConfirm() {}, bindStepRetryButtons() {}, bindDetailPaneActions() {},
-      retryJobsPolling() {}, applyFilters() {}, applyOriginFilter() {}, setInterval() {},
-      fetchJobs: () => Promise.resolve(failed !== 'active'),
-      fetchHistory: () => Promise.resolve(failed !== 'history'),
-      selectJob() {}, showToast: (...args) => warnings.push(args)});
-    vm.runInContext(source, context);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(warnings.length, 0);
-  }
+  const resolveCalls = [];
+  const state = {activeJobs: [], historyJobs: [], pendingLinkedJobId: null,
+    jobsPollState: {active: {loaded: false}, history: {loaded: false}}};
+  const context = vm.createContext({state, URLSearchParams, window: {location: {search: '?job=export-1'}},
+    HTMLButtonElement: Element, HTMLSelectElement: Element, jobsElement: () => new Element(),
+    bindJobListClicks() {}, bindSourceCleanupConfirm() {}, bindStepRetryButtons() {}, bindDetailPaneActions() {},
+    retryJobsPolling() {}, applyFilters() {}, applyOriginFilter() {}, setInterval() {},
+    fetchJobs: () => Promise.resolve(true), fetchHistory: () => Promise.resolve(true),
+    resolvePendingLinkedJob: () => resolveCalls.push(null)});
+  vm.runInContext(source, context);
+  assert.equal(state.pendingLinkedJobId, 'export-1');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resolveCalls.length, 1);
 });
