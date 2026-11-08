@@ -166,7 +166,7 @@ Current stable set:
 | Method | Path | Description |
 | --- | --- | --- |
 | GET  | `/api/v1/health` | Liveness probe. |
-| GET  | `/api/v1/version` | `{"version": "x.y.z"}`. |
+| GET  | `/api/v1/version` | `{"version": "x.y.z", "build_commit": "<full Git commit>"}`. The packaged version matches About Vireo; About also shows the first 12 commit characters. `build_commit` is `null` when unavailable (for example, older bundles). |
 | POST | `/api/v1/shutdown` | Gracefully stop the sidecar. |
 | GET  | `/api/v1/photos` | List/search photos in the active workspace. |
 | GET  | `/api/v1/photos/<id>` | One photo's metadata. |

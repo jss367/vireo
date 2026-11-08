@@ -437,7 +437,7 @@ def _register_catalog_tools(server, client):
 
     @server.tool()
     def vireo_status() -> dict:
-        """Whether Vireo is running, its version, the catalog it has open,
+        """Whether Vireo is running, its app version and build commit,
         the active workspace and how many photos it holds."""
         version = client.get_json("/api/v1/version")
         workspace = client.get_json("/api/workspaces/active", {"include_folders": "0"})
@@ -445,6 +445,7 @@ def _register_catalog_tools(server, client):
         out = {
             "running": True,
             "version": version.get("version"),
+            "build_commit": version.get("build_commit"),
             "active_workspace": _pick(workspace, ("id", "name")),
             "photo_count": photos.get("total"),
         }
