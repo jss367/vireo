@@ -435,6 +435,7 @@ def _valid_photo_id(value: object) -> bool:
 #: not a measurement but a payload, and the column is not for that.
 COMPARISON_MAX_KEYS = 12
 COMPARISON_MAX_JSON_CHARS = 1000
+COMPARISON_MAX_ABS_INT = 2**53
 
 
 def _valid_comparison(value: object) -> bool:
@@ -453,6 +454,9 @@ def _valid_comparison_value(item: object) -> bool:
         return True
     if isinstance(item, bool) or not isinstance(item, (int, float)):
         return False
+    if isinstance(item, int):
+        # A measurement fits a double; an int past that range would overflow isfinite.
+        return abs(item) <= COMPARISON_MAX_ABS_INT
     return math.isfinite(item)
 
 

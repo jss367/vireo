@@ -154,7 +154,7 @@ def test_apply_rejects_bad_rejections(app_and_db):
     assert post([{"photo_id": loser, "keeper_photo_id": other}], rejects=[loser, other]).status_code == 400
     assert post([{"photo_id": loser, "keeper_photo_id": keeper, "comparison": "eye"}]).status_code == 400
     assert post([{"photo_id": loser, "keeper_photo_id": keeper, "comparison": {"nested": {"a": 1}}}]).status_code == 400
-    for bad in (float("nan"), float("inf"), float("-inf")):
+    for bad in (float("nan"), float("inf"), float("-inf"), 10**309, -(10**309), 2**53 + 1):
         resp = client.post("/api/culling/apply", data=json.dumps({
             "keepers": [keeper], "rejects": [loser], "unflag": [],
             "rejections": [{"photo_id": loser, "keeper_photo_id": keeper, "comparison": {"photo": bad}}],
