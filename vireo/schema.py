@@ -260,11 +260,19 @@ def _add_classifier_background_match(conn):
     Rows written before this stay NULL: the prompts were not scored, so the
     verdict for those runs is "not measured", not "not background". A
     re-classification fills them in.
+
+    A dev catalog stamped ``user_version=33`` by this branch before the
+    restack has the background columns but lacks the keeper columns that
+    migration 33 (`flag_attribution_keeper`) adds on main, and would skip
+    that migration here because ``_apply_pending`` runs only migrations
+    newer than ``user_version``. Idempotently repair both column sets so
+    either alternate v33 layout converges on the canonical v34 schema.
     """
     present = _classifier_match_score_columns(conn)
     for column, definition in CLASSIFIER_BACKGROUND_COLUMNS:
         if column not in present:
             conn.execute(f"ALTER TABLE classifier_match_scores ADD COLUMN {column} {definition}")
+    _add_flag_attribution_keeper(conn)
 
 
 def _validate_classifier_background_match(conn):
@@ -272,6 +280,7 @@ def _validate_classifier_background_match(conn):
     missing = [column for column, _ in CLASSIFIER_BACKGROUND_COLUMNS if column not in columns]
     if missing:
         raise RuntimeError(f"classifier_match_scores is missing {', '.join(missing)}")
+    _validate_flag_attribution_keeper(conn)
 
 
 # Job types only Vireo itself started before ``origin`` was recorded: the

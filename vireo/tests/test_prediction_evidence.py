@@ -314,3 +314,35 @@ def test_background_migration_is_a_noop_when_columns_already_exist(tmp_path):
         assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         columns = {row[1] for row in conn.execute('PRAGMA table_info(classifier_match_scores)')}
         assert {'background_score', 'background_prompt'} <= columns
+
+
+def test_background_migration_repairs_alternate_v33_missing_keeper_columns(tmp_path):
+    """A dev catalog stamped v33 by this branch before the restack has the
+    background columns but no keeper columns, and ``_apply_pending`` would
+    skip migration 33 on it. Migration 34 must idempotently repair the
+    keeper columns too, preserving any existing rows."""
+    path = str(tmp_path / 'alternate-v33.db')
+    with Database(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO current_flag_attribution "
+            "(workspace_id, photo_id, flag, source, reason, description, created_at) "
+            "VALUES (1, 1, 'rejected', 'cull', 'duplicate', 'kept sibling', '2026-01-01')"
+        )
+        conn.execute('ALTER TABLE current_flag_attribution DROP COLUMN keeper_photo_id')
+        conn.execute('ALTER TABLE current_flag_attribution DROP COLUMN comparison')
+        conn.execute('ALTER TABLE current_flag_attribution DROP COLUMN keeper_deleted_at')
+        conn.execute('PRAGMA user_version=33')
+        conn.commit()
+        schema._apply_pending(conn)
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        attribution = {row[1] for row in conn.execute('PRAGMA table_info(current_flag_attribution)')}
+        assert {'keeper_photo_id', 'comparison', 'keeper_deleted_at'} <= attribution
+        background = {row[1] for row in conn.execute('PRAGMA table_info(classifier_match_scores)')}
+        assert {'background_score', 'background_prompt'} <= background
+        preserved = conn.execute(
+            "SELECT reason, description FROM current_flag_attribution WHERE photo_id = 1"
+        ).fetchone()
+        assert preserved == ('duplicate', 'kept sibling')
