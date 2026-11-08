@@ -278,3 +278,23 @@ test('favorite suggestions on one day are ordered by the cross-encounter quality
   const c = {photo_id: 4, quality: 0.3, comparable: null};
   assert.deepEqual([b, c, a].sort(ctx.cullQualityOrder).map(p => p.photo_id), [2, 3, 4]);
 });
+
+test('mixing measured and unmeasured photos sorts transitively', () => {
+  // Pre-fix: the comparator used comparable for measured/measured pairs
+  // and encounter quality whenever either side was unmeasured, which
+  // formed cycles — A beats B on comparable, C beats A on encounter,
+  // B beats C on encounter — so ``Array.sort`` returned a different
+  // leader depending on input order. Partitioning measured first keeps
+  // every pairwise call consistent with the final order.
+  const {ctx} = page();
+  const A = {photo_id: 1, quality: 0.3, comparable: 0.9};
+  const B = {photo_id: 2, quality: 0.6, comparable: 0.8};
+  const C = {photo_id: 3, quality: 0.5, comparable: null};
+  const permutations = [
+    [A, B, C], [A, C, B], [B, A, C], [B, C, A], [C, A, B], [C, B, A],
+  ];
+  const sorted = permutations.map(p => p.slice().sort(ctx.cullQualityOrder).map(x => x.photo_id));
+  for (const result of sorted) assert.deepEqual(result, sorted[0]);
+  // Measured photos lead unmeasured ones regardless of encounter rank.
+  assert.deepEqual(sorted[0], [1, 2, 3]);
+});

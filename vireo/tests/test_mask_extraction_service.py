@@ -111,7 +111,8 @@ def test_service_uses_captured_workspace_and_reports_progress(db, tmp_path, extr
 
     assert result == {
         "masked": 1, "skipped": 0, "failed": 0, "unreadable": 0,
-        "total": 1, "detail_measured": 0, "detail_unreadable": 0, "ok": True, "errors": [],
+        "total": 1, "detail_measured": 0, "detail_unreadable": 0,
+        "mask_cache_invalidated": 0, "ok": True, "errors": [],
     }
     assert db.masks_features.get_mask(first, "sam2-base")["subject_detail"] == 100.0
     assert len(extraction.generated) == 1
@@ -198,3 +199,58 @@ def test_dependency_failure_closes_worker_database(extraction, monkeypatch):
     with pytest.raises(RuntimeError, match="model dependencies unavailable"):
         run(extraction)
     assert_released(extraction)
+
+
+def test_fresh_mask_whose_detail_reread_fails_credits_detail_unreadable(db, tmp_path, extraction):
+    # A source that becomes unreadable between the proxy decode and the
+    # larger-edge detail re-read: the fresh mask is stored but its detail
+    # measurement stays pending, counted the same way as a cached mask
+    # with pending detail so the job result does not claim completion
+    # with planned work left behind.
+    first = seed_photo(db, tmp_path, "source-lost-midrun")
+    extraction.deps.measure_subject_detail = (
+        lambda proxy, mask, *, source_path, frame_size=None: {}
+    )
+
+    result = run(extraction)
+
+    assert result["masked"] == 1
+    assert result["detail_unreadable"] == 1
+    assert result["ok"] is False
+    assert any("subject detail measurement" in e for e in result["errors"])
+    stored = db.masks_features.get_mask(first, "sam2-base")
+    assert stored is not None and stored["subject_detail"] is None
+    assert_released(extraction, first)
+
+
+def test_cached_mask_whose_png_will_not_decode_is_dropped_so_extract_rebuilds_it(
+    db, tmp_path, extraction,
+):
+    # A photo_masks row whose PNG is corrupt would be reused forever:
+    # os.path.isfile passes, we take the cache hit, the detail re-read
+    # fails on every run, and the mask is never regenerated. Dropping
+    # the file here makes the next Extract miss the cache and rebuild.
+    import quality
+
+    first = seed_photo(db, tmp_path, "cached-but-corrupt")
+    assert run(extraction)["masked"] == 1
+    mask_path = Path(db.masks_features.get_mask(first, "sam2-base")["path"])
+    assert mask_path.is_file()
+    db.conn.execute(
+        "UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL "
+        "WHERE photo_id=?",
+        (first,),
+    )
+    db.commit()
+    extraction.deps.measure_cached_subject_detail = (
+        lambda mask_path, source_path, frame_size=None: quality.MASK_CACHE_INVALID
+    )
+
+    result = run(extraction)
+
+    assert result["mask_cache_invalidated"] == 1
+    assert result["detail_unreadable"] == 0
+    assert result["ok"] is False
+    assert any("will be rebuilt on the next Extract run" in e for e in result["errors"])
+    assert not mask_path.is_file()
+    assert_released(extraction, first)

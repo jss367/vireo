@@ -75,6 +75,7 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
     )
     from pipeline_locks import acquire_photo_mask
     from quality import (
+        MASK_CACHE_INVALID,
         compute_all_quality_features,
         frame_size,
         measure_cached_subject_detail,
@@ -100,6 +101,7 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
         frame_size=frame_size,
         measure_subject_detail=measure_subject_detail,
         measure_cached_subject_detail=measure_cached_subject_detail,
+        mask_cache_invalid=MASK_CACHE_INVALID,
         ResourceWaitCancelled=ResourceWaitCancelled,
         sync_primary=sync_primary,
     )
@@ -198,11 +200,18 @@ class _MaskExtractionRun:
         # hard-rejected in Process Review as `no_subject_mask`. Mirrors
         # extract_masks_stage in pipeline_job.
         self.unreadable = 0
-        # Cached masks measured for subject detail this run, and those
-        # whose mask or source could not be read for it (still masked,
-        # measurement pending).
+        # Masks measured for subject detail this run, and those whose
+        # source could not be read for it (still masked, measurement
+        # pending). Both the cached and the fresh-mask path credit
+        # ``detail_unreadable`` so the job result does not claim
+        # completion with planned work pending.
         self.detail_measured = 0
         self.detail_unreadable = 0
+        # Cached mask PNGs that failed to decode this run: the file
+        # is dropped so ``_reuse_cached_mask`` misses next time and
+        # the next Extract rebuilds the mask instead of looping on
+        # the same decode error.
+        self.mask_cache_invalidated = 0
         job["_start_time"] = time.time()
 
         for i, photo in enumerate(photos):
@@ -353,9 +362,17 @@ class _MaskExtractionRun:
         # fixed-scale subject detail (comparable across encounters)
         completeness = deps.crop_completeness(mask)
         features = deps.compute_all_quality_features(proxy, mask)
-        features.update(deps.measure_subject_detail(
+        detail = deps.measure_subject_detail(
             proxy, mask, source_path=item.image_path, frame_size=deps.frame_size(photo),
-        ))
+        )
+        if detail:
+            features.update(detail)
+        else:
+            # Source went unreadable between the proxy decode and this
+            # larger-edge re-read: the mask is stored but its detail
+            # measurement stays pending, counted so the final job status
+            # does not claim completion with planned work left behind.
+            self.detail_unreadable += 1
 
         subj_emb_blob, global_emb_blob = self._embed(proxy, mask)
         self._store_mask(
@@ -452,6 +469,9 @@ class _MaskExtractionRun:
 
         The mask stays valid when its source cannot be read; only the
         measurement stays pending, counted apart so the result says so.
+        A mask PNG that fails to decode is a different failure: the cache
+        is lost, so the file is dropped and the next Extract regenerates
+        the mask instead of looping on the same decode error.
         """
         existing = item.existing
         if existing is None:
@@ -459,6 +479,10 @@ class _MaskExtractionRun:
         measured = self.deps.measure_cached_subject_detail(
             existing["path"], item.image_path, self.deps.frame_size(item.photo),
         )
+        if measured is self.deps.mask_cache_invalid:
+            self.thread_db.masks_features.remove_file(existing["path"])
+            self.mask_cache_invalidated += 1
+            return
         if measured is None:
             self.detail_unreadable += 1
             return
@@ -621,8 +645,16 @@ class _MaskExtractionRun:
                 f"subject detail measurement because the source could not be "
                 f"read; run Extract again when it is reachable."
             )
+        if self.mask_cache_invalidated:
+            noun, verb = (("mask PNG", "was") if self.mask_cache_invalidated == 1
+                          else ("mask PNGs", "were"))
+            job_errors.append(
+                f"{self.mask_cache_invalidated} cached {noun} {verb} "
+                f"unreadable and will be rebuilt on the next Extract run."
+            )
         return {"masked": self.masked, "skipped": self.skipped,
                 "failed": failed, "unreadable": unreadable, "total": total,
                 "detail_measured": self.detail_measured,
                 "detail_unreadable": self.detail_unreadable,
+                "mask_cache_invalidated": self.mask_cache_invalidated,
                 "ok": not job_errors, "errors": job_errors}

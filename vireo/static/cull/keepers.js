@@ -98,13 +98,22 @@ function cullComparison(photoId, keeperId, scope) {
 }
 
 /**
- * Orders two cards best first by the quality that fits their relation:
- * the cross-encounter quality when both have it, else the encounter rank.
+ * Orders two cards best first by one sortable key per photo, so a day
+ * mixing measured and unmeasured photos still sorts transitively.
+ * Measured photos (cross-encounter quality) come first in their own
+ * comparable order; unmeasured photos follow in their encounter rank.
+ * Mixing the two scales inside one comparator produces cycles — a
+ * measured A can beat a measured B on comparable while an unmeasured
+ * C beats A and loses to B on encounter rank — and ``Array.sort`` then
+ * picks a different favorite depending on input order.
  *
  * @param {CullDisplayPhoto} a @param {CullDisplayPhoto} b
  */
 function cullQualityOrder(a, b) {
-  if (typeof a.comparable === 'number' && typeof b.comparable === 'number' && a.comparable !== b.comparable) {
+  var aMeasured = typeof a.comparable === 'number';
+  var bMeasured = typeof b.comparable === 'number';
+  if (aMeasured !== bMeasured) return aMeasured ? -1 : 1;
+  if (aMeasured && a.comparable !== b.comparable) {
     return b.comparable - a.comparable;
   }
   return b.quality - a.quality || a.photo_id - b.photo_id;

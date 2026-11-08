@@ -186,6 +186,12 @@ def _unmeasured_detail(count: int) -> str:
     return f"{count} cached {noun} still {verb} a subject detail measurement"
 
 
+def _invalidated_cache(count: int) -> str:
+    """'N cached mask PNG(s) could not be decoded', singular aware."""
+    noun, verb = ("mask PNG", "was") if count == 1 else ("mask PNGs", "were")
+    return f"{count} cached {noun} {verb} unreadable"
+
+
 class _MaskFileStage(Protocol):
     """The staged mask generation ``pipeline_job._StagedMaskFile`` publishes.
 
@@ -348,6 +354,7 @@ class _MaskPass:
             save_mask,
         )
         from quality import (
+            MASK_CACHE_INVALID,
             compute_all_quality_features,
             frame_size,
             measure_cached_subject_detail,
@@ -365,6 +372,7 @@ class _MaskPass:
         self.compute_all_quality_features = compute_all_quality_features
         self.measure_subject_detail = measure_subject_detail
         self.measure_cached_subject_detail = measure_cached_subject_detail
+        self.mask_cache_invalid = MASK_CACHE_INVALID
         self.frame_size = frame_size
 
         self.thread_db = self.run.database_factory(self.run.db_path)
@@ -672,9 +680,16 @@ class _MaskPass:
         # one this run, and those whose source could not be read for it.
         # The latter stay masked (the cached branch needs no source for
         # the mask) but their measurement stays pending, so they are
-        # reported apart from ``em_unreadable``.
+        # reported apart from ``em_unreadable``. The fresh-mask path
+        # also credits a failed detail re-read here so finalize does
+        # not quietly complete the stage with planned work pending.
         self.detail_measured = 0
         self.detail_unreadable = 0
+        # Cached mask PNGs that could not be decoded this run. We drop
+        # the stale file so the next run misses the cache check and
+        # rebuilds the mask, and surface the regeneration in the
+        # stage error message.
+        self.mask_cache_invalidated = 0
         # Photos whose source file could not be read. Kept out of
         # ``skipped`` because the two mean opposite things to the
         # user: a skip is "SAM found no subject in this frame" (a
@@ -1250,20 +1265,31 @@ class _MaskPass:
         """Subject detail for a freshly made mask (``quality.measure_subject_detail``).
 
         A source that cannot be re-read for it leaves the measurement
-        unmade, which the next run treats as pending work.
+        unmade, which the next run treats as pending work. Empty results
+        (the source went unreachable between the proxy decode and this
+        larger-edge re-read) also credit ``detail_unreadable`` so finalize
+        does not report "completed" with planned work left behind.
         """
         with self._timed("detail"):
-            return self.measure_subject_detail(
+            measured = self.measure_subject_detail(
                 proxy, mask, source_path=item.image_path, frame_size=self.frame_size(item.photo),
             )
+        if not measured:
+            self.detail_unreadable += 1
+            if self.source_offline_reason(item.folder_path, item.image_path) is not None:
+                self.em_offline_folder_ids.add(item.photo["folder_id"])
+        return measured
 
     def _measure_cached_detail(self, item: _MaskPhoto) -> None:
         """Measure subject detail for a cached mask that predates it, without SAM.
 
         The cached branch never needs the source for the mask itself, so a
-        source (or mask file) that cannot be read keeps the photo masked and
-        counts only here; the measurement stays NULL and pending for the
-        next run.
+        source that cannot be read keeps the photo masked and credits
+        ``detail_unreadable``; the measurement stays NULL and pending for
+        the next run. A mask PNG that fails to decode is a different
+        failure: the cache is lost, so the file is dropped and the next
+        run regenerates the mask from scratch rather than looping forever
+        on the same decode error.
         """
         existing = item.existing
         if existing is None:
@@ -1275,6 +1301,10 @@ class _MaskPass:
             measured = self.measure_cached_subject_detail(
                 existing["path"], item.image_path, self.frame_size(item.photo),
             )
+        if measured is self.mask_cache_invalid:
+            self.thread_db.masks_features.remove_file(existing["path"])
+            self.mask_cache_invalidated += 1
+            return
         if measured is None:
             self.detail_unreadable += 1
             if self.source_offline_reason(item.folder_path, item.image_path) is not None:
@@ -1449,12 +1479,61 @@ class _MaskPass:
             parts.append(f"{self.detail_measured} detail measured")
         if self.detail_unreadable:
             parts.append(f"{self.detail_unreadable} detail unmeasured")
+        if self.mask_cache_invalidated:
+            parts.append(f"{self.mask_cache_invalidated} mask cache dropped")
         if self.photos_subthreshold_only > 0:
             parts.append(
                 f"{self.photos_subthreshold_only} below detector_confidence "
                 f"({self.detector_confidence})"
             )
         return ", ".join(parts)
+
+    def _build_rollups(
+        self, *, em_failed: int, em_other_unreadable: int,
+        em_offline_unreadable: int, em_total_candidates: int,
+    ) -> tuple[str | None, list[str]]:
+        """The fatal + secondary error lines this stage emits."""
+        # Source outages own the headline: "reconnect this volume" is
+        # the actionable message, and its Fatal prefix keeps the
+        # end-of-run summary from picking a lesser warning. Each cause
+        # reports only the photos it actually explains — a corrupt file
+        # in a healthy folder is not recovered by reconnecting a drive.
+        fatal = None
+        if em_offline_unreadable > 0:
+            fatal = (
+                f"[extract_masks] Fatal: {em_offline_unreadable} "
+                f"of {em_total_candidates} photos unreachable — "
+                f"{'; '.join(self.em_offline_reasons)}. Reconnect the "
+                f"source and run Process again; until then these "
+                f"photos have no mask and Process Review rejects "
+                f"them as `no_subject_mask`."
+            )
+        secondary: list[str] = []
+        if em_other_unreadable > 0:
+            secondary.append(
+                f"[extract_masks] {em_other_unreadable} of "
+                f"{em_total_candidates} photos could not be read, "
+                f"so they have no mask and Process Review rejects "
+                f"them as `no_subject_mask`."
+            )
+        if em_failed > 0:
+            secondary.append(
+                f"[extract_masks] {em_failed} of {em_total_candidates} photos "
+                f"failed mask extraction"
+            )
+        if self.detail_unreadable > 0:
+            secondary.append(
+                f"[extract_masks] {_unmeasured_detail(self.detail_unreadable)} "
+                f"because the source could not be read; run Process again "
+                f"when it is reachable."
+            )
+        if self.mask_cache_invalidated > 0:
+            secondary.append(
+                f"[extract_masks] "
+                f"{_invalidated_cache(self.mask_cache_invalidated)} "
+                f"and will be rebuilt on the next Process run."
+            )
+        return fatal, secondary
 
     def finalize(self) -> None:
         run = self.run
@@ -1481,46 +1560,17 @@ class _MaskPass:
             "failed"
             if em_failed > 0 or em_unreadable_all > 0
             or self.detail_unreadable > 0
+            or self.mask_cache_invalidated > 0
             or self.em_offline_latched
             else "completed"
         )
         run.stages["extract_masks"]["status"] = final_status
-        # Source outages own the headline: "reconnect this volume"
-        # is the actionable message, and its Fatal prefix keeps
-        # the end-of-run summary from picking a lesser warning.
-        # Each cause reports only the photos it actually explains
-        # — a corrupt file in a healthy folder is not recovered
-        # by reconnecting a drive.
-        em_other_unreadable = em_unreadable - em_offline_unreadable
-        em_fatal_msg = None
-        if em_offline_unreadable > 0:
-            em_fatal_msg = (
-                f"[extract_masks] Fatal: {em_offline_unreadable} "
-                f"of {em_total_candidates} photos unreachable — "
-                f"{'; '.join(self.em_offline_reasons)}. Reconnect the "
-                f"source and run Process again; until then these "
-                f"photos have no mask and Process Review rejects "
-                f"them as `no_subject_mask`."
-            )
-        em_secondary_rollups = []
-        if em_other_unreadable > 0:
-            em_secondary_rollups.append(
-                f"[extract_masks] {em_other_unreadable} of "
-                f"{em_total_candidates} photos could not be read, "
-                f"so they have no mask and Process Review rejects "
-                f"them as `no_subject_mask`."
-            )
-        if em_failed > 0:
-            em_secondary_rollups.append(
-                f"[extract_masks] {em_failed} of {em_total_candidates} photos "
-                f"failed mask extraction"
-            )
-        if self.detail_unreadable > 0:
-            em_secondary_rollups.append(
-                f"[extract_masks] {_unmeasured_detail(self.detail_unreadable)} "
-                f"because the source could not be read; run Process again "
-                f"when it is reachable."
-            )
+        em_fatal_msg, em_secondary_rollups = self._build_rollups(
+            em_failed=em_failed,
+            em_other_unreadable=em_unreadable - em_offline_unreadable,
+            em_offline_unreadable=em_offline_unreadable,
+            em_total_candidates=em_total_candidates,
+        )
         # Emit the actionable Fatal last so any collapse-by-stage
         # consumer that keeps whichever entry appeared last for
         # each stage still sees the reconnect instruction rather
@@ -1538,7 +1588,9 @@ class _MaskPass:
         )
         run.runner.update_step(run.job["id"], "extract_masks", status=final_status,
                            summary=self._summary(em_masked_all, em_unreadable_all, em_failed),
-                           error_count=em_failed + em_unreadable_all + self.detail_unreadable,
+                           error_count=(em_failed + em_unreadable_all
+                                        + self.detail_unreadable
+                                        + self.mask_cache_invalidated),
                            error=em_rollup)
         run.result["stages"]["extract_masks"] = {
             "masked": em_masked_all, "skipped": self.skipped,
@@ -1548,6 +1600,7 @@ class _MaskPass:
             "subthreshold": photos_subthreshold_only,
             "detail_measured": self.detail_measured,
             "detail_unreadable": self.detail_unreadable,
+            "mask_cache_invalidated": self.mask_cache_invalidated,
             "phase_seconds": self._phase_seconds_result(),
         }
 

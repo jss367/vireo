@@ -534,7 +534,7 @@ def test_measure_subject_detail_rereads_the_source_only_when_the_proxy_is_too_sm
 
 def test_measure_cached_subject_detail_reads_the_saved_mask_and_source(tmp_path):
     from masking import save_mask
-    from quality import compute_subject_detail, measure_cached_subject_detail
+    from quality import MASK_CACHE_INVALID, compute_subject_detail, measure_cached_subject_detail
 
     frame, mask = _band_limited_scene(1600, 0.4)
     source = tmp_path / "scene.png"
@@ -543,11 +543,14 @@ def test_measure_cached_subject_detail_reads_the_saved_mask_and_source(tmp_path)
     got = measure_cached_subject_detail(mask_path, str(source), (1600, 1200))
     assert got["subject_detail"] == pytest.approx(compute_subject_detail(frame, mask)["subject_detail"], rel=0.05)
     assert got["subject_detail_px"] == pytest.approx(640, abs=10)
-    assert measure_cached_subject_detail(str(tmp_path / "missing.png"), str(source)) is None
+    # A missing or undecodable mask PNG is the cache going bad and is
+    # distinguished from a source we simply cannot read right now, so
+    # the caller can drop the stale cache instead of looping on it.
+    assert measure_cached_subject_detail(str(tmp_path / "missing.png"), str(source)) is MASK_CACHE_INVALID
     assert measure_cached_subject_detail(mask_path, str(tmp_path / "gone.png")) is None
     placeholder = tmp_path / "placeholder.png"
     placeholder.write_bytes(b"mask")
-    assert measure_cached_subject_detail(str(placeholder), str(source)) is None
+    assert measure_cached_subject_detail(str(placeholder), str(source)) is MASK_CACHE_INVALID
 
 
 def test_frame_size_reads_rows_and_dicts():

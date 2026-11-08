@@ -19711,3 +19711,70 @@ def test_cached_mask_whose_source_cannot_be_read_stays_masked_but_fails_the_stag
     assert "still lacks a subject detail measurement" in final["error"]
     assert db.masks_features.get_mask(pid, "sam2-small")["subject_detail"] is None
     assert db.masks_features.get_mask(pid, "sam2-small")["path"]
+
+
+def test_fresh_mask_detail_unmeasured_fails_the_stage_like_cached(tmp_path, monkeypatch):
+    # A freshly made mask whose detail re-read fails (the proxy already
+    # decoded but the source became unreachable before the larger-edge
+    # re-read) must be reported the same way as a cached mask with
+    # pending detail: ``_measure_subject_detail`` returning {} would
+    # otherwise store a mask with NULL detail and ``finalize`` would
+    # quietly mark the stage completed despite planned work pending.
+    import quality
+
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = workspace_folders.add_folder(db, folder_path)
+    photo_id = _add_photo_with_detection(db, folder_id, folder_path, "bird.jpg")
+    collection_id = db.collections.add(
+        "Fresh detail", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+    db.commit()
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    monkeypatch.setattr(
+        quality, "measure_subject_detail",
+        lambda proxy, mask, *, source_path, frame_size=None: {},
+    )
+
+    runner, result = _run_extract_masks_only(db_path, ws_id, collection_id)
+
+    em = result["stages"]["extract_masks"]
+    assert em["masked"] == 1
+    assert em["detail_unreadable"] == 1
+    final = _extract_masks_final_update(runner)
+    assert final["status"] == "failed"
+    assert "detail unmeasured" in final["summary"]
+
+
+def test_cached_mask_png_that_will_not_decode_is_dropped_and_rebuilt_next_run(tmp_path, monkeypatch):
+    # The cache check only stats the mask file, so a mask row whose PNG is
+    # corrupt would be reused forever: the detail re-read would fail on
+    # every run, be reported as "source could not be read", and the mask
+    # would never be regenerated. Distinguishing a mask-decode failure
+    # from a source read lets the stage drop the stale file and surface
+    # the regeneration instead of looping on it.
+    import quality
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    _null_subject_detail(db, pid)
+    mask_path = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    assert os.path.isfile(mask_path)
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail",
+        lambda *a, **k: quality.MASK_CACHE_INVALID,
+    )
+    _, final = _rerun_extract_masks_cached(
+        tmp_path, monkeypatch, db, expect_error="cached mask PNG was unreadable",
+    )
+
+    assert final["status"] == "failed" and final["error_count"] == 1
+    assert "1 mask cache dropped" in final["summary"]
+    assert "will be rebuilt on the next Process run" in final["error"]
+    # The stale PNG is gone so ``_reuse_cached_mask`` misses on the next
+    # run; the stage never increments ``detail_unreadable`` because the
+    # cache is the problem, not an unreachable source.
+    assert not os.path.isfile(mask_path)
+    assert "detail unmeasured" not in final["summary"]

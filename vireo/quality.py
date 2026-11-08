@@ -18,6 +18,13 @@ from scoring import DETAIL_SCALE_PX
 
 log = logging.getLogger(__name__)
 
+# A saved mask PNG whose file is missing or will not decode: the cached mask
+# is invalid, distinct from a source we simply cannot re-read right now. The
+# detail-measurement entry point returns this so the caller can drop the
+# stale mask and let the next run regenerate it, instead of looping on the
+# same decode failure forever.
+MASK_CACHE_INVALID: object = object()
+
 
 def _background_ring(mask, dilation_frac=0.10):
     """Produce a background ring mask by dilating and subtracting the original.
@@ -459,8 +466,10 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     """Subject detail for a saved mask PNG whose row predates the measurement.
 
     Reads the mask from disk and the source at the edge the detail scale
-    needs; SAM does not run. Returns the ``compute_subject_detail`` dict,
-    or None when the mask or the source cannot be read.
+    needs; SAM does not run. Returns the ``compute_subject_detail`` dict on
+    success, ``MASK_CACHE_INVALID`` when the mask PNG cannot be decoded (the
+    cached mask is lost; the caller should drop it so the next run
+    regenerates), or None when the source cannot be read.
     """
     from image_loader import load_image
 
@@ -469,7 +478,7 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
             mask = np.asarray(mask_image.convert("L")) > 127
     except OSError:
         log.warning("Could not read mask %s for the subject detail measurement", mask_path, exc_info=True)
-        return None
+        return MASK_CACHE_INVALID
     needed = detail_decode_edge(mask)
     if needed is None:
         return {"subject_detail": 0.0, "subject_detail_px": None}
