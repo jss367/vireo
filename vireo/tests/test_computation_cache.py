@@ -2104,6 +2104,193 @@ def test_complete_enrichment_beats_partial_enrichment_same_identity(tmp_path):
         destination.close()
 
 
+def test_background_enriched_artifact_wins_over_pre_background_same_identity(tmp_path):
+    """A classification ``match`` block with background fields must beat the
+    same-identity pre-background block regardless of manifest order.
+
+    ``background_score`` and ``background_prompt`` are additive fields on
+    the artifact's ``match`` block — they change the digest but leave the
+    lookup identity (model, labels, runtimes, input) and the
+    ``_classification_enrichment_rank`` outer count ("no match block")
+    unchanged. Without a second-tier rank, both artifacts rank 0 and the
+    digest tiebreaker can drop the background-enriched block. That path
+    hits the ``already_materialized`` short-circuit, so the summary row
+    lands with ``background_score`` NULL and background-like regions
+    keep opening Highlights buckets.
+    """
+    pre_background = classification_artifact(
+        candidates=[{"species": "Elf Owl", "confidence": 0.88,
+                     "match_score": 0.41}],
+        match={"max_match_score": 0.41, "top_species": "Elf Owl",
+               "score_kind": "cosine"},
+    )
+    with_background = classification_artifact(
+        candidates=[{"species": "Elf Owl", "confidence": 0.88,
+                     "match_score": 0.41}],
+        match={"max_match_score": 0.41, "top_species": "Elf Owl",
+               "score_kind": "cosine",
+               "background_score": 0.27, "background_prompt": "leaves"},
+    )
+    # Sanity: same lookup identity, different digests.
+    assert with_background["runtime_fingerprint"] == pre_background[
+        "runtime_fingerprint"
+    ]
+    assert with_background["input_fingerprint"] == pre_background[
+        "input_fingerprint"
+    ]
+    assert artifact_digest(with_background) != artifact_digest(pre_background)
+
+    for order in ([with_background, pre_background],
+                  [pre_background, with_background]):
+        label = "background-first" if order[0] is with_background else "plain-first"
+        destination, _folder_id, _photo_id = _database_with_photo(
+            tmp_path / f"identity-{label}.db", "photo.jpg",
+        )
+        destination.model_runs.upsert_labels_fingerprint(
+            "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+        )
+        destination.commit()
+        materialize_artifacts(
+            destination,
+            [detection_artifact(), *order],
+            known_runtimes={RUNTIME},
+            known_classifier_runtimes={CLASSIFIER_RUNTIME},
+        )
+        row = destination.conn.execute(
+            "SELECT background_score, background_prompt "
+            "FROM classifier_match_scores",
+        ).fetchone()
+        assert row is not None
+        assert row["background_score"] == 0.27, (
+            f"[{label}] pre-background artifact won dedup; the background "
+            "score was dropped, so this region stays unknown to the "
+            "Highlights gate"
+        )
+        assert row["background_prompt"] == "leaves"
+        destination.close()
+
+
+def test_backfill_fills_background_fields_on_existing_match_summary(tmp_path):
+    """A later import carrying background fields must enrich an already-
+    materialized match-summary row.
+
+    The pre-background artifact landed by an earlier import wrote a
+    ``classifier_match_scores`` row with NULL background columns. When the
+    enriched artifact arrives later, ``materialize_artifacts`` hits the
+    ``already_materialized`` short-circuit — without the background-aware
+    backfill, the existing summary row would keep ``background_score``
+    NULL and the Highlights gate would never see the measurement.
+    """
+    destination, _folder_id, _photo_id = _database_with_photo(
+        tmp_path / "bg-backfill.db", "photo.jpg",
+    )
+    destination.model_runs.upsert_labels_fingerprint(
+        "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+    )
+    destination.commit()
+    pre_background = classification_artifact(
+        candidates=[{"species": "Elf Owl", "confidence": 0.88,
+                     "match_score": 0.41}],
+        match={"max_match_score": 0.41, "top_species": "Elf Owl",
+               "score_kind": "cosine"},
+    )
+    first = materialize_artifacts(
+        destination,
+        [detection_artifact(), pre_background],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    assert first["classifier_runs_applied"] == 1
+    # Baseline: the summary row exists but has NULL background columns.
+    baseline = destination.conn.execute(
+        "SELECT background_score, background_prompt "
+        "FROM classifier_match_scores",
+    ).fetchone()
+    assert baseline["background_score"] is None
+    assert baseline["background_prompt"] is None
+
+    with_background = classification_artifact(
+        candidates=[{"species": "Elf Owl", "confidence": 0.88,
+                     "match_score": 0.41}],
+        match={"max_match_score": 0.41, "top_species": "Elf Owl",
+               "score_kind": "cosine",
+               "background_score": 0.27, "background_prompt": "leaves"},
+    )
+    second = materialize_artifacts(
+        destination,
+        [with_background],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    # Same identity, so no new run row is applied — the backfill counter
+    # fires instead, and the once-NULL background columns are populated.
+    assert second["classifier_runs_applied"] == 0
+    assert second["already_materialized"] == 1
+    assert second["enrichment_backfilled"] == 1
+
+    row = destination.conn.execute(
+        "SELECT max_match_score, background_score, background_prompt "
+        "FROM classifier_match_scores",
+    ).fetchone()
+    assert row["max_match_score"] == 0.41
+    assert row["background_score"] == 0.27
+    assert row["background_prompt"] == "leaves"
+    destination.close()
+
+
+def test_backfill_never_overwrites_existing_background_score(tmp_path):
+    """A real background measurement must survive a later import.
+
+    Once ``classifier_match_scores.background_score`` is set, a subsequent
+    import that carries a different number must not overwrite it — the
+    local measurement is authoritative, and swapping in an incoming score
+    would let a bundle rewrite live verdicts by re-importing the same run.
+    """
+    destination, _folder_id, _photo_id = _database_with_photo(
+        tmp_path / "bg-no-overwrite.db", "photo.jpg",
+    )
+    destination.model_runs.upsert_labels_fingerprint(
+        "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
+    )
+    destination.commit()
+    original = classification_artifact(
+        candidates=[{"species": "Elf Owl", "confidence": 0.88,
+                     "match_score": 0.41}],
+        match={"max_match_score": 0.41, "top_species": "Elf Owl",
+               "score_kind": "cosine",
+               "background_score": 0.27, "background_prompt": "leaves"},
+    )
+    materialize_artifacts(
+        destination,
+        [detection_artifact(), original],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    replayed = classification_artifact(
+        candidates=[{"species": "Elf Owl", "confidence": 0.88,
+                     "match_score": 0.41}],
+        match={"max_match_score": 0.41, "top_species": "Elf Owl",
+               "score_kind": "cosine",
+               "background_score": 0.99, "background_prompt": "sky"},
+    )
+    result = materialize_artifacts(
+        destination,
+        [replayed],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    assert result["already_materialized"] == 1
+    assert result["enrichment_backfilled"] == 0
+
+    row = destination.conn.execute(
+        "SELECT background_score, background_prompt "
+        "FROM classifier_match_scores",
+    ).fetchone()
+    assert row["background_score"] == 0.27
+    assert row["background_prompt"] == "leaves"
+    destination.close()
+
+
 def test_tree_of_life_models_share_sentinel_without_label_collision(tmp_path):
     db, _, _ = _database_with_photo(tmp_path / "destination.db", "bird.jpg")
     artifacts = []
