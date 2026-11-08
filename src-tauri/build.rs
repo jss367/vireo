@@ -1,8 +1,12 @@
+#[path = "src/build_commit.rs"]
+mod build_commit;
+
 fn main() {
     // Release builds use the exact stamp embedded in the Python sidecar.
     // Debug builds run from source and do not require a sidecar build.
     let stamp = std::path::Path::new("../build/build-commit.txt");
-    let commit = if std::env::var("PROFILE").as_deref() == Ok("release") {
+    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    let commit = if release {
         println!("cargo:rerun-if-changed={}", stamp.display());
         std::fs::read_to_string(stamp).expect("build the sidecar before the desktop app")
     } else {
@@ -26,8 +30,7 @@ fn main() {
     };
     let commit = commit.trim();
     assert!(
-        commit == "unknown"
-            || (commit.len() == 40 && commit.bytes().all(|c| c.is_ascii_hexdigit())),
+        build_commit::is_valid(commit, release),
         "invalid build commit stamp"
     );
     println!("cargo:rustc-env=VIREO_BUILD_COMMIT={commit}");

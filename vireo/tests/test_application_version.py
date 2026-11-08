@@ -52,7 +52,7 @@ def test_source_version_falls_back_to_checkout_manifest(monkeypatch):
     assert system._application_version() == tomllib.loads(manifest.read_text())["project"]["version"]
 
 
-@pytest.mark.parametrize("contents", [None, "", "unknown", "a" * 39, "z" * 40, b"\xff"])
+@pytest.mark.parametrize("contents", [None, "", "unknown", "a" * 39, "z" * 40, "A" * 40, b"\xff"])
 def test_frozen_commit_unavailable_is_explicit(monkeypatch, tmp_path, contents):
     if contents is not None:
         (tmp_path / "build-commit.txt").write_bytes(
