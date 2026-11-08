@@ -185,8 +185,8 @@ class MasksFeaturesRepository:
 
     def drop_cache_entry(
         self, photo_id: int, variant: str, path: str | None,
-    ) -> None:
-        """Invalidate a cached mask: remove its file and drop its row.
+    ) -> bool:
+        """Invalidate a cached mask: drop its row, its projection, and the file.
 
         A best-effort unlink alone is not enough. ``remove_file`` logs
         and returns without raising when the masks dir is unresolved,
@@ -194,14 +194,43 @@ class MasksFeaturesRepository:
         row still points at the corrupt PNG and the next run's
         ``os.path.isfile`` check reuses it. Deleting the row makes the
         next pass see a clean cache miss and regenerate the mask from
-        scratch regardless of whether the file actually left disk. No
-        commit — the caller owns it.
+        scratch regardless of whether the file actually left disk.
+
+        The DELETE pins the row to the supplied ``path`` so that a
+        concurrent writer that has already published a replacement
+        generation (mask files use unique generation paths) is not
+        discarded: when the caller measured an older generation that
+        has since been superseded, the DELETE matches nothing and we
+        return ``False`` without unlinking the fresh file or clearing
+        the projection. The caller uses that to skip counting a
+        spurious invalidation.
+
+        When the delete matches, also clear the denormalized projection
+        on ``photos`` if it still names this exact (variant, path); a
+        later activation of another variant or another generation of
+        the same variant stays untouched. The unlink runs only after
+        the row and projection are gone, so the file is not removed
+        while something still references it. No commit — the caller
+        owns it.
         """
-        self.remove_file(path)
-        self.conn.execute(
-            "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
-            (photo_id, variant),
+        cur = self.conn.execute(
+            "DELETE FROM photo_masks WHERE photo_id=? AND variant=? AND path=?",
+            (photo_id, variant, path),
         )
+        if cur.rowcount <= 0:
+            return False
+        self.conn.execute(
+            "UPDATE photos SET mask_path=NULL, active_mask_variant=NULL, "
+            "subject_size=NULL, subject_tenengrad=NULL, bg_tenengrad=NULL, "
+            "crop_complete=NULL, quality_input_recipe=NULL, "
+            "subject_clip_high=NULL, subject_clip_low=NULL, "
+            "subject_y_median=NULL, bg_separation=NULL, phash_crop=NULL, "
+            "noise_estimate=NULL, subject_detail=NULL, subject_detail_px=NULL "
+            "WHERE id=? AND active_mask_variant=? AND mask_path=?",
+            (photo_id, variant, path),
+        )
+        self.remove_file(path)
+        return True
 
     @property
     def workspace_id(self) -> int:

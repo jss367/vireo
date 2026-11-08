@@ -482,11 +482,12 @@ class _MaskExtractionRun:
             existing["path"], item.image_path, self.deps.frame_size(item.photo),
         )
         if measured is self.deps.mask_cache_invalid:
-            self.thread_db.masks_features.drop_cache_entry(
+            dropped = self.thread_db.masks_features.drop_cache_entry(
                 item.photo_id, self.sam2_variant, existing["path"],
             )
             self.thread_db.commit_with_retry()
-            self.mask_cache_invalidated += 1
+            if dropped:
+                self.mask_cache_invalidated += 1
             return
         if measured is None:
             self.detail_unreadable += 1
