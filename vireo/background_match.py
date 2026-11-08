@@ -21,7 +21,10 @@ on the same import after the first reclassify, every one of the strongest
 boxes the gap flagged (detector 0.76 to 0.87) held a real bird, while the
 trunk strips and empty frames the gate exists for were all weak boxes
 (0.21 to 0.43) or whole frames. So the verdict defers to the detector:
-a box at or above ``CONFIDENT_DETECTION`` is never called background.
+a localized box at or above ``CONFIDENT_DETECTION`` is never called
+background. The whole-frame row is excluded from that override whatever
+its stored confidence — it does not localize an animal, so there is no
+box for the detector to vouch for; the gap decides.
 """
 
 COSINE = "cosine"
@@ -32,7 +35,7 @@ BACKGROUND_MARGIN = 0.15
 
 # A detector box at or above this confidence is trusted to hold an animal
 # and is never called background, whatever its prompt gap. Below it, and for
-# the whole-frame row (confidence 0), the gap decides.
+# the whole-frame row (no localized box), the gap decides.
 CONFIDENT_DETECTION = 0.5
 
 
@@ -46,27 +49,39 @@ def background_gap(max_match_score, background_score):
     return float(background_score) - float(max_match_score)
 
 
-def is_confident_detection(detector_confidence):
+def is_confident_detection(detector_confidence, *, whole_frame=False):
     """True when the detector's confidence is at or above ``CONFIDENT_DETECTION``.
 
-    None (confidence unknown) is not confident: the gap alone decides.
+    The whole-frame row is never confident whatever its stored confidence:
+    it is a placeholder for "no detector box", so there is no box for the
+    detector to vouch for and the gap must still decide. The schema does
+    not constrain its ``detector_confidence`` (legacy rows and some test
+    fixtures carry 1.0), so this is a rule about the row's identity, not
+    its value. None (confidence unknown) is likewise not confident: the
+    gap alone decides.
     """
+    if whole_frame:
+        return False
     return detector_confidence is not None and float(detector_confidence) >= CONFIDENT_DETECTION
 
 
 def is_background_like(max_match_score, background_score, score_kind=COSINE,
-                       detector_confidence=None):
+                       detector_confidence=None, *, whole_frame=False):
     """True when the region's background match is within ``BACKGROUND_MARGIN``
     of its best species match and the detector was not confident about it.
 
     Only cosine scores are comparable to the background prompts (a supervised
     classifier's logits have no background prompt to compare with), so any
     other ``score_kind`` and any missing score answer False: an unmeasured
-    region is never called background. A box at or above
+    region is never called background. A localized box at or above
     ``CONFIDENT_DETECTION`` answers False too (:func:`is_confident_detection`);
     ``detector_confidence`` None means unknown and leaves the gap to decide.
+    ``whole_frame`` marks a no-box row so the gap decides however its stored
+    detector confidence reads.
     """
-    if score_kind != COSINE or is_confident_detection(detector_confidence):
+    if score_kind != COSINE or is_confident_detection(
+        detector_confidence, whole_frame=whole_frame,
+    ):
         return False
     gap = background_gap(max_match_score, background_score)
     return gap is not None and gap >= -BACKGROUND_MARGIN

@@ -67,11 +67,14 @@ def subject_is_whole_frame(subject):
 def subject_is_background_like(subject):
     """True when the subject's classifier run matched background about as
     well as any listed species and the detector was not confident about
-    the box (``background_match``)."""
+    the box (``background_match``). A whole-frame row is always judged by
+    the gap: it has no detector box for the override to trust, and its
+    stored confidence is not constrained by the schema."""
     return is_background_like(
         _field(subject, "max_match_score"), _field(subject, "background_score"),
         _field(subject, "score_kind") or "cosine",
         detector_confidence=_field(subject, "detector_confidence"),
+        whole_frame=subject_is_whole_frame(subject),
     )
 
 

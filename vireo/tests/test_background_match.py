@@ -43,6 +43,32 @@ def test_confident_detector_box_is_never_background():
     assert not background_match.is_confident_detection(None)
 
 
+def test_whole_frame_row_is_never_a_confident_detection():
+    # The schema does not constrain the whole-frame row's detector_confidence
+    # (legacy rows and some test fixtures carry 1.0). It is still a no-box
+    # placeholder, so the override that trusts a confident box over the gap
+    # must not fire for it — the gap decides.
+    assert background_match.is_background_like(
+        0.49, 0.35, detector_confidence=1.0, whole_frame=True,
+    )
+    assert background_match.is_background_like(
+        0.49, 0.35, detector_confidence=background_match.CONFIDENT_DETECTION,
+        whole_frame=True,
+    )
+    assert not background_match.is_confident_detection(1.0, whole_frame=True)
+    assert not background_match.is_confident_detection(
+        background_match.CONFIDENT_DETECTION, whole_frame=True,
+    )
+    # A low-confidence whole-frame row still falls to the gap, as before.
+    assert background_match.is_background_like(
+        0.49, 0.35, detector_confidence=0.0, whole_frame=True,
+    )
+    # Outside the margin, a whole-frame row stays a subject.
+    assert not background_match.is_background_like(
+        0.49, 0.09, detector_confidence=1.0, whole_frame=True,
+    )
+
+
 def test_unmeasured_or_foreign_scale_is_never_background():
     assert not background_match.is_background_like(None, 0.5)
     assert not background_match.is_background_like(0.4, None)
@@ -70,6 +96,14 @@ def test_assess_background_states_and_sentences():
     assert "detector was 0.87 sure" in verdict["explanation"]
     assert "tamarisk" in verdict["explanation"]
     assert match_confidence.assess_background("cosine", 0.49, 0.35, "tamarisk", detector_confidence=0.34)["state"] == match_confidence.BACKGROUND
+
+    # A whole-frame row with a high stored confidence still goes by the gap:
+    # no detector box means no override, even when the stored value sits at 1.0.
+    whole_frame_verdict = match_confidence.assess_background(
+        "cosine", 0.49, 0.35, "twigs", detector_confidence=1.0, whole_frame=True,
+    )
+    assert whole_frame_verdict["state"] == match_confidence.BACKGROUND
+    assert "detector was" not in whole_frame_verdict["explanation"]
 
     assert match_confidence.assess_background("cosine", 0.49, None)["state"] == match_confidence.UNAVAILABLE
     assert match_confidence.assess_background("logit", 3.0, 2.9)["state"] == match_confidence.UNAVAILABLE
@@ -178,6 +212,21 @@ def test_whole_frame_guess_speaks_only_for_a_photo_without_boxes():
     assert photo_species_memberships({"species_names": [], "subject_predictions": [WHOLE]}) == []
     # ...and neither does a photo whose only box is a trunk.
     assert photo_species_memberships({"species_names": [], "subject_predictions": [TRUNK]}) == []
+
+
+def test_whole_frame_row_opens_no_bucket_even_when_its_stored_confidence_is_high():
+    # The schema does not pin a whole-frame row's detector_confidence at 0,
+    # and legacy anchors may already carry a non-zero value. The gap must
+    # still decide: a photo whose only "subject" is a twig-frame row stays
+    # out of the Highlights bucket however its stored confidence reads.
+    legacy_whole = _subject(
+        "Red-breasted Nuthatch", 0.98, detector=1.0, model="full-image",
+        label=0.47, background=0.36, prediction_id=14,
+    )
+    assert subject_is_background_like(legacy_whole)
+    assert photo_species_memberships(
+        {"species_names": [], "subject_predictions": [legacy_whole]},
+    ) == []
 
 
 def test_small_bird_in_foliage_keeps_its_bucket_on_a_confident_box():
