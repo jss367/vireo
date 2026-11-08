@@ -5,7 +5,37 @@ import { renderActiveOverview, renderDetail, renderHistoryDetail, renderHistoryO
 import { jobConfig } from './format.js';
 import { importChainProcessJobIds } from './import-retry.js';
 import { populateTypeFilter, selectedOriginFilter, updateList, updateRunningBadge } from './list.js';
-import { canRetryImportDirectToNas } from './shared.js';
+import { selectJob } from './selection.js';
+import { canRetryImportDirectToNas, showToast } from './shared.js';
+
+// A ?job=X link waits for either lane to produce it, and both lanes to have
+// loaded before it can be declared missing. Called after each successful
+// apply and from boot once the first fetches settle. ES-module cycle with
+// selection.js is safe: both sides export function declarations and nothing
+// calls across the cycle during module evaluation.
+export function resolvePendingLinkedJob() {
+  var jobId = state.pendingLinkedJobId;
+  if (!jobId) return;
+  // A separate flow (an import restart or retry) may have already selected
+  // another job by writing selectedJobId directly: the user's choice wins,
+  // so drop the URL link silently rather than overriding it.
+  if (state.selectedJobId && state.selectedJobId !== jobId) {
+    state.pendingLinkedJobId = null;
+    return;
+  }
+  if (state.activeJobs.some(function(job) { return job.id === jobId; })) {
+    selectJob(jobId, 'active');
+    return;
+  }
+  if (state.historyJobs.some(function(job) { return job.id === jobId; })) {
+    selectJob(jobId, 'history');
+    return;
+  }
+  if (state.jobsPollState.active.loaded && state.jobsPollState.history.loaded) {
+    state.pendingLinkedJobId = null;
+    showToast('This job is not in the recent job history. Its notification details remain in Notifications.', 'warning');
+  }
+}
 
 export function renderJobsPollWarning() {
   var warning = /** @type {HTMLElement} */ (document.getElementById('jobsPollWarning'));
@@ -204,6 +234,10 @@ export async function jobsServerError(response) {
     } else if (state.currentView === 'active') {
       renderActiveOverview();
     }
+    // A URL-linked job may be in this newly-loaded list, or the sibling
+    // lane may have finished loading and let the "not in history" warning
+    // fire. Either way, attempt resolution after each successful apply.
+    resolvePendingLinkedJob();
   }, background);
 }
 
@@ -249,5 +283,6 @@ export async function jobsServerError(response) {
       return;
     }
     if (state.currentView === 'history') renderHistoryOverview();
+    resolvePendingLinkedJob();
   }, background);
 }

@@ -38,6 +38,8 @@
     "../vireo/static/navbar-pipeline-inspector.js",
     "../vireo/static/navbar-report-context-menu.js",
     "../vireo/static/navbar-shared-helpers.js",
+    "../vireo/static/navbar-notifications.js",
+    "../vireo/static/navbar-notification-store.js",
     "../vireo/static/navbar-similar-photos.js",
     "../vireo/static/navbar-state.js",
     "../vireo/static/navbar-tab-reorder-hotkeys.js",

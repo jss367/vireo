@@ -7,6 +7,9 @@ import { updateList, updateRunningBadge } from './list.js';
 import { fetchHistory, fetchJobs } from './polling.js';
 
 /** @param {string} jobId @param {string} source */ export function selectJob(jobId, source) {
+  // The user chose; any pending ?job=X link is superseded so a late poll does
+  // not jump away from the job they picked.
+  state.pendingLinkedJobId = null;
   state.currentView = jobId;
   state.selectedJobId = jobId;
   state.selectedSource = source;

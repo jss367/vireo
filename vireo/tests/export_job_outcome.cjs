@@ -91,6 +91,21 @@ test('an expired job does not claim success', () => {
   assert.equal(outcome({status: 'expired', result: null}).type, 'warning');
 });
 
+test('a cancelled export with a zero-photo result reads the same in toast and history', () => {
+  const toasts = [];
+  const job = load({
+    safeEventSource(url, callbacks) { callbacks.onComplete({
+      status: 'cancelled', result: {exported: 0, errors: [], destinations: ['/out']},
+    }); },
+    showToast(message, type, options) { toasts.push([message, type, options]); },
+  });
+  job.watch('export-cancel');
+  // The persistent summary (first argument) and the expanded details must agree,
+  // not read "Export stopped after exporting 0 photos" against "stopped before any photo".
+  assert.equal(toasts[0][0], 'Export stopped before any photo was exported.');
+  assert.equal(toasts[0][2].details, 'Export stopped before any photo was exported');
+});
+
 test('watch toasts the outcome when the job stream completes', () => {
   const toasts = [];
   let streamed;
@@ -98,11 +113,11 @@ test('watch toasts the outcome when the job stream completes', () => {
     safeEventSource(url, callbacks) { streamed = url; callbacks.onComplete({
       status: 'completed', result: {exported: 1, errors: [], destinations: ['/out']},
     }); },
-    showToast(message, type) { toasts.push([message, type]); },
+    showToast(message, type, options) { toasts.push([message, type, options]); },
   });
   job.watch('export-1');
   assert.equal(streamed, '/api/jobs/export-1/stream');
-  same(toasts, [['Exported 1 photo to /out', 'success']]);
+  same(toasts, [['Exported 1 photo.', 'success', {details: 'Exported 1 photo to /out', jobId: 'export-1'}]]);
 });
 
 test('watch points to the jobs panel when the stream drops', () => {
@@ -112,10 +127,10 @@ test('watch points to the jobs panel when the stream drops', () => {
       assert.equal(callbacks.quietError, true, 'the generic Connection lost toast must be suppressed');
       callbacks.onError();
     },
-    showToast(message, type) { toasts.push([message, type]); },
+    showToast(message, type, options) { toasts.push([message, type, options]); },
   });
   job.watch('export-2');
-  same(toasts, [['Could not follow the export to the end. Its result is in the jobs panel.', 'warning']]);
+  same(toasts, [['Could not follow the export to the end. Check job details.', 'warning', {jobId: 'export-2'}]]);
 });
 
 test('metadata-free exports are explicitly identified', () => {
@@ -141,6 +156,24 @@ test('successful metadata writes are shown separately from image counts', () => 
     }}}});
   assert.match(result.message, /Species keywords 2\/2 written/);
   assert.equal(result.type, 'success');
+});
+
+test('metadata warnings stay concise while retaining the complete report and job link', () => {
+  const toasts = [];
+  const job = load({
+    safeEventSource(url, callbacks) { callbacks.onComplete({status: 'completed', result: {
+      exported: 1, destination: '/photos', metadata: {metadata_free: false, categories: {
+        species: {requested: 1, written: 0, unavailable: 1, failed: 0, not_attempted: 0},
+        location: {requested: 1, written: 1, unavailable: 0, failed: 0, not_attempted: 0},
+      }},
+    }}); },
+    showToast(...args) { toasts.push(args); },
+  });
+  job.watch('export-3');
+  assert.equal(toasts[0][0], 'Exported 1 photo. Species keywords unavailable.');
+  assert.equal(toasts[0][1], 'warning');
+  assert.equal(toasts[0][2].jobId, 'export-3');
+  assert.match(toasts[0][2].details, /Location \(GPS\) 1\/1 written/);
 });
 
 let failed = 0;

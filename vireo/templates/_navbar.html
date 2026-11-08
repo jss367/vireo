@@ -26,6 +26,7 @@
   <button type="button" class="nav-overflow-btn" id="navOverflowBtn" hidden data-navbar-on="click:toggleOverflowMenu">&hellip;</button>
   <div class="nav-overflow-menu" id="navOverflowMenu" hidden></div>
   <span class="nav-spacer"></span>
+  <button type="button" class="nav-icon notification-toggle" id="notificationsToggle" aria-label="Notifications" aria-expanded="false" aria-controls="notificationHistory" title="Notification history">&#128276;<span id="notificationBadge" hidden></span></button>
   <span class="nav-icon" title="Report Issue" id="reportToggle" data-navbar-on="click:openReportModal">&#9888;</span>
   <span class="nav-icon" title="Help (F1)" id="helpToggle" data-navbar-on="click:openHelpModal">&#63;</span>
   <span class="nav-icon" title="Toggle advanced mode" id="devModeToggle" style="opacity:0.4;" data-navbar-on="click:toggleAdvancedMode">&#9881;</span>
@@ -35,6 +36,12 @@
     <span class="activity-dot" id="navActivityDot"></span>
   </span>
 </nav>
+<section id="notificationHistory" class="notification-history" aria-label="Notification history" hidden>
+  <div class="notification-toolbar"><strong>Notifications</strong><button type="button" id="notificationClose">Close</button></div>
+  <p>Last 100 notifications in this browser.</p>
+  <div class="notification-toolbar"><button type="button" id="notificationReadAll">Mark all read</button><button type="button" id="notificationClear">Clear history</button></div>
+  <ol id="notificationList"></ol>
+</section>
 
 <div class="runtime-warning-banner" id="runtimeWarningBanner" data-testid="runtime-warning-banner">
   <div class="runtime-warning-text" id="runtimeWarningText"></div>
