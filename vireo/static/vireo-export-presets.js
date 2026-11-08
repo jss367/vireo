@@ -654,18 +654,53 @@ var VireoExportPresets = (function() {
     VireoViewPreferences.write(CUSTOM_SETTINGS_KEY, JSON.stringify(collectSettings()));
   }
 
+  function migrateLegacyCustomSettings() {
+    // The editor has no data-view-preference attributes. Read the legacy
+    // Browse preferences explicitly so migration works from either page.
+    [
+      ['exportSubfolder', 'subfolder'],
+      ['exportSubfolderName', 'subfolderName'],
+      ['exportRevealAfter', 'revealAfter'],
+      ['exportMetadataSpecies', 'metadata.species'],
+      ['exportMetadataRating', 'metadata.rating'],
+      ['exportMetadataLocation', 'metadata.location'],
+      ['exportMetadataCamera', 'metadata.camera'],
+      ['exportMetadataCaptureDateTime', 'metadata.captureDateTime'],
+      ['exportMetadataCaptureDate', 'metadata.captureDateTime'],
+      ['exportMetadataCaptureTime', 'metadata.captureDateTime'],
+    ].forEach(function(entry) {
+      var control = document.getElementById(entry[0] || '');
+      var value = VireoViewPreferences.read('vireo.browse.export.' + entry[1]);
+      if (!(control instanceof HTMLInputElement) || value === null) return;
+      if (control.type === 'checkbox') {
+        if (value === '0' || value === '1') control.checked = value === '1';
+      } else {
+        control.value = value;
+      }
+    });
+    var split = VireoViewPreferences.read(CAPTURE_SPLIT_KEY);
+    if (split === 'capture_date' || split === 'capture_time') {
+      var other = document.getElementById(split === 'capture_date'
+        ? 'exportMetadataCaptureTime' : 'exportMetadataCaptureDate');
+      if (other instanceof HTMLInputElement) other.checked = false;
+    }
+    restoreCaptureSplitHint();
+    applySettings(collectSettings());
+    rememberCustomSettings();
+  }
+
   function restoreCustomSettings() {
     var stored = VireoViewPreferences.read(CUSTOM_SETTINGS_KEY);
-    if (!stored) return;
     try {
-      var settings = JSON.parse(stored);
+      var settings = stored ? JSON.parse(stored) : null;
       if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
         applySettings(settings);
+        return;
       }
     } catch (error) {
-      // Older installations have no snapshot; unreadable storage also
-      // leaves the host's defaults and individual preferences intact.
+      // Unreadable snapshots follow the same migration as older installs.
     }
+    migrateLegacyCustomSettings();
   }
 
   /* Called by the host page after it resets the modal to defaults and

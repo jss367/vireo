@@ -71,3 +71,30 @@ def test_custom_export_without_valid_snapshot_still_opens(live_server, page, sto
     open_export(page, live_server, "browse")
     expect(page.locator("#exportPreset")).to_have_value("custom")
     expect(page.locator("#exportFormat")).to_have_value("jpg")
+
+
+@pytest.mark.parametrize("source", ["browse", "editor"])
+@pytest.mark.parametrize("stored", [None, "broken json"])
+def test_legacy_custom_preferences_migrate_across_pages(live_server, page, source, stored):
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("""stored => {
+        localStorage.setItem('vireo.export.lastPreset', 'custom');
+        if (stored !== null) localStorage.setItem('vireo.export.customSettings', stored);
+        for (const [key, value] of Object.entries({
+            subfolder: '1', subfolderName: 'keepers', revealAfter: '1',
+            'metadata.location': '1', 'metadata.captureDateTime': '1',
+            'metadata.captureDateTime.presetFields': 'capture_date',
+        })) localStorage.setItem('vireo.browse.export.' + key, value);
+    }""", stored)
+    for view in [source, "editor" if source == "browse" else "browse"]:
+        open_export(page, live_server, view)
+        expect(page.locator("#exportMetadataLocation")).to_be_checked()
+        expect(page.locator("#exportSubfolder")).to_be_checked()
+        expect(page.locator("#exportSubfolderName")).to_have_value("keepers")
+        expect(page.locator("#exportRevealAfter")).to_be_checked()
+        if view == "editor":
+            expect(page.locator("#exportMetadataCaptureDate")).to_be_checked()
+            expect(page.locator("#exportMetadataCaptureTime")).not_to_be_checked()
+        snapshot = page.evaluate("JSON.parse(localStorage.getItem('vireo.export.customSettings'))")
+        assert snapshot["metadata_fields"] == ["capture_date", "location"]
+        page.locator("#exportOverlay [data-export-cancel]").click()
