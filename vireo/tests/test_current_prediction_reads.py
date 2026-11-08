@@ -69,7 +69,11 @@ def test_threshold_changes_and_full_image_anchors(db, catalog):
     assert _ranked(db, pid) == ("Visible",) * 3
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.2})
     db.commit()
-    assert _ranked(db, pid) == ("Low",) * 3
+    # With both detections eligible, ``cull.top_prediction`` ranks by prediction
+    # confidence (``Low`` at 0.99 > ``Visible`` at 0.6), while Highlights and
+    # the confirm route rank by ``subject_evidence_order`` — the strongest
+    # detector box first (``Visible`` at 0.8 > ``Low`` at 0.3).
+    assert _ranked(db, pid) == ("Low", "Visible", "Visible")
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.9})
     db.commit()
     assert _ranked(db, pid) == (None,) * 3
@@ -82,7 +86,7 @@ def test_threshold_changes_and_full_image_anchors(db, catalog):
     cfg.save({})
     db.workspaces.update(db.active_workspace_id, config_overrides={})
     db.commit()
-    assert _ranked(db, pid) == ("Low",) * 3
+    assert _ranked(db, pid) == ("Low", "Visible", "Visible")
 
 
 def test_highlight_eligibility_tracks_ranking_but_keeps_saved_choices_and_keywords(db, catalog):
