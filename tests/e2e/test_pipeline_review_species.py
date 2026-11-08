@@ -2378,7 +2378,7 @@ def test_pipeline_review_says_when_undo_cannot_update_its_results(
     expect(banner.get_by_role("link", name="Open Process")).to_have_attribute(
         "href", "/pipeline"
     )
-    toast = page.locator('#toastContainer [data-type="warning"]')
+    toast = page.locator('#toastContainer [data-type="warning"] span')
     expect(toast).to_have_text(
         "Undo saved, but Vireo could not update Process Review's saved "
         "results to match, so they may still list the old species for these photos."
@@ -2495,7 +2495,7 @@ def test_undo_elsewhere_warns_when_process_review_results_go_stale(
     expect(page.locator('#toastContainer [data-type="success"]')).to_contain_text(
         "Undone: "
     )
-    expect(page.locator('#toastContainer [data-type="warning"]')).to_have_text(
+    expect(page.locator('#toastContainer [data-type="warning"] span')).to_have_text(
         "Undo saved, but Vireo could not update Process Review's saved "
         "results to match, so they may still list the old species for these photos."
     )

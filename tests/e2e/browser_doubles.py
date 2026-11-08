@@ -14,7 +14,10 @@ _RECORD_TOASTS = """() => {
     for (const record of records) {
       for (const node of record.addedNodes) {
         if (node.nodeType === Node.ELEMENT_NODE) {
-          window.__toasts.push({message: node.textContent, type: node.dataset.type});
+          // The message is the toast's first <span>; its action buttons
+          // (View job details, Dismiss) are not part of what it says.
+          const message = node.querySelector('span') || node;
+          window.__toasts.push({message: message.textContent, type: node.dataset.type});
         }
       }
     }

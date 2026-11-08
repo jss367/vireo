@@ -127,6 +127,7 @@ export function showToast(msg, type, options = {}) {
   toast.className = 'notification-toast';
   toast.dataset.type = entry.type;
   toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  toast.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
   const message = document.createElement('span');
   message.textContent = msg;
   toast.appendChild(message);

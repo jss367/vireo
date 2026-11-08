@@ -32,6 +32,17 @@ def _open_browse_export(page, live_server, ids):
     expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
 
 
+def _expect_toast(page, kind, summary):
+    """Check the toast says ``summary``, open its notification details and
+    return the full message shown there."""
+    toast = page.locator(f'#toastContainer [data-type="{kind}"]')
+    expect(toast.locator("span")).to_have_text(summary, timeout=15000)
+    toast.get_by_role("button", name="View notification details").click()
+    entry = page.locator("#notificationList details[open] p")
+    expect(entry).to_have_count(1)
+    return entry
+
+
 def test_browse_export_reports_where_the_photos_went(live_server, page, field_photos):
     _open_browse_export(page, live_server, field_photos["ids"])
     dest = field_photos["folder"].parent / "out"
@@ -40,8 +51,12 @@ def test_browse_export_reports_where_the_photos_went(live_server, page, field_ph
         page.locator("#exportDest").fill(str(dest))
     page.locator("#exportSubmitBtn").click()
 
-    toast = page.locator('#toastContainer [data-type="success"]')
-    expect(toast).to_have_text(f"Exported 2 photos to {dest}. Metadata: none selected (metadata-free export)", timeout=15000)
+    details = _expect_toast(
+        page, "success", "Exported 2 photos. No metadata selected.",
+    )
+    expect(details).to_have_text(
+        f"Exported 2 photos to {dest}. Metadata: none selected (metadata-free export)"
+    )
 
 
 def test_browse_export_reports_an_unreachable_original_folder(
@@ -53,12 +68,13 @@ def test_browse_export_reports_an_unreachable_original_folder(
     folder.rename(folder.parent / "unplugged")
     page.locator("#exportSubmitBtn").click()
 
-    toast = page.locator('#toastContainer [data-type="error"]')
-    expect(toast).to_have_text(
+    details = _expect_toast(
+        page, "error", "Nothing was exported. 1 photo failed. No metadata selected.",
+    )
+    expect(details).to_have_text(
         "Nothing was exported. 1 photo failed: "
         f"kestrel-a.jpg: original folder is not reachable ({folder})"
-        ". Metadata: none selected (metadata-free export)",
-        timeout=15000,
+        ". Metadata: none selected (metadata-free export)"
     )
     assert not folder.exists()
 
@@ -73,5 +89,7 @@ def test_photo_editor_export_reports_its_outcome(live_server, page, field_photos
     folder.rename(folder.parent / "unplugged")
     page.locator("#exportSubmitBtn").click()
 
-    toast = page.locator('#toastContainer [data-type="error"]')
-    expect(toast).to_contain_text("original folder is not reachable", timeout=15000)
+    details = _expect_toast(
+        page, "error", "Nothing was exported. 1 photo failed. No metadata selected.",
+    )
+    expect(details).to_contain_text("original folder is not reachable")
