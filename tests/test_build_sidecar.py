@@ -48,7 +48,8 @@ def test_sidecar_bundles_synchronized_release_manifest(monkeypatch, tmp_path, pl
     assert version == desktop["version"]
 
 
-def test_build_stamp_records_checkout_commit(tmp_path):
+@pytest.mark.parametrize("worktree", [False, True])
+def test_build_stamp_records_checkout_commit(tmp_path, worktree):
     """The stamp comes from the build checkout, independent of the caller's cwd."""
     import subprocess
 
@@ -59,4 +60,30 @@ def test_build_stamp_records_checkout_commit(tmp_path):
         cwd=tmp_path, check=True, capture_output=True,
     )
     expected = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
-    assert build_sidecar.write_build_commit(tmp_path).read_text().strip() == expected
+    root = tmp_path
+    if worktree:
+        root = tmp_path / "linked-worktree"
+        subprocess.run(["git", "worktree", "add", "--detach", str(root)], cwd=tmp_path,
+                       check=True, capture_output=True)
+    try:
+        assert build_sidecar.write_build_commit(root).read_text().strip() == expected
+    finally:
+        if worktree:
+            subprocess.run(["git", "worktree", "remove", "--force", str(root)], cwd=tmp_path,
+                           check=True, capture_output=True)
+
+
+def test_build_stamp_rejects_archive_inside_another_repository(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "--allow-empty", "-m", "Unrelated parent"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    archive = tmp_path / "unpacked-vireo"
+    archive.mkdir()
+    with pytest.raises(ValueError, match="root of their own Git checkout"):
+        build_sidecar.write_build_commit(archive)
+    assert not (archive / "build" / "build-commit.txt").exists()

@@ -82,6 +82,12 @@ def get_target_triple():
 
 def write_build_commit(repo_root):
     """Stamp the sidecar once; the desktop shell consumes the same build stamp."""
+    root = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=repo_root,
+        check=True, capture_output=True, text=True,
+    )
+    if Path(root.stdout.strip()).resolve() != Path(repo_root).resolve():
+        raise ValueError("Build sources must be the root of their own Git checkout")
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo_root,
         check=True, capture_output=True, text=True,

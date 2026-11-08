@@ -20,10 +20,16 @@ fn main() {
                 );
             }
         }
-        std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .ok()
+        // An unpacked source tree may live inside an unrelated repository.
+        // Worktrees have a .git file instead of a directory; both are valid.
+        std::path::Path::new("../.git")
+            .exists()
+            .then(|| {
+                std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+            })
+            .and_then(Result::ok)
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             .unwrap_or_else(|| "unknown".to_owned())

@@ -86,9 +86,13 @@ def _application_build_commit() -> str | None:
         if bundle_root is not None:
             commit = (Path(bundle_root) / "build-commit.txt").read_text().strip()
         else:
+            repo_root = Path(__file__).resolve().parents[2]
+            # Source archives nested in another repository must not borrow its SHA.
+            if not (repo_root / ".git").exists():
+                return None
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                cwd=Path(__file__).resolve().parents[2],
+                cwd=repo_root,
                 capture_output=True, text=True, check=True, timeout=2,
                 **no_window_kwargs(),
             )
