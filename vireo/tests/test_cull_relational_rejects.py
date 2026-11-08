@@ -324,3 +324,26 @@ def test_a_reject_merged_into_its_keeper_is_not_rejected_in_favor_of_itself(app_
     note = db.photo_review.current_flag_note(keeper)
     assert note is None or note["keeper_photo_id"] is None
     assert keeper not in {o["photo_id"] for o in client.get("/api/culling/orphans").get_json()["orphans"]}
+
+
+def test_a_reject_merged_into_the_id_reusing_newcomer_keeps_its_deleted_keeper(app_and_db):
+    from services import photo_ingest
+
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.photos.list_page()
+    keeper = max(p["id"] for p in photos)
+    loser = min(p["id"] for p in photos)
+    folder_id = db.photos.get(keeper)["folder_id"]
+    _apply(client, keeper, [loser])
+    catalog_deletion.delete_photos(db, [keeper])
+    newcomer = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="newcomer.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    assert newcomer == keeper
+    with db.transaction():
+        db.photo_review.transfer_flag_for_merge(loser, newcomer, "rejected")
+    note = db.photo_review.current_flag_note(newcomer)
+    assert note["keeper_photo_id"] == keeper
+    assert note["keeper_filename"] is None
+    assert note["comparison"] == COMPARISON

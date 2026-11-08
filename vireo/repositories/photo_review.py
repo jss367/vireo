@@ -364,8 +364,13 @@ class PhotoReviewRepository:
         state = self.flag_attributions([source_id]).get(source_id)
         self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, surviving_id))
         if state is not None and state["flag"] == flag:
-            # A reject absorbed by its own keeper cannot be rejected in favor of itself.
-            own_keeper = state.get("keeper_photo_id") == surviving_id
+            # A reject absorbed by its own keeper cannot be rejected in favor of
+            # itself; a stamped reference names a deleted keeper whose id the
+            # survivor merely reused, and stays.
+            own_keeper = (
+                state.get("keeper_photo_id") == surviving_id
+                and state.get("keeper_deleted_at") is None
+            )
             self.conn.execute(
                 """INSERT INTO current_flag_attribution
                    (photo_id,workspace_id,flag,source,reason,description,created_at,
