@@ -1164,7 +1164,19 @@ def test_delete_photos_sql_order(db, lib, monkeypatch, tmp_path):
         f"DELETE FROM photo_embedded_keyword_offered WHERE photo_id IN ({a})",
         f"DELETE FROM pending_changes WHERE photo_id IN ({a})",
         f"DELETE FROM detections WHERE photo_id IN ({a})",
-        # ``photo_row_deletion``: the rows, then their collection entries.
+        # ``photo_row_deletion``: a reject that lost to this photo keeps the
+        # relation, stamped as deleted (the id may be reused), then the rows,
+        # then their collection entries.
+        "UPDATE current_flag_attribution SET keeper_deleted_at = datetime('now')\n"
+        f"                   WHERE keeper_photo_id = {a} AND keeper_deleted_at IS NULL",
+        "UPDATE flag_attribution_history\n"
+        "                        SET old_state = json_set(old_state, '$.keeper_deleted_at', datetime('now'))\n"
+        f"                        WHERE json_extract(old_state, '$.keeper_photo_id') = {a}\n"
+        "                          AND json_extract(old_state, '$.keeper_deleted_at') IS NULL",
+        "UPDATE flag_attribution_history\n"
+        "                        SET new_state = json_set(new_state, '$.keeper_deleted_at', datetime('now'))\n"
+        f"                        WHERE json_extract(new_state, '$.keeper_photo_id') = {a}\n"
+        "                          AND json_extract(new_state, '$.keeper_deleted_at') IS NULL",
         f"DELETE FROM photos WHERE id IN ({a})",
         "SELECT id, rules FROM collections",
         f"SELECT filename FROM photos WHERE folder_id = {root}",
