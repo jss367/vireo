@@ -114,12 +114,16 @@ def test_legacy_custom_preferences_migrate_across_pages(live_server, page, sourc
         page.locator("#exportOverlay [data-export-cancel]").click()
 
 
-@pytest.mark.parametrize("stale_snapshot", [False, True])
-def test_snapshot_write_failure_does_not_change_last_preset(live_server, page, stale_snapshot):
+@pytest.mark.parametrize("stale_snapshot,previous_preset", [
+    (False, "web-jpg"), (True, "web-jpg"), (True, "custom"),
+])
+def test_snapshot_write_failure_does_not_change_last_preset(
+    live_server, page, stale_snapshot, previous_preset,
+):
     open_export(page, live_server, "browse")
     if stale_snapshot:
         page.locator("#exportTemplate").fill("old_{original}")
-    page.locator("#exportPreset").select_option("web-jpg")
+    page.locator("#exportPreset").select_option(previous_preset)
     previous = page.evaluate("localStorage.getItem('vireo.export.customSettings')")
     page.evaluate("""() => {
         const original = Storage.prototype.setItem;
@@ -134,11 +138,17 @@ def test_snapshot_write_failure_does_not_change_last_preset(live_server, page, s
     page.locator("#exportTemplate").fill("new_{original}")
     expect(page.locator("#exportPreset")).to_have_value("custom")
     expect(page.locator("#exportTemplate")).to_have_value("new_{original}")
-    assert page.evaluate("localStorage.getItem('vireo.export.lastPreset')") == "web-jpg"
+    assert page.evaluate("localStorage.getItem('vireo.export.lastPreset')") == previous_preset
     assert page.evaluate("localStorage.getItem('vireo.export.customSettings')") == previous
     expect(page.get_by_text("Could not remember export settings. You can still export with these settings.", exact=True)).to_be_visible()
     expect(page.locator("#exportSubmitBtn")).to_be_enabled()
     page.evaluate("window.restoreExportStorage()")
+    if previous_preset == "custom":
+        # A failed save retains the last durable settings, rather than
+        # destroying them and silently substituting factory defaults.
+        open_export(page, live_server, "editor")
+        expect(page.locator("#exportPreset")).to_have_value("custom")
+        expect(page.locator("#exportTemplate")).to_have_value("old_{original}")
     page.locator("#exportTemplate").fill("recovered_{original}")
     assert page.evaluate("localStorage.getItem('vireo.export.lastPreset')") == "custom"
     open_export(page, live_server, "editor")
