@@ -614,3 +614,22 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
         assert conn.execute("SELECT value FROM db_meta WHERE key='photographer_choice_test'").fetchone()[0] == 'preserved'
         assert [r[1] for r in conn.execute("PRAGMA table_info(subject_ranking_analysis)")] == [
             "detection_id", "source_key", "features", "mask_png"]
+
+
+def test_version_34_catalog_gains_subject_detail_columns(tmp_path):
+    path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        for table in ("photo_masks", "photos"):
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN subject_detail")
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN subject_detail_px")
+        conn.execute("PRAGMA user_version=34")
+    schema.ensure_schema(path)
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        for table in ("photo_masks", "photos"):
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            assert {"subject_detail", "subject_detail_px"} <= columns
+        # Existing rows are unmeasured, never zero.
+        assert conn.execute("SELECT COUNT(*) FROM photos WHERE subject_detail IS NOT NULL").fetchone()[0] == 0

@@ -68,6 +68,7 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
         checkpoint()
         features = compute_all_quality_features(image, mask)
         features.update(subject_size=float(mask.mean()), crop_complete=crop_completeness(mask))
+        features.update(_measure_detail(path, image, mask, photo))
         features.update(measure_eye(db, photo["id"], detection, image, mask, effective_cfg))
         features["analysis"] = {"source": "original", "width": image.width, "height": image.height,
                                 "longest_edge_limit": 1024, "measurement_basis": "subject_mask"}
@@ -84,6 +85,17 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
     finally:
         image.close()
     return True
+
+
+def _measure_detail(path, image, mask, photo):
+    """Subject detail beside the 1024 px analysis (``quality.measure_subject_detail``).
+
+    A source that cannot be re-read for it leaves the measurement out, so
+    the cards show no cross-encounter detail rather than an interpolated one.
+    """
+    from quality import frame_size, measure_subject_detail
+
+    return measure_subject_detail(image, mask, source_path=path, frame_size=frame_size(photo))
 
 
 def _existing_analysis(db, detection_id, key):

@@ -54,12 +54,15 @@ function cullSameEncounter(photoId, keeperId) {
 }
 
 /**
- * The measurement a reject and its keeper share, only inside one encounter:
- * the focus evidence (eye or subject Tenengrad) when both were measured on
- * the same basis, else the composite quality. Both are relative to the
- * encounter's frames (raw Tenengrad varies with region, texture, exposure
- * and scale; the quality is a rank), so a keeper from another encounter
- * gets null rather than a comparison the record would imply was decisive.
+ * The measurement a reject and its keeper share. Inside one encounter it is
+ * the scorer's own evidence: the focus evidence (eye or subject Tenengrad)
+ * when both were measured on the same basis, else the composite quality.
+ * Both are relative to the encounter's frames (raw Tenengrad varies with
+ * region, texture, exposure and scale; the quality is a rank), so across
+ * encounters, or when the encounter evidence is missing, the record uses
+ * the subject detail instead: Tenengrad at a fixed subject scale, measured
+ * the same way for every photo, with each photo's cross-encounter quality
+ * beside it. Null when neither applies.
  *
  * @param {number} photoId @param {number} keeperId @param {string} scope
  * @returns {CullComparison | null}
@@ -67,20 +70,44 @@ function cullSameEncounter(photoId, keeperId) {
 function cullComparison(photoId, keeperId, scope) {
   var a = cullSourcePhoto(photoId);
   var b = cullSourcePhoto(keeperId);
-  if (!a || !b || !cullSameEncounter(photoId, keeperId)) return null;
-  var fa = a.focus_evidence;
-  var fb = b.focus_evidence;
-  if (fa && fb && fa.basis === fb.basis && typeof fa.measurement === 'number' && typeof fb.measurement === 'number') {
+  if (!a || !b) return null;
+  if (cullSameEncounter(photoId, keeperId)) {
+    var fa = a.focus_evidence;
+    var fb = b.focus_evidence;
+    if (fa && fb && fa.basis === fb.basis && typeof fa.measurement === 'number' && typeof fb.measurement === 'number') {
+      return {
+        basis: fa.basis, measurement_name: fa.measurement_name || 'Tenengrad',
+        photo: Math.round(fa.measurement), keeper: Math.round(fb.measurement), scope: scope,
+      };
+    }
+    if (typeof a.quality_composite === 'number' && typeof b.quality_composite === 'number') {
+      return {basis: 'quality', measurement_name: 'quality rank in encounter',
+        photo: a.quality_composite, keeper: b.quality_composite, scope: scope};
+    }
+  }
+  var ca = a.comparable_quality;
+  var cb = b.comparable_quality;
+  if (ca && cb && typeof ca.detail === 'number' && typeof cb.detail === 'number') {
     return {
-      basis: fa.basis, measurement_name: fa.measurement_name || 'Tenengrad',
-      photo: Math.round(fa.measurement), keeper: Math.round(fb.measurement), scope: scope,
+      basis: 'detail', measurement_name: ca.measurement_name, scale_px: ca.scale_px,
+      photo: Math.round(ca.detail), keeper: Math.round(cb.detail), scope: scope,
+      photo_quality: ca.score, keeper_quality: cb.score,
     };
   }
-  if (typeof a.quality_composite === 'number' && typeof b.quality_composite === 'number') {
-    return {basis: 'quality', measurement_name: 'quality rank in encounter',
-      photo: a.quality_composite, keeper: b.quality_composite, scope: scope};
-  }
   return null;
+}
+
+/**
+ * Orders two cards best first by the quality that fits their relation:
+ * the cross-encounter quality when both have it, else the encounter rank.
+ *
+ * @param {CullDisplayPhoto} a @param {CullDisplayPhoto} b
+ */
+function cullQualityOrder(a, b) {
+  if (typeof a.comparable === 'number' && typeof b.comparable === 'number' && a.comparable !== b.comparable) {
+    return b.comparable - a.comparable;
+  }
+  return b.quality - a.quality || a.photo_id - b.photo_id;
 }
 
 /**
@@ -91,10 +118,32 @@ function cullComparison(photoId, keeperId, scope) {
 function cullKeeperText(keeperName, comparison) {
   var text = 'Instead of ' + keeperName;
   if (!comparison) return text + ' (no shared measurement)';
-  var where = comparison.scope === 'compared' ? 'compared side by side' : 'same encounter';
+  var where = comparison.scope === 'compared' ? 'compared side by side'
+    : comparison.basis === 'detail' ? 'across encounters' : 'same encounter';
+  if (comparison.basis === 'detail') {
+    return text + ' · subject detail ' + comparison.photo + ' vs ' + comparison.keeper +
+      (comparison.scale_px ? ' at ' + comparison.scale_px + ' px' : '') + ' (' + where + ')';
+  }
   var basis = comparison.basis === 'quality' ? comparison.measurement_name
     : comparison.basis + ' ' + comparison.measurement_name;
   return text + ' · ' + basis + ' ' + comparison.photo + ' vs ' + comparison.keeper + ' (' + where + ')';
+}
+
+/**
+ * The card line for a photo's cross-encounter quality: the detail
+ * measurement and the composite, or '' until the detail is measured.
+ *
+ * @param {number} photoId @returns {{text: string, title: string} | null}
+ */
+function cullDetailLine(photoId) {
+  var source = cullSourcePhoto(photoId);
+  var cq = source && source.comparable_quality;
+  if (!cq || typeof cq.detail !== 'number') return null;
+  return {
+    text: 'Detail ' + Math.round(cq.detail).toLocaleString() + ' · quality ' + Math.round(cq.score * 100) + '% across encounters',
+    title: cq.measurement_name + '. The quality combines that detail with the subject\'s exposure, framing and size; ' +
+      'unlike the encounter rank it means the same for every photo, so it can be compared across outings.',
+  };
 }
 
 /**

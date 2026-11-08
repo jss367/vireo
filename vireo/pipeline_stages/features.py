@@ -177,7 +177,13 @@ _NEXT_PHOTO = "next"
 _STOP = "stop"
 # The per-photo phases whose time the stage result reports, in
 # the order a photo goes through them.
-_MASK_PHASES = ("decode", "segment", "analyze", "embed", "store")
+_MASK_PHASES = ("decode", "segment", "analyze", "detail", "embed", "store")
+
+
+def _unmeasured_detail(count: int) -> str:
+    """'N cached masks still lack a subject detail measurement', singular aware."""
+    noun, verb = ("mask", "lacks") if count == 1 else ("masks", "lack")
+    return f"{count} cached {noun} still {verb} a subject detail measurement"
 
 
 class _MaskFileStage(Protocol):
@@ -341,7 +347,12 @@ class _MaskPass:
             render_proxy,
             save_mask,
         )
-        from quality import compute_all_quality_features
+        from quality import (
+            compute_all_quality_features,
+            frame_size,
+            measure_cached_subject_detail,
+            measure_subject_detail,
+        )
 
         self.embed = embed
         self.embed_batch = embed_batch
@@ -352,6 +363,9 @@ class _MaskPass:
         self.render_proxy = render_proxy
         self.save_mask = save_mask
         self.compute_all_quality_features = compute_all_quality_features
+        self.measure_subject_detail = measure_subject_detail
+        self.measure_cached_subject_detail = measure_cached_subject_detail
+        self.frame_size = frame_size
 
         self.thread_db = self.run.database_factory(self.run.db_path)
         self.thread_db.set_active_workspace(self.run.workspace_id)
@@ -654,6 +668,13 @@ class _MaskPass:
         self.masked = 0
         self.skipped = 0
         self.em_failed = 0
+        # Cached masks that lacked a subject detail measurement and got
+        # one this run, and those whose source could not be read for it.
+        # The latter stay masked (the cached branch needs no source for
+        # the mask) but their measurement stays pending, so they are
+        # reported apart from ``em_unreadable``.
+        self.detail_measured = 0
+        self.detail_unreadable = 0
         # Photos whose source file could not be read. Kept out of
         # ``skipped`` because the two mean opposite things to the
         # user: a skip is "SAM found no subject in this frame" (a
@@ -969,6 +990,8 @@ class _MaskPass:
         item.entry["detector_model"] = selected["detector_model"]
         item.entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
         if self._reuse_cached_mask(item):
+            if item.existing is not None and item.existing["subject_detail"] is None:
+                self._measure_cached_detail(item)
             self.outcomes.record(item.photo_id, "cached")
             self.masked += 1
             self.processed = i + 1
@@ -1218,7 +1241,50 @@ class _MaskPass:
                 analysis_report.update(self.raw_session.source_metadata())
                 features = scoring_features(analysis_report)
                 features["quality_input_recipe"] = RECIPE
+        features.update(self._measure_detail(item, proxy, mask))
         return completeness, features, analysis_report
+
+    def _measure_detail(
+        self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
+    ) -> dict[str, Any]:
+        """Subject detail for a freshly made mask (``quality.measure_subject_detail``).
+
+        A source that cannot be re-read for it leaves the measurement
+        unmade, which the next run treats as pending work.
+        """
+        with self._timed("detail"):
+            return self.measure_subject_detail(
+                proxy, mask, source_path=item.image_path, frame_size=self.frame_size(item.photo),
+            )
+
+    def _measure_cached_detail(self, item: _MaskPhoto) -> None:
+        """Measure subject detail for a cached mask that predates it, without SAM.
+
+        The cached branch never needs the source for the mask itself, so a
+        source (or mask file) that cannot be read keeps the photo masked and
+        counts only here; the measurement stays NULL and pending for the
+        next run.
+        """
+        existing = item.existing
+        if existing is None:
+            return
+        if item.photo["folder_id"] in self.em_offline_folder_ids:
+            self.detail_unreadable += 1
+            return
+        with self._timed("detail"):
+            measured = self.measure_cached_subject_detail(
+                existing["path"], item.image_path, self.frame_size(item.photo),
+            )
+        if measured is None:
+            self.detail_unreadable += 1
+            if self.source_offline_reason(item.folder_path, item.image_path) is not None:
+                self.em_offline_folder_ids.add(item.photo["folder_id"])
+            return
+        self.thread_db.masks_features.set_subject_detail(
+            item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
+        )
+        self.thread_db.commit_with_retry()
+        self.detail_measured += 1
 
     def _store_mask(
         self, item: _MaskPhoto, mask: np.ndarray, completeness: float,
@@ -1268,6 +1334,8 @@ class _MaskPass:
                 bg_separation=features.pop("bg_separation", None),
                 phash_crop=features.pop("phash_crop", None),
                 noise_estimate=features.pop("noise_estimate", None),
+                subject_detail=features.pop("subject_detail", None),
+                subject_detail_px=features.pop("subject_detail_px", None),
             ),
         )
         subject_masks.set_active_mask_variant(
@@ -1370,6 +1438,24 @@ class _MaskPass:
             "phase_seconds": self._phase_seconds_result(),
         }
 
+    def _summary(self, masked: int, unreadable: int, failed: int) -> str:
+        """The step summary: every outcome with a count, in a fixed order."""
+        parts = [f"{masked} masked", f"{self.skipped} skipped"]
+        if unreadable:
+            parts.append(f"{unreadable} unreadable")
+        if failed:
+            parts.append(f"{failed} failed")
+        if self.detail_measured:
+            parts.append(f"{self.detail_measured} detail measured")
+        if self.detail_unreadable:
+            parts.append(f"{self.detail_unreadable} detail unmeasured")
+        if self.photos_subthreshold_only > 0:
+            parts.append(
+                f"{self.photos_subthreshold_only} below detector_confidence "
+                f"({self.detector_confidence})"
+            )
+        return ", ".join(parts)
+
     def finalize(self) -> None:
         run = self.run
         em_failed = self.em_failed
@@ -1394,6 +1480,7 @@ class _MaskPass:
         final_status = (
             "failed"
             if em_failed > 0 or em_unreadable_all > 0
+            or self.detail_unreadable > 0
             or self.em_offline_latched
             else "completed"
         )
@@ -1428,6 +1515,12 @@ class _MaskPass:
                 f"[extract_masks] {em_failed} of {em_total_candidates} photos "
                 f"failed mask extraction"
             )
+        if self.detail_unreadable > 0:
+            em_secondary_rollups.append(
+                f"[extract_masks] {_unmeasured_detail(self.detail_unreadable)} "
+                f"because the source could not be read; run Process again "
+                f"when it is reachable."
+            )
         # Emit the actionable Fatal last so any collapse-by-stage
         # consumer that keeps whichever entry appeared last for
         # each stage still sees the reconnect instruction rather
@@ -1443,23 +1536,9 @@ class _MaskPass:
             em_secondary_rollups[0]
             if em_secondary_rollups else None
         )
-        em_summary_parts = [
-            f"{em_masked_all} masked", f"{self.skipped} skipped",
-        ]
-        if em_unreadable_all:
-            em_summary_parts.append(
-                f"{em_unreadable_all} unreadable",
-            )
-        if em_failed:
-            em_summary_parts.append(f"{em_failed} failed")
-        if photos_subthreshold_only > 0:
-            em_summary_parts.append(
-                f"{photos_subthreshold_only} below detector_confidence "
-                f"({self.detector_confidence})"
-            )
         run.runner.update_step(run.job["id"], "extract_masks", status=final_status,
-                           summary=", ".join(em_summary_parts),
-                           error_count=em_failed + em_unreadable_all,
+                           summary=self._summary(em_masked_all, em_unreadable_all, em_failed),
+                           error_count=em_failed + em_unreadable_all + self.detail_unreadable,
                            error=em_rollup)
         run.result["stages"]["extract_masks"] = {
             "masked": em_masked_all, "skipped": self.skipped,
@@ -1467,6 +1546,8 @@ class _MaskPass:
             "unreadable": em_unreadable_all,
             "total": em_total_candidates,
             "subthreshold": photos_subthreshold_only,
+            "detail_measured": self.detail_measured,
+            "detail_unreadable": self.detail_unreadable,
             "phase_seconds": self._phase_seconds_result(),
         }
 

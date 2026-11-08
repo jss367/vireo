@@ -37,6 +37,24 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
 
+@pytest.fixture(autouse=True)
+def stub_subject_detail(monkeypatch):
+    # The mask stage's subject detail measurement re-reads the source and
+    # saved mask PNGs; the stage tests here stub the proxy with arrays and
+    # write placeholder mask bytes, so the measurement is stubbed to a fixed
+    # value. Tests of the measurement itself re-patch these.
+    import quality
+
+    monkeypatch.setattr(
+        quality, "measure_subject_detail",
+        lambda proxy, mask, *, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+    )
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail",
+        lambda mask_path, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+    )
+
+
 def _open_db(tmp_path):
     """Create the test catalog at tmp_path/test.db and return
     ``(db_path, db, active_workspace_id)``."""
@@ -9180,7 +9198,7 @@ def test_extract_masks_overlaps_quality_analysis_with_embedding(tmp_path, monkey
     ).fetchall()
     assert [tuple(row) for row in stored] == [(photo_ids[0], 42.0), (photo_ids[1], 42.0)]
     assert threading.current_thread().name not in analysis_threads
-    assert set(em["phase_seconds"]) == {"decode", "segment", "analyze", "embed", "store"}
+    assert set(em["phase_seconds"]) == {"decode", "segment", "analyze", "detail", "embed", "store"}
     assert all(seconds >= 0 for seconds in em["phase_seconds"].values())
 
 
@@ -19592,3 +19610,104 @@ def test_pipeline_notes_a_timm_model_without_common_names(tmp_path, monkeypatch)
         stage, SimpleNamespace(), "BioCLIP", "classify:b",
     ) is None
     assert notes == []
+
+
+# ---------------------------------------------------------------------------
+# Subject detail for cached masks
+#
+# A mask made before the fixed-scale subject detail existed is a cache hit
+# the stage keeps; it measures the detail from the source without SAM and
+# reports what it could not measure.
+# ---------------------------------------------------------------------------
+
+
+def _rerun_extract_masks_cached(tmp_path, monkeypatch, db, *, expect_error=None):
+    """Run the stage again over a catalog whose masks are all cache hits.
+
+    A failed stage fails the job (``_raise_if_stages_failed``); pass the
+    expected message as ``expect_error`` to assert that and read the stage's
+    final step update instead of the result."""
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+
+    def no_sam(*a, **k):
+        raise AssertionError("a cache hit must not run SAM")
+
+    monkeypatch.setattr(masking, "render_proxy", lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8))
+    monkeypatch.setattr(masking, "generate_mask", no_sam)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(dino_embed, "embed", lambda p, variant=None: np.zeros(384, dtype=np.float32))
+    monkeypatch.setattr(dino_embed, "embed_batch", lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32))
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+    cfg.save({"pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"}})
+    col_id = db.conn.execute("SELECT id FROM collections ORDER BY id LIMIT 1").fetchone()[0]
+    params = PipelineParams(collection_id=col_id, skip_classify=True, skip_extract_masks=False, skip_regroup=True)
+    runner = FakeRunner()
+    job = _make_job()
+    if expect_error is None:
+        result = run_pipeline_job(job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params)
+        stage = result["stages"]["extract_masks"]
+    else:
+        with pytest.raises(RuntimeError, match=expect_error):
+            run_pipeline_job(job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params)
+        stage = None
+    final = [kw for _, step, kw in runner.step_updates if step == "extract_masks" and "status" in kw][-1]
+    return stage, final
+
+
+def _null_subject_detail(db, pid):
+    db.conn.execute("UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL WHERE photo_id=?", (pid,))
+    db.conn.execute("UPDATE photos SET subject_detail=NULL, subject_detail_px=NULL WHERE id=?", (pid,))
+    db.conn.commit()
+
+
+def test_cached_mask_without_subject_detail_is_measured_without_sam(tmp_path, monkeypatch):
+    import quality
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    mask_path = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    _null_subject_detail(db, pid)
+    measured = []
+
+    def fake_measure(path, source_path, frame_size=None):
+        measured.append((path, os.path.basename(source_path), frame_size))
+        return {"subject_detail": 4321.0, "subject_detail_px": 800.0}
+
+    monkeypatch.setattr(quality, "measure_cached_subject_detail", fake_measure)
+    stage, final = _rerun_extract_masks_cached(tmp_path, monkeypatch, db)
+
+    assert [(path, name) for path, name, _ in measured] == [(mask_path, "a.jpg")]
+    assert stage["masked"] == 1 and stage["detail_measured"] == 1 and stage["detail_unreadable"] == 0
+    assert final["status"] == "completed"
+    assert "1 detail measured" in final["summary"]
+    row = db.masks_features.get_mask(pid, "sam2-small")
+    assert (row["subject_detail"], row["subject_detail_px"]) == (4321.0, 800.0)
+    photo = db.conn.execute("SELECT subject_detail, subject_detail_px FROM photos WHERE id=?", (pid,)).fetchone()
+    assert tuple(photo) == (4321.0, 800.0)
+    # Measured once: the next run has nothing to measure.
+    stage, _ = _rerun_extract_masks_cached(tmp_path, monkeypatch, db)
+    assert measured[1:] == [] and stage["detail_measured"] == 0
+
+
+def test_cached_mask_whose_source_cannot_be_read_stays_masked_but_fails_the_stage(tmp_path, monkeypatch):
+    import quality
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    _null_subject_detail(db, pid)
+    monkeypatch.setattr(quality, "measure_cached_subject_detail", lambda *a, **k: None)
+    _, final = _rerun_extract_masks_cached(
+        tmp_path, monkeypatch, db, expect_error="1 cached mask still lacks a subject detail measurement",
+    )
+
+    assert final["status"] == "failed" and final["error_count"] == 1
+    assert "1 masked" in final["summary"] and "1 detail unmeasured" in final["summary"]
+    assert "still lacks a subject detail measurement" in final["error"]
+    assert db.masks_features.get_mask(pid, "sam2-small")["subject_detail"] is None
+    assert db.masks_features.get_mask(pid, "sam2-small")["path"]

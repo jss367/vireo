@@ -16,6 +16,10 @@ function _extractMasksSummary(ext) {
   // file). Both leave the photo unmasked, but only one is the user's to fix.
   if (ext.unreadable) parts.push(ext.unreadable + ' unreadable');
   if (ext.failed) parts.push(ext.failed + ' failed');
+  // Cached masks measured for subject detail this run, and those whose
+  // source could not be read for it (still masked, measurement pending).
+  if (ext.detail_measured) parts.push(ext.detail_measured + ' detail measured');
+  if (ext.detail_unreadable) parts.push(ext.detail_unreadable + ' detail unmeasured');
   if (parts.length) return parts.join(', ');
   // Every counter is zero. `reason` means the backend emptied the worklist
   // because something went wrong (no detections, missing weights, everything
@@ -34,7 +38,7 @@ function _extractMasksSummary(ext) {
 /** @param {PipelineStageResult | null | undefined} ext */
 function _extractMasksClean(ext) {
   if (!ext) return true;
-  return !ext.unreadable && !ext.failed && !ext.reason;
+  return !ext.unreadable && !ext.failed && !ext.reason && !ext.detail_unreadable;
 }
 
 // What the standalone Extract card should show for a finished job. The job

@@ -47,6 +47,10 @@ def extraction(db, tmp_path, monkeypatch):
     deps.generate_mask = generate
     deps.crop_completeness = lambda mask: 0.9
     deps.compute_all_quality_features = lambda proxy, mask: {"subject_tenengrad": 1.5}
+    deps.measure_subject_detail = lambda proxy, mask, *, source_path, frame_size=None: {
+        "subject_detail": 100.0, "subject_detail_px": 40.0}
+    deps.measure_cached_subject_detail = lambda mask_path, source_path, frame_size=None: {
+        "subject_detail": 100.0, "subject_detail_px": 40.0}
     deps.crop_subject = lambda proxy, mask, margin: None
     deps.embed = lambda proxy, variant: np.zeros(384, dtype=np.float32)
     monkeypatch.setattr(mask_extraction, "_import_mask_extraction_deps", lambda: deps)
@@ -107,8 +111,9 @@ def test_service_uses_captured_workspace_and_reports_progress(db, tmp_path, extr
 
     assert result == {
         "masked": 1, "skipped": 0, "failed": 0, "unreadable": 0,
-        "total": 1, "ok": True, "errors": [],
+        "total": 1, "detail_measured": 0, "detail_unreadable": 0, "ok": True, "errors": [],
     }
+    assert db.masks_features.get_mask(first, "sam2-base")["subject_detail"] == 100.0
     assert len(extraction.generated) == 1
     assert db.masks_features.get_mask(first, "sam2-base") is not None
     assert db.masks_features.get_mask(other, "sam2-base") is None

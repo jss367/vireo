@@ -40,6 +40,7 @@ PIPELINE_PHOTO_COLS = """
     p.dino_subject_embedding, p.dino_global_embedding,
     p.dino_embedding_variant,
     p.focal_length, p.burst_id, p.noise_estimate,
+    p.subject_detail, p.subject_detail_px,
     p.flag, p.rating,
     p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad
 """

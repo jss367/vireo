@@ -213,3 +213,68 @@ test('the orphan banner counts saved rejects whose keeper is gone', async () => 
   assert.equal(ctx.cullOrphanReason(ctx.cullOrphans[0]),
     'Instead of a photo since deleted (no shared measurement) — that photo was deleted.');
 });
+
+/** The two-encounter fixture with the fixed-scale detail measured on photos 1 to 3. */
+function resultsWithDetail() {
+  const data = results();
+  const detail = (value, score) => ({
+    detail: value, detail_px: 900, scale_px: 512, score,
+    measurement_name: 'Tenengrad at 512 px subject scale', basis: 'subject',
+  });
+  data.photos[0].comparable_quality = detail(18200, 0.81);
+  data.photos[1].comparable_quality = detail(6100, 0.52);
+  data.photos[2].comparable_quality = detail(9400, 0.63);
+  return data;
+}
+
+test('across encounters a reject is compared by the fixed-scale subject detail', () => {
+  const {ctx} = page();
+  ctx.setPipelineResults(resultsWithDetail());
+  // Inside one encounter the scorer's own evidence still wins.
+  assert.equal(plain(ctx.cullComparison(2, 1, 'encounter')).basis, 'eye');
+  // Across encounters the detail carries each photo's cross-encounter quality beside it.
+  assert.deepEqual(plain(ctx.cullComparison(2, 3, 'species')), {
+    basis: 'detail', measurement_name: 'Tenengrad at 512 px subject scale', scale_px: 512,
+    photo: 6100, keeper: 9400, scope: 'species', photo_quality: 0.52, keeper_quality: 0.63,
+  });
+  // An unmeasured photo still has nothing honest to compare across encounters.
+  assert.equal(ctx.cullComparison(4, 1, 'species'), null);
+  assert.equal(ctx.cullKeeperText('p3.jpg', ctx.cullComparison(2, 3, 'species')),
+    'Instead of p3.jpg · subject detail 6100 vs 9400 at 512 px (across encounters)');
+  assert.equal(ctx.cullKeeperText('p3.jpg', ctx.cullComparison(2, 3, 'compared')),
+    'Instead of p3.jpg · subject detail 6100 vs 9400 at 512 px (compared side by side)');
+});
+
+test('the Apply record carries the detail comparison for a cross-encounter keeper', () => {
+  const {ctx} = page();
+  ctx.setPipelineResults(resultsWithDetail());
+  ctx.setCullAction(3, 'keep');
+  ctx.setCullAction(2, 'reject');
+  const [rejection] = plain(ctx.collectCullingApplyPayload(ctx.cullData).rejections);
+  // Nothing is kept in photo 2's encounter, so it loses to the species reference (photo 3).
+  assert.equal(rejection.keeper_photo_id, 3);
+  assert.equal(rejection.comparison.basis, 'detail');
+  assert.deepEqual([rejection.comparison.photo, rejection.comparison.keeper], [6100, 9400]);
+});
+
+test('cards show the detail and the cross-encounter quality once measured', () => {
+  const {ctx} = page();
+  ctx.setPipelineResults(resultsWithDetail());
+  assert.deepEqual(plain(ctx.cullDetailLine(1)).text, 'Detail 18,200 · quality 81% across encounters');
+  assert.equal(ctx.cullDetailLine(4), null);
+  const first = ctx.cullData.species_groups[0].scene_groups[0].photos[0];
+  assert.equal(first.comparable, 0.81);
+});
+
+test('favorite suggestions on one day are ordered by the cross-encounter quality when measured', () => {
+  const {ctx} = page();
+  const data = resultsWithDetail();
+  // Photo 3 ranks top of its encounter (0.8) but photo 2 has more measured detail;
+  // photo 4 is unmeasured and falls back to its encounter rank.
+  data.photos[1].comparable_quality.score = 0.7;
+  data.photos[2].comparable_quality.score = 0.6;
+  const a = {photo_id: 2, quality: 0.4, comparable: 0.7};
+  const b = {photo_id: 3, quality: 0.8, comparable: 0.6};
+  const c = {photo_id: 4, quality: 0.3, comparable: null};
+  assert.deepEqual([b, c, a].sort(ctx.cullQualityOrder).map(p => p.photo_id), [2, 3, 4]);
+});

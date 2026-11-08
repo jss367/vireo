@@ -1,5 +1,9 @@
 # Interpreting relative focus measurements
 
+For the one sharpness value meant to be compared across encounters (the
+subject resampled to a fixed scale), see `docs/comparable-quality.md`; this
+document covers the encounter-relative scores.
+
 Focus scores help order similar photographs. They are not calibrated estimates
 of absolute sharpness. A low percentile can describe a photograph with visible
 eye and head detail; a high percentile can describe the least blurred photograph

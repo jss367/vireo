@@ -349,6 +349,28 @@ def count_extract_stale(
     )
 
 
+def count_mask_detail_pending(
+    db: Database, sam2_variant: str | None, photo_ids: Iterable[int] | None = None,
+    detector_confidence: float | None = None, *, rescue_floors: dict[int, float] | None = None,
+) -> int:
+    """Count masks in scope the stage will keep but still has to measure.
+
+    A mask made before subject detail existed is a cache hit (current
+    prompt, file on disk) whose ``photo_masks.subject_detail`` is NULL; the
+    stage measures it from the source without rerunning SAM. These are
+    work, so the plan counts them beside ``pending`` and ``stale``; the
+    three are disjoint (see ``StatsRepository.count_mask_detail_pending``).
+    """
+    if not sam2_variant:
+        return 0
+    repo = _scoped_stats(db)
+    detector_confidence = _detector_confidence(db, detector_confidence)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
+    return repo.count_mask_detail_pending(
+        sam2_variant, detector_confidence, scope_sql, scope_params, rescue_floors=rescue_floors,
+    )
+
+
 def count_eye_keypoint_eligible(
     db: Database, photo_ids: Iterable[int] | None = None,
 ) -> int:

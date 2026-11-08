@@ -13,6 +13,7 @@ import pytest
 from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from repositories.masks_features import MaskQuality
 from services import classify_preflight, photo_ingest, stage_counts, subject_masks, workspace_folders
 
 
@@ -47,6 +48,7 @@ def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
         photo_id, variant, path,
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
+        quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),
     )
     subject_masks.set_active_mask_variant(db, photo_id, variant)
     db.commit()
@@ -512,6 +514,7 @@ def test_count_photos_pending_masks_is_variant_aware(tmp_path):
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
             prompt=(0.1, 0.1, 0.5, 0.5),
+            quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),
         )
         subject_masks.set_active_mask_variant(db, pid, "sam2-large")
         db.commit()
@@ -531,6 +534,7 @@ def test_count_photos_pending_masks_selected_variant_requires_cache_row(tmp_path
         p_done, "sam2-small", "/m/done.small.png",
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
+        quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),
     )
     subject_masks.set_active_mask_variant(db, p_done, "sam2-small")
     db.commit()
@@ -581,6 +585,7 @@ def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
             prompt=(0.1, 0.1, 0.5, 0.5),
+            quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),
         )
         subject_masks.set_active_mask_variant(db, pid, "sam2-large")
         db.commit()
@@ -810,6 +815,7 @@ def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
         pid, "sam2-small", "/m/a.png",
         detector_model="megadetector-v6",
         prompt=(0.9, 0.9, 0.05, 0.05),
+        quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),
     )
     db.commit()
     db.conn.execute(
@@ -2168,6 +2174,7 @@ def test_extract_plan_done_prior_when_all_masks_present(tmp_path):
         pid, "sam2-small", "/m/a.png",
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
+        quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),
     )
     subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     db.commit()
@@ -2185,6 +2192,7 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
         pid_done, "sam2-small", "/m/done.png",
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
+        quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),
     )
     subject_masks.set_active_mask_variant(db, pid_done, "sam2-small")
     db.commit()
@@ -2248,9 +2256,10 @@ def test_extract_plan_pending_includes_stale_when_all_masked(tmp_path):
     )
     db.conn.execute(
         "INSERT INTO photo_masks(photo_id, variant, path, created_at, "
-        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h) "
+        "detector_model, prompt_x, prompt_y, prompt_w, prompt_h, "
+        "subject_detail, subject_detail_px) "
         "VALUES (?, 'sam2-small', '/m/fresh.png', 0, 'megadetector-v6', "
-        "0.1, 0.1, 0.5, 0.5)",  # matches detection
+        "0.1, 0.1, 0.5, 0.5, 1.0, 1.0)",  # matches detection, detail measured
         (pid_fresh,),
     )
     db.conn.execute(
@@ -4332,7 +4341,8 @@ def test_extract_plan_counts_rescued_masks_and_stale_prompts(tmp_path, monkeypat
 
     pid = ids[1]
     db.masks_features.upsert_mask(pid, 'sam2-small', '/m/rescued.png',
-                                 detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5))
+                                 detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5),
+                                 quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),)
     subject_masks.set_active_mask_variant(db, pid, 'sam2-small', weak_rescue_min_conf=0.001)
     db.commit()
     done = extract()
@@ -4383,7 +4393,8 @@ def test_rescued_mask_counts_keep_variant_detector_and_large_scope_gates(tmp_pat
                        detector_model='other-detector')
     db.commit()
     db.masks_features.upsert_mask(pid, 'sam2-small', '/m/rescued.png',
-                                 detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5))
+                                 detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5),
+                                 quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),)
     subject_masks.set_active_mask_variant(db, pid, 'sam2-small', weak_rescue_min_conf=0.001)
     db.commit()
     # Force both the scope and the rescue set past SQLite's legacy parameter
@@ -4410,3 +4421,70 @@ def test_rescued_mask_counts_keep_variant_detector_and_large_scope_gates(tmp_pat
     assert stage_counts.count_photos_pending_masks(
         db, [], sam2_variant='sam2-small', rescue_floors=floors,
     ) == {'eligible': 0, 'pending': 0}
+
+
+# -- subject detail backfill: cached masks the stage keeps but must measure --
+
+
+def test_count_mask_detail_pending_counts_current_masks_without_a_measurement(tmp_path):
+    db, folder_id = _make_db(tmp_path)
+    p_measured, _ = _add_photo_with_detection(db, folder_id, "measured.jpg")
+    p_unmeasured, _ = _add_photo_with_detection(db, folder_id, "unmeasured.jpg")
+    p_stale, _ = _add_photo_with_detection(db, folder_id, "stale.jpg")
+    p_missing, _ = _add_photo_with_detection(db, folder_id, "missing.jpg")
+    _mark_sam_done(db, p_measured, "/m/measured.png")
+    db.masks_features.upsert_mask(
+        p_unmeasured, "sam2-small", "/m/unmeasured.png",
+        detector_model="megadetector-v6", prompt=(0.1, 0.1, 0.5, 0.5),
+    )
+    subject_masks.set_active_mask_variant(db, p_unmeasured, "sam2-small")
+    # A stale prompt is re-extracted (and measured then): it is stale work, not detail work.
+    db.masks_features.upsert_mask(
+        p_stale, "sam2-small", "/m/stale.png",
+        detector_model="megadetector-v6", prompt=(0.9, 0.9, 0.05, 0.05),
+    )
+    db.conn.execute("UPDATE photos SET mask_path='/m/stale.png' WHERE id=?", (p_stale,))
+    db.commit()
+
+    assert stage_counts.count_mask_detail_pending(db, "sam2-small") == 1
+    assert stage_counts.count_mask_detail_pending(db, "sam2-small", photo_ids=[p_measured, p_missing]) == 0
+    assert stage_counts.count_mask_detail_pending(db, None) == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 1
+    assert stage_counts.count_photos_pending_masks(db, sam2_variant="sam2-small") == {"eligible": 4, "pending": 1}
+
+
+def test_extract_plan_counts_detail_measurements_as_work(tmp_path):
+    """A catalog masked before subject detail existed is not done: the pill
+    says the run will measure, and the counts stay disjoint from pending/stale."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    p_measured, _ = _add_photo_with_detection(db, folder_id, "measured.jpg")
+    p_unmeasured, _ = _add_photo_with_detection(db, folder_id, "unmeasured.jpg")
+    _mark_sam_done(db, p_measured, "/m/measured.png")
+    db.masks_features.upsert_mask(
+        p_unmeasured, "sam2-small", "/m/unmeasured.png",
+        detector_model="megadetector-v6", prompt=(0.1, 0.1, 0.5, 0.5),
+    )
+    subject_masks.set_active_mask_variant(db, p_unmeasured, "sam2-small")
+    db.commit()
+
+    extract = compute_plan(db, _params(), str(tmp_path / "test.db"))["stages"]["Extract"]
+    assert extract["state"] == "will-run"
+    assert extract["summary"] == "Will measure subject detail for 1 cached mask (2 eligible)"
+    assert extract["detail"] == {
+        "eligible": 2, "pending": 1, "stale": 0, "detail_pending": 1, "fingerprint_outdated": False,
+    }
+
+    p_missing, _ = _add_photo_with_detection(db, folder_id, "missing.jpg")
+    extract = compute_plan(db, _params(), str(tmp_path / "test.db"))["stages"]["Extract"]
+    assert extract["summary"] == (
+        "Will extract masks for 1 photo and measure subject detail for 1 cached mask (3 eligible)"
+    )
+    assert extract["detail"]["pending"] == 2
+    assert extract["detail"]["detail_pending"] == 1
+
+    db.masks_features.set_subject_detail(p_unmeasured, "sam2-small", 12000.0, 800.0)
+    _mark_sam_done(db, p_missing, "/m/missing.png")
+    extract = compute_plan(db, _params(), str(tmp_path / "test.db"))["stages"]["Extract"]
+    assert extract["state"] == "done-prior"
+    assert extract["detail"]["detail_pending"] == 0

@@ -74,7 +74,12 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
         _StagedMaskFile,
     )
     from pipeline_locks import acquire_photo_mask
-    from quality import compute_all_quality_features
+    from quality import (
+        compute_all_quality_features,
+        frame_size,
+        measure_cached_subject_detail,
+        measure_subject_detail,
+    )
     from resource_ledger import ResourceWaitCancelled
     from subjects import sync_primary
 
@@ -92,6 +97,9 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
         StagedMaskFile=_StagedMaskFile,
         acquire_photo_mask=acquire_photo_mask,
         compute_all_quality_features=compute_all_quality_features,
+        frame_size=frame_size,
+        measure_subject_detail=measure_subject_detail,
+        measure_cached_subject_detail=measure_cached_subject_detail,
         ResourceWaitCancelled=ResourceWaitCancelled,
         sync_primary=sync_primary,
     )
@@ -99,10 +107,18 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
 
 def _mask_candidate(photo: Row, det: Row) -> JsonDict:
     """The per-photo record the extract-masks loop works from."""
+    # The collection path's rows carry no dimensions; the detail measurement
+    # then reports the subject's size in decoded rather than native pixels.
+    try:
+        width, height = photo["width"], photo["height"]
+    except IndexError:
+        width = height = None
     return {
         "id": photo["id"],
         "folder_id": photo["folder_id"],
         "filename": photo["filename"],
+        "width": width,
+        "height": height,
         "detector_model": det["detector_model"],
         "detection_box": json.dumps({
             "x": det["box_x"], "y": det["box_y"],
@@ -182,6 +198,11 @@ class _MaskExtractionRun:
         # hard-rejected in Process Review as `no_subject_mask`. Mirrors
         # extract_masks_stage in pipeline_job.
         self.unreadable = 0
+        # Cached masks measured for subject detail this run, and those
+        # whose mask or source could not be read for it (still masked,
+        # measurement pending).
+        self.detail_measured = 0
+        self.detail_unreadable = 0
         job["_start_time"] = time.time()
 
         for i, photo in enumerate(photos):
@@ -328,9 +349,13 @@ class _MaskExtractionRun:
             self.skipped += 1
             return False
 
-        # Compute crop completeness + all quality features
+        # Compute crop completeness + all quality features, plus the
+        # fixed-scale subject detail (comparable across encounters)
         completeness = deps.crop_completeness(mask)
         features = deps.compute_all_quality_features(proxy, mask)
+        features.update(deps.measure_subject_detail(
+            proxy, mask, source_path=item.image_path, frame_size=deps.frame_size(photo),
+        ))
 
         subj_emb_blob, global_emb_blob = self._embed(proxy, mask)
         self._store_mask(
@@ -411,6 +436,8 @@ class _MaskExtractionRun:
                 and state["dino_embedding_variant"]
                 == self.dinov2_variant
                 and state["quality_input_recipe"] is None):
+            if existing["subject_detail"] is None:
+                self._measure_cached_detail(item)
             self.masked += 1
             self._push_progress(item.index, photo["filename"])
             return True
@@ -419,6 +446,27 @@ class _MaskExtractionRun:
         # writes set_active_mask_variant +
         # masks_features.update_embeddings atomically.
         return False
+
+    def _measure_cached_detail(self, item: _MaskPhoto) -> None:
+        """Measure subject detail for a cached mask that predates it, without SAM.
+
+        The mask stays valid when its source cannot be read; only the
+        measurement stays pending, counted apart so the result says so.
+        """
+        existing = item.existing
+        if existing is None:
+            return
+        measured = self.deps.measure_cached_subject_detail(
+            existing["path"], item.image_path, self.deps.frame_size(item.photo),
+        )
+        if measured is None:
+            self.detail_unreadable += 1
+            return
+        self.thread_db.masks_features.set_subject_detail(
+            item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
+        )
+        self.thread_db.commit_with_retry()
+        self.detail_measured += 1
 
     def _embed(self, proxy: np.ndarray, mask: np.ndarray) -> tuple[bytes | None, bytes]:
         """Return the (subject, global) DINOv2 embedding blobs.
@@ -502,6 +550,8 @@ class _MaskExtractionRun:
                 bg_separation=features.pop("bg_separation", None),
                 phash_crop=features.pop("phash_crop", None),
                 noise_estimate=features.pop("noise_estimate", None),
+                subject_detail=features.pop("subject_detail", None),
+                subject_detail_px=features.pop("subject_detail_px", None),
             ),
         )
         subject_masks.set_active_mask_variant(
@@ -564,6 +614,15 @@ class _MaskExtractionRun:
             job_errors.append(
                 f"{failed} of {total} photos failed mask extraction"
             )
+        if self.detail_unreadable:
+            noun, verb = ("mask", "lacks") if self.detail_unreadable == 1 else ("masks", "lack")
+            job_errors.append(
+                f"{self.detail_unreadable} cached {noun} still {verb} a "
+                f"subject detail measurement because the source could not be "
+                f"read; run Extract again when it is reachable."
+            )
         return {"masked": self.masked, "skipped": self.skipped,
                 "failed": failed, "unreadable": unreadable, "total": total,
+                "detail_measured": self.detail_measured,
+                "detail_unreadable": self.detail_unreadable,
                 "ok": not job_errors, "errors": job_errors}

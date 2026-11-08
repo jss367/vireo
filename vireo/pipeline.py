@@ -884,6 +884,8 @@ class _FeatureLoad:
             "focal_length": row["focal_length"],
             "burst_id": row["burst_id"],
             "noise_estimate": row["noise_estimate"],
+            "subject_detail": row["subject_detail"],
+            "subject_detail_px": row["subject_detail_px"],
             "flag": row["flag"],
             "rating": row["rating"],
             "eye_x": row["eye_x"],
@@ -1058,7 +1060,7 @@ def _clear_derived_scores(photos):
     """Remove derived scoring/triage fields so photos can be re-scored."""
     derived_keys = [
         "focus_score", "exposure_score", "composition_score",
-        "area_score", "noise_score", "quality_composite",
+        "area_score", "noise_score", "quality_composite", "comparable_quality",
         "reject_reasons", "label", "rarity_protected",
         "analysis_status", "analysis_reasons", "selection_eligible", "eye_focus_score", "focus_evidence",
     ]

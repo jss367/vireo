@@ -883,7 +883,7 @@ def test_workspace_mask_candidate_detections_rows_and_order(db):
     assert got == [(a, 0.9), (a, 0.5), (c, 0.3)]
     first = dict(rows[0])
     assert first == {
-        "id": a, "folder_id": fid, "filename": "a.jpg",
+        "id": a, "folder_id": fid, "filename": "a.jpg", "width": 40, "height": 30,
         "detector_model": "megadetector-v6",
         "box_x": BOX[0], "box_y": BOX[1], "box_w": BOX[2], "box_h": BOX[3],
         "detector_confidence": 0.9,

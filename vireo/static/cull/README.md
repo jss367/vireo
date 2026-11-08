@@ -12,7 +12,7 @@ page globals, as the inline script and the older `cull-favorites.js` did.
 | `settings.js` | The scoring and grouping sliders: request configs, defaults, resets, Save grouping defaults, and the debounced recompute |
 | `analysis.js` | Storing results, the request body for the current scope, the pending state behind Apply, reflow and regroup, and loading the cached results |
 | `history.js` | The undo/redo page hooks (`beforeHistoryChange`, `afterHistoryChange`) |
-| `keepers.js` | Relational rejects: the kept photo a reject loses to (`resolveCullKeeper`: the Compare reference, else the scene group's best kept photo, else the species' reference favorite), the measurement both share (`cullComparison`), the `rejections` Apply records, and the orphan banner and dialog (saved rejects whose keeper was deleted or rejected since) |
+| `keepers.js` | Relational rejects: the kept photo a reject loses to (`resolveCullKeeper`: the Compare reference, else the scene group's best kept photo, else the species' reference favorite), the measurement both share (`cullComparison`; across encounters the fixed-scale subject detail), the cross-encounter quality order and card line (`cullQualityOrder`, `cullDetailLine`), the `rejections` Apply records, and the orphan banner and dialog (saved rejects whose keeper was deleted or rejected since) |
 | `decisions.js` | Species names (`speciesListForPhoto` / `speciesListForEncounter`: every species a photo counts under), flag and label to action, pin counts, `resolveCullDecision`, encounter labels |
 | `data.js` | `pipelineToCullData`: species groups, scene groups, each photo's decision, and the summary totals (`cullPhotoTallies`, once per photo) |
 | `render.js` | The summary's decision stats and actions, and `renderCulling` |
@@ -39,10 +39,15 @@ comes with converting the page to modules.
   record onto the source photo as `reject_keeper`. Only pinned (this
   session's) rejects get an entry (keeper null when nothing is kept to
   compare against); an already-saved reject is sent as a flag alone and the
-  server preserves the record it has. `cullComparison` records a
-  measurement only when both photos are in one encounter (the focus evidence
-  when they share its basis, else the composite quality); both are relative to
-  that encounter's frames and are never compared across two.
+  server preserves the record it has. `cullComparison` records the scorer's
+  own evidence when both photos are in one encounter (the focus evidence
+  when they share its basis, else the composite quality; both are relative
+  to that encounter's frames and are never compared across two). Across
+  encounters it records the subject detail (`comparable_quality.detail`,
+  Tenengrad at a fixed 512 px subject scale, `docs/comparable-quality.md`)
+  with each photo's cross-encounter quality beside it, or null while either
+  photo is unmeasured. `cullQualityOrder` sorts by that quality when both
+  cards have it and by the encounter rank otherwise.
 
 - Your pins (`cullManualDecisions`) outrank saved flags and fresh suggestions,
   so a slider tweak never silently undoes a decision. Review pins stay pinned
