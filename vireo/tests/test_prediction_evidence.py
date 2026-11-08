@@ -279,15 +279,37 @@ def test_background_like_region_is_named_in_the_evidence(app_and_db):
     assert by_species['Verdin']['background']['state'] == 'unavailable'
 
 
-def test_version_33_migration_adds_background_columns_idempotently(tmp_path):
-    path = str(tmp_path / 'previous.db')
+@pytest.mark.parametrize('starting_version', [32, 33])
+def test_background_migration_adds_columns_idempotently_from_either_v33_layout(
+    tmp_path, starting_version,
+):
+    """Background columns land whether the catalog was stamped 33 by the sibling
+    migration (missing both column sets) or came up through 32.
+
+    The reverse — a pre-fix catalog stamped 33 by this branch where the
+    background columns already exist — is covered by
+    ``test_background_migration_is_a_noop_when_columns_already_exist``.
+    """
+    path = str(tmp_path / f'previous-v{starting_version}.db')
     with Database(path):
         pass
     with sqlite3.connect(path) as conn:
         conn.execute('ALTER TABLE classifier_match_scores DROP COLUMN background_score')
         conn.execute('ALTER TABLE classifier_match_scores DROP COLUMN background_prompt')
-        conn.execute('PRAGMA user_version=32')
+        conn.execute(f'PRAGMA user_version={starting_version}')
         schema._apply_pending(conn)
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(classifier_match_scores)')}
+        assert {'background_score', 'background_prompt'} <= columns
+
+
+def test_background_migration_is_a_noop_when_columns_already_exist(tmp_path):
+    path = str(tmp_path / 'pre-fix-v33.db')
+    with Database(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        conn.execute('PRAGMA user_version=33')
         schema._apply_pending(conn)
         assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         columns = {row[1] for row in conn.execute('PRAGMA table_info(classifier_match_scores)')}

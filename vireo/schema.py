@@ -368,7 +368,7 @@ MIGRATIONS = (
         _add_detection_subject_verdict, _validate_detection_subject_verdict,
     ),
     Migration(
-        33, "classifier_background_match",
+        34, "classifier_background_match",
         _add_classifier_background_match, _validate_classifier_background_match,
     ),
 )
