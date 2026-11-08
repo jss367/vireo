@@ -276,7 +276,10 @@ def _google_suggestion(
     broad = places.is_broad_area(details)
     existing = db.locations.find_place_keyword(details["place_id"])
     if existing is not None:
-        return {"kind": "keyword", "keyword_id": existing["id"], "source": "your_place"}, None, broad
+        return {
+            "kind": "keyword", "keyword_id": existing["id"], "source": "your_place",
+            "warning": details.get("warning"),
+        }, None, broad
     source = "google_park" if details.get("source") == "park" else "google_area"
     return {
         "kind": "google",
@@ -284,6 +287,7 @@ def _google_suggestion(
         "name": details.get("name") or "",
         "summary": summarize_details(details),
         "source": source,
+        "warning": details.get("warning"),
     }, None, broad
 
 

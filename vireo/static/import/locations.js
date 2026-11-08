@@ -170,7 +170,7 @@ function importLocationSuggestedValue(group) {
 function importLocationTarget(group) {
   const state = importLocations.choices.get(group.key);
   const value = (state ? state.value : importLocationSuggestedValue(group)).trim();
-  if (state && !state.enabled) return { kind: 'skip', reason: 'Skipped: these photos won’t get a location.' };
+  if ((!state && group.suggestion?.warning) || (state && !state.enabled)) return { kind: 'skip', reason: 'Skipped: these photos won’t get a location.' };
   if (!value) return { kind: 'skip', reason: 'Type a name to tag these photos, or leave it blank to skip them.' };
   const suggestion = group.suggestion;
   const folded = value.toLocaleLowerCase();
@@ -387,10 +387,10 @@ function renderImportLocationGroup(group) {
   input.placeholder = 'Location name';
   const state = importLocations.choices.get(group.key);
   input.value = state ? state.value : importLocationSuggestedValue(group);
-  toggle.checked = state ? state.enabled : !!group.suggestion;
+  toggle.checked = state ? state.enabled : !!group.suggestion && !group.suggestion.warning;
   const source = document.createElement('div');
   source.className = 'hint';
-  source.textContent = importLocationSourceText(group);
+  source.textContent = importLocationSourceText(group) + (group.suggestion?.warning ? ' ' + group.suggestion.warning : '');
   const outcome = document.createElement('div');
   outcome.className = 'hint import-location-outcome';
   /** @type {string | undefined} */ let pick = state ? state.pick : undefined;

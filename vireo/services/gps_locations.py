@@ -53,7 +53,7 @@ REVERSE_GEOCODE_CACHE_LANGUAGE_KEY = "_vireo_result_language"
 REVERSE_GEOCODE_CACHE_RESOLVER_KEY = "_vireo_place_resolver"
 # Which ``places.reverse_geocode`` wrote a cache row. Bump it when the
 # resolver starts naming places differently, so stale names are refetched.
-REVERSE_GEOCODE_CACHE_RESOLVER = "named-place-1"
+REVERSE_GEOCODE_CACHE_RESOLVER = "named-place-2"
 
 
 class LocationEditErrors(Protocol):
@@ -284,6 +284,22 @@ def summarize_details(details: JsonDict | None) -> str:
     return " · ".join(parts)
 
 
+def _preview_group(group: JsonDict) -> JsonDict:
+    """Expose the suggestion's evidence alongside the grouped photo IDs."""
+    details = group["details"]
+    return {
+        "place_id": group["place_id"],
+        "summary": group["summary"],
+        "name": group["name"],
+        "count": len(group["photo_ids"]),
+        "photo_ids": group["photo_ids"],
+        "sample_filenames": group["sample_filenames"],
+        "source": details.get("source"),
+        "warning": details.get("warning"),
+        "country_conflict": details.get("country_conflict", False),
+    }
+
+
 class BulkGpsLocations:
     """Bulk EXIF-GPS location flows that answer with error responses.
 
@@ -414,14 +430,7 @@ class BulkGpsLocations:
         group_list = []
         for place_id in ordered_group_keys:
             group = groups[place_id]
-            group_list.append({
-                "place_id": group["place_id"],
-                "summary": group["summary"],
-                "name": group["name"],
-                "count": len(group["photo_ids"]),
-                "photo_ids": group["photo_ids"],
-                "sample_filenames": group["sample_filenames"],
-            })
+            group_list.append(_preview_group(group))
 
         result = {
             "total": len(photo_ids),

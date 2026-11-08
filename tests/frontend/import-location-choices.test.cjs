@@ -288,3 +288,18 @@ test('a list from partly failed lookups says it may be missing places', () => {
     globalThis.nearby = renderImportLocationGroup(data.groups[0]).children[2].children[4];`);
   assert.equal(h.run('nearby.children.length'), 2, 'a complete list carries no warning');
 });
+
+test('uncertain GPS suggestion needs confirmation and permits a broader label', () => {
+  const {ctx, run, edit, choices} = harness();
+  ctx.data.groups[0].suggestion = {
+    kind: 'google', source: 'google_park', name: 'Nearby Park', place_id: 'park',
+    warning: 'Nearby park, not a verified capture site.',
+  };
+  run('globalThis.row = renderImportLocationGroup(data.groups[0]);');
+  assert.equal(run('row.children[0].checked'), false);
+  assert.match(run('row.children[2].children[2].textContent'), /not a verified capture site/);
+  assert.deepEqual(choices(), []);
+  edit(0, 'Verified broader area');
+  assert.equal(choices()[0].name, 'Verified broader area');
+  assert.equal(choices()[0].kind, 'new');
+});
