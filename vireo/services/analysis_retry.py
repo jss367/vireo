@@ -365,6 +365,14 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                 stages = required_stages(photo)
                 job["progress"].update(current=index, current_file=photo["filename"], phase="Checking analysis")
                 ran = []
+                if expected_primary_detection_id is not None:
+                    stage = "segmentation and quality"
+                    job["progress"]["phase"] = "Rebuilding selected subject measurements"
+                    retry_features(db, pid, effective, cache_dir, checkpoint,
+                                   expected_primary_detection_id=expected_primary_detection_id)
+                    published.add(pid)
+                    ran.extend(["segmentation", "quality"])
+                    stages = []
                 if "detection" in stages:
                     stage = "detection"
                     job["progress"]["phase"] = "Retrying subject detection"

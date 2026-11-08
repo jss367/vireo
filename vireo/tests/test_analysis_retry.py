@@ -945,3 +945,75 @@ def test_wrong_trunk_correction_reanalyzes_only_corrected_animal_and_is_undoable
     result, _ = execute(db, [pid], tmp_path)
     assert result['photos'][0]['status'] == 'complete'
     assert prompts == [bird_box, bird_box]
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_selected_retry_checks_click_identity_after_lock(retry_library, tmp_path, monkeypatch, changed):
+    from contextlib import contextmanager
+
+    from services import analysis_retry
+    from subjects import select_reviewer_box
+
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    select_reviewer_box(db, pid, {"x": .1, "y": .1, "w": .2, "h": .2})
+    expected = db.subjects.choice(pid)["detection_id"]
+    db.commit()
+    original = analysis_retry._photo_lock
+
+    @contextmanager
+    def queued_lock(photo_id, checkpoint):
+        if changed:
+            select_reviewer_box(db, pid, {"x": .6, "y": .1, "w": .2, "h": .2})
+            db.commit()
+        with original(photo_id, checkpoint):
+            yield
+
+    monkeypatch.setattr(analysis_retry, "_photo_lock", queued_lock)
+    job = {"id": "selected-retry", "progress": {}, "errors": []}
+    effective = db.get_effective_config({"pipeline": {"eye_detect_enabled": False}})
+    result = run_retry(Context(db), job, [pid], effective, str(tmp_path), expected_primary_detection_id=expected)
+    assert not calls["detection"]
+    if changed:
+        assert not result["ok"]
+        assert "Primary subject changed" in result["photos"][0]["error"]
+        assert not calls["segmentation"]
+        assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
+    else:
+        assert result["ok"]
+        assert len(calls["segmentation"]) == 1
+
+
+
+
+def test_selected_retry_rejects_complete_replacement(retry_library, tmp_path):
+    from services.analysis_retry import _selected_detection
+    from subjects import select_reviewer_box
+
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    effective = db.get_effective_config({"pipeline": {"eye_detect_enabled": False}})
+    select_reviewer_box(db, pid, {"x": .1, "y": .1, "w": .2, "h": .2})
+    clicked = _selected_detection(db, pid, effective)["id"]
+    select_reviewer_box(db, pid, {"x": .6, "y": .1, "w": .2, "h": .2})
+    db.commit()
+    assert execute(db, [pid], tmp_path)[0]["ok"]
+    assert explain_selected(db, [pid], effective)["photos"][0]["required_stages"] == []
+    before = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone())
+    calls["detection"].clear()
+    calls["segmentation"].clear()
+    result = run_retry(Context(db), {"id": "stale-complete", "progress": {}, "errors": []},
+                       [pid], effective, str(tmp_path), expected_primary_detection_id=clicked)
+    assert result["photos"][0]["status"] == "failed"
+    assert "Primary subject changed" in result["photos"][0]["error"]
+    assert calls == {"detection": [], "segmentation": []}
+    assert dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone()) == before
+
+
+def test_selected_retry_missing_subject_does_not_run_replacement_detection(retry_library, tmp_path):
+    _, db, ids, calls = retry_library
+    effective = db.get_effective_config({})
+    result = run_retry(Context(db), {"id": "missing-subject", "progress": {}, "errors": []},
+                       ids[:1], effective, str(tmp_path), expected_primary_detection_id=123)
+    assert result["photos"][0]["status"] == "failed"
+    assert calls == {"detection": [], "segmentation": []}

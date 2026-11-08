@@ -226,7 +226,10 @@ result and readiness. Pass `expected_primary_detection_id` to require that the
 retry still runs on the detection the caller chose: the job fails with
 `Primary subject changed before analysis started` when the primary moved
 between the click and lock acquisition, so measurements never publish for a
-different subject. The lightbox's **Retry subject mask and quality** button
+different subject. A pinned retry always rebuilds that subject under the photo
+lock, including when prior measurements are complete; if the subject is gone,
+it fails without running replacement detection. Unpinned retries keep normal
+readiness-based stage selection. The lightbox's **Retry subject mask and quality** button
 uses this path. The older `subjects/analyze` endpoint measures detection boxes
 for crop/exposure suggestions; it does not rebuild the selected animal's mask,
 quality or available eye evidence used for ranking. Missing eye identification
