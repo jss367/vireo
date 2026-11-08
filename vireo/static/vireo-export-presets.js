@@ -716,11 +716,31 @@ var VireoExportPresets = (function() {
     rememberCustomSettings();
   }
 
+  /** @param {unknown} settings @returns {settings is SavedExportSettings} */
+  function isCompleteCustomSettings(settings) {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return false;
+    var value = /** @type {Record<string, unknown>} */ (settings);
+    if (!['destination', 'subfolder_name', 'format', 'naming_template'].every(function(key) {
+      return typeof value[key] === 'string';
+    })) return false;
+    if (!['export_to_subfolder', 'reveal_after_export'].every(function(key) {
+      return typeof value[key] === 'boolean';
+    })) return false;
+    if (value.format !== 'jpg' && value.format !== 'png' && value.format !== 'tiff') return false;
+    if (typeof value.quality !== 'number' || !Number.isInteger(value.quality) ||
+        value.quality < 1 || value.quality > 100) return false;
+    if (value.max_size !== null && (typeof value.max_size !== 'number' ||
+        !Number.isInteger(value.max_size) || value.max_size <= 0)) return false;
+    return Array.isArray(value.metadata_fields) && value.metadata_fields.every(function(field) {
+      return typeof field === 'string';
+    });
+  }
+
   function restoreCustomSettings() {
     var stored = VireoViewPreferences.read(CUSTOM_SETTINGS_KEY);
     try {
       var settings = stored ? JSON.parse(stored) : null;
-      if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+      if (isCompleteCustomSettings(settings)) {
         applySettings(settings);
         return;
       }
