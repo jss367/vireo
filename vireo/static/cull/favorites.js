@@ -592,13 +592,20 @@ function initializeCullFavorites() {
       if (p) {
         p.flag = e.detail.flag;
         p.flag_confirmation_status = 'confirmed';
+        // A hand flag drops the relation (the flag trigger clears the attribution).
+        delete p.reject_keeper;
       }
     });
     delete cullManualDecisions[id]; delete cullAppliedDecisions[id];
     cullDirty = unappliedPinCount() > 0;
     rebuildCullDataFromPipeline();
+    // The photo may have been another reject's keeper.
+    loadCullOrphans();
   });
-  document.addEventListener('lightbox:photodeleted', function(e) { removeCullPhotos([e.detail.photoId]); });
+  document.addEventListener('lightbox:photodeleted', function(e) {
+    removeCullPhotos([e.detail.photoId]);
+    loadCullOrphans();
+  });
 }
 
 /** @param {string} endpoint @param {string} [statusText] @param {boolean} [sourceOnly] */

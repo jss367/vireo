@@ -364,6 +364,8 @@ class PhotoReviewRepository:
         state = self.flag_attributions([source_id]).get(source_id)
         self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, surviving_id))
         if state is not None and state["flag"] == flag:
+            # A reject absorbed by its own keeper cannot be rejected in favor of itself.
+            own_keeper = state.get("keeper_photo_id") == surviving_id
             self.conn.execute(
                 """INSERT INTO current_flag_attribution
                    (photo_id,workspace_id,flag,source,reason,description,created_at,
@@ -371,8 +373,9 @@ class PhotoReviewRepository:
                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (surviving_id, state["workspace_id"], flag, state["source"],
                  state["reason"], state["description"], state["created_at"],
-                 state.get("keeper_photo_id"), state.get("comparison"),
-                 state.get("keeper_deleted_at")),
+                 None if own_keeper else state.get("keeper_photo_id"),
+                 None if own_keeper else state.get("comparison"),
+                 None if own_keeper else state.get("keeper_deleted_at")),
             )
 
     def record_flag_attribution_history(self, edit_id, photo_ids, before, after):

@@ -311,3 +311,16 @@ def test_a_merge_of_the_id_reusing_newcomer_keeps_the_deleted_keeper_stamp(app_a
     assert client.post("/api/undo").status_code == 200
     assert client.post("/api/redo").status_code == 200
     assert flag_note(db, loser, "rejected")["keeper_status"] == "deleted"
+
+
+def test_a_reject_merged_into_its_keeper_is_not_rejected_in_favor_of_itself(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    keeper, loser, _ = _three(db)
+    _apply(client, keeper, [loser])
+    # The staged-collision merge carries the losing photo's flag onto the survivor.
+    with db.transaction():
+        db.photo_review.transfer_flag_for_merge(loser, keeper, "rejected")
+    note = db.photo_review.current_flag_note(keeper)
+    assert note is None or note["keeper_photo_id"] is None
+    assert keeper not in {o["photo_id"] for o in client.get("/api/culling/orphans").get_json()["orphans"]}
