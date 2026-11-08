@@ -1367,7 +1367,7 @@ def test_prepare_full_resolution_surfaces_fatal_job_failure(live_server, page):
     page.wait_for_function(
         "() => pageModules.export._prepareFullResolutionJobId === null"
     )
-    expect(page.locator("#toastContainer > div").last).to_have_text(
+    expect(page.locator("#toastContainer > div").last.locator("span")).to_have_text(
         "Full-resolution preparation failed: database unavailable"
     )
 
@@ -1415,7 +1415,7 @@ def test_prepare_full_resolution_summarizes_result(
     page.wait_for_function(
         "() => pageModules.export._prepareFullResolutionJobId === null"
     )
-    expect(page.locator("#toastContainer > div").last).to_have_text(
+    expect(page.locator("#toastContainer > div").last.locator("span")).to_have_text(
         "Full-resolution preparation complete: 2 ready, 2 copied locally, "
         + ending
     )
