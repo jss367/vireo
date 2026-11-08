@@ -10,7 +10,7 @@
 .development-dialog fieldset { border: 1px solid var(--border-primary); border-radius: 6px; margin: 12px 0; padding: 12px; }
 .development-dialog legend { font-size: 13px; font-weight: 600; }
 .development-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.development-fields label { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.development-category, .development-fields label { display: flex; gap: 8px; align-items: center; font-size: 13px; }
 .development-dialog select, .development-dialog input[type="number"] {
   background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-primary);
   border-radius: 4px; padding: 8px; max-width: 100%;
