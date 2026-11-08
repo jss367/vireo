@@ -35,13 +35,7 @@ def _write(service, ids, batch):
 @pytest.mark.parametrize("failure", ["queue", "record_edit", "commit"])
 def test_failed_rating_restores_photos_sync_history_and_redo(db, rated_photos, monkeypatch, batch, failure):
     before = _snapshot(db.conn)
-    # The rating write queues its sync through ``db.pending_changes`` (a
-    # fresh repository per access), so the queue fault is injected on the
-    # repository class, not on one instance.
-    if failure == "queue":
-        target = type(db.pending_changes)
-    else:
-        target = db.conn if failure == "commit" else db
+    target = {"queue": type(db.pending_changes), "record_edit": db, "commit": db.conn}[failure]
     original = getattr(target, failure)
     calls = 0
 
