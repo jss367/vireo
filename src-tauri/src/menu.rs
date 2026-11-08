@@ -222,6 +222,9 @@ fn build_about_metadata() -> tauri::menu::AboutMetadata<'static> {
     AboutMetadataBuilder::new()
         .name(Some("Vireo"))
         .version(Some(env!("CARGO_PKG_VERSION")))
+        .short_version(Some(
+            &env!("VIREO_BUILD_COMMIT")[..env!("VIREO_BUILD_COMMIT").len().min(12)],
+        ))
         .comments(Some("AI-powered wildlife photo organizer"))
         .website(Some("https://github.com/jss367/vireo"))
         .website_label(Some("GitHub"))
@@ -580,4 +583,18 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(&window_menu)
         .item(&help_menu)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn about_identifies_release_and_sidecar_commit() {
+        let metadata = super::build_about_metadata();
+        let commit = env!("VIREO_BUILD_COMMIT");
+        assert_eq!(metadata.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            metadata.short_version.as_deref(),
+            Some(&commit[..commit.len().min(12)])
+        );
+    }
 }

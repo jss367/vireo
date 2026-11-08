@@ -79,6 +79,31 @@ def _application_version() -> str:
         return "0.0.0"
 
 
+def _application_build_commit() -> str | None:
+    """Identify this bundle, never a nearby checkout when running frozen."""
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    try:
+        if bundle_root is not None:
+            commit = (Path(bundle_root) / "build-commit.txt").read_text().strip()
+        else:
+            repo_root = Path(__file__).resolve().parents[2]
+            # Source archives nested in another repository must not borrow its SHA.
+            if not (repo_root / ".git").exists():
+                return None
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                capture_output=True, text=True, check=True, timeout=2,
+                **no_window_kwargs(),
+            )
+            commit = result.stdout.strip()
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return None
+    if len(commit) == 40 and all(c in "0123456789abcdef" for c in commit):
+        return commit
+    return None
+
+
 def _launch_reveal(path: str, is_folder: bool) -> tuple[subprocess.CompletedProcess[str] | None, str | None]:
     """Run the platform's reveal command for ``path``.
 
@@ -374,7 +399,10 @@ def create_system_blueprint(
     @blueprint.get("/api/version")
     @blueprint.get("/api/v1/version")
     def version() -> ResponseReturnValue:
-        return jsonify({"version": _application_version()})
+        return jsonify({
+            "version": _application_version(),
+            "build_commit": _application_build_commit(),
+        })
 
     @blueprint.route("/api/v1/shutdown", methods=["POST"])
     def api_v1_shutdown() -> ResponseReturnValue:

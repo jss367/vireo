@@ -1,4 +1,6 @@
 mod app_paths;
+#[cfg(test)]
+mod build_commit;
 mod config;
 mod menu;
 mod navigation;

@@ -1,4 +1,45 @@
+#[path = "src/build_commit.rs"]
+mod build_commit;
+
 fn main() {
+    // Release builds use the exact stamp embedded in the Python sidecar.
+    // Debug builds run from source and do not require a sidecar build.
+    let stamp = std::path::Path::new("../build/build-commit.txt");
+    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    let commit = if release {
+        println!("cargo:rerun-if-changed={}", stamp.display());
+        std::fs::read_to_string(stamp).expect("build the sidecar before the desktop app")
+    } else {
+        // Watching HEAD alone misses new commits on an existing branch.
+        for name in ["HEAD", "refs"] {
+            let args = ["rev-parse", "--git-path", name];
+            if let Ok(output) = std::process::Command::new("git").args(args).output() {
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            }
+        }
+        // An unpacked source tree may live inside an unrelated repository.
+        // Worktrees have a .git file instead of a directory; both are valid.
+        std::path::Path::new("../.git")
+            .exists()
+            .then(|| {
+                std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+            })
+            .and_then(Result::ok)
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_else(|| "unknown".to_owned())
+    };
+    let commit = commit.trim();
+    assert!(
+        build_commit::is_valid(commit, release),
+        "invalid build commit stamp"
+    );
+    println!("cargo:rustc-env=VIREO_BUILD_COMMIT={commit}");
     // Debug builds (including `cargo test`) do not spawn the bundled Python
     // sidecar.  Keeping the release-only external binary in Tauri's build
     // configuration made otherwise self-contained Rust unit tests fail before
