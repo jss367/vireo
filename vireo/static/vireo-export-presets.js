@@ -18,6 +18,7 @@
 var VireoExportPresets = (function() {
   var SAVED_PREFIX = 'saved:';
   var LAST_USED_KEY = 'vireo.export.lastPreset';
+  var CUSTOM_SETTINGS_KEY = 'vireo.export.customSettings';
   var CAPTURE_SPLIT_KEY =
     'vireo.browse.export.metadata.captureDateTime.presetFields';
   var DEFAULT_SUBFOLDER = 'exported';
@@ -337,6 +338,7 @@ var VireoExportPresets = (function() {
       var applyPreset = Vireo.pageHook('applyExportPreset');
       if (applyPreset) applyPreset(value);
     }
+    if (value === 'custom') rememberCustomSettings();
     VireoViewPreferences.write(LAST_USED_KEY, value);
     updateButtons();
   }
@@ -572,6 +574,7 @@ var VireoExportPresets = (function() {
         return;
       }
       if (VireoViewPreferences.read(LAST_USED_KEY) === SAVED_PREFIX + name) {
+        rememberCustomSettings();
         VireoViewPreferences.write(LAST_USED_KEY, 'custom');
       }
       var refreshResult = await refresh();
@@ -647,9 +650,27 @@ var VireoExportPresets = (function() {
     return {keptCurrent: keptCurrent};
   }
 
+  function rememberCustomSettings() {
+    VireoViewPreferences.write(CUSTOM_SETTINGS_KEY, JSON.stringify(collectSettings()));
+  }
+
+  function restoreCustomSettings() {
+    var stored = VireoViewPreferences.read(CUSTOM_SETTINGS_KEY);
+    if (!stored) return;
+    try {
+      var settings = JSON.parse(stored);
+      if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+        applySettings(settings);
+      }
+    } catch (error) {
+      // Older installations have no snapshot; unreadable storage also
+      // leaves the host's defaults and individual preferences intact.
+    }
+  }
+
   /* Called by the host page after it resets the modal to defaults and
    * restores its view preferences: fetches the current preset list, then
-   * re-applies whatever the user exported with last time. */
+   * re-applies the last selected preset or custom settings. */
   async function modalOpened() {
     var openGeneration = ++modalOpenGeneration;
     var editGeneration = modalEditGeneration;
@@ -685,7 +706,10 @@ var VireoExportPresets = (function() {
         // fields (subfolder, metadata boxes, reveal-after) that mark the
         // dialog Custom. Snap the dropdown back so it doesn't advertise a
         // built-in preset while the fields below no longer match it.
-        if (last === 'custom') presetSelect().value = 'custom';
+        if (last === 'custom') {
+          restoreCustomSettings();
+          presetSelect().value = 'custom';
+        }
         restorationComplete = true;
         updateButtons();
         return;
@@ -698,6 +722,7 @@ var VireoExportPresets = (function() {
           // to Custom. A failed list cannot prove that, so keep Export gated
           // rather than silently using the host defaults in its place.
           if (refreshResult.ok) {
+            rememberCustomSettings();
             VireoViewPreferences.write(LAST_USED_KEY, 'custom');
             sel.value = 'custom';
             restoreCaptureSplitHint();
@@ -748,6 +773,7 @@ var VireoExportPresets = (function() {
     modalEditGeneration++;
     var markPageCustom = Vireo.pageHook('markExportCustom');
     if (markPageCustom) markPageCustom();
+    rememberCustomSettings();
     VireoViewPreferences.write(LAST_USED_KEY, 'custom');
     updateButtons();
   }
