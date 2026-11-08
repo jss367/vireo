@@ -500,19 +500,28 @@ def test_drop_cache_entry_clears_the_active_projection_in_the_same_transaction(d
     # and every denormalized feature column pointing at the invalid
     # generation. Downstream consumers (readiness checks, mask-based
     # filters) would still treat the photo as masked even though its
-    # backing row is gone.
+    # backing row is gone. The eye projection must come down too: the
+    # eye stage skips a photo whose stored fingerprint matches the
+    # pipeline's current version, so leaving a stale fingerprint would
+    # strand the regenerated mask's keypoints.
     pid = _photo(db, "a.jpg")
     _det(db, pid)
     fa = _mask_file(db, "active.png")
     _mask(db, pid, "sam2-small", path=fa, subject_size=0.3,
           subject_tenengrad=1.5)
     subject_masks.set_active_mask_variant(db, pid, "sam2-small")
+    db.conn.execute(
+        "UPDATE photos SET eye_x=?, eye_y=?, eye_conf=?, eye_tenengrad=?, "
+        "eye_kp_fingerprint=? WHERE id=?",
+        (0.4, 0.5, 0.9, 2.5, "kp-v1:stale", pid),
+    )
     db.commit()
     before = _row(db, pid)
     assert before["active_mask_variant"] == "sam2-small"
     assert before["mask_path"] == fa
     assert before["subject_size"] == 0.3
     assert before["subject_tenengrad"] == 1.5
+    assert before["eye_kp_fingerprint"] == "kp-v1:stale"
 
     assert db.masks_features.drop_cache_entry(pid, "sam2-small", fa) is True
     db.commit()
@@ -525,6 +534,7 @@ def test_drop_cache_entry_clears_the_active_projection_in_the_same_transaction(d
         "quality_input_recipe", "subject_clip_high", "subject_clip_low",
         "subject_y_median", "bg_separation", "phash_crop", "noise_estimate",
         "subject_detail", "subject_detail_px",
+        "eye_x", "eye_y", "eye_conf", "eye_tenengrad", "eye_kp_fingerprint",
     ):
         assert after[col] is None, f"{col} should be cleared when the active row drops"
     assert not os.path.exists(fa)

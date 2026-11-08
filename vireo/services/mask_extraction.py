@@ -452,9 +452,16 @@ class _MaskExtractionRun:
                 and state["dino_embedding_variant"]
                 == self.dinov2_variant
                 and state["quality_input_recipe"] is None):
+            invalidated = False
             if existing["subject_detail"] is None:
-                self._measure_cached_detail(item)
-            self.masked += 1
+                invalidated = self._measure_cached_detail(item)
+            # When the cached PNG was unreadable, the row and its
+            # projection have been dropped, so the photo no longer has
+            # a mask. Counting it as masked here would overstate what
+            # the run produced; ``mask_cache_invalidated`` already
+            # surfaces the drop and flips ``ok`` to False.
+            if not invalidated:
+                self.masked += 1
             self._push_progress(item.index, photo["filename"])
             return True
         # Denormalised subject state is stale: fall
@@ -463,7 +470,7 @@ class _MaskExtractionRun:
         # masks_features.update_embeddings atomically.
         return False
 
-    def _measure_cached_detail(self, item: _MaskPhoto) -> None:
+    def _measure_cached_detail(self, item: _MaskPhoto) -> bool:
         """Measure subject detail for a cached mask that predates it, without SAM.
 
         The mask stays valid when its source cannot be read; only the
@@ -474,10 +481,14 @@ class _MaskExtractionRun:
         Dropping the row (not just the file) is what breaks the loop when
         the unlink itself is refused, since the cache check only consults
         the row and ``os.path.isfile``.
+
+        Returns True when the cache row was actually dropped. The caller
+        uses this to skip masked accounting for a photo that now has no
+        mask on disk.
         """
         existing = item.existing
         if existing is None:
-            return
+            return False
         measured = self.deps.measure_cached_subject_detail(
             existing["path"], item.image_path, self.deps.frame_size(item.photo),
         )
@@ -488,17 +499,18 @@ class _MaskExtractionRun:
             self.thread_db.commit_with_retry()
             if dropped:
                 self.mask_cache_invalidated += 1
-            return
+            return dropped
         if measured is None:
             self.detail_unreadable += 1
-            return
+            return False
         if not isinstance(measured, dict):
-            return
+            return False
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
         )
         self.thread_db.commit_with_retry()
         self.detail_measured += 1
+        return False
 
     def _embed(self, proxy: np.ndarray, mask: np.ndarray) -> tuple[bytes | None, bytes]:
         """Return the (subject, global) DINOv2 embedding blobs.

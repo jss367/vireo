@@ -219,13 +219,22 @@ class MasksFeaturesRepository:
         )
         if cur.rowcount <= 0:
             return False
+        # Clear the eye projection too: ``eye_kp_fingerprint`` is the only
+        # thing that makes ``list_photos_for_eye_keypoint_stage`` skip a
+        # photo, and the stored fingerprint describes the dropped mask. If
+        # the pipeline's current fingerprint version happens to match it,
+        # the regenerated mask would never be fed to the eye stage and
+        # ``eye_x``/``eye_y``/``eye_conf``/``eye_tenengrad`` would stay
+        # pinned to the discarded generation.
         self.conn.execute(
             "UPDATE photos SET mask_path=NULL, active_mask_variant=NULL, "
             "subject_size=NULL, subject_tenengrad=NULL, bg_tenengrad=NULL, "
             "crop_complete=NULL, quality_input_recipe=NULL, "
             "subject_clip_high=NULL, subject_clip_low=NULL, "
             "subject_y_median=NULL, bg_separation=NULL, phash_crop=NULL, "
-            "noise_estimate=NULL, subject_detail=NULL, subject_detail_px=NULL "
+            "noise_estimate=NULL, subject_detail=NULL, subject_detail_px=NULL, "
+            "eye_x=NULL, eye_y=NULL, eye_conf=NULL, eye_tenengrad=NULL, "
+            "eye_kp_fingerprint=NULL "
             "WHERE id=? AND active_mask_variant=? AND mask_path=?",
             (photo_id, variant, path),
         )

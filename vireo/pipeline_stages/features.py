@@ -1009,10 +1009,15 @@ class _MaskPass:
         item.entry["detector_model"] = selected["detector_model"]
         item.entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
         if self._reuse_cached_mask(item):
+            invalidated = False
             if item.existing is not None and item.existing["subject_detail"] is None:
-                self._measure_cached_detail(item)
-            self.outcomes.record(item.photo_id, "cached")
-            self.masked += 1
+                invalidated = self._measure_cached_detail(item)
+            # A dropped cache row means the photo now has no mask; the
+            # next run regenerates it, so do not count it as masked.
+            tag = "cache_invalidated" if invalidated else "cached"
+            self.outcomes.record(item.photo_id, tag)
+            if not invalidated:
+                self.masked += 1
             self.processed = i + 1
             return _NEXT_PHOTO
 
@@ -1288,7 +1293,7 @@ class _MaskPass:
             self._latch_offline_folder(item)
         return measured
 
-    def _measure_cached_detail(self, item: _MaskPhoto) -> None:
+    def _measure_cached_detail(self, item: _MaskPhoto) -> bool:
         """Measure subject detail for a cached mask that predates it, without SAM.
 
         The cached branch never needs the source for the mask itself, so a
@@ -1300,13 +1305,17 @@ class _MaskPass:
         row (not just the file) is what breaks the loop when the unlink
         itself is refused, since the cache check only consults the row
         and ``os.path.isfile``.
+
+        Returns True when the cache row was actually dropped. The caller
+        uses this to skip cache-hit and masked accounting for a photo
+        that now has no mask on disk.
         """
         existing = item.existing
         if existing is None:
-            return
+            return False
         if item.photo["folder_id"] in self.em_offline_folder_ids:
             self.detail_unreadable += 1
-            return
+            return False
         with self._timed("detail"):
             measured = self.measure_cached_subject_detail(
                 existing["path"], item.image_path, self.frame_size(item.photo),
@@ -1318,18 +1327,19 @@ class _MaskPass:
             self.thread_db.commit_with_retry()
             if dropped:
                 self.mask_cache_invalidated += 1
-            return
+            return dropped
         if measured is None:
             self.detail_unreadable += 1
             self._latch_offline_folder(item)
-            return
+            return False
         if not isinstance(measured, dict):
-            return
+            return False
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
         )
         self.thread_db.commit_with_retry()
         self.detail_measured += 1
+        return False
 
     def _store_mask(
         self, item: _MaskPhoto, mask: np.ndarray, completeness: float,
