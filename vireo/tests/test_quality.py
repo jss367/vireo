@@ -553,6 +553,107 @@ def test_measure_cached_subject_detail_reads_the_saved_mask_and_source(tmp_path)
     assert measure_cached_subject_detail(str(placeholder), str(source)) is MASK_CACHE_INVALID
 
 
+def _png_chunk(ctype, data):
+    import struct
+    import zlib
+
+    crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+
+def _grayscale_png_parts():
+    """Minimal 2x2 8-bit grayscale PNG as (signature, ihdr, idat, iend)."""
+    import struct
+    import zlib
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 0, 0, 0, 0))
+    # Two rows, each (filter byte 0) + two gray pixels.
+    raw = b"\x00\xff\xff" + b"\x00\xff\xff"
+    idat = _png_chunk(b"IDAT", zlib.compress(raw))
+    iend = _png_chunk(b"IEND", b"")
+    return sig, ihdr, idat, iend
+
+
+def test_cached_mask_with_bad_ztxt_chunk_returns_mask_cache_invalid(tmp_path):
+    """A post-IDAT zTXt chunk with an invalid compression method raises
+    SyntaxError during convert(). The OSError-only catch would propagate
+    it; the broadened catch returns MASK_CACHE_INVALID so the caller can
+    drop the stale row and let the next run regenerate.
+    """
+    from quality import MASK_CACHE_INVALID, measure_cached_subject_detail
+
+    sig, ihdr, idat, iend = _grayscale_png_parts()
+    # zTXt: keyword\0 + compression_method(1) + compressed_text. Method
+    # 0xff is undefined, so PngImagePlugin raises SyntaxError.
+    ztxt = _png_chunk(b"zTXt", b"Author\x00\xff\x78\x9c\x00")
+    mask_path = tmp_path / "bad_ztxt.png"
+    mask_path.write_bytes(sig + ihdr + idat + ztxt + iend)
+    source = tmp_path / "source.png"
+    Image.new("L", (16, 16), 128).save(source)
+
+    assert measure_cached_subject_detail(str(mask_path), str(source)) is MASK_CACHE_INVALID
+
+
+def test_cached_mask_with_truncated_ihdr_returns_mask_cache_invalid(tmp_path):
+    """A truncated IHDR (declared length < 13 bytes) raises ValueError
+    during open, which bypasses the OSError-only catch.
+    """
+    from quality import MASK_CACHE_INVALID, measure_cached_subject_detail
+
+    sig, _, idat, iend = _grayscale_png_parts()
+    truncated_ihdr = _png_chunk(b"IHDR", b"\x00" * 10)
+    mask_path = tmp_path / "truncated_ihdr.png"
+    mask_path.write_bytes(sig + truncated_ihdr + idat + iend)
+    source = tmp_path / "source.png"
+    Image.new("L", (16, 16), 128).save(source)
+
+    assert measure_cached_subject_detail(str(mask_path), str(source)) is MASK_CACHE_INVALID
+
+
+def test_cached_mask_with_oversized_header_returns_mask_cache_invalid(tmp_path):
+    """An IHDR declaring more pixels than MAX_IMAGE_PIXELS raises
+    DecompressionBombError, which bypasses the OSError-only catch.
+    """
+    import struct
+
+    from quality import MASK_CACHE_INVALID, measure_cached_subject_detail
+
+    sig, _, idat, iend = _grayscale_png_parts()
+    # 65535x65535 = ~4.3e9 pixels; well above the default
+    # ``Image.MAX_IMAGE_PIXELS`` (~1.79e8), which triggers the bomb check.
+    oversized = _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 65535, 65535, 8, 0, 0, 0, 0))
+    mask_path = tmp_path / "oversized.png"
+    mask_path.write_bytes(sig + oversized + idat + iend)
+    source = tmp_path / "source.png"
+    Image.new("L", (16, 16), 128).save(source)
+
+    assert measure_cached_subject_detail(str(mask_path), str(source)) is MASK_CACHE_INVALID
+
+
+def test_cached_mask_processing_error_still_propagates(tmp_path, monkeypatch):
+    """Expanding the cached-mask except block kept it scoped to the
+    Image.open + convert read. A ValueError raised by the downstream
+    detail computation must still propagate so an unrelated bug doesn't
+    get mis-counted as an invalid cache.
+    """
+    import quality
+    from masking import save_mask
+    from quality import measure_cached_subject_detail
+
+    frame, mask = _band_limited_scene(1600, 0.4)
+    source = tmp_path / "scene.png"
+    frame.save(source)
+    mask_path = save_mask(mask, str(tmp_path / "masks"), 7, "sam2-small")
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("synthetic processing failure")
+
+    monkeypatch.setattr(quality, "compute_subject_detail", boom)
+    with pytest.raises(ValueError, match="synthetic processing failure"):
+        measure_cached_subject_detail(mask_path, str(source), (1600, 1200))
+
+
 def test_frame_size_reads_rows_and_dicts():
     from quality import frame_size
 

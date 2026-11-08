@@ -110,11 +110,12 @@ function cullComparison(photoId, keeperId, scope) {
  * @param {CullDisplayPhoto} a @param {CullDisplayPhoto} b
  */
 function cullQualityOrder(a, b) {
-  var aMeasured = typeof a.comparable === 'number';
-  var bMeasured = typeof b.comparable === 'number';
-  if (aMeasured !== bMeasured) return aMeasured ? -1 : 1;
-  if (aMeasured && a.comparable !== b.comparable) {
-    return b.comparable - a.comparable;
+  var ac = a.comparable;
+  var bc = b.comparable;
+  if (typeof ac === 'number' && typeof bc === 'number') {
+    if (ac !== bc) return bc - ac;
+  } else if (typeof ac === 'number' || typeof bc === 'number') {
+    return typeof ac === 'number' ? -1 : 1;
   }
   return b.quality - a.quality || a.photo_id - b.photo_id;
 }

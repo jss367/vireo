@@ -1322,6 +1322,8 @@ class _MaskPass:
             self.detail_unreadable += 1
             self._latch_offline_folder(item)
             return
+        if not isinstance(measured, dict):
+            return
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
         )

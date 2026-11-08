@@ -476,7 +476,17 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     try:
         with Image.open(mask_path) as mask_image:
             mask = np.asarray(mask_image.convert("L")) > 127
-    except OSError:
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+        # OSError covers the file missing or unreadable; the others cover
+        # Pillow decode failures that bypass OSError — a post-IDAT zTXt
+        # chunk with an invalid compression method raises SyntaxError on
+        # convert, a truncated IHDR chunk raises ValueError, and a
+        # header that declares more pixels than MAX_IMAGE_PIXELS raises
+        # DecompressionBombError. The cache file is lost either way, so
+        # the caller drops the row and the next run regenerates. Scoped
+        # to the open+convert read so unrelated processing failures in
+        # detail_decode_edge / load_image / compute_subject_detail below
+        # still propagate.
         log.warning("Could not read mask %s for the subject detail measurement", mask_path, exc_info=True)
         return MASK_CACHE_INVALID
     needed = detail_decode_edge(mask)

@@ -491,6 +491,8 @@ class _MaskExtractionRun:
         if measured is None:
             self.detail_unreadable += 1
             return
+        if not isinstance(measured, dict):
+            return
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
         )

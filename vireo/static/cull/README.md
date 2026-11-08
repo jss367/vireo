@@ -46,8 +46,11 @@ comes with converting the page to modules.
   encounters it records the subject detail (`comparable_quality.detail`,
   Tenengrad at a fixed 512 px subject scale, `docs/comparable-quality.md`)
   with each photo's cross-encounter quality beside it, or null while either
-  photo is unmeasured. `cullQualityOrder` sorts by that quality when both
-  cards have it and by the encounter rank otherwise.
+  photo is unmeasured. `cullQualityOrder` puts measured cards first, sorted
+  by that quality. Unmeasured cards follow, sorted by the encounter rank.
+  Equal qualities also fall back to the encounter rank. Partitioning by
+  measurement before comparing is what keeps the sort transitive on a day
+  mixing the two scales (see the comment above the function).
 
 - Your pins (`cullManualDecisions`) outrank saved flags and fresh suggestions,
   so a slider tweak never silently undoes a decision. Review pins stay pinned
