@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import tempfile
 from collections.abc import Callable
@@ -441,12 +442,18 @@ def _valid_comparison(value: object) -> bool:
         return True
     if not isinstance(value, dict) or len(value) > COMPARISON_MAX_KEYS:
         return False
-    if not all(
-        isinstance(key, str) and (item is None or isinstance(item, (str, int, float)))
-        for key, item in value.items()
-    ):
+    if not all(isinstance(key, str) and _valid_comparison_value(item) for key, item in value.items()):
         return False
     return len(json.dumps(value)) <= COMPARISON_MAX_JSON_CHARS
+
+
+def _valid_comparison_value(item: object) -> bool:
+    """A string, a finite number or None: NaN and Infinity are not JSON and would poison every later read."""
+    if item is None or isinstance(item, str):
+        return True
+    if isinstance(item, bool) or not isinstance(item, (int, float)):
+        return False
+    return math.isfinite(item)
 
 
 def _parse_rejections(

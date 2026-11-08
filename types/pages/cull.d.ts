@@ -14,7 +14,11 @@ interface CullSourcePhoto {
   reject_keeper?: CullRejectKeeper;
 }
 interface CullComparison {basis: string; measurement_name: string; photo: number; keeper: number; scope: string;}
-interface CullRejectKeeper {photo_id: number; filename: string | null; comparison: CullComparison | null;}
+interface CullRejectKeeper {
+  photo_id: number; filename: string | null; comparison: CullComparison | null;
+  /** False when the keeper is not visible in the active workspace (no thumbnail then). */
+  visible?: boolean;
+}
 interface CullRejection {photo_id: number; keeper_photo_id: number | null; comparison: CullComparison | null;}
 /** The keeper a reject loses to and how it was chosen: compared, encounter or species. */
 interface CullKeeperChoice {keeper: CullDisplayPhoto; scope: string;}

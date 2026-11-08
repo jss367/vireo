@@ -92,6 +92,15 @@ class PhotoReviewRepository:
         self.chunk_size = chunk_size
 
     @staticmethod
+    def _keeper_visible(row):
+        """SQLite yields the visibility test as 0/1; a keeper-less row has no visibility to speak of."""
+        if row.get("keeper_photo_id") is None:
+            row["keeper_visible"] = None
+        else:
+            row["keeper_visible"] = bool(row.get("keeper_visible"))
+        return row
+
+    @staticmethod
     def _decode_comparison(row):
         """Decode the stored comparison JSON in place; a malformed value reads as None."""
         raw = row.get("comparison")
@@ -260,15 +269,16 @@ class PhotoReviewRepository:
         row = self.conn.execute(
             """SELECT a.flag, a.source, a.reason, a.description, a.created_at AS at,
                       a.keeper_photo_id, a.comparison, k.filename AS keeper_filename,
-                      k.flag AS keeper_flag
+                      k.flag AS keeper_flag, kv.photo_id IS NOT NULL AS keeper_visible
                FROM current_flag_attribution a JOIN photos p ON p.id=a.photo_id
                LEFT JOIN photos k ON k.id=a.keeper_photo_id AND a.keeper_deleted_at IS NULL
+               LEFT JOIN photo_workspace_visibility kv ON kv.photo_id=k.id AND kv.workspace_id=?
                WHERE a.photo_id=? AND a.workspace_id=? AND a.flag IS p.flag
                  AND (a.source IS NOT NULL OR a.reason IS NOT NULL
                       OR a.keeper_photo_id IS NOT NULL)""",
-            (photo_id, self.workspace_id),
+            (self.workspace_id, photo_id, self.workspace_id),
         ).fetchone()
-        return self._decode_comparison(dict(row)) if row else None
+        return self._decode_comparison(self._keeper_visible(dict(row))) if row else None
 
     def orphaned_rejections(self):
         """Rejects in the visible scope whose keeper no longer justifies them.
@@ -303,6 +313,8 @@ class PhotoReviewRepository:
         is unknown, and an attributed automated source is not a photographer.
         Flags are global, so a real manual decision remains valid when its photo
         is visible in another workspace. No catalog flag is changed here.
+        ``keeper_visible`` says whether the keeper can be shown in this
+        workspace (its thumbnail route answers 404 otherwise).
         """
         if self.workspace_id is None:
             raise RuntimeError("No active workspace set")
@@ -314,14 +326,16 @@ class PhotoReviewRepository:
                     CASE WHEN a.photo_id IS NOT NULL
                               AND a.source IS NULL AND a.reason IS NULL
                          THEN p.flag END AS confirmed_flag,
-                    a.keeper_photo_id, k.filename AS keeper_filename, a.comparison
+                    a.keeper_photo_id, k.filename AS keeper_filename, a.comparison,
+                    kv.photo_id IS NOT NULL AS keeper_visible
                     FROM photos p
                     JOIN photo_workspace_visibility v ON v.photo_id=p.id AND v.workspace_id=?
                     LEFT JOIN current_flag_attribution a ON a.photo_id=p.id AND a.flag IS p.flag
                     LEFT JOIN photos k ON k.id=a.keeper_photo_id AND a.keeper_deleted_at IS NULL
-                    WHERE p.id IN ({placeholders})""", [self.workspace_id, *chunk],
+                    LEFT JOIN photo_workspace_visibility kv ON kv.photo_id=k.id AND kv.workspace_id=?
+                    WHERE p.id IN ({placeholders})""", [self.workspace_id, self.workspace_id, *chunk],
             )
-            result.update({row["id"]: self._decode_comparison(dict(row)) for row in rows})
+            result.update({row["id"]: self._decode_comparison(self._keeper_visible(dict(row))) for row in rows})
         return result
 
     def flag_attributions(self, photo_ids):

@@ -6,7 +6,9 @@ it, and a reject whose keeper is later deleted or rejected resurfaces as an
 orphan instead of staying silently rejected.
 """
 
-from services import catalog_deletion
+import json
+
+from services import catalog_deletion, workspace_folders
 from services.photo_review import PhotoReviewService, flag_note
 
 COMPARISON = {"basis": "eye", "measurement_name": "Tenengrad", "photo": 610, "keeper": 1840,
@@ -65,6 +67,7 @@ def test_cull_page_state_carries_the_keeper(app_and_db):
     state = client.post("/api/pipeline/group/state", json={"photo_ids": [keeper, loser]}).get_json()
     assert state["photos"][str(loser)]["reject_keeper"] == {
         "photo_id": keeper, "filename": db.photos.get(keeper)["filename"], "comparison": COMPARISON,
+        "visible": True,
     }
     assert state["photos"][str(keeper)]["reject_keeper"] is None
     assert state["photos"][str(loser)]["flag_confirmation_status"] == "confirmed"
@@ -151,6 +154,12 @@ def test_apply_rejects_bad_rejections(app_and_db):
     assert post([{"photo_id": loser, "keeper_photo_id": other}], rejects=[loser, other]).status_code == 400
     assert post([{"photo_id": loser, "keeper_photo_id": keeper, "comparison": "eye"}]).status_code == 400
     assert post([{"photo_id": loser, "keeper_photo_id": keeper, "comparison": {"nested": {"a": 1}}}]).status_code == 400
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        resp = client.post("/api/culling/apply", data=json.dumps({
+            "keepers": [keeper], "rejects": [loser], "unflag": [],
+            "rejections": [{"photo_id": loser, "keeper_photo_id": keeper, "comparison": {"photo": bad}}],
+        }), content_type="application/json")
+        assert resp.status_code == 400, bad
     assert post([{"photo_id": loser, "keeper_photo_id": keeper},
                  {"photo_id": loser, "keeper_photo_id": keeper}]).status_code == 400
     assert post([{"photo_id": loser, "keeper_photo_id": 10**9}]).status_code == 403
@@ -347,3 +356,26 @@ def test_a_reject_merged_into_the_id_reusing_newcomer_keeps_its_deleted_keeper(a
     assert note["keeper_photo_id"] == keeper
     assert note["keeper_filename"] is None
     assert note["comparison"] == COMPARISON
+
+
+def test_a_keeper_hidden_from_the_active_workspace_is_reported_as_not_visible(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    photos = {p["filename"]: p for p in db.photos.list_page()}
+    keeper, loser = photos["bird1.jpg"]["id"], photos["bird2.jpg"]["id"]
+    _apply(client, keeper, [loser])
+    states = db.photo_review.culling_flag_states([loser])
+    assert states[loser]["keeper_visible"] is True
+    assert flag_note(db, loser, "rejected")["keeper_visible"] is True
+    # A workspace that sees only the January folder sees the reject but not its keeper.
+    other = db.create_workspace("January only")
+    workspace_folders.add_workspace_folder(db, other, photos["bird2.jpg"]["folder_id"])
+    db.commit()
+    db.set_active_workspace(other)
+    states = db.photo_review.culling_flag_states([loser])
+    assert states[loser]["keeper_photo_id"] == keeper
+    assert states[loser]["keeper_visible"] is False
+    # The request DB restores the last activated workspace, so switch through the API.
+    assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
+    state = client.post("/api/pipeline/group/state", json={"photo_ids": [loser]}).get_json()
+    assert state["photos"][str(loser)]["reject_keeper"]["visible"] is False

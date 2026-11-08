@@ -114,7 +114,9 @@ function cullCardKeeper(photo, group, sg) {
       return {photo_id: null, name: 'a photo since deleted',
         text: cullKeeperText('a photo since deleted', saved.comparison), saved: true};
     }
-    return {photo_id: saved.photo_id, name: saved.filename, text: cullKeeperText(saved.filename, saved.comparison), saved: true};
+    // A keeper this workspace cannot see has no thumbnail to show either.
+    return {photo_id: saved.visible === false ? null : saved.photo_id, name: saved.filename,
+      text: cullKeeperText(saved.filename, saved.comparison), saved: true};
   }
   var choice = resolveCullKeeper(photo, group, sg);
   if (!choice) return null;

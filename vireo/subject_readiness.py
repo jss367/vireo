@@ -53,6 +53,7 @@ def attach_flag_confirmations(photos, states):
                 "photo_id": state["keeper_photo_id"],
                 "filename": state.get("keeper_filename"),
                 "comparison": state.get("comparison"),
+                "visible": bool(state.get("keeper_visible")),
             }
         else:
             photo.pop("reject_keeper", None)

@@ -1441,6 +1441,7 @@ def create_pipeline_blueprint(
                         "photo_id": flag_state["keeper_photo_id"],
                         "filename": flag_state.get("keeper_filename"),
                         "comparison": flag_state.get("comparison"),
+                        "visible": bool(flag_state.get("keeper_visible")),
                     }
                     if flag == "rejected" and flag_state.get("keeper_photo_id") is not None
                     else None

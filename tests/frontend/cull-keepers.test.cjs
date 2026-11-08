@@ -192,6 +192,14 @@ test('the card text says what a reject lost to and by what measure', () => {
   assert.equal(saved.saved, true);
   assert.equal(saved.photo_id, null);
   assert.equal(saved.text, 'Instead of a photo since deleted (no shared measurement)');
+  // A keeper this workspace cannot see keeps its name but gets no thumbnail.
+  ctx.pipelineResults.photos[1].reject_keeper = {photo_id: 1, filename: 'p1.jpg', comparison: null, visible: false};
+  ctx.rebuildCullDataFromPipeline();
+  const hidden = ctx.cullCardKeeper(
+    ctx.cullData.species_groups[0].scene_groups[0].photos.find(p => p.photo_id === 2),
+    ctx.cullData.species_groups[0].scene_groups[0], ctx.cullData.species_groups[0]);
+  assert.equal(hidden.photo_id, null);
+  assert.equal(hidden.name, 'p1.jpg');
 });
 
 test('the orphan banner counts saved rejects whose keeper is gone', async () => {
