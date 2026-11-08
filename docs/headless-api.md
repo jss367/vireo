@@ -218,14 +218,13 @@ subject or its mask generation, so the default pack withholds them (`eye_x`,
 `coverage.with_eye` and `eye_tenengrad` still report the measurement the
 scorer used) and `basis=eye` without a selected subject returns 404.
 Otherwise the crop is centered on the detection box, which on a perched bird
-is usually the body. Each card's `focus_crop_clips_subject` is `true` when
-the crop's native window, centered where the crop centers (the box middle, or
-a selected subject's bound eye), cuts off part of the box, so the crop cannot
-show the whole animal and may miss the head; `false` when it fits; `null` when
-unknown (no box or catalog size, or the answer depends on an EXIF rotation
-the pack does not read, or on whether the crop comes from the original or from a smaller working copy when the original is unreadable). The folder listing does not compute it. The crop's `X-Vireo-Focus-Subject-Clipped` header
-(`1`, `0` or `unknown`) gives the exact answer for the decoded raster. When a
-crop clips the subject, look at the card's `crop_url` (the whole detection)
+is usually the body. The crop's `X-Vireo-Focus-Subject-Clipped` header is `1`
+when the window cuts off part of that box, so a big or close animal may be
+missing its head; `0` when the whole box is inside; `unknown` when the crop
+has no subject box (a frame or manual crop). It is computed against the
+raster actually decoded, which can be a working copy or a RAW's embedded
+preview when the original is unreadable, so the pack does not predict it.
+When a crop clips the subject, look at the card's `crop_url` (the whole detection)
 to find the head, then request it with `center=x,y`. `center=x,y` refers explicitly to the
 unedited upright source raster (the returned `X-Vireo-Focus-Raster-Size`),
 not the recipe-rendered `preview_url`. Locate the point on an unedited upright

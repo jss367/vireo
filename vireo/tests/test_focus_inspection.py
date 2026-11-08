@@ -210,27 +210,6 @@ def test_window_clips_subject_compares_the_box_with_the_window_in_raster_pixels(
     assert window_clips_subject((0, 0, 512, 512), (5000, 3000), _box(0, 0, 0, .1)) is None
 
 
-def test_subject_exceeds_window_answers_only_when_both_orientations_agree():
-    from focus_crop import subject_exceeds_window
-    assert subject_exceeds_window(_box(.1, .1, .05, .05), 6000, 4000, 512) is False
-    assert subject_exceeds_window(_box(.1, .1, .5, .5), 6000, 4000, 512) is True
-    # 0.1 of the long side is 600px, of the short side 400px: the answer
-    # depends on the EXIF orientation the catalog row does not carry.
-    assert subject_exceeds_window(_box(.1, .1, .1, .01), 6000, 4000, 512) is None
-    assert subject_exceeds_window(_box(.1, .1, .1, .1), None, 4000, 512) is None
-    # A frame smaller than the window is shown whole.
-    assert subject_exceeds_window(_box(0, 0, 1, 1), 400, 300, 512) is False
-
-
-def test_subject_exceeds_window_follows_an_off_center_eye():
-    from focus_crop import subject_exceeds_window
-    # A 0.06 x 0.06 box is 360 x 240 pixels: it fits a 512 window around its
-    # middle, but not one centered on an eye at its top-left corner.
-    box = _box(.5, .5, .06, .06)
-    assert subject_exceeds_window(box, 6000, 4000, 512) is False
-    assert subject_exceeds_window(box, 6000, 4000, 512, center=(.502, .502)) is True
-
-
 def test_focus_crop_reports_when_the_window_cuts_off_part_of_the_subject(app_and_db):
     app, db = app_and_db
     pid = db.photos.list_page()[0]['id']

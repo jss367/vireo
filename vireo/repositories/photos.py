@@ -393,8 +393,7 @@ class PhotoRepository:
 
         Each row carries ``id``, ``has_mask``, ``has_quality``, ``has_eye``
         (0/1 for ``mask_path``, ``subject_tenengrad`` and ``eye_tenengrad``
-        being set), ``crop_complete``, ``subject_size``, the catalog
-        ``width``/``height`` (sensor axes) and
+        being set), ``crop_complete``, ``subject_size`` and
         ``detection_count``: the photo's animal boxes from a real detector
         (not the ``full-image`` fallback) at or above ``min_conf``. Not
         workspace-scoped; callers pass ids they have already resolved.
@@ -411,7 +410,7 @@ class PhotoRepository:
                                AND pm.path = p.mask_path LIMIT 1) AS mask_variant,
                            (p.subject_tenengrad IS NOT NULL) AS has_quality,
                            (p.eye_tenengrad IS NOT NULL) AS has_eye,
-                           p.crop_complete, p.subject_size, p.width, p.height,
+                           p.crop_complete, p.subject_size,
                            (SELECT COUNT(*) FROM detections d
                              WHERE d.photo_id = p.id
                                AND d.category = 'animal'

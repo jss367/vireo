@@ -63,9 +63,8 @@ def _analyze(db, photo_ids, comparison, config=None):
         analyze_detection(db, photo, detection, effective, lambda: None)
 
 
-def _pack(app, photo_ids, focus_size=None, **context):
-    url = "/api/v1/photos/burst-evidence" + (f"?focus_size={focus_size}" if focus_size else "")
-    response = app.test_client().post(url, json={"photo_ids": photo_ids, **context},
+def _pack(app, photo_ids, **context):
+    response = app.test_client().post("/api/v1/photos/burst-evidence", json={"photo_ids": photo_ids, **context},
         headers={"X-Vireo-Token": app.config["API_TOKEN"]})
     assert response.status_code == 200, response.get_json()
     return response.get_json()
@@ -95,8 +94,6 @@ def test_sharp_other_species_never_promotes_soft_target(comparison_library):
         assert card["subject"]["selection"] == "confirmed"
         assert card["eye_x"] is None and card["eye_tenengrad"] is None
         assert all(f"detection_id={did}" in card[k] for k in ("crop_url", "focus_crop_url", "mask_url", "focus_crop_mask_url"))
-        # The fixture photos carry no catalog size, so the fit is unknown.
-        assert card["focus_crop_clips_subject"] is None
         assert db.subjects.choice(card["id"])["detection_id"] == detections[card["id"]][1]
 
 
@@ -641,20 +638,3 @@ def test_selected_subject_provisional_ranking_requires_review(comparison_library
     assert pack["ambiguity"]["reasons"] == [{
         "code": "positive_keep_not_validated", "detail": KEEP_REVIEW_MESSAGE,
     }]
-
-
-def test_selected_subject_pack_flags_a_subject_larger_than_the_focus_window(comparison_library):
-    app, db, pids, _ = comparison_library
-    import config as cfg
-    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
-    marks = ",".join("?" * len(pids))
-    db.conn.execute(f"UPDATE photos SET width = 320, height = 160 WHERE id IN ({marks})", pids)
-    db.commit()
-    # The flycatcher box is 0.32 x 0.76 of the frame; in either sensor
-    # orientation its longest side is under 256 pixels.
-    fits = _pack(app, pids, requested_species=TARGET, focus_size=256)
-    assert {c["focus_crop_clips_subject"] for c in fits["cards"]} == {False}
-    db.conn.execute(f"UPDATE photos SET width = 3200, height = 1600 WHERE id IN ({marks})", pids)
-    db.commit()
-    clipped = _pack(app, pids, requested_species=TARGET, focus_size=512)
-    assert {c["focus_crop_clips_subject"] for c in clipped["cards"]} == {True}

@@ -14,10 +14,7 @@ decide whether to trust it:
   independent of relative ranking and is still required for automatic keeps.
 - per-frame URLs for the 1:1 focus crop (``/photos/<id>/focus-crop``), the
   detection crop, the mask and the preview, so the reviewer judges
-  sharpness from native pixels rather than a downscaled frame, and
-  ``focus_crop_clips_subject`` saying when that crop cannot hold the whole
-  animal (a big or close bird centered on its box shows the torso, not the
-  head).
+  sharpness from native pixels rather than a downscaled frame.
 - Photo-level eye locations have no binding to the scored subject or its
   mask generation, so the focus crop never centers on them; outside a
   selected-subject comparison the pack withholds them (``eye_status``
@@ -29,8 +26,7 @@ folder listing (``/api/folders/<id>/bursts``) and the per-photo pack
 (``/api/photos/<id>/burst-evidence``) agree on what a burst is.
 
 Pure functions over database rows and the Best Batch response; the only
-database access is through ``db.photos``, ``build_best_batch_response`` and
-``focus_crop.focus_subject_detections`` (the box the focus crop centers on).
+database access is through ``db.photos`` and ``build_best_batch_response``.
 See ``docs/plans/2026-10-17-burst-evidence-adjudication-design.md``.
 """
 
@@ -47,7 +43,6 @@ from best_batch import (
     limit_batch_rows,
 )
 from config import config_value
-from focus_crop import focus_point, focus_subject_detections, subject_exceeds_window
 from scoring import DEFAULTS as SCORING_DEFAULTS
 from scoring import _normalize_scoring_config
 
@@ -315,67 +310,10 @@ def card_urls(photo_id, *, has_mask, focus_size=DEFAULT_FOCUS_CROP_SIZE, mask_va
     }
 
 
-def _focus_fit(box, evidence, focus_size, *, center=None, working_max=None):
-    """``focus_crop_clips_subject`` for one card: True, False or None (unknown).
-
-    Without ``working_max`` the crop is cut from the original (a
-    ``source=original`` URL), whose size is the catalog's. With it the URL
-    is ``source=auto``, which falls back to a working copy capped at
-    ``working_max`` on its long side when the original is unreadable, and a
-    smaller raster puts more of the animal in the same window. The answer is
-    reported only when the original and that working copy agree; any raster
-    between them agrees too, since clipping only grows with raster size.
-    """
-    if box is None or not evidence:
-        return None
-    width, height = evidence["width"], evidence["height"]
-    rasters = [(width, height)]
-    if working_max and width and height and max(width, height) > working_max:
-        scale = working_max / max(width, height)
-        rasters.append((round(width * scale), round(height * scale)))
-    answers = {subject_exceeds_window(box, w, h, focus_size, center=center) for w, h in rasters}
-    return answers.pop() if len(answers) == 1 else None
-
-
-def _selected_focus_fit(card, evidence, focus_size, eye_enabled):
-    """The fit of a selected-subject crop, centered where the crop route centers it.
-
-    With eye scoring on, a bound eye inside the selected box moves the window
-    off the box middle (``focus_point``), so a box smaller than the window can
-    still be clipped at its far end.
-    """
-    box = _selected_box(card["subject"])
-    if box is None or not card["focus_crop_url"]:
-        return None
-    try:
-        center, _ = focus_point(card, [box], "auto", eye_enabled=eye_enabled)
-    except ValueError:
-        return None
-    # ``subject_urls`` pins these crops to ``source=original``.
-    return _focus_fit(box, evidence, focus_size, center=center)
-
-
-def _unbound_focus_box(db, photo_id):
-    """The box ``/photos/<id>/focus-crop`` centers on without a selected subject."""
-    try:
-        boxes = focus_subject_detections(db, photo_id)
-    except ValueError:
-        return None
-    return boxes[0] if boxes else None
-
-
-def _attach_evidence(db, card, evidence, focus_size, working_max=None):
-    """Evidence and URLs for a card of the default (no selected subject) pack.
-
-    ``working_max`` is the working-copy size cap the ``source=auto`` crop
-    may fall back to; None skips the per-photo subject-box read and leaves
-    ``focus_crop_clips_subject`` unknown (the folder listing reports no cards).
-    """
+def _attach_evidence(card, evidence, focus_size):
+    """Evidence and URLs for a card of the default (no selected subject) pack."""
     # The crop route discards photo-level eyes (no subject/generation binding).
     card.update(eye_x=None, eye_y=None, eye_conf=None, eye_status="unbound")
-    card["focus_crop_clips_subject"] = _focus_fit(
-        _unbound_focus_box(db, card["id"]), evidence, focus_size, working_max=working_max,
-    ) if working_max else None
     card["has_mask"] = bool(evidence["has_mask"]) if evidence else False
     eligible = card.get("selection_eligible") is not False
     card["has_quality"] = bool(evidence["has_quality"]) and eligible if evidence else False
@@ -391,19 +329,6 @@ def _attach_evidence(db, card, evidence, focus_size, working_max=None):
     variant = evidence["mask_variant"] if evidence and "mask_variant" in evidence.keys() else None  # noqa: SIM118
     card.update(card_urls(card["id"], has_mask=card["has_mask"], focus_size=focus_size, mask_variant=variant))
     return card
-
-
-def _working_copy_max(effective_cfg):
-    """The long-side cap of working copies.
-
-    An unusable setting bounds nothing, so it becomes a 1-pixel floor: every
-    subject then fits that raster, and only a fit the original agrees with
-    is reported.
-    """
-    try:
-        return max(1, int(config_value(effective_cfg, "working_copy_max_size")))
-    except (TypeError, ValueError):
-        return 1
 
 
 def _scoring_settings(effective_cfg, margin):
@@ -436,7 +361,7 @@ def _evidence_ambiguity(pack, scoring, margin):
 
 def build_evidence_pack(
     db, seed_photo_id, rows, *, effective_cfg, margin=DEFAULT_CLOSE_CALL_MARGIN,
-    focus_size=DEFAULT_FOCUS_CROP_SIZE, evidence_rows=None, comparison=None, card_fit=True,
+    focus_size=DEFAULT_FOCUS_CROP_SIZE, evidence_rows=None, comparison=None,
 ) -> dict[str, Any]:
     """The evidence pack for the burst ``rows`` (Best Batch scope rows).
 
@@ -448,9 +373,7 @@ def build_evidence_pack(
     folder listing can still report the burst and its coverage.
 
     ``evidence_rows`` lets a caller that already fetched
-    ``analysis_evidence_rows`` for a wider set pass it in. ``card_fit=False``
-    skips the per-card subject-box reads behind ``focus_crop_clips_subject``,
-    for callers that report no cards.
+    ``analysis_evidence_rows`` for a wider set pass it in.
     """
     rows = list(rows)
     photo_ids = [row["id"] for row in rows]
@@ -459,7 +382,6 @@ def build_evidence_pack(
         return _subject_evidence_pack(db, seed_photo_id, rows, comparison, scoring, margin, focus_size)
     if evidence_rows is None:
         evidence_rows = db.photos.analysis_evidence_rows(photo_ids, scoring["detector_confidence"])
-    working_max = _working_copy_max(effective_cfg) if card_fit else None
 
     result, error = build_best_batch_response(db, seed_photo_id, rows)
     if error:
@@ -481,7 +403,7 @@ def build_evidence_pack(
                 "flag": row["flag"] or "none",
                 "rating": row["rating"],
             }
-            cards.append(_attach_evidence(db, card, evidence_rows.get(row["id"]), focus_size, working_max))
+            cards.append(_attach_evidence(card, evidence_rows.get(row["id"]), focus_size))
         sequence_nums = [
             key[1] for key in (_filename_sequence_key(row["filename"]) for row in rows) if key
         ]
@@ -506,7 +428,7 @@ def build_evidence_pack(
         pack["scored"] = True
         pack["unscored_reason"] = None
         for card in pack["cards"]:
-            _attach_evidence(db, card, evidence_rows.get(card["id"]), focus_size, working_max)
+            _attach_evidence(card, evidence_rows.get(card["id"]), focus_size)
 
     coverage = coverage_counts(pack["cards"])
     coverage["photos"] = len(photo_ids)
@@ -516,28 +438,11 @@ def build_evidence_pack(
     return pack
 
 
-def _selected_box(selection):
-    """The selected detection's box from a comparison card's candidates, as a detection row.
-
-    Only an animal detection is ever selected, which ``focus_point`` checks.
-    """
-    detection_id = selection.get("detection_id")
-    for candidate in selection.get("candidates", []):
-        if candidate["detection_id"] == detection_id:
-            box = {"box_" + k: v for k, v in candidate["box"].items()}
-            return {**box, "category": "animal", "detector_model": "selected"}
-    return None
-
-
 def _subject_evidence_pack(db, seed_photo_id, rows, comparison, scoring, margin, focus_size):
     from subject_ranking import subject_urls
     pack, _ = build_best_batch_response(db, seed_photo_id, rows, comparison=comparison)
-    evidence_rows = db.photos.analysis_evidence_rows([row["id"] for row in rows], scoring["detector_confidence"])
     for card in pack["cards"]:
         card.update(subject_urls(card["id"], card["subject"], focus_size))
-        card["focus_crop_clips_subject"] = _selected_focus_fit(
-            card, evidence_rows.get(card["id"]), focus_size, scoring["eye_detect_enabled"],
-        )
     pack["coverage"] = coverage_counts(pack["cards"])
     pack["coverage"]["with_selected_subject"] = sum(c["subject"]["detection_id"] is not None for c in pack["cards"])
     pack["ambiguity"] = _evidence_ambiguity(pack, scoring, margin)
@@ -581,7 +486,7 @@ def build_folder_bursts(
         burst_rows = limit_batch_rows(scope["rows"], scope["seed_photo_id"])
         pack = build_evidence_pack(
             db, scope["seed_photo_id"], burst_rows,
-            effective_cfg=effective_cfg, margin=margin, evidence_rows=evidence_rows, card_fit=False,
+            effective_cfg=effective_cfg, margin=margin, evidence_rows=evidence_rows,
         )
         photos_in_bursts.update(r["id"] for r in scope["rows"])
         bursts.append({
