@@ -15,6 +15,10 @@ decide whether to trust it:
 - per-frame URLs for the 1:1 focus crop (``/photos/<id>/focus-crop``), the
   detection crop, the mask and the preview, so the reviewer judges
   sharpness from native pixels rather than a downscaled frame.
+- Photo-level eye locations have no binding to the scored subject or its
+  mask generation, so the focus crop never centers on them; outside a
+  selected-subject comparison the pack withholds them (``eye_status``
+  ``"unbound"``) rather than offer a location nothing will use.
 
 ``group_folder_bursts`` chains one folder's frames into bursts with the same
 rules ``best_batch.best_batch_scope`` applies around a seed photo, so the
@@ -307,6 +311,9 @@ def card_urls(photo_id, *, has_mask, focus_size=DEFAULT_FOCUS_CROP_SIZE, mask_va
 
 
 def _attach_evidence(card, evidence, focus_size):
+    """Evidence and URLs for a card of the default (no selected subject) pack."""
+    # The crop route discards photo-level eyes (no subject/generation binding).
+    card.update(eye_x=None, eye_y=None, eye_conf=None, eye_status="unbound")
     card["has_mask"] = bool(evidence["has_mask"]) if evidence else False
     eligible = card.get("selection_eligible") is not False
     card["has_quality"] = bool(evidence["has_quality"]) and eligible if evidence else False

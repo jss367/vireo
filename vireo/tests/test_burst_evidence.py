@@ -797,3 +797,18 @@ def test_stale_populated_features_are_uncovered_in_burst_ranking(app_and_db):
     assert unavailable["scored"] is False and unavailable["best_photo_id"] is None
     assert unavailable["coverage"]["with_quality"] == 0
     assert unavailable["ambiguity"]["needs_review"] is True
+
+
+def test_burst_evidence_withholds_unbound_eyes(app_and_db):
+    app, db = app_and_db
+    pids = _seed_burst(db, _folder_id(db), 3069, [10, 80])
+    # A legacy photo-level eye the focus crop will not center on.
+    db.conn.execute("UPDATE photos SET eye_x = 0.8, eye_y = 0.8, eye_conf = 0.9, eye_tenengrad = 40 WHERE id = ?",
+                    (pids[0],))
+    db.commit()
+    pack = app.test_client().get(f"/api/photos/{pids[0]}/burst-evidence").get_json()
+    legacy = next(c for c in pack["cards"] if c["id"] == pids[0])
+    assert legacy["eye_x"] is None and legacy["eye_y"] is None and legacy["eye_conf"] is None
+    assert legacy["eye_status"] == "unbound"
+    # The measurement the scorer used is still reported.
+    assert legacy["has_eye"] is True and legacy["eye_tenengrad"] == 40

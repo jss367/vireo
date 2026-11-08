@@ -340,7 +340,7 @@ class CropRoutes:
         response = Response(buf.getvalue(), mimetype="image/jpeg")
         response.headers.update(focus_headers(
             used, center, window, img.size, source, mask_bytes is not None,
-            scale=original_scale(img.size, photo),
+            scale=original_scale(img.size, photo), subject=boxes[0] if boxes else None,
         ))
         response.headers.update(focus_evidence_headers(photo, boxes, bound=selected_analysis is not None))
         if selected_analysis:

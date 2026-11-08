@@ -210,10 +210,22 @@ Each pack's `scoring.weights` and `scoring.rejection_thresholds` include the
 scorer defaults with effective workspace overrides and nested pipeline precedence.
 Each card's `focus_crop_scale` describes decoded-raster pixels; the response's
 `X-Vireo-Focus-Original-Scale` header gives the real ratio once the image is
-decoded. Auto crops use an eye only when eye scoring is enabled
-and an eye measurement exists; `basis=eye` explicitly requests a recorded eye.
-Without eye detection the subject crop is centred on the detection box, which
-on a perched bird is usually the body. `center=x,y` refers explicitly to the
+decoded. A crop centers on an eye only in a selected-subject comparison
+(`requested_species` or `subject_overrides`) whose analysis located one, with
+eye scoring enabled. Photo-level eye locations have no binding to the scored
+subject or its mask generation, so the default pack withholds them (`eye_x`,
+`eye_y` and `eye_conf` are null, `eye_status` is `"unbound"`; `has_eye`,
+`coverage.with_eye` and `eye_tenengrad` still report the measurement the
+scorer used) and `basis=eye` without a selected subject returns 404.
+Otherwise the crop is centered on the detection box, which on a perched bird
+is usually the body. The crop's `X-Vireo-Focus-Subject-Clipped` header is `1`
+when the window cuts off part of that box, so a big or close animal may be
+missing its head; `0` when the whole box is inside; `unknown` when the crop
+has no subject box (a frame or manual crop). It is computed against the
+raster actually decoded, which can be a working copy or a RAW's embedded
+preview when the original is unreadable, so the pack does not predict it.
+When a crop clips the subject, look at the card's `crop_url` (the whole detection)
+to find the head, then request it with `center=x,y`. `center=x,y` refers explicitly to the
 unedited upright source raster (the returned `X-Vireo-Focus-Raster-Size`),
 not the recipe-rendered `preview_url`. Locate the point on an unedited upright
 reference of that source; preview coordinates require undoing its crop/rotation
