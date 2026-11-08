@@ -59,13 +59,13 @@ SCHEMA = {
         "type": "int", "min": 0, "max": 1048576, "category": "Paths", "scope": "global",
         "label": "Retained generated files limit (MB)",
         "desc": "Shared limit for full-resolution renders, upload renders and imported computation objects. External editor files are preserved. "
-                "Hourly maintenance removes oldest payloads after a one-hour write grace period. Renders are retained unless independent catalog sources are fully readable and unchanged. 0 removes eligible payloads after the grace period; protected files remain. "
+                "Daily maintenance removes oldest payloads after a one-hour write grace period. Renders are retained unless independent catalog sources are fully readable and unchanged. 0 removes eligible payloads after the grace period; protected files remain. "
                 "Removed computation objects require reimport or recomputation; originals and exports are retained.",
     },
     "retained_cache_max_age_days": {
         "type": "int", "min": 0, "max": 3650, "category": "Paths", "scope": "global",
         "label": "Retained generated files age limit (days)",
-        "desc": "Hourly maintenance removes generated files older than this age using their latest filesystem access, write or change timestamp. "
+        "desc": "Daily maintenance removes generated files older than this age using their latest filesystem access, write or change timestamp. "
                 "0 disables age expiry; the byte limit still applies.",
     },
     "grouping_history_max_mb": {
