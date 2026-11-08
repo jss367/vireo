@@ -194,7 +194,7 @@ interface BrowseLocationResult {location?: BrowseLocation | null}
 interface BrowseExportRequest {photo_ids: number[]; destination: string; export_to_subfolder: boolean; subfolder_name: string; naming_template: string; max_size: number | null; format: string; quality?: number; metadata_fields?: string[]; reveal_after_export?: boolean}
 interface BrowseExportPreflight {error?: string; collision_count?: number}
 declare var VireoExportCollisions: {reset(): void; schedule(): void; cancelPending(): void; acknowledged(result: BrowseExportPreflight): boolean};
-declare var VireoExportPresets: {modalOpened(): void; markCustom(): void; subfolderName(): string};
+declare var VireoExportPresets: {migrateExportCaptureDateTimePreference(): void; modalOpened(): void; markCustom(): void; subfolderName(): string};
 declare var VireoExportJob: {watch(id: string): void};
 declare var VireoFolderBrowser: new(options: {overlayId: string; defaultMode: string; modes: Record<string, {title: string; multiple: boolean; showCounts: boolean; startPath(): string; onSelect(path: string): void}>}) => {sequence: number; open(mode: string, options?: {skipInitialBrowse: boolean}): void};
 interface BrowseMenuItem {label?: string; title?: string; disabled?: boolean; disabledHint?: string; separator?: boolean; chips?: BrowseMenuItem[]; onClick?: () => void; color?: string | null; colorBaseTitle?: string}
